@@ -32,6 +32,7 @@ export interface MountOptions {
   dockSizes: Observable<DockSizes>;
   assetsVersion: Observable<number>;
   saveAsset?: (file: string, content: string) => void;
+  onFocusEntity?: (entityId: string) => void;
 }
 
 /** Mount the editor overlay panels. Dev-only: don't ship this in production builds. */
@@ -56,6 +57,7 @@ export function mountEditor(options: MountOptions): { unmount(): void } {
       dockSizes={options.dockSizes}
       assetsVersion={options.assetsVersion}
       saveAsset={options.saveAsset}
+      onFocusEntity={options.onFocusEntity}
     />,
   );
   return { unmount: () => root.unmount() };

@@ -54,6 +54,8 @@ export interface AppProps {
   dockSizes: Observable<DockSizes>;
   assetsVersion: Observable<number>;
   saveAsset?: (file: string, content: string) => void;
+  /** Fly the editor camera to frame an entity (double-click in hierarchy / F key). */
+  onFocusEntity?: (entityId: string) => void;
 }
 
 function useObservable<T>(obs: Observable<T>): T {
@@ -206,6 +208,7 @@ export function App(props: AppProps) {
             selection={props.selection}
             assetSelection={props.assetSelection}
             contextMenu={props.contextMenu}
+            onFocusEntity={props.onFocusEntity}
           />
         </div>
 
@@ -461,6 +464,7 @@ function HierarchyDock(props: {
   selection: Selection;
   assetSelection: AssetSelection;
   contextMenu: ContextMenu;
+  onFocusEntity?: (entityId: string) => void;
 }) {
   const doc = useStoreDoc(props.store);
   const selected = useObservable(props.selection);
@@ -528,6 +532,7 @@ function HierarchyDock(props: {
               assetSelection={props.assetSelection}
               store={props.store}
               contextMenu={props.contextMenu}
+              onFocusEntity={props.onFocusEntity}
             />
           ))
         ) : (
@@ -540,6 +545,7 @@ function HierarchyDock(props: {
             assetSelection={props.assetSelection}
             store={props.store}
             contextMenu={props.contextMenu}
+            onFocusEntity={props.onFocusEntity}
           />
         )}
       </div>
@@ -556,6 +562,7 @@ interface TreeProps {
   assetSelection: AssetSelection;
   store: SceneStore;
   contextMenu: ContextMenu;
+  onFocusEntity?: (entityId: string) => void;
 }
 
 function Tree(props: TreeProps) {
@@ -596,6 +603,9 @@ function TreeRow(props: Omit<TreeProps, "parent"> & { id: string }) {
         props.selection.set(props.id);
       }}
       onDoubleClick={() => {
+        // frame the entity in the viewport (Unity double-click)
+        props.onFocusEntity?.(props.id);
+        // ...and if it's a prefab instance, open its definition too
         const prefabId = (entity.components["prefab"] as { prefabId?: string } | undefined)
           ?.prefabId;
         if (prefabId) {

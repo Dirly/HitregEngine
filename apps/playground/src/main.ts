@@ -259,7 +259,19 @@ async function main(): Promise<void> {
     dockSizes,
     assetsVersion,
     saveAsset,
+    onFocusEntity: frameEntity,
   });
+
+  function frameEntity(id: string): void {
+    const object = built.objects.get(id);
+    if (!object) return;
+    void controls.fitToBox(new THREE.Box3().setFromObject(object), true, {
+      paddingLeft: 1,
+      paddingRight: 1,
+      paddingTop: 1,
+      paddingBottom: 1,
+    });
+  }
 
   window.addEventListener("keydown", (e) => {
     if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
@@ -269,15 +281,7 @@ async function main(): Promise<void> {
     // Unity F: frame the selection
     if (e.code === "KeyF" && editorVisible.get()) {
       const id = selection.get();
-      const object = id ? built.objects.get(id) : undefined;
-      if (object) {
-        void controls.fitToBox(new THREE.Box3().setFromObject(object), true, {
-          paddingLeft: 1,
-          paddingRight: 1,
-          paddingTop: 1,
-          paddingBottom: 1,
-        });
-      }
+      if (id) frameEntity(id);
     }
   });
 

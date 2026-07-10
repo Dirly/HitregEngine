@@ -24,25 +24,28 @@ interface MaterialData {
   transparent: boolean;
 }
 
-const textureCache = new Map<string, THREE.Texture>();
-
-function loadTexture(url: string, repeat: [number, number]): THREE.Texture {
-  let texture = textureCache.get(url);
-  if (!texture) {
-    texture = new THREE.TextureLoader().load(url);
-    texture.colorSpace = THREE.SRGBColorSpace;
-    texture.wrapS = THREE.RepeatWrapping;
-    texture.wrapT = THREE.RepeatWrapping;
-    textureCache.set(url, texture);
-  }
-  // per-material repeat needs a clone sharing the image
-  if (repeat[0] !== 1 || repeat[1] !== 1) {
-    const tiled = texture.clone();
-    tiled.repeat.set(repeat[0], repeat[1]);
-    tiled.needsUpdate = true;
-    return tiled;
-  }
-  return texture;
+/**
+ * Attach a color map to a material once the image has actually loaded — the
+ * WebGPU backend crashes rendering a texture whose image is still null.
+ */
+function applyTextureWhenReady(
+  material: THREE.Material & { map?: THREE.Texture | null },
+  url: string,
+  repeat: [number, number],
+): void {
+  new THREE.TextureLoader().load(
+    url,
+    (texture) => {
+      texture.colorSpace = THREE.SRGBColorSpace;
+      texture.wrapS = THREE.RepeatWrapping;
+      texture.wrapT = THREE.RepeatWrapping;
+      texture.repeat.set(repeat[0], repeat[1]);
+      material.map = texture;
+      material.needsUpdate = true;
+    },
+    undefined,
+    (error) => console.warn(`[render] texture failed to load: ${url}`, error),
+  );
 }
 
 let gltfLoader: GLTFLoader | null = null;
@@ -175,13 +178,11 @@ function geometryFor(shape: string, size: [number, number, number]): THREE.Buffe
  * resolved via expandScene). Each entity becomes a Group; component visuals
  * hang off it, so transform updates touch only the group.
  */
-function makeMaterial(data: MaterialData, options: BuildOptions): THREE.Material {
-  const mapUrl = data.map ? options.resolveTexture?.(data.map) : undefined;
+function makeMaterial(data: MaterialData): THREE.Material {
   const common = {
     color: new THREE.Color(data.color),
     opacity: data.opacity,
     transparent: data.transparent || data.opacity < 1,
-    ...(mapUrl ? { map: loadTexture(mapUrl, data.repeat ?? [1, 1]) } : {}),
   };
   switch (data.shader) {
     case "unlit":
@@ -220,7 +221,15 @@ function resolveMaterialFor(
     console.warn(`[render] no material asset "${id}" — using default`);
     return defaultMaterial;
   }
-  const material = makeMaterial(data, options);
+  const material = makeMaterial(data);
+  const mapUrl = data.map ? options.resolveTexture?.(data.map) : undefined;
+  if (mapUrl && data.shader !== "wireframe") {
+    applyTextureWhenReady(
+      material as THREE.Material & { map?: THREE.Texture | null },
+      mapUrl,
+      data.repeat ?? [1, 1],
+    );
+  }
   cache.set(id, material);
   return material;
 }
