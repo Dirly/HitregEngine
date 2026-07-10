@@ -19,6 +19,10 @@ export interface ScriptContext {
   input: InputLike;
   sim: SimLike | null;
   getEntity(id: string): EntityDoc | undefined;
+  /** Runtime object of ANY entity (world queries: positions, visibility). */
+  getObject(id: string): THREE.Object3D | undefined;
+  /** Entity ids carrying a tag (expanded scene). */
+  findByTag(tag: string): string[];
   /** Milliseconds of simulated time (fixed-step accumulated, replay-safe). */
   now(): number;
   /** Horizontal camera forward [x, z], normalized — for camera-relative movement. */
@@ -40,6 +44,8 @@ export interface SimLike {
   getLinvel(id: string): [number, number, number] | null;
   setLinvel(id: string, v: [number, number, number]): void;
   applyImpulse(id: string, v: [number, number, number]): void;
+  /** Teleport (respawns): position set, velocities zeroed. */
+  setPosition?(id: string, p: [number, number, number]): void;
   takeCollisions?(): Array<[string, string]>;
 }
 
@@ -69,6 +75,8 @@ export abstract class Script {
   onStart?(): void;
   onFixedUpdate?(dt: number): void;
   onCollision?(otherId: string): void;
+  /** Play session ended (stop pressed) — clean up anything external (DOM, timers). */
+  onDispose?(): void;
 }
 
 export type ScriptClass = (new () => Script) & {

@@ -216,6 +216,15 @@ export class PhysicsSim {
     this.moving.get(id)?.applyImpulse({ x: v[0], y: v[1], z: v[2] }, true);
   }
 
+  /** Teleport a body (respawns): position set, velocities zeroed. */
+  setPosition(id: string, p: Vec3): void {
+    const body = this.moving.get(id);
+    if (!body) return;
+    body.setTranslation({ x: p[0], y: p[1], z: p[2] }, true);
+    body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+  }
+
   /** World-space states of every moving body, keyed by (expanded) entity id. */
   states(): Map<string, BodyState> {
     const out = new Map<string, BodyState>();

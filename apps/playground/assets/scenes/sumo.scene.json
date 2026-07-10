@@ -1,0 +1,633 @@
+{
+  "version": 1,
+  "name": "sumo",
+  "entities": {
+    "sun": {
+      "name": "Sun",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            25,
+            35,
+            15
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "light": {
+          "kind": "directional",
+          "color": "#fff2d8",
+          "intensity": 1.1,
+          "castShadow": true
+        }
+      }
+    },
+    "sky": {
+      "name": "Ambient",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "light": {
+          "kind": "ambient",
+          "color": "#2c3a55",
+          "intensity": 0.7
+        }
+      }
+    },
+    "glow-1": {
+      "name": "Ring Light A",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            10,
+            8,
+            10
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "light": {
+          "kind": "point",
+          "color": "#58a6ff",
+          "intensity": 25,
+          "range": 25
+        }
+      }
+    },
+    "glow-2": {
+      "name": "Ring Light B",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -10,
+            8,
+            -10
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "light": {
+          "kind": "point",
+          "color": "#f778ba",
+          "intensity": 25,
+          "range": 25
+        }
+      }
+    },
+    "void": {
+      "name": "The Void",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            -20,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "plane",
+            "size": [
+              200,
+              1,
+              200
+            ]
+          },
+          "material": "arena/accent-glow",
+          "castShadow": false,
+          "receiveShadow": false
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            200,
+            0.2,
+            200
+          ],
+          "offset": [
+            0,
+            -0.1,
+            0
+          ]
+        }
+      }
+    },
+    "platform": {
+      "name": "Platform",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            3,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "cylinder",
+            "size": [
+              22,
+              1,
+              22
+            ]
+          }
+        },
+        "collider": {
+          "shape": "cylinder",
+          "size": [
+            22,
+            1,
+            22
+          ]
+        }
+      }
+    },
+    "hub": {
+      "name": "Sweeper Hub",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            4.1,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "cylinder",
+            "size": [
+              0.6,
+              1.4,
+              0.6
+            ]
+          }
+        },
+        "collider": {
+          "shape": "cylinder",
+          "size": [
+            0.6,
+            1.4,
+            0.6
+          ]
+        }
+      }
+    },
+    "sweeper": {
+      "name": "Sweeper Arm",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            4.15,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              11,
+              0.35,
+              0.35
+            ]
+          },
+          "material": "arena/ball-metal"
+        },
+        "rigidbody": {
+          "angularDamping": 0
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            11,
+            0.35,
+            0.35
+          ],
+          "density": 2
+        },
+        "joint": {
+          "kind": "hinge",
+          "target": "hub",
+          "anchorA": [
+            0,
+            0,
+            0
+          ],
+          "anchorB": [
+            0,
+            0.05,
+            0
+          ],
+          "axis": [
+            0,
+            1,
+            0
+          ],
+          "motor": {
+            "targetVelocity": 1.1,
+            "maxForce": 900
+          }
+        }
+      }
+    },
+    "player": {
+      "name": "Player",
+      "parent": null,
+      "tags": [
+        "player"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            6,
+            4.6,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "capsule",
+            "size": [
+              0.8,
+              1.8,
+              0.8
+            ]
+          },
+          "material": "arena/accent-glow"
+        },
+        "rigidbody": {
+          "lockRotations": true,
+          "angularDamping": 1
+        },
+        "collider": {
+          "shape": "capsule",
+          "size": [
+            0.8,
+            1.8,
+            0.8
+          ],
+          "friction": 0.3
+        },
+        "script": {
+          "name": "player-controller",
+          "params": {
+            "speed": 7.5,
+            "jump": 8
+          }
+        }
+      }
+    },
+    "bot-0": {
+      "name": "Sumo Bot 1",
+      "parent": null,
+      "tags": [
+        "sumo-bot"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            -6,
+            4.1,
+            4
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "robot.glb"
+          }
+        },
+        "animator": {
+          "play": "Running",
+          "fade": 0.3
+        },
+        "rigidbody": {
+          "lockRotations": true,
+          "angularDamping": 1
+        },
+        "collider": {
+          "shape": "capsule",
+          "size": [
+            0.9,
+            1.7,
+            0.9
+          ],
+          "offset": [
+            0,
+            0.85,
+            0
+          ],
+          "friction": 0.3
+        },
+        "script": {
+          "name": "chaser",
+          "params": {
+            "speed": 3.6
+          }
+        }
+      }
+    },
+    "bot-1": {
+      "name": "Sumo Bot 2",
+      "parent": null,
+      "tags": [
+        "sumo-bot"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            4.1,
+            -7
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "robot.glb"
+          }
+        },
+        "animator": {
+          "play": "Running",
+          "fade": 0.3
+        },
+        "rigidbody": {
+          "lockRotations": true,
+          "angularDamping": 1
+        },
+        "collider": {
+          "shape": "capsule",
+          "size": [
+            0.9,
+            1.7,
+            0.9
+          ],
+          "offset": [
+            0,
+            0.85,
+            0
+          ],
+          "friction": 0.3
+        },
+        "script": {
+          "name": "chaser",
+          "params": {
+            "speed": 4.2
+          }
+        }
+      }
+    },
+    "bot-2": {
+      "name": "Sumo Bot 3",
+      "parent": null,
+      "tags": [
+        "sumo-bot"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            5,
+            4.1,
+            -5
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "robot.glb"
+          }
+        },
+        "animator": {
+          "play": "Running",
+          "fade": 0.3
+        },
+        "rigidbody": {
+          "lockRotations": true,
+          "angularDamping": 1
+        },
+        "collider": {
+          "shape": "capsule",
+          "size": [
+            0.9,
+            1.7,
+            0.9
+          ],
+          "offset": [
+            0,
+            0.85,
+            0
+          ],
+          "friction": 0.3
+        },
+        "script": {
+          "name": "chaser",
+          "params": {
+            "speed": 4.8
+          }
+        }
+      }
+    },
+    "manager": {
+      "name": "Game Manager",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            4,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "script": {
+          "name": "sumo-manager",
+          "params": {}
+        }
+      }
+    },
+    "game-camera": {
+      "name": "Game Camera",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            10,
+            18
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "camera": {
+          "active": true,
+          "rig": {
+            "mode": "follow",
+            "targetTag": "player",
+            "distance": 9,
+            "height": 4,
+            "damping": 5
+          }
+        }
+      }
+    }
+  }
+}

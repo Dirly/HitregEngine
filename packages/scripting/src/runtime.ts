@@ -62,6 +62,11 @@ export class ScriptRuntime {
         input: this.opts.input,
         sim: this.opts.sim,
         getEntity: (eid) => this.opts.doc.entities[eid],
+        getObject: (eid) => this.opts.objects.get(eid),
+        findByTag: (tag) =>
+          Object.entries(this.opts.doc.entities)
+            .filter(([, e]) => e.tags.includes(tag))
+            .map(([eid]) => eid),
         now: () => this.timeMs,
         ...(this.opts.viewForward ? { viewForward: this.opts.viewForward } : {}),
         setActiveCamera: (cameraId) => {
@@ -102,6 +107,13 @@ export class ScriptRuntime {
   }
 
   dispose(): void {
+    for (const [id, script] of this.instances) {
+      try {
+        script.onDispose?.();
+      } catch (error) {
+        console.warn(`[scripts] ${id} onDispose failed:`, error);
+      }
+    }
     this.instances.clear();
   }
 }
