@@ -46,6 +46,12 @@ export const jointSchema = z.object({
   axis: vec3.default([0, 1, 0]),
   /** Radians for hinge, meters for slider. */
   limits: z.object({ min: z.number(), max: z.number() }).optional(),
+  /**
+   * Collision response between the two jointed bodies. Off by default —
+   * jointed bodies usually touch (door on its post) and fighting contacts
+   * pump energy into the joint (violent oscillation).
+   */
+  contactsEnabled: z.boolean().default(false),
   motor: z
     .object({ targetVelocity: z.number(), maxForce: z.number().positive() })
     .optional(),

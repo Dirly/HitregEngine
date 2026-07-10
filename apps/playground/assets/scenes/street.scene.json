@@ -530,7 +530,7 @@
           }
         },
         "rigidbody": {
-          "angularDamping": 0.3
+          "angularDamping": 0.8
         },
         "collider": {
           "shape": "box",

@@ -33,6 +33,7 @@ interface JointData {
   axis: Vec3;
   limits?: { min: number; max: number };
   motor?: { targetVelocity: number; maxForce: number };
+  contactsEnabled: boolean;
 }
 
 export interface BodyState {
@@ -165,6 +166,7 @@ export class PhysicsSim {
         data.limits = [joint.limits.min, joint.limits.max];
       }
       const created = this.world.createImpulseJoint(data, bodyA, bodyB, true);
+      created.setContactsEnabled(joint.contactsEnabled ?? false);
       if (joint.motor && (joint.kind === "hinge" || joint.kind === "slider")) {
         (created as RAPIER.RevoluteImpulseJoint).configureMotorVelocity(
           joint.motor.targetVelocity,
