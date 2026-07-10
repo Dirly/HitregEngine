@@ -21,6 +21,10 @@ export interface ScriptContext {
   getEntity(id: string): EntityDoc | undefined;
   /** Milliseconds of simulated time (fixed-step accumulated, replay-safe). */
   now(): number;
+  /** Horizontal camera forward [x, z], normalized — for camera-relative movement. */
+  viewForward?(): [number, number];
+  /** Switch the render camera to another camera-component entity (runtime-only). */
+  setActiveCamera?(entityId: string | null): void;
 }
 
 export interface InputLike {

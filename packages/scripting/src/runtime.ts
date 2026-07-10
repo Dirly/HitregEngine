@@ -10,6 +10,8 @@ export interface RuntimeOptions {
   sim: SimLike | null;
   registry: ScriptRegistry;
   input: InputLike;
+  /** Horizontal camera forward [x, z] — enables camera-relative controls. */
+  viewForward?: () => [number, number];
 }
 
 interface ScriptComponentData {
@@ -26,8 +28,14 @@ export class ScriptRuntime {
   private readonly instances = new Map<string, Script>();
   private timeMs = 0;
   private started = false;
+  private activeCameraId: string | null = null;
 
   constructor(private readonly opts: RuntimeOptions) {}
+
+  /** Camera-entity id a script switched to, or null for the scene default. */
+  getActiveCameraId(): string | null {
+    return this.activeCameraId;
+  }
 
   start(): void {
     if (this.started) return;
@@ -51,6 +59,10 @@ export class ScriptRuntime {
         sim: this.opts.sim,
         getEntity: (eid) => this.opts.doc.entities[eid],
         now: () => this.timeMs,
+        ...(this.opts.viewForward ? { viewForward: this.opts.viewForward } : {}),
+        setActiveCamera: (cameraId) => {
+          this.activeCameraId = cameraId;
+        },
       };
       const script = new cls();
       script.ctx = context;

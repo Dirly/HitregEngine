@@ -85,6 +85,8 @@ export interface BuiltScene {
   objects: Map<string, THREE.Object3D>;
   /** The camera marked active in the doc, if any. */
   activeCamera: THREE.PerspectiveCamera | null;
+  /** Every camera-component entity — multi-camera switching at runtime. */
+  cameras: Map<string, THREE.PerspectiveCamera>;
 }
 
 const defaultMaterial = new THREE.MeshStandardMaterial({
@@ -199,6 +201,7 @@ function resolveMaterialFor(
 export function buildScene(doc: SceneDoc, options: BuildOptions = {}): BuiltScene {
   const scene = new THREE.Scene();
   const objects = new Map<string, THREE.Object3D>();
+  const cameras = new Map<string, THREE.PerspectiveCamera>();
   const materialCache = new Map<string, THREE.Material>();
   let activeCamera: THREE.PerspectiveCamera | null = null;
 
@@ -305,6 +308,7 @@ export function buildScene(doc: SceneDoc, options: BuildOptions = {}): BuiltScen
         cameraData.far,
       );
       group.add(camera);
+      cameras.set(id, camera);
       if (cameraData.active && !activeCamera) activeCamera = camera;
     }
 
@@ -318,5 +322,5 @@ export function buildScene(doc: SceneDoc, options: BuildOptions = {}): BuiltScen
     (parent ?? scene).add(object);
   }
 
-  return { scene, objects, activeCamera };
+  return { scene, objects, activeCamera, cameras };
 }

@@ -145,6 +145,10 @@ async function main(): Promise<void> {
     });
     if (settings.get().showPhysics) attachPhysicsDebug(expanded, built.objects);
     built.scene.background = new THREE.Color(0x0b0e14);
+    for (const sceneCam of built.cameras.values()) {
+      sceneCam.aspect = (canvas.clientWidth || 1) / (canvas.clientHeight || 1);
+      sceneCam.updateProjectionMatrix();
+    }
     viewport?.onSceneRebuilt();
   }
 
@@ -286,8 +290,18 @@ async function main(): Promise<void> {
   }
   const input = new InputService();
 
+  const viewDir = new THREE.Vector3();
+  function viewForward(): [number, number] {
+    camera.getWorldDirection(viewDir);
+    viewDir.y = 0;
+    if (viewDir.lengthSq() < 1e-6) return [0, -1];
+    viewDir.normalize();
+    return [viewDir.x, viewDir.z];
+  }
+
   let sim: PhysicsSim | null = null;
   let scripts: ScriptRuntime | null = null;
+  let followTargetId: string | null = null;
   function startPlaySession(): void {
     sim?.free();
     scripts?.dispose();
@@ -298,14 +312,30 @@ async function main(): Promise<void> {
       sim,
       registry: scriptRegistry,
       input,
+      viewForward,
     });
     scripts.start();
+
+    // data-driven follow cam: an active camera with a follow rig tracks its target tag
+    followTargetId = null;
+    for (const entity of Object.values(lastExpanded.entities)) {
+      const cam = entity.components["camera"] as
+        | { active?: boolean; rig?: { mode: string; targetTag: string } }
+        | undefined;
+      if (cam?.active && cam.rig?.mode === "follow") {
+        const tag = cam.rig.targetTag;
+        followTargetId =
+          Object.entries(lastExpanded.entities).find(([, e]) => e.tags.includes(tag))?.[0] ?? null;
+        break;
+      }
+    }
   }
   function endPlaySession(): void {
     scripts?.dispose();
     scripts = null;
     sim?.free();
     sim = null;
+    followTargetId = null;
   }
 
   store.subscribe(rebuild);
@@ -545,6 +575,10 @@ async function main(): Promise<void> {
     const h = canvas.clientHeight || window.innerHeight;
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
+    for (const sceneCam of built?.cameras.values() ?? []) {
+      sceneCam.aspect = w / h;
+      sceneCam.updateProjectionMatrix();
+    }
     renderer.setSize(w, h, window.devicePixelRatio);
   }
   window.addEventListener("resize", onResize);
@@ -553,6 +587,7 @@ async function main(): Promise<void> {
   applyCanvasLayout();
 
   let lastFrameMs = 0;
+  const followPos = new THREE.Vector3();
   const loop = new FixedTimestepLoop({
     fixedUpdate: (dt) => {
       if (playMode.get() !== "playing" || !sim) return;
@@ -565,8 +600,27 @@ async function main(): Promise<void> {
       scripts?.fixedUpdate(dt);
     },
     update: (dt) => {
+      // follow cam: keep the orbit center on the target; mouse still orbits/zooms
+      if (playMode.get() !== "edit" && followTargetId) {
+        const target = built.objects.get(followTargetId);
+        if (target) {
+          const p = target.getWorldPosition(followPos);
+          void controls.moveTo(p.x, p.y + 1, p.z, true);
+        }
+      }
       controls.update(dt);
-      renderer.render(built.scene, camera);
+      // camera priority in play mode: script-switched cam > rigless active scene
+      // cam > editor/follow camera. Edit mode always uses the editor camera.
+      let renderCamera: THREE.Camera = camera;
+      if (playMode.get() !== "edit") {
+        const switched = scripts?.getActiveCameraId();
+        if (switched && built.cameras.get(switched)) {
+          renderCamera = built.cameras.get(switched)!;
+        } else if (!followTargetId && built.activeCamera) {
+          renderCamera = built.activeCamera;
+        }
+      }
+      renderer.render(built.scene, renderCamera);
       lastFrameMs = dt * 1000;
     },
   });

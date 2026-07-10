@@ -67,6 +67,16 @@ export const cameraSchema = z.object({
   far: z.number().positive().default(1000),
   /** Exactly one camera should be active at runtime; enforced by the render layer. */
   active: z.boolean().default(false),
+  /** Play-mode camera rig. follow = orbit-follow the first entity with targetTag. */
+  rig: z
+    .object({
+      mode: z.enum(["follow"]),
+      targetTag: z.string().default("player"),
+      distance: z.number().positive().default(7),
+      height: z.number().default(3.5),
+      damping: z.number().positive().default(5),
+    })
+    .optional(),
 });
 
 /** PBR material — a data asset referenced by mesh.material GUID. */

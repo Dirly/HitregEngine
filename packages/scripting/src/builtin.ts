@@ -60,12 +60,19 @@ class PlayerController extends Script {
     if (!vel) return;
 
     const input = this.ctx.input;
-    let x = 0;
-    let z = 0;
-    if (input.isDown("KeyW") || input.isDown("ArrowUp")) z -= 1;
-    if (input.isDown("KeyS") || input.isDown("ArrowDown")) z += 1;
-    if (input.isDown("KeyA") || input.isDown("ArrowLeft")) x -= 1;
-    if (input.isDown("KeyD") || input.isDown("ArrowRight")) x += 1;
+    let forwardIn = 0;
+    let strafeIn = 0;
+    if (input.isDown("KeyW") || input.isDown("ArrowUp")) forwardIn += 1;
+    if (input.isDown("KeyS") || input.isDown("ArrowDown")) forwardIn -= 1;
+    if (input.isDown("KeyA") || input.isDown("ArrowLeft")) strafeIn -= 1;
+    if (input.isDown("KeyD") || input.isDown("ArrowRight")) strafeIn += 1;
+
+    // camera-relative when the host provides a view direction; world axes otherwise
+    const [fx, fz] = this.ctx.viewForward?.() ?? [0, -1];
+    const rx = -fz; // right = forward rotated -90° about Y
+    const rz = fx;
+    let x = fx * forwardIn + rx * strafeIn;
+    let z = fz * forwardIn + rz * strafeIn;
     const len = Math.hypot(x, z);
     const speed = this.param<number>("speed");
     if (len > 0) {
