@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "name": "Crate",
+  "root": "crate",
+  "entities": {
+    "crate": {
+      "name": "Crate",
+      "parent": null,
+      "tags": ["crate"],
+      "components": {
+        "transform": {},
+        "mesh": {
+          "source": { "kind": "primitive", "shape": "box", "size": [1, 1, 1] },
+          "material": "arena/crate-wood",
+          "castShadow": true,
+          "receiveShadow": true
+        },
+        "rigidbody": {},
+        "collider": { "shape": "box", "size": [1, 1, 1] }
+      }
+    }
+  },
+  "props": {
+    "crateColor": {
+      "default": "arena/crate-wood",
+      "bindings": ["crate/components/mesh/material"],
+      "description": "Material asset id applied to the crate mesh"
+    }
+  }
+}

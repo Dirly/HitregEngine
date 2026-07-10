@@ -29,8 +29,6 @@
           "kind": "directional",
           "color": "#fff5e0",
           "intensity": 1,
-          "range": 10,
-          "angle": 0.5235987755982988,
           "castShadow": true
         }
       }
@@ -44,9 +42,142 @@
           "kind": "ambient",
           "color": "#334455",
           "intensity": 0.6,
-          "range": 10,
-          "angle": 0.5235987755982988,
           "castShadow": false
+        }
+      }
+    },
+    "glow-tower": {
+      "name": "Glow Tower",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            9,
+            4,
+            -10
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "light": {
+          "kind": "point",
+          "color": "#ff8844",
+          "intensity": 25,
+          "range": 16
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "sphere",
+            "size": [
+              0.5,
+              0.5,
+              0.5
+            ]
+          },
+          "material": "arena/accent-glow",
+          "castShadow": false,
+          "receiveShadow": false
+        }
+      }
+    },
+    "glow-seesaw": {
+      "name": "Glow Seesaw",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -14,
+            3,
+            8
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "light": {
+          "kind": "point",
+          "color": "#44ddff",
+          "intensity": 25,
+          "range": 16
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "sphere",
+            "size": [
+              0.5,
+              0.5,
+              0.5
+            ]
+          },
+          "material": "arena/accent-glow",
+          "castShadow": false,
+          "receiveShadow": false
+        }
+      }
+    },
+    "glow-ball": {
+      "name": "Glow Wrecker",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            17,
+            7,
+            2
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "light": {
+          "kind": "point",
+          "color": "#ff44cc",
+          "intensity": 25,
+          "range": 18
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "sphere",
+            "size": [
+              0.5,
+              0.5,
+              0.5
+            ]
+          },
+          "material": "arena/accent-glow",
+          "castShadow": false,
+          "receiveShadow": false
         }
       }
     },
@@ -65,9 +196,9 @@
           ],
           "rotation": [
             0,
-            0.3826834323650899,
             0,
-            -0.9238795325112867
+            0,
+            1
           ],
           "scale": [
             1,
@@ -80,28 +211,357 @@
             "kind": "primitive",
             "shape": "plane",
             "size": [
-              60,
+              44,
               1,
-              24
+              28
             ]
           },
           "castShadow": false,
           "receiveShadow": true,
-          "renderMode": "auto",
+          "static": true
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            44,
+            1,
+            28
+          ],
+          "offset": [
+            0,
+            -0.5,
+            0
+          ]
+        }
+      }
+    },
+    "wall-north": {
+      "name": "Wall North",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            1.25,
+            -12.5
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              42,
+              2.5,
+              1
+            ]
+          },
+          "material": "arena/wall-concrete",
+          "static": true
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            42,
+            2.5,
+            1
+          ]
+        }
+      }
+    },
+    "wall-south": {
+      "name": "Wall South",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            1.25,
+            12.5
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              42,
+              2.5,
+              1
+            ]
+          },
+          "material": "arena/wall-concrete",
+          "static": true
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            42,
+            2.5,
+            1
+          ]
+        }
+      }
+    },
+    "wall-west": {
+      "name": "Wall West",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            -20.5,
+            1.25,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              1,
+              2.5,
+              26
+            ]
+          },
+          "material": "arena/wall-concrete",
+          "static": true
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            1,
+            2.5,
+            26
+          ]
+        }
+      }
+    },
+    "wall-east": {
+      "name": "Wall East",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            20.5,
+            1.25,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              1,
+              2.5,
+              26
+            ]
+          },
+          "material": "arena/wall-concrete",
+          "static": true
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            1,
+            2.5,
+            26
+          ]
+        }
+      }
+    },
+    "platform": {
+      "name": "Platform",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            13,
+            1,
+            -6
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              6,
+              2,
+              6
+            ]
+          },
+          "material": "arena/wall-concrete",
+          "static": true
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            6,
+            2,
+            6
+          ]
+        }
+      }
+    },
+    "ramp": {
+      "name": "Ramp",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            7,
+            1,
+            -6
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "wedge",
+            "size": [
+              6,
+              2,
+              6
+            ]
+          },
+          "material": "arena/wall-concrete",
           "static": true
         }
       }
     },
-    "light-0": {
-      "name": "Streetlight 1",
-      "parent": "ground",
-      "tags": [],
+    "ramp-col": {
+      "name": "Ramp Collider",
+      "parent": "ramp",
+      "tags": [
+        "static"
+      ],
       "components": {
         "transform": {
           "position": [
-            -15,
+            0.05,
+            -0.14,
+            0
+          ],
+          "rotation": [
             0,
-            4
+            0,
+            0.1601822,
+            0.9870875
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            6.4,
+            0.3,
+            6
+          ]
+        }
+      }
+    },
+    "tower-1": {
+      "name": "Tower Crate 1",
+      "parent": null,
+      "tags": [
+        "prop"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            12.45,
+            2.5,
+            -6
           ],
           "rotation": [
             0,
@@ -116,22 +576,24 @@
           ]
         },
         "prefab": {
-          "prefabId": "prefab-streetlight",
+          "prefabId": "arena/prefab-crate",
           "props": {},
           "overrides": []
         }
       }
     },
-    "light-1": {
-      "name": "Streetlight 2",
-      "parent": "ground",
-      "tags": [],
+    "tower-2": {
+      "name": "Tower Crate 2",
+      "parent": null,
+      "tags": [
+        "prop"
+      ],
       "components": {
         "transform": {
           "position": [
-            -5,
-            0,
-            4
+            13.55,
+            2.5,
+            -6
           ],
           "rotation": [
             0,
@@ -146,173 +608,24 @@
           ]
         },
         "prefab": {
-          "prefabId": "prefab-streetlight",
-          "props": {
-            "lightColor": "#00ff88"
-          },
-          "overrides": []
-        }
-      }
-    },
-    "light-2": {
-      "name": "Streetlight 3",
-      "parent": "ground",
-      "tags": [],
-      "components": {
-        "transform": {
-          "position": [
-            5,
-            0,
-            4
-          ],
-          "rotation": [
-            0,
-            0,
-            0,
-            1
-          ],
-          "scale": [
-            1,
-            1,
-            1
-          ]
-        },
-        "prefab": {
-          "prefabId": "prefab-streetlight",
+          "prefabId": "arena/prefab-crate",
           "props": {},
           "overrides": []
         }
       }
     },
-    "light-3": {
-      "name": "Streetlight 4",
-      "parent": "ground",
-      "tags": [],
-      "components": {
-        "transform": {
-          "position": [
-            15,
-            0,
-            4
-          ],
-          "rotation": [
-            0,
-            0,
-            0,
-            1
-          ],
-          "scale": [
-            1,
-            1,
-            1
-          ]
-        },
-        "prefab": {
-          "prefabId": "prefab-streetlight",
-          "props": {},
-          "overrides": []
-        }
-      }
-    },
-    "crate-0": {
-      "name": "Crate 1",
-      "parent": "ground",
+    "tower-3": {
+      "name": "Tower Crate 3",
+      "parent": null,
       "tags": [
-        "prop",
-        "spin"
+        "prop"
       ],
       "components": {
         "transform": {
           "position": [
-            -8,
-            0.5,
-            -3
-          ],
-          "rotation": [
-            0,
-            0,
-            0,
-            1
-          ],
-          "scale": [
-            1,
-            1,
-            1
-          ]
-        },
-        "mesh": {
-          "source": {
-            "kind": "primitive",
-            "shape": "box",
-            "size": [
-              1,
-              1,
-              1
-            ]
-          },
-          "castShadow": true,
-          "receiveShadow": true,
-          "renderMode": "auto",
-          "static": false
-        }
-      }
-    },
-    "crate-1": {
-      "name": "Crate 2",
-      "parent": "ground",
-      "tags": [
-        "prop",
-        "spin"
-      ],
-      "components": {
-        "transform": {
-          "position": [
-            -4,
-            0.5,
-            -3
-          ],
-          "rotation": [
-            0,
-            0,
-            0,
-            1
-          ],
-          "scale": [
-            1,
-            1,
-            1
-          ]
-        },
-        "mesh": {
-          "source": {
-            "kind": "primitive",
-            "shape": "box",
-            "size": [
-              1,
-              1,
-              1
-            ]
-          },
-          "castShadow": true,
-          "receiveShadow": true,
-          "renderMode": "auto",
-          "static": false
-        }
-      }
-    },
-    "crate-2": {
-      "name": "Crate 3",
-      "parent": "ground",
-      "tags": [
-        "prop",
-        "spin"
-      ],
-      "components": {
-        "transform": {
-          "position": [
-            0,
+            12.45,
             3.5,
-            -3
+            -6
           ],
           "rotation": [
             0,
@@ -326,36 +639,25 @@
             1
           ]
         },
-        "mesh": {
-          "source": {
-            "kind": "primitive",
-            "shape": "box",
-            "size": [
-              1,
-              1,
-              1
-            ]
-          },
-          "castShadow": true,
-          "receiveShadow": true,
-          "renderMode": "auto",
-          "static": false
+        "prefab": {
+          "prefabId": "arena/prefab-crate",
+          "props": {},
+          "overrides": []
         }
       }
     },
-    "crate-3": {
-      "name": "Crate 4",
-      "parent": "ground",
+    "tower-4": {
+      "name": "Tower Crate 4",
+      "parent": null,
       "tags": [
-        "prop",
-        "spin"
+        "prop"
       ],
       "components": {
         "transform": {
           "position": [
-            4,
-            0.5,
-            -3
+            13.55,
+            3.5,
+            -6
           ],
           "rotation": [
             0,
@@ -369,36 +671,187 @@
             1
           ]
         },
-        "mesh": {
-          "source": {
-            "kind": "primitive",
-            "shape": "box",
-            "size": [
-              1,
-              1,
-              1
-            ]
-          },
-          "castShadow": true,
-          "receiveShadow": true,
-          "renderMode": "auto",
-          "static": false
+        "prefab": {
+          "prefabId": "arena/prefab-crate",
+          "props": {},
+          "overrides": []
         }
       }
     },
-    "crate-4": {
-      "name": "Crate 5",
-      "parent": "ground",
+    "tower-5": {
+      "name": "Tower Crate 5",
+      "parent": null,
       "tags": [
-        "prop",
-        "spin"
+        "prop"
       ],
       "components": {
         "transform": {
           "position": [
-            8,
+            12.45,
+            4.5,
+            -6
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "prefab": {
+          "prefabId": "arena/prefab-crate",
+          "props": {},
+          "overrides": []
+        }
+      }
+    },
+    "tower-6": {
+      "name": "Tower Crate 6",
+      "parent": null,
+      "tags": [
+        "prop"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            13.55,
+            4.5,
+            -6
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "prefab": {
+          "prefabId": "arena/prefab-crate",
+          "props": {},
+          "overrides": []
+        }
+      }
+    },
+    "tower-7": {
+      "name": "Tower Crate 7",
+      "parent": null,
+      "tags": [
+        "prop"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            12.45,
+            5.5,
+            -6
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "prefab": {
+          "prefabId": "arena/prefab-crate",
+          "props": {},
+          "overrides": []
+        }
+      }
+    },
+    "tower-8": {
+      "name": "Tower Crate 8",
+      "parent": null,
+      "tags": [
+        "prop"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            13.55,
+            5.5,
+            -6
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "prefab": {
+          "prefabId": "arena/prefab-crate",
+          "props": {},
+          "overrides": []
+        }
+      }
+    },
+    "tower-9": {
+      "name": "Tower Crate Top",
+      "parent": null,
+      "tags": [
+        "prop"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            13,
+            6.5,
+            -6
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "prefab": {
+          "prefabId": "arena/prefab-crate",
+          "props": {
+            "crateColor": "arena/accent-glow"
+          },
+          "overrides": []
+        }
+      }
+    },
+    "seesaw-support": {
+      "name": "Seesaw Support",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            -10,
             0.5,
-            -3
+            4
           ],
           "rotation": [
             0,
@@ -417,15 +870,469 @@
             "kind": "primitive",
             "shape": "box",
             "size": [
+              0.6,
               1,
-              1,
-              1
+              1.6
             ]
           },
-          "castShadow": true,
-          "receiveShadow": true,
-          "renderMode": "auto",
-          "static": false
+          "material": "arena/wall-concrete",
+          "static": true
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            0.6,
+            1,
+            1.6
+          ]
+        }
+      }
+    },
+    "seesaw-plank": {
+      "name": "Seesaw Plank",
+      "parent": null,
+      "tags": [
+        "prop"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            -10,
+            1.15,
+            4
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              6,
+              0.3,
+              1.4
+            ]
+          },
+          "material": "arena/crate-wood"
+        },
+        "rigidbody": {},
+        "collider": {
+          "shape": "box",
+          "size": [
+            6,
+            0.3,
+            1.4
+          ]
+        },
+        "joint": {
+          "kind": "hinge",
+          "target": "seesaw-support",
+          "anchorA": [
+            0,
+            -0.15,
+            0
+          ],
+          "anchorB": [
+            0,
+            0.5,
+            0
+          ],
+          "axis": [
+            0,
+            0,
+            1
+          ],
+          "limits": {
+            "min": -0.45,
+            "max": 0.45
+          }
+        }
+      }
+    },
+    "seesaw-crate": {
+      "name": "Seesaw Crate",
+      "parent": null,
+      "tags": [
+        "prop"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            -12.4,
+            1.8,
+            4
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "prefab": {
+          "prefabId": "arena/prefab-crate",
+          "props": {},
+          "overrides": []
+        }
+      }
+    },
+    "wb-post": {
+      "name": "Wrecker Post",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            15.5,
+            4.5,
+            -4
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              0.5,
+              9,
+              0.5
+            ]
+          },
+          "material": "arena/wall-concrete",
+          "static": true
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            0.5,
+            9,
+            0.5
+          ]
+        }
+      }
+    },
+    "wb-arm": {
+      "name": "Wrecker Arm",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            14.25,
+            8.8,
+            -4
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              3,
+              0.4,
+              0.4
+            ]
+          },
+          "material": "arena/ball-metal",
+          "static": true
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            3,
+            0.4,
+            0.4
+          ]
+        }
+      }
+    },
+    "wb-link-1": {
+      "name": "Chain Link 1",
+      "parent": null,
+      "tags": [
+        "prop"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            13,
+            8.8,
+            -3.4
+          ],
+          "rotation": [
+            0.7071067811865476,
+            0,
+            0,
+            0.7071067811865476
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              0.25,
+              1.2,
+              0.25
+            ]
+          },
+          "material": "arena/ball-metal"
+        },
+        "rigidbody": {},
+        "collider": {
+          "shape": "box",
+          "size": [
+            0.25,
+            1.2,
+            0.25
+          ]
+        },
+        "joint": {
+          "kind": "ball",
+          "target": "wb-arm",
+          "anchorA": [
+            0,
+            -0.6,
+            0
+          ],
+          "anchorB": [
+            -1.25,
+            0,
+            0
+          ]
+        }
+      }
+    },
+    "wb-link-2": {
+      "name": "Chain Link 2",
+      "parent": null,
+      "tags": [
+        "prop"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            13,
+            8.8,
+            -2.2
+          ],
+          "rotation": [
+            0.7071067811865476,
+            0,
+            0,
+            0.7071067811865476
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              0.25,
+              1.2,
+              0.25
+            ]
+          },
+          "material": "arena/ball-metal"
+        },
+        "rigidbody": {},
+        "collider": {
+          "shape": "box",
+          "size": [
+            0.25,
+            1.2,
+            0.25
+          ]
+        },
+        "joint": {
+          "kind": "ball",
+          "target": "wb-link-1",
+          "anchorA": [
+            0,
+            -0.6,
+            0
+          ],
+          "anchorB": [
+            0,
+            0.6,
+            0
+          ]
+        }
+      }
+    },
+    "wb-link-3": {
+      "name": "Chain Link 3",
+      "parent": null,
+      "tags": [
+        "prop"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            13,
+            8.8,
+            -1
+          ],
+          "rotation": [
+            0.7071067811865476,
+            0,
+            0,
+            0.7071067811865476
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              0.25,
+              1.2,
+              0.25
+            ]
+          },
+          "material": "arena/ball-metal"
+        },
+        "rigidbody": {},
+        "collider": {
+          "shape": "box",
+          "size": [
+            0.25,
+            1.2,
+            0.25
+          ]
+        },
+        "joint": {
+          "kind": "ball",
+          "target": "wb-link-2",
+          "anchorA": [
+            0,
+            -0.6,
+            0
+          ],
+          "anchorB": [
+            0,
+            0.6,
+            0
+          ]
+        }
+      }
+    },
+    "wb-ball": {
+      "name": "Wrecking Ball",
+      "parent": null,
+      "tags": [
+        "prop"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            13,
+            8.8,
+            0.4
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "sphere",
+            "size": [
+              1.4,
+              1.4,
+              1.4
+            ]
+          },
+          "material": "arena/ball-metal"
+        },
+        "rigidbody": {},
+        "collider": {
+          "shape": "sphere",
+          "size": [
+            1.4,
+            1.4,
+            1.4
+          ],
+          "density": 5
+        },
+        "joint": {
+          "kind": "ball",
+          "target": "wb-link-3",
+          "anchorA": [
+            0,
+            0,
+            -0.8
+          ],
+          "anchorB": [
+            0,
+            0.6,
+            0
+          ]
         }
       }
     }
