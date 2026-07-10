@@ -42,6 +42,7 @@ export class ViewportTools {
   private pointerDown: { x: number; y: number } | null = null;
   private disposers: Array<() => void> = [];
   private altDown = false;
+  private rmbDown = false;
   /** Alt-scale anchor: keep the object's lowest point fixed while scaling. */
   private scaleAnchor: { bottomY: number; k: number } | null = null;
 
@@ -73,8 +74,14 @@ export class ViewportTools {
     });
 
     const onPointerDown = (e: PointerEvent) => {
+      if (e.button === 2) this.rmbDown = true;
       this.pointerDown = { x: e.clientX, y: e.clientY };
     };
+    const onWindowPointerUp = (e: PointerEvent) => {
+      if (e.button === 2) this.rmbDown = false;
+    };
+    window.addEventListener("pointerup", onWindowPointerUp);
+    this.disposers.push(() => window.removeEventListener("pointerup", onWindowPointerUp));
     const onPointerUp = (e: PointerEvent) => {
       if (this.opts.grayboxActive?.get()) return;
       if (!this.opts.enabled.get() || !this.pointerDown) return;
@@ -99,6 +106,8 @@ export class ViewportTools {
       ) {
         return;
       }
+      // while flying (RMB held), WASD/QE belong to the camera, not the gizmo
+      if (this.rmbDown) return;
       if (e.code === "KeyW") this.opts.gizmoMode.set("translate");
       if (e.code === "KeyE") this.opts.gizmoMode.set("rotate");
       if (e.code === "KeyR") this.opts.gizmoMode.set("scale");

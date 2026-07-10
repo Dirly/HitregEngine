@@ -271,6 +271,43 @@ async function main(): Promise<void> {
   const controls = new CameraControls(camera, canvas);
   controls.setLookAt(18, 12, 22, 0, 1, 0, false);
 
+  // editor fly-cam: hold RMB + WASD (QE = down/up, Shift = boost)
+  let rmbDown = false;
+  let flewWithKeys = false;
+  canvas.addEventListener("pointerdown", (e) => {
+    if (e.button === 2) {
+      rmbDown = true;
+      flewWithKeys = false;
+    }
+  });
+  window.addEventListener("pointerup", (e) => {
+    if (e.button === 2) rmbDown = false;
+  });
+  // flying shouldn't pop the context menu on release
+  canvas.addEventListener(
+    "contextmenu",
+    (e) => {
+      if (flewWithKeys) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      }
+    },
+    { capture: true },
+  );
+  function updateFlyCam(dt: number): void {
+    if (!editorVisible.get() || !rmbDown) return;
+    const boost = input.isDown("ShiftLeft") || input.isDown("ShiftRight") ? 3 : 1;
+    const move = 14 * dt * boost;
+    let used = false;
+    if (input.isDown("KeyW")) (void controls.forward(move, false), (used = true));
+    if (input.isDown("KeyS")) (void controls.forward(-move, false), (used = true));
+    if (input.isDown("KeyA")) (void controls.truck(-move, 0, false), (used = true));
+    if (input.isDown("KeyD")) (void controls.truck(move, 0, false), (used = true));
+    if (input.isDown("KeyE")) (void controls.truck(0, -move, false), (used = true));
+    if (input.isDown("KeyQ")) (void controls.truck(0, move, false), (used = true));
+    if (used) flewWithKeys = true;
+  }
+
   // -- editor ----------------------------------------------------------------
 
   const selection = createSelection();
@@ -872,6 +909,7 @@ async function main(): Promise<void> {
         }
       }
       if (playMode.get() === "playing") animations.update(dt);
+      updateFlyCam(dt);
       controls.update(dt);
       // camera priority in play mode: script-switched cam > rigless active scene
       // cam > editor/follow camera. Edit mode always uses the editor camera.

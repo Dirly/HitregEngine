@@ -537,8 +537,8 @@ function Toolbar(props: {
         </span>
       </div>
       <div style={{ color: "#8b949e", fontSize: 10 }}>
-        ~ close editor · W/E/R gizmo · F frame · G draw · Del delete · Ctrl+D duplicate · Ctrl+Z/Y undo ·
-        Ctrl inverts snap · poly: click points, Enter/near-first closes · dbl-click prefab opens it
+        ~ close editor · RMB+WASD fly (QE up/down, Shift boost) · W/E/R gizmo · F frame · G draw ·
+        Alt+scale anchors floor · Del · Ctrl+D dup · Ctrl+Z/Y · Ctrl inverts snap · dbl-click prefab opens
       </div>
     </div>
   );
