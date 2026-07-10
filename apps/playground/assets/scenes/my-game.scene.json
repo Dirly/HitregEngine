@@ -1,0 +1,1159 @@
+{
+  "version": 1,
+  "name": "my-game",
+  "entities": {
+    "sun": {
+      "name": "Sun",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            25,
+            35,
+            15
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "light": {
+          "kind": "directional",
+          "color": "#fff6e0",
+          "intensity": 1.2,
+          "castShadow": true
+        }
+      }
+    },
+    "ambient": {
+      "name": "Ambient",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "light": {
+          "kind": "ambient",
+          "color": "#bcd8ff",
+          "intensity": 0.6
+        }
+      }
+    },
+    "ground": {
+      "name": "Ground",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "plane",
+            "size": [
+              80,
+              1,
+              80
+            ]
+          },
+          "material": "fun/grass",
+          "castShadow": false,
+          "receiveShadow": true
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            80,
+            0.2,
+            80
+          ],
+          "offset": [
+            0,
+            -0.1,
+            0
+          ]
+        }
+      }
+    },
+    "wall-north": {
+      "name": "Wall North",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            0.75,
+            -15
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              31,
+              1.5,
+              1
+            ]
+          },
+          "material": "fun/sunny-yellow"
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            31,
+            1.5,
+            1
+          ]
+        }
+      }
+    },
+    "wall-south": {
+      "name": "Wall South",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            0.75,
+            15
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              31,
+              1.5,
+              1
+            ]
+          },
+          "material": "fun/sunny-yellow"
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            31,
+            1.5,
+            1
+          ]
+        }
+      }
+    },
+    "wall-east": {
+      "name": "Wall East",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            15,
+            0.75,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              1,
+              1.5,
+              31
+            ]
+          },
+          "material": "fun/sunny-yellow"
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            1,
+            1.5,
+            31
+          ]
+        }
+      }
+    },
+    "wall-west": {
+      "name": "Wall West",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            -15,
+            0.75,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              1,
+              1.5,
+              31
+            ]
+          },
+          "material": "fun/sunny-yellow"
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            1,
+            1.5,
+            31
+          ]
+        }
+      }
+    },
+    "player": {
+      "name": "Hero",
+      "parent": null,
+      "tags": [
+        "player"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            0.2,
+            6
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "soldier.glb"
+          }
+        },
+        "animator": {
+          "play": "Idle",
+          "fade": 0.25
+        },
+        "rigidbody": {
+          "lockRotations": true,
+          "angularDamping": 1
+        },
+        "collider": {
+          "shape": "capsule",
+          "size": [
+            0.8,
+            1.8,
+            0.8
+          ],
+          "offset": [
+            0,
+            0.9,
+            0
+          ],
+          "friction": 0.3
+        },
+        "script": {
+          "name": "third-person-controller",
+          "params": {
+            "speed": 6.5,
+            "jump": 8
+          }
+        }
+      }
+    },
+    "manager": {
+      "name": "Game Manager",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            1,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "script": {
+          "name": "survivors-manager",
+          "params": {}
+        }
+      }
+    },
+    "game-camera": {
+      "name": "Game Camera",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            6.5,
+            17
+          ],
+          "rotation": [
+            -0.1045,
+            0,
+            0,
+            0.9945
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "camera": {
+          "active": true,
+          "rig": {
+            "mode": "follow",
+            "targetTag": "player",
+            "distance": 10,
+            "height": 4.5,
+            "damping": 5
+          }
+        }
+      }
+    },
+    "environment": {
+      "name": "Environment",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "sky": {
+          "top": "#4aa8ff",
+          "bottom": "#d6ecff",
+          "light": 0.8,
+          "fog": {
+            "color": "#d6ecff",
+            "near": 60,
+            "far": 200
+          }
+        }
+      }
+    },
+    "9b81e4fd-26e7-46b1-bf63-54ff2fdd201a": {
+      "name": "low_poly_rocks.glb",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            29.5,
+            12.5,
+            0
+          ],
+          "rotation": [
+            0,
+            0.3826834323650898,
+            0,
+            0.9238795325112867
+          ],
+          "scale": [
+            15.3,
+            28.6,
+            18.400000000000002
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "low_poly_rocks.glb"
+          },
+          "castShadow": true,
+          "receiveShadow": true,
+          "renderMode": "auto",
+          "static": true
+        }
+      }
+    },
+    "3c8436e3-7cbd-4866-97be-d0281848fe91": {
+      "name": "low_poly_rocks.glb Copy",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            29.5,
+            8,
+            9
+          ],
+          "rotation": [
+            0,
+            0.3826834323650898,
+            0,
+            0.9238795325112867
+          ],
+          "scale": [
+            15.3,
+            19.8,
+            18.400000000000002
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "low_poly_rocks.glb"
+          },
+          "castShadow": true,
+          "receiveShadow": true,
+          "renderMode": "auto",
+          "static": true
+        }
+      }
+    },
+    "d2050ecb-39b5-4fc0-8f90-f7b658bd94a8": {
+      "name": "low_poly_rocks.glb Copy Copy",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            29.5,
+            8,
+            -16.5
+          ],
+          "rotation": [
+            0,
+            0.3826834323650898,
+            0,
+            0.9238795325112867
+          ],
+          "scale": [
+            15.3,
+            19.8,
+            18.400000000000002
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "low_poly_rocks.glb"
+          },
+          "castShadow": true,
+          "receiveShadow": true,
+          "renderMode": "auto",
+          "static": true
+        }
+      }
+    },
+    "bot-01": {
+      "name": "Bot 1",
+      "parent": null,
+      "tags": [
+        "bot"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            -13.5,
+            -31,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "skeleton-minion.glb"
+          }
+        },
+        "animator": {
+          "play": "Running_A",
+          "fade": 0.3
+        },
+        "rigidbody": {
+          "lockRotations": true,
+          "angularDamping": 1
+        },
+        "collider": {
+          "shape": "capsule",
+          "size": [
+            0.9,
+            1.7,
+            0.9
+          ],
+          "offset": [
+            0,
+            0.85,
+            0
+          ],
+          "friction": 0.3
+        }
+      }
+    },
+    "bot-02": {
+      "name": "Bot 2",
+      "parent": null,
+      "tags": [
+        "bot"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            -10.5,
+            -31,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "skeleton-warrior.glb"
+          }
+        },
+        "animator": {
+          "play": "Running_A",
+          "fade": 0.3
+        },
+        "rigidbody": {
+          "lockRotations": true,
+          "angularDamping": 1
+        },
+        "collider": {
+          "shape": "capsule",
+          "size": [
+            0.9,
+            1.7,
+            0.9
+          ],
+          "offset": [
+            0,
+            0.85,
+            0
+          ],
+          "friction": 0.3
+        }
+      }
+    },
+    "bot-03": {
+      "name": "Bot 3",
+      "parent": null,
+      "tags": [
+        "bot"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            -7.5,
+            -31,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "skeleton-minion.glb"
+          }
+        },
+        "animator": {
+          "play": "Running_A",
+          "fade": 0.3
+        },
+        "rigidbody": {
+          "lockRotations": true,
+          "angularDamping": 1
+        },
+        "collider": {
+          "shape": "capsule",
+          "size": [
+            0.9,
+            1.7,
+            0.9
+          ],
+          "offset": [
+            0,
+            0.85,
+            0
+          ],
+          "friction": 0.3
+        }
+      }
+    },
+    "bot-04": {
+      "name": "Bot 4",
+      "parent": null,
+      "tags": [
+        "bot"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            -4.5,
+            -31,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "skeleton-warrior.glb"
+          }
+        },
+        "animator": {
+          "play": "Running_A",
+          "fade": 0.3
+        },
+        "rigidbody": {
+          "lockRotations": true,
+          "angularDamping": 1
+        },
+        "collider": {
+          "shape": "capsule",
+          "size": [
+            0.9,
+            1.7,
+            0.9
+          ],
+          "offset": [
+            0,
+            0.85,
+            0
+          ],
+          "friction": 0.3
+        }
+      }
+    },
+    "bot-05": {
+      "name": "Bot 5",
+      "parent": null,
+      "tags": [
+        "bot"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            -1.5,
+            -31,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "skeleton-minion.glb"
+          }
+        },
+        "animator": {
+          "play": "Running_A",
+          "fade": 0.3
+        },
+        "rigidbody": {
+          "lockRotations": true,
+          "angularDamping": 1
+        },
+        "collider": {
+          "shape": "capsule",
+          "size": [
+            0.9,
+            1.7,
+            0.9
+          ],
+          "offset": [
+            0,
+            0.85,
+            0
+          ],
+          "friction": 0.3
+        }
+      }
+    },
+    "bot-06": {
+      "name": "Bot 6",
+      "parent": null,
+      "tags": [
+        "bot"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            1.5,
+            -31,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "skeleton-warrior.glb"
+          }
+        },
+        "animator": {
+          "play": "Running_A",
+          "fade": 0.3
+        },
+        "rigidbody": {
+          "lockRotations": true,
+          "angularDamping": 1
+        },
+        "collider": {
+          "shape": "capsule",
+          "size": [
+            0.9,
+            1.7,
+            0.9
+          ],
+          "offset": [
+            0,
+            0.85,
+            0
+          ],
+          "friction": 0.3
+        }
+      }
+    },
+    "bot-07": {
+      "name": "Bot 7",
+      "parent": null,
+      "tags": [
+        "bot"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            4.5,
+            -31,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "skeleton-minion.glb"
+          }
+        },
+        "animator": {
+          "play": "Running_A",
+          "fade": 0.3
+        },
+        "rigidbody": {
+          "lockRotations": true,
+          "angularDamping": 1
+        },
+        "collider": {
+          "shape": "capsule",
+          "size": [
+            0.9,
+            1.7,
+            0.9
+          ],
+          "offset": [
+            0,
+            0.85,
+            0
+          ],
+          "friction": 0.3
+        }
+      }
+    },
+    "bot-08": {
+      "name": "Bot 8",
+      "parent": null,
+      "tags": [
+        "bot"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            7.5,
+            -31,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "skeleton-warrior.glb"
+          }
+        },
+        "animator": {
+          "play": "Running_A",
+          "fade": 0.3
+        },
+        "rigidbody": {
+          "lockRotations": true,
+          "angularDamping": 1
+        },
+        "collider": {
+          "shape": "capsule",
+          "size": [
+            0.9,
+            1.7,
+            0.9
+          ],
+          "offset": [
+            0,
+            0.85,
+            0
+          ],
+          "friction": 0.3
+        }
+      }
+    },
+    "bot-09": {
+      "name": "Bot 9",
+      "parent": null,
+      "tags": [
+        "bot"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            10.5,
+            -31,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "skeleton-minion.glb"
+          }
+        },
+        "animator": {
+          "play": "Running_A",
+          "fade": 0.3
+        },
+        "rigidbody": {
+          "lockRotations": true,
+          "angularDamping": 1
+        },
+        "collider": {
+          "shape": "capsule",
+          "size": [
+            0.9,
+            1.7,
+            0.9
+          ],
+          "offset": [
+            0,
+            0.85,
+            0
+          ],
+          "friction": 0.3
+        }
+      }
+    },
+    "bot-10": {
+      "name": "Bot 10",
+      "parent": null,
+      "tags": [
+        "bot"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            13.5,
+            -31,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "skeleton-warrior.glb"
+          }
+        },
+        "animator": {
+          "play": "Running_A",
+          "fade": 0.3
+        },
+        "rigidbody": {
+          "lockRotations": true,
+          "angularDamping": 1
+        },
+        "collider": {
+          "shape": "capsule",
+          "size": [
+            0.9,
+            1.7,
+            0.9
+          ],
+          "offset": [
+            0,
+            0.85,
+            0
+          ],
+          "friction": 0.3
+        }
+      }
+    },
+    "bot-hangar": {
+      "name": "Bot Hangar Floor",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            -32,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            40,
+            1,
+            10
+          ]
+        }
+      }
+    },
+    "8e57cb72-645f-4dd0-9475-3fa84a533b19": {
+      "name": "low_poly_rocks.glb Copy",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -27.5,
+            7,
+            22.5
+          ],
+          "rotation": [
+            0,
+            0.3826834323650898,
+            0,
+            0.9238795325112867
+          ],
+          "scale": [
+            15.3,
+            18,
+            18.400000000000002
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "low_poly_rocks.glb"
+          },
+          "castShadow": true,
+          "receiveShadow": true,
+          "renderMode": "auto",
+          "static": true
+        }
+      }
+    }
+  }
+}

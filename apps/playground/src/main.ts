@@ -5,6 +5,7 @@ import {
   ComponentRegistry,
   expandScene,
   FixedTimestepLoop,
+  newId,
   registerCoreAssetTypes,
   registerCoreComponents,
   sceneDocSchema,
@@ -214,6 +215,8 @@ async function main(): Promise<void> {
   let built: BuiltScene;
   let lastExpanded: SceneDoc;
   const animations = new AnimationSystem();
+  /** model asset id -> its named sub-objects (kits) — exposed to the AI bridge. */
+  const modelNodes: Record<string, string[]> = {};
 
   // debug viz is an EDIT-mode tool — the game view stays clean during play
   function refreshPhysicsDebugVisibility(): void {
@@ -233,10 +236,16 @@ async function main(): Promise<void> {
       resolveMaterial: (assetId) => assets.getDataAsset(assetId)?.data,
       resolveTexture: (assetId) => assets.getTexture(assetId)?.url,
       onModelLoaded: (entityId, root, clips) => {
-        const animator = lastExpanded.entities[entityId]?.components["animator"] as
-          | AnimatorData
-          | undefined;
+        const entity = lastExpanded.entities[entityId];
+        const animator = entity?.components["animator"] as AnimatorData | undefined;
         animations.register(entityId, root, clips, animator ?? null);
+        // report kit contents so AI (and unpack) can see what's inside a model
+        const source = (
+          entity?.components["mesh"] as { source?: { assetId?: string; node?: string } } | undefined
+        )?.source;
+        if (source?.assetId && !source.node) {
+          modelNodes[source.assetId] = root.children.map((c) => c.name).filter(Boolean);
+        }
       },
     });
     if (settings.get().showPhysics) attachPhysicsDebug(expanded, built.objects);
@@ -336,10 +345,54 @@ async function main(): Promise<void> {
     assetsVersion,
     saveAsset,
     onFocusEntity: frameEntity,
+    onUnpackModel: unpackModel,
     scenes: sceneList,
     onSwitchScene: (name) => void switchScene(name),
     onNewScene: newScene,
   });
+
+  // "unpack model parts": each named sub-object of a loaded kit becomes a child
+  // entity referencing that node; the original keeps only the group transform
+  function unpackModel(id: string): void {
+    const entity = store.doc.entities[id];
+    const mesh = structuredClone(entity?.components["mesh"]) as
+      | { source: { kind: string; assetId?: string; node?: string }; [k: string]: unknown }
+      | undefined;
+    if (!entity || mesh?.source.kind !== "asset" || mesh.source.node) return;
+    const root = built.objects.get(id)?.children.find((c) => c.userData["modelRoot"]);
+    if (!root || root.children.length === 0) {
+      console.warn("[unpack] model not loaded yet or has no sub-objects");
+      return;
+    }
+    const ops: Parameters<typeof store.apply>[0] = [];
+    for (const node of root.children) {
+      if (!node.name) continue;
+      ops.push({
+        op: "add-entity",
+        id: newId(),
+        entity: {
+          name: node.name,
+          parent: id,
+          tags: [],
+          components: {
+            transform: {
+              position: node.position.toArray() as [number, number, number],
+              rotation: node.quaternion.toArray() as [number, number, number, number],
+              scale: node.scale.toArray() as [number, number, number],
+            },
+            mesh: { ...mesh, source: { ...mesh.source, node: node.name } },
+          },
+        },
+      });
+    }
+    if (ops.length === 0) return;
+    ops.push({ op: "remove-component", id, component: "mesh" });
+    try {
+      store.apply(ops);
+    } catch (error) {
+      console.warn("[unpack] rejected:", error);
+    }
+  }
 
   function frameEntity(id: string): void {
     const object = built.objects.get(id);
@@ -427,6 +480,8 @@ async function main(): Promise<void> {
     scripts?.dispose();
     audio.stopAll();
     audio.resume();
+    prevBodyPos.clear();
+    currBodyPos.clear();
     sim = new PhysicsSim(lastExpanded);
     scripts = new ScriptRuntime({
       doc: lastExpanded,
@@ -492,6 +547,36 @@ async function main(): Promise<void> {
       rebuild();
     } else if (mode === "playing" && !sim) {
       startPlaySession();
+    }
+  });
+
+  // Fortnite-style mouse look: play mode captures the pointer, so moving the
+  // mouse IS the camera. Esc (browser-enforced) or leaving play releases it;
+  // clicking the game recaptures. camera-controls' own pointer handling is
+  // parked while locked so drags don't double-apply.
+  const editorMaxPolar = controls.maxPolarAngle;
+  const MOUSE_LOOK_SPEED = 0.0025; // rad per px
+  function syncPointerLockState(): void {
+    const locked = document.pointerLockElement === canvas;
+    controls.enabled = !locked;
+  }
+  document.addEventListener("pointerlockchange", syncPointerLockState);
+  document.addEventListener("mousemove", (e) => {
+    if (document.pointerLockElement !== canvas) return;
+    void controls.rotate(-e.movementX * MOUSE_LOOK_SPEED, -e.movementY * MOUSE_LOOK_SPEED, false);
+  });
+  canvas.addEventListener("mousedown", () => {
+    if (playMode.get() === "playing" && document.pointerLockElement !== canvas) {
+      canvas.requestPointerLock();
+    }
+  });
+  playMode.subscribe(() => {
+    if (playMode.get() === "playing") {
+      controls.maxPolarAngle = 1.45; // don't let the game camera dive underground
+      canvas.requestPointerLock(); // the play-button click is our user gesture
+    } else {
+      controls.maxPolarAngle = editorMaxPolar;
+      if (document.pointerLockElement === canvas) document.exitPointerLock();
     }
   });
   rebuild();
@@ -684,6 +769,7 @@ async function main(): Promise<void> {
           target: controls.getTarget(new THREE.Vector3()).toArray().map((v) => Number(v.toFixed(2))),
         },
         inView: inView.slice(0, 25),
+        modelNodes,
         debug: {
           sceneSource: seeded ? "code-fallback" : "file",
           sceneLoadError: sceneLoadError || undefined,
@@ -734,6 +820,13 @@ async function main(): Promise<void> {
 
   let lastFrameMs = 0;
   const followPos = new THREE.Vector3();
+  // render-side smoothing: bodies step at the fixed rate, frames don't — draw
+  // them interpolated between the last two sim states (scripts still read the
+  // exact stepped state inside fixedUpdate)
+  const prevBodyPos = new Map<string, THREE.Vector3>();
+  const currBodyPos = new Map<string, THREE.Vector3>();
+  const lerpPos = new THREE.Vector3();
+  const TELEPORT_SNAP_SQ = 25; // jumps larger than this are teleports, not motion
   const loop = new FixedTimestepLoop({
     fixedUpdate: (dt) => {
       if (playMode.get() !== "playing" || !sim) return;
@@ -741,12 +834,36 @@ async function main(): Promise<void> {
       sim.step(dt);
       for (const [id, state] of sim.states()) {
         const object = built.objects.get(id);
-        if (object) applyBodyState(object, state);
+        if (!object) continue;
+        applyBodyState(object, state);
+        const curr = currBodyPos.get(id);
+        if (curr) {
+          const prev = prevBodyPos.get(id)!;
+          prev.copy(curr);
+          curr.set(state.position[0], state.position[1], state.position[2]);
+          if (prev.distanceToSquared(curr) > TELEPORT_SNAP_SQ) prev.copy(curr);
+        } else {
+          const p = new THREE.Vector3(state.position[0], state.position[1], state.position[2]);
+          currBodyPos.set(id, p);
+          prevBodyPos.set(id, p.clone());
+        }
       }
       scripts?.fixedUpdate(dt);
     },
-    update: (dt) => {
-      // follow cam: keep the orbit center on the target; mouse still orbits/zooms
+    update: (dt, alpha) => {
+      // draw dynamic bodies between their last two sim states
+      if (playMode.get() === "playing" && sim) {
+        for (const [id, curr] of currBodyPos) {
+          const object = built.objects.get(id);
+          const prev = prevBodyPos.get(id);
+          if (!object?.parent || !prev) continue;
+          lerpPos.lerpVectors(prev, curr, alpha);
+          object.parent.updateWorldMatrix(true, false);
+          object.position.copy(object.parent.worldToLocal(lerpPos));
+        }
+      }
+      // follow cam: keep the orbit center on the target; the pointer-lock
+      // mouse look (play) or drag-orbit (paused) supplies the rotation
       if (playMode.get() !== "edit" && followTargetId) {
         const target = built.objects.get(followTargetId);
         if (target) {

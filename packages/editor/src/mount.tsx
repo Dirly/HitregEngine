@@ -33,6 +33,7 @@ export interface MountOptions {
   assetsVersion: Observable<number>;
   saveAsset?: (file: string, content: string) => void;
   onFocusEntity?: (entityId: string) => void;
+  onUnpackModel?: (entityId: string) => void;
   scenes?: Observable<string[]>;
   onSwitchScene?: (name: string) => void;
   onNewScene?: (name: string) => void;
@@ -61,6 +62,7 @@ export function mountEditor(options: MountOptions): { unmount(): void } {
       assetsVersion={options.assetsVersion}
       saveAsset={options.saveAsset}
       onFocusEntity={options.onFocusEntity}
+      onUnpackModel={options.onUnpackModel}
       scenes={options.scenes}
       onSwitchScene={options.onSwitchScene}
       onNewScene={options.onNewScene}

@@ -41,13 +41,35 @@ export class ViewportTools {
   private grid: THREE.GridHelper | null = null;
   private pointerDown: { x: number; y: number } | null = null;
   private disposers: Array<() => void> = [];
+  private altDown = false;
+  /** Alt-scale anchor: keep the object's lowest point fixed while scaling. */
+  private scaleAnchor: { bottomY: number; k: number } | null = null;
 
   constructor(private readonly opts: ViewportOptions) {
     this.controls = new TransformControls(opts.camera, opts.canvas);
     this.controls.addEventListener("dragging-changed", (event) => {
       const dragging = Boolean((event as { value: unknown }).value);
       opts.onDraggingChanged?.(dragging);
-      if (!dragging) this.commitTransform();
+      if (dragging && this.controls.mode === "scale" && this.controls.object) {
+        // capture the lowest point so Alt can anchor scaling to the floor
+        const object = this.controls.object;
+        const box = new THREE.Box3().setFromObject(object);
+        if (Number.isFinite(box.min.y) && object.scale.y !== 0) {
+          this.scaleAnchor = {
+            bottomY: box.min.y,
+            k: (object.position.y - box.min.y) / object.scale.y,
+          };
+        }
+      }
+      if (!dragging) {
+        this.scaleAnchor = null;
+        this.commitTransform();
+      }
+    });
+    this.controls.addEventListener("objectChange", () => {
+      const object = this.controls.object;
+      if (!object || !this.altDown || this.controls.mode !== "scale" || !this.scaleAnchor) return;
+      object.position.y = this.scaleAnchor.bottomY + this.scaleAnchor.k * object.scale.y;
     });
 
     const onPointerDown = (e: PointerEvent) => {
@@ -61,7 +83,14 @@ export class ViewportTools {
       this.pointerDown = null;
       if (moved < 5 && !this.controls.dragging) this.pick(e);
     };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === "Alt") this.altDown = false;
+    };
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Alt") {
+        this.altDown = true;
+        e.preventDefault(); // keep browsers from stealing focus to the menu bar
+      }
       if (!this.opts.enabled.get()) return;
       if (
         e.target instanceof HTMLInputElement ||
@@ -120,6 +149,8 @@ export class ViewportTools {
     opts.canvas.addEventListener("dragover", onDragOver);
     opts.canvas.addEventListener("drop", onDrop);
     window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    this.disposers.push(() => window.removeEventListener("keyup", onKeyUp));
     this.disposers.push(
       () => opts.canvas.removeEventListener("pointerdown", onPointerDown),
       () => opts.canvas.removeEventListener("pointerup", onPointerUp),

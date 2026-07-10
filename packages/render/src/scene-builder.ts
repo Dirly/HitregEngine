@@ -1,6 +1,19 @@
 import * as THREE from "three/webgpu";
-import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { GLTFLoader, type GLTF } from "three/addons/loaders/GLTFLoader.js";
+import { clone as skeletonClone } from "three/addons/utils/SkeletonUtils.js";
 import type { SceneDoc } from "@hitreg/core";
+
+// kits load once and instance many times
+const gltfCache = new Map<string, Promise<GLTF>>();
+
+function loadGltf(url: string): Promise<GLTF> {
+  let pending = gltfCache.get(url);
+  if (!pending) {
+    pending = (gltfLoader ??= new GLTFLoader()).loadAsync(url);
+    gltfCache.set(url, pending);
+  }
+  return pending;
+}
 
 export interface BuildOptions {
   /** Resolve a mesh asset id to a fetchable glTF/GLB URL (from the AssetLibrary). */
@@ -61,7 +74,7 @@ interface TransformData {
 interface MeshData {
   source:
     | { kind: "primitive"; shape: string; size: [number, number, number] }
-    | { kind: "asset"; assetId: string }
+    | { kind: "asset"; assetId: string; node?: string }
     | {
         kind: "polygon";
         points: Array<[number, number]>;
@@ -312,21 +325,43 @@ export function buildScene(doc: SceneDoc, options: BuildOptions = {}): BuiltScen
 
     if (meshData && meshData.source.kind === "asset") {
       const url = options.resolveModel?.(meshData.source.assetId);
+      const nodeName = meshData.source.node;
       if (url) {
         // async: the model pops in when loaded; group placement is already correct
-        (gltfLoader ??= new GLTFLoader()).loadAsync(url).then(
+        loadGltf(url).then(
           (gltf) => {
-            gltf.scene.traverse((node) => {
+            let source: THREE.Object3D = gltf.scene;
+            if (nodeName) {
+              const found = gltf.scene.getObjectByName(nodeName);
+              if (!found) {
+                console.warn(`[render] node "${nodeName}" not found in ${url}`);
+                return;
+              }
+              source = found;
+            }
+            // the cache shares one loaded scene: always instance a skeleton-safe clone
+            const instance = skeletonClone(source);
+            if (nodeName) {
+              // detached part: the entity's transform governs placement
+              instance.position.set(0, 0, 0);
+              instance.quaternion.identity();
+              instance.scale.set(1, 1, 1);
+            }
+            instance.userData["modelRoot"] = true;
+            instance.traverse((node) => {
               if ((node as THREE.Mesh).isMesh) {
                 node.castShadow = meshData.castShadow;
                 node.receiveShadow = meshData.receiveShadow;
+                // skinned bounds stay at the bind pose, so a moved/teleported
+                // character would be frustum-culled while plainly on screen
+                if ((node as THREE.SkinnedMesh).isSkinnedMesh) node.frustumCulled = false;
               }
               node.userData["entityId"] = id;
             });
-            group.add(gltf.scene);
-            options.onModelLoaded?.(id, gltf.scene, gltf.animations ?? []);
+            group.add(instance);
+            options.onModelLoaded?.(id, instance, gltf.animations ?? []);
           },
-          (error) => console.warn(`[render] failed to load model ${meshData.source.kind === "asset" ? meshData.source.assetId : ""}:`, error),
+          (error) => console.warn(`[render] failed to load model:`, error),
         );
       } else {
         console.warn(`[render] no URL for mesh asset "${meshData.source.assetId}"`);

@@ -25,6 +25,8 @@ export const meshSchema = z.object({
     z.object({
       kind: z.literal("asset"),
       assetId: z.string().min(1),
+      /** Named node WITHIN the model — set by "unpack model" to detach parts. */
+      node: z.string().optional(),
     }),
     z.object({
       /** Extruded 2D footprint (graybox poly-draw). Rises from the entity origin. */

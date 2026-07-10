@@ -59,6 +59,8 @@ export interface AppProps {
   saveAsset?: (file: string, content: string) => void;
   /** Fly the editor camera to frame an entity (double-click in hierarchy / F key). */
   onFocusEntity?: (entityId: string) => void;
+  /** Detach a loaded model's named sub-objects into child entities. */
+  onUnpackModel?: (entityId: string) => void;
   /** Scene management (host-provided): available scene names + switching. */
   scenes?: Observable<string[]>;
   onSwitchScene?: (name: string) => void;
@@ -313,6 +315,7 @@ export function App(props: AppProps) {
         selection={props.selection}
         contextMenu={props.contextMenu}
         onCreatePrefab={createPrefabFrom}
+        onUnpackModel={props.onUnpackModel}
       />
     </>
   );
@@ -1532,6 +1535,7 @@ function ContextMenuView(props: {
   selection: Selection;
   contextMenu: ContextMenu;
   onCreatePrefab: (entityId: string) => void;
+  onUnpackModel?: (entityId: string) => void;
 }) {
   const menu = useObservable(props.contextMenu);
   if (!menu) return null;
@@ -1606,6 +1610,20 @@ function ContextMenuView(props: {
           "create prefab from this",
           () => id && props.onCreatePrefab(id),
           !id || "prefab" in (props.store.doc.entities[id]?.components ?? {}),
+        )}
+        {item(
+          "unpack model parts",
+          () => id && props.onUnpackModel?.(id),
+          !id ||
+            !props.onUnpackModel ||
+            (() => {
+              const source = (
+                props.store.doc.entities[id]?.components["mesh"] as
+                  | { source?: { kind?: string; node?: string } }
+                  | undefined
+              )?.source;
+              return source?.kind !== "asset" || !!source.node;
+            })(),
         )}
         {item(
           "delete  (Del)",
