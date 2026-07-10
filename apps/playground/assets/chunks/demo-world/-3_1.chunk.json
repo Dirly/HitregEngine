@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "entities": {
+    "ground": {
+      "name": "Ground -3,1",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            -0.5,
+            0
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              16,
+              1,
+              16
+            ]
+          },
+          "material": "demo-world/ground-a"
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            16,
+            1,
+            16
+          ]
+        }
+      }
+    }
+  }
+}

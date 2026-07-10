@@ -1,5 +1,5 @@
 import type * as THREE from "three";
-import type { EntityDoc } from "@hitreg/core";
+import type { EntityDoc, PlayerDataService } from "@hitreg/core";
 
 /** Declared tuning value — drives inspector fields and the AI-facing spec. */
 export interface ScriptParamSpec {
@@ -33,6 +33,14 @@ export interface ScriptContext {
   setAnimation?(clip: string, fadeSeconds?: number): void;
   /** Play this entity's audio component, or any sound asset id, at this entity. */
   playSound?(soundId?: string): void;
+  /**
+   * Experience-scoped persistence for the local player (async — use from
+   * onStart or fire-and-forget; never block onFixedUpdate on it):
+   * `ctx.playerData?.set("primary", "wood", 42)`. Quotas, rate limits, and
+   * atomic revisions are enforced by the service; category-1 platform data
+   * (currency, cosmetics, entitlements) is NOT reachable from here by design.
+   */
+  playerData?: PlayerDataService;
 }
 
 export interface InputLike {

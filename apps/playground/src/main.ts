@@ -6,21 +6,32 @@ import {
   expandScene,
   FixedTimestepLoop,
   newId,
+  registerChunkComponents,
+  PlayerDataService,
   registerCoreAssetTypes,
   registerCoreComponents,
   sceneDocSchema,
   SceneStore,
   validateScene,
+  type ChunkStreamerData,
   type SceneDoc,
 } from "@hitreg/core";
 import {
   AnimationSystem,
   attachPhysicsDebug,
+  attachSkeletonDebug,
   buildScene,
+  collectBones,
   EngineRenderer,
+  loadGltf,
+  makeMaterial,
+  makeMeshGeometryProvider,
+  ParticleSystem,
   type AnimatorData,
   type BuiltScene,
+  type MaterialData,
 } from "@hitreg/render";
+import { clone as skeletonClone } from "three/addons/utils/SkeletonUtils.js";
 import { AudioSystem, type AudioComponentData } from "./audio-system.js";
 import { initPhysics, PhysicsSim, type BodyState } from "@hitreg/physics";
 import {
@@ -33,6 +44,7 @@ import {
   createAssetSelection,
   createContextMenu,
   createDockSizes,
+  createModelBones,
   createSelection,
   defaultEditorSettings,
   GrayboxTool,
@@ -44,6 +56,9 @@ import {
   type PlayMode,
 } from "@hitreg/editor";
 import { buildStarterDoc, buildStreetDoc } from "./street-scene.js";
+import { ChunkManager } from "./chunk-manager.js";
+import { BridgePlayerDataBackend } from "./player-data-bridge.js";
+import { NetPresence } from "./net-presence.js";
 
 CameraControls.install({ THREE });
 
@@ -113,8 +128,26 @@ async function main(): Promise<void> {
 
   const registry = new ComponentRegistry();
   registerCoreComponents(registry);
+  registerChunkComponents(registry);
   const assets = new AssetLibrary();
   registerCoreAssetTypes(assets);
+  // trimesh/convex colliders cook their geometry from the entity's GLB model
+  const meshGeometry = makeMeshGeometryProvider((assetId) => assets.getModel(assetId)?.url);
+  // streamed chunk worlds: runtime-only content loaded by distance to the focus
+  const chunkManager = new ChunkManager(assets, registry, {
+    resolveModel: (assetId) => assets.getModel(assetId)?.url,
+    resolveMaterial: (assetId) => assets.getDataAsset(assetId)?.data,
+    resolveTexture: (assetId) => assets.getTexture(assetId)?.url,
+  }, {
+    onLoaded: (doc, objects) => {
+      for (const [id, object] of objects) built.objects.set(id, object);
+      scripts?.addEntities(doc, objects);
+    },
+    onUnloaded: (ids) => {
+      for (const id of ids) built.objects.delete(id);
+      scripts?.removeEntities(ids);
+    },
+  });
 
   // -- scene: files are the source of truth (fetched fresh, never bundled) ----
   // otherwise the code-built street seeds the first scene file.
@@ -214,9 +247,13 @@ async function main(): Promise<void> {
 
   let built: BuiltScene;
   let lastExpanded: SceneDoc;
+  let netPresence: NetPresence | null = null; // constructed after the editor mounts
   const animations = new AnimationSystem();
+  const particles = new ParticleSystem();
   /** model asset id -> its named sub-objects (kits) — exposed to the AI bridge. */
   const modelNodes: Record<string, string[]> = {};
+  /** entity id -> bone names of its loaded skinned model (inspector bone dropdowns). */
+  const modelBones = createModelBones();
 
   // debug viz is an EDIT-mode tool — the game view stays clean during play
   function refreshPhysicsDebugVisibility(): void {
@@ -224,6 +261,13 @@ async function main(): Promise<void> {
     const visible = playMode.get() === "edit" && settings.get().showPhysics;
     built.scene.traverse((node) => {
       if (node.userData["physicsDebug"]) node.visible = visible;
+    });
+  }
+  function refreshSkeletonDebugVisibility(): void {
+    if (!built) return;
+    const visible = playMode.get() === "edit" && settings.get().showSkeletons;
+    built.scene.traverse((node) => {
+      if (node.userData["skeletonDebug"]) node.visible = visible;
     });
   }
   // camera collision: in play mode the follow camera dollies in instead of
@@ -247,10 +291,13 @@ async function main(): Promise<void> {
     const expanded = expandScene(store.doc, assets, registry);
     lastExpanded = expanded;
     animations.clear();
+    particles.clear();
     built = buildScene(expanded, {
       resolveModel: (assetId) => assets.getModel(assetId)?.url,
       resolveMaterial: (assetId) => assets.getDataAsset(assetId)?.data,
       resolveTexture: (assetId) => assets.getTexture(assetId)?.url,
+      onParticles: (entityId, group, data) =>
+        particles.register(entityId, group, data, (assetId) => assets.getTexture(assetId)?.url),
       onModelLoaded: (entityId, root, clips) => {
         const entity = lastExpanded.entities[entityId];
         const animator = entity?.components["animator"] as AnimatorData | undefined;
@@ -262,6 +309,15 @@ async function main(): Promise<void> {
         if (source?.assetId && !source.node) {
           modelNodes[source.assetId] = root.children.map((c) => c.name).filter(Boolean);
         }
+        // rigged models: expose bone names to the inspector + skeleton overlay
+        const bones = collectBones(root);
+        if (bones.length > 0) {
+          modelBones.set({ ...modelBones.get(), [entityId]: bones });
+          if (built) {
+            attachSkeletonDebug(built.objects); // idempotent — one call per async load
+            refreshSkeletonDebugVisibility();
+          }
+        }
         // late-loading static models (rocks, trees) must block the camera too
         if (playMode.get() !== "edit") refreshCameraColliders();
       },
@@ -271,10 +327,33 @@ async function main(): Promise<void> {
     refreshCameraColliders();
     // sky component sets its own background; this is only the no-sky fallback
     if (!built.scene.background) built.scene.background = new THREE.Color(0x0b0e14);
+    // postfx component drives renderer post-processing (one per scene, first wins);
+    // live file edits land here via the same store.subscribe(rebuild) path as sky
+    type BloomData = { enabled: boolean; strength: number; radius: number; threshold: number };
+    let bloomOpts: BloomData | null = null;
+    for (const entity of Object.values(expanded.entities)) {
+      const fx = entity.components["postfx"] as { bloom?: BloomData } | undefined;
+      if (fx) {
+        bloomOpts = fx.bloom ?? null;
+        break;
+      }
+    }
+    renderer.setBloom(bloomOpts?.enabled ? bloomOpts : null);
+    // chunkStreamer component opts the scene into streamed chunk content
+    let streamer: ChunkStreamerData | null = null;
+    for (const entity of Object.values(expanded.entities)) {
+      const cs = entity.components["chunkStreamer"] as ChunkStreamerData | undefined;
+      if (cs) {
+        streamer = cs;
+        break;
+      }
+    }
+    void chunkManager.configure(streamer, built.scene);
     for (const sceneCam of built.cameras.values()) {
       sceneCam.aspect = (canvas.clientWidth || 1) / (canvas.clientHeight || 1);
       sceneCam.updateProjectionMatrix();
     }
+    netPresence?.attach(built.scene); // remote-player avatars survive rebuilds
     viewport?.onSceneRebuilt();
   }
 
@@ -291,9 +370,18 @@ async function main(): Promise<void> {
   controls.setLookAt(18, 12, 22, 0, 1, 0, false);
 
   // editor fly-cam: hold LEFT mouse + WASD (QE = down/up, Shift = boost);
-  // left-drag keeps orbiting, so drag-to-look + WASD flies like Unity
+  // plain left-drag keeps orbiting. Once a fly key is pressed, camera-controls
+  // is parked and we drive the camera directly — drag = FPS look, keys = move —
+  // because camera-controls' update()/setLookAt would stomp the drag rotation
+  // every frame if both tried to own the camera.
   let flyBtnDown = false;
   let flyLookMode = false;
+  let gizmoDragging = false;
+  let flyYaw = 0;
+  let flyPitch = 0;
+  const FLY_LOOK_SPEED = 0.0025; // rad per px
+  const FLY_PITCH_LIMIT = Math.PI / 2 - 0.03;
+  const flyEuler = new THREE.Euler(0, 0, 0, "YXZ");
   canvas.addEventListener("pointerdown", (e) => {
     if (e.button === 0) flyBtnDown = true;
   });
@@ -303,31 +391,38 @@ async function main(): Promise<void> {
       exitFlyLook();
     }
   });
+  window.addEventListener("pointermove", (e) => {
+    if (!flyLookMode) return;
+    flyYaw -= e.movementX * FLY_LOOK_SPEED;
+    flyPitch = THREE.MathUtils.clamp(
+      flyPitch - e.movementY * FLY_LOOK_SPEED,
+      -FLY_PITCH_LIMIT,
+      FLY_PITCH_LIMIT,
+    );
+    camera.quaternion.setFromEuler(flyEuler.set(flyPitch, flyYaw, 0));
+  });
 
-  // FPS look while flying: pivot at the camera (drag = turn in place),
-  // restored to normal orbit when the button releases
   function enterFlyLook(): void {
-    if (flyLookMode) return;
+    if (flyLookMode || gizmoDragging) return;
     flyLookMode = true;
+    // seed yaw/pitch from where the camera already looks — no visual jump
     camera.getWorldDirection(flyDir);
-    const p = camera.position;
-    void controls.setLookAt(p.x, p.y, p.z, p.x + flyDir.x * 0.6, p.y + flyDir.y * 0.6, p.z + flyDir.z * 0.6, false);
-    controls.azimuthRotateSpeed = -0.35;
-    controls.polarRotateSpeed = -0.35;
+    flyPitch = Math.asin(THREE.MathUtils.clamp(flyDir.y, -1, 1));
+    flyYaw = Math.atan2(-flyDir.x, -flyDir.z);
+    controls.enabled = false;
   }
   function exitFlyLook(): void {
     if (!flyLookMode) return;
     flyLookMode = false;
+    // hand the camera back with the orbit pivot a comfortable distance ahead
     camera.getWorldDirection(flyDir);
     const p = camera.position;
     void controls.setLookAt(p.x, p.y, p.z, p.x + flyDir.x * 12, p.y + flyDir.y * 12, p.z + flyDir.z * 12, false);
-    controls.azimuthRotateSpeed = 1;
-    controls.polarRotateSpeed = 1;
+    controls.enabled = document.pointerLockElement !== canvas;
   }
   const flyDir = new THREE.Vector3();
   const flyRight = new THREE.Vector3();
   const flyDelta = new THREE.Vector3();
-  const flyTarget = new THREE.Vector3();
   const WORLD_UP = new THREE.Vector3(0, 1, 0);
   function updateFlyCam(dt: number): void {
     if (!editorVisible.get() || !flyBtnDown) return;
@@ -344,18 +439,17 @@ async function main(): Promise<void> {
     if (input.isDown("KeyE")) flyDelta.addScaledVector(WORLD_UP, move);
     if (input.isDown("KeyQ")) flyDelta.addScaledVector(WORLD_UP, -move);
     if (flyDelta.lengthSq() === 0) return;
-    enterFlyLook(); // first fly key switches drag to turn-in-place
-    const px = camera.position.x + flyDelta.x;
-    const py = camera.position.y + flyDelta.y;
-    const pz = camera.position.z + flyDelta.z;
-    // keep the look pivot glued just ahead so dragging keeps steering
-    void controls.setLookAt(px, py, pz, px + flyDir.x * 0.6, py + flyDir.y * 0.6, pz + flyDir.z * 0.6, false);
+    enterFlyLook(); // first fly key hands the camera to the fly-cam
+    if (!flyLookMode) return; // gizmo drag owns this mouse gesture
+    camera.position.add(flyDelta);
   }
 
   // -- editor ----------------------------------------------------------------
 
   const selection = createSelection();
-  const editorVisible = observable(false);
+  // Authoring is the default state. The editor stays available whenever the
+  // game is not actively running; play mode is the clean fullscreen view.
+  const editorVisible = observable(true);
   const settings = observable(defaultEditorSettings);
   const gizmoMode = observable<GizmoMode>("translate");
   const playMode = observable<PlayMode>("edit");
@@ -384,6 +478,7 @@ async function main(): Promise<void> {
     getScene: () => built.scene,
     getObject: (id) => built.objects.get(id),
     onDraggingChanged: (dragging) => {
+      gizmoDragging = dragging;
       controls.enabled = !dragging;
     },
   });
@@ -400,6 +495,7 @@ async function main(): Promise<void> {
     bevel: grayboxBevel,
     getScene: () => built.scene,
     onDraggingChanged: (dragging) => {
+      gizmoDragging = dragging;
       controls.enabled = !dragging;
     },
   });
@@ -424,12 +520,37 @@ async function main(): Promise<void> {
     thumbnails,
     dockSizes,
     assetsVersion,
+    modelBones,
     saveAsset,
     onFocusEntity: frameEntity,
     onUnpackModel: unpackModel,
     scenes: sceneList,
     onSwitchScene: (name) => void switchScene(name),
     onNewScene: newScene,
+  });
+
+  // -- multiplayer presence (dev): other tabs on this scene appear as avatars --
+
+  const netPlayerPos = new THREE.Vector3();
+  const netPlayerQuat = new THREE.Quaternion();
+  const netPlayerEuler = new THREE.Euler(0, 0, 0, "YXZ");
+  netPresence = new NetPresence({
+    getSceneName: () => store.doc.name,
+    getLocalPlayer: () => {
+      if (playMode.get() !== "playing") return null;
+      const playerId = Object.entries(lastExpanded.entities).find(([, e]) =>
+        e.tags.includes("player"),
+      )?.[0];
+      const object = playerId ? built.objects.get(playerId) : undefined;
+      if (!object) return null;
+      object.getWorldPosition(netPlayerPos);
+      object.getWorldQuaternion(netPlayerQuat);
+      netPlayerEuler.setFromQuaternion(netPlayerQuat);
+      return {
+        position: [netPlayerPos.x, netPlayerPos.y, netPlayerPos.z],
+        yaw: netPlayerEuler.y,
+      };
+    },
   });
 
   // "unpack model parts": each named sub-object of a loaded kit becomes a child
@@ -486,10 +607,10 @@ async function main(): Promise<void> {
     });
   }
 
-  // Unity-style flow: play = fullscreen game; ~ pauses and opens the editor;
-  // ~ again resumes fullscreen; stop (toolbar) returns to editing.
+  // Unity-style flow: edit/paused = editor visible; play = fullscreen game.
+  // Backquote starts play from edit, pauses from play, and resumes from pause.
   playMode.subscribe(() => {
-    if (playMode.get() === "playing") editorVisible.set(false);
+    editorVisible.set(playMode.get() !== "playing");
   });
 
   window.addEventListener("keydown", (e) => {
@@ -497,11 +618,9 @@ async function main(): Promise<void> {
     if (e.code === "Backquote") {
       if (playMode.get() === "playing") {
         playMode.set("paused");
-        editorVisible.set(true);
-      } else if (playMode.get() === "paused" && editorVisible.get()) {
-        playMode.set("playing"); // auto-hides the editor via the subscription above
       } else {
-        editorVisible.set(!editorVisible.get());
+        // Both edit and paused transition straight into the running game.
+        playMode.set("playing");
       }
     }
     // Unity F: frame the selection
@@ -552,6 +671,7 @@ async function main(): Promise<void> {
   }
 
   const audio = new AudioSystem(camera, (soundId) => assets.getSound(soundId)?.url);
+  const playerDataBackend = new BridgePlayerDataBackend();
 
   let sim: PhysicsSim | null = null;
   let scripts: ScriptRuntime | null = null;
@@ -563,11 +683,17 @@ async function main(): Promise<void> {
     audio.resume();
     prevBodyPos.clear();
     currBodyPos.clear();
-    sim = new PhysicsSim(lastExpanded);
+    sim = new PhysicsSim(lastExpanded, undefined, { meshGeometry });
+    chunkManager.setSim(sim); // loaded chunks collide too
     scripts = new ScriptRuntime({
       doc: lastExpanded,
       objects: built.objects,
       sim,
+      // dev identity: single local player; the scene is the experience
+      playerData: new PlayerDataService(playerDataBackend, {
+        playerId: "local",
+        experienceId: store.doc.name,
+      }),
       registry: scriptRegistry,
       input,
       viewForward,
@@ -583,6 +709,7 @@ async function main(): Promise<void> {
       },
     });
     scripts.start();
+    chunkManager.forEachLoaded((doc, objects) => scripts?.addEntities(doc, objects));
     animations.setRunning(true);
 
     // autoplay audio components (music, ambience)
@@ -608,6 +735,7 @@ async function main(): Promise<void> {
   function endPlaySession(): void {
     scripts?.dispose();
     scripts = null;
+    chunkManager.setSim(null);
     sim?.free();
     sim = null;
     followTargetId = null;
@@ -621,6 +749,8 @@ async function main(): Promise<void> {
   });
   // stop restores the scene from the document — sim/script state is runtime-only
   playMode.subscribe(refreshPhysicsDebugVisibility);
+  playMode.subscribe(refreshSkeletonDebugVisibility);
+  settings.subscribe(refreshSkeletonDebugVisibility);
   playMode.subscribe(() => {
     const mode = playMode.get();
     if (mode === "edit") {
@@ -686,6 +816,62 @@ async function main(): Promise<void> {
   // -- prefab thumbnails: render each prefab to a tiny offscreen target -------
 
   const THUMB = 96;
+
+  /** Frame `object` in a 3/4 studio view and rasterize it to a PNG data URL. */
+  async function snapshotObject(object: THREE.Object3D): Promise<string> {
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0b0e14);
+    scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+    const sun = new THREE.DirectionalLight(0xfff5e0, 2);
+    sun.position.set(3, 5, 4);
+    scene.add(sun);
+    scene.add(object);
+
+    const box = new THREE.Box3().setFromObject(object);
+    const size = box.getSize(new THREE.Vector3()).length() || 1;
+    const center = box.getCenter(new THREE.Vector3());
+    const cam = new THREE.PerspectiveCamera(45, 1, 0.01, size * 10);
+    cam.position.copy(center).add(new THREE.Vector3(size * 0.7, size * 0.55, size * 0.7));
+    cam.lookAt(center);
+
+    const target = new THREE.RenderTarget(THUMB, THUMB);
+    renderer.renderer.setRenderTarget(target);
+    renderer.renderer.render(scene, cam);
+    const pixels = (await renderer.renderer.readRenderTargetPixelsAsync(
+      target,
+      0,
+      0,
+      THUMB,
+      THUMB,
+    )) as Uint8Array;
+    renderer.renderer.setRenderTarget(null);
+    target.dispose();
+
+    const canvas2d = document.createElement("canvas");
+    canvas2d.width = THUMB;
+    canvas2d.height = THUMB;
+    const ctx = canvas2d.getContext("2d")!;
+    const image = ctx.createImageData(THUMB, THUMB);
+    // WebGPU copies each row into a buffer aligned to 256 bytes;
+    // `readRenderTargetPixelsAsync()` returns that padded buffer verbatim.
+    // Treating it as tightly packed RGBA made every following row start 128
+    // bytes early at our 96px thumbnail size, producing horizontal strips.
+    // WebGPU uses top-left row order, while the WebGL fallback is bottom-up.
+    const bytesPerPixel = 4; // RenderTarget's default RGBA UnsignedByteType
+    const sourceRowStride = Math.ceil((THUMB * bytesPerPixel) / 256) * 256;
+    const destinationRowStride = THUMB * bytesPerPixel;
+    for (let y = 0; y < THUMB; y++) {
+      const sourceY = backend === "webgl" ? THUMB - 1 - y : y;
+      const src = sourceY * sourceRowStride;
+      image.data.set(
+        pixels.subarray(src, src + destinationRowStride),
+        y * destinationRowStride,
+      );
+    }
+    ctx.putImageData(image, 0, 0);
+    return canvas2d.toDataURL();
+  }
+
   async function renderThumbnails(): Promise<void> {
     const out: Record<string, string> = { ...thumbnails.get() };
     let changed = false;
@@ -693,58 +879,64 @@ async function main(): Promise<void> {
       try {
         const key = `${pid}:${JSON.stringify(assets.getPrefab(pid)).length}`;
         if (out[`__key_${pid}`] === key) continue;
-        const { doc: thumbDoc } = (() => {
-          const d = buildStreetDocEmpty(pid);
-          return { doc: d };
-        })();
+        const thumbDoc = buildStreetDocEmpty(pid);
         const expanded = expandScene(thumbDoc, assets, registry);
         const thumb = buildScene(expanded, {
           resolveMaterial: (id) => assets.getDataAsset(id)?.data,
         });
-        thumb.scene.background = new THREE.Color(0x0b0e14);
-        thumb.scene.add(new THREE.AmbientLight(0xffffff, 1.2));
-        const sun = new THREE.DirectionalLight(0xfff5e0, 2);
-        sun.position.set(3, 5, 4);
-        thumb.scene.add(sun);
-
-        const box = new THREE.Box3().setFromObject(thumb.scene);
-        const size = box.getSize(new THREE.Vector3()).length() || 1;
-        const center = box.getCenter(new THREE.Vector3());
-        const cam = new THREE.PerspectiveCamera(45, 1, 0.01, size * 10);
-        cam.position.copy(center).add(new THREE.Vector3(size * 0.7, size * 0.55, size * 0.7));
-        cam.lookAt(center);
-
-        const target = new THREE.RenderTarget(THUMB, THUMB);
-        renderer.renderer.setRenderTarget(target);
-        renderer.renderer.render(thumb.scene, cam);
-        const pixels = (await renderer.renderer.readRenderTargetPixelsAsync(
-          target,
-          0,
-          0,
-          THUMB,
-          THUMB,
-        )) as Uint8Array;
-        renderer.renderer.setRenderTarget(null);
-        target.dispose();
-
-        const canvas2d = document.createElement("canvas");
-        canvas2d.width = THUMB;
-        canvas2d.height = THUMB;
-        const ctx = canvas2d.getContext("2d")!;
-        const image = ctx.createImageData(THUMB, THUMB);
-        // flip Y: render targets are bottom-up
-        for (let y = 0; y < THUMB; y++) {
-          const src = (THUMB - 1 - y) * THUMB * 4;
-          image.data.set(pixels.subarray(src, src + THUMB * 4), y * THUMB * 4);
-        }
-        ctx.putImageData(image, 0, 0);
-        out[pid] = canvas2d.toDataURL();
+        out[pid] = await snapshotObject(thumb.scene);
         out[`__key_${pid}`] = key;
         changed = true;
       } catch (error) {
-        console.warn(`[thumbnails] failed for ${pid}:`, error);
+        console.warn(`[thumbnails] failed for prefab ${pid}:`, error);
       }
     }
+
+    for (const mid of assets.modelIds()) {
+      try {
+        const model = assets.getModel(mid);
+        if (!model) continue;
+        const key = model.url;
+        if (out[`__key_model_${mid}`] === key) continue;
+        const gltf = await loadGltf(model.url);
+        // the cache shares one loaded scene: always render a skeleton-safe clone
+        const instance = skeletonClone(gltf.scene);
+        out[mid] = await snapshotObject(instance);
+        out[`__key_model_${mid}`] = key;
+        changed = true;
+      } catch (error) {
+        console.warn(`[thumbnails] failed for model ${mid}:`, error);
+      }
+    }
+
+    for (const asset of assets.dataAssetsOfType("material")) {
+      try {
+        const key = JSON.stringify(asset.data);
+        if (out[`__key_material_${asset.id}`] === key) continue;
+        const data = asset.data as MaterialData;
+        const material = makeMaterial(data) as THREE.Material & { map?: THREE.Texture | null };
+        const textureUrl = data.map ? assets.getTexture(data.map)?.url : undefined;
+        if (textureUrl && data.shader !== "wireframe") {
+          // snapshot is one-shot (no render loop to pick up a later-arriving
+          // texture), so wait for it instead of the fire-and-forget helper
+          const texture = await new THREE.TextureLoader().loadAsync(textureUrl);
+          texture.colorSpace = THREE.SRGBColorSpace;
+          texture.wrapS = THREE.RepeatWrapping;
+          texture.wrapT = THREE.RepeatWrapping;
+          const [rx, ry] = data.repeat ?? [1, 1];
+          texture.repeat.set(rx, ry);
+          material.map = texture;
+          material.needsUpdate = true;
+        }
+        const sphere = new THREE.Mesh(new THREE.SphereGeometry(1, 48, 32), material);
+        out[asset.id] = await snapshotObject(sphere);
+        out[`__key_material_${asset.id}`] = key;
+        changed = true;
+      } catch (error) {
+        console.warn(`[thumbnails] failed for material ${asset.id}:`, error);
+      }
+    }
+
     if (changed) thumbnails.set(out);
   }
 
@@ -809,6 +1001,9 @@ async function main(): Promise<void> {
             if (assets.getPrefab(id)) assets.updatePrefab(id, doc);
             else assets.addPrefab(id, doc);
             assetsVersion.set(assetsVersion.get() + 1);
+          } else if (file.startsWith("chunks/")) {
+            // hot-swap a loaded chunk in place (or pick up a brand-new cell)
+            void chunkManager.onFileChanged(file.slice("chunks/".length), content);
           }
         } catch (error) {
           console.warn(`[live-sync] rejected change to ${file}:`, error);
@@ -856,6 +1051,9 @@ async function main(): Promise<void> {
         },
         inView: inView.slice(0, 25),
         modelNodes,
+        modelBones: modelBones.get(),
+        chunks: chunkManager.stats,
+        net: netPresence?.debug() ?? null,
         debug: {
           sceneSource: seeded ? "code-fallback" : "file",
           sceneLoadError: sceneLoadError || undefined,
@@ -958,8 +1156,21 @@ async function main(): Promise<void> {
         }
       }
       if (playMode.get() === "playing") animations.update(dt);
+      // chunk streaming follows the player in play mode, the fly-cam in edit
+      {
+        const focusObj =
+          playMode.get() !== "edit" && followTargetId ? built.objects.get(followTargetId) : null;
+        if (focusObj) {
+          const p = focusObj.getWorldPosition(followPos);
+          chunkManager.update(p.x, p.z);
+        } else {
+          chunkManager.update(camera.position.x, camera.position.z);
+        }
+      }
       updateFlyCam(dt);
-      controls.update(dt);
+      // while flying, the fly-cam owns the camera — camera-controls' update
+      // would overwrite our position/rotation from its own internal state
+      if (!flyLookMode) controls.update(dt);
       // camera priority in play mode: script-switched cam > rigless active scene
       // cam > editor/follow camera. Edit mode always uses the editor camera.
       let renderCamera: THREE.Camera = camera;
@@ -971,6 +1182,8 @@ async function main(): Promise<void> {
           renderCamera = built.activeCamera;
         }
       }
+      particles.update(dt, renderCamera); // billboards face the camera actually used
+      netPresence?.update(dt); // remote avatars lerp toward their snapshot targets
       renderer.render(built.scene, renderCamera);
       lastFrameMs = dt * 1000;
     },
@@ -984,9 +1197,17 @@ async function main(): Promise<void> {
         : mode === "paused"
           ? "PAUSED — ~ resume · ⏹ stop in toolbar"
           : "~ editor";
+    const chunkStats = chunkManager.stats;
+    const netStats = netPresence?.stats();
     hud.textContent =
       `backend: ${backend}\n` +
       `entities: ${Object.keys(store.doc.entities).length} (source)\n` +
+      (chunkStats.chunks > 0
+        ? `chunks: ${chunkStats.chunks} (${chunkStats.entities} streamed)\n`
+        : "") +
+      (netStats && netStats.role !== "off"
+        ? `net: ${netStats.role} · ${netStats.players} players\n`
+        : "") +
       `frame: ${lastFrameMs.toFixed(1)}ms\n` +
       `mode: ${mode}  ·  ${hint}`;
   }, 500);

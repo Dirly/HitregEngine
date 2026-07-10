@@ -72,6 +72,8 @@ export interface EditorSettings {
   gridSize: number;
   /** X-ray collider wireframes + joint anchors/axes in the viewport. */
   showPhysics: boolean;
+  /** Skeleton lines + bone-name labels on skinned models in the viewport. */
+  showSkeletons: boolean;
 }
 
 /** Selected asset in the Assets panel (mutually exclusive with entity selection). */
@@ -100,4 +102,13 @@ export const defaultEditorSettings: EditorSettings = {
   grid: true,
   gridSize: 1,
   showPhysics: true,
+  showSkeletons: false,
 };
+
+/**
+ * Entity id -> ordered bone names of its loaded skinned model. Populated by
+ * the host from onModelLoaded (via @hitreg/render collectBones); the
+ * inspector uses it to offer bone-name dropdowns instead of blind typing.
+ */
+export type ModelBones = Observable<Record<string, string[]>>;
+export const createModelBones = (): ModelBones => observable<Record<string, string[]>>({});

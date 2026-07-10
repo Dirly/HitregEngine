@@ -25,6 +25,8 @@ export {
   animatorSchema,
   audioSchema,
   skySchema,
+  postfxSchema,
+  particlesSchema,
   vec3,
   quat,
   hexColor,
@@ -70,3 +72,24 @@ export {
   type HeightmapParams,
   type HeightmapMesh,
 } from "./terrain.js";
+export {
+  PlayerDataService,
+  PlayerDataError,
+  MemoryPlayerDataBackend,
+  playerDataRecordSchema,
+  defaultPlayerDataLimits,
+  type PlayerDataBackend,
+  type PlayerDataRecord,
+  type PlayerDataScope,
+  type PlayerDataLimits,
+} from "./player-data.js";
+export {
+  chunkDocSchema,
+  chunkStreamerSchema,
+  registerChunkComponents,
+  parseChunkCoords,
+  chunkFileName,
+  chunkToSceneDoc,
+  type ChunkDoc,
+  type ChunkStreamerData,
+} from "./chunks.js";

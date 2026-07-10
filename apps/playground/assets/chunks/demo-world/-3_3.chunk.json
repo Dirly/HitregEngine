@@ -1,0 +1,149 @@
+{
+  "version": 1,
+  "entities": {
+    "ground": {
+      "name": "Ground -3,3",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            -0.5,
+            0
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              16,
+              1,
+              16
+            ]
+          },
+          "material": "demo-world/ground-a"
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            16,
+            1,
+            16
+          ]
+        }
+      }
+    },
+    "pillar-0": {
+      "name": "Pillar 0",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            1.0789999999999995,
+            0.896,
+            -1.846
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              1,
+              1.792,
+              1
+            ]
+          },
+          "material": "demo-world/pillar"
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            1,
+            1.792,
+            1
+          ]
+        }
+      }
+    },
+    "pillar-1": {
+      "name": "Pillar 1",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            -3.5100000000000002,
+            0.8345,
+            -2.9639999999999995
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              1,
+              1.669,
+              1
+            ]
+          },
+          "material": "demo-world/pillar"
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            1,
+            1.669,
+            1
+          ]
+        }
+      }
+    },
+    "pillar-2": {
+      "name": "Pillar 2",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            -2.1189999999999998,
+            0.6695,
+            2.3790000000000004
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              1,
+              1.339,
+              1
+            ]
+          },
+          "material": "demo-world/pillar"
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            1,
+            1.339,
+            1
+          ]
+        }
+      }
+    }
+  }
+}

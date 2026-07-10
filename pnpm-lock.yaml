@@ -16,6 +16,9 @@ importers:
       '@hitreg/editor':
         specifier: workspace:^
         version: link:../../packages/editor
+      '@hitreg/net':
+        specifier: workspace:*
+        version: link:../../packages/net
       '@hitreg/physics':
         specifier: workspace:^
         version: link:../../packages/physics
@@ -88,6 +91,18 @@ importers:
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
+
+  packages/net:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^3.0.0
+        version: 3.2.7(@types/node@22.20.1)(lightningcss@1.32.0)(tsx@4.23.0)
 
   packages/physics:
     dependencies:

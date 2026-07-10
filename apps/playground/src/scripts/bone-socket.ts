@@ -6,11 +6,18 @@ import { Script } from "@hitreg/scripting";
  * (weapons in hands, hats on heads). Visual-only: copies the bone's world
  * pose onto this entity every tick, with tunable offsets — adjust `offset` /
  * `rotationDeg` live in the inspector until the prop sits right.
+ *
+ * Finding the right bone: toggle "bones" in the editor toolbar to draw the
+ * skeleton with joint name labels, and the inspector's `bone` field becomes
+ * a dropdown of the parent model's actual bone names once the model loads.
  */
 export default class BoneSocket extends Script {
   static override scriptName = "bone-socket";
   static override params = {
-    bone: { default: "mixamorig:RightHand" },
+    bone: {
+      default: "mixamorig:RightHand",
+      description: "bone name on the parent model's rig (see the 'bones' toolbar toggle)",
+    },
     offset: { default: [0, 0, 0], description: "position offset, bone-oriented world units" },
     rotationDeg: { default: [0, 90, 0], description: "rotation offset in degrees" },
   };

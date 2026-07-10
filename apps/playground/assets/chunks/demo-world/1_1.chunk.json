@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "entities": {
+    "ground": {
+      "name": "Ground 1,1",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            -0.5,
+            0
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              16,
+              1,
+              16
+            ]
+          },
+          "material": "demo-world/ground-a"
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            16,
+            1,
+            16
+          ]
+        }
+      }
+    },
+    "pillar-0": {
+      "name": "Pillar 0",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            3.263,
+            1.7285,
+            -0.78
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              1,
+              3.457,
+              1
+            ]
+          },
+          "material": "demo-world/pillar"
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            1,
+            3.457,
+            1
+          ]
+        }
+      }
+    }
+  }
+}

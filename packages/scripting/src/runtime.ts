@@ -1,5 +1,5 @@
 import type * as THREE from "three";
-import type { SceneDoc } from "@hitreg/core";
+import type { PlayerDataService, SceneDoc } from "@hitreg/core";
 import type { InputLike, Script, ScriptContext, SimLike } from "./script.js";
 import type { ScriptRegistry } from "./registry.js";
 
@@ -16,6 +16,8 @@ export interface RuntimeOptions {
   setAnimation?: (entityId: string, clip: string, fadeSeconds?: number) => void;
   /** Host audio hook: play an entity's audio component or a sound asset id. */
   playSound?: (entityId: string, soundId?: string) => void;
+  /** Experience-scoped persistence for the local player (ARCHITECTURE §3c). */
+  playerData?: PlayerDataService;
 }
 
 interface ScriptComponentData {
@@ -30,11 +32,16 @@ interface ScriptComponentData {
  */
 export class ScriptRuntime {
   private readonly instances = new Map<string, Script>();
+  private readonly entities: Map<string, SceneDoc["entities"][string]>;
+  private readonly objects: Map<string, THREE.Object3D>;
   private timeMs = 0;
   private started = false;
   private activeCameraId: string | null = null;
 
-  constructor(private readonly opts: RuntimeOptions) {}
+  constructor(private readonly opts: RuntimeOptions) {
+    this.entities = new Map(Object.entries(opts.doc.entities));
+    this.objects = opts.objects;
+  }
 
   /** Camera-entity id a script switched to, or null for the scene default. */
   getActiveCameraId(): string | null {
@@ -44,16 +51,47 @@ export class ScriptRuntime {
   start(): void {
     if (this.started) return;
     this.started = true;
-    for (const [id, entity] of Object.entries(this.opts.doc.entities)) {
+    for (const [id, entity] of this.entities) this.startEntity(id, entity);
+  }
+
+  /** Attach runtime-only entities such as a streamed chunk. */
+  addEntities(doc: SceneDoc, objects: Map<string, THREE.Object3D>): void {
+    for (const [id, entity] of Object.entries(doc.entities)) {
+      this.entities.set(id, entity);
+      const object = objects.get(id);
+      if (object) this.objects.set(id, object);
+      if (this.started) this.startEntity(id, entity);
+    }
+  }
+
+  /** Dispose scripts and forget entities removed with an unloaded chunk. */
+  removeEntities(ids: Iterable<string>): void {
+    for (const id of ids) {
+      const script = this.instances.get(id);
+      if (script) {
+        try {
+          script.onDispose?.();
+        } catch (error) {
+          console.warn(`[scripts] ${id} onDispose failed:`, error);
+        }
+        this.instances.delete(id);
+      }
+      this.entities.delete(id);
+      this.objects.delete(id);
+    }
+  }
+
+  private startEntity(id: string, entity: SceneDoc["entities"][string]): void {
+      if (this.instances.has(id)) return;
       const comp = entity.components["script"] as ScriptComponentData | undefined;
-      if (!comp) continue;
+      if (!comp) return;
       const cls = this.opts.registry.get(comp.name);
       if (!cls) {
         console.warn(`[scripts] entity ${id}: unknown script "${comp.name}"`);
-        continue;
+        return;
       }
-      const object = this.opts.objects.get(id);
-      if (!object) continue;
+      const object = this.objects.get(id);
+      if (!object) return;
 
       const context: ScriptContext = {
         entityId: id,
@@ -61,10 +99,10 @@ export class ScriptRuntime {
         params: { ...this.opts.registry.defaultParams(comp.name), ...comp.params },
         input: this.opts.input,
         sim: this.opts.sim,
-        getEntity: (eid) => this.opts.doc.entities[eid],
-        getObject: (eid) => this.opts.objects.get(eid),
+        getEntity: (eid) => this.entities.get(eid),
+        getObject: (eid) => this.objects.get(eid),
         findByTag: (tag) =>
-          Object.entries(this.opts.doc.entities)
+          [...this.entities]
             .filter(([, e]) => e.tags.includes(tag))
             .map(([eid]) => eid),
         now: () => this.timeMs,
@@ -78,6 +116,7 @@ export class ScriptRuntime {
         ...(this.opts.playSound
           ? { playSound: (soundId?: string) => this.opts.playSound!(id, soundId) }
           : {}),
+        ...(this.opts.playerData ? { playerData: this.opts.playerData } : {}),
       };
       const script = new cls();
       script.ctx = context;
@@ -87,7 +126,6 @@ export class ScriptRuntime {
       } catch (error) {
         console.warn(`[scripts] ${comp.name}@${id} onStart failed:`, error);
       }
-    }
   }
 
   fixedUpdate(dt: number): void {

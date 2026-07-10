@@ -1,0 +1,113 @@
+{
+  "version": 1,
+  "entities": {
+    "ground": {
+      "name": "Ground -1,-1",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            -0.5,
+            0
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              16,
+              1,
+              16
+            ]
+          },
+          "material": "demo-world/ground-c"
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            16,
+            1,
+            16
+          ]
+        }
+      }
+    },
+    "pillar-0": {
+      "name": "Pillar 0",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            -2.769,
+            0.8765000000000001,
+            -4.134
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              1,
+              1.7530000000000001,
+              1
+            ]
+          },
+          "material": "demo-world/pillar"
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            1,
+            1.7530000000000001,
+            1
+          ]
+        }
+      }
+    },
+    "pillar-1": {
+      "name": "Pillar 1",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            -3.198,
+            0.9349999999999999,
+            -1.4689999999999999
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              1,
+              1.8699999999999999,
+              1
+            ]
+          },
+          "material": "demo-world/pillar"
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            1,
+            1.8699999999999999,
+            1
+          ]
+        }
+      }
+    }
+  }
+}

@@ -8,6 +8,7 @@ import type {
   EditorSettings,
   GizmoMode,
   GrayboxShape,
+  ModelBones,
   Observable,
   PlayMode,
   Selection,
@@ -31,6 +32,8 @@ export interface MountOptions {
   thumbnails: Observable<Record<string, string>>;
   dockSizes: Observable<DockSizes>;
   assetsVersion: Observable<number>;
+  /** Entity id -> bone names of its loaded skinned model (bone dropdowns). */
+  modelBones?: ModelBones;
   saveAsset?: (file: string, content: string) => void;
   onFocusEntity?: (entityId: string) => void;
   onUnpackModel?: (entityId: string) => void;
@@ -60,6 +63,7 @@ export function mountEditor(options: MountOptions): { unmount(): void } {
       thumbnails={options.thumbnails}
       dockSizes={options.dockSizes}
       assetsVersion={options.assetsVersion}
+      modelBones={options.modelBones}
       saveAsset={options.saveAsset}
       onFocusEntity={options.onFocusEntity}
       onUnpackModel={options.onUnpackModel}

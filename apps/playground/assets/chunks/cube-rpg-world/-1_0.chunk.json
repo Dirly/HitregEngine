@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "entities": {
+    "western-highlands": {
+      "name": "Western Highlands",
+      "parent": null,
+      "tags": ["static", "terrain", "rpg-biome"],
+      "components": {
+        "transform": { "position": [0, 0, 0] },
+        "mesh": {
+          "source": { "kind": "heightmap", "size": [160, 160], "amplitude": 1.6, "frequency": 0.065, "seed": 12, "offset": [-160, 0], "resolution": 96, "flatRadius": 0, "flatFalloff": 20 },
+          "material": "rpg/highlands", "castShadow": false, "receiveShadow": true, "static": true
+        },
+        "collider": { "shape": "heightmap", "friction": 0.78 }
+      }
+    },
+    "highland-ruin": {
+      "name": "Highland Watch Ruin", "parent": null, "tags": ["static", "poi"],
+      "components": { "transform": { "position": [28, 0, 16], "scale": [1.5, 1.5, 1.5] }, "mesh": { "source": { "kind": "asset", "assetId": "cube-world/Environment/glTF/Crystal_Big.gltf" }, "static": true }, "collider": { "shape": "cylinder", "size": [1.4, 3.4, 1.4], "offset": [0, 1.7, 0] } }
+    },
+    "highland-rock": {
+      "name": "Highland Marker Rock", "parent": null, "tags": ["static", "biome-transition"],
+      "components": { "transform": { "position": [69, 0.2, -24], "scale": [1.6, 1.6, 1.6] }, "mesh": { "source": { "kind": "asset", "assetId": "cube-world/Environment/glTF/Rock2.gltf" }, "static": true }, "collider": { "shape": "cylinder", "size": [1.8, 1.5, 1.8], "offset": [0, 0.75, 0] } }
+    },
+    "highland-skeleton": {
+      "name": "Ruin Skeleton", "parent": null, "tags": ["rpg-enemy"],
+      "components": { "transform": { "position": [24, 0.8, 10], "scale": [0.9, 0.9, 0.9] }, "mesh": { "source": { "kind": "asset", "assetId": "cube-world/Enemies/glTF/Skeleton.gltf" } }, "rigidbody": { "lockRotations": true, "angularDamping": 1 }, "collider": { "shape": "capsule", "size": [0.9, 1.8, 0.9], "offset": [0, 0.9, 0] }, "script": { "name": "chaser", "params": { "speed": 3.5, "targetTag": "player", "runClip": "Run", "idleClip": "Idle", "aggroRange": 10 } }, "animator": { "play": "Idle", "fade": 0.25, "speed": 1 } }
+    }
+  }
+}

@@ -19,7 +19,7 @@ interface RigidbodyData {
 }
 
 interface ColliderData {
-  shape: "box" | "sphere" | "capsule" | "cylinder" | "heightmap";
+  shape: "box" | "sphere" | "capsule" | "cylinder" | "heightmap" | "trimesh" | "convex";
   size: Vec3;
   offset: Vec3;
   friction: number;
@@ -28,8 +28,32 @@ interface ColliderData {
   isTrigger: boolean;
 }
 
-interface HeightmapMeshData {
-  source: { kind: string } & Partial<HeightmapParams>;
+interface MeshComponentData {
+  source:
+    | ({ kind: "heightmap" } & Partial<HeightmapParams>)
+    | { kind: "asset"; assetId: string; node?: string }
+    | { kind: "primitive"; shape: string; size?: Vec3 }
+    | { kind: string };
+}
+
+/** Cooked collision geometry: flat xyz triples + triangle indices. */
+export interface MeshGeometryData {
+  positions: Float32Array;
+  indices: Uint32Array;
+}
+
+export interface PhysicsSimOptions {
+  /**
+   * Resolves an asset mesh (GLB model) to collision geometry for trimesh/
+   * convex colliders. The sim is headless — geometry lives renderer-side, so
+   * the host injects it (@hitreg/render exports extractCollisionGeometry /
+   * makeMeshGeometryProvider). A Promise result attaches the collider to the
+   * already-created body when it resolves; null falls back to a box.
+   */
+  meshGeometry?: (
+    assetId: string,
+    node?: string,
+  ) => MeshGeometryData | Promise<MeshGeometryData | null> | null | undefined;
 }
 
 interface JointData {
@@ -64,20 +88,34 @@ export async function initPhysics(): Promise<void> {
  */
 export class PhysicsSim {
   private readonly world: RAPIER.World;
+  /** Every body by entity id (removal, chunk streaming). */
+  private readonly bodies = new Map<string, RAPIER.RigidBody>();
   /** Only bodies that can move (dynamic/kinematic) — statics never report state. */
   private readonly moving = new Map<string, RAPIER.RigidBody>();
   private readonly events = new RAPIER.EventQueue(true);
   private readonly colliderToEntity = new Map<number, string>();
   private pendingCollisions: Array<[string, string]> = [];
+  private readonly options: PhysicsSimOptions;
+  private disposed = false;
+  private readonly warned = new Set<string>();
 
-  constructor(doc: SceneDoc, gravity: Vec3 = [0, -9.81, 0]) {
+  constructor(doc: SceneDoc, gravity: Vec3 = [0, -9.81, 0], options: PhysicsSimOptions = {}) {
     if (!initialized) {
       throw new Error("call initPhysics() before constructing a PhysicsSim");
     }
+    this.options = options;
     this.world = new RAPIER.World({ x: gravity[0], y: gravity[1], z: gravity[2] });
+    this.addEntities(doc);
+  }
 
+  /**
+   * Build bodies/colliders/joints for a doc's entities into the live world.
+   * The constructor path and runtime injection (chunk streaming) share this;
+   * ids must be unique across the whole sim.
+   */
+  addEntities(doc: SceneDoc): void {
     const transforms = worldTransforms(doc);
-    const bodies = new Map<string, RAPIER.RigidBody>();
+    const bodies = this.bodies;
 
     // pass 1: bodies + colliders
     for (const [id, entity] of Object.entries(doc.entities)) {
@@ -123,20 +161,37 @@ export class PhysicsSim {
         const sy = Math.abs(world.scale[1]);
         const sz = Math.abs(world.scale[2]);
         const [w, h, d] = [size[0] * sx, size[1] * sy, size[2] * sz];
-        let shape: RAPIER.ColliderDesc;
+        const scaledOffset: Vec3 = [offset[0] * sx, offset[1] * sy, offset[2] * sz];
+        const boxFallback = (): RAPIER.ColliderDesc =>
+          RAPIER.ColliderDesc.cuboid(w / 2, h / 2, d / 2);
+        // null = skipped, or deferred (async geometry attaches to the body later)
+        let shape: RAPIER.ColliderDesc | null;
         switch (col.shape) {
           case "heightmap": {
             // cook a static trimesh from the SAME grid the renderer draws
             // (core/terrain.ts) — visual ground and physical ground can't drift
-            const mesh = entity.components["mesh"] as HeightmapMeshData | undefined;
+            const mesh = entity.components["mesh"] as MeshComponentData | undefined;
             if (mesh?.source.kind !== "heightmap") {
               console.warn(`[physics] ${id}: heightmap collider needs a heightmap mesh component`);
               continue;
             }
-            const grid = heightmapMesh(mesh.source as HeightmapParams);
+            const grid = heightmapMesh(mesh.source as unknown as HeightmapParams);
             shape = RAPIER.ColliderDesc.trimesh(grid.positions, grid.indices);
             break;
           }
+          case "trimesh":
+          case "convex":
+            shape = this.meshColliderDesc(
+              id,
+              entity.components,
+              col.shape,
+              [sx, sy, sz],
+              body,
+              col,
+              scaledOffset,
+              boxFallback,
+            );
+            break;
           case "sphere":
             shape = RAPIER.ColliderDesc.ball(w / 2);
             break;
@@ -148,17 +203,10 @@ export class PhysicsSim {
             break;
           case "box":
           default:
-            shape = RAPIER.ColliderDesc.cuboid(w / 2, h / 2, d / 2);
+            shape = boxFallback();
         }
-        shape
-          .setTranslation(offset[0] * sx, offset[1] * sy, offset[2] * sz)
-          .setFriction(col.friction ?? 0.5)
-          .setRestitution(col.restitution ?? 0)
-          .setDensity(col.density ?? 1)
-          .setSensor(col.isTrigger ?? false)
-          .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS);
-        const created = this.world.createCollider(shape, body);
-        this.colliderToEntity.set(created.handle, id);
+        if (!shape) continue;
+        this.finishCollider(shape, body, col, scaledOffset, id);
       }
     }
 
@@ -204,6 +252,137 @@ export class PhysicsSim {
         );
       }
     }
+  }
+
+  /** Remove entities (and their colliders/joints) from the live world. */
+  removeEntities(ids: Iterable<string>): void {
+    for (const id of ids) {
+      const body = this.bodies.get(id);
+      if (!body) continue;
+      for (let i = 0; i < body.numColliders(); i++) {
+        this.colliderToEntity.delete(body.collider(i).handle);
+      }
+      this.world.removeRigidBody(body); // attached colliders/joints go with it
+      this.bodies.delete(id);
+      this.moving.delete(id);
+    }
+  }
+
+  /** Apply the shared collider settings and register it on the body. */
+  private finishCollider(
+    shape: RAPIER.ColliderDesc,
+    body: RAPIER.RigidBody,
+    col: ColliderData,
+    scaledOffset: Vec3,
+    id: string,
+  ): void {
+    shape
+      .setTranslation(scaledOffset[0], scaledOffset[1], scaledOffset[2])
+      .setFriction(col.friction ?? 0.5)
+      .setRestitution(col.restitution ?? 0)
+      .setDensity(col.density ?? 1)
+      .setSensor(col.isTrigger ?? false)
+      .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS);
+    const created = this.world.createCollider(shape, body);
+    this.colliderToEntity.set(created.handle, id);
+  }
+
+  /**
+   * trimesh/convex colliders cook from the SAME entity's mesh component.
+   * Heightmap and box primitives cook synchronously from analytic geometry;
+   * asset meshes go through the injected meshGeometry provider (sync data,
+   * a Promise, or absent). Returns null when the collider is deferred — an
+   * async provider attaches it to the already-created body on resolve.
+   */
+  private meshColliderDesc(
+    id: string,
+    components: Record<string, unknown>,
+    kind: "trimesh" | "convex",
+    scale: Vec3,
+    body: RAPIER.RigidBody,
+    col: ColliderData,
+    scaledOffset: Vec3,
+    boxFallback: () => RAPIER.ColliderDesc,
+  ): RAPIER.ColliderDesc | null {
+    const source = (components["mesh"] as MeshComponentData | undefined)?.source;
+
+    if (source?.kind === "heightmap") {
+      const grid = heightmapMesh(source as unknown as HeightmapParams);
+      return (
+        this.cookShape(id, kind, scaleVertices(grid.positions, scale), grid.indices) ??
+        boxFallback()
+      );
+    }
+
+    if (source?.kind === "asset") {
+      const asset = source as { kind: "asset"; assetId: string; node?: string };
+      const provider = this.options.meshGeometry;
+      const result = provider ? provider(asset.assetId, asset.node) : undefined;
+      if (!result) {
+        this.warnOnce(
+          id,
+          provider
+            ? `no collision geometry for asset "${asset.assetId}" — using box`
+            : `${kind} collider on an asset mesh needs a meshGeometry provider — using box`,
+        );
+        return boxFallback();
+      }
+      if (result instanceof Promise) {
+        // the body exists now; the collider joins it once geometry arrives
+        result
+          .then((data) => {
+            if (this.disposed || this.bodies.get(id) !== body) return; // freed or unloaded
+            if (!data) {
+              this.warnOnce(id, `no collision geometry for asset "${asset.assetId}" — using box`);
+            }
+            const desc =
+              (data &&
+                this.cookShape(id, kind, scaleVertices(data.positions, scale), data.indices)) ||
+              boxFallback();
+            this.finishCollider(desc, body, col, scaledOffset, id);
+          })
+          .catch((error) => console.warn(`[physics] ${id}: collision geometry failed`, error));
+        return null;
+      }
+      return (
+        this.cookShape(id, kind, scaleVertices(result.positions, scale), result.indices) ??
+        boxFallback()
+      );
+    }
+
+    if (source?.kind === "primitive") {
+      const prim = source as { kind: "primitive"; shape: string; size?: Vec3 };
+      if (prim.shape === "box") {
+        const geom = boxMeshGeometry(prim.size ?? [1, 1, 1], scale);
+        return this.cookShape(id, kind, geom.positions, geom.indices) ?? boxFallback();
+      }
+      // curved primitives already have exact analytic colliders — a cooked
+      // mesh would only be worse; point authors at those instead
+      this.warnOnce(id, `${kind} collider not cooked for primitive "${prim.shape}" — using box`);
+      return boxFallback();
+    }
+
+    this.warnOnce(id, `${kind} collider needs a mesh component — using box`);
+    return boxFallback();
+  }
+
+  private cookShape(
+    id: string,
+    kind: "trimesh" | "convex",
+    positions: Float32Array,
+    indices: Uint32Array,
+  ): RAPIER.ColliderDesc | null {
+    if (kind === "trimesh") return RAPIER.ColliderDesc.trimesh(positions, indices);
+    const hull = RAPIER.ColliderDesc.convexHull(positions);
+    if (!hull) this.warnOnce(id, "convex hull cooking failed — using box");
+    return hull;
+  }
+
+  private warnOnce(id: string, message: string): void {
+    const key = `${id}:${message}`;
+    if (this.warned.has(key)) return;
+    this.warned.add(key);
+    console.warn(`[physics] ${id}: ${message}`);
   }
 
   step(dt: number): void {
@@ -263,6 +442,47 @@ export class PhysicsSim {
   }
 
   free(): void {
+    this.disposed = true;
     this.world.free();
   }
+}
+
+/**
+ * Rapier colliders don't scale with their body — bake the entity's world
+ * scale into the vertices before cooking. Provider data may be cached and
+ * shared, so never mutate it in place.
+ */
+function scaleVertices(positions: Float32Array, scale: Vec3): Float32Array {
+  const [sx, sy, sz] = scale;
+  if (sx === 1 && sy === 1 && sz === 1) return positions;
+  const out = new Float32Array(positions.length);
+  for (let i = 0; i < positions.length; i += 3) {
+    out[i] = positions[i]! * sx;
+    out[i + 1] = positions[i + 1]! * sy;
+    out[i + 2] = positions[i + 2]! * sz;
+  }
+  return out;
+}
+
+/** Analytic 8-corner/12-triangle mesh for a box primitive (CCW outward). */
+function boxMeshGeometry(size: Vec3, scale: Vec3): MeshGeometryData {
+  const hx = (size[0] * scale[0]) / 2;
+  const hy = (size[1] * scale[1]) / 2;
+  const hz = (size[2] * scale[2]) / 2;
+  const positions = new Float32Array(24);
+  for (let k = 0; k < 8; k++) {
+    positions[k * 3] = k & 1 ? hx : -hx;
+    positions[k * 3 + 1] = k & 2 ? hy : -hy;
+    positions[k * 3 + 2] = k & 4 ? hz : -hz;
+  }
+  // prettier-ignore
+  const indices = new Uint32Array([
+    4, 5, 7,  4, 7, 6, // +z
+    1, 0, 2,  1, 2, 3, // -z
+    5, 1, 3,  5, 3, 7, // +x
+    0, 4, 6,  0, 6, 2, // -x
+    2, 6, 7,  2, 7, 3, // +y
+    0, 1, 5,  0, 5, 4, // -y
+  ]);
+  return { positions, indices };
 }

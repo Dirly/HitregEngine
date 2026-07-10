@@ -43,6 +43,64 @@ describe("ComponentRegistry", () => {
     if (!result.ok) expect(result.error).toMatch(/intensity/);
   });
 
+  it("defaults postfx bloom to disabled with tuned parameters", () => {
+    const registry = setup();
+    const result = registry.validate("postfx", {});
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data).toEqual({
+        bloom: { enabled: false, strength: 0.5, radius: 0.4, threshold: 0.85 },
+      });
+    }
+  });
+
+  it("rejects out-of-range postfx bloom values", () => {
+    const registry = setup();
+    const result = registry.validate("postfx", { bloom: { enabled: true, radius: 2 } });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/radius/);
+  });
+
+  it("defaults particles to a ready-to-use additive emitter", () => {
+    const registry = setup();
+    const result = registry.validate("particles", {});
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data).toMatchObject({
+        emitting: true,
+        rate: 20,
+        max: 200,
+        lifetime: [0.8, 1.6],
+        shape: "point",
+        shapeSize: [0.2, 0.2, 0.2],
+        coneAngle: 25,
+        direction: [0, 1, 0],
+        speed: [1, 2],
+        gravity: 0,
+        drag: 0,
+        sizeStart: 0.15,
+        sizeEnd: 0.02,
+        spin: 0,
+        colorStart: "#ffffff",
+        colorEnd: "#ffffff",
+        opacityStart: 1,
+        opacityEnd: 0,
+        blending: "additive",
+        space: "world",
+      });
+    }
+  });
+
+  it("hard-caps particles max at 2000 and rejects bad shapes", () => {
+    const registry = setup();
+    const capped = registry.validate("particles", { max: 5000 });
+    expect(capped.ok).toBe(false);
+    if (!capped.ok) expect(capped.error).toMatch(/max/);
+    const badShape = registry.validate("particles", { shape: "torus" });
+    expect(badShape.ok).toBe(false);
+    if (!badShape.ok) expect(badShape.error).toMatch(/shape/);
+  });
+
   it("exports JSON Schema for every registered component", () => {
     const registry = setup();
     const schemas = registry.jsonSchemas();
@@ -54,6 +112,8 @@ describe("ComponentRegistry", () => {
       "joint",
       "light",
       "mesh",
+      "particles",
+      "postfx",
       "prefab",
       "rigidbody",
       "script",

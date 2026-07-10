@@ -1,0 +1,186 @@
+{
+  "version": 1,
+  "name": "demo-chunks",
+  "entities": {
+    "sky": {
+      "name": "Sky",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "sky": {
+          "top": "#7db4ff",
+          "bottom": "#e8f4ff",
+          "light": 0.8,
+          "fog": {
+            "color": "#e8f4ff",
+            "near": 40,
+            "far": 110
+          }
+        }
+      }
+    },
+    "sun": {
+      "name": "Sun",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            20,
+            40,
+            12
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "light": {
+          "kind": "directional",
+          "color": "#fff2dd",
+          "intensity": 2.2,
+          "castShadow": true
+        }
+      }
+    },
+    "world": {
+      "name": "Streamed World",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "chunkStreamer": {
+          "source": "demo-world",
+          "cellSize": 16,
+          "radius": 2,
+          "keepPadding": 1
+        }
+      }
+    },
+    "postfx": {
+      "name": "PostFX",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "postfx": {
+          "bloom": {
+            "enabled": true,
+            "strength": 0.5,
+            "radius": 0.4,
+            "threshold": 0.85
+          }
+        }
+      }
+    },
+    "crystal": {
+      "name": "Glow Crystal",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            1.6,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              0.8,
+              2.6,
+              0.8
+            ]
+          },
+          "material": "demo-world/crystal-glow"
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            0.8,
+            2.6,
+            0.8
+          ]
+        },
+        "script": {
+          "name": "session-counter",
+          "params": {
+            "namespace": "stats"
+          }
+        }
+      }
+    },
+    "crystal-sparks": {
+      "name": "Crystal Sparks",
+      "parent": "crystal",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            1.4,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "particles": {
+          "rate": 24,
+          "max": 120,
+          "lifetime": [
+            0.9,
+            1.8
+          ],
+          "shape": "cone",
+          "coneAngle": 20,
+          "direction": [
+            0,
+            1,
+            0
+          ],
+          "speed": [
+            0.8,
+            1.6
+          ],
+          "gravity": -0.2,
+          "sizeStart": 0.12,
+          "sizeEnd": 0.02,
+          "colorStart": "#9fe8ff",
+          "colorEnd": "#2266aa",
+          "blending": "additive",
+          "space": "world"
+        }
+      }
+    }
+  }
+}

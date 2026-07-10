@@ -11,7 +11,7 @@ import type { SceneDoc } from "@hitreg/core";
  */
 
 interface ColliderData {
-  shape: "box" | "sphere" | "capsule" | "cylinder";
+  shape: "box" | "sphere" | "capsule" | "cylinder" | "trimesh" | "convex";
   size: [number, number, number];
   offset: [number, number, number];
   isTrigger: boolean;
@@ -38,6 +38,43 @@ function xray<T extends THREE.Material>(material: T): T {
   material.transparent = true;
   material.opacity = 0.85;
   return material;
+}
+
+/**
+ * trimesh/convex colliders follow the entity's mesh, so draw the bounding box
+ * of the meshes under the entity (in entity-local space — the wireframe is a
+ * child, so it inherits entity scale exactly like the model does). Models
+ * load async: if nothing is loaded yet this yields a unit box, corrected on
+ * the next rebuild.
+ */
+function meshColliderBounds(object: THREE.Object3D): THREE.BufferGeometry {
+  object.updateWorldMatrix(true, true);
+  const inverse = new THREE.Matrix4().copy(object.matrixWorld).invert();
+  const relative = new THREE.Matrix4();
+  const bounds = new THREE.Box3();
+  const meshBounds = new THREE.Box3();
+  let found = false;
+  object.traverse((child) => {
+    const mesh = child as THREE.Mesh;
+    if (!mesh.isMesh || mesh.userData["physicsDebug"] || !mesh.geometry) return;
+    if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+    const box = mesh.geometry.boundingBox;
+    if (!box || box.isEmpty()) return;
+    relative.multiplyMatrices(inverse, mesh.matrixWorld);
+    meshBounds.copy(box).applyMatrix4(relative);
+    bounds.union(meshBounds);
+    found = true;
+  });
+  if (!found) return new THREE.BoxGeometry(1, 1, 1);
+  const size = bounds.getSize(new THREE.Vector3());
+  const center = bounds.getCenter(new THREE.Vector3());
+  const geometry = new THREE.BoxGeometry(
+    Math.max(size.x, 0.01),
+    Math.max(size.y, 0.01),
+    Math.max(size.z, 0.01),
+  );
+  geometry.translate(center.x, center.y, center.z);
+  return geometry;
 }
 
 function colliderGeometry(collider: ColliderData): THREE.BufferGeometry {
@@ -80,8 +117,12 @@ export function attachPhysicsDebug(
           : rigidbody?.kind === "kinematic"
             ? COLORS.kinematic
             : COLORS.static;
+      const geometry =
+        collider.shape === "trimesh" || collider.shape === "convex"
+          ? meshColliderBounds(object)
+          : colliderGeometry(collider);
       const edges = new THREE.LineSegments(
-        new THREE.EdgesGeometry(colliderGeometry(collider), 20),
+        new THREE.EdgesGeometry(geometry, 20),
         xray(new THREE.LineBasicMaterial({ color })),
       );
       edges.position.fromArray(collider.offset);

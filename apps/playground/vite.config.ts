@@ -60,6 +60,7 @@ function hitregBridge(): Plugin {
           models: [],
           textures: [],
           audio: [],
+          chunks: [],
         };
         const walk = (dir: string, bucket: string[], base: string) => {
           if (!fs.existsSync(dir)) return;
@@ -91,6 +92,72 @@ function hitregBridge(): Plugin {
           res.end(data);
         } catch (error) {
           res.statusCode = 404;
+          res.end(JSON.stringify({ ok: false, error: String(error) }));
+        }
+      });
+
+      // dev backend for experience-scoped player data (ARCHITECTURE §3c cat. 2):
+      // same PlayerDataBackend contract the platform service implements later.
+      // Files: .hitreg/player-data/<experience>/<player>/<namespace>.json
+      const playerDataRoot = path.resolve(server.config.root, ".hitreg", "player-data");
+      const segment = (raw: string): string => {
+        if (!/^[a-zA-Z0-9][a-zA-Z0-9-_]{0,63}$/.test(raw)) throw new Error(`bad segment "${raw}"`);
+        return raw;
+      };
+      const recordPath = (experience: string, player: string, namespace: string) =>
+        path.join(playerDataRoot, segment(experience), segment(player), `${segment(namespace)}.json`);
+      server.middlewares.use("/__hitreg/player-data", (req, res) => {
+        try {
+          if (req.method === "GET") {
+            const url = new URL(req.url ?? "", "http://x");
+            const file = recordPath(
+              url.searchParams.get("experience") ?? "",
+              url.searchParams.get("player") ?? "",
+              url.searchParams.get("namespace") ?? "",
+            );
+            res.setHeader("content-type", "application/json");
+            res.setHeader("cache-control", "no-store");
+            res.end(fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "null");
+            return;
+          }
+          if (req.method === "POST") {
+            let body = "";
+            req.on("data", (chunk: Buffer) => (body += chunk));
+            req.on("end", () => {
+              try {
+                const { experience, player, namespace, record, expectedRevision } = JSON.parse(
+                  body,
+                ) as {
+                  experience: string;
+                  player: string;
+                  namespace: string;
+                  record: { revision: number };
+                  expectedRevision: number | null;
+                };
+                const file = recordPath(experience, player, namespace);
+                const current = fs.existsSync(file)
+                  ? (JSON.parse(fs.readFileSync(file, "utf8")) as { revision: number })
+                  : null;
+                const currentRevision = current ? current.revision : null;
+                res.setHeader("content-type", "application/json");
+                if (currentRevision !== expectedRevision) {
+                  res.end(JSON.stringify({ ok: false, conflict: true }));
+                  return;
+                }
+                fs.mkdirSync(path.dirname(file), { recursive: true });
+                fs.writeFileSync(file, JSON.stringify(record, null, 2), "utf8");
+                res.end(JSON.stringify({ ok: true }));
+              } catch (error) {
+                res.statusCode = 400;
+                res.end(JSON.stringify({ ok: false, error: String(error) }));
+              }
+            });
+            return;
+          }
+          res.statusCode = 405;
+          res.end();
+        } catch (error) {
+          res.statusCode = 400;
           res.end(JSON.stringify({ ok: false, error: String(error) }));
         }
       });
@@ -131,6 +198,92 @@ function hitregBridge(): Plugin {
         }
         res.statusCode = 405;
         res.end();
+      });
+
+      // -- multiplayer dev signaling (WebRTC) --------------------------------
+      // The dev server is a signaling relay ONLY: it brokers room membership
+      // and forwards SDP/ICE envelopes between tabs over the vite websocket.
+      // Game traffic never touches it — that flows P2P over DataChannels.
+      // Host = FIRST joiner still present; when the host leaves, the
+      // next-oldest member inherits (clients tear down and re-dial).
+      type NetSignalUp =
+        | { kind: "join"; room: string; peerId: string }
+        | { kind: "leave"; room: string; peerId: string }
+        | { kind: "signal"; room: string; from: string; to: string; data: unknown };
+      const netRooms = new Map<string, string[]>(); // room -> peerIds in join order
+      // socket -> (room -> peerId), so a dead tab's memberships get cleaned up
+      const netSockets = new WeakMap<object, Map<string, string>>();
+      const broadcastMembers = (room: string) => {
+        const members = netRooms.get(room) ?? [];
+        server.ws.send("hitreg:net-signal", {
+          kind: "members",
+          room,
+          members,
+          host: members[0] ?? null,
+        });
+      };
+      const leaveNetRoom = (room: string, peerId: string) => {
+        const members = netRooms.get(room);
+        if (!members?.includes(peerId)) return;
+        const next = members.filter((id) => id !== peerId);
+        if (next.length === 0) netRooms.delete(room);
+        else netRooms.set(room, next);
+        broadcastMembers(room);
+      };
+      // ring buffer of relayed traffic — GET /__hitreg/net-debug (AI debugging)
+      const netLog: Array<Record<string, unknown>> = [];
+      const logNet = (entry: Record<string, unknown>) => {
+        netLog.push({ at: new Date().toISOString(), ...entry });
+        if (netLog.length > 80) netLog.shift();
+      };
+      server.middlewares.use("/__hitreg/net-debug", (_req, res) => {
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ rooms: Object.fromEntries(netRooms), log: netLog }));
+      });
+      server.ws.on("hitreg:net-signal", (payload, client) => {
+        try {
+          const msg = payload as NetSignalUp;
+          if (msg.kind === "signal") {
+            logNet({
+              kind: "signal",
+              from: msg.from,
+              to: msg.to,
+              rtc: (msg.data as { rtc?: string } | null)?.rtc ?? "?",
+            });
+            // broadcast; clients filter by `to` (dev tab counts are tiny)
+            server.ws.send("hitreg:net-signal", msg);
+            return;
+          }
+          const m = msg as { kind: string; room?: string; peerId?: string };
+          logNet({ kind: m.kind, room: m.room, peerId: m.peerId });
+          if (msg.kind === "join") {
+            const members = netRooms.get(msg.room) ?? [];
+            if (!members.includes(msg.peerId)) members.push(msg.peerId);
+            netRooms.set(msg.room, members);
+            const socket = client.socket as unknown as {
+              on(event: "close", cb: () => void): void;
+            } & object;
+            let owned = netSockets.get(socket);
+            if (!owned) {
+              const registrations = new Map<string, string>();
+              owned = registrations;
+              netSockets.set(socket, registrations);
+              socket.on("close", () => {
+                for (const [room, peerId] of registrations) leaveNetRoom(room, peerId);
+                registrations.clear();
+              });
+            }
+            owned.set(msg.room, msg.peerId);
+            broadcastMembers(msg.room);
+            return;
+          }
+          if (msg.kind === "leave") {
+            leaveNetRoom(msg.room, msg.peerId);
+            netSockets.get(client.socket as unknown as object)?.delete(msg.room);
+          }
+        } catch (error) {
+          console.warn("[hitreg] net-signal relay error:", error);
+        }
       });
 
       // live-sync: push asset file changes into the running app

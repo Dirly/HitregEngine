@@ -91,6 +91,59 @@
         }
       }
     },
+    "torch-fire": {
+      "name": "Torch Fire",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            9,
+            4.3,
+            -10
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "particles": {
+          "rate": 36,
+          "max": 150,
+          "lifetime": [
+            0.5,
+            1
+          ],
+          "shape": "cone",
+          "coneAngle": 18,
+          "direction": [
+            0,
+            1,
+            0
+          ],
+          "speed": [
+            0.9,
+            1.8
+          ],
+          "drag": 0.8,
+          "sizeStart": 0.32,
+          "sizeEnd": 0.06,
+          "colorStart": "#ffd27a",
+          "colorEnd": "#ff5522",
+          "opacityStart": 0.9,
+          "opacityEnd": 0,
+          "blending": "additive",
+          "space": "world"
+        }
+      }
+    },
     "glow-seesaw": {
       "name": "Glow Seesaw",
       "parent": null,
@@ -1737,6 +1790,21 @@
             "color": "#131a26",
             "near": 55,
             "far": 220
+          }
+        }
+      }
+    },
+    "postfx": {
+      "name": "Post FX",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "postfx": {
+          "bloom": {
+            "enabled": true,
+            "strength": 0.4,
+            "radius": 0.4,
+            "threshold": 0.9
           }
         }
       }

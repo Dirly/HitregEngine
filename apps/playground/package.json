@@ -12,6 +12,7 @@
   "dependencies": {
     "@hitreg/core": "workspace:*",
     "@hitreg/editor": "workspace:^",
+    "@hitreg/net": "workspace:*",
     "@hitreg/physics": "workspace:^",
     "@hitreg/render": "workspace:*",
     "@hitreg/scripting": "workspace:^",

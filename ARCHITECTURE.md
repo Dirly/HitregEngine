@@ -20,7 +20,7 @@ this engine serves.
 | Core structure | Vanilla TypeScript engine core, zero framework deps | react-three-fiber (React-locked, can't run headless) |
 | Editor UI | React overlay, dev-only mount, toggled with `~` | Tweakpane (too weak for hierarchy/asset browser) |
 | Physics | Rapier (`@dimforge/rapier3d-compat`), deterministic config | cannon-es (slow, stale), Jolt (younger JS bindings) |
-| Particles | three.quarks (GPU-instanced, native JSON serialization) | custom GPGPU (later optimization, not v1) |
+| Particles | three.quarks (GPU-instanced, native JSON serialization) — *amended 2026-07: custom instanced system (CPU sim + InstancedMesh + node materials) until three.quarks supports WebGPURenderer (it is WebGL ShaderMaterial-based; WebGPU is roadmap-only). The `particles` JSON schema is engine-owned either way, so swapping the backend later is non-breaking.* | custom GPGPU (later optimization, not v1) |
 | Editor camera | `camera-controls` (yomotsu) | OrbitControls (no damping/dolly-to-cursor/fit) |
 | Scripting | TS component classes + JSON-exposed params | JSON behavior graphs, eval'd script strings |
 | Multiplayer | **Day one.** Server-authoritative, client prediction, lag compensation | single-player-first retrofit |
@@ -188,6 +188,71 @@ tables, the asset viewer shell) is designed into `core`'s document model now.
 - **Transport**: WebTransport (unreliable datagrams) where available,
   WebSocket fallback. `netIdentity` component marks replicated entities and
   their sync policy (owner, interpolated, static).
+
+### 3a. Layered so P2P is replaceable (amended 2026-07-10, per Derek)
+
+The decisions above stand; what this amendment adds is that **where the
+authority runs is a deployment choice, not an engine assumption**. Three
+independent layers:
+
+```
+game simulation (fixed-step, headless-capable)
+  ↓ input commands up / snapshots down
+replication protocol (rooms, membership, seq/dedup, interest mgmt later)
+  ↓ two channels: reliable-ordered | unreliable-sequenced
+transport (swappable adapters behind one interface)
+  ├── loopback            single-player + tests (zero network)
+  ├── WebRTC DataChannel  P2P rooms — the initial multiplayer mode
+  ├── WebSocket           universal fallback
+  └── WebTransport        dedicated authoritative servers
+```
+
+- The simulation never knows which transport carries its packets; the
+  replication layer addresses "the authority" and "peers", never sockets.
+- **P2P host mode** (prototypes, private worlds, low stakes): one player's tab
+  runs the *same authoritative sim* a dedicated server would. Clients send
+  input commands (intentions), never outcomes. The platform backend does
+  matchmaking + signaling (in dev, the vite bridge is the signaling relay);
+  TURN relays NAT-blocked peers. Rooms emit transferable snapshots (host
+  migration; later, promotion to server hosting with zero game changes).
+- **Trust boundary (hard rule):** a P2P host is authoritative over SESSION
+  state only. Nothing valuable or persistent — platform currency, cosmetics,
+  marketplace items, ranks, entitlements, cross-game inventory — is ever
+  awarded on a peer's authority; those mutations go through the platform
+  persistence service (server-side authority, §3c) or not at all.
+- **Own room protocol, not Colyseus:** schema-based sync layers would sit
+  exactly where our binary-delta-against-ECS-tables snapshots live and
+  duplicate them. We borrow the shape (rooms, matchmaking-as-a-service),
+  not the dependency.
+
+### 3c. Persistence taxonomy (added 2026-07-10, per Derek)
+
+Four data categories with four different owners — formalized now so game code
+and platform code never blur:
+
+1. **Platform/meta** — account, avatar prefab, friends/blocks, entitlements,
+   platform currency, moderation status, cross-game achievements. Platform-
+   owned; **no individual game gets direct write access**.
+2. **Experience player data** — namespaced by `(playerId, experienceId,
+   namespace)` with `schemaVersion` + `revision` (optimistic concurrency) +
+   `updatedAt`: saves, inventory, quest state, per-game settings.
+3. **Creator/project data** — projects, scenes, assets, prefabs, scripts,
+   published versions, collaborators, permissions, AI change history,
+   rollback snapshots.
+4. **Session data** — transforms, projectiles, match score, physics state:
+   dies with the room unless the game **explicitly commits** selected results
+   into category 2.
+
+**Games never see a database.** They get a constrained persistence service —
+`playerData.get / set / increment / transaction / keys` — that enforces
+experience ownership, player identity, size quotas, rate limits, schema
+validation, atomic revisions, server authority, and audit logging. This is
+the API the AI codes against ("save the player's collected pets between
+sessions") without ever creating tables, auth middleware, or migrations.
+The engine ships the service interface + a dev backend (vite bridge, files
+under `.hitreg/`) now; the platform backend implements the same contract in
+Phase 3. Browser storage (IndexedDB) is cache/drafts/offline only — never
+authoritative for published player data.
 
 ## 3b. Physics data model (designed now, implemented with the Rapier package)
 

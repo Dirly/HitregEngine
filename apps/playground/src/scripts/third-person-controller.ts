@@ -39,7 +39,13 @@ export default class ThirdPersonController extends Script {
     const vel = sim.getLinvel(this.entityId);
     if (!vel) return;
 
-    const ud = this.object.userData as { speedMult?: number; frozen?: boolean };
+    const ud = this.object.userData as {
+      speedMult?: number;
+      frozen?: boolean;
+      holdingWeapon?: boolean;
+      actionClip?: string;
+      actionUntil?: number;
+    };
     if (ud.frozen) {
       sim.setLinvel(this.entityId, [0, vel[1], 0]);
       this.play(this.param<string>("idleClip"), 0.25);
@@ -86,9 +92,15 @@ export default class ThirdPersonController extends Script {
       this.object.rotation.set(0, this.yaw, 0);
     }
 
-    this.play(
-      len > 0 ? this.param<string>("runClip") : this.param<string>("idleClip"),
-      len > 0 ? 0.15 : 0.25,
-    );
+    const now = this.ctx.now() / 1000;
+    if (ud.actionClip && (ud.actionUntil ?? 0) > now) {
+      this.play(ud.actionClip, 0.05);
+      return;
+    }
+
+    const holding = ud.holdingWeapon === true;
+    const idleClip = holding ? "Idle_Hold" : this.param<string>("idleClip");
+    const runClip = holding ? "Run_Hold" : this.param<string>("runClip");
+    this.play(len > 0 ? runClip : idleClip, len > 0 ? 0.15 : 0.25);
   }
 }

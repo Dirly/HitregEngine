@@ -1,0 +1,9 @@
+{
+  "color": "#2f88b8",
+  "roughness": 0.24,
+  "metalness": 0.08,
+  "opacity": 0.78,
+  "transparent": true,
+  "emissive": "#0b3150",
+  "emissiveIntensity": 0.22
+}

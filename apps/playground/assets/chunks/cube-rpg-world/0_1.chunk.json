@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "entities": {
+    "northern-wilds": {
+      "name": "Northern Wilds",
+      "parent": null,
+      "tags": ["static", "terrain", "rpg-biome"],
+      "components": {
+        "transform": { "position": [0, 0, 0] },
+        "mesh": {
+          "source": { "kind": "heightmap", "size": [160, 160], "amplitude": 1.6, "frequency": 0.065, "seed": 12, "offset": [0, 160], "resolution": 96, "flatRadius": 0, "flatFalloff": 20 },
+          "material": "rpg/grassland", "castShadow": false, "receiveShadow": true, "static": true
+        },
+        "collider": { "shape": "heightmap", "friction": 0.72 }
+      }
+    },
+    "hunter-campfire": {
+      "name": "Hunter Campfire", "parent": null, "tags": ["static", "poi"],
+      "components": {
+        "transform": { "position": [-18, 0.4, -40], "scale": [1.4, 1.4, 1.4] },
+        "mesh": { "source": { "kind": "asset", "assetId": "cube-world/Environment/glTF/Crystal_Small.gltf" }, "material": "rpg/water", "static": true },
+        "light": { "kind": "point", "color": "#ffb45a", "intensity": 2.2, "range": 10 }
+      }
+    },
+    "north-tree-1": {
+      "name": "Northwood Tree", "parent": null, "tags": ["static", "biome-transition"],
+      "components": { "transform": { "position": [-61, 0, -70], "scale": [1.7, 1.7, 1.7] }, "mesh": { "source": { "kind": "asset", "assetId": "cube-world/Environment/glTF/Tree_2.gltf" }, "static": true }, "collider": { "shape": "cylinder", "size": [1.2, 5, 1.2], "offset": [0, 2.5, 0] } }
+    },
+    "north-tree-2": {
+      "name": "Northwood Tree", "parent": null, "tags": ["static"],
+      "components": { "transform": { "position": [42, 0, -56], "scale": [1.45, 1.45, 1.45] }, "mesh": { "source": { "kind": "asset", "assetId": "cube-world/Environment/glTF/Tree_1.gltf" }, "static": true }, "collider": { "shape": "cylinder", "size": [1, 4.5, 1], "offset": [0, 2.25, 0] } }
+    },
+    "north-wolf": {
+      "name": "Northwood Wolf", "parent": null, "tags": ["rpg-enemy"],
+      "components": { "transform": { "position": [19, 0.8, -32], "scale": [0.85, 0.85, 0.85] }, "mesh": { "source": { "kind": "asset", "assetId": "cube-world/Animals/glTF/Wolf.gltf" } }, "rigidbody": { "lockRotations": true, "angularDamping": 1 }, "collider": { "shape": "capsule", "size": [0.9, 1.7, 0.9], "offset": [0, 0.85, 0], "friction": 0.35 }, "script": { "name": "chaser", "params": { "speed": 3.8, "targetTag": "player", "runClip": "Run", "idleClip": "Idle", "aggroRange": 9 } }, "animator": { "play": "Idle", "fade": 0.25, "speed": 1 } }
+    }
+  }
+}

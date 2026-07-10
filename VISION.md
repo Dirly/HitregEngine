@@ -59,6 +59,13 @@ runs, AI can build and modify a live scene, multiplayer works.
 **Phase 2 — Proving-ground game.** Build a real (small, multiplayer) game with
 the engine. Nothing exposes a fake abstraction like real use. Exit criteria: a
 game fun enough to share, built substantially through the AI loop.
+A big static scene proves nothing — the slice must deliberately pressure the
+whole platform at once: streaming/partitioning, instancing, animation and
+physics-body counts, character controllers, asset load/dispose, network
+interest management, persistence, editing performance, AI context retrieval,
+publish/rollback. Think: a multiplayer town — reusable buildings, NPCs,
+physics props, combat, inventory, quests, persistent housing, avatar
+cosmetics, multiple streamed regions.
 
 **Phase 3 — Identity & sharing.** Persistent avatar (a user-owned JSON prefab
 that follows the account across worlds; games may constrain/restyle it),

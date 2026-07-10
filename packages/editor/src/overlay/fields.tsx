@@ -191,8 +191,10 @@ export function SliderField(props: {
 export function ValueField(props: {
   value: unknown;
   onCommit: (value: unknown) => void;
+  /** Per-key overrides for STRING fields at any depth (e.g. bone-name dropdowns). */
+  special?: Record<string, (value: string, onCommit: (v: string) => void) => React.ReactNode>;
 }) {
-  const { value, onCommit } = props;
+  const { value, onCommit, special } = props;
 
   if (typeof value === "number") {
     return <NumberField value={value} onCommit={onCommit} />;
@@ -226,16 +228,20 @@ export function ValueField(props: {
   if (typeof value === "object" && value !== null && !Array.isArray(value)) {
     return (
       <div style={{ paddingLeft: 8, borderLeft: "1px solid #30363d" }}>
-        {Object.entries(value as Record<string, unknown>).map(([key, v]) => (
-          <Row key={key} label={key}>
-            <ValueField
-              value={v}
-              onCommit={(next) =>
-                onCommit({ ...(value as Record<string, unknown>), [key]: next })
-              }
-            />
-          </Row>
-        ))}
+        {Object.entries(value as Record<string, unknown>).map(([key, v]) => {
+          const commitKey = (next: unknown) =>
+            onCommit({ ...(value as Record<string, unknown>), [key]: next });
+          const override = typeof v === "string" ? special?.[key] : undefined;
+          return (
+            <Row key={key} label={key}>
+              {override ? (
+                override(v as string, commitKey)
+              ) : (
+                <ValueField value={v} special={special} onCommit={commitKey} />
+              )}
+            </Row>
+          );
+        })}
       </div>
     );
   }

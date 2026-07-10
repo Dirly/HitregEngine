@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "entities": {
+    "southern-dunes": {
+      "name": "Southern Dunes",
+      "parent": null,
+      "tags": ["static", "terrain", "rpg-biome", "sand"],
+      "components": {
+        "transform": { "position": [0, 0, 0] },
+        "mesh": {
+          "source": { "kind": "heightmap", "size": [160, 160], "amplitude": 1.6, "frequency": 0.065, "seed": 12, "offset": [0, -160], "resolution": 96, "flatRadius": 0, "flatFalloff": 20 },
+          "material": "rpg/grassland", "castShadow": false, "receiveShadow": true, "static": true
+        },
+        "collider": { "shape": "heightmap", "friction": 0.58 }
+      }
+    },
+    "dune-oasis": {
+      "name": "Dune Oasis", "parent": null, "tags": ["static", "poi", "sand"],
+      "components": { "transform": { "position": [18, 0, 36], "scale": [1.4, 1.4, 1.4] }, "mesh": { "source": { "kind": "asset", "assetId": "cube-world/Environment/glTF/Bamboo.gltf" }, "static": true }, "collider": { "shape": "cylinder", "size": [1.3, 4, 1.3], "offset": [0, 2, 0] } }
+    },
+    "dune-chest": {
+      "name": "Dune Cache", "parent": null, "tags": ["rpg-chest", "static", "poi"],
+      "components": { "transform": { "position": [20, 0.25, 33] }, "mesh": { "source": { "kind": "asset", "assetId": "cube-world/Environment/glTF/Chest_Closed.gltf" }, "static": true }, "collider": { "shape": "box", "size": [1.2, 0.9, 0.9], "offset": [0, 0.45, 0] } }
+    },
+    "dune-sandstone": {
+      "name": "Dune Sandstone", "parent": null, "tags": ["static", "sand", "biome-transition"],
+      "components": { "transform": { "position": [-54, 0.25, -66], "scale": [1.8, 1.8, 1.8] }, "mesh": { "source": { "kind": "asset", "assetId": "cube-world/Environment/glTF/Rock1.gltf" }, "material": "rpg/sand", "static": true }, "collider": { "shape": "cylinder", "size": [1.5, 1.4, 1.5], "offset": [0, 0.7, 0] } }
+    },
+    "dune-zombie": {
+      "name": "Dune Drifter", "parent": null, "tags": ["rpg-enemy"],
+      "components": { "transform": { "position": [-8, 0.8, 42], "scale": [0.9, 0.9, 0.9] }, "mesh": { "source": { "kind": "asset", "assetId": "cube-world/Enemies/glTF/Zombie.gltf" } }, "rigidbody": { "lockRotations": true, "angularDamping": 1 }, "collider": { "shape": "capsule", "size": [0.9, 1.8, 0.9], "offset": [0, 0.9, 0] }, "script": { "name": "chaser", "params": { "speed": 3.2, "targetTag": "player", "runClip": "Run", "idleClip": "Idle", "aggroRange": 9 } }, "animator": { "play": "Idle", "fade": 0.25, "speed": 1 } }
+    }
+  }
+}

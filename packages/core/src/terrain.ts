@@ -13,12 +13,16 @@ export interface HeightmapParams {
   frequency: number;
   /** Seed for the noise lattice; same seed = same terrain, everywhere. */
   seed: number;
+  /** World-space XZ origin. Lets adjacent streamed cells sample one field. */
+  offset?: [number, number];
   /** Grid subdivisions per side. */
   resolution: number;
   /** Radius of a flat disc at the center (a playfield); 0 = no flattening. */
   flatRadius: number;
   /** Distance over which the flat disc blends up to full height. */
   flatFalloff: number;
+  /** Optional world-space river channel running parallel to the Z axis. */
+  river?: { centerX: number; width: number; depth: number };
 }
 
 /** Deterministic lattice hash → [0, 1). Same bits in browser and Node (V8). */
@@ -46,8 +50,11 @@ function valueNoise(x: number, z: number, seed: number): number {
 
 /** Terrain height at local (x, z) — entity-local, origin at the center. */
 export function sampleHeightmap(p: HeightmapParams, x: number, z: number): number {
-  const nx = x * p.frequency;
-  const nz = z * p.frequency;
+  const [offsetX, offsetZ] = p.offset ?? [0, 0];
+  const worldX = x + offsetX;
+  const worldZ = z + offsetZ;
+  const nx = worldX * p.frequency;
+  const nz = worldZ * p.frequency;
   // two octaves: broad hills + finer detail
   const n =
     valueNoise(nx, nz, p.seed) * 0.72 + valueNoise(nx * 2.7 + 13.7, nz * 2.7 + 7.3, p.seed + 5) * 0.28;
@@ -56,6 +63,10 @@ export function sampleHeightmap(p: HeightmapParams, x: number, z: number): numbe
     const r = Math.hypot(x, z);
     const t = Math.min(1, Math.max(0, (r - p.flatRadius) / p.flatFalloff));
     h *= smooth(t);
+  }
+  if (p.river) {
+    const edge = Math.min(1, Math.abs(worldX - p.river.centerX) / (p.river.width / 2));
+    h -= p.river.depth * (1 - smooth(edge));
   }
   return h;
 }

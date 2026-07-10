@@ -51,12 +51,22 @@ export const meshSchema = z.object({
       /** Noise feature scale — higher = smaller, busier hills. */
       frequency: z.number().positive().default(0.08),
       seed: z.number().int().default(1),
+      /** World-space XZ origin used when tiling terrain across streamed chunks. */
+      offset: z.tuple([z.number(), z.number()]).default([0, 0]),
       /** Grid subdivisions per side. */
       resolution: z.number().int().min(8).max(256).default(96),
       /** Radius of a flat disc at the center (a playfield); 0 = none. */
       flatRadius: z.number().min(0).default(0),
       /** Distance over which the flat disc blends up to full height. */
       flatFalloff: z.number().positive().default(8),
+      /** Optional world-space river channel, running parallel to the Z axis. */
+      river: z
+        .object({
+          centerX: z.number(),
+          width: z.number().positive(),
+          depth: z.number().positive(),
+        })
+        .optional(),
     }),
   ]),
   /** Material asset GUID; omitted = engine default material. */
@@ -164,6 +174,69 @@ export const skySchema = z.object({
     .optional(),
 });
 
+/**
+ * Scene post-processing stack. One per scene (first wins). Each effect is its
+ * own object so future passes (DoF, AO, vignette) slot in beside bloom.
+ */
+export const postfxSchema = z.object({
+  bloom: z
+    .object({
+      enabled: z.boolean().default(false),
+      strength: z.number().min(0).max(3).default(0.5),
+      /** Bloom spread; BloomNode requires [0, 1]. */
+      radius: z.number().min(0).max(1).default(0.4),
+      /** Luminance threshold — only pixels brighter than this glow. */
+      threshold: z.number().min(0).default(0.85),
+    })
+    // prefault: `{ "postfx": {} }` parses and the inner field defaults apply
+    .prefault({}),
+});
+
+/**
+ * Data-driven particle emitter. Defaults describe a small additive spark
+ * fountain, so `{ "particles": {} }` is a working starter effect. Rendered by
+ * a custom instanced system in @hitreg/render (CPU sim, InstancedMesh) —
+ * three.quarks is WebGL-only today; this schema is engine-owned, so the
+ * backend can swap later without touching scene documents.
+ */
+export const particlesSchema = z.object({
+  emitting: z.boolean().default(true),
+  /** Particles spawned per second. */
+  rate: z.number().min(0).default(20),
+  /** Live-particle cap — pool size, hard-capped for the latency budget. */
+  max: z.number().int().min(1).max(2000).default(200),
+  /** Per-particle lifespan, random in [min, max] seconds. */
+  lifetime: z.tuple([z.number().min(0), z.number().min(0)]).default([0.8, 1.6]),
+  /** Emitter volume; cone spreads velocity by coneAngle around direction. */
+  shape: z.enum(["point", "sphere", "box", "cone"]).default("point"),
+  /** Emitter half-extents (box) / radii (sphere) in local units. */
+  shapeSize: vec3.default([0.2, 0.2, 0.2]),
+  /** Cone shape only: half-angle of the velocity spread, degrees. */
+  coneAngle: z.number().min(0).max(90).default(25),
+  /** Initial velocity direction (emitter-local; normalized at runtime). */
+  direction: vec3.default([0, 1, 0]),
+  /** Initial speed, random in [min, max] units/sec. */
+  speed: z.tuple([z.number(), z.number()]).default([1, 2]),
+  /** Positive pulls particles down (world -Y), units/sec^2. */
+  gravity: z.number().default(0),
+  /** Velocity damping per second; 0 = none. */
+  drag: z.number().min(0).default(0),
+  sizeStart: z.number().min(0).default(0.15),
+  sizeEnd: z.number().min(0).default(0.02),
+  /** Billboard spin, radians/sec. */
+  spin: z.number().default(0),
+  colorStart: hexColor.default("#ffffff"),
+  colorEnd: hexColor.default("#ffffff"),
+  opacityStart: z.number().min(0).max(1).default(1),
+  opacityEnd: z.number().min(0).max(1).default(0),
+  /** additive = fire/magic glow; normal = smoke/dust. */
+  blending: z.enum(["normal", "additive"]).default("additive"),
+  /** Texture asset id; omitted = procedural soft round sprite. */
+  texture: z.string().optional(),
+  /** world = particles trail behind a moving emitter; local = they ride it. */
+  space: z.enum(["local", "world"]).default("world"),
+});
+
 export function registerCoreComponents(registry: ComponentRegistry): void {
   registry.register("transform", transformSchema);
   registry.register("mesh", meshSchema);
@@ -174,5 +247,7 @@ export function registerCoreComponents(registry: ComponentRegistry): void {
   registry.register("animator", animatorSchema);
   registry.register("audio", audioSchema);
   registry.register("sky", skySchema);
+  registry.register("postfx", postfxSchema);
+  registry.register("particles", particlesSchema);
   registerPhysicsComponents(registry);
 }

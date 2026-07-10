@@ -1,4 +1,6 @@
-import { useSyncExternalStore, useState } from "react";
+import { useEffect, useRef, useSyncExternalStore, useState } from "react";
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import {
   childrenOf,
   duplicateSubtree,
@@ -56,6 +58,8 @@ export interface AppProps {
   /** Resizable dock sizes; the host resizes the viewport canvas from these. */
   dockSizes: Observable<DockSizes>;
   assetsVersion: Observable<number>;
+  /** Entity id -> bone names of its loaded skinned model (host-populated). */
+  modelBones?: Observable<Record<string, string[]>>;
   saveAsset?: (file: string, content: string) => void;
   /** Fly the editor camera to frame an entity (double-click in hierarchy / F key). */
   onFocusEntity?: (entityId: string) => void;
@@ -310,7 +314,9 @@ export function App(props: AppProps) {
             assets={props.assets}
             assetSelection={props.assetSelection}
             assetsVersion={props.assetsVersion}
+            modelBones={props.modelBones}
             saveAsset={props.saveAsset}
+            thumbnails={props.thumbnails}
           />
         </div>
       </div>
@@ -526,6 +532,17 @@ function Toolbar(props: {
               onChange={(e) => set({ showPhysics: e.target.checked })}
             />
             phys
+          </label>
+          <label
+            style={{ display: "flex", gap: 3, alignItems: "center", cursor: "pointer" }}
+            title="Skeleton lines + bone-name labels on skinned models"
+          >
+            <input
+              type="checkbox"
+              checked={settings.showSkeletons}
+              onChange={(e) => set({ showSkeletons: e.target.checked })}
+            />
+            bones
           </label>
         </span>
 
@@ -769,7 +786,7 @@ function TreeRow(props: Omit<TreeProps, "parent"> & { id: string }) {
           </span>
         ))}
       </span>
-      <span
+      {false && <span
         style={{ color: "#8b949e", cursor: "pointer" }}
         title="Delete entity (and subtree)"
         onClick={(e) => {
@@ -779,12 +796,109 @@ function TreeRow(props: Omit<TreeProps, "parent"> & { id: string }) {
         }}
       >
         ✕
-      </span>
+      </span>}
     </div>
   );
 }
 
 // ---------------------------------------------------------------- assets
+
+const ASSET_FOLDERS_KEY = "hitreg-asset-folders";
+const ASSET_FOLDERS_OPEN_KEY = "hitreg-asset-folders-open";
+
+interface FolderNode {
+  name: string;
+  path: string;
+  children: FolderNode[];
+}
+
+/** Build a nested folder tree from slash-delimited folder paths (adds missing ancestors). */
+function buildFolderTree(paths: Iterable<string>): FolderNode[] {
+  const root: FolderNode = { name: "", path: "", children: [] };
+  const byPath = new Map<string, FolderNode>([["", root]]);
+  for (const raw of paths) {
+    if (!raw) continue;
+    let parent = root;
+    let path = "";
+    for (const seg of raw.split("/").filter(Boolean)) {
+      path = path ? `${path}/${seg}` : seg;
+      let node = byPath.get(path);
+      if (!node) {
+        node = { name: seg, path, children: [] };
+        byPath.set(path, node);
+        parent.children.push(node);
+      }
+      parent = node;
+    }
+  }
+  const sortRec = (nodes: FolderNode[]): void => {
+    nodes.sort((a, b) => a.name.localeCompare(b.name));
+    for (const n of nodes) sortRec(n.children);
+  };
+  sortRec(root.children);
+  return root.children;
+}
+
+function FolderRow(props: {
+  node: FolderNode;
+  depth: number;
+  selected: string;
+  open: Record<string, boolean>;
+  onToggle: (path: string) => void;
+  onSelect: (path: string) => void;
+}) {
+  const hasChildren = props.node.children.length > 0;
+  const isOpen = !!props.open[props.node.path];
+  const isSelected = props.selected === props.node.path;
+  return (
+    <>
+      <div
+        onClick={() => props.onSelect(props.node.path)}
+        title={props.node.path}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 4,
+          padding: "2px 4px",
+          paddingLeft: 4 + props.depth * 14,
+          cursor: "pointer",
+          borderRadius: 3,
+          background: isSelected ? "#1f3a5f" : "transparent",
+          color: isSelected ? "#e6edf3" : "#c9d1d9",
+          whiteSpace: "nowrap",
+        }}
+      >
+        <span
+          onClick={(e) => {
+            if (!hasChildren) return;
+            e.stopPropagation();
+            props.onToggle(props.node.path);
+          }}
+          title={hasChildren ? (isOpen ? "Collapse" : "Expand") : undefined}
+          style={{ width: 12, flexShrink: 0, color: "#8b949e", textAlign: "center" }}
+        >
+          {hasChildren ? (isOpen ? "▾" : "▸") : ""}
+        </span>
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{props.node.name}</span>
+      </div>
+      {hasChildren &&
+        isOpen &&
+        props.node.children.map((child) => (
+          <FolderRow {...props} key={child.path} node={child} depth={props.depth + 1} />
+        ))}
+    </>
+  );
+}
+
+/** A labelled group of asset cards (one per asset type). */
+function AssetSection(props: { label: string; children: React.ReactNode }) {
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <div style={{ color: "#8b949e", fontSize: 10, marginBottom: 4 }}>{props.label}</div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>{props.children}</div>
+    </div>
+  );
+}
 
 function AssetsDock(props: {
   assets: AssetLibrary;
@@ -805,15 +919,56 @@ function AssetsDock(props: {
   const [folder, setFolder] = useState("");
   const [userFolders, setUserFolders] = useState<string[]>(() => {
     try {
-      return JSON.parse(localStorage.getItem("hitreg-asset-folders") ?? "[]") as string[];
+      return JSON.parse(localStorage.getItem(ASSET_FOLDERS_KEY) ?? "[]") as string[];
     } catch {
       return [];
     }
   });
+  const [openFolders, setOpenFolders] = useState<Record<string, boolean>>(() => {
+    try {
+      const paths = JSON.parse(localStorage.getItem(ASSET_FOLDERS_OPEN_KEY) ?? "[]") as string[];
+      return Object.fromEntries(paths.map((p) => [p, true]));
+    } catch {
+      return {};
+    }
+  });
   const q = query.toLowerCase();
 
+  const persistOpen = (next: Record<string, boolean>) => {
+    setOpenFolders(next);
+    try {
+      localStorage.setItem(
+        ASSET_FOLDERS_OPEN_KEY,
+        JSON.stringify(Object.keys(next).filter((p) => next[p])),
+      );
+    } catch {
+      /* non-fatal */
+    }
+  };
+
+  const toggleFolder = (path: string) =>
+    persistOpen({ ...openFolders, [path]: !openFolders[path] });
+
+  /** Select a folder and expand it plus every ancestor so it stays visible. */
+  const selectFolder = (path: string) => {
+    setFolder(path);
+    if (!path) return;
+    const next = { ...openFolders };
+    let prefix = "";
+    for (const seg of path.split("/")) {
+      prefix = prefix ? `${prefix}/${seg}` : seg;
+      next[prefix] = true;
+    }
+    persistOpen(next);
+  };
+
   const folderOf = (id: string) => (id.includes("/") ? id.slice(0, id.lastIndexOf("/")) : "");
-  const inFolder = (id: string) => folder === "" || folderOf(id) === folder;
+  // prefix match: a folder shows its own assets plus everything in descendants
+  const inFolder = (id: string) => {
+    if (folder === "") return true;
+    const f = folderOf(id);
+    return f === folder || f.startsWith(folder + "/");
+  };
 
   const prefabIds = props.assets
     .prefabIds()
@@ -827,30 +982,38 @@ function AssetsDock(props: {
   const textureIds = props.assets
     .textureIds()
     .filter((id) => inFolder(id) && id.toLowerCase().includes(q));
+  const soundIds = props.assets
+    .soundIds()
+    .filter((sid) => inFolder(sid) && sid.toLowerCase().includes(q));
 
   const allIds = [
     ...props.assets.prefabIds(),
     ...props.assets.modelIds(),
     ...props.assets.textureIds(),
+    ...props.assets.soundIds(),
     ...props.assets.dataAssetsOfType("material").map((a) => a.id),
   ];
-  const folders = [...new Set([...allIds.map(folderOf).filter(Boolean), ...userFolders])].sort();
+  const tree = buildFolderTree([...allIds.map(folderOf).filter(Boolean), ...userFolders]);
 
   const addFolder = () => {
     const name = window
-      .prompt("Folder name (a-z, 0-9, dashes; use / to nest):")
+      .prompt(
+        `New folder${folder ? ` in ${folder}/` : ""} (a-z, 0-9, dashes; use / to nest):`,
+      )
       ?.toLowerCase()
       .replace(/[^a-z0-9/-]+/g, "-")
-      .replace(/^-+|-+$/g, "");
+      .replace(/\/{2,}/g, "/")
+      .replace(/^[-/]+|[-/]+$/g, "");
     if (!name) return;
-    const next = [...new Set([...userFolders, name])];
+    const path = folder ? `${folder}/${name}` : name;
+    const next = [...new Set([...userFolders, path])];
     setUserFolders(next);
-    setFolder(name);
     try {
-      localStorage.setItem("hitreg-asset-folders", JSON.stringify(next));
+      localStorage.setItem(ASSET_FOLDERS_KEY, JSON.stringify(next));
     } catch {
       /* non-fatal */
     }
+    selectFolder(path);
   };
 
   const instantiate = (ops: Op[], selectId: string) => {
@@ -874,10 +1037,20 @@ function AssetsDock(props: {
     ]);
   };
 
+  const crumbs = folder ? folder.split("/") : [];
+  const empty =
+    prefabIds.length === 0 &&
+    modelIds.length === 0 &&
+    materials.length === 0 &&
+    textureIds.length === 0 &&
+    soundIds.length === 0;
+
   return (
     <>
-      <DockHeader title={`Assets — assets/${folder ? ` · ${folder}/` : ""}`}>
-        <SearchInput value={query} onChange={setQuery} />
+      <DockHeader title="Assets">
+        <span title="Search within the selected folder (and its subfolders)">
+          <SearchInput value={query} onChange={setQuery} />
+        </span>
         <button
           style={buttonStyle}
           title={`New material asset${folder ? ` in ${folder}/` : ""}`}
@@ -893,146 +1066,238 @@ function AssetsDock(props: {
         >
           + prefab
         </button>
-      </DockHeader>
-      <div style={{ display: "flex", gap: 4, padding: "4px 8px", flexWrap: "wrap", borderBottom: "1px solid #21262d" }}>
-        <button style={folder === "" ? activeButtonStyle : buttonStyle} onClick={() => setFolder("")}>
-          all
-        </button>
-        {folders.map((f) => (
-          <button
-            key={f}
-            style={folder === f ? activeButtonStyle : buttonStyle}
-            onClick={() => setFolder(f)}
-          >
-            📁 {f}
-          </button>
-        ))}
-        <button style={buttonStyle} title="New folder" onClick={addFolder}>
+        <button
+          style={buttonStyle}
+          title={`New folder${folder ? ` inside ${folder}/` : ""}`}
+          onClick={addFolder}
+        >
           + folder
         </button>
-      </div>
-      <div style={{ flex: 1, overflowY: "auto", padding: 8 }}>
-        {prefabIds.length === 0 && modelIds.length === 0 && materials.length === 0 && textureIds.length === 0 && (
-          <div style={{ color: "#8b949e" }}>
-            {query
-              ? "No assets match."
-              : "Create materials/prefabs here; drop .glb in assets/models/, images in assets/textures/"}
+      </DockHeader>
+      <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
+        {/* folder tree — scrolls independently of the card grid */}
+        <div
+          style={{
+            width: 190,
+            flexShrink: 0,
+            overflowY: "auto",
+            overflowX: "hidden",
+            borderRight: "1px solid #21262d",
+            padding: 4,
+          }}
+        >
+          <div
+            onClick={() => selectFolder("")}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 4,
+              padding: "2px 4px",
+              cursor: "pointer",
+              borderRadius: 3,
+              background: folder === "" ? "#1f3a5f" : "transparent",
+              color: folder === "" ? "#e6edf3" : "#c9d1d9",
+              whiteSpace: "nowrap",
+            }}
+          >
+            <span style={{ width: 12, flexShrink: 0 }} />
+            <span>assets</span>
           </div>
-        )}
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-          {materials.map((mat) => {
-            const color = (mat.data as { color?: string }).color ?? "#9aa0a8";
-            return (
-              <AssetCard
-                key={mat.id}
-                swatch={color}
-                color="#e3b341"
-                name={mat.name.split("/").pop()!}
-                kind="material"
-                dragPayload={{ kind: "material", id: mat.id }}
-                selected={selectedAsset?.kind === "material" && selectedAsset.id === mat.id}
-                onSelect={() => select("material", mat.id)}
-                actionLabel="apply to selection"
-                actionDisabled={!selectedEntity}
-                onAction={() => applyMaterialToSelection(mat.id)}
-              />
-            );
-          })}
-          {prefabIds.map((pid) => (
-            <AssetCard
-              key={pid}
-              glyph="◆"
-              color="#79c0ff"
-              name={props.assets.getPrefab(pid)!.name}
-              kind="prefab"
-              thumbnail={thumbnails[pid]}
-              dragPayload={{ kind: "prefab", id: pid }}
-              selected={selectedAsset?.kind === "prefab" && selectedAsset.id === pid}
-              onSelect={() => select("prefab", pid)}
-              actionLabel="+ add to scene"
-              onAction={() => {
-                const id = newId();
-                instantiate(
-                  [
-                    {
-                      op: "add-entity",
-                      id,
-                      entity: {
-                        name: props.assets.getPrefab(pid)!.name,
-                        parent: null,
-                        tags: [],
-                        components: { transform: {}, prefab: { prefabId: pid } },
-                      },
-                    },
-                  ],
-                  id,
-                );
+          {tree.map((node) => (
+            <FolderRow
+              key={node.path}
+              node={node}
+              depth={1}
+              selected={folder}
+              open={openFolders}
+              onToggle={toggleFolder}
+              onSelect={selectFolder}
+            />
+          ))}
+        </div>
+        {/* breadcrumb + cards */}
+        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 3,
+              padding: "3px 8px",
+              borderBottom: "1px solid #21262d",
+              flexShrink: 0,
+              whiteSpace: "nowrap",
+              overflowX: "auto",
+              fontSize: 11,
+            }}
+          >
+            <span
+              onClick={() => selectFolder("")}
+              style={{
+                cursor: "pointer",
+                color: folder === "" ? "#e6edf3" : "#8b949e",
               }}
-            />
-          ))}
-          {textureIds.map((tid) => (
-            <AssetCard
-              key={tid}
-              thumbnail={props.assets.getTexture(tid)!.url}
-              color="#ffa657"
-              name={props.assets.getTexture(tid)!.name}
-              kind="texture"
-              selected={selectedAsset?.kind === "texture" && selectedAsset.id === tid}
-              onSelect={() => select("texture", tid)}
-              actionLabel="set as sky"
-              onAction={() => props.onSetSky(tid)}
-            />
-          ))}
-          {props.assets
-            .soundIds()
-            .filter((sid) => inFolder(sid) && sid.toLowerCase().includes(q))
-            .map((sid) => (
-              <AssetCard
-                key={sid}
-                glyph="♪"
-                color="#f778ba"
-                name={props.assets.getSound(sid)!.name}
-                kind="sound"
-                selected={false}
-                onSelect={() => new Audio(props.assets.getSound(sid)!.url).play()}
-                actionLabel="▶ preview"
-                onAction={() => new Audio(props.assets.getSound(sid)!.url).play()}
-              />
-            ))}
-          {modelIds.map((mid) => (
-            <AssetCard
-              key={mid}
-              glyph="▣"
-              color="#7ee787"
-              name={props.assets.getModel(mid)!.name}
-              kind="model"
-              dragPayload={{ kind: "model", id: mid }}
-              selected={selectedAsset?.kind === "model" && selectedAsset.id === mid}
-              onSelect={() => select("model", mid)}
-              actionLabel="+ add to scene"
-              onAction={() => {
-                const id = newId();
-                instantiate(
-                  [
-                    {
-                      op: "add-entity",
-                      id,
-                      entity: {
-                        name: props.assets.getModel(mid)!.name,
-                        parent: null,
-                        tags: [],
-                        components: {
-                          transform: {},
-                          mesh: { source: { kind: "asset", assetId: mid } },
-                        },
-                      },
-                    },
-                  ],
-                  id,
-                );
-              }}
-            />
-          ))}
+            >
+              assets
+            </span>
+            {crumbs.map((seg, i) => {
+              const path = crumbs.slice(0, i + 1).join("/");
+              const last = i === crumbs.length - 1;
+              return (
+                <span key={path} style={{ display: "flex", gap: 3 }}>
+                  <span style={{ color: "#8b949e" }}>/</span>
+                  <span
+                    onClick={() => selectFolder(path)}
+                    style={{ cursor: last ? "default" : "pointer", color: last ? "#e6edf3" : "#8b949e" }}
+                  >
+                    {seg}
+                  </span>
+                </span>
+              );
+            })}
+          </div>
+          <div style={{ flex: 1, overflowY: "auto", padding: 8 }}>
+            {empty && (
+              <div style={{ color: "#8b949e" }}>
+                {query
+                  ? "No assets match."
+                  : folder
+                    ? "Folder is empty — new materials/prefabs land in the selected folder."
+                    : "Create materials/prefabs here; drop .glb in assets/models/, images in assets/textures/"}
+              </div>
+            )}
+            {materials.length > 0 && (
+              <AssetSection label="materials">
+                {materials.map((mat) => {
+                  const color = (mat.data as { color?: string }).color ?? "#9aa0a8";
+                  return (
+                    <AssetCard
+                      key={mat.id}
+                      swatch={color}
+                      thumbnail={thumbnails[mat.id]}
+                      color="#e3b341"
+                      name={mat.name.split("/").pop()!}
+                      kind="material"
+                      dragPayload={{ kind: "material", id: mat.id }}
+                      selected={selectedAsset?.kind === "material" && selectedAsset.id === mat.id}
+                      onSelect={() => select("material", mat.id)}
+                      actionLabel="apply to selection"
+                      actionDisabled={!selectedEntity}
+                      onAction={() => applyMaterialToSelection(mat.id)}
+                    />
+                  );
+                })}
+              </AssetSection>
+            )}
+            {prefabIds.length > 0 && (
+              <AssetSection label="prefabs">
+                {prefabIds.map((pid) => (
+                  <AssetCard
+                    key={pid}
+                    glyph="◆"
+                    color="#79c0ff"
+                    name={props.assets.getPrefab(pid)!.name}
+                    kind="prefab"
+                    thumbnail={thumbnails[pid]}
+                    dragPayload={{ kind: "prefab", id: pid }}
+                    selected={selectedAsset?.kind === "prefab" && selectedAsset.id === pid}
+                    onSelect={() => select("prefab", pid)}
+                    actionLabel="+ add to scene"
+                    onAction={() => {
+                      const id = newId();
+                      instantiate(
+                        [
+                          {
+                            op: "add-entity",
+                            id,
+                            entity: {
+                              name: props.assets.getPrefab(pid)!.name,
+                              parent: null,
+                              tags: [],
+                              components: { transform: {}, prefab: { prefabId: pid } },
+                            },
+                          },
+                        ],
+                        id,
+                      );
+                    }}
+                  />
+                ))}
+              </AssetSection>
+            )}
+            {textureIds.length > 0 && (
+              <AssetSection label="textures">
+                {textureIds.map((tid) => (
+                  <AssetCard
+                    key={tid}
+                    thumbnail={props.assets.getTexture(tid)!.url}
+                    color="#ffa657"
+                    name={props.assets.getTexture(tid)!.name}
+                    kind="texture"
+                    selected={selectedAsset?.kind === "texture" && selectedAsset.id === tid}
+                    onSelect={() => select("texture", tid)}
+                    actionLabel="set as sky"
+                    onAction={() => props.onSetSky(tid)}
+                  />
+                ))}
+              </AssetSection>
+            )}
+            {soundIds.length > 0 && (
+              <AssetSection label="audio">
+                {soundIds.map((sid) => (
+                  <AssetCard
+                    key={sid}
+                    glyph="♪"
+                    color="#f778ba"
+                    name={props.assets.getSound(sid)!.name}
+                    kind="sound"
+                    selected={false}
+                    onSelect={() => new Audio(props.assets.getSound(sid)!.url).play()}
+                    actionLabel="▶ preview"
+                    onAction={() => new Audio(props.assets.getSound(sid)!.url).play()}
+                  />
+                ))}
+              </AssetSection>
+            )}
+            {modelIds.length > 0 && (
+              <AssetSection label="models">
+                {modelIds.map((mid) => (
+                  <AssetCard
+                    key={mid}
+                    glyph="▣"
+                    thumbnail={thumbnails[mid]}
+                    color="#7ee787"
+                    name={props.assets.getModel(mid)!.name}
+                    kind="model"
+                    dragPayload={{ kind: "model", id: mid }}
+                    selected={selectedAsset?.kind === "model" && selectedAsset.id === mid}
+                    onSelect={() => select("model", mid)}
+                    actionLabel="+ add to scene"
+                    onAction={() => {
+                      const id = newId();
+                      instantiate(
+                        [
+                          {
+                            op: "add-entity",
+                            id,
+                            entity: {
+                              name: props.assets.getModel(mid)!.name,
+                              parent: null,
+                              tags: [],
+                              components: {
+                                transform: {},
+                                mesh: { source: { kind: "asset", assetId: mid } },
+                              },
+                            },
+                          },
+                        ],
+                        id,
+                      );
+                    }}
+                  />
+                ))}
+              </AssetSection>
+            )}
+          </div>
         </div>
       </div>
     </>
@@ -1137,6 +1402,13 @@ function AssetCard(props: {
 
 // ---------------------------------------------------------------- inspector
 
+const EMPTY_BONES: Record<string, string[]> = {};
+const emptyBonesObservable: Observable<Record<string, string[]>> = {
+  get: () => EMPTY_BONES,
+  set: () => undefined,
+  subscribe: () => () => undefined,
+};
+
 function InspectorDock(props: {
   store: SceneStore;
   registry: ComponentRegistry;
@@ -1144,11 +1416,14 @@ function InspectorDock(props: {
   assets: AssetLibrary;
   assetSelection: AssetSelection;
   assetsVersion: Observable<number>;
+  modelBones?: Observable<Record<string, string[]>>;
   saveAsset?: (file: string, content: string) => void;
+  thumbnails: Observable<Record<string, string>>;
 }) {
   const doc = useStoreDoc(props.store);
   const selected = useObservable(props.selection);
   const selectedAsset = useObservable(props.assetSelection);
+  const thumbnails = useObservable(props.thumbnails);
   useObservable(props.assetsVersion);
   const entity = selected ? doc.entities[selected] : undefined;
 
@@ -1164,13 +1439,20 @@ function InspectorDock(props: {
       <DockHeader title={title} />
       <div style={{ flex: 1, overflowY: "auto", padding: 8 }}>
         {selected && entity ? (
-          <Inspector id={selected} doc={doc} store={props.store} registry={props.registry} />
+          <Inspector
+            id={selected}
+            doc={doc}
+            store={props.store}
+            registry={props.registry}
+            modelBones={props.modelBones}
+          />
         ) : selectedAsset ? (
           <AssetInspector
             selection={selectedAsset}
             assets={props.assets}
             assetsVersion={props.assetsVersion}
             saveAsset={props.saveAsset}
+            thumbnails={thumbnails}
           />
         ) : (
           <div style={{ color: "#8b949e" }}>
@@ -1182,15 +1464,67 @@ function InspectorDock(props: {
   );
 }
 
+/**
+ * Bone-name picker: a dropdown of the model's actual bones with a free-text
+ * escape hatch (rigs the host hasn't loaded yet, unconventional names).
+ */
+const BONE_CUSTOM = " custom";
+function BoneField(props: { value: string; bones: string[]; onCommit: (v: string) => void }) {
+  const [mode, setMode] = useState<"list" | "text" | null>(null);
+  const known = props.bones.includes(props.value);
+  const showList = mode ? mode === "list" : known;
+
+  if (!showList) {
+    return (
+      <div style={{ display: "flex", gap: 4 }}>
+        <div style={{ flex: 1 }}>
+          <TextField value={props.value} onCommit={props.onCommit} />
+        </div>
+        <button
+          style={buttonStyle}
+          title="Pick from the model's bones"
+          onClick={() => setMode("list")}
+        >
+          ▾
+        </button>
+      </div>
+    );
+  }
+  return (
+    <select
+      style={{ ...buttonStyle, width: "100%" }}
+      value={props.value}
+      onChange={(e) => {
+        if (e.target.value === BONE_CUSTOM) setMode("text");
+        else props.onCommit(e.target.value);
+      }}
+    >
+      {!known && <option value={props.value}>{props.value} (not in rig)</option>}
+      {props.bones.map((bone) => (
+        <option key={bone} value={bone}>
+          {bone}
+        </option>
+      ))}
+      <option value={BONE_CUSTOM}>type a name…</option>
+    </select>
+  );
+}
+
 function Inspector(props: {
   id: string;
   doc: SceneDoc;
   store: SceneStore;
   registry: ComponentRegistry;
+  modelBones?: Observable<Record<string, string[]>>;
 }) {
   const entity = props.doc.entities[props.id]!;
   const [addChoice, setAddChoice] = useState("");
   const available = props.registry.names().filter((name) => !(name in entity.components));
+  // bone-socket looks bones up on the PARENT's model, so prefer the parent's
+  // rig and fall back to this entity's own (script directly on the model)
+  const boneMap = useObservable(props.modelBones ?? emptyBonesObservable);
+  const bones =
+    (entity.parent ? boneMap[entity.parent] : undefined) ?? boneMap[props.id] ?? [];
 
   return (
     <div>
@@ -1236,6 +1570,13 @@ function Inspector(props: {
           </div>
           <ValueField
             value={data}
+            special={
+              name === "script" && bones.length > 0
+                ? {
+                    bone: (v, commit) => <BoneField value={v} bones={bones} onCommit={commit} />,
+                  }
+                : undefined
+            }
             onCommit={(next) =>
               apply(props.store, [
                 { op: "set-component", id: props.id, component: name, data: next },
@@ -1285,6 +1626,7 @@ function AssetInspector(props: {
   assets: AssetLibrary;
   assetsVersion: Observable<number>;
   saveAsset?: (file: string, content: string) => void;
+  thumbnails: Record<string, string>;
 }) {
   const bump = () => props.assetsVersion.set(props.assetsVersion.get() + 1);
   const { kind, id } = props.selection;
@@ -1313,8 +1655,9 @@ function AssetInspector(props: {
     };
     return (
       <div>
+        <AssetPreview key={`material:${id}`} material={data} assets={props.assets} />
         <div style={{ color: "#8b949e", fontSize: 10, marginBottom: 8 }}>
-          assets/materials/{id}.json — edits apply live to every mesh using it
+          assets/materials/{id}.json — edits apply live to every mesh using it (preview refreshes on save)
         </div>
         <Row label="shader">
           <select
@@ -1433,6 +1776,7 @@ function AssetInspector(props: {
   if (!model) return <div style={{ color: "#8b949e" }}>Missing model {id}</div>;
   return (
     <div>
+      <AssetPreview key={`model:${id}`} modelUrl={model.url} assets={props.assets} />
       <Row label="name">
         <span>{model.name}</span>
       </Row>
@@ -1440,8 +1784,207 @@ function AssetInspector(props: {
         <span style={{ color: "#8b949e", fontSize: 10, wordBreak: "break-all" }}>{model.url}</span>
       </Row>
       <div style={{ color: "#8b949e", fontSize: 10, marginTop: 6 }}>
-        glTF/GLB from assets/models/ — rendered thumbnails come with the asset viewer.
+        glTF/GLB from assets/models/
       </div>
+    </div>
+  );
+}
+
+/**
+ * A small, real renderer for the asset inspector. Thumbnails are useful for
+ * scanning, but this view is deliberately interactive: drag to orbit and
+ * wheel to zoom the selected model or material preview.
+ */
+function AssetPreview(props: {
+  assets: AssetLibrary;
+  modelUrl?: string;
+  material?: {
+    shader: string;
+    color: string;
+    map?: string;
+    repeat?: [number, number];
+    roughness: number;
+    metalness: number;
+    emissive: string;
+    emissiveIntensity: number;
+    opacity: number;
+    transparent: boolean;
+  };
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0b0e14);
+    scene.add(new THREE.HemisphereLight(0xeaf2ff, 0x1b2432, 2.2));
+    const key = new THREE.DirectionalLight(0xfff1dc, 3);
+    key.position.set(4, 6, 5);
+    scene.add(key);
+    const rim = new THREE.DirectionalLight(0x8ab8ff, 1.5);
+    rim.position.set(-4, 2, -4);
+    scene.add(rim);
+
+    const subject = new THREE.Group();
+    scene.add(subject);
+    const camera = new THREE.PerspectiveCamera(40, 1, 0.01, 1000);
+    let azimuth = 0.7;
+    let elevation = 0.35;
+    let distance = 3;
+    const target = new THREE.Vector3();
+    const spherical = new THREE.Spherical();
+    let dragging: { x: number; y: number } | null = null;
+    let disposed = false;
+    let previewTexture: THREE.Texture | null = null;
+
+    const render = () => {
+      if (disposed) return;
+      const width = Math.max(canvas.clientWidth, 1);
+      const height = Math.max(canvas.clientHeight, 1);
+      renderer.setSize(width, height, false);
+      camera.aspect = width / height;
+      camera.updateProjectionMatrix();
+      spherical.set(distance, Math.PI / 2 - elevation, azimuth);
+      camera.position.copy(target).add(new THREE.Vector3().setFromSpherical(spherical));
+      camera.lookAt(target);
+      renderer.render(scene, camera);
+    };
+
+    const frameSubject = () => {
+      const bounds = new THREE.Box3().setFromObject(subject);
+      if (bounds.isEmpty()) return;
+      const size = bounds.getSize(new THREE.Vector3()).length() || 1;
+      bounds.getCenter(target);
+      distance = Math.max(size * 1.35, 1.5);
+      camera.near = Math.max(size / 1000, 0.01);
+      camera.far = Math.max(size * 100, 100);
+      render();
+    };
+
+    if (props.material) {
+      const data = props.material;
+      const common = {
+        color: data.color || "#9aa0a8",
+        transparent: data.transparent,
+        opacity: data.opacity,
+      };
+      let material: THREE.Material & { map?: THREE.Texture | null };
+      switch (data.shader) {
+        case "unlit":
+          material = new THREE.MeshBasicMaterial(common);
+          break;
+        case "toon":
+          material = new THREE.MeshToonMaterial({
+            ...common,
+            emissive: data.emissive,
+            emissiveIntensity: data.emissiveIntensity,
+          });
+          break;
+        case "wireframe":
+          material = new THREE.MeshBasicMaterial({ ...common, wireframe: true });
+          break;
+        default:
+          material = new THREE.MeshStandardMaterial({
+            ...common,
+            roughness: data.roughness,
+            metalness: data.metalness,
+            emissive: data.emissive,
+            emissiveIntensity: data.emissiveIntensity,
+          });
+      }
+      const sphere = new THREE.Mesh(new THREE.SphereGeometry(1, 64, 40), material);
+      subject.add(sphere);
+      const textureUrl = data.map ? props.assets.getTexture(data.map)?.url : undefined;
+      if (textureUrl && data.shader !== "wireframe") {
+        new THREE.TextureLoader().load(textureUrl, (texture) => {
+          if (disposed) {
+            texture.dispose();
+            return;
+          }
+          previewTexture = texture;
+          texture.colorSpace = THREE.SRGBColorSpace;
+          texture.wrapS = THREE.RepeatWrapping;
+          texture.wrapT = THREE.RepeatWrapping;
+          const [x, y] = data.repeat ?? [1, 1];
+          texture.repeat.set(x, y);
+          material.map = texture;
+          material.needsUpdate = true;
+          render();
+        });
+      }
+      frameSubject();
+    } else if (props.modelUrl) {
+      new GLTFLoader().load(
+        props.modelUrl,
+        (gltf) => {
+          if (disposed) return;
+          subject.add(gltf.scene);
+          frameSubject();
+        },
+        undefined,
+        (error) => console.warn("[editor] asset preview failed to load:", error),
+      );
+    }
+
+    const onPointerDown = (event: PointerEvent) => {
+      dragging = { x: event.clientX, y: event.clientY };
+      canvas.setPointerCapture(event.pointerId);
+    };
+    const onPointerMove = (event: PointerEvent) => {
+      if (!dragging) return;
+      azimuth -= (event.clientX - dragging.x) * 0.012;
+      elevation = Math.max(-1.45, Math.min(1.45, elevation + (event.clientY - dragging.y) * 0.012));
+      dragging = { x: event.clientX, y: event.clientY };
+      render();
+    };
+    const onPointerUp = () => (dragging = null);
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      distance = Math.max(0.3, Math.min(100, distance * Math.exp(event.deltaY * 0.001)));
+      render();
+    };
+    const resize = new ResizeObserver(render);
+    resize.observe(canvas);
+    canvas.addEventListener("pointerdown", onPointerDown);
+    canvas.addEventListener("pointermove", onPointerMove);
+    canvas.addEventListener("pointerup", onPointerUp);
+    canvas.addEventListener("pointercancel", onPointerUp);
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    render();
+
+    return () => {
+      disposed = true;
+      resize.disconnect();
+      canvas.removeEventListener("pointerdown", onPointerDown);
+      canvas.removeEventListener("pointermove", onPointerMove);
+      canvas.removeEventListener("pointerup", onPointerUp);
+      canvas.removeEventListener("pointercancel", onPointerUp);
+      canvas.removeEventListener("wheel", onWheel);
+      previewTexture?.dispose();
+      subject.traverse((object) => {
+        const mesh = object as THREE.Mesh;
+        mesh.geometry?.dispose();
+        const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+        materials.filter(Boolean).forEach((material) => material.dispose());
+      });
+      renderer.dispose();
+    };
+  }, [props.assets, props.material, props.modelUrl]);
+
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <canvas
+        ref={canvasRef}
+        title="Drag to orbit · scroll to zoom"
+        style={{ width: "100%", height: 220, display: "block", borderRadius: 3, cursor: "grab" }}
+      />
+      <div style={{ color: "#8b949e", fontSize: 10, marginTop: 4 }}>drag to orbit · scroll to zoom</div>
     </div>
   );
 }

@@ -16,3 +16,6 @@ coverage/
 
 # stray npm cache copies (accidentally landed in the repo once)
 %USERPROFILE%*/
+
+# local dev player-data (never authoritative, never committed)
+.hitreg/

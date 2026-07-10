@@ -51,8 +51,12 @@ The primary AI channel is **direct file editing** — no MCP required:
   scenes supported — the editor toolbar picks; only the ACTIVE scene live-syncs).
   Prefabs: `assets/prefabs/**/*.json`. Materials: `assets/materials/**/*.json`
   (support `map` texture id + `repeat`). Textures: `assets/textures/` (images).
-  Audio: `assets/audio/` (wav/mp3/ogg). Models: `assets/models/*.glb` (animation
-  clips drive the `animator` component; blending via scripts' ctx.setAnimation).
+  Audio: `assets/audio/` (wav/mp3/ogg). Models: `assets/models/*.glb|gltf`
+  (GLB or self-contained glTF only — external .bin/texture sidecars won't
+  resolve; animation clips drive the `animator` component; blending via
+  scripts' ctx.setAnimation). Chunks: `assets/chunks/<world>/<cx>_<cz>.chunk.json`
+  streamed by a scene's `chunkStreamer` component (runtime-only, never in the
+  scene doc).
 - While `pnpm dev` runs, any edit to those files **applies to the running
   browser scene in place** (dev-server watcher → websocket), no reload. Invalid
   edits are rejected with a console warning and change nothing — schemas guard

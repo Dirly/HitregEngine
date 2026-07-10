@@ -2,11 +2,12 @@ import * as THREE from "three/webgpu";
 import { GLTFLoader, type GLTF } from "three/addons/loaders/GLTFLoader.js";
 import { clone as skeletonClone } from "three/addons/utils/SkeletonUtils.js";
 import { heightmapMesh, type HeightmapParams, type SceneDoc } from "@hitreg/core";
+import type { ParticlesData } from "./particles.js";
 
 // kits load once and instance many times
 const gltfCache = new Map<string, Promise<GLTF>>();
 
-function loadGltf(url: string): Promise<GLTF> {
+export function loadGltf(url: string): Promise<GLTF> {
   let pending = gltfCache.get(url);
   if (!pending) {
     pending = (gltfLoader ??= new GLTFLoader()).loadAsync(url);
@@ -24,9 +25,13 @@ export interface BuildOptions {
   resolveTexture?(assetId: string): string | undefined;
   /** Fired when an asset mesh finishes loading (animation clips included). */
   onModelLoaded?(entityId: string, root: THREE.Object3D, clips: THREE.AnimationClip[]): void;
+  /** Fired for each `particles` entity — the app registers it with its
+   * ParticleSystem (the builder stays free of the simulation). `group` is the
+   * entity's anchor group; the system parents its InstancedMesh under it. */
+  onParticles?(entityId: string, group: THREE.Group, data: ParticlesData): void;
 }
 
-interface MaterialData {
+export interface MaterialData {
   shader: "standard" | "unlit" | "toon" | "wireframe";
   color: string;
   map?: string;
@@ -226,7 +231,7 @@ function geometryFor(shape: string, size: [number, number, number]): THREE.Buffe
  * resolved via expandScene). Each entity becomes a Group; component visuals
  * hang off it, so transform updates touch only the group.
  */
-function makeMaterial(data: MaterialData): THREE.Material {
+export function makeMaterial(data: MaterialData): THREE.Material {
   const common = {
     color: new THREE.Color(data.color),
     opacity: data.opacity,
@@ -467,6 +472,9 @@ export function buildScene(doc: SceneDoc, options: BuildOptions = {}): BuiltScen
         group.add(new THREE.HemisphereLight(new THREE.Color(skyData.top), new THREE.Color(skyData.bottom), skyData.light));
       }
     }
+
+    const particlesData = entity.components["particles"] as ParticlesData | undefined;
+    if (particlesData) options.onParticles?.(id, group, particlesData);
 
     const cameraData = entity.components["camera"] as CameraData | undefined;
     if (cameraData) {
