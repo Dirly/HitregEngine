@@ -22,6 +22,8 @@ export {
   cameraSchema,
   materialSchema,
   scriptSchema,
+  animatorSchema,
+  audioSchema,
   vec3,
   quat,
   hexColor,

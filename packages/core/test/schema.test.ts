@@ -47,6 +47,8 @@ describe("ComponentRegistry", () => {
     const registry = setup();
     const schemas = registry.jsonSchemas();
     expect(Object.keys(schemas).sort()).toEqual([
+      "animator",
+      "audio",
       "camera",
       "collider",
       "joint",

@@ -876,6 +876,9 @@
             ]
           },
           "material": "arena/wall-concrete",
+          "castShadow": true,
+          "receiveShadow": true,
+          "renderMode": "auto",
           "static": true
         },
         "collider": {
@@ -923,7 +926,11 @@
               1.4
             ]
           },
-          "material": "arena/crate-wood"
+          "material": "arena/wall-concrete",
+          "castShadow": true,
+          "receiveShadow": true,
+          "renderMode": "auto",
+          "static": false
         },
         "rigidbody": {},
         "collider": {
@@ -1445,6 +1452,12 @@
         "script": {
           "name": "collectible",
           "params": {}
+        },
+        "audio": {
+          "src": "chime.wav",
+          "volume": 0.9,
+          "positional": true,
+          "refDistance": 6
         }
       }
     },
@@ -1498,6 +1511,12 @@
         "script": {
           "name": "collectible",
           "params": {}
+        },
+        "audio": {
+          "src": "chime.wav",
+          "volume": 0.9,
+          "positional": true,
+          "refDistance": 6
         }
       }
     },
@@ -1551,6 +1570,12 @@
         "script": {
           "name": "collectible",
           "params": {}
+        },
+        "audio": {
+          "src": "chime.wav",
+          "volume": 0.9,
+          "positional": true,
+          "refDistance": 6
         }
       }
     },
@@ -1585,6 +1610,116 @@
             "distance": 7,
             "height": 3.5,
             "damping": 5
+          }
+        }
+      }
+    },
+    "97b9c312-92a8-4024-9242-d5822f307e97": {
+      "name": "Streetlight",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -14.5,
+            0.01,
+            4.5
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "prefab": {
+          "prefabId": "prefab-streetlight",
+          "props": {},
+          "overrides": []
+        }
+      }
+    },
+    "7bf10728-2c47-41be-8adf-4a0be81c3800": {
+      "name": "Crate",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -7.5,
+            2.2679864832082988,
+            4.5
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "prefab": {
+          "prefabId": "arena/prefab-crate",
+          "props": {},
+          "overrides": []
+        }
+      }
+    },
+    "robot": {
+      "name": "Robot",
+      "parent": null,
+      "tags": [
+        "npc"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            -4,
+            0,
+            8
+          ],
+          "rotation": [
+            0,
+            0.985,
+            0,
+            0.174
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "robot.glb"
+          }
+        },
+        "animator": {
+          "play": "Idle",
+          "fade": 0.5
+        },
+        "script": {
+          "name": "anim-cycler",
+          "params": {
+            "clips": [
+              "Idle",
+              "Walking",
+              "Dance",
+              "Wave"
+            ],
+            "interval": 4,
+            "fade": 0.6
           }
         }
       }

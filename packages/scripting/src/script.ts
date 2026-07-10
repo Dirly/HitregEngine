@@ -25,6 +25,10 @@ export interface ScriptContext {
   viewForward?(): [number, number];
   /** Switch the render camera to another camera-component entity (runtime-only). */
   setActiveCamera?(entityId: string | null): void;
+  /** Crossfade this entity's animator to a clip (Unity-style blending). */
+  setAnimation?(clip: string, fadeSeconds?: number): void;
+  /** Play this entity's audio component, or any sound asset id, at this entity. */
+  playSound?(soundId?: string): void;
 }
 
 export interface InputLike {

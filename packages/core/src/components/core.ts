@@ -102,6 +102,29 @@ export const scriptSchema = z.object({
   params: z.record(z.string(), z.unknown()).default({}),
 });
 
+/**
+ * Skeletal animation for asset meshes (clips come from the glTF). `play` is
+ * the clip started in play mode; scripts blend via ctx.setAnimation (Unity
+ * crossfade semantics: transitions fade over `fade` seconds).
+ */
+export const animatorSchema = z.object({
+  play: z.string().optional(),
+  fade: z.number().min(0).default(0.3),
+  speed: z.number().default(1),
+});
+
+/** Sound emitter. `src` is an audio asset id (assets/audio/). */
+export const audioSchema = z.object({
+  src: z.string().min(1),
+  volume: z.number().min(0).max(1).default(1),
+  loop: z.boolean().default(false),
+  /** Start when play mode starts (looping ambience, music). */
+  autoplay: z.boolean().default(false),
+  /** 3D positional vs flat. */
+  positional: z.boolean().default(true),
+  refDistance: z.number().positive().default(8),
+});
+
 export function registerCoreComponents(registry: ComponentRegistry): void {
   registry.register("transform", transformSchema);
   registry.register("mesh", meshSchema);
@@ -109,5 +132,7 @@ export function registerCoreComponents(registry: ComponentRegistry): void {
   registry.register("camera", cameraSchema);
   registry.register("prefab", prefabInstanceSchema);
   registry.register("script", scriptSchema);
+  registry.register("animator", animatorSchema);
+  registry.register("audio", audioSchema);
   registerPhysicsComponents(registry);
 }

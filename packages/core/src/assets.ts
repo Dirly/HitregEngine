@@ -110,6 +110,25 @@ export class AssetLibrary {
     return [...this.textures.keys()];
   }
 
+  // -- sound assets (audio files, resolved to URLs by the host app) ----------
+
+  private sounds = new Map<string, ModelAssetDoc>();
+
+  addSound(sound: ModelAssetDoc): void {
+    if (this.sounds.has(sound.id)) {
+      throw new AssetError(`sound ${sound.id} already exists`);
+    }
+    this.sounds.set(sound.id, sound);
+  }
+
+  getSound(id: string): ModelAssetDoc | undefined {
+    return this.sounds.get(id);
+  }
+
+  soundIds(): string[] {
+    return [...this.sounds.keys()];
+  }
+
   // -- data assets (ScriptableObjects) --------------------------------------
 
   defineDataType(type: string, schema: z.ZodType): void {

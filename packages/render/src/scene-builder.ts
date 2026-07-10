@@ -9,6 +9,8 @@ export interface BuildOptions {
   resolveMaterial?(assetId: string): unknown | undefined;
   /** Resolve a texture asset id to a fetchable image URL. */
   resolveTexture?(assetId: string): string | undefined;
+  /** Fired when an asset mesh finishes loading (animation clips included). */
+  onModelLoaded?(entityId: string, root: THREE.Object3D, clips: THREE.AnimationClip[]): void;
 }
 
 interface MaterialData {
@@ -290,6 +292,7 @@ export function buildScene(doc: SceneDoc, options: BuildOptions = {}): BuiltScen
               node.userData["entityId"] = id;
             });
             group.add(gltf.scene);
+            options.onModelLoaded?.(id, gltf.scene, gltf.animations ?? []);
           },
           (error) => console.warn(`[render] failed to load model ${meshData.source.kind === "asset" ? meshData.source.assetId : ""}:`, error),
         );

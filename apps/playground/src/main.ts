@@ -12,7 +12,15 @@ import {
   validateScene,
   type SceneDoc,
 } from "@hitreg/core";
-import { attachPhysicsDebug, buildScene, EngineRenderer, type BuiltScene } from "@hitreg/render";
+import {
+  AnimationSystem,
+  attachPhysicsDebug,
+  buildScene,
+  EngineRenderer,
+  type AnimatorData,
+  type BuiltScene,
+} from "@hitreg/render";
+import { AudioSystem, type AudioComponentData } from "./audio-system.js";
 import { initPhysics, PhysicsSim, type BodyState } from "@hitreg/physics";
 import {
   InputService,
@@ -34,7 +42,7 @@ import {
   type GrayboxShape,
   type PlayMode,
 } from "@hitreg/editor";
-import { buildStreetDoc } from "./street-scene.js";
+import { buildStarterDoc, buildStreetDoc } from "./street-scene.js";
 
 CameraControls.install({ THREE });
 
@@ -69,6 +77,10 @@ async function loadAssets(assets: AssetLibrary): Promise<string | null> {
   for (const file of index["textures"] ?? []) {
     if (!/\.(png|jpe?g|webp)$/i.test(file)) continue;
     assets.addTexture({ id: file, name: file.split("/").pop()!, url: fileUrl("textures", file) });
+  }
+  for (const file of index["audio"] ?? []) {
+    if (!/\.(wav|mp3|ogg)$/i.test(file)) continue;
+    assets.addSound({ id: file, name: file.split("/").pop()!, url: fileUrl("audio", file) });
   }
 
   const sceneFile = (index["scenes"] ?? []).find((f) => f.endsWith(".scene.json"));
@@ -129,6 +141,23 @@ async function main(): Promise<void> {
   const store = new SceneStore(initialDoc ?? buildStreetDoc(registry), registry);
 
   let lastWrittenScene = loadedSceneContent;
+  const sceneList = observable<string[]>([]);
+  try {
+    const index = (await fetch("/__hitreg/assets-index").then((r) => r.json())) as {
+      scenes?: string[];
+    };
+    sceneList.set(
+      (index.scenes ?? [])
+        .filter((f) => f.endsWith(".scene.json"))
+        .map((f) => f.replace(/\.scene\.json$/, ""))
+        .sort(),
+    );
+  } catch {
+    /* prod build: no bridge */
+  }
+  if (seeded && !sceneList.get().includes(store.doc.name)) {
+    sceneList.set([...sceneList.get(), store.doc.name].sort());
+  }
   function persistScene(): void {
     const content = JSON.stringify(store.doc, null, 2);
     if (content === lastWrittenScene) return;
@@ -142,10 +171,49 @@ async function main(): Promise<void> {
     sceneSaveTimer = setTimeout(persistScene, 500);
   });
 
+  async function switchScene(name: string): Promise<void> {
+    if (name === store.doc.name) return;
+    persistScene(); // save where we were
+    try {
+      const content = await fetch(
+        `/__hitreg/asset-file?file=${encodeURIComponent(`scenes/${name}.scene.json`)}`,
+      ).then((r) => r.text());
+      const parsed = sceneDocSchema.safeParse(JSON.parse(content));
+      if (!parsed.success) {
+        console.warn(`[scene] ${name} failed validation:`, parsed.error);
+        return;
+      }
+      playMode.set("edit");
+      selection.set(null);
+      lastWrittenScene = content;
+      store.replace(parsed.data);
+    } catch (error) {
+      console.warn(`[scene] failed to load ${name}:`, error);
+    }
+  }
+
+  function newScene(rawName: string): void {
+    const name = rawName.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+    if (!name) return;
+    if (sceneList.get().includes(name)) {
+      void switchScene(name);
+      return;
+    }
+    persistScene();
+    playMode.set("edit");
+    selection.set(null);
+    const starter = buildStarterDoc(name, registry);
+    lastWrittenScene = "";
+    store.replace(starter);
+    persistScene();
+    sceneList.set([...sceneList.get(), name].sort());
+  }
+
   // -- render side -----------------------------------------------------------
 
   let built: BuiltScene;
   let lastExpanded: SceneDoc;
+  const animations = new AnimationSystem();
 
   // debug viz is an EDIT-mode tool — the game view stays clean during play
   function refreshPhysicsDebugVisibility(): void {
@@ -159,10 +227,17 @@ async function main(): Promise<void> {
     // v1: full rebuild per change — fine at this scale; diffing comes with ECS
     const expanded = expandScene(store.doc, assets, registry);
     lastExpanded = expanded;
+    animations.clear();
     built = buildScene(expanded, {
       resolveModel: (assetId) => assets.getModel(assetId)?.url,
       resolveMaterial: (assetId) => assets.getDataAsset(assetId)?.data,
       resolveTexture: (assetId) => assets.getTexture(assetId)?.url,
+      onModelLoaded: (entityId, root, clips) => {
+        const animator = lastExpanded.entities[entityId]?.components["animator"] as
+          | AnimatorData
+          | undefined;
+        animations.register(entityId, root, clips, animator ?? null);
+      },
     });
     if (settings.get().showPhysics) attachPhysicsDebug(expanded, built.objects);
     refreshPhysicsDebugVisibility();
@@ -260,6 +335,9 @@ async function main(): Promise<void> {
     assetsVersion,
     saveAsset,
     onFocusEntity: frameEntity,
+    scenes: sceneList,
+    onSwitchScene: (name) => void switchScene(name),
+    onNewScene: newScene,
   });
 
   function frameEntity(id: string): void {
@@ -273,10 +351,23 @@ async function main(): Promise<void> {
     });
   }
 
+  // Unity-style flow: play = fullscreen game; ~ pauses and opens the editor;
+  // ~ again resumes fullscreen; stop (toolbar) returns to editing.
+  playMode.subscribe(() => {
+    if (playMode.get() === "playing") editorVisible.set(false);
+  });
+
   window.addEventListener("keydown", (e) => {
     if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
     if (e.code === "Backquote") {
-      editorVisible.set(!editorVisible.get());
+      if (playMode.get() === "playing") {
+        playMode.set("paused");
+        editorVisible.set(true);
+      } else if (playMode.get() === "paused" && editorVisible.get()) {
+        playMode.set("playing"); // auto-hides the editor via the subscription above
+      } else {
+        editorVisible.set(!editorVisible.get());
+      }
     }
     // Unity F: frame the selection
     if (e.code === "KeyF" && editorVisible.get()) {
@@ -325,12 +416,16 @@ async function main(): Promise<void> {
     return [viewDir.x, viewDir.z];
   }
 
+  const audio = new AudioSystem(camera, (soundId) => assets.getSound(soundId)?.url);
+
   let sim: PhysicsSim | null = null;
   let scripts: ScriptRuntime | null = null;
   let followTargetId: string | null = null;
   function startPlaySession(): void {
     sim?.free();
     scripts?.dispose();
+    audio.stopAll();
+    audio.resume();
     sim = new PhysicsSim(lastExpanded);
     scripts = new ScriptRuntime({
       doc: lastExpanded,
@@ -339,8 +434,25 @@ async function main(): Promise<void> {
       registry: scriptRegistry,
       input,
       viewForward,
+      setAnimation: (entityId, clip, fade) =>
+        animations.play(entityId, clip, fade ?? 0.3),
+      playSound: (entityId, soundId) => {
+        const comp = lastExpanded.entities[entityId]?.components["audio"] as
+          | AudioComponentData
+          | undefined;
+        const src = soundId ?? comp?.src;
+        if (!src) return;
+        void audio.play(built.objects.get(entityId) ?? null, src, soundId ? {} : (comp ?? {}));
+      },
     });
     scripts.start();
+    animations.setRunning(true);
+
+    // autoplay audio components (music, ambience)
+    for (const [id, entity] of Object.entries(lastExpanded.entities)) {
+      const comp = entity.components["audio"] as AudioComponentData | undefined;
+      if (comp?.autoplay) void audio.play(built.objects.get(id) ?? null, comp.src, comp);
+    }
 
     // data-driven follow cam: an active camera with a follow rig tracks its target tag
     followTargetId = null;
@@ -362,6 +474,8 @@ async function main(): Promise<void> {
     sim?.free();
     sim = null;
     followTargetId = null;
+    animations.setRunning(false);
+    audio.stopAll();
   }
 
   store.subscribe(rebuild);
@@ -495,6 +609,11 @@ async function main(): Promise<void> {
         if (!content) return;
         try {
           if (file.startsWith("scenes/")) {
+            const name = file.slice("scenes/".length).replace(/\.scene\.json$/, "");
+            if (!sceneList.get().includes(name)) {
+              sceneList.set([...sceneList.get(), name].sort()); // e.g. an agent made a scene
+            }
+            if (name !== store.doc.name) return; // change to a scene we're not editing
             if (content === lastWrittenScene) return; // our own autosave echo
             const doc = sceneDocSchema.parse(JSON.parse(content));
             const issues = validateScene(doc, registry);
@@ -634,6 +753,7 @@ async function main(): Promise<void> {
           void controls.moveTo(p.x, p.y + 1, p.z, true);
         }
       }
+      if (playMode.get() === "playing") animations.update(dt);
       controls.update(dt);
       // camera priority in play mode: script-switched cam > rigless active scene
       // cam > editor/follow camera. Edit mode always uses the editor camera.
@@ -652,11 +772,18 @@ async function main(): Promise<void> {
   });
 
   setInterval(() => {
+    const mode = playMode.get();
+    const hint =
+      mode === "playing"
+        ? "~ pause + editor"
+        : mode === "paused"
+          ? "PAUSED — ~ resume · ⏹ stop in toolbar"
+          : "~ editor";
     hud.textContent =
       `backend: ${backend}\n` +
       `entities: ${Object.keys(store.doc.entities).length} (source)\n` +
       `frame: ${lastFrameMs.toFixed(1)}ms\n` +
-      `mode: ${playMode.get()}  ·  press ~ for editor`;
+      `mode: ${mode}  ·  ${hint}`;
   }, 500);
 
   function frame(t: number): void {

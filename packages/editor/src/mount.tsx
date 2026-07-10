@@ -33,6 +33,9 @@ export interface MountOptions {
   assetsVersion: Observable<number>;
   saveAsset?: (file: string, content: string) => void;
   onFocusEntity?: (entityId: string) => void;
+  scenes?: Observable<string[]>;
+  onSwitchScene?: (name: string) => void;
+  onNewScene?: (name: string) => void;
 }
 
 /** Mount the editor overlay panels. Dev-only: don't ship this in production builds. */
@@ -58,6 +61,9 @@ export function mountEditor(options: MountOptions): { unmount(): void } {
       assetsVersion={options.assetsVersion}
       saveAsset={options.saveAsset}
       onFocusEntity={options.onFocusEntity}
+      scenes={options.scenes}
+      onSwitchScene={options.onSwitchScene}
+      onNewScene={options.onNewScene}
     />,
   );
   return { unmount: () => root.unmount() };

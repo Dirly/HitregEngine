@@ -12,6 +12,10 @@ export interface RuntimeOptions {
   input: InputLike;
   /** Horizontal camera forward [x, z] — enables camera-relative controls. */
   viewForward?: () => [number, number];
+  /** Host animation hook: crossfade an entity's animator to a clip. */
+  setAnimation?: (entityId: string, clip: string, fadeSeconds?: number) => void;
+  /** Host audio hook: play an entity's audio component or a sound asset id. */
+  playSound?: (entityId: string, soundId?: string) => void;
 }
 
 interface ScriptComponentData {
@@ -63,6 +67,12 @@ export class ScriptRuntime {
         setActiveCamera: (cameraId) => {
           this.activeCameraId = cameraId;
         },
+        ...(this.opts.setAnimation
+          ? { setAnimation: (clip: string, fade?: number) => this.opts.setAnimation!(id, clip, fade) }
+          : {}),
+        ...(this.opts.playSound
+          ? { playSound: (soundId?: string) => this.opts.playSound!(id, soundId) }
+          : {}),
       };
       const script = new cls();
       script.ctx = context;

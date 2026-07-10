@@ -59,6 +59,7 @@ function hitregBridge(): Plugin {
           materials: [],
           models: [],
           textures: [],
+          audio: [],
         };
         const walk = (dir: string, bucket: string[], base: string) => {
           if (!fs.existsSync(dir)) return;

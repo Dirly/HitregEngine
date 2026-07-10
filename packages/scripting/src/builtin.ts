@@ -103,6 +103,7 @@ class Collectible extends Script {
     if (!other?.tags.includes(this.param<string>("collectorTag"))) return;
     this.collected = true;
     this.object.visible = false;
+    this.ctx.playSound?.();
     console.log(`[collectible] ${this.entityId} collected by ${otherId}`);
   }
 }

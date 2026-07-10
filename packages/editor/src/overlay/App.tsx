@@ -56,6 +56,10 @@ export interface AppProps {
   saveAsset?: (file: string, content: string) => void;
   /** Fly the editor camera to frame an entity (double-click in hierarchy / F key). */
   onFocusEntity?: (entityId: string) => void;
+  /** Scene management (host-provided): available scene names + switching. */
+  scenes?: Observable<string[]>;
+  onSwitchScene?: (name: string) => void;
+  onNewScene?: (name: string) => void;
 }
 
 function useObservable<T>(obs: Observable<T>): T {
@@ -199,6 +203,9 @@ export function App(props: AppProps) {
             grayboxActive={props.grayboxActive}
             grayboxShape={props.grayboxShape}
             grayboxBevel={props.grayboxBevel}
+            scenes={props.scenes}
+            onSwitchScene={props.onSwitchScene}
+            onNewScene={props.onNewScene}
           />
         </div>
 
@@ -322,6 +329,13 @@ export function SearchInput(props: { value: string; onChange: (v: string) => voi
 
 // ---------------------------------------------------------------- toolbar
 
+const EMPTY_SCENES: string[] = [];
+const emptyScenesObservable: Observable<string[]> = {
+  get: () => EMPTY_SCENES,
+  set: () => undefined,
+  subscribe: () => () => undefined,
+};
+
 function Toolbar(props: {
   store: SceneStore;
   playMode: Observable<PlayMode>;
@@ -330,7 +344,12 @@ function Toolbar(props: {
   grayboxActive: Observable<boolean>;
   grayboxShape: Observable<GrayboxShape>;
   grayboxBevel: Observable<number>;
+  scenes?: Observable<string[]>;
+  onSwitchScene?: (name: string) => void;
+  onNewScene?: (name: string) => void;
 }) {
+  const doc = useStoreDoc(props.store);
+  const scenes = useObservable(props.scenes ?? emptyScenesObservable);
   const play = useObservable(props.playMode);
   const mode = useObservable(props.gizmoMode);
   const settings = useObservable(props.settings);
@@ -359,6 +378,32 @@ function Toolbar(props: {
       <div style={{ display: "flex", alignItems: "center", flexWrap: "nowrap", overflowX: "auto" }}>
         <span style={group}>
           <strong style={{ color: "#e6edf3", marginRight: 4 }}>HitReg</strong>
+          {props.scenes && (
+            <>
+              <select
+                style={{ ...buttonStyle, padding: "4px 6px", maxWidth: 140 }}
+                title="Scene (saved automatically on switch)"
+                value={doc.name}
+                onChange={(e) => props.onSwitchScene?.(e.target.value)}
+              >
+                {[...new Set([doc.name, ...scenes])].map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+              <button
+                style={buttonStyle}
+                title="Create a new scene"
+                onClick={() => {
+                  const name = window.prompt("New scene name:");
+                  if (name) props.onNewScene?.(name);
+                }}
+              >
+                +
+              </button>
+            </>
+          )}
           <button
             style={play === "playing" ? activeButtonStyle : buttonStyle}
             disabled={play === "playing"}
@@ -861,6 +906,22 @@ function AssetsDock(props: {
               onAction={() => select("texture", tid)}
             />
           ))}
+          {props.assets
+            .soundIds()
+            .filter((sid) => inFolder(sid) && sid.toLowerCase().includes(q))
+            .map((sid) => (
+              <AssetCard
+                key={sid}
+                glyph="♪"
+                color="#f778ba"
+                name={props.assets.getSound(sid)!.name}
+                kind="sound"
+                selected={false}
+                onSelect={() => new Audio(props.assets.getSound(sid)!.url).play()}
+                actionLabel="▶ preview"
+                onAction={() => new Audio(props.assets.getSound(sid)!.url).play()}
+              />
+            ))}
           {modelIds.map((mid) => (
             <AssetCard
               key={mid}
