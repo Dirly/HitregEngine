@@ -17,9 +17,9 @@ import { initPhysics, PhysicsSim, type BodyState } from "@hitreg/physics";
 import {
   createAssetSelection,
   createContextMenu,
+  createDockSizes,
   createSelection,
   defaultEditorSettings,
-  DOCK,
   GrayboxTool,
   mountEditor,
   observable,
@@ -32,25 +32,29 @@ import { buildStreetDoc } from "./street-scene.js";
 
 CameraControls.install({ THREE });
 
+/** Path after the type dir becomes the asset id — subfolders are organization. */
+function assetId(path: string, typeDir: string): string {
+  return path.split(`${typeDir}/`)[1]!.replace(/\.(json|glb|gltf)$/, "");
+}
+
 /** assets/ is the project content folder: prefabs and models load from disk. */
 function loadAssets(assets: AssetLibrary): void {
-  const prefabs = import.meta.glob("../assets/prefabs/*.json", { eager: true });
+  const prefabs = import.meta.glob("../assets/prefabs/**/*.json", { eager: true });
   for (const [path, mod] of Object.entries(prefabs)) {
-    const id = path.split("/").pop()!.replace(/\.json$/, "");
-    assets.addPrefab(id, (mod as { default: unknown }).default);
+    assets.addPrefab(assetId(path, "prefabs"), (mod as { default: unknown }).default);
   }
-  const models = import.meta.glob("../assets/models/*.{glb,gltf}", {
+  const models = import.meta.glob("../assets/models/**/*.{glb,gltf}", {
     eager: true,
     query: "?url",
     import: "default",
   });
   for (const [path, url] of Object.entries(models)) {
-    const name = path.split("/").pop()!;
-    assets.addModel({ id: name, name, url: url as string });
+    const id = path.split("models/")[1]!;
+    assets.addModel({ id, name: id.split("/").pop()!, url: url as string });
   }
-  const materials = import.meta.glob("../assets/materials/*.json", { eager: true });
+  const materials = import.meta.glob("../assets/materials/**/*.json", { eager: true });
   for (const [path, mod] of Object.entries(materials)) {
-    const id = path.split("/").pop()!.replace(/\.json$/, "");
+    const id = assetId(path, "materials");
     assets.addDataAsset({
       id,
       type: "material",
@@ -161,6 +165,7 @@ async function main(): Promise<void> {
   const grayboxShape = observable<GrayboxShape>("box");
   const grayboxBevel = observable(0);
   const thumbnails = observable<Record<string, string>>({});
+  const dockSizes = createDockSizes();
   const assetsVersion = observable(0);
   assetsVersion.subscribe(() => rebuild()); // material/prefab edits re-render the scene
   settings.subscribe(() => rebuild()); // physics-debug toggle takes effect immediately
@@ -175,6 +180,7 @@ async function main(): Promise<void> {
     gizmoMode,
     contextMenu,
     grayboxActive,
+    assets,
     getScene: () => built.scene,
     getObject: (id) => built.objects.get(id),
     onDraggingChanged: (dragging) => {
@@ -216,6 +222,7 @@ async function main(): Promise<void> {
     grayboxShape,
     grayboxBevel,
     thumbnails,
+    dockSizes,
     assetsVersion,
     saveAsset,
   });
@@ -403,14 +410,14 @@ async function main(): Promise<void> {
             selection.set(null);
             store.replace(doc);
           } else if (file.startsWith("materials/")) {
-            const id = file.split("/").pop()!.replace(/\.json$/, "");
+            const id = file.slice("materials/".length).replace(/\.json$/, "");
             const data = JSON.parse(content);
             const asset = { id, type: "material", name: id, data };
             if (assets.getDataAsset(id)) assets.updateDataAsset(asset);
             else assets.addDataAsset(asset);
             assetsVersion.set(assetsVersion.get() + 1);
           } else if (file.startsWith("prefabs/")) {
-            const id = file.split("/").pop()!.replace(/\.json$/, "");
+            const id = file.slice("prefabs/".length).replace(/\.json$/, "");
             const doc = JSON.parse(content);
             if (assets.getPrefab(id)) assets.updatePrefab(id, doc);
             else assets.addPrefab(id, doc);
@@ -480,10 +487,11 @@ async function main(): Promise<void> {
   function applyCanvasLayout(): void {
     canvas.style.position = "fixed";
     if (editorVisible.get()) {
-      canvas.style.left = `${DOCK.left}px`;
-      canvas.style.top = `${DOCK.top}px`;
-      canvas.style.width = `calc(100vw - ${DOCK.left + DOCK.right}px)`;
-      canvas.style.height = `calc(100vh - ${DOCK.top + DOCK.bottom}px)`;
+      const dock = dockSizes.get();
+      canvas.style.left = `${dock.left}px`;
+      canvas.style.top = `${dock.top}px`;
+      canvas.style.width = `calc(100vw - ${dock.left + dock.right}px)`;
+      canvas.style.height = `calc(100vh - ${dock.top + dock.bottom}px)`;
     } else {
       canvas.style.left = "0px";
       canvas.style.top = "0px";
@@ -502,6 +510,7 @@ async function main(): Promise<void> {
   }
   window.addEventListener("resize", onResize);
   editorVisible.subscribe(applyCanvasLayout);
+  dockSizes.subscribe(applyCanvasLayout);
   applyCanvasLayout();
 
   let lastFrameMs = 0;

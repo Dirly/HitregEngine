@@ -1,6 +1,6 @@
 import * as THREE from "three/webgpu";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
-import { duplicateSubtree, type SceneStore } from "@hitreg/core";
+import { duplicateSubtree, newId, type AssetLibrary, type SceneStore } from "@hitreg/core";
 import type {
   ContextMenu,
   EditorSettings,
@@ -20,6 +20,8 @@ export interface ViewportOptions {
   contextMenu?: ContextMenu;
   /** While the graybox tool is active, picking and gizmos stand down. */
   grayboxActive?: Observable<boolean>;
+  /** Needed to resolve names when assets are drag-dropped into the viewport. */
+  assets?: AssetLibrary;
   /** Current (possibly rebuilt) scene + entity object lookup. */
   getScene(): THREE.Scene;
   getObject(id: string): THREE.Object3D | undefined;
@@ -91,14 +93,39 @@ export class ViewportTools {
       this.opts.contextMenu.set({ x: e.clientX, y: e.clientY, entityId: picked });
     };
 
+    // drag & drop from the assets dock: prefabs/models spawn at the drop
+    // point; a material dropped onto an object is assigned to its mesh
+    const onDragOver = (e: DragEvent) => {
+      if (e.dataTransfer?.types.includes("application/x-hitreg-asset")) e.preventDefault();
+    };
+    const onDrop = (e: DragEvent) => {
+      const raw = e.dataTransfer?.getData("application/x-hitreg-asset");
+      if (!raw || !this.opts.enabled.get()) return;
+      e.preventDefault();
+      try {
+        this.handleAssetDrop(
+          JSON.parse(raw) as { kind: string; id: string },
+          e.clientX,
+          e.clientY,
+          e.ctrlKey,
+        );
+      } catch (error) {
+        console.warn("[editor] asset drop failed:", error);
+      }
+    };
+
     opts.canvas.addEventListener("pointerdown", onPointerDown);
     opts.canvas.addEventListener("pointerup", onPointerUp);
     opts.canvas.addEventListener("contextmenu", onContextMenu);
+    opts.canvas.addEventListener("dragover", onDragOver);
+    opts.canvas.addEventListener("drop", onDrop);
     window.addEventListener("keydown", onKeyDown);
     this.disposers.push(
       () => opts.canvas.removeEventListener("pointerdown", onPointerDown),
       () => opts.canvas.removeEventListener("pointerup", onPointerUp),
       () => opts.canvas.removeEventListener("contextmenu", onContextMenu),
+      () => opts.canvas.removeEventListener("dragover", onDragOver),
+      () => opts.canvas.removeEventListener("drop", onDrop),
       () => window.removeEventListener("keydown", onKeyDown),
       opts.selection.subscribe(() => this.syncAttachment()),
       opts.enabled.subscribe(() => {
@@ -194,6 +221,66 @@ export class ViewportTools {
       }
     }
     return null;
+  }
+
+  private handleAssetDrop(
+    payload: { kind: string; id: string },
+    clientX: number,
+    clientY: number,
+    ctrl: boolean,
+  ): void {
+    // material dropped onto an object: assign it
+    if (payload.kind === "material") {
+      const target = this.pickAt(clientX, clientY);
+      if (!target) return;
+      const entity = this.opts.store.doc.entities[target];
+      const mesh = entity?.components["mesh"] as Record<string, unknown> | undefined;
+      if (!mesh) return;
+      this.opts.store.apply([
+        { op: "set-component", id: target, component: "mesh", data: { ...mesh, material: payload.id } },
+      ]);
+      this.opts.selection.set(target);
+      return;
+    }
+
+    // prefab/model: spawn at the drop point (surface hit or ground plane)
+    const rect = this.opts.canvas.getBoundingClientRect();
+    this.raycaster.setFromCamera(
+      new THREE.Vector2(
+        ((clientX - rect.left) / rect.width) * 2 - 1,
+        -((clientY - rect.top) / rect.height) * 2 + 1,
+      ),
+      this.opts.camera,
+    );
+    const hit = this.raycaster
+      .intersectObjects(this.opts.getScene().children, true)
+      .find((h) => !h.object.userData["physicsDebug"]);
+    let point = hit?.point ?? null;
+    if (!point) {
+      const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+      const p = new THREE.Vector3();
+      point = this.raycaster.ray.intersectPlane(plane, p) ? p : null;
+    }
+    if (!point) return;
+
+    const s = this.opts.settings.get();
+    const snapping = s.snap !== ctrl;
+    const sn = (v: number) => (snapping ? Math.round(v / s.translateSnap) * s.translateSnap : v);
+    const position: [number, number, number] = [sn(point.x), Math.max(0, point.y), sn(point.z)];
+
+    const id = newId();
+    const name =
+      payload.kind === "prefab"
+        ? (this.opts.assets?.getPrefab(payload.id)?.name ?? payload.id)
+        : (this.opts.assets?.getModel(payload.id)?.name ?? payload.id);
+    const components: Record<string, unknown> =
+      payload.kind === "prefab"
+        ? { transform: { position }, prefab: { prefabId: payload.id } }
+        : { transform: { position }, mesh: { source: { kind: "asset", assetId: payload.id } } };
+    this.opts.store.apply([
+      { op: "add-entity", id, entity: { name, parent: null, tags: [], components } },
+    ]);
+    this.opts.selection.set(id);
   }
 
   private commitTransform(): void {

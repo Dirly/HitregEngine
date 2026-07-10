@@ -4,6 +4,7 @@ import { App } from "./overlay/App.js";
 import type {
   AssetSelection,
   ContextMenu,
+  DockSizes,
   EditorSettings,
   GizmoMode,
   GrayboxShape,
@@ -28,6 +29,7 @@ export interface MountOptions {
   grayboxShape: Observable<GrayboxShape>;
   grayboxBevel: Observable<number>;
   thumbnails: Observable<Record<string, string>>;
+  dockSizes: Observable<DockSizes>;
   assetsVersion: Observable<number>;
   saveAsset?: (file: string, content: string) => void;
 }
@@ -51,6 +53,7 @@ export function mountEditor(options: MountOptions): { unmount(): void } {
       grayboxShape={options.grayboxShape}
       grayboxBevel={options.grayboxBevel}
       thumbnails={options.thumbnails}
+      dockSizes={options.dockSizes}
       assetsVersion={options.assetsVersion}
       saveAsset={options.saveAsset}
     />,

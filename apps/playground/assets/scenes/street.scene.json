@@ -65,9 +65,9 @@
           ],
           "rotation": [
             0,
+            0.3826834323650899,
             0,
-            0,
-            1
+            -0.9238795325112867
           ],
           "scale": [
             1,
@@ -426,65 +426,6 @@
           "receiveShadow": true,
           "renderMode": "auto",
           "static": false
-        }
-      }
-    },
-    "cae2cd40-9946-4902-8930-752ea05abc5f": {
-      "name": "Box",
-      "parent": null,
-      "tags": [
-        "graybox"
-      ],
-      "components": {
-        "transform": {
-          "position": [
-            16.5,
-            1.5,
-            -9.5
-          ],
-          "rotation": [
-            0,
-            0,
-            0,
-            1
-          ],
-          "scale": [
-            1,
-            1,
-            1
-          ]
-        },
-        "mesh": {
-          "source": {
-            "kind": "primitive",
-            "shape": "box",
-            "size": [
-              5,
-              3,
-              5.5
-            ]
-          },
-          "castShadow": true,
-          "receiveShadow": true,
-          "renderMode": "auto",
-          "static": false
-        },
-        "collider": {
-          "shape": "box",
-          "size": [
-            5,
-            3,
-            5.5
-          ],
-          "offset": [
-            0,
-            0,
-            0
-          ],
-          "friction": 0.5,
-          "restitution": 0,
-          "density": 1,
-          "isTrigger": false
         }
       }
     }

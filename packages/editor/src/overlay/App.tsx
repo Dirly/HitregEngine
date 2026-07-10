@@ -13,6 +13,7 @@ import {
 import type {
   AssetSelection,
   ContextMenu,
+  DockSizes,
   EditorSettings,
   GizmoMode,
   GrayboxShape,
@@ -21,9 +22,6 @@ import type {
   Selection,
 } from "../state.js";
 import { ColorField, NumberField, Row, SliderField, TextField, ValueField } from "./fields.js";
-
-/** Docked layout constants — main.ts sizes the viewport canvas to the center hole. */
-export const DOCK = { left: 300, right: 360, top: 64, bottom: 240 } as const;
 
 /** Minimal valid data for components whose schemas have required fields. */
 const componentSeeds: Record<string, unknown> = {
@@ -51,6 +49,8 @@ export interface AppProps {
   grayboxBevel: Observable<number>;
   /** prefab id -> data-url thumbnail rendered by the host. */
   thumbnails: Observable<Record<string, string>>;
+  /** Resizable dock sizes; the host resizes the viewport canvas from these. */
+  dockSizes: Observable<DockSizes>;
   assetsVersion: Observable<number>;
   saveAsset?: (file: string, content: string) => void;
 }
@@ -105,21 +105,52 @@ const dockStyle: React.CSSProperties = {
   pointerEvents: "auto",
 };
 
+function clamp(v: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, v));
+}
+
+function Splitter(props: {
+  style: React.CSSProperties;
+  onDrag: (dx: number, dy: number) => void;
+}) {
+  return (
+    <div
+      style={{ ...props.style, position: "fixed", zIndex: 950, pointerEvents: "auto" }}
+      onPointerDown={(e) => {
+        e.preventDefault();
+        let last = { x: e.clientX, y: e.clientY };
+        const move = (ev: PointerEvent) => {
+          props.onDrag(ev.clientX - last.x, ev.clientY - last.y);
+          last = { x: ev.clientX, y: ev.clientY };
+        };
+        const up = () => {
+          window.removeEventListener("pointermove", move);
+          window.removeEventListener("pointerup", up);
+        };
+        window.addEventListener("pointermove", move);
+        window.addEventListener("pointerup", up);
+      }}
+    />
+  );
+}
+
 export function App(props: AppProps) {
   const visible = useObservable(props.visible);
+  const docks = useObservable(props.dockSizes);
   if (!visible) return null;
 
   const bumpAssets = () => props.assetsVersion.set(props.assetsVersion.get() + 1);
 
-  const createPrefabFrom = (entityId: string): void => {
+  const createPrefabFrom = (entityId: string, folder = ""): void => {
     const doc = props.store.doc;
     const entity = doc.entities[entityId];
     if (!entity) return;
     const base =
       entity.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "entity";
-    let id = `prefab-${base}`;
+    const prefix = folder ? `${folder}/` : "";
+    let id = `${prefix}prefab-${base}`;
     let n = 2;
-    while (props.assets.getPrefab(id)) id = `prefab-${base}-${n++}`;
+    while (props.assets.getPrefab(id)) id = `${prefix}prefab-${base}-${n++}`;
     try {
       const { prefab, replaceOps } = prefabFromSubtree(doc, entityId, id);
       props.assets.addPrefab(id, prefab);
@@ -131,10 +162,11 @@ export function App(props: AppProps) {
     }
   };
 
-  const createMaterial = (): void => {
+  const createMaterial = (folder = ""): void => {
+    const prefix = folder ? `${folder}/` : "";
     let n = props.assets.dataAssetsOfType("material").length + 1;
-    let id = `material-${n}`;
-    while (props.assets.getDataAsset(id)) id = `material-${++n}`;
+    let id = `${prefix}material-${n}`;
+    while (props.assets.getDataAsset(id)) id = `${prefix}material-${++n}`;
     const stored = props.assets.addDataAsset({ id, type: "material", name: id, data: {} });
     props.saveAsset?.(`materials/${id}.json`, JSON.stringify(stored.data, null, 2));
     bumpAssets();
@@ -149,8 +181,8 @@ export function App(props: AppProps) {
           position: "fixed",
           inset: 0,
           display: "grid",
-          gridTemplateColumns: `${DOCK.left}px 1fr ${DOCK.right}px`,
-          gridTemplateRows: `${DOCK.top}px 1fr ${DOCK.bottom}px`,
+          gridTemplateColumns: `${docks.left}px 1fr ${docks.right}px`,
+          gridTemplateRows: `${docks.top}px 1fr ${docks.bottom}px`,
           zIndex: 900,
           pointerEvents: "none",
         }}
@@ -204,6 +236,35 @@ export function App(props: AppProps) {
           />
         </div>
       </div>
+
+      {/* resizable dock splitters (Unity-style) */}
+      <Splitter
+        style={{ top: docks.top, bottom: 0, left: docks.left - 3, width: 6, cursor: "ew-resize" }}
+        onDrag={(dx) => {
+          const s = props.dockSizes.get();
+          props.dockSizes.set({ ...s, left: clamp(s.left + dx, 180, 560) });
+        }}
+      />
+      <Splitter
+        style={{ top: docks.top, bottom: 0, right: docks.right - 3, width: 6, cursor: "ew-resize" }}
+        onDrag={(dx) => {
+          const s = props.dockSizes.get();
+          props.dockSizes.set({ ...s, right: clamp(s.right - dx, 220, 640) });
+        }}
+      />
+      <Splitter
+        style={{
+          left: docks.left,
+          right: docks.right,
+          bottom: docks.bottom - 3,
+          height: 6,
+          cursor: "ns-resize",
+        }}
+        onDrag={(_dx, dy) => {
+          const s = props.dockSizes.get();
+          props.dockSizes.set({ ...s, bottom: clamp(s.bottom - dy, 120, 520) });
+        }}
+      />
 
       <ContextMenuView
         store={props.store}
@@ -577,25 +638,60 @@ function AssetsDock(props: {
   assetSelection: AssetSelection;
   assetsVersion: Observable<number>;
   thumbnails: Observable<Record<string, string>>;
-  onCreateMaterial: () => void;
-  onCreatePrefab: (entityId: string) => void;
+  onCreateMaterial: (folder: string) => void;
+  onCreatePrefab: (entityId: string, folder: string) => void;
 }) {
   useObservable(props.assetsVersion);
   const thumbnails = useObservable(props.thumbnails);
   const selectedEntity = useObservable(props.selection);
   const selectedAsset = useObservable(props.assetSelection);
   const [query, setQuery] = useState("");
+  const [folder, setFolder] = useState("");
+  const [userFolders, setUserFolders] = useState<string[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("hitreg-asset-folders") ?? "[]") as string[];
+    } catch {
+      return [];
+    }
+  });
   const q = query.toLowerCase();
+
+  const folderOf = (id: string) => (id.includes("/") ? id.slice(0, id.lastIndexOf("/")) : "");
+  const inFolder = (id: string) => folder === "" || folderOf(id) === folder;
 
   const prefabIds = props.assets
     .prefabIds()
-    .filter((id) => props.assets.getPrefab(id)!.name.toLowerCase().includes(q));
+    .filter((id) => inFolder(id) && props.assets.getPrefab(id)!.name.toLowerCase().includes(q));
   const modelIds = props.assets
     .modelIds()
-    .filter((id) => props.assets.getModel(id)!.name.toLowerCase().includes(q));
+    .filter((id) => inFolder(id) && props.assets.getModel(id)!.name.toLowerCase().includes(q));
   const materials = props.assets
     .dataAssetsOfType("material")
-    .filter((a) => a.name.toLowerCase().includes(q));
+    .filter((a) => inFolder(a.id) && a.name.toLowerCase().includes(q));
+
+  const allIds = [
+    ...props.assets.prefabIds(),
+    ...props.assets.modelIds(),
+    ...props.assets.dataAssetsOfType("material").map((a) => a.id),
+  ];
+  const folders = [...new Set([...allIds.map(folderOf).filter(Boolean), ...userFolders])].sort();
+
+  const addFolder = () => {
+    const name = window
+      .prompt("Folder name (a-z, 0-9, dashes; use / to nest):")
+      ?.toLowerCase()
+      .replace(/[^a-z0-9/-]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+    if (!name) return;
+    const next = [...new Set([...userFolders, name])];
+    setUserFolders(next);
+    setFolder(name);
+    try {
+      localStorage.setItem("hitreg-asset-folders", JSON.stringify(next));
+    } catch {
+      /* non-fatal */
+    }
+  };
 
   const instantiate = (ops: Op[], selectId: string) => {
     apply(props.store, ops);
@@ -620,20 +716,41 @@ function AssetsDock(props: {
 
   return (
     <>
-      <DockHeader title="Assets — assets/">
+      <DockHeader title={`Assets — assets/${folder ? ` · ${folder}/` : ""}`}>
         <SearchInput value={query} onChange={setQuery} />
-        <button style={buttonStyle} title="New material asset" onClick={props.onCreateMaterial}>
+        <button
+          style={buttonStyle}
+          title={`New material asset${folder ? ` in ${folder}/` : ""}`}
+          onClick={() => props.onCreateMaterial(folder)}
+        >
           + material
         </button>
         <button
           style={buttonStyle}
-          title="Create a prefab from the selected entity"
+          title={`Create a prefab from the selected entity${folder ? ` in ${folder}/` : ""}`}
           disabled={!selectedEntity}
-          onClick={() => selectedEntity && props.onCreatePrefab(selectedEntity)}
+          onClick={() => selectedEntity && props.onCreatePrefab(selectedEntity, folder)}
         >
           + prefab
         </button>
       </DockHeader>
+      <div style={{ display: "flex", gap: 4, padding: "4px 8px", flexWrap: "wrap", borderBottom: "1px solid #21262d" }}>
+        <button style={folder === "" ? activeButtonStyle : buttonStyle} onClick={() => setFolder("")}>
+          all
+        </button>
+        {folders.map((f) => (
+          <button
+            key={f}
+            style={folder === f ? activeButtonStyle : buttonStyle}
+            onClick={() => setFolder(f)}
+          >
+            📁 {f}
+          </button>
+        ))}
+        <button style={buttonStyle} title="New folder" onClick={addFolder}>
+          + folder
+        </button>
+      </div>
       <div style={{ flex: 1, overflowY: "auto", padding: 8 }}>
         {prefabIds.length === 0 && modelIds.length === 0 && materials.length === 0 && (
           <div style={{ color: "#8b949e" }}>
@@ -650,8 +767,9 @@ function AssetsDock(props: {
                 key={mat.id}
                 swatch={color}
                 color="#e3b341"
-                name={mat.name}
+                name={mat.name.split("/").pop()!}
                 kind="material"
+                dragPayload={{ kind: "material", id: mat.id }}
                 selected={selectedAsset?.kind === "material" && selectedAsset.id === mat.id}
                 onSelect={() => select("material", mat.id)}
                 actionLabel="apply to selection"
@@ -668,6 +786,7 @@ function AssetsDock(props: {
               name={props.assets.getPrefab(pid)!.name}
               kind="prefab"
               thumbnail={thumbnails[pid]}
+              dragPayload={{ kind: "prefab", id: pid }}
               selected={selectedAsset?.kind === "prefab" && selectedAsset.id === pid}
               onSelect={() => select("prefab", pid)}
               actionLabel="+ add to scene"
@@ -698,6 +817,7 @@ function AssetsDock(props: {
               color="#7ee787"
               name={props.assets.getModel(mid)!.name}
               kind="model"
+              dragPayload={{ kind: "model", id: mid }}
               selected={selectedAsset?.kind === "model" && selectedAsset.id === mid}
               onSelect={() => select("model", mid)}
               actionLabel="+ add to scene"
@@ -742,10 +862,20 @@ function AssetCard(props: {
   actionLabel: string;
   actionDisabled?: boolean;
   onAction: () => void;
+  /** Enables drag & drop into the viewport (spawn / assign material). */
+  dragPayload?: { kind: string; id: string };
 }) {
   return (
     <div
       onClick={props.onSelect}
+      draggable={!!props.dragPayload}
+      onDragStart={(e) => {
+        if (props.dragPayload) {
+          e.dataTransfer.setData("application/x-hitreg-asset", JSON.stringify(props.dragPayload));
+          e.dataTransfer.effectAllowed = "copy";
+        }
+      }}
+      title={props.dragPayload ? "Drag into the viewport" : undefined}
       style={{
         display: "flex",
         flexDirection: "column",

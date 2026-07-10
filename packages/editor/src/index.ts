@@ -1,13 +1,15 @@
 export { mountEditor, type MountOptions } from "./mount.js";
-export { DOCK } from "./overlay/App.js";
 export { ViewportTools, type ViewportOptions } from "./viewport.js";
 export { GrayboxTool, type GrayboxToolOptions } from "./graybox-tool.js";
 export {
   createAssetSelection,
   createContextMenu,
+  createDockSizes,
   createSelection,
   observable,
+  defaultDockSizes,
   defaultEditorSettings,
+  type DockSizes,
   type AssetSelection,
   type AssetSelectionState,
   type ContextMenu,

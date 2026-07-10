@@ -31,6 +31,35 @@ export type GizmoMode = "translate" | "rotate" | "scale";
 
 export type GrayboxShape = "box" | "cylinder" | "sphere" | "wedge" | "poly";
 
+/** Docked-layout panel sizes (px). Resizable via splitters, persisted. */
+export interface DockSizes {
+  top: number;
+  left: number;
+  right: number;
+  bottom: number;
+}
+
+export const defaultDockSizes: DockSizes = { top: 64, left: 300, right: 360, bottom: 240 };
+
+export function createDockSizes(): Observable<DockSizes> {
+  let initial = defaultDockSizes;
+  try {
+    const saved = localStorage.getItem("hitreg-editor-docks");
+    if (saved) initial = { ...defaultDockSizes, ...(JSON.parse(saved) as Partial<DockSizes>) };
+  } catch {
+    /* fresh defaults */
+  }
+  const sizes = observable(initial);
+  sizes.subscribe(() => {
+    try {
+      localStorage.setItem("hitreg-editor-docks", JSON.stringify(sizes.get()));
+    } catch {
+      /* non-fatal */
+    }
+  });
+  return sizes;
+}
+
 /** edit = authoring; playing/paused = simulation running over runtime state (doc untouched). */
 export type PlayMode = "edit" | "playing" | "paused";
 
