@@ -466,16 +466,24 @@ function HierarchyDock(props: {
   const selected = useObservable(props.selection);
   const [query, setQuery] = useState("");
 
+  // "#tag" searches tags; anything else searches names
+  const q = query.toLowerCase();
   const matches = query
     ? Object.entries(doc.entities)
-        .filter(([, e]) => e.name.toLowerCase().includes(query.toLowerCase()))
+        .filter(([, e]) =>
+          q.startsWith("#")
+            ? e.tags.some((t) => t.toLowerCase().includes(q.slice(1)))
+            : e.name.toLowerCase().includes(q),
+        )
         .map(([id]) => id)
     : null;
 
   return (
     <>
       <DockHeader title={`Hierarchy — ${doc.name}`}>
-        <SearchInput value={query} onChange={setQuery} />
+        <span title={'Search names, or "#tag" to search tags'}>
+          <SearchInput value={query} onChange={setQuery} />
+        </span>
         <button
           style={buttonStyle}
           title="Add entity (child of selection)"
@@ -611,9 +619,24 @@ function TreeRow(props: Omit<TreeProps, "parent"> & { id: string }) {
         color: isPrefab ? "#79c0ff" : "#c9d1d9",
       }}
     >
-      <span>
+      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         {isPrefab ? "◆ " : "· "}
         {entity.name}
+        {entity.tags.map((tag) => (
+          <span
+            key={tag}
+            style={{
+              marginLeft: 4,
+              padding: "0 4px",
+              borderRadius: 3,
+              background: "#21262d",
+              color: "#8b949e",
+              fontSize: 9,
+            }}
+          >
+            #{tag}
+          </span>
+        ))}
       </span>
       <span
         style={{ color: "#8b949e", cursor: "pointer" }}

@@ -50,6 +50,44 @@ function hitregBridge(): Plugin {
         });
       });
 
+      // fresh-from-disk asset reads: dev NEVER trusts vite's module cache for
+      // assets (the watcher ignores assets/, so cached imports go stale)
+      server.middlewares.use("/__hitreg/assets-index", (_req, res) => {
+        const index: Record<string, string[]> = { scenes: [], prefabs: [], materials: [], models: [] };
+        const walk = (dir: string, bucket: string[], base: string) => {
+          if (!fs.existsSync(dir)) return;
+          for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+            const full = path.join(dir, entry.name);
+            if (entry.isDirectory()) walk(full, bucket, base);
+            else bucket.push(path.relative(base, full).split(path.sep).join("/"));
+          }
+        };
+        for (const kind of Object.keys(index)) {
+          walk(path.join(assetsRoot, kind), index[kind]!, path.join(assetsRoot, kind));
+        }
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify(index));
+      });
+
+      server.middlewares.use("/__hitreg/asset-file", (req, res) => {
+        try {
+          const url = new URL(req.url ?? "", "http://x");
+          const file = url.searchParams.get("file") ?? "";
+          const target = path.resolve(assetsRoot, file);
+          if (!target.startsWith(assetsRoot + path.sep)) throw new Error("path outside assets/");
+          const data = fs.readFileSync(target);
+          res.setHeader(
+            "content-type",
+            file.endsWith(".json") ? "application/json" : "application/octet-stream",
+          );
+          res.setHeader("cache-control", "no-store");
+          res.end(data);
+        } catch (error) {
+          res.statusCode = 404;
+          res.end(JSON.stringify({ ok: false, error: String(error) }));
+        }
+      });
+
       server.middlewares.use("/__hitreg/log", (req, res) => {
         if (req.method !== "POST") {
           res.statusCode = 405;

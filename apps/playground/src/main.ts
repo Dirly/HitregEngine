@@ -38,36 +38,38 @@ import { buildStreetDoc } from "./street-scene.js";
 
 CameraControls.install({ THREE });
 
-/** Path after the type dir becomes the asset id — subfolders are organization. */
-function assetId(path: string, typeDir: string): string {
-  return path.split(`${typeDir}/`)[1]!.replace(/\.(json|glb|gltf)$/, "");
-}
+/**
+ * assets/ is the project content folder. In dev everything is fetched FRESH
+ * from disk through the bridge — vite's module cache must never serve assets
+ * (its watcher ignores assets/, so cached imports go stale across reloads).
+ * Returns the freshest scene doc content found, if any.
+ */
+async function loadAssets(assets: AssetLibrary): Promise<string | null> {
+  const index = (await fetch("/__hitreg/assets-index").then((r) => r.json())) as Record<
+    string,
+    string[]
+  >;
+  const fileUrl = (kind: string, file: string) =>
+    `/__hitreg/asset-file?file=${encodeURIComponent(`${kind}/${file}`)}`;
+  const readJson = (kind: string, file: string) =>
+    fetch(fileUrl(kind, file)).then((r) => r.json());
 
-/** assets/ is the project content folder: prefabs and models load from disk. */
-function loadAssets(assets: AssetLibrary): void {
-  const prefabs = import.meta.glob("../assets/prefabs/**/*.json", { eager: true });
-  for (const [path, mod] of Object.entries(prefabs)) {
-    assets.addPrefab(assetId(path, "prefabs"), (mod as { default: unknown }).default);
+  for (const file of index["prefabs"] ?? []) {
+    const id = file.replace(/\.json$/, "");
+    assets.addPrefab(id, await readJson("prefabs", file));
   }
-  const models = import.meta.glob("../assets/models/**/*.{glb,gltf}", {
-    eager: true,
-    query: "?url",
-    import: "default",
-  });
-  for (const [path, url] of Object.entries(models)) {
-    const id = path.split("models/")[1]!;
-    assets.addModel({ id, name: id.split("/").pop()!, url: url as string });
+  for (const file of index["materials"] ?? []) {
+    const id = file.replace(/\.json$/, "");
+    assets.addDataAsset({ id, type: "material", name: id, data: await readJson("materials", file) });
   }
-  const materials = import.meta.glob("../assets/materials/**/*.json", { eager: true });
-  for (const [path, mod] of Object.entries(materials)) {
-    const id = assetId(path, "materials");
-    assets.addDataAsset({
-      id,
-      type: "material",
-      name: id,
-      data: (mod as { default: unknown }).default,
-    });
+  for (const file of index["models"] ?? []) {
+    if (!/\.(glb|gltf)$/.test(file)) continue;
+    assets.addModel({ id: file, name: file.split("/").pop()!, url: fileUrl("models", file) });
   }
+
+  const sceneFile = (index["scenes"] ?? []).find((f) => f.endsWith(".scene.json"));
+  if (!sceneFile) return null;
+  return fetch(fileUrl("scenes", sceneFile)).then((r) => r.text());
 }
 
 /** Persist an asset file through the dev server's write endpoint. */
@@ -96,28 +98,33 @@ async function main(): Promise<void> {
   registerCoreComponents(registry);
   const assets = new AssetLibrary();
   registerCoreAssetTypes(assets);
-  loadAssets(assets);
 
-  // -- scene: files are the source of truth ----------------------------------
-  // assets/scenes/*.scene.json is loaded if present; otherwise the code-built
-  // street seeds the first scene file. Editor edits autosave back to the file.
+  // -- scene: files are the source of truth (fetched fresh, never bundled) ----
+  // otherwise the code-built street seeds the first scene file.
 
-  const sceneFiles = import.meta.glob("../assets/scenes/*.scene.json", { eager: true });
   let initialDoc: SceneDoc | null = null;
   let sceneLoadError = "";
-  for (const [file, mod] of Object.entries(sceneFiles)) {
-    const parsed = sceneDocSchema.safeParse((mod as { default: unknown }).default);
-    if (parsed.success) {
-      initialDoc = parsed.data;
-      break;
+  let loadedSceneContent = "";
+  try {
+    const content = await loadAssets(assets);
+    if (content) {
+      const parsed = sceneDocSchema.safeParse(JSON.parse(content));
+      if (parsed.success) {
+        initialDoc = parsed.data;
+        loadedSceneContent = content;
+      } else {
+        sceneLoadError = parsed.error.message.slice(0, 200);
+        console.warn("[scene] scene file failed validation:", parsed.error);
+      }
     }
-    sceneLoadError = `${file}: ${parsed.error.message.slice(0, 200)}`;
-    console.warn("[scene] failed to load", file, parsed.error);
+  } catch (error) {
+    sceneLoadError = String(error);
+    console.warn("[assets] fresh load failed:", error);
   }
   const seeded = initialDoc === null;
   const store = new SceneStore(initialDoc ?? buildStreetDoc(registry), registry);
 
-  let lastWrittenScene = "";
+  let lastWrittenScene = loadedSceneContent;
   function persistScene(): void {
     const content = JSON.stringify(store.doc, null, 2);
     if (content === lastWrittenScene) return;
@@ -539,7 +546,6 @@ async function main(): Promise<void> {
         inView: inView.slice(0, 25),
         debug: {
           sceneSource: seeded ? "code-fallback" : "file",
-          sceneFilesFound: Object.keys(sceneFiles).length,
           sceneLoadError: sceneLoadError || undefined,
         },
         updatedAt: performance.now(),
