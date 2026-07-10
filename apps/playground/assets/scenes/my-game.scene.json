@@ -344,7 +344,8 @@
           "name": "third-person-controller",
           "params": {
             "speed": 6.5,
-            "jump": 8
+            "jump": 8,
+            "modelYaw": 3.14159
           }
         }
       }

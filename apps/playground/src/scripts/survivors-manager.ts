@@ -4,16 +4,19 @@ import { Script } from "@hitreg/scripting";
 /**
  * Robot Survivors game rules — a tiny Vampire-Survivors-alike:
  *
- * - Bots attack in WAVES. Clear a wave, catch your breath, a bigger and
- *   stronger wave arrives. Bots come from a pre-placed pool of entities
+ * - Skeletons attack in WAVES. Clear a wave, catch your breath, a bigger and
+ *   stronger wave arrives. Enemies come from a pre-placed pool of entities
  *   parked underground (scenes can't add entities at runtime), teleported
  *   in to "spawn" and parked again on death.
- * - Punching bots earns XP; each level-up pauses the fight and offers a
- *   choice of three upgrades (keys 1/2/3 or click).
- * - Juice: particle bursts on hits, emissive damage blinks, a red hurt
+ * - SHOOT with the mouse (hold to auto-fire; F/E also work). Bullets are
+ *   manager-owned visuals with manual hit checks — no pooled physics bodies
+ *   needed — plus a light auto-aim cone so kids land their shots.
+ * - Kills earn XP; each level-up pauses the fight and offers a choice of
+ *   three upgrades (keys 1/2/3 or click).
+ * - Juice: crosshair, particle bursts, emissive damage blinks, a red hurt
  *   vignette, knockback + stun, sounds.
  *
- * Owns bot movement so punches can stun (a separate chaser script would
+ * Owns enemy movement so hits can stun (a separate chaser script would
  * overwrite knockback velocity every tick). Talks to the player's
  * third-person-controller through object.userData (speedMult, frozen).
  */
@@ -35,6 +38,13 @@ interface Particle {
   maxLife: number;
 }
 
+interface Bullet {
+  mesh: THREE.Mesh;
+  vel: THREE.Vector3;
+  life: number;
+  hitRadius: number;
+}
+
 interface Upgrade {
   emoji: string;
   name: string;
@@ -45,16 +55,19 @@ interface Upgrade {
 
 const BLINK_RED = 0xff2222;
 const BLINK_WHITE = 0xffffff;
+const ARENA_HALF = 14.5; // bullets die at the walls
 
 export default class SurvivorsManager extends Script {
   static override scriptName = "survivors-manager";
   static override params = {
     maxHp: { default: 100, min: 10, max: 1000 },
-    punchDamage: { default: 20, min: 1, max: 200 },
-    punchRange: { default: 3, min: 1, max: 12 },
-    punchKnockback: { default: 10, min: 0, max: 40 },
-    punchCooldown: { default: 0.55, min: 0.1, max: 5 },
-    stunSeconds: { default: 0.6, min: 0, max: 5 },
+    bulletDamage: { default: 12, min: 1, max: 200 },
+    fireCooldown: { default: 0.35, min: 0.05, max: 5, description: "seconds between shots" },
+    bulletSpeed: { default: 26, min: 5, max: 80 },
+    bulletKnockback: { default: 6, min: 0, max: 40 },
+    bulletLife: { default: 1.1, min: 0.2, max: 5, description: "seconds before a bullet fades" },
+    autoAimDegrees: { default: 12, min: 0, max: 45, description: "aim-assist cone" },
+    stunSeconds: { default: 0.25, min: 0, max: 5 },
     botTag: { default: "bot" },
     botBaseHp: { default: 25, min: 1, max: 500 },
     botHpPerWave: { default: 12, min: 0, max: 200 },
@@ -81,13 +94,13 @@ export default class SurvivorsManager extends Script {
   private xpNeeded = 25;
   private kills = 0;
   private elapsed = 0;
-  private punchDamage = 0;
-  private punchRange = 0;
-  private punchKnockback = 0;
-  private punchCooldown = 0;
+  private bulletDamage = 0;
+  private fireCooldown = 0;
+  private bulletKnockback = 0;
+  private bulletScale = 1;
   private critChance = 0;
   private regen = 0;
-  private shockwave = false;
+  private tripleShot = false;
   private takenOnce = new Set<string>();
 
   // waves
@@ -97,7 +110,8 @@ export default class SurvivorsManager extends Script {
   private breatherUntil = 0;
 
   // moment-to-moment
-  private punchReadyAt = 0;
+  private fireReadyAt = 0;
+  private fireHeld = false;
   private result: "over" | null = null;
   private overUntil = 0;
   private message = "";
@@ -111,9 +125,12 @@ export default class SurvivorsManager extends Script {
 
   // juice
   private particles: Particle[] = [];
+  private bullets: Bullet[] = [];
   private blinks: Array<{ obj: THREE.Object3D; until: number }> = [];
   private fx: THREE.Group | null = null;
   private particleGeo: THREE.SphereGeometry | null = null;
+  private bulletGeo: THREE.SphereGeometry | null = null;
+  private bulletMat: THREE.MeshBasicMaterial | null = null;
   private hurtFlashUntil = 0;
   private levelFlashUntil = 0;
 
@@ -122,20 +139,27 @@ export default class SurvivorsManager extends Script {
   private vignette: HTMLDivElement | null = null;
   private levelFlash: HTMLDivElement | null = null;
   private menu: HTMLDivElement | null = null;
+  private crosshair: HTMLDivElement | null = null;
+
+  private readonly onMouseDown = (e: MouseEvent): void => {
+    if (e.button === 0) this.fireHeld = true;
+  };
+  private readonly onMouseUp = (e: MouseEvent): void => {
+    if (e.button === 0) this.fireHeld = false;
+  };
 
   // ---------------------------------------------------------------- setup
 
   override onStart(): void {
-    this.playerMaxHp = this.param<number>("maxHp");
-    this.punchDamage = this.param<number>("punchDamage");
-    this.punchRange = this.param<number>("punchRange");
-    this.punchKnockback = this.param<number>("punchKnockback");
-    this.punchCooldown = this.param<number>("punchCooldown");
-
     this.fx = new THREE.Group();
     this.fx.name = "survivors-fx";
     this.object.parent?.add(this.fx);
     this.particleGeo = new THREE.SphereGeometry(0.1, 6, 4);
+    this.bulletGeo = new THREE.SphereGeometry(0.13, 8, 6);
+    this.bulletMat = new THREE.MeshBasicMaterial({ color: 0xffe066 });
+
+    window.addEventListener("mousedown", this.onMouseDown);
+    window.addEventListener("mouseup", this.onMouseUp);
 
     this.hud = this.div("survivors-hud");
     this.hud.style.cssText =
@@ -153,6 +177,12 @@ export default class SurvivorsManager extends Script {
       "position:fixed;inset:0;z-index:790;pointer-events:none;opacity:0;" +
       "box-shadow:inset 0 0 160px 60px rgba(255,223,90,.7)";
 
+    this.crosshair = this.div("survivors-crosshair");
+    this.crosshair.style.cssText =
+      "position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:795;" +
+      "width:8px;height:8px;border-radius:50%;background:rgba(255,255,255,.9);" +
+      "box-shadow:0 0 0 2px rgba(13,17,23,.55);pointer-events:none";
+
     this.menu = this.div("survivors-menu");
     this.menu.style.cssText =
       "position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:810;display:none;" +
@@ -168,16 +198,25 @@ export default class SurvivorsManager extends Script {
       const obj = this.ctx.getObject(id);
       if (obj) obj.visible = true;
     }
-    for (const el of [this.hud, this.vignette, this.levelFlash, this.menu]) el?.remove();
-    this.hud = this.vignette = this.levelFlash = this.menu = null;
+    window.removeEventListener("mousedown", this.onMouseDown);
+    window.removeEventListener("mouseup", this.onMouseUp);
+    for (const el of [this.hud, this.vignette, this.levelFlash, this.menu, this.crosshair]) {
+      el?.remove();
+    }
+    this.hud = this.vignette = this.levelFlash = this.menu = this.crosshair = null;
     if (this.fx) {
       this.fx.parent?.remove(this.fx);
       for (const p of this.particles) (p.mesh.material as THREE.Material).dispose();
       this.fx = null;
     }
     this.particles = [];
+    this.bullets = [];
     this.particleGeo?.dispose();
     this.particleGeo = null;
+    this.bulletGeo?.dispose();
+    this.bulletGeo = null;
+    this.bulletMat?.dispose();
+    this.bulletMat = null;
   }
 
   private div(id: string): HTMLDivElement {
@@ -198,13 +237,13 @@ export default class SurvivorsManager extends Script {
     this.xpNeeded = 25;
     this.kills = 0;
     this.elapsed = 0;
-    this.punchDamage = this.param<number>("punchDamage");
-    this.punchRange = this.param<number>("punchRange");
-    this.punchKnockback = this.param<number>("punchKnockback");
-    this.punchCooldown = this.param<number>("punchCooldown");
+    this.bulletDamage = this.param<number>("bulletDamage");
+    this.fireCooldown = this.param<number>("fireCooldown");
+    this.bulletKnockback = this.param<number>("bulletKnockback");
+    this.bulletScale = 1;
     this.critChance = 0;
     this.regen = 0;
-    this.shockwave = false;
+    this.tripleShot = false;
     this.takenOnce.clear();
     this.wave = 0;
     this.toSpawn = 0;
@@ -212,6 +251,8 @@ export default class SurvivorsManager extends Script {
     this.result = null;
     this.menuOpen = false;
     this.pendingChoice = -1;
+    for (const b of this.bullets) b.mesh.parent?.remove(b.mesh);
+    this.bullets = [];
 
     const playerId = this.ctx.findByTag("player")[0];
     if (playerId) {
@@ -253,6 +294,8 @@ export default class SurvivorsManager extends Script {
   }
 
   private spawnBot(id: string, t: number): void {
+    const s = this.bots.get(id);
+    if (!s) return;
     const angle = Math.random() * Math.PI * 2;
     const r = this.param<number>("spawnRadius") * (0.85 + Math.random() * 0.15);
     const x = Math.max(-13.5, Math.min(13.5, Math.cos(angle) * r));
@@ -261,8 +304,6 @@ export default class SurvivorsManager extends Script {
     const obj = this.ctx.getObject(id);
     if (obj) obj.visible = true;
     const w = this.wave - 1;
-    const s = this.bots.get(id);
-    if (!s) return;
     s.active = true;
     s.maxHp = this.param<number>("botBaseHp") + this.param<number>("botHpPerWave") * w;
     s.hp = s.maxHp;
@@ -391,29 +432,126 @@ export default class SurvivorsManager extends Script {
     }
   }
 
+  // ---------------------------------------------------------------- shooting
+
+  private spawnBullet(from: THREE.Vector3, dirX: number, dirZ: number): void {
+    if (!this.fx || !this.bulletGeo || !this.bulletMat) return;
+    const mesh = new THREE.Mesh(this.bulletGeo, this.bulletMat);
+    mesh.scale.setScalar(this.bulletScale);
+    mesh.position.set(from.x + dirX * 0.6, from.y + 1.3, from.z + dirZ * 0.6);
+    this.fx.add(mesh);
+    this.bullets.push({
+      mesh,
+      vel: new THREE.Vector3(dirX, 0, dirZ).multiplyScalar(this.param<number>("bulletSpeed")),
+      life: this.param<number>("bulletLife"),
+      hitRadius: 0.9 + (this.bulletScale - 1) * 0.4,
+    });
+  }
+
+  private shoot(player: THREE.Object3D, activeBots: string[]): void {
+    let [ax, az] = this.ctx.viewForward?.() ?? [0, -1];
+    // aim assist: snap to the nearest enemy within the cone
+    const cone = Math.cos((this.param<number>("autoAimDegrees") * Math.PI) / 180);
+    let bestDot = cone;
+    for (const id of activeBots) {
+      const bot = this.ctx.getObject(id);
+      if (!bot) continue;
+      const dx = bot.position.x - player.position.x;
+      const dz = bot.position.z - player.position.z;
+      const len = Math.hypot(dx, dz);
+      if (len < 0.01) continue;
+      const dot = (dx / len) * ax + (dz / len) * az;
+      if (dot > bestDot) {
+        bestDot = dot;
+        ax = dx / len;
+        az = dz / len;
+      }
+    }
+    const spreads = this.tripleShot ? [-0.22, 0, 0.22] : [0];
+    for (const spread of spreads) {
+      const cos = Math.cos(spread);
+      const sin = Math.sin(spread);
+      this.spawnBullet(player.position, ax * cos - az * sin, ax * sin + az * cos);
+    }
+  }
+
+  private updateBullets(dt: number, t: number, activeBots: string[]): void {
+    const sim = this.ctx.sim;
+    for (let i = this.bullets.length - 1; i >= 0; i--) {
+      const b = this.bullets[i]!;
+      b.life -= dt;
+      b.mesh.position.addScaledVector(b.vel, dt);
+      const pos = b.mesh.position;
+      let dead = b.life <= 0 || Math.abs(pos.x) > ARENA_HALF || Math.abs(pos.z) > ARENA_HALF;
+
+      if (!dead) {
+        for (const id of activeBots) {
+          const s = this.bots.get(id);
+          const bot = this.ctx.getObject(id);
+          if (!s?.active || !bot) continue;
+          const dx = bot.position.x - pos.x;
+          const dz = bot.position.z - pos.z;
+          if (dx * dx + dz * dz > b.hitRadius * b.hitRadius) continue;
+
+          const crit = Math.random() < this.critChance;
+          s.hp -= this.bulletDamage * (crit ? 2 : 1);
+          s.stunUntil = t + this.param<number>("stunSeconds");
+          const vlen = b.vel.length() || 1;
+          sim?.setLinvel(id, [
+            (b.vel.x / vlen) * this.bulletKnockback,
+            3,
+            (b.vel.z / vlen) * this.bulletKnockback,
+          ]);
+          this.blink(bot, BLINK_WHITE);
+          this.burst(
+            bot.position.clone().setY(1.2),
+            crit ? 0xffd93d : 0xffffff,
+            crit ? 14 : 8,
+            crit ? 6 : 4,
+          );
+          if (crit) this.banner("🎯 CRIT!", 0.5);
+          this.ctx.playSound?.("thud.wav");
+          if (s.hp <= 0) {
+            this.kills++;
+            this.burst(bot.position.clone().setY(1), 0xf85149, 20, 6);
+            this.parkBot(id);
+            this.gainXp(this.param<number>("xpPerKill"));
+          }
+          dead = true;
+          break;
+        }
+      }
+
+      if (dead) {
+        b.mesh.parent?.remove(b.mesh);
+        this.bullets.splice(i, 1);
+      }
+    }
+  }
+
   // ---------------------------------------------------------------- upgrades
 
   private upgradePool(): Upgrade[] {
     return [
       {
         emoji: "💪",
-        name: "Power Punch",
-        desc: "+8 punch damage",
-        apply: () => (this.punchDamage += 8),
+        name: "Power Shots",
+        desc: "+5 bullet damage",
+        apply: () => (this.bulletDamage += 5),
       },
       {
         emoji: "⚡",
-        name: "Fast Hands",
-        desc: "punch 15% faster",
-        apply: () => (this.punchCooldown *= 0.85),
+        name: "Rapid Fire",
+        desc: "shoot 20% faster",
+        apply: () => (this.fireCooldown *= 0.8),
       },
       {
-        emoji: "🥊",
-        name: "Long Arms",
-        desc: "+punch reach & knockback",
+        emoji: "🔫",
+        name: "Big Bullets",
+        desc: "bigger bullets, more knockback",
         apply: () => {
-          this.punchRange += 0.6;
-          this.punchKnockback += 2;
+          this.bulletScale *= 1.35;
+          this.bulletKnockback += 3;
         },
       },
       {
@@ -435,11 +573,11 @@ export default class SurvivorsManager extends Script {
         },
       },
       {
-        emoji: "🌀",
-        name: "Shockwave",
-        desc: "punches hit EVERY bot in reach",
+        emoji: "🔱",
+        name: "Triple Shot",
+        desc: "every shot fires THREE bullets",
         once: true,
-        apply: () => (this.shockwave = true),
+        apply: () => (this.tripleShot = true),
       },
       {
         emoji: "🎯",
@@ -538,9 +676,9 @@ export default class SurvivorsManager extends Script {
     if (!this.hud) return;
     const t = this.now();
     const alive = [...this.bots.values()].filter((b) => b.active).length;
-    let bannerText = `🌊 wave ${Math.max(1, this.wave)} · 🤖 ${alive + this.toSpawn} left`;
+    let bannerText = `🌊 wave ${Math.max(1, this.wave)} · 💀 ${alive + this.toSpawn} left`;
     if (this.result === "over") {
-      bannerText = `💀 GAME OVER — you reached wave ${this.wave} with ${this.kills} bonks!`;
+      bannerText = `💀 GAME OVER — you reached wave ${this.wave} with ${this.kills} takedowns!`;
     } else if (t < this.messageUntil) {
       bannerText = this.message;
     } else if (t < this.breatherUntil) {
@@ -558,7 +696,7 @@ export default class SurvivorsManager extends Script {
       ) +
       this.barRow("⭐ XP", this.xp / this.xpNeeded, `lvl ${this.level}`, "#58a6ff") +
       `<div style="font-size:12px;font-weight:500;color:#8b949e;margin-top:4px">` +
-      `⏱ ${m}:${String(s).padStart(2, "0")} · 💥 ${this.kills} bonks · WASD move · mouse look · SPACE jump · F punch</div>`;
+      `⏱ ${m}:${String(s).padStart(2, "0")} · 💥 ${this.kills} takedowns · WASD move · mouse aim · CLICK shoot · SPACE jump</div>`;
     if (this.vignette) {
       this.vignette.style.opacity = String(Math.max(0, (this.hurtFlashUntil - t) / 0.45));
     }
@@ -627,7 +765,7 @@ export default class SurvivorsManager extends Script {
       }
     }
 
-    // bot brains: chase, bite, never fall out of the world
+    // enemy brains: chase, bite, never fall out of the world
     for (const id of activeBots) {
       const s = this.bots.get(id)!;
       const bot = this.ctx.getObject(id);
@@ -652,55 +790,19 @@ export default class SurvivorsManager extends Script {
         this.hurtFlashUntil = t + 0.45;
         this.blink(player, BLINK_RED);
         this.burst(player.position.clone().setY(1.2), 0xf85149, 6, 3);
-        this.banner("🤖 OUCH!", 0.6);
+        this.banner("💀 OUCH!", 0.6);
         this.ctx.playSound?.("thud.wav");
       }
     }
 
-    // punch!
+    // shoot! (hold mouse to auto-fire; F/E as backup)
     const input = this.ctx.input;
-    if ((input.isDown("KeyF") || input.isDown("KeyE")) && t >= this.punchReadyAt) {
-      this.punchReadyAt = t + this.punchCooldown;
-      const inRange = activeBots
-        .map((id) => {
-          const bot = this.ctx.getObject(id);
-          if (!bot) return null;
-          const dx = bot.position.x - player.position.x;
-          const dz = bot.position.z - player.position.z;
-          return { id, bot, dist: Math.hypot(dx, dz), dx, dz };
-        })
-        .filter((h): h is NonNullable<typeof h> => h !== null && h.dist < this.punchRange)
-        .sort((a, b) => a.dist - b.dist);
-      const targets = this.shockwave ? inRange : inRange.slice(0, 1);
-      for (const hit of targets) {
-        const s = this.bots.get(hit.id)!;
-        const crit = Math.random() < this.critChance;
-        s.hp -= this.punchDamage * (crit ? 2 : 1);
-        s.stunUntil = t + this.param<number>("stunSeconds");
-        const n = hit.dist > 0.01 ? hit.dist : 1;
-        sim.setLinvel(hit.id, [
-          (hit.dx / n) * this.punchKnockback,
-          5,
-          (hit.dz / n) * this.punchKnockback,
-        ]);
-        this.blink(hit.bot, BLINK_WHITE);
-        this.burst(
-          hit.bot.position.clone().setY(1.2),
-          crit ? 0xffd93d : 0xffffff,
-          crit ? 16 : 10,
-          crit ? 6 : 4,
-        );
-        this.banner(crit ? "🎯 CRIT!" : "💥 POW!", 0.5);
-        this.ctx.playSound?.("thud.wav");
-        if (s.hp <= 0) {
-          this.kills++;
-          this.burst(hit.bot.position.clone().setY(1), 0xf85149, 20, 6);
-          this.parkBot(hit.id);
-          this.gainXp(this.param<number>("xpPerKill"));
-          if (this.menuOpen) break; // level-up popped mid-swing
-        }
-      }
+    const firing = this.fireHeld || input.isDown("KeyF") || input.isDown("KeyE");
+    if (firing && t >= this.fireReadyAt) {
+      this.fireReadyAt = t + this.fireCooldown;
+      this.shoot(player, activeBots);
     }
+    this.updateBullets(dt, t, activeBots);
 
     if (this.playerHp <= 0) {
       this.result = "over";

@@ -271,41 +271,25 @@ async function main(): Promise<void> {
   const controls = new CameraControls(camera, canvas);
   controls.setLookAt(18, 12, 22, 0, 1, 0, false);
 
-  // editor fly-cam: hold RMB + WASD (QE = down/up, Shift = boost)
-  let rmbDown = false;
-  let flewWithKeys = false;
+  // editor fly-cam: hold LEFT mouse + WASD (QE = down/up, Shift = boost);
+  // left-drag keeps orbiting, so drag-to-look + WASD flies like Unity
+  let flyBtnDown = false;
   canvas.addEventListener("pointerdown", (e) => {
-    if (e.button === 2) {
-      rmbDown = true;
-      flewWithKeys = false;
-    }
+    if (e.button === 0) flyBtnDown = true;
   });
   window.addEventListener("pointerup", (e) => {
-    if (e.button === 2) rmbDown = false;
+    if (e.button === 0) flyBtnDown = false;
   });
-  // flying shouldn't pop the context menu on release
-  canvas.addEventListener(
-    "contextmenu",
-    (e) => {
-      if (flewWithKeys) {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-      }
-    },
-    { capture: true },
-  );
   function updateFlyCam(dt: number): void {
-    if (!editorVisible.get() || !rmbDown) return;
+    if (!editorVisible.get() || !flyBtnDown) return;
     const boost = input.isDown("ShiftLeft") || input.isDown("ShiftRight") ? 3 : 1;
     const move = 14 * dt * boost;
-    let used = false;
-    if (input.isDown("KeyW")) (void controls.forward(move, false), (used = true));
-    if (input.isDown("KeyS")) (void controls.forward(-move, false), (used = true));
-    if (input.isDown("KeyA")) (void controls.truck(-move, 0, false), (used = true));
-    if (input.isDown("KeyD")) (void controls.truck(move, 0, false), (used = true));
-    if (input.isDown("KeyE")) (void controls.truck(0, -move, false), (used = true));
-    if (input.isDown("KeyQ")) (void controls.truck(0, move, false), (used = true));
-    if (used) flewWithKeys = true;
+    if (input.isDown("KeyW")) void controls.forward(move, false);
+    if (input.isDown("KeyS")) void controls.forward(-move, false);
+    if (input.isDown("KeyA")) void controls.truck(-move, 0, false);
+    if (input.isDown("KeyD")) void controls.truck(move, 0, false);
+    if (input.isDown("KeyE")) void controls.truck(0, -move, false);
+    if (input.isDown("KeyQ")) void controls.truck(0, move, false);
   }
 
   // -- editor ----------------------------------------------------------------

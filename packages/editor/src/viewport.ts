@@ -42,7 +42,8 @@ export class ViewportTools {
   private pointerDown: { x: number; y: number } | null = null;
   private disposers: Array<() => void> = [];
   private altDown = false;
-  private rmbDown = false;
+  private flyBtnDown = false;
+  private flewDuringDrag = false;
   /** Alt-scale anchor: keep the object's lowest point fixed while scaling. */
   private scaleAnchor: { bottomY: number; k: number } | null = null;
 
@@ -74,11 +75,14 @@ export class ViewportTools {
     });
 
     const onPointerDown = (e: PointerEvent) => {
-      if (e.button === 2) this.rmbDown = true;
+      if (e.button === 0) {
+        this.flyBtnDown = true;
+        this.flewDuringDrag = false;
+      }
       this.pointerDown = { x: e.clientX, y: e.clientY };
     };
     const onWindowPointerUp = (e: PointerEvent) => {
-      if (e.button === 2) this.rmbDown = false;
+      if (e.button === 0) this.flyBtnDown = false;
     };
     window.addEventListener("pointerup", onWindowPointerUp);
     this.disposers.push(() => window.removeEventListener("pointerup", onWindowPointerUp));
@@ -88,6 +92,8 @@ export class ViewportTools {
       const moved =
         Math.abs(e.clientX - this.pointerDown.x) + Math.abs(e.clientY - this.pointerDown.y);
       this.pointerDown = null;
+      // a keyboard flight with a still mouse is not a selection click
+      if (this.flewDuringDrag) return;
       if (moved < 5 && !this.controls.dragging) this.pick(e);
     };
     const onKeyUp = (e: KeyboardEvent) => {
@@ -106,8 +112,11 @@ export class ViewportTools {
       ) {
         return;
       }
-      // while flying (RMB held), WASD/QE belong to the camera, not the gizmo
-      if (this.rmbDown) return;
+      // while flying (mouse held + move keys), WASD/QE belong to the camera
+      if (this.flyBtnDown) {
+        if (/^Key[WASDQE]$/.test(e.code)) this.flewDuringDrag = true;
+        return;
+      }
       if (e.code === "KeyW") this.opts.gizmoMode.set("translate");
       if (e.code === "KeyE") this.opts.gizmoMode.set("rotate");
       if (e.code === "KeyR") this.opts.gizmoMode.set("scale");
