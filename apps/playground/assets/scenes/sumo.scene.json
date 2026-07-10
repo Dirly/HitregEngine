@@ -628,6 +628,23 @@
           }
         }
       }
+    },
+    "environment": {
+      "name": "Environment",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "sky": {
+          "top": "#1d3461",
+          "bottom": "#0d1220",
+          "light": 0.35,
+          "fog": {
+            "color": "#0d1220",
+            "near": 45,
+            "far": 180
+          }
+        }
+      }
     }
   }
 }

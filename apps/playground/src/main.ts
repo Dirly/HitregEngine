@@ -241,7 +241,8 @@ async function main(): Promise<void> {
     });
     if (settings.get().showPhysics) attachPhysicsDebug(expanded, built.objects);
     refreshPhysicsDebugVisibility();
-    built.scene.background = new THREE.Color(0x0b0e14);
+    // sky component sets its own background; this is only the no-sky fallback
+    if (!built.scene.background) built.scene.background = new THREE.Color(0x0b0e14);
     for (const sceneCam of built.cameras.values()) {
       sceneCam.aspect = (canvas.clientWidth || 1) / (canvas.clientHeight || 1);
       sceneCam.updateProjectionMatrix();

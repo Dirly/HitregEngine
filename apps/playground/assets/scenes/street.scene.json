@@ -1723,6 +1723,23 @@
           }
         }
       }
+    },
+    "environment": {
+      "name": "Environment",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "sky": {
+          "top": "#35548c",
+          "bottom": "#131a26",
+          "light": 0.4,
+          "fog": {
+            "color": "#131a26",
+            "near": 55,
+            "far": 220
+          }
+        }
+      }
     }
   }
 }

@@ -125,6 +125,38 @@ const defaultMaterial = new THREE.MeshStandardMaterial({
   metalness: 0.05,
 });
 
+/** Gradient dome: vertex-colored inverted sphere — no custom shaders, so it
+ * renders identically on the WebGPU and WebGL backends. */
+function buildSkyDome(top: string, bottom: string): THREE.Mesh {
+  const radius = 450;
+  const geometry = new THREE.SphereGeometry(radius, 24, 14);
+  const positions = geometry.getAttribute("position");
+  const colors = new Float32Array(positions.count * 3);
+  const topColor = new THREE.Color(top);
+  const bottomColor = new THREE.Color(bottom);
+  const mixed = new THREE.Color();
+  for (let i = 0; i < positions.count; i++) {
+    const t = Math.pow(Math.max(0, (positions.getY(i) / radius + 0.35) / 1.35), 0.9);
+    mixed.copy(bottomColor).lerp(topColor, t);
+    colors[i * 3] = mixed.r;
+    colors[i * 3 + 1] = mixed.g;
+    colors[i * 3 + 2] = mixed.b;
+  }
+  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+  const mesh = new THREE.Mesh(
+    geometry,
+    new THREE.MeshBasicMaterial({
+      vertexColors: true,
+      side: THREE.BackSide,
+      fog: false,
+      depthWrite: false,
+    }),
+  );
+  mesh.frustumCulled = false;
+  mesh.renderOrder = -1000;
+  return mesh;
+}
+
 /** Triangular prism rising toward +Z — the graybox ramp. */
 function wedgeGeometry(w: number, h: number, d: number): THREE.BufferGeometry {
   const x = w / 2;
@@ -348,6 +380,20 @@ export function buildScene(doc: SceneDoc, options: BuildOptions = {}): BuiltScen
       if (light) {
         light.castShadow = lightData.castShadow;
         group.add(light);
+      }
+    }
+
+    const skyData = entity.components["sky"] as
+      | { top: string; bottom: string; light: number; fog?: { color: string; near: number; far: number } }
+      | undefined;
+    if (skyData && !scene.background) {
+      group.add(buildSkyDome(skyData.top, skyData.bottom));
+      scene.background = new THREE.Color(skyData.bottom);
+      if (skyData.fog) {
+        scene.fog = new THREE.Fog(new THREE.Color(skyData.fog.color), skyData.fog.near, skyData.fog.far);
+      }
+      if (skyData.light > 0) {
+        group.add(new THREE.HemisphereLight(new THREE.Color(skyData.top), new THREE.Color(skyData.bottom), skyData.light));
       }
     }
 

@@ -125,6 +125,24 @@ export const audioSchema = z.object({
   refDistance: z.number().positive().default(8),
 });
 
+/**
+ * Environment sky: gradient dome + matching background/fog + hemisphere fill.
+ * One per scene (first wins).
+ */
+export const skySchema = z.object({
+  top: hexColor.default("#39598f"),
+  bottom: hexColor.default("#101522"),
+  /** Hemisphere fill light tinted by the sky colors. 0 disables. */
+  light: z.number().min(0).default(0.5),
+  fog: z
+    .object({
+      color: hexColor.default("#101522"),
+      near: z.number().positive().default(40),
+      far: z.number().positive().default(180),
+    })
+    .optional(),
+});
+
 export function registerCoreComponents(registry: ComponentRegistry): void {
   registry.register("transform", transformSchema);
   registry.register("mesh", meshSchema);
@@ -134,5 +152,6 @@ export function registerCoreComponents(registry: ComponentRegistry): void {
   registry.register("script", scriptSchema);
   registry.register("animator", animatorSchema);
   registry.register("audio", audioSchema);
+  registry.register("sky", skySchema);
   registerPhysicsComponents(registry);
 }

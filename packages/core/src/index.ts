@@ -24,6 +24,7 @@ export {
   scriptSchema,
   animatorSchema,
   audioSchema,
+  skySchema,
   vec3,
   quat,
   hexColor,

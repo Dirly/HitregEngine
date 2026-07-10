@@ -32,6 +32,9 @@ const componentSeeds: Record<string, unknown> = {
   collider: {},
   joint: { kind: "hinge", target: "SET-TARGET-ENTITY-ID" },
   script: { name: "spinner", params: {} },
+  sky: {},
+  animator: {},
+  audio: { src: "chime.wav" },
 };
 
 export interface AppProps {
@@ -169,6 +172,33 @@ export function App(props: AppProps) {
     }
   };
 
+  // lighting tool: jump to (or create) the scene's Environment entity — its
+  // sky component edits with color pickers in the inspector
+  const selectEnvironment = (): void => {
+    const existing = Object.entries(props.store.doc.entities).find(
+      ([, e]) => "sky" in e.components,
+    );
+    if (existing) {
+      props.assetSelection.set(null);
+      props.selection.set(existing[0]);
+      return;
+    }
+    const id = newId();
+    try {
+      props.store.apply([
+        {
+          op: "add-entity",
+          id,
+          entity: { name: "Environment", parent: null, tags: [], components: { sky: {} } },
+        },
+      ]);
+      props.assetSelection.set(null);
+      props.selection.set(id);
+    } catch (error) {
+      console.warn("[editor] environment create failed:", error);
+    }
+  };
+
   const createMaterial = (folder = ""): void => {
     const prefix = folder ? `${folder}/` : "";
     let n = props.assets.dataAssetsOfType("material").length + 1;
@@ -206,6 +236,7 @@ export function App(props: AppProps) {
             scenes={props.scenes}
             onSwitchScene={props.onSwitchScene}
             onNewScene={props.onNewScene}
+            onEnvironment={selectEnvironment}
           />
         </div>
 
@@ -347,6 +378,7 @@ function Toolbar(props: {
   scenes?: Observable<string[]>;
   onSwitchScene?: (name: string) => void;
   onNewScene?: (name: string) => void;
+  onEnvironment?: () => void;
 }) {
   const doc = useStoreDoc(props.store);
   const scenes = useObservable(props.scenes ?? emptyScenesObservable);
@@ -486,6 +518,13 @@ function Toolbar(props: {
         </span>
 
         <span style={{ ...group, borderRight: "none" }}>
+          <button
+            style={buttonStyle}
+            title="Environment / lighting: edit the scene's sky, fog, and fill light"
+            onClick={props.onEnvironment}
+          >
+            ☀ env
+          </button>
           <button style={buttonStyle} disabled={!props.store.canUndo} onClick={() => props.store.undo()}>
             ⟲ undo
           </button>

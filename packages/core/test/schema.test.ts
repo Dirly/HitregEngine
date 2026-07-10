@@ -57,6 +57,7 @@ describe("ComponentRegistry", () => {
       "prefab",
       "rigidbody",
       "script",
+      "sky",
       "transform",
     ]);
     const transform = schemas["transform"] as { properties: Record<string, unknown> };
