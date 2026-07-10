@@ -1,0 +1,433 @@
+{
+  "version": 1,
+  "name": "street",
+  "entities": {
+    "sun": {
+      "name": "Sun",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            20,
+            30,
+            10
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "light": {
+          "kind": "directional",
+          "color": "#fff5e0",
+          "intensity": 1,
+          "range": 10,
+          "angle": 0.5235987755982988,
+          "castShadow": true
+        }
+      }
+    },
+    "sky": {
+      "name": "Ambient",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "light": {
+          "kind": "ambient",
+          "color": "#334455",
+          "intensity": 0.6,
+          "range": 10,
+          "angle": 0.5235987755982988,
+          "castShadow": false
+        }
+      }
+    },
+    "ground": {
+      "name": "Ground",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "plane",
+            "size": [
+              60,
+              1,
+              24
+            ]
+          },
+          "castShadow": false,
+          "receiveShadow": true,
+          "renderMode": "auto",
+          "static": true
+        }
+      }
+    },
+    "light-0": {
+      "name": "Streetlight 1",
+      "parent": "ground",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -15,
+            0,
+            4
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "prefab": {
+          "prefabId": "prefab-streetlight",
+          "props": {},
+          "overrides": []
+        }
+      }
+    },
+    "light-1": {
+      "name": "Streetlight 2",
+      "parent": "ground",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -5,
+            0,
+            4
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "prefab": {
+          "prefabId": "prefab-streetlight",
+          "props": {
+            "lightColor": "#00ff88"
+          },
+          "overrides": []
+        }
+      }
+    },
+    "light-2": {
+      "name": "Streetlight 3",
+      "parent": "ground",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            5,
+            0,
+            4
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "prefab": {
+          "prefabId": "prefab-streetlight",
+          "props": {},
+          "overrides": []
+        }
+      }
+    },
+    "light-3": {
+      "name": "Streetlight 4",
+      "parent": "ground",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            15,
+            0,
+            4
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "prefab": {
+          "prefabId": "prefab-streetlight",
+          "props": {},
+          "overrides": []
+        }
+      }
+    },
+    "crate-0": {
+      "name": "Crate 1",
+      "parent": "ground",
+      "tags": [
+        "prop",
+        "spin"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            -8,
+            0.5,
+            -3
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              1,
+              1,
+              1
+            ]
+          },
+          "castShadow": true,
+          "receiveShadow": true,
+          "renderMode": "auto",
+          "static": false
+        }
+      }
+    },
+    "crate-1": {
+      "name": "Crate 2",
+      "parent": "ground",
+      "tags": [
+        "prop",
+        "spin"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            -4,
+            0.5,
+            -3
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              1,
+              1,
+              1
+            ]
+          },
+          "castShadow": true,
+          "receiveShadow": true,
+          "renderMode": "auto",
+          "static": false
+        }
+      }
+    },
+    "crate-2": {
+      "name": "Crate 3",
+      "parent": "ground",
+      "tags": [
+        "prop",
+        "spin"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            3.5,
+            -3
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              1,
+              1,
+              1
+            ]
+          },
+          "castShadow": true,
+          "receiveShadow": true,
+          "renderMode": "auto",
+          "static": false
+        }
+      }
+    },
+    "crate-3": {
+      "name": "Crate 4",
+      "parent": "ground",
+      "tags": [
+        "prop",
+        "spin"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            4,
+            0.5,
+            -3
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              1,
+              1,
+              1
+            ]
+          },
+          "castShadow": true,
+          "receiveShadow": true,
+          "renderMode": "auto",
+          "static": false
+        }
+      }
+    },
+    "crate-4": {
+      "name": "Crate 5",
+      "parent": "ground",
+      "tags": [
+        "prop",
+        "spin"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            8,
+            0.5,
+            -3
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              1,
+              1,
+              1
+            ]
+          },
+          "castShadow": true,
+          "receiveShadow": true,
+          "renderMode": "auto",
+          "static": false
+        }
+      }
+    }
+  }
+}

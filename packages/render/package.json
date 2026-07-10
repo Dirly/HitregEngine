@@ -1,0 +1,20 @@
+{
+  "name": "@hitreg/render",
+  "version": "0.0.1",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "echo \"(no tests yet)\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hitreg/core": "workspace:*",
+    "three": "^0.185.1"
+  },
+  "devDependencies": {
+    "@types/three": "^0.185.1",
+    "typescript": "^5.7.0"
+  }
+}

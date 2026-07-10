@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "name": "Streetlight",
+  "root": "pole",
+  "entities": {
+    "pole": {
+      "name": "Pole",
+      "parent": null,
+      "tags": ["streetlight"],
+      "components": {
+        "transform": {},
+        "mesh": {
+          "source": { "kind": "primitive", "shape": "cylinder", "size": [0.2, 4, 0.2] }
+        }
+      }
+    },
+    "lamp": {
+      "name": "Lamp",
+      "parent": "pole",
+      "tags": [],
+      "components": {
+        "transform": { "position": [0, 4, 0], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1] },
+        "mesh": {
+          "source": { "kind": "primitive", "shape": "sphere", "size": [0.5, 0.5, 0.5] },
+          "castShadow": false
+        },
+        "light": { "kind": "point", "intensity": 30, "range": 18 }
+      }
+    }
+  },
+  "props": {
+    "lightColor": {
+      "default": "#ffcc88",
+      "bindings": ["lamp/components/light/color"],
+      "description": "Color of the lamp's point light"
+    }
+  }
+}

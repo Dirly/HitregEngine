@@ -1,0 +1,24 @@
+{
+  "name": "playground",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "test": "echo \"(no tests yet)\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hitreg/core": "workspace:*",
+    "@hitreg/editor": "workspace:^",
+    "@hitreg/render": "workspace:*",
+    "camera-controls": "^3.1.2",
+    "three": "^0.185.1"
+  },
+  "devDependencies": {
+    "@types/three": "^0.185.1",
+    "typescript": "^5.7.0",
+    "vite": "^8.1.4"
+  }
+}

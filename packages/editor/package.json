@@ -1,0 +1,24 @@
+{
+  "name": "@hitreg/editor",
+  "version": "0.0.1",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "echo \"(no tests yet)\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hitreg/core": "workspace:*",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "three": "^0.185.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@types/three": "^0.185.1",
+    "typescript": "^5.7.0"
+  }
+}

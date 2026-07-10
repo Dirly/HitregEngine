@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>HitReg Playground</title>
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0e14; }
+      #app { display: block; width: 100vw; height: 100vh; }
+      #hud {
+        position: fixed; top: 8px; left: 8px;
+        font: 12px/1.4 ui-monospace, monospace; color: #8b949e;
+        background: rgba(13, 17, 23, 0.7); padding: 4px 8px; border-radius: 4px;
+        pointer-events: none; white-space: pre;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="app"></canvas>
+    <div id="hud">loading…</div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
