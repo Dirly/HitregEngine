@@ -12,6 +12,7 @@
   "dependencies": {
     "@hitreg/core": "workspace:*",
     "@hitreg/editor": "workspace:^",
+    "@hitreg/physics": "workspace:^",
     "@hitreg/render": "workspace:*",
     "camera-controls": "^3.1.2",
     "three": "^0.185.1"

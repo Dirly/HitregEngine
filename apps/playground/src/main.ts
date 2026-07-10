@@ -13,6 +13,7 @@ import {
   type SceneDoc,
 } from "@hitreg/core";
 import { buildScene, EngineRenderer, type BuiltScene } from "@hitreg/render";
+import { initPhysics, PhysicsSim, type BodyState } from "@hitreg/physics";
 import {
   createAssetSelection,
   createContextMenu,
@@ -131,7 +132,7 @@ async function main(): Promise<void> {
   }
 
   const renderer = new EngineRenderer(canvas);
-  const backend = await renderer.init();
+  const [backend] = await Promise.all([renderer.init(), initPhysics()]);
 
   const camera = new THREE.PerspectiveCamera(
     60,
@@ -194,12 +195,46 @@ async function main(): Promise<void> {
     }
   });
 
+  // -- physics: play mode builds a Rapier world from the expanded doc ---------
+
+  let sim: PhysicsSim | null = null;
+  function rebuildSim(): void {
+    sim?.free();
+    sim = new PhysicsSim(expandScene(store.doc, assets, registry));
+  }
+
   store.subscribe(rebuild);
+  store.subscribe(() => {
+    if (sim) rebuildSim(); // edits during play restart the sim from the new doc
+  });
   // stop restores the scene from the document — sim state is runtime-only
   playMode.subscribe(() => {
-    if (playMode.get() === "edit") rebuild();
+    const mode = playMode.get();
+    if (mode === "edit") {
+      sim?.free();
+      sim = null;
+      rebuild();
+    } else if (mode === "playing" && !sim) {
+      rebuildSim();
+    }
   });
   rebuild();
+
+  const bodyWorldPos = new THREE.Vector3();
+  const parentQuat = new THREE.Quaternion();
+  const bodyQuat = new THREE.Quaternion();
+  function applyBodyState(object: THREE.Object3D, state: BodyState): void {
+    const parent = object.parent;
+    if (!parent) return;
+    parent.updateWorldMatrix(true, false);
+    object.position.copy(
+      parent.worldToLocal(bodyWorldPos.set(state.position[0], state.position[1], state.position[2])),
+    );
+    parent.getWorldQuaternion(parentQuat).invert();
+    object.quaternion.copy(
+      parentQuat.multiply(bodyQuat.set(state.rotation[0], state.rotation[1], state.rotation[2], state.rotation[3])),
+    );
+  }
 
   // -- live sync: file changes (AI edits, text editors) apply in place --------
 
@@ -305,13 +340,12 @@ async function main(): Promise<void> {
   let lastFrameMs = 0;
   const loop = new FixedTimestepLoop({
     fixedUpdate: (dt) => {
-      if (playMode.get() !== "playing") return;
-      // stand-in gameplay until physics/scripting land: "spin"-tagged entities rotate.
-      // Sim mutates RUNTIME objects only — the document is authoring truth.
-      for (const [id, entity] of Object.entries(store.doc.entities)) {
-        if (entity.tags.includes("spin")) {
-          built.objects.get(id)?.rotateY(dt * 1.5);
-        }
+      if (playMode.get() !== "playing" || !sim) return;
+      // sim mutates RUNTIME objects only — the document is authoring truth
+      sim.step(dt);
+      for (const [id, state] of sim.states()) {
+        const object = built.objects.get(id);
+        if (object) applyBodyState(object, state);
       }
     },
     update: (dt) => {

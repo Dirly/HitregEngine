@@ -50,6 +50,7 @@ export function buildStreetDoc(registry: ComponentRegistry): SceneDoc {
             castShadow: false,
             static: true,
           },
+          collider: { shape: "box", size: [60, 0.2, 24], offset: [0, -0.1, 0] },
         },
       },
     },
@@ -75,14 +76,73 @@ export function buildStreetDoc(registry: ComponentRegistry): SceneDoc {
       entity: {
         name: `Crate ${i + 1}`,
         parent: "ground",
-        tags: ["prop", "spin"],
+        tags: ["prop"],
         components: {
           transform: { position: [i * 4 - 8, 0.5, -3] },
           mesh: { source: { kind: "primitive", shape: "box", size: [1, 1, 1] } },
+          rigidbody: {},
+          collider: {},
         },
       },
     })),
   ];
+
+  // a hinged door: static frame post + dynamic panel joined by a hinge.
+  // press play and knock it around with falling crates.
+  ops.push(
+    {
+      op: "add-entity",
+      id: "door-frame",
+      entity: {
+        name: "Door Frame",
+        parent: null,
+        tags: ["door"],
+        components: {
+          transform: { position: [3, 1.5, -6] },
+          mesh: { source: { kind: "primitive", shape: "cylinder", size: [0.15, 3, 0.15] } },
+          collider: { shape: "cylinder", size: [0.15, 3, 0.15] },
+        },
+      },
+    },
+    {
+      op: "add-entity",
+      id: "door-panel",
+      entity: {
+        name: "Door Panel",
+        parent: null,
+        tags: ["door"],
+        components: {
+          transform: { position: [3.65, 1.5, -6] },
+          mesh: { source: { kind: "primitive", shape: "box", size: [1.3, 2.4, 0.08] } },
+          rigidbody: { angularDamping: 0.3 },
+          collider: { shape: "box", size: [1.3, 2.4, 0.08], density: 0.4 },
+          joint: {
+            kind: "hinge",
+            target: "door-frame",
+            anchorA: [-0.65, 0, 0],
+            anchorB: [0, 0, 0],
+            axis: [0, 1, 0],
+            limits: { min: -2.2, max: 2.2 },
+          },
+        },
+      },
+    },
+    {
+      op: "add-entity",
+      id: "door-crate",
+      entity: {
+        name: "Door Knocker",
+        parent: null,
+        tags: ["prop"],
+        components: {
+          transform: { position: [4.1, 4.5, -5.8] },
+          mesh: { source: { kind: "primitive", shape: "box", size: [1, 1, 1] } },
+          rigidbody: {},
+          collider: {},
+        },
+      },
+    },
+  );
 
   const { doc } = applyOps(createScene("street"), ops, registry);
   return doc;

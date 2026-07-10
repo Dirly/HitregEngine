@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { ComponentRegistry } from "./registry.js";
 import { prefabInstanceSchema } from "../prefab.js";
+import { registerPhysicsComponents } from "./physics.js";
 
 export const vec3 = z.tuple([z.number(), z.number(), z.number()]);
 export const quat = z.tuple([z.number(), z.number(), z.number(), z.number()]);
@@ -74,4 +75,5 @@ export function registerCoreComponents(registry: ComponentRegistry): void {
   registry.register("light", lightSchema);
   registry.register("camera", cameraSchema);
   registry.register("prefab", prefabInstanceSchema);
+  registerPhysicsComponents(registry);
 }

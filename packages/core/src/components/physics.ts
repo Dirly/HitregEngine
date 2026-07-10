@@ -1,0 +1,58 @@
+import { z } from "zod";
+import type { ComponentRegistry } from "./registry.js";
+
+// local copy — importing from core.ts would create a circular module init
+const vec3 = z.tuple([z.number(), z.number(), z.number()]);
+
+/**
+ * Physics components (consumed by @hitreg/physics / Rapier). An entity with a
+ * collider but no rigidbody is treated as static scenery.
+ */
+
+export const rigidbodySchema = z.object({
+  kind: z.enum(["dynamic", "kinematic", "static"]).default("dynamic"),
+  /** Extra mass on top of collider density-derived mass. */
+  mass: z.number().min(0).default(0),
+  linearDamping: z.number().min(0).default(0),
+  angularDamping: z.number().min(0).default(0.05),
+  gravityScale: z.number().default(1),
+  /** Continuous collision detection for fast movers (bullets). */
+  ccd: z.boolean().default(false),
+});
+
+export const colliderSchema = z.object({
+  // convex/trimesh arrive with the asset pipeline's collision cooking
+  shape: z.enum(["box", "sphere", "capsule", "cylinder"]).default("box"),
+  /** Full extents (box) / diameter+height (sphere, capsule, cylinder use x and y). */
+  size: vec3.default([1, 1, 1]),
+  /** Local offset from the entity origin. */
+  offset: vec3.default([0, 0, 0]),
+  friction: z.number().min(0).default(0.5),
+  restitution: z.number().min(0).default(0),
+  density: z.number().positive().default(1),
+  /** Triggers detect overlap without physical response. */
+  isTrigger: z.boolean().default(false),
+});
+
+export const jointSchema = z.object({
+  kind: z.enum(["fixed", "hinge", "slider", "ball"]),
+  /** Entity id of the other body (in the expanded scene). */
+  target: z.string().min(1),
+  /** Anchor on this entity, local space. */
+  anchorA: vec3.default([0, 0, 0]),
+  /** Anchor on the target entity, local space. */
+  anchorB: vec3.default([0, 0, 0]),
+  /** Hinge rotation axis / slider travel axis, local space. */
+  axis: vec3.default([0, 1, 0]),
+  /** Radians for hinge, meters for slider. */
+  limits: z.object({ min: z.number(), max: z.number() }).optional(),
+  motor: z
+    .object({ targetVelocity: z.number(), maxForce: z.number().positive() })
+    .optional(),
+});
+
+export function registerPhysicsComponents(registry: ComponentRegistry): void {
+  registry.register("rigidbody", rigidbodySchema);
+  registry.register("collider", colliderSchema);
+  registry.register("joint", jointSchema);
+}

@@ -27,6 +27,9 @@ const componentSeeds: Record<string, unknown> = {
   light: { kind: "point" },
   mesh: { source: { kind: "primitive", shape: "box", size: [1, 1, 1] } },
   prefab: { prefabId: "" },
+  rigidbody: {},
+  collider: {},
+  joint: { kind: "hinge", target: "SET-TARGET-ENTITY-ID" },
 };
 
 export interface AppProps {

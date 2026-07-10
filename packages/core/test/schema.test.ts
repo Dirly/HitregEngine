@@ -48,9 +48,12 @@ describe("ComponentRegistry", () => {
     const schemas = registry.jsonSchemas();
     expect(Object.keys(schemas).sort()).toEqual([
       "camera",
+      "collider",
+      "joint",
       "light",
       "mesh",
       "prefab",
+      "rigidbody",
       "transform",
     ]);
     const transform = schemas["transform"] as { properties: Record<string, unknown> };

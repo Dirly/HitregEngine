@@ -46,3 +46,17 @@ export {
 } from "./assets.js";
 export { SceneStore } from "./store.js";
 export { duplicateSubtree } from "./duplicate.js";
+export {
+  quatMultiply,
+  vecApplyQuat,
+  worldTransforms,
+  type Vec3,
+  type Quat,
+  type WorldTransform,
+} from "./math.js";
+export {
+  registerPhysicsComponents,
+  rigidbodySchema,
+  colliderSchema,
+  jointSchema,
+} from "./components/physics.js";
