@@ -31,10 +31,36 @@ interface TransformData {
 interface MeshData {
   source:
     | { kind: "primitive"; shape: string; size: [number, number, number] }
-    | { kind: "asset"; assetId: string };
+    | { kind: "asset"; assetId: string }
+    | {
+        kind: "polygon";
+        points: Array<[number, number]>;
+        height: number;
+        bevel?: { size: number; segments: number };
+      };
   material?: string;
   castShadow: boolean;
   receiveShadow: boolean;
+}
+
+export function polygonGeometry(source: {
+  points: Array<[number, number]>;
+  height: number;
+  bevel?: { size: number; segments: number };
+}): THREE.BufferGeometry {
+  const shape = new THREE.Shape(source.points.map(([x, y]) => new THREE.Vector2(x, y)));
+  const bevelSize = source.bevel?.size ?? 0;
+  const geometry = new THREE.ExtrudeGeometry(shape, {
+    depth: source.height,
+    bevelEnabled: bevelSize > 0,
+    bevelSize,
+    bevelThickness: bevelSize,
+    bevelSegments: source.bevel?.segments ?? 2,
+    curveSegments: 8,
+  });
+  // extrude runs along +Z; stand it up so it rises along +Y
+  geometry.rotateX(-Math.PI / 2);
+  return geometry;
 }
 
 interface LightData {
@@ -200,6 +226,17 @@ export function buildScene(doc: SceneDoc, options: BuildOptions = {}): BuiltScen
       mesh.userData["entityId"] = id;
       group.add(mesh);
     }
+    if (meshData && meshData.source.kind === "polygon") {
+      const mesh = new THREE.Mesh(
+        polygonGeometry(meshData.source),
+        resolveMaterialFor(meshData, options, materialCache),
+      );
+      mesh.castShadow = meshData.castShadow;
+      mesh.receiveShadow = meshData.receiveShadow;
+      mesh.userData["entityId"] = id;
+      group.add(mesh);
+    }
+
     if (meshData && meshData.source.kind === "asset") {
       const url = options.resolveModel?.(meshData.source.assetId);
       if (url) {

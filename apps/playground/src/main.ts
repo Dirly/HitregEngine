@@ -19,11 +19,13 @@ import {
   createContextMenu,
   createSelection,
   defaultEditorSettings,
+  DOCK,
   GrayboxTool,
   mountEditor,
   observable,
   ViewportTools,
   type GizmoMode,
+  type GrayboxShape,
   type PlayMode,
 } from "@hitreg/editor";
 import { buildStreetDoc } from "./street-scene.js";
@@ -156,6 +158,9 @@ async function main(): Promise<void> {
   const contextMenu = createContextMenu();
   const assetSelection = createAssetSelection();
   const grayboxActive = observable(false);
+  const grayboxShape = observable<GrayboxShape>("box");
+  const grayboxBevel = observable(0);
+  const thumbnails = observable<Record<string, string>>({});
   const assetsVersion = observable(0);
   assetsVersion.subscribe(() => rebuild()); // material/prefab edits re-render the scene
   settings.subscribe(() => rebuild()); // physics-debug toggle takes effect immediately
@@ -185,6 +190,8 @@ async function main(): Promise<void> {
     settings,
     enabled: editorVisible,
     active: grayboxActive,
+    shape: grayboxShape,
+    bevel: grayboxBevel,
     getScene: () => built.scene,
     onDraggingChanged: (dragging) => {
       controls.enabled = !dragging;
@@ -206,6 +213,9 @@ async function main(): Promise<void> {
     contextMenu,
     assetSelection,
     grayboxActive,
+    grayboxShape,
+    grayboxBevel,
+    thumbnails,
     assetsVersion,
     saveAsset,
   });
@@ -283,6 +293,94 @@ async function main(): Promise<void> {
       parentQuat.multiply(bodyQuat.set(state.rotation[0], state.rotation[1], state.rotation[2], state.rotation[3])),
     );
   }
+
+  // -- prefab thumbnails: render each prefab to a tiny offscreen target -------
+
+  const THUMB = 96;
+  async function renderThumbnails(): Promise<void> {
+    const out: Record<string, string> = { ...thumbnails.get() };
+    let changed = false;
+    for (const pid of assets.prefabIds()) {
+      try {
+        const key = `${pid}:${JSON.stringify(assets.getPrefab(pid)).length}`;
+        if (out[`__key_${pid}`] === key) continue;
+        const { doc: thumbDoc } = (() => {
+          const d = buildStreetDocEmpty(pid);
+          return { doc: d };
+        })();
+        const expanded = expandScene(thumbDoc, assets, registry);
+        const thumb = buildScene(expanded, {
+          resolveMaterial: (id) => assets.getDataAsset(id)?.data,
+        });
+        thumb.scene.background = new THREE.Color(0x0b0e14);
+        thumb.scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+        const sun = new THREE.DirectionalLight(0xfff5e0, 2);
+        sun.position.set(3, 5, 4);
+        thumb.scene.add(sun);
+
+        const box = new THREE.Box3().setFromObject(thumb.scene);
+        const size = box.getSize(new THREE.Vector3()).length() || 1;
+        const center = box.getCenter(new THREE.Vector3());
+        const cam = new THREE.PerspectiveCamera(45, 1, 0.01, size * 10);
+        cam.position.copy(center).add(new THREE.Vector3(size * 0.7, size * 0.55, size * 0.7));
+        cam.lookAt(center);
+
+        const target = new THREE.RenderTarget(THUMB, THUMB);
+        renderer.renderer.setRenderTarget(target);
+        renderer.renderer.render(thumb.scene, cam);
+        const pixels = (await renderer.renderer.readRenderTargetPixelsAsync(
+          target,
+          0,
+          0,
+          THUMB,
+          THUMB,
+        )) as Uint8Array;
+        renderer.renderer.setRenderTarget(null);
+        target.dispose();
+
+        const canvas2d = document.createElement("canvas");
+        canvas2d.width = THUMB;
+        canvas2d.height = THUMB;
+        const ctx = canvas2d.getContext("2d")!;
+        const image = ctx.createImageData(THUMB, THUMB);
+        // flip Y: render targets are bottom-up
+        for (let y = 0; y < THUMB; y++) {
+          const src = (THUMB - 1 - y) * THUMB * 4;
+          image.data.set(pixels.subarray(src, src + THUMB * 4), y * THUMB * 4);
+        }
+        ctx.putImageData(image, 0, 0);
+        out[pid] = canvas2d.toDataURL();
+        out[`__key_${pid}`] = key;
+        changed = true;
+      } catch (error) {
+        console.warn(`[thumbnails] failed for ${pid}:`, error);
+      }
+    }
+    if (changed) thumbnails.set(out);
+  }
+
+  function buildStreetDocEmpty(prefabId: string) {
+    const { doc: d } = (() => {
+      const empty = { version: 1 as const, name: "thumb", entities: {} };
+      return {
+        doc: {
+          ...empty,
+          entities: {
+            subject: {
+              name: "Subject",
+              parent: null,
+              tags: [],
+              components: { transform: {}, prefab: { prefabId, props: {}, overrides: [] } },
+            },
+          },
+        },
+      };
+    })();
+    return d;
+  }
+
+  void renderThumbnails();
+  assetsVersion.subscribe(() => void renderThumbnails());
 
   // -- live sync: file changes (AI edits, text editors) apply in place --------
 
@@ -377,13 +475,34 @@ async function main(): Promise<void> {
 
   // -- loop --------------------------------------------------------------------
 
+  // docked editor layout: the canvas shrinks to the center hole (Unity-style),
+  // fullscreen when the editor is closed
+  function applyCanvasLayout(): void {
+    canvas.style.position = "fixed";
+    if (editorVisible.get()) {
+      canvas.style.left = `${DOCK.left}px`;
+      canvas.style.top = `${DOCK.top}px`;
+      canvas.style.width = `calc(100vw - ${DOCK.left + DOCK.right}px)`;
+      canvas.style.height = `calc(100vh - ${DOCK.top + DOCK.bottom}px)`;
+    } else {
+      canvas.style.left = "0px";
+      canvas.style.top = "0px";
+      canvas.style.width = "100vw";
+      canvas.style.height = "100vh";
+    }
+    onResize();
+  }
+
   function onResize(): void {
-    camera.aspect = window.innerWidth / window.innerHeight;
+    const w = canvas.clientWidth || window.innerWidth;
+    const h = canvas.clientHeight || window.innerHeight;
+    camera.aspect = w / h;
     camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight, window.devicePixelRatio);
+    renderer.setSize(w, h, window.devicePixelRatio);
   }
   window.addEventListener("resize", onResize);
-  onResize();
+  editorVisible.subscribe(applyCanvasLayout);
+  applyCanvasLayout();
 
   let lastFrameMs = 0;
   const loop = new FixedTimestepLoop({

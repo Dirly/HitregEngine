@@ -6,6 +6,7 @@ import type {
   ContextMenu,
   EditorSettings,
   GizmoMode,
+  GrayboxShape,
   Observable,
   PlayMode,
   Selection,
@@ -24,6 +25,9 @@ export interface MountOptions {
   contextMenu: ContextMenu;
   assetSelection: AssetSelection;
   grayboxActive: Observable<boolean>;
+  grayboxShape: Observable<GrayboxShape>;
+  grayboxBevel: Observable<number>;
+  thumbnails: Observable<Record<string, string>>;
   assetsVersion: Observable<number>;
   saveAsset?: (file: string, content: string) => void;
 }
@@ -44,6 +48,9 @@ export function mountEditor(options: MountOptions): { unmount(): void } {
       contextMenu={options.contextMenu}
       assetSelection={options.assetSelection}
       grayboxActive={options.grayboxActive}
+      grayboxShape={options.grayboxShape}
+      grayboxBevel={options.grayboxBevel}
+      thumbnails={options.thumbnails}
       assetsVersion={options.assetsVersion}
       saveAsset={options.saveAsset}
     />,

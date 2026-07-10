@@ -15,12 +15,15 @@ import type {
   ContextMenu,
   EditorSettings,
   GizmoMode,
+  GrayboxShape,
   Observable,
   PlayMode,
   Selection,
 } from "../state.js";
 import { ColorField, NumberField, Row, SliderField, TextField, ValueField } from "./fields.js";
-import { clearPanelLayout, Panel, SearchInput } from "./panels.js";
+
+/** Docked layout constants — main.ts sizes the viewport canvas to the center hole. */
+export const DOCK = { left: 300, right: 360, top: 64, bottom: 240 } as const;
 
 /** Minimal valid data for components whose schemas have required fields. */
 const componentSeeds: Record<string, unknown> = {
@@ -43,11 +46,12 @@ export interface AppProps {
   playMode: Observable<PlayMode>;
   contextMenu: ContextMenu;
   assetSelection: AssetSelection;
-  /** Graybox draw mode (✏ / G key). */
   grayboxActive: Observable<boolean>;
-  /** Bumped whenever the AssetLibrary changes (panels re-render, host rebuilds). */
+  grayboxShape: Observable<GrayboxShape>;
+  grayboxBevel: Observable<number>;
+  /** prefab id -> data-url thumbnail rendered by the host. */
+  thumbnails: Observable<Record<string, string>>;
   assetsVersion: Observable<number>;
-  /** Persist an asset file under the project's assets/ dir (dev server writes it). */
   saveAsset?: (file: string, content: string) => void;
 }
 
@@ -79,8 +83,8 @@ const buttonStyle: React.CSSProperties = {
   borderRadius: 3,
   color: "#c9d1d9",
   cursor: "pointer",
-  font: "11px ui-monospace, monospace",
-  padding: "2px 8px",
+  font: "12px ui-monospace, monospace",
+  padding: "4px 10px",
 };
 
 const activeButtonStyle: React.CSSProperties = {
@@ -90,9 +94,19 @@ const activeButtonStyle: React.CSSProperties = {
   color: "#e6edf3",
 };
 
+const dockStyle: React.CSSProperties = {
+  background: "#0d1117",
+  border: "1px solid #21262d",
+  color: "#c9d1d9",
+  font: "12px ui-monospace, monospace",
+  display: "flex",
+  flexDirection: "column",
+  minHeight: 0,
+  pointerEvents: "auto",
+};
+
 export function App(props: AppProps) {
   const visible = useObservable(props.visible);
-  const [layoutVersion, setLayoutVersion] = useState(0);
   if (!visible) return null;
 
   const bumpAssets = () => props.assetsVersion.set(props.assetsVersion.get() + 1);
@@ -129,52 +143,67 @@ export function App(props: AppProps) {
   };
 
   return (
-    <div key={layoutVersion}>
-      <Panel
-        id="toolbar"
-        title="HitReg"
-        defaultRect={() => ({ x: Math.max(8, window.innerWidth / 2 - 300), y: 8, w: 600, h: 118 })}
+    <>
+      <div
+        style={{
+          position: "fixed",
+          inset: 0,
+          display: "grid",
+          gridTemplateColumns: `${DOCK.left}px 1fr ${DOCK.right}px`,
+          gridTemplateRows: `${DOCK.top}px 1fr ${DOCK.bottom}px`,
+          zIndex: 900,
+          pointerEvents: "none",
+        }}
       >
-        <Toolbar
-          store={props.store}
-          playMode={props.playMode}
-          gizmoMode={props.gizmoMode}
-          settings={props.settings}
-          onResetLayout={() => {
-            clearPanelLayout();
-            setLayoutVersion((v) => v + 1);
-          }}
-        />
-      </Panel>
+        <div style={{ ...dockStyle, gridColumn: "1 / 4", gridRow: 1 }}>
+          <Toolbar
+            store={props.store}
+            playMode={props.playMode}
+            gizmoMode={props.gizmoMode}
+            settings={props.settings}
+            grayboxActive={props.grayboxActive}
+            grayboxShape={props.grayboxShape}
+            grayboxBevel={props.grayboxBevel}
+          />
+        </div>
 
-      <GrayboxBar store={props.store} selection={props.selection} active={props.grayboxActive} />
+        <div style={{ ...dockStyle, gridColumn: 1, gridRow: "2 / 4" }}>
+          <HierarchyDock
+            store={props.store}
+            selection={props.selection}
+            assetSelection={props.assetSelection}
+            contextMenu={props.contextMenu}
+          />
+        </div>
 
-      <HierarchyPanel
-        store={props.store}
-        selection={props.selection}
-        assetSelection={props.assetSelection}
-        contextMenu={props.contextMenu}
-      />
+        {/* center = the live viewport; the canvas is sized to this hole */}
+        <div style={{ gridColumn: 2, gridRow: 2, pointerEvents: "none" }} />
 
-      <AssetsPanel
-        assets={props.assets}
-        store={props.store}
-        selection={props.selection}
-        assetSelection={props.assetSelection}
-        assetsVersion={props.assetsVersion}
-        onCreateMaterial={createMaterial}
-        onCreatePrefab={createPrefabFrom}
-      />
+        <div style={{ ...dockStyle, gridColumn: 2, gridRow: 3 }}>
+          <AssetsDock
+            assets={props.assets}
+            store={props.store}
+            selection={props.selection}
+            assetSelection={props.assetSelection}
+            assetsVersion={props.assetsVersion}
+            thumbnails={props.thumbnails}
+            onCreateMaterial={createMaterial}
+            onCreatePrefab={createPrefabFrom}
+          />
+        </div>
 
-      <InspectorPanel
-        store={props.store}
-        registry={props.registry}
-        selection={props.selection}
-        assets={props.assets}
-        assetSelection={props.assetSelection}
-        assetsVersion={props.assetsVersion}
-        saveAsset={props.saveAsset}
-      />
+        <div style={{ ...dockStyle, gridColumn: 3, gridRow: "2 / 4" }}>
+          <InspectorDock
+            store={props.store}
+            registry={props.registry}
+            selection={props.selection}
+            assets={props.assets}
+            assetSelection={props.assetSelection}
+            assetsVersion={props.assetsVersion}
+            saveAsset={props.saveAsset}
+          />
+        </div>
+      </div>
 
       <ContextMenuView
         store={props.store}
@@ -182,7 +211,47 @@ export function App(props: AppProps) {
         contextMenu={props.contextMenu}
         onCreatePrefab={createPrefabFrom}
       />
+    </>
+  );
+}
+
+function DockHeader(props: { title: string; children?: React.ReactNode }) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        padding: "5px 8px",
+        background: "#161b22",
+        borderBottom: "1px solid #21262d",
+        flexShrink: 0,
+      }}
+    >
+      <strong style={{ color: "#e6edf3", flex: 1, whiteSpace: "nowrap", overflow: "hidden" }}>
+        {props.title}
+      </strong>
+      {props.children}
     </div>
+  );
+}
+
+export function SearchInput(props: { value: string; onChange: (v: string) => void }) {
+  return (
+    <input
+      placeholder="search…"
+      value={props.value}
+      onChange={(e) => props.onChange(e.target.value)}
+      style={{
+        background: "#0d1117",
+        border: "1px solid #30363d",
+        borderRadius: 3,
+        color: "#c9d1d9",
+        font: "11px ui-monospace, monospace",
+        padding: "2px 6px",
+        width: 130,
+      }}
+    />
   );
 }
 
@@ -193,249 +262,139 @@ function Toolbar(props: {
   playMode: Observable<PlayMode>;
   gizmoMode: Observable<GizmoMode>;
   settings: Observable<EditorSettings>;
-  onResetLayout: () => void;
+  grayboxActive: Observable<boolean>;
+  grayboxShape: Observable<GrayboxShape>;
+  grayboxBevel: Observable<number>;
 }) {
   const play = useObservable(props.playMode);
   const mode = useObservable(props.gizmoMode);
   const settings = useObservable(props.settings);
+  const grayboxOn = useObservable(props.grayboxActive);
+  const shape = useObservable(props.grayboxShape);
+  const bevel = useObservable(props.grayboxBevel);
   const set = (patch: Partial<EditorSettings>) => props.settings.set({ ...settings, ...patch });
 
+  const group: React.CSSProperties = {
+    display: "flex",
+    gap: 5,
+    alignItems: "center",
+    paddingRight: 10,
+    marginRight: 10,
+    borderRight: "1px solid #21262d",
+  };
+
   const modes: Array<{ key: GizmoMode; label: string }> = [
-    { key: "translate", label: "move W" },
-    { key: "rotate", label: "rot E" },
-    { key: "scale", label: "scale R" },
+    { key: "translate", label: "move" },
+    { key: "rotate", label: "rotate" },
+    { key: "scale", label: "scale" },
   ];
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      <div style={{ display: "flex", gap: 6 }}>
-        <button
-          style={play === "playing" ? activeButtonStyle : buttonStyle}
-          disabled={play === "playing"}
-          onClick={() => props.playMode.set("playing")}
-          title="Play — simulate over runtime state; the document stays untouched"
-        >
-          ▶ play
-        </button>
-        <button
-          style={play === "paused" ? activeButtonStyle : buttonStyle}
-          disabled={play !== "playing"}
-          onClick={() => props.playMode.set("paused")}
-        >
-          ⏸ pause
-        </button>
-        <button
-          style={buttonStyle}
-          disabled={play === "edit"}
-          onClick={() => props.playMode.set("edit")}
-          title="Stop — restore the scene from the document"
-        >
-          ⏹ stop
-        </button>
-        <span style={{ flex: 1 }} />
-        <button style={buttonStyle} disabled={!props.store.canUndo} onClick={() => props.store.undo()}>
-          ⟲
-        </button>
-        <button style={buttonStyle} disabled={!props.store.canRedo} onClick={() => props.store.redo()}>
-          ⟳
-        </button>
-        <button style={buttonStyle} title="Reset window layout" onClick={props.onResetLayout}>
-          ⊞ reset
-        </button>
-      </div>
-      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 11 }}>
-        {modes.map((m) => (
+    <div style={{ padding: "6px 10px", display: "flex", flexDirection: "column", gap: 3, height: "100%" }}>
+      <div style={{ display: "flex", alignItems: "center", flexWrap: "nowrap", overflowX: "auto" }}>
+        <span style={group}>
+          <strong style={{ color: "#e6edf3", marginRight: 4 }}>HitReg</strong>
           <button
-            key={m.key}
-            style={mode === m.key ? activeButtonStyle : buttonStyle}
-            onClick={() => props.gizmoMode.set(m.key)}
+            style={play === "playing" ? activeButtonStyle : buttonStyle}
+            disabled={play === "playing"}
+            onClick={() => props.playMode.set("playing")}
           >
-            {m.label}
+            ▶ play
           </button>
-        ))}
-        <label style={{ display: "flex", gap: 3, alignItems: "center", cursor: "pointer" }}>
-          <input type="checkbox" checked={settings.snap} onChange={(e) => set({ snap: e.target.checked })} />
-          snap
-        </label>
-        <span style={{ display: "flex", gap: 3, alignItems: "center", color: "#8b949e" }}>
-          move
-          <span style={{ width: 44 }}>
+          <button
+            style={play === "paused" ? activeButtonStyle : buttonStyle}
+            disabled={play !== "playing"}
+            onClick={() => props.playMode.set("paused")}
+          >
+            ⏸
+          </button>
+          <button style={buttonStyle} disabled={play === "edit"} onClick={() => props.playMode.set("edit")}>
+            ⏹
+          </button>
+        </span>
+
+        <span style={group}>
+          {modes.map((m) => (
+            <button
+              key={m.key}
+              style={mode === m.key ? activeButtonStyle : buttonStyle}
+              onClick={() => props.gizmoMode.set(m.key)}
+            >
+              {m.label}
+            </button>
+          ))}
+        </span>
+
+        <span style={group}>
+          <label style={{ display: "flex", gap: 3, alignItems: "center", cursor: "pointer" }}>
+            <input type="checkbox" checked={settings.snap} onChange={(e) => set({ snap: e.target.checked })} />
+            snap
+          </label>
+          <span style={{ width: 46 }}>
             <NumberField value={settings.translateSnap} onCommit={(v) => v > 0 && set({ translateSnap: v })} />
           </span>
+          <label style={{ display: "flex", gap: 3, alignItems: "center", cursor: "pointer" }}>
+            <input type="checkbox" checked={settings.grid} onChange={(e) => set({ grid: e.target.checked })} />
+            grid
+          </label>
+          <label
+            style={{ display: "flex", gap: 3, alignItems: "center", cursor: "pointer" }}
+            title="Collider wireframes + joint anchors/axes"
+          >
+            <input
+              type="checkbox"
+              checked={settings.showPhysics}
+              onChange={(e) => set({ showPhysics: e.target.checked })}
+            />
+            phys
+          </label>
         </span>
-        <span style={{ display: "flex", gap: 3, alignItems: "center", color: "#8b949e" }}>
-          rot°
-          <span style={{ width: 40 }}>
-            <NumberField value={settings.rotateSnapDeg} onCommit={(v) => v > 0 && set({ rotateSnapDeg: v })} />
+
+        <span style={group}>
+          <button
+            style={grayboxOn ? activeButtonStyle : buttonStyle}
+            title="Graybox draw mode — drag footprint, pull height, click to place. Alt+drag box face = extrude. Ctrl inverts snap."
+            onClick={() => props.grayboxActive.set(!grayboxOn)}
+          >
+            ✏ draw (G)
+          </button>
+          <select
+            style={{ ...buttonStyle, padding: "4px 6px" }}
+            value={shape}
+            onChange={(e) => props.grayboxShape.set(e.target.value as GrayboxShape)}
+          >
+            {(["box", "cylinder", "sphere", "wedge", "poly"] as GrayboxShape[]).map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+          <span style={{ color: "#8b949e" }}>bevel</span>
+          <span style={{ width: 44 }} title="0 = off; boxes/polys extrude with rounded edges">
+            <NumberField value={bevel} onCommit={(v) => v >= 0 && props.grayboxBevel.set(v)} />
           </span>
         </span>
-        <label style={{ display: "flex", gap: 3, alignItems: "center", cursor: "pointer" }}>
-          <input type="checkbox" checked={settings.grid} onChange={(e) => set({ grid: e.target.checked })} />
-          grid
-        </label>
-        <label
-          style={{ display: "flex", gap: 3, alignItems: "center", cursor: "pointer" }}
-          title="Show collider wireframes and joint anchors/axes"
-        >
-          <input
-            type="checkbox"
-            checked={settings.showPhysics}
-            onChange={(e) => set({ showPhysics: e.target.checked })}
-          />
-          phys
-        </label>
-        <span style={{ display: "flex", gap: 3, alignItems: "center", color: "#8b949e" }}>
-          size
-          <span style={{ width: 40 }}>
-            <NumberField value={settings.gridSize} onCommit={(v) => v > 0 && set({ gridSize: v })} />
-          </span>
+
+        <span style={{ ...group, borderRight: "none" }}>
+          <button style={buttonStyle} disabled={!props.store.canUndo} onClick={() => props.store.undo()}>
+            ⟲ undo
+          </button>
+          <button style={buttonStyle} disabled={!props.store.canRedo} onClick={() => props.store.redo()}>
+            ⟳ redo
+          </button>
         </span>
       </div>
       <div style={{ color: "#8b949e", fontSize: 10 }}>
-        ~ toggle · W/E/R gizmo · Del delete · Ctrl+D duplicate · Ctrl+Z/Y undo/redo · right-click menu
+        ~ close editor · W/E/R gizmo · F frame · G draw · Del delete · Ctrl+D duplicate · Ctrl+Z/Y undo ·
+        Ctrl inverts snap · poly: click points, Enter/near-first closes · dbl-click prefab opens it
       </div>
     </div>
   );
 }
 
-// ---------------------------------------------------------------- graybox kit
-
-type Vec3 = [number, number, number];
-
-function grayboxEntity(
-  name: string,
-  shape: string,
-  size: Vec3,
-  position: Vec3,
-  parent: string | null = null,
-): Omit<Extract<Op, { op: "add-entity" }>, "id"> & { id: string } {
-  return {
-    op: "add-entity",
-    id: newId(),
-    entity: {
-      name,
-      parent,
-      tags: ["graybox"],
-      components: {
-        transform: { position },
-        mesh: { source: { kind: "primitive", shape, size } },
-      },
-    },
-  };
-}
-
-/** ProBuilder-style blockout: draw-to-create + face push/pull, plus one-click shapes. */
-function GrayboxBar(props: {
-  store: SceneStore;
-  selection: Selection;
-  active: Observable<boolean>;
-}) {
-  const active = useObservable(props.active);
-  const spawn = (ops: Op[], selectId: string) => {
-    apply(props.store, ops);
-    props.selection.set(selectId);
-  };
-
-  const kits: Array<{ label: string; build: () => { ops: Op[]; select: string } }> = [
-    {
-      label: "floor",
-      build: () => {
-        const op = grayboxEntity("Floor", "box", [8, 0.2, 8], [0, 0.1, 0]);
-        return { ops: [op], select: op.id };
-      },
-    },
-    {
-      label: "wall",
-      build: () => {
-        const op = grayboxEntity("Wall", "box", [4, 3, 0.2], [0, 1.5, 0]);
-        return { ops: [op], select: op.id };
-      },
-    },
-    {
-      label: "platform",
-      build: () => {
-        const op = grayboxEntity("Platform", "box", [4, 0.2, 4], [0, 1, 0]);
-        return { ops: [op], select: op.id };
-      },
-    },
-    {
-      label: "pillar",
-      build: () => {
-        const op = grayboxEntity("Pillar", "cylinder", [0.6, 3, 0.6], [0, 1.5, 0]);
-        return { ops: [op], select: op.id };
-      },
-    },
-    {
-      label: "ramp",
-      build: () => {
-        const op = grayboxEntity("Ramp", "wedge", [2, 1, 4], [0, 0, 0]);
-        return { ops: [op], select: op.id };
-      },
-    },
-    {
-      label: "stairs",
-      build: () => {
-        const root: Op = {
-          op: "add-entity",
-          id: newId(),
-          entity: { name: "Stairs", parent: null, tags: ["graybox"], components: { transform: {} } },
-        };
-        const rootId = (root as { id: string }).id;
-        const steps = Array.from({ length: 8 }, (_, i) =>
-          grayboxEntity(
-            `Step ${i + 1}`,
-            "box",
-            [2, 0.25, 0.4],
-            [0, 0.125 + i * 0.25, -i * 0.4],
-            rootId,
-          ),
-        );
-        return { ops: [root, ...steps], select: rootId };
-      },
-    },
-  ];
-
-  return (
-    <Panel
-      id="graybox"
-      title="Graybox"
-      defaultRect={() => ({ x: 12, y: 8, w: 300, h: 108 })}
-    >
-      <button
-        style={{ ...(active ? activeButtonStyle : buttonStyle), width: "100%", marginBottom: 6 }}
-        title="Drag on the ground to draw a box, release, move up for height, click to place. Drag any box face to push/pull it. Esc cancels."
-        onClick={() => props.active.set(!active)}
-      >
-        ✏ draw mode (G) {active ? "— ON" : ""}
-      </button>
-      {active && (
-        <div style={{ color: "#8b949e", fontSize: 10, marginBottom: 6 }}>
-          drag ground → footprint · release, move up → height · click → place
-          <br />
-          drag any box face → push/pull · Esc cancels
-        </div>
-      )}
-      <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-        {kits.map((kit) => (
-          <button
-            key={kit.label}
-            style={buttonStyle}
-            onClick={() => {
-              const { ops, select } = kit.build();
-              spawn(ops, select);
-            }}
-          >
-            {kit.label}
-          </button>
-        ))}
-      </div>
-    </Panel>
-  );
-}
-
 // ---------------------------------------------------------------- hierarchy
 
-function HierarchyPanel(props: {
+function HierarchyDock(props: {
   store: SceneStore;
   selection: Selection;
   assetSelection: AssetSelection;
@@ -452,57 +411,59 @@ function HierarchyPanel(props: {
     : null;
 
   return (
-    <Panel
-      id="hierarchy"
-      title={`Hierarchy — ${doc.name}`}
-      defaultRect={() => ({
-        x: 12,
-        y: 48,
-        w: 300,
-        h: Math.max(240, window.innerHeight - 340),
-      })}
-      headerExtra={
-        <>
-          <SearchInput value={query} onChange={setQuery} />
-          <button
-            style={buttonStyle}
-            title="Add entity (child of selection)"
-            onClick={() =>
-              apply(props.store, [
-                {
-                  op: "add-entity",
-                  id: newId(),
-                  entity: {
-                    name: "New Entity",
-                    parent: selected && doc.entities[selected] ? selected : null,
-                    tags: [],
-                    components: { transform: {} },
-                  },
+    <>
+      <DockHeader title={`Hierarchy — ${doc.name}`}>
+        <SearchInput value={query} onChange={setQuery} />
+        <button
+          style={buttonStyle}
+          title="Add entity (child of selection)"
+          onClick={() =>
+            apply(props.store, [
+              {
+                op: "add-entity",
+                id: newId(),
+                entity: {
+                  name: "New Entity",
+                  parent: selected && doc.entities[selected] ? selected : null,
+                  tags: [],
+                  components: { transform: {} },
                 },
-              ])
-            }
-          >
-            +
-          </button>
-        </>
-      }
-    >
+              },
+            ])
+          }
+        >
+          +
+        </button>
+      </DockHeader>
       <div
+        style={{ flex: 1, overflowY: "auto", padding: 6 }}
         onDragOver={(e) => e.preventDefault()}
         onDrop={(e) => {
           const dragged = e.dataTransfer.getData("text/plain");
           if (dragged) apply(props.store, [{ op: "reparent", id: dragged, parent: null }]);
         }}
-        style={{ color: "#8b949e", fontSize: 10, marginBottom: 4 }}
       >
-        drag rows to nest · drop here for root
-      </div>
-      {matches ? (
-        matches.map((id) => (
-          <TreeRow
-            key={id}
-            id={id}
+        <div style={{ color: "#8b949e", fontSize: 10, marginBottom: 4 }}>
+          drag rows to nest · drop on empty space for root
+        </div>
+        {matches ? (
+          matches.map((id) => (
+            <TreeRow
+              key={id}
+              id={id}
+              doc={doc}
+              depth={0}
+              selected={selected}
+              selection={props.selection}
+              assetSelection={props.assetSelection}
+              store={props.store}
+              contextMenu={props.contextMenu}
+            />
+          ))
+        ) : (
+          <Tree
             doc={doc}
+            parent={null}
             depth={0}
             selected={selected}
             selection={props.selection}
@@ -510,20 +471,9 @@ function HierarchyPanel(props: {
             store={props.store}
             contextMenu={props.contextMenu}
           />
-        ))
-      ) : (
-        <Tree
-          doc={doc}
-          parent={null}
-          depth={0}
-          selected={selected}
-          selection={props.selection}
-          assetSelection={props.assetSelection}
-          store={props.store}
-          contextMenu={props.contextMenu}
-        />
-      )}
-    </Panel>
+        )}
+      </div>
+    </>
   );
 }
 
@@ -576,7 +526,6 @@ function TreeRow(props: Omit<TreeProps, "parent"> & { id: string }) {
         props.selection.set(props.id);
       }}
       onDoubleClick={() => {
-        // Unity gesture: double-click a prefab instance opens its definition
         const prefabId = (entity.components["prefab"] as { prefabId?: string } | undefined)
           ?.prefabId;
         if (prefabId) {
@@ -592,7 +541,7 @@ function TreeRow(props: Omit<TreeProps, "parent"> & { id: string }) {
       style={{
         display: "flex",
         justifyContent: "space-between",
-        padding: "1px 4px",
+        padding: "2px 4px",
         paddingLeft: 4 + props.depth * 14,
         cursor: "pointer",
         borderRadius: 3,
@@ -621,16 +570,18 @@ function TreeRow(props: Omit<TreeProps, "parent"> & { id: string }) {
 
 // ---------------------------------------------------------------- assets
 
-function AssetsPanel(props: {
+function AssetsDock(props: {
   assets: AssetLibrary;
   store: SceneStore;
   selection: Selection;
   assetSelection: AssetSelection;
   assetsVersion: Observable<number>;
+  thumbnails: Observable<Record<string, string>>;
   onCreateMaterial: () => void;
   onCreatePrefab: (entityId: string) => void;
 }) {
-  useObservable(props.assetsVersion); // re-render on library changes
+  useObservable(props.assetsVersion);
+  const thumbnails = useObservable(props.thumbnails);
   const selectedEntity = useObservable(props.selection);
   const selectedAsset = useObservable(props.assetSelection);
   const [query, setQuery] = useState("");
@@ -663,138 +614,126 @@ function AssetsPanel(props: {
     const mesh = entity?.components["mesh"] as Record<string, unknown> | undefined;
     if (!mesh) return;
     apply(props.store, [
-      {
-        op: "set-component",
-        id: selectedEntity,
-        component: "mesh",
-        data: { ...mesh, material: materialId },
-      },
+      { op: "set-component", id: selectedEntity, component: "mesh", data: { ...mesh, material: materialId } },
     ]);
   };
 
   return (
-    <Panel
-      id="assets"
-      title="Assets — assets/"
-      defaultRect={() => ({
-        x: 12,
-        y: window.innerHeight - 264,
-        w: Math.max(480, window.innerWidth - 400),
-        h: 252,
-      })}
-      headerExtra={
-        <>
-          <SearchInput value={query} onChange={setQuery} />
-          <button style={buttonStyle} title="New material asset" onClick={props.onCreateMaterial}>
-            + material
-          </button>
-          <button
-            style={buttonStyle}
-            title="Create a prefab from the selected entity"
-            disabled={!selectedEntity}
-            onClick={() => selectedEntity && props.onCreatePrefab(selectedEntity)}
-          >
-            + prefab
-          </button>
-        </>
-      }
-    >
-      {prefabIds.length === 0 && modelIds.length === 0 && materials.length === 0 && (
-        <div style={{ color: "#8b949e" }}>
-          {query
-            ? "No assets match."
-            : "Create materials/prefabs here, drop .glb models in assets/models/, prefab .json in assets/prefabs/"}
-        </div>
-      )}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-        {materials.map((mat) => {
-          const color = (mat.data as { color?: string }).color ?? "#9aa0a8";
-          return (
+    <>
+      <DockHeader title="Assets — assets/">
+        <SearchInput value={query} onChange={setQuery} />
+        <button style={buttonStyle} title="New material asset" onClick={props.onCreateMaterial}>
+          + material
+        </button>
+        <button
+          style={buttonStyle}
+          title="Create a prefab from the selected entity"
+          disabled={!selectedEntity}
+          onClick={() => selectedEntity && props.onCreatePrefab(selectedEntity)}
+        >
+          + prefab
+        </button>
+      </DockHeader>
+      <div style={{ flex: 1, overflowY: "auto", padding: 8 }}>
+        {prefabIds.length === 0 && modelIds.length === 0 && materials.length === 0 && (
+          <div style={{ color: "#8b949e" }}>
+            {query
+              ? "No assets match."
+              : "Create materials/prefabs here, drop .glb models in assets/models/, prefab .json in assets/prefabs/"}
+          </div>
+        )}
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {materials.map((mat) => {
+            const color = (mat.data as { color?: string }).color ?? "#9aa0a8";
+            return (
+              <AssetCard
+                key={mat.id}
+                swatch={color}
+                color="#e3b341"
+                name={mat.name}
+                kind="material"
+                selected={selectedAsset?.kind === "material" && selectedAsset.id === mat.id}
+                onSelect={() => select("material", mat.id)}
+                actionLabel="apply to selection"
+                actionDisabled={!selectedEntity}
+                onAction={() => applyMaterialToSelection(mat.id)}
+              />
+            );
+          })}
+          {prefabIds.map((pid) => (
             <AssetCard
-              key={mat.id}
-              swatch={color}
-              color="#e3b341"
-              name={mat.name}
-              kind="material"
-              selected={selectedAsset?.kind === "material" && selectedAsset.id === mat.id}
-              onSelect={() => select("material", mat.id)}
-              actionLabel="apply to selection"
-              actionDisabled={!selectedEntity}
-              onAction={() => applyMaterialToSelection(mat.id)}
-            />
-          );
-        })}
-        {prefabIds.map((pid) => (
-          <AssetCard
-            key={pid}
-            glyph="◆"
-            color="#79c0ff"
-            name={props.assets.getPrefab(pid)!.name}
-            kind="prefab"
-            selected={selectedAsset?.kind === "prefab" && selectedAsset.id === pid}
-            onSelect={() => select("prefab", pid)}
-            actionLabel="+ add to scene"
-            onAction={() => {
-              const id = newId();
-              instantiate(
-                [
-                  {
-                    op: "add-entity",
-                    id,
-                    entity: {
-                      name: props.assets.getPrefab(pid)!.name,
-                      parent: null,
-                      tags: [],
-                      components: { transform: {}, prefab: { prefabId: pid } },
-                    },
-                  },
-                ],
-                id,
-              );
-            }}
-          />
-        ))}
-        {modelIds.map((mid) => (
-          <AssetCard
-            key={mid}
-            glyph="▣"
-            color="#7ee787"
-            name={props.assets.getModel(mid)!.name}
-            kind="model"
-            selected={selectedAsset?.kind === "model" && selectedAsset.id === mid}
-            onSelect={() => select("model", mid)}
-            actionLabel="+ add to scene"
-            onAction={() => {
-              const id = newId();
-              instantiate(
-                [
-                  {
-                    op: "add-entity",
-                    id,
-                    entity: {
-                      name: props.assets.getModel(mid)!.name,
-                      parent: null,
-                      tags: [],
-                      components: {
-                        transform: {},
-                        mesh: { source: { kind: "asset", assetId: mid } },
+              key={pid}
+              glyph="◆"
+              color="#79c0ff"
+              name={props.assets.getPrefab(pid)!.name}
+              kind="prefab"
+              thumbnail={thumbnails[pid]}
+              selected={selectedAsset?.kind === "prefab" && selectedAsset.id === pid}
+              onSelect={() => select("prefab", pid)}
+              actionLabel="+ add to scene"
+              onAction={() => {
+                const id = newId();
+                instantiate(
+                  [
+                    {
+                      op: "add-entity",
+                      id,
+                      entity: {
+                        name: props.assets.getPrefab(pid)!.name,
+                        parent: null,
+                        tags: [],
+                        components: { transform: {}, prefab: { prefabId: pid } },
                       },
                     },
-                  },
-                ],
-                id,
-              );
-            }}
-          />
-        ))}
+                  ],
+                  id,
+                );
+              }}
+            />
+          ))}
+          {modelIds.map((mid) => (
+            <AssetCard
+              key={mid}
+              glyph="▣"
+              color="#7ee787"
+              name={props.assets.getModel(mid)!.name}
+              kind="model"
+              selected={selectedAsset?.kind === "model" && selectedAsset.id === mid}
+              onSelect={() => select("model", mid)}
+              actionLabel="+ add to scene"
+              onAction={() => {
+                const id = newId();
+                instantiate(
+                  [
+                    {
+                      op: "add-entity",
+                      id,
+                      entity: {
+                        name: props.assets.getModel(mid)!.name,
+                        parent: null,
+                        tags: [],
+                        components: {
+                          transform: {},
+                          mesh: { source: { kind: "asset", assetId: mid } },
+                        },
+                      },
+                    },
+                  ],
+                  id,
+                );
+              }}
+            />
+          ))}
+        </div>
       </div>
-    </Panel>
+    </>
   );
 }
 
 function AssetCard(props: {
   glyph?: string;
   swatch?: string;
+  thumbnail?: string;
   color: string;
   name: string;
   kind: string;
@@ -812,38 +751,54 @@ function AssetCard(props: {
         flexDirection: "column",
         gap: 4,
         padding: 6,
-        width: 126,
+        width: 132,
         background: props.selected ? "#1f3a5f" : "#161b22",
         border: `1px solid ${props.selected ? "#79c0ff" : "#30363d"}`,
         borderRadius: 3,
         cursor: "pointer",
       }}
     >
+      {props.thumbnail ? (
+        <img
+          src={props.thumbnail}
+          alt={props.name}
+          style={{ width: "100%", height: 84, objectFit: "cover", borderRadius: 3, background: "#0b0e14" }}
+        />
+      ) : props.swatch ? (
+        <div
+          style={{
+            width: "100%",
+            height: 40,
+            borderRadius: 3,
+            background: props.swatch,
+            border: "1px solid #30363d",
+          }}
+        />
+      ) : (
+        <div
+          style={{
+            width: "100%",
+            height: 40,
+            borderRadius: 3,
+            background: "#0b0e14",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: props.color,
+            fontSize: 20,
+          }}
+        >
+          {props.glyph}
+        </div>
+      )}
       <span
         style={{
           color: props.color,
           whiteSpace: "nowrap",
           overflow: "hidden",
           textOverflow: "ellipsis",
-          display: "flex",
-          alignItems: "center",
-          gap: 5,
         }}
       >
-        {props.swatch ? (
-          <span
-            style={{
-              width: 12,
-              height: 12,
-              borderRadius: "50%",
-              background: props.swatch,
-              border: "1px solid #30363d",
-              flexShrink: 0,
-            }}
-          />
-        ) : (
-          <span>{props.glyph}</span>
-        )}
         {props.name}
       </span>
       <span style={{ color: "#8b949e", fontSize: 10 }}>{props.kind}</span>
@@ -863,7 +818,7 @@ function AssetCard(props: {
 
 // ---------------------------------------------------------------- inspector
 
-function InspectorPanel(props: {
+function InspectorDock(props: {
   store: SceneStore;
   registry: ComponentRegistry;
   selection: Selection;
@@ -886,31 +841,123 @@ function InspectorPanel(props: {
         : "Inspector";
 
   return (
-    <Panel
-      id="inspector"
-      title={title}
-      defaultRect={() => ({
-        x: window.innerWidth - 372,
-        y: 48,
-        w: 360,
-        h: window.innerHeight - 72,
-      })}
-    >
-      {selected && entity ? (
-        <Inspector id={selected} doc={doc} store={props.store} registry={props.registry} />
-      ) : selectedAsset ? (
-        <AssetInspector
-          selection={selectedAsset}
-          assets={props.assets}
-          assetsVersion={props.assetsVersion}
-          saveAsset={props.saveAsset}
+    <>
+      <DockHeader title={title} />
+      <div style={{ flex: 1, overflowY: "auto", padding: 8 }}>
+        {selected && entity ? (
+          <Inspector id={selected} doc={doc} store={props.store} registry={props.registry} />
+        ) : selectedAsset ? (
+          <AssetInspector
+            selection={selectedAsset}
+            assets={props.assets}
+            assetsVersion={props.assetsVersion}
+            saveAsset={props.saveAsset}
+          />
+        ) : (
+          <div style={{ color: "#8b949e" }}>
+            Select an entity (viewport/hierarchy) or an asset (assets panel)
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+function Inspector(props: {
+  id: string;
+  doc: SceneDoc;
+  store: SceneStore;
+  registry: ComponentRegistry;
+}) {
+  const entity = props.doc.entities[props.id]!;
+  const [addChoice, setAddChoice] = useState("");
+  const available = props.registry.names().filter((name) => !(name in entity.components));
+
+  return (
+    <div>
+      <Row label="name">
+        <TextField
+          value={entity.name}
+          onCommit={(name) =>
+            name.length > 0 && apply(props.store, [{ op: "rename", id: props.id, name }])
+          }
         />
-      ) : (
-        <div style={{ color: "#8b949e" }}>
-          Select an entity (viewport/hierarchy) or an asset (assets panel)
+      </Row>
+      <Row label="id">
+        <span style={{ color: "#8b949e", fontSize: 10 }}>{props.id}</span>
+      </Row>
+      <Row label="tags">
+        <TextField
+          value={entity.tags.join(", ")}
+          onCommit={(text) =>
+            apply(props.store, [
+              {
+                op: "set-tags",
+                id: props.id,
+                tags: text.split(",").map((t) => t.trim()).filter(Boolean),
+              },
+            ])
+          }
+        />
+      </Row>
+
+      {Object.entries(entity.components).map(([name, data]) => (
+        <div key={name} style={{ marginTop: 10 }}>
+          <div style={{ display: "flex", justifyContent: "space-between" }}>
+            <strong style={{ color: "#d2a8ff" }}>{name}</strong>
+            <span
+              style={{ color: "#8b949e", cursor: "pointer" }}
+              title="Remove component"
+              onClick={() =>
+                apply(props.store, [{ op: "remove-component", id: props.id, component: name }])
+              }
+            >
+              ✕
+            </span>
+          </div>
+          <ValueField
+            value={data}
+            onCommit={(next) =>
+              apply(props.store, [
+                { op: "set-component", id: props.id, component: name, data: next },
+              ])
+            }
+          />
         </div>
-      )}
-    </Panel>
+      ))}
+
+      <div style={{ display: "flex", gap: 6, marginTop: 12 }}>
+        <select
+          style={{ ...buttonStyle, flex: 1 }}
+          value={addChoice}
+          onChange={(e) => setAddChoice(e.target.value)}
+        >
+          <option value="">add component…</option>
+          {available.map((name) => (
+            <option key={name} value={name}>
+              {name}
+            </option>
+          ))}
+        </select>
+        <button
+          style={buttonStyle}
+          disabled={addChoice === ""}
+          onClick={() => {
+            apply(props.store, [
+              {
+                op: "set-component",
+                id: props.id,
+                component: addChoice,
+                data: componentSeeds[addChoice] ?? {},
+              },
+            ]);
+            setAddChoice("");
+          }}
+        >
+          add
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -1023,11 +1070,6 @@ function AssetInspector(props: {
 
   const model = props.assets.getModel(id);
   if (!model) return <div style={{ color: "#8b949e" }}>Missing model {id}</div>;
-  return <ModelInspector model={model} />;
-}
-
-function ModelInspector(props: { model: { name: string; url: string } }) {
-  const { model } = props;
   return (
     <div>
       <Row label="name">
@@ -1043,104 +1085,6 @@ function ModelInspector(props: { model: { name: string; url: string } }) {
   );
 }
 
-function Inspector(props: {
-  id: string;
-  doc: SceneDoc;
-  store: SceneStore;
-  registry: ComponentRegistry;
-}) {
-  const entity = props.doc.entities[props.id]!;
-  const [addChoice, setAddChoice] = useState("");
-  const available = props.registry.names().filter((name) => !(name in entity.components));
-
-  return (
-    <div>
-      <Row label="name">
-        <TextField
-          value={entity.name}
-          onCommit={(name) =>
-            name.length > 0 && apply(props.store, [{ op: "rename", id: props.id, name }])
-          }
-        />
-      </Row>
-      <Row label="id">
-        <span style={{ color: "#8b949e", fontSize: 10 }}>{props.id}</span>
-      </Row>
-      <Row label="tags">
-        <TextField
-          value={entity.tags.join(", ")}
-          onCommit={(text) =>
-            apply(props.store, [
-              {
-                op: "set-tags",
-                id: props.id,
-                tags: text.split(",").map((t) => t.trim()).filter(Boolean),
-              },
-            ])
-          }
-        />
-      </Row>
-
-      {Object.entries(entity.components).map(([name, data]) => (
-        <div key={name} style={{ marginTop: 10 }}>
-          <div style={{ display: "flex", justifyContent: "space-between" }}>
-            <strong style={{ color: "#d2a8ff" }}>{name}</strong>
-            <span
-              style={{ color: "#8b949e", cursor: "pointer" }}
-              title="Remove component"
-              onClick={() =>
-                apply(props.store, [{ op: "remove-component", id: props.id, component: name }])
-              }
-            >
-              ✕
-            </span>
-          </div>
-          <ValueField
-            value={data}
-            onCommit={(next) =>
-              apply(props.store, [
-                { op: "set-component", id: props.id, component: name, data: next },
-              ])
-            }
-          />
-        </div>
-      ))}
-
-      <div style={{ display: "flex", gap: 6, marginTop: 12 }}>
-        <select
-          style={{ ...buttonStyle, flex: 1 }}
-          value={addChoice}
-          onChange={(e) => setAddChoice(e.target.value)}
-        >
-          <option value="">add component…</option>
-          {available.map((name) => (
-            <option key={name} value={name}>
-              {name}
-            </option>
-          ))}
-        </select>
-        <button
-          style={buttonStyle}
-          disabled={addChoice === ""}
-          onClick={() => {
-            apply(props.store, [
-              {
-                op: "set-component",
-                id: props.id,
-                component: addChoice,
-                data: componentSeeds[addChoice] ?? {},
-              },
-            ]);
-            setAddChoice("");
-          }}
-        >
-          add
-        </button>
-      </div>
-    </div>
-  );
-}
-
 function PrefabInspector(props: {
   id: string;
   assets: AssetLibrary;
@@ -1148,7 +1092,6 @@ function PrefabInspector(props: {
 }) {
   const prefab = props.assets.getPrefab(props.id)!;
 
-  /** Clone → mutate → validate/update → persist. Rejected edits leave the prefab untouched. */
   const update = (mutate: (draft: typeof prefab) => void): void => {
     const draft = structuredClone(prefab);
     mutate(draft);
@@ -1160,7 +1103,6 @@ function PrefabInspector(props: {
     }
   };
 
-  // internal entity tree, root-first with depth for indentation
   const rows: Array<{ localId: string; depth: number }> = [];
   const walk = (parent: string | null, depth: number) => {
     for (const [localId, entity] of Object.entries(prefab.entities)) {
@@ -1308,7 +1250,7 @@ function ContextMenuView(props: {
         style={{
           position: "fixed",
           left: Math.min(menu.x, window.innerWidth - 180),
-          top: Math.min(menu.y, window.innerHeight - 140),
+          top: Math.min(menu.y, window.innerHeight - 160),
           zIndex: 5001,
           minWidth: 160,
           background: "rgba(13, 17, 23, 0.97)",
@@ -1318,21 +1260,14 @@ function ContextMenuView(props: {
           padding: "4px 0",
         }}
       >
-        {item(
-          "add child entity",
-          () =>
-            apply(props.store, [
-              {
-                op: "add-entity",
-                id: newId(),
-                entity: {
-                  name: "New Entity",
-                  parent: id,
-                  tags: [],
-                  components: { transform: {} },
-                },
-              },
-            ]),
+        {item("add child entity", () =>
+          apply(props.store, [
+            {
+              op: "add-entity",
+              id: newId(),
+              entity: { name: "New Entity", parent: id, tags: [], components: { transform: {} } },
+            },
+          ]),
         )}
         {item(
           "duplicate  (Ctrl+D)",

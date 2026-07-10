@@ -26,6 +26,19 @@ export const meshSchema = z.object({
       kind: z.literal("asset"),
       assetId: z.string().min(1),
     }),
+    z.object({
+      /** Extruded 2D footprint (graybox poly-draw). Rises from the entity origin. */
+      kind: z.literal("polygon"),
+      /** Footprint points in entity-local XZ (stored as extrude-space [x, -z]). */
+      points: z.array(z.tuple([z.number(), z.number()])).min(3),
+      height: z.number().positive(),
+      bevel: z
+        .object({
+          size: z.number().min(0),
+          segments: z.number().int().min(1).max(8).default(2),
+        })
+        .optional(),
+    }),
   ]),
   /** Material asset GUID; omitted = engine default material. */
   material: z.string().optional(),

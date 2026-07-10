@@ -24,7 +24,8 @@ export class EngineRenderer {
 
   setSize(width: number, height: number, pixelRatio = 1): void {
     this.renderer.setPixelRatio(pixelRatio);
-    this.renderer.setSize(width, height);
+    // updateStyle=false: the host app owns canvas CSS (docked editor layout)
+    this.renderer.setSize(width, height, false);
   }
 
   render(scene: THREE.Scene, camera: THREE.Camera): void {

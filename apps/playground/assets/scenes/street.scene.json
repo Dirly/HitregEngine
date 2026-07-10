@@ -89,19 +89,6 @@
           "receiveShadow": true,
           "renderMode": "auto",
           "static": true
-        },
-        "collider": {
-          "shape": "box",
-          "size": [
-            60,
-            0.2,
-            24
-          ],
-          "offset": [
-            0,
-            -0.1,
-            0
-          ]
         }
       }
     },
@@ -231,7 +218,8 @@
       "name": "Crate 1",
       "parent": "ground",
       "tags": [
-        "prop"
+        "prop",
+        "spin"
       ],
       "components": {
         "transform": {
@@ -266,16 +254,15 @@
           "receiveShadow": true,
           "renderMode": "auto",
           "static": false
-        },
-        "rigidbody": {},
-        "collider": {}
+        }
       }
     },
     "crate-1": {
       "name": "Crate 2",
       "parent": "ground",
       "tags": [
-        "prop"
+        "prop",
+        "spin"
       ],
       "components": {
         "transform": {
@@ -310,16 +297,15 @@
           "receiveShadow": true,
           "renderMode": "auto",
           "static": false
-        },
-        "rigidbody": {},
-        "collider": {}
+        }
       }
     },
     "crate-2": {
       "name": "Crate 3",
       "parent": "ground",
       "tags": [
-        "prop"
+        "prop",
+        "spin"
       ],
       "components": {
         "transform": {
@@ -354,16 +340,15 @@
           "receiveShadow": true,
           "renderMode": "auto",
           "static": false
-        },
-        "rigidbody": {},
-        "collider": {}
+        }
       }
     },
     "crate-3": {
       "name": "Crate 4",
       "parent": "ground",
       "tags": [
-        "prop"
+        "prop",
+        "spin"
       ],
       "components": {
         "transform": {
@@ -398,16 +383,15 @@
           "receiveShadow": true,
           "renderMode": "auto",
           "static": false
-        },
-        "rigidbody": {},
-        "collider": {}
+        }
       }
     },
     "crate-4": {
       "name": "Crate 5",
       "parent": "ground",
       "tags": [
-        "prop"
+        "prop",
+        "spin"
       ],
       "components": {
         "transform": {
@@ -442,69 +426,21 @@
           "receiveShadow": true,
           "renderMode": "auto",
           "static": false
-        },
-        "rigidbody": {},
-        "collider": {}
-      }
-    },
-    "door-frame": {
-      "name": "Door Frame",
-      "parent": null,
-      "tags": [
-        "door"
-      ],
-      "components": {
-        "transform": {
-          "position": [
-            3,
-            1.5,
-            -6
-          ],
-          "rotation": [
-            0,
-            0,
-            0,
-            1
-          ],
-          "scale": [
-            1,
-            1,
-            1
-          ]
-        },
-        "mesh": {
-          "source": {
-            "kind": "primitive",
-            "shape": "cylinder",
-            "size": [
-              0.15,
-              3,
-              0.15
-            ]
-          }
-        },
-        "collider": {
-          "shape": "cylinder",
-          "size": [
-            0.15,
-            3,
-            0.15
-          ]
         }
       }
     },
-    "door-panel": {
-      "name": "Door Panel",
+    "cae2cd40-9946-4902-8930-752ea05abc5f": {
+      "name": "Box",
       "parent": null,
       "tags": [
-        "door"
+        "graybox"
       ],
       "components": {
         "transform": {
           "position": [
-            3.65,
+            16.5,
             1.5,
-            -6
+            -9.5
           ],
           "rotation": [
             0,
@@ -523,464 +459,32 @@
             "kind": "primitive",
             "shape": "box",
             "size": [
-              1.3,
-              2.4,
-              0.08
+              5,
+              3,
+              5.5
             ]
-          }
-        },
-        "rigidbody": {
-          "angularDamping": 0.8
+          },
+          "castShadow": true,
+          "receiveShadow": true,
+          "renderMode": "auto",
+          "static": false
         },
         "collider": {
           "shape": "box",
           "size": [
-            1.3,
-            2.4,
-            0.08
+            5,
+            3,
+            5.5
           ],
-          "density": 0.4
-        },
-        "joint": {
-          "kind": "hinge",
-          "target": "door-frame",
-          "anchorA": [
-            -0.65,
-            0,
-            0
-          ],
-          "anchorB": [
+          "offset": [
             0,
             0,
             0
           ],
-          "axis": [
-            0,
-            1,
-            0
-          ],
-          "limits": {
-            "min": -2.2,
-            "max": 2.2
-          }
-        }
-      }
-    },
-    "door-crate": {
-      "name": "Door Knocker",
-      "parent": null,
-      "tags": [
-        "prop"
-      ],
-      "components": {
-        "transform": {
-          "position": [
-            4.1,
-            4.5,
-            -0.5
-          ],
-          "rotation": [
-            0,
-            0,
-            0,
-            1
-          ],
-          "scale": [
-            1,
-            1,
-            1
-          ]
-        },
-        "mesh": {
-          "source": {
-            "kind": "primitive",
-            "shape": "box",
-            "size": [
-              1,
-              1,
-              1
-            ]
-          }
-        },
-        "rigidbody": {},
-        "collider": {}
-      }
-    },
-    "775b2183-af3c-4cba-a71c-e59bfa4a5767": {
-      "name": "Pillar",
-      "parent": null,
-      "tags": [
-        "graybox"
-      ],
-      "components": {
-        "transform": {
-          "position": [
-            0,
-            1.5,
-            0
-          ],
-          "rotation": [
-            0,
-            0,
-            0,
-            1
-          ],
-          "scale": [
-            1,
-            1,
-            1
-          ]
-        },
-        "mesh": {
-          "source": {
-            "kind": "primitive",
-            "shape": "cylinder",
-            "size": [
-              0.6,
-              3,
-              0.6
-            ]
-          },
-          "castShadow": true,
-          "receiveShadow": true,
-          "renderMode": "auto",
-          "static": false
-        }
-      }
-    },
-    "e9b78e04-cdbb-444a-9978-12e1145454c5": {
-      "name": "Platform",
-      "parent": null,
-      "tags": [
-        "graybox"
-      ],
-      "components": {
-        "transform": {
-          "position": [
-            0,
-            1,
-            0
-          ],
-          "rotation": [
-            0,
-            0,
-            0,
-            1
-          ],
-          "scale": [
-            1,
-            1,
-            1
-          ]
-        },
-        "mesh": {
-          "source": {
-            "kind": "primitive",
-            "shape": "box",
-            "size": [
-              4,
-              0.2,
-              4
-            ]
-          },
-          "castShadow": true,
-          "receiveShadow": true,
-          "renderMode": "auto",
-          "static": false
-        }
-      }
-    },
-    "70143229-e04f-46af-8eed-3663a3795083": {
-      "name": "Platform",
-      "parent": null,
-      "tags": [
-        "graybox"
-      ],
-      "components": {
-        "transform": {
-          "position": [
-            0,
-            1,
-            0
-          ],
-          "rotation": [
-            0,
-            0,
-            0,
-            1
-          ],
-          "scale": [
-            1,
-            1,
-            1
-          ]
-        },
-        "mesh": {
-          "source": {
-            "kind": "primitive",
-            "shape": "box",
-            "size": [
-              4,
-              0.2,
-              4
-            ]
-          },
-          "castShadow": true,
-          "receiveShadow": true,
-          "renderMode": "auto",
-          "static": false
-        }
-      }
-    },
-    "e24ac203-367f-4b14-b47c-635c44b9dbf0": {
-      "name": "Platform",
-      "parent": null,
-      "tags": [
-        "graybox"
-      ],
-      "components": {
-        "transform": {
-          "position": [
-            0,
-            1,
-            0
-          ],
-          "rotation": [
-            0,
-            0,
-            0,
-            1
-          ],
-          "scale": [
-            1,
-            1,
-            1
-          ]
-        },
-        "mesh": {
-          "source": {
-            "kind": "primitive",
-            "shape": "box",
-            "size": [
-              4,
-              0.2,
-              4
-            ]
-          },
-          "castShadow": true,
-          "receiveShadow": true,
-          "renderMode": "auto",
-          "static": false
-        }
-      }
-    },
-    "5d29ab5e-5eaf-4dfb-a52f-969e4e60c868": {
-      "name": "Platform",
-      "parent": null,
-      "tags": [
-        "graybox"
-      ],
-      "components": {
-        "transform": {
-          "position": [
-            0,
-            1,
-            0
-          ],
-          "rotation": [
-            0,
-            0,
-            0,
-            1
-          ],
-          "scale": [
-            1,
-            1,
-            1
-          ]
-        },
-        "mesh": {
-          "source": {
-            "kind": "primitive",
-            "shape": "box",
-            "size": [
-              4,
-              0.2,
-              4
-            ]
-          },
-          "castShadow": true,
-          "receiveShadow": true,
-          "renderMode": "auto",
-          "static": false
-        }
-      }
-    },
-    "b2115071-f6e0-402d-945a-ab161ef8dde1": {
-      "name": "Platform",
-      "parent": null,
-      "tags": [
-        "graybox"
-      ],
-      "components": {
-        "transform": {
-          "position": [
-            0,
-            1,
-            0
-          ],
-          "rotation": [
-            0,
-            0,
-            0,
-            1
-          ],
-          "scale": [
-            1,
-            1,
-            1
-          ]
-        },
-        "mesh": {
-          "source": {
-            "kind": "primitive",
-            "shape": "box",
-            "size": [
-              4,
-              0.2,
-              4
-            ]
-          },
-          "castShadow": true,
-          "receiveShadow": true,
-          "renderMode": "auto",
-          "static": false
-        }
-      }
-    },
-    "5d59dda7-4c9f-488b-a700-e9581cf48a24": {
-      "name": "Platform",
-      "parent": null,
-      "tags": [
-        "graybox"
-      ],
-      "components": {
-        "transform": {
-          "position": [
-            0,
-            1,
-            0
-          ],
-          "rotation": [
-            0,
-            0,
-            0,
-            1
-          ],
-          "scale": [
-            1,
-            1,
-            1
-          ]
-        },
-        "mesh": {
-          "source": {
-            "kind": "primitive",
-            "shape": "box",
-            "size": [
-              4,
-              0.2,
-              4
-            ]
-          },
-          "castShadow": true,
-          "receiveShadow": true,
-          "renderMode": "auto",
-          "static": false
-        }
-      }
-    },
-    "23cb3512-3c35-440a-afc6-098a93fd852c": {
-      "name": "Platform",
-      "parent": null,
-      "tags": [
-        "graybox"
-      ],
-      "components": {
-        "transform": {
-          "position": [
-            0,
-            1,
-            0
-          ],
-          "rotation": [
-            0,
-            0,
-            0,
-            1
-          ],
-          "scale": [
-            1,
-            1,
-            1
-          ]
-        },
-        "mesh": {
-          "source": {
-            "kind": "primitive",
-            "shape": "box",
-            "size": [
-              4,
-              0.2,
-              4
-            ]
-          },
-          "castShadow": true,
-          "receiveShadow": true,
-          "renderMode": "auto",
-          "static": false
-        }
-      }
-    },
-    "35c29ac2-7627-4239-b027-1e5dea0ac617": {
-      "name": "Wall",
-      "parent": null,
-      "tags": [
-        "graybox"
-      ],
-      "components": {
-        "transform": {
-          "position": [
-            0,
-            1.5,
-            0
-          ],
-          "rotation": [
-            0,
-            0,
-            0,
-            1
-          ],
-          "scale": [
-            1,
-            1,
-            1
-          ]
-        },
-        "mesh": {
-          "source": {
-            "kind": "primitive",
-            "shape": "box",
-            "size": [
-              4,
-              3,
-              0.2
-            ]
-          },
-          "castShadow": true,
-          "receiveShadow": true,
-          "renderMode": "auto",
-          "static": false
+          "friction": 0.5,
+          "restitution": 0,
+          "density": 1,
+          "isTrigger": false
         }
       }
     }

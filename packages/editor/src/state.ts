@@ -29,6 +29,8 @@ export const createSelection = (): Selection => observable<string | null>(null);
 
 export type GizmoMode = "translate" | "rotate" | "scale";
 
+export type GrayboxShape = "box" | "cylinder" | "sphere" | "wedge" | "poly";
+
 /** edit = authoring; playing/paused = simulation running over runtime state (doc untouched). */
 export type PlayMode = "edit" | "playing" | "paused";
 
