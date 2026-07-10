@@ -66,6 +66,10 @@ async function loadAssets(assets: AssetLibrary): Promise<string | null> {
     if (!/\.(glb|gltf)$/.test(file)) continue;
     assets.addModel({ id: file, name: file.split("/").pop()!, url: fileUrl("models", file) });
   }
+  for (const file of index["textures"] ?? []) {
+    if (!/\.(png|jpe?g|webp)$/i.test(file)) continue;
+    assets.addTexture({ id: file, name: file.split("/").pop()!, url: fileUrl("textures", file) });
+  }
 
   const sceneFile = (index["scenes"] ?? []).find((f) => f.endsWith(".scene.json"));
   if (!sceneFile) return null;
@@ -142,6 +146,15 @@ async function main(): Promise<void> {
 
   let built: BuiltScene;
   let lastExpanded: SceneDoc;
+
+  // debug viz is an EDIT-mode tool — the game view stays clean during play
+  function refreshPhysicsDebugVisibility(): void {
+    if (!built) return;
+    const visible = playMode.get() === "edit" && settings.get().showPhysics;
+    built.scene.traverse((node) => {
+      if (node.userData["physicsDebug"]) node.visible = visible;
+    });
+  }
   function rebuild(): void {
     // v1: full rebuild per change — fine at this scale; diffing comes with ECS
     const expanded = expandScene(store.doc, assets, registry);
@@ -149,8 +162,10 @@ async function main(): Promise<void> {
     built = buildScene(expanded, {
       resolveModel: (assetId) => assets.getModel(assetId)?.url,
       resolveMaterial: (assetId) => assets.getDataAsset(assetId)?.data,
+      resolveTexture: (assetId) => assets.getTexture(assetId)?.url,
     });
     if (settings.get().showPhysics) attachPhysicsDebug(expanded, built.objects);
+    refreshPhysicsDebugVisibility();
     built.scene.background = new THREE.Color(0x0b0e14);
     for (const sceneCam of built.cameras.values()) {
       sceneCam.aspect = (canvas.clientWidth || 1) / (canvas.clientHeight || 1);
@@ -350,6 +365,7 @@ async function main(): Promise<void> {
     if (sim) startPlaySession(); // edits during play restart the session on the new doc
   });
   // stop restores the scene from the document — sim/script state is runtime-only
+  playMode.subscribe(refreshPhysicsDebugVisibility);
   playMode.subscribe(() => {
     const mode = playMode.get();
     if (mode === "edit") {

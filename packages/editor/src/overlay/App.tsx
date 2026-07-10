@@ -692,10 +692,14 @@ function AssetsDock(props: {
   const materials = props.assets
     .dataAssetsOfType("material")
     .filter((a) => inFolder(a.id) && a.name.toLowerCase().includes(q));
+  const textureIds = props.assets
+    .textureIds()
+    .filter((id) => inFolder(id) && id.toLowerCase().includes(q));
 
   const allIds = [
     ...props.assets.prefabIds(),
     ...props.assets.modelIds(),
+    ...props.assets.textureIds(),
     ...props.assets.dataAssetsOfType("material").map((a) => a.id),
   ];
   const folders = [...new Set([...allIds.map(folderOf).filter(Boolean), ...userFolders])].sort();
@@ -723,7 +727,7 @@ function AssetsDock(props: {
     props.selection.set(selectId);
   };
 
-  const select = (kind: "material" | "prefab" | "model", id: string) => {
+  const select = (kind: "material" | "prefab" | "model" | "texture", id: string) => {
     props.selection.set(null);
     props.assetSelection.set({ kind, id });
   };
@@ -776,11 +780,11 @@ function AssetsDock(props: {
         </button>
       </div>
       <div style={{ flex: 1, overflowY: "auto", padding: 8 }}>
-        {prefabIds.length === 0 && modelIds.length === 0 && materials.length === 0 && (
+        {prefabIds.length === 0 && modelIds.length === 0 && materials.length === 0 && textureIds.length === 0 && (
           <div style={{ color: "#8b949e" }}>
             {query
               ? "No assets match."
-              : "Create materials/prefabs here, drop .glb models in assets/models/, prefab .json in assets/prefabs/"}
+              : "Create materials/prefabs here; drop .glb in assets/models/, images in assets/textures/"}
           </div>
         )}
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
@@ -832,6 +836,19 @@ function AssetsDock(props: {
                   id,
                 );
               }}
+            />
+          ))}
+          {textureIds.map((tid) => (
+            <AssetCard
+              key={tid}
+              thumbnail={props.assets.getTexture(tid)!.url}
+              color="#ffa657"
+              name={props.assets.getTexture(tid)!.name}
+              kind="texture"
+              selected={selectedAsset?.kind === "texture" && selectedAsset.id === tid}
+              onSelect={() => select("texture", tid)}
+              actionLabel="view"
+              onAction={() => select("texture", tid)}
             />
           ))}
           {modelIds.map((mid) => (
@@ -1116,7 +1133,7 @@ function Inspector(props: {
 }
 
 function AssetInspector(props: {
-  selection: { kind: "material" | "prefab" | "model"; id: string };
+  selection: { kind: "material" | "prefab" | "model" | "texture"; id: string };
   assets: AssetLibrary;
   assetsVersion: Observable<number>;
   saveAsset?: (file: string, content: string) => void;
@@ -1167,6 +1184,28 @@ function AssetInspector(props: {
         <Row label="color">
           <ColorField value={data.color} onCommit={(v) => commit({ color: v })} />
         </Row>
+        <Row label="texture">
+          <select
+            style={{ ...buttonStyle, width: "100%" }}
+            value={(data as { map?: string }).map ?? ""}
+            onChange={(e) => commit({ map: e.target.value || undefined })}
+          >
+            <option value="">(none)</option>
+            {props.assets.textureIds().map((tid) => (
+              <option key={tid} value={tid}>
+                {tid}
+              </option>
+            ))}
+          </select>
+        </Row>
+        {(data as { map?: string }).map && (
+          <Row label="tiling">
+            <ValueField
+              value={(data as { repeat?: [number, number] }).repeat ?? [1, 1]}
+              onCommit={(v) => commit({ repeat: v })}
+            />
+          </Row>
+        )}
         {data.shader === "standard" && (
           <>
             <Row label="roughness">
@@ -1219,6 +1258,26 @@ function AssetInspector(props: {
           bump();
         }}
       />
+    );
+  }
+
+  if (kind === "texture") {
+    const texture = props.assets.getTexture(id);
+    if (!texture) return <div style={{ color: "#8b949e" }}>Missing texture {id}</div>;
+    return (
+      <div>
+        <img
+          src={texture.url}
+          alt={texture.name}
+          style={{ width: "100%", borderRadius: 3, background: "#0b0e14" }}
+        />
+        <Row label="id">
+          <span style={{ color: "#8b949e", fontSize: 10 }}>{id}</span>
+        </Row>
+        <div style={{ color: "#8b949e", fontSize: 10, marginTop: 6 }}>
+          assets/textures/ — assign via a material's texture dropdown
+        </div>
+      </div>
     );
   }
 

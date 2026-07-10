@@ -84,6 +84,10 @@ export const materialSchema = z.object({
   /** Built-in shader set; custom TSL node-graph shaders are the planned upgrade path. */
   shader: z.enum(["standard", "unlit", "toon", "wireframe"]).default("standard"),
   color: hexColor.default("#9aa0a8"),
+  /** Texture asset id (assets/textures/) used as the color map. */
+  map: z.string().optional(),
+  /** Texture tiling [u, v]. */
+  repeat: z.tuple([z.number(), z.number()]).default([1, 1]),
   roughness: z.number().min(0).max(1).default(0.85),
   metalness: z.number().min(0).max(1).default(0.05),
   emissive: hexColor.default("#000000"),

@@ -7,17 +7,42 @@ export interface BuildOptions {
   resolveModel?(assetId: string): string | undefined;
   /** Resolve a material asset id to its (schema-validated) material data. */
   resolveMaterial?(assetId: string): unknown | undefined;
+  /** Resolve a texture asset id to a fetchable image URL. */
+  resolveTexture?(assetId: string): string | undefined;
 }
 
 interface MaterialData {
   shader: "standard" | "unlit" | "toon" | "wireframe";
   color: string;
+  map?: string;
+  repeat: [number, number];
   roughness: number;
   metalness: number;
   emissive: string;
   emissiveIntensity: number;
   opacity: number;
   transparent: boolean;
+}
+
+const textureCache = new Map<string, THREE.Texture>();
+
+function loadTexture(url: string, repeat: [number, number]): THREE.Texture {
+  let texture = textureCache.get(url);
+  if (!texture) {
+    texture = new THREE.TextureLoader().load(url);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    textureCache.set(url, texture);
+  }
+  // per-material repeat needs a clone sharing the image
+  if (repeat[0] !== 1 || repeat[1] !== 1) {
+    const tiled = texture.clone();
+    tiled.repeat.set(repeat[0], repeat[1]);
+    tiled.needsUpdate = true;
+    return tiled;
+  }
+  return texture;
 }
 
 let gltfLoader: GLTFLoader | null = null;
@@ -150,11 +175,13 @@ function geometryFor(shape: string, size: [number, number, number]): THREE.Buffe
  * resolved via expandScene). Each entity becomes a Group; component visuals
  * hang off it, so transform updates touch only the group.
  */
-function makeMaterial(data: MaterialData): THREE.Material {
+function makeMaterial(data: MaterialData, options: BuildOptions): THREE.Material {
+  const mapUrl = data.map ? options.resolveTexture?.(data.map) : undefined;
   const common = {
     color: new THREE.Color(data.color),
     opacity: data.opacity,
     transparent: data.transparent || data.opacity < 1,
+    ...(mapUrl ? { map: loadTexture(mapUrl, data.repeat ?? [1, 1]) } : {}),
   };
   switch (data.shader) {
     case "unlit":
@@ -193,7 +220,7 @@ function resolveMaterialFor(
     console.warn(`[render] no material asset "${id}" — using default`);
     return defaultMaterial;
   }
-  const material = makeMaterial(data);
+  const material = makeMaterial(data, options);
   cache.set(id, material);
   return material;
 }
@@ -277,6 +304,19 @@ export function buildScene(doc: SceneDoc, options: BuildOptions = {}): BuiltScen
           const dir = new THREE.DirectionalLight(color, lightData.intensity);
           dir.target.position.set(0, -1, 0);
           group.add(dir.target);
+          if (lightData.castShadow) {
+            // default frustum is ~10 units — useless for a real scene
+            dir.shadow.mapSize.set(2048, 2048);
+            const cam = dir.shadow.camera;
+            cam.left = -40;
+            cam.right = 40;
+            cam.top = 40;
+            cam.bottom = -40;
+            cam.near = 0.5;
+            cam.far = 120;
+            dir.shadow.bias = -0.0004;
+            dir.shadow.normalBias = 0.02;
+          }
           light = dir;
           break;
         }

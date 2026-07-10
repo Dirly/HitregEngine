@@ -53,7 +53,13 @@ function hitregBridge(): Plugin {
       // fresh-from-disk asset reads: dev NEVER trusts vite's module cache for
       // assets (the watcher ignores assets/, so cached imports go stale)
       server.middlewares.use("/__hitreg/assets-index", (_req, res) => {
-        const index: Record<string, string[]> = { scenes: [], prefabs: [], materials: [], models: [] };
+        const index: Record<string, string[]> = {
+          scenes: [],
+          prefabs: [],
+          materials: [],
+          models: [],
+          textures: [],
+        };
         const walk = (dir: string, bucket: string[], base: string) => {
           if (!fs.existsSync(dir)) return;
           for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {

@@ -91,6 +91,25 @@ export class AssetLibrary {
     return [...this.models.keys()];
   }
 
+  // -- texture assets (images, resolved to URLs by the host app) -------------
+
+  private textures = new Map<string, ModelAssetDoc>();
+
+  addTexture(texture: ModelAssetDoc): void {
+    if (this.textures.has(texture.id)) {
+      throw new AssetError(`texture ${texture.id} already exists`);
+    }
+    this.textures.set(texture.id, texture);
+  }
+
+  getTexture(id: string): ModelAssetDoc | undefined {
+    return this.textures.get(id);
+  }
+
+  textureIds(): string[] {
+    return [...this.textures.keys()];
+  }
+
   // -- data assets (ScriptableObjects) --------------------------------------
 
   defineDataType(type: string, schema: z.ZodType): void {

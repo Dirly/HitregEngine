@@ -76,7 +76,7 @@ export interface EditorSettings {
 
 /** Selected asset in the Assets panel (mutually exclusive with entity selection). */
 export interface AssetSelectionState {
-  kind: "material" | "prefab" | "model";
+  kind: "material" | "prefab" | "model" | "texture";
   id: string;
 }
 export type AssetSelection = Observable<AssetSelectionState | null>;
