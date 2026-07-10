@@ -22,6 +22,9 @@ importers:
       '@hitreg/render':
         specifier: workspace:*
         version: link:../../packages/render
+      '@hitreg/scripting':
+        specifier: workspace:^
+        version: link:../../packages/scripting
       camera-controls:
         specifier: ^3.1.2
         version: 3.1.2(three@0.185.1)
@@ -120,6 +123,28 @@ importers:
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
+
+  packages/scripting:
+    dependencies:
+      '@hitreg/core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.1
+      '@types/three':
+        specifier: ^0.185.1
+        version: 0.185.1
+      three:
+        specifier: ^0.185.1
+        version: 0.185.1
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^3.0.0
+        version: 3.2.7(@types/node@22.20.1)(lightningcss@1.32.0)(tsx@4.23.0)
 
 packages:
 

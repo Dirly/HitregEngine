@@ -31,6 +31,7 @@ const componentSeeds: Record<string, unknown> = {
   rigidbody: {},
   collider: {},
   joint: { kind: "hinge", target: "SET-TARGET-ENTITY-ID" },
+  script: { name: "spinner", params: {} },
 };
 
 export interface AppProps {

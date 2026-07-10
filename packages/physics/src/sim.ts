@@ -13,6 +13,7 @@ interface RigidbodyData {
   angularDamping: number;
   gravityScale: number;
   ccd: boolean;
+  lockRotations: boolean;
 }
 
 interface ColliderData {
@@ -59,6 +60,9 @@ export class PhysicsSim {
   private readonly world: RAPIER.World;
   /** Only bodies that can move (dynamic/kinematic) — statics never report state. */
   private readonly moving = new Map<string, RAPIER.RigidBody>();
+  private readonly events = new RAPIER.EventQueue(true);
+  private readonly colliderToEntity = new Map<number, string>();
+  private pendingCollisions: Array<[string, string]> = [];
 
   constructor(doc: SceneDoc, gravity: Vec3 = [0, -9.81, 0]) {
     if (!initialized) {
@@ -98,6 +102,7 @@ export class PhysicsSim {
           .setGravityScale(rb.gravityScale)
           .setCcdEnabled(rb.ccd);
         if (rb.mass > 0) bodyDesc.setAdditionalMass(rb.mass);
+        if (rb.lockRotations) bodyDesc.lockRotations();
       }
       const body = this.world.createRigidBody(bodyDesc);
       bodies.set(id, body);
@@ -127,8 +132,10 @@ export class PhysicsSim {
           .setFriction(col.friction)
           .setRestitution(col.restitution)
           .setDensity(col.density)
-          .setSensor(col.isTrigger);
-        this.world.createCollider(shape, body);
+          .setSensor(col.isTrigger)
+          .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS);
+        const created = this.world.createCollider(shape, body);
+        this.colliderToEntity.set(created.handle, id);
       }
     }
 
@@ -178,7 +185,35 @@ export class PhysicsSim {
 
   step(dt: number): void {
     this.world.timestep = dt;
-    this.world.step();
+    this.world.step(this.events);
+    this.events.drainCollisionEvents((h1, h2, started) => {
+      if (!started) return;
+      const a = this.colliderToEntity.get(h1);
+      const b = this.colliderToEntity.get(h2);
+      if (a && b) this.pendingCollisions.push([a, b]);
+    });
+  }
+
+  /** Collision-started pairs since the last call (entity ids, expanded scene). */
+  takeCollisions(): Array<[string, string]> {
+    const out = this.pendingCollisions;
+    this.pendingCollisions = [];
+    return out;
+  }
+
+  getLinvel(id: string): Vec3 | null {
+    const body = this.moving.get(id);
+    if (!body) return null;
+    const v = body.linvel();
+    return [v.x, v.y, v.z];
+  }
+
+  setLinvel(id: string, v: Vec3): void {
+    this.moving.get(id)?.setLinvel({ x: v[0], y: v[1], z: v[2] }, true);
+  }
+
+  applyImpulse(id: string, v: Vec3): void {
+    this.moving.get(id)?.applyImpulse({ x: v[0], y: v[1], z: v[2] }, true);
   }
 
   /** World-space states of every moving body, keyed by (expanded) entity id. */

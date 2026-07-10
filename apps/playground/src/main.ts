@@ -15,6 +15,12 @@ import {
 import { attachPhysicsDebug, buildScene, EngineRenderer, type BuiltScene } from "@hitreg/render";
 import { initPhysics, PhysicsSim, type BodyState } from "@hitreg/physics";
 import {
+  InputService,
+  registerBuiltinScripts,
+  ScriptRegistry,
+  ScriptRuntime,
+} from "@hitreg/scripting";
+import {
   createAssetSelection,
   createContextMenu,
   createDockSizes,
@@ -128,9 +134,11 @@ async function main(): Promise<void> {
   // -- render side -----------------------------------------------------------
 
   let built: BuiltScene;
+  let lastExpanded: SceneDoc;
   function rebuild(): void {
     // v1: full rebuild per change — fine at this scale; diffing comes with ECS
     const expanded = expandScene(store.doc, assets, registry);
+    lastExpanded = expanded;
     built = buildScene(expanded, {
       resolveModel: (assetId) => assets.getModel(assetId)?.url,
       resolveMaterial: (assetId) => assets.getDataAsset(assetId)?.data,
@@ -260,27 +268,58 @@ async function main(): Promise<void> {
     }
   });
 
-  // -- physics: play mode builds a Rapier world from the expanded doc ---------
+  // -- play mode: physics world + script runtime from the expanded doc --------
+
+  const scriptRegistry = new ScriptRegistry();
+  registerBuiltinScripts(scriptRegistry);
+  // project-defined scripts: any default-exported Script class in src/scripts/
+  const projectScripts = import.meta.glob("./scripts/*.ts", { eager: true });
+  for (const [path, mod] of Object.entries(projectScripts)) {
+    const cls = (mod as { default?: Parameters<ScriptRegistry["register"]>[0] }).default;
+    if (cls) {
+      try {
+        scriptRegistry.register(cls);
+      } catch (error) {
+        console.warn(`[scripts] failed to register ${path}:`, error);
+      }
+    }
+  }
+  const input = new InputService();
 
   let sim: PhysicsSim | null = null;
-  function rebuildSim(): void {
+  let scripts: ScriptRuntime | null = null;
+  function startPlaySession(): void {
     sim?.free();
-    sim = new PhysicsSim(expandScene(store.doc, assets, registry));
+    scripts?.dispose();
+    sim = new PhysicsSim(lastExpanded);
+    scripts = new ScriptRuntime({
+      doc: lastExpanded,
+      objects: built.objects,
+      sim,
+      registry: scriptRegistry,
+      input,
+    });
+    scripts.start();
+  }
+  function endPlaySession(): void {
+    scripts?.dispose();
+    scripts = null;
+    sim?.free();
+    sim = null;
   }
 
   store.subscribe(rebuild);
   store.subscribe(() => {
-    if (sim) rebuildSim(); // edits during play restart the sim from the new doc
+    if (sim) startPlaySession(); // edits during play restart the session on the new doc
   });
-  // stop restores the scene from the document — sim state is runtime-only
+  // stop restores the scene from the document — sim/script state is runtime-only
   playMode.subscribe(() => {
     const mode = playMode.get();
     if (mode === "edit") {
-      sim?.free();
-      sim = null;
+      endPlaySession();
       rebuild();
     } else if (mode === "playing" && !sim) {
-      rebuildSim();
+      startPlaySession();
     }
   });
   rebuild();
@@ -517,12 +556,13 @@ async function main(): Promise<void> {
   const loop = new FixedTimestepLoop({
     fixedUpdate: (dt) => {
       if (playMode.get() !== "playing" || !sim) return;
-      // sim mutates RUNTIME objects only — the document is authoring truth
+      // sim/scripts mutate RUNTIME objects only — the document is authoring truth
       sim.step(dt);
       for (const [id, state] of sim.states()) {
         const object = built.objects.get(id);
         if (object) applyBodyState(object, state);
       }
+      scripts?.fixedUpdate(dt);
     },
     update: (dt) => {
       controls.update(dt);

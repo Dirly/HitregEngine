@@ -82,11 +82,18 @@ export const materialSchema = z.object({
   transparent: z.boolean().default(false),
 });
 
+/** Attach behavior: a registered script by name + its tuning params. */
+export const scriptSchema = z.object({
+  name: z.string().min(1),
+  params: z.record(z.string(), z.unknown()).default({}),
+});
+
 export function registerCoreComponents(registry: ComponentRegistry): void {
   registry.register("transform", transformSchema);
   registry.register("mesh", meshSchema);
   registry.register("light", lightSchema);
   registry.register("camera", cameraSchema);
   registry.register("prefab", prefabInstanceSchema);
+  registry.register("script", scriptSchema);
   registerPhysicsComponents(registry);
 }

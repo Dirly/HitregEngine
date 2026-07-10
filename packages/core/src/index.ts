@@ -21,6 +21,7 @@ export {
   lightSchema,
   cameraSchema,
   materialSchema,
+  scriptSchema,
   vec3,
   quat,
   hexColor,

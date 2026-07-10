@@ -18,6 +18,8 @@ export const rigidbodySchema = z.object({
   gravityScale: z.number().default(1),
   /** Continuous collision detection for fast movers (bullets). */
   ccd: z.boolean().default(false),
+  /** Keep the body upright (character controllers). */
+  lockRotations: z.boolean().default(false),
 });
 
 export const colliderSchema = z.object({

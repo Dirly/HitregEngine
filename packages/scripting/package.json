@@ -1,0 +1,22 @@
+{
+  "name": "@hitreg/scripting",
+  "version": "0.0.1",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hitreg/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/three": "^0.185.1",
+    "three": "^0.185.1",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
