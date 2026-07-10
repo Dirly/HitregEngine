@@ -4,3 +4,15 @@ coverage/
 *.log
 .DS_Store
 .vite/
+
+# secrets / local env — never commit
+.env
+.env.*
+
+# local-only Claude Code state and third-party tooling
+.claude/settings.local.json
+.claude/skills/impeccable/
+.impeccable/
+
+# stray npm cache copies (accidentally landed in the repo once)
+%USERPROFILE%*/
