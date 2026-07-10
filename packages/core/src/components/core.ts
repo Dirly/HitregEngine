@@ -134,6 +134,8 @@ export const audioSchema = z.object({
 export const skySchema = z.object({
   top: hexColor.default("#39598f"),
   bottom: hexColor.default("#101522"),
+  /** Equirectangular panorama texture asset id — replaces the gradient dome. */
+  texture: z.string().optional(),
   /** Hemisphere fill light tinted by the sky colors. 0 disables. */
   light: z.number().min(0).default(0.5),
   fog: z

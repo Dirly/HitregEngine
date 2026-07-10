@@ -419,11 +419,32 @@ export function buildScene(doc: SceneDoc, options: BuildOptions = {}): BuiltScen
     }
 
     const skyData = entity.components["sky"] as
-      | { top: string; bottom: string; light: number; fog?: { color: string; near: number; far: number } }
+      | {
+          top: string;
+          bottom: string;
+          texture?: string;
+          light: number;
+          fog?: { color: string; near: number; far: number };
+        }
       | undefined;
     if (skyData && !scene.background) {
-      group.add(buildSkyDome(skyData.top, skyData.bottom));
-      scene.background = new THREE.Color(skyData.bottom);
+      const panoramaUrl = skyData.texture ? options.resolveTexture?.(skyData.texture) : undefined;
+      if (panoramaUrl) {
+        scene.background = new THREE.Color(skyData.bottom); // until the image lands
+        new THREE.TextureLoader().load(
+          panoramaUrl,
+          (texture) => {
+            texture.mapping = THREE.EquirectangularReflectionMapping;
+            texture.colorSpace = THREE.SRGBColorSpace;
+            scene.background = texture;
+          },
+          undefined,
+          (error) => console.warn(`[render] sky texture failed: ${panoramaUrl}`, error),
+        );
+      } else {
+        group.add(buildSkyDome(skyData.top, skyData.bottom));
+        scene.background = new THREE.Color(skyData.bottom);
+      }
       if (skyData.fog) {
         scene.fog = new THREE.Fog(new THREE.Color(skyData.fog.color), skyData.fog.near, skyData.fog.far);
       }

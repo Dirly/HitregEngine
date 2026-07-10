@@ -265,6 +265,40 @@ export function App(props: AppProps) {
             thumbnails={props.thumbnails}
             onCreateMaterial={createMaterial}
             onCreatePrefab={createPrefabFrom}
+            onSetSky={(textureId) => {
+              // put the panorama on the scene's Environment (creating it if needed)
+              const found = Object.entries(props.store.doc.entities).find(
+                ([, e]) => "sky" in e.components,
+              );
+              try {
+                if (found) {
+                  const sky = found[1].components["sky"] as Record<string, unknown>;
+                  props.store.apply([
+                    {
+                      op: "set-component",
+                      id: found[0],
+                      component: "sky",
+                      data: { ...sky, texture: textureId },
+                    },
+                  ]);
+                } else {
+                  props.store.apply([
+                    {
+                      op: "add-entity",
+                      id: newId(),
+                      entity: {
+                        name: "Environment",
+                        parent: null,
+                        tags: [],
+                        components: { sky: { texture: textureId } },
+                      },
+                    },
+                  ]);
+                }
+              } catch (error) {
+                console.warn("[editor] set sky failed:", error);
+              }
+            }}
           />
         </div>
 
@@ -761,6 +795,7 @@ function AssetsDock(props: {
   thumbnails: Observable<Record<string, string>>;
   onCreateMaterial: (folder: string) => void;
   onCreatePrefab: (entityId: string, folder: string) => void;
+  onSetSky: (textureId: string) => void;
 }) {
   useObservable(props.assetsVersion);
   const thumbnails = useObservable(props.thumbnails);
@@ -944,8 +979,8 @@ function AssetsDock(props: {
               kind="texture"
               selected={selectedAsset?.kind === "texture" && selectedAsset.id === tid}
               onSelect={() => select("texture", tid)}
-              actionLabel="view"
-              onAction={() => select("texture", tid)}
+              actionLabel="set as sky"
+              onAction={() => props.onSetSky(tid)}
             />
           ))}
           {props.assets

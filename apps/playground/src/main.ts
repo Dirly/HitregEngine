@@ -280,16 +280,36 @@ async function main(): Promise<void> {
   window.addEventListener("pointerup", (e) => {
     if (e.button === 0) flyBtnDown = false;
   });
+  const flyDir = new THREE.Vector3();
+  const flyRight = new THREE.Vector3();
+  const flyDelta = new THREE.Vector3();
+  const flyTarget = new THREE.Vector3();
+  const WORLD_UP = new THREE.Vector3(0, 1, 0);
   function updateFlyCam(dt: number): void {
     if (!editorVisible.get() || !flyBtnDown) return;
     const boost = input.isDown("ShiftLeft") || input.isDown("ShiftRight") ? 3 : 1;
     const move = 14 * dt * boost;
-    if (input.isDown("KeyW")) void controls.forward(move, false);
-    if (input.isDown("KeyS")) void controls.forward(-move, false);
-    if (input.isDown("KeyA")) void controls.truck(-move, 0, false);
-    if (input.isDown("KeyD")) void controls.truck(move, 0, false);
-    if (input.isDown("KeyE")) void controls.truck(0, -move, false);
-    if (input.isDown("KeyQ")) void controls.truck(0, move, false);
+    // W flies along the LOOK direction (pitch included); A/D strafe camera-right
+    camera.getWorldDirection(flyDir);
+    flyRight.crossVectors(flyDir, WORLD_UP).normalize();
+    flyDelta.set(0, 0, 0);
+    if (input.isDown("KeyW")) flyDelta.addScaledVector(flyDir, move);
+    if (input.isDown("KeyS")) flyDelta.addScaledVector(flyDir, -move);
+    if (input.isDown("KeyA")) flyDelta.addScaledVector(flyRight, -move);
+    if (input.isDown("KeyD")) flyDelta.addScaledVector(flyRight, move);
+    if (input.isDown("KeyE")) flyDelta.addScaledVector(WORLD_UP, move);
+    if (input.isDown("KeyQ")) flyDelta.addScaledVector(WORLD_UP, -move);
+    if (flyDelta.lengthSq() === 0) return;
+    controls.getTarget(flyTarget);
+    void controls.setLookAt(
+      camera.position.x + flyDelta.x,
+      camera.position.y + flyDelta.y,
+      camera.position.z + flyDelta.z,
+      flyTarget.x + flyDelta.x,
+      flyTarget.y + flyDelta.y,
+      flyTarget.z + flyDelta.z,
+      false,
+    );
   }
 
   // -- editor ----------------------------------------------------------------
