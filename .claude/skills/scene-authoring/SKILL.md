@@ -29,8 +29,13 @@ minimal data is idiomatic: `transform: {}` is a valid identity transform.
 - `transform` — `{ position: [x,y,z], rotation: quat [x,y,z,w], scale: [x,y,z] }`, all optional.
 - `mesh` — `{ source: { kind: "primitive", shape: box|sphere|plane|cylinder|capsule|cone|torus, size: [x,y,z] } | { kind: "asset", assetId }, castShadow, receiveShadow, static }`.
 - `light` — `{ kind: directional|point|spot|ambient, color: "#rrggbb", intensity, range, angle, castShadow }`.
-- `camera` — `{ fov, near, far, active }`.
+- `camera` — `{ fov, near, far, active, rig?: { mode: "follow", targetTag, distance, height, damping } }` (follow rig tracks the first entity with targetTag in play mode).
 - `prefab` — makes the entity a prefab instance (below).
+- `rigidbody` — `{ kind: dynamic|kinematic|static, lockRotations, ccd, ... }`; `collider` — `{ shape: box|sphere|capsule|cylinder, size, offset, friction, restitution, isTrigger }` (collider without rigidbody = static). `joint` — `{ kind: fixed|hinge|slider|ball, target, anchorA, anchorB, axis, limits?, motor? }`.
+- `script` — `{ name, params }`: attach registered behaviors (spinner, oscillator, player-controller, collectible, anim-cycler + project scripts in src/scripts/). Script context: setAnimation(clip, fade), playSound(id?), setActiveCamera(id), viewForward(), sim velocity APIs.
+- `animator` — `{ play?: clipName, fade, speed }` for glTF asset meshes; clips crossfade Unity-style.
+- `audio` — `{ src: soundAssetId, volume, loop, autoplay, positional, refDistance }` (files in assets/audio/).
+- Scenes: multiple `assets/scenes/<name>.scene.json` files; the editor toolbar picks between them. Only the scene being edited live-syncs; creating a new scene file adds it to the picker.
 
 Get the full machine-readable spec: `registry.jsonSchemas()`.
 

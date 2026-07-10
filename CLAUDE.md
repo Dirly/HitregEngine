@@ -45,8 +45,12 @@ Use the `scene-authoring` skill when creating or editing scene/prefab documents.
 
 The primary AI channel is **direct file editing** — no MCP required:
 
-- Scenes: `apps/playground/assets/scenes/*.scene.json` (SceneDoc format).
-  Prefabs: `assets/prefabs/*.json`. Materials: `assets/materials/*.json`.
+- Scenes: `apps/playground/assets/scenes/*.scene.json` (SceneDoc format; multiple
+  scenes supported — the editor toolbar picks; only the ACTIVE scene live-syncs).
+  Prefabs: `assets/prefabs/**/*.json`. Materials: `assets/materials/**/*.json`
+  (support `map` texture id + `repeat`). Textures: `assets/textures/` (images).
+  Audio: `assets/audio/` (wav/mp3/ogg). Models: `assets/models/*.glb` (animation
+  clips drive the `animator` component; blending via scripts' ctx.setAnimation).
 - While `pnpm dev` runs, any edit to those files **applies to the running
   browser scene in place** (dev-server watcher → websocket), no reload. Invalid
   edits are rejected with a console warning and change nothing — schemas guard
