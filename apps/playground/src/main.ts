@@ -226,6 +226,22 @@ async function main(): Promise<void> {
       if (node.userData["physicsDebug"]) node.visible = visible;
     });
   }
+  // camera collision: in play mode the follow camera dollies in instead of
+  // clipping through static scenery (terrain, rocks, trees)
+  function refreshCameraColliders(): void {
+    if (!built || playMode.get() === "edit") {
+      controls.colliderMeshes = [];
+      return;
+    }
+    const meshes: THREE.Object3D[] = [];
+    for (const [id, entity] of Object.entries(lastExpanded.entities)) {
+      if (!entity.tags.includes("static")) continue;
+      built.objects.get(id)?.traverse((node) => {
+        if ((node as THREE.Mesh).isMesh) meshes.push(node);
+      });
+    }
+    controls.colliderMeshes = meshes;
+  }
   function rebuild(): void {
     // v1: full rebuild per change — fine at this scale; diffing comes with ECS
     const expanded = expandScene(store.doc, assets, registry);
@@ -246,10 +262,13 @@ async function main(): Promise<void> {
         if (source?.assetId && !source.node) {
           modelNodes[source.assetId] = root.children.map((c) => c.name).filter(Boolean);
         }
+        // late-loading static models (rocks, trees) must block the camera too
+        if (playMode.get() !== "edit") refreshCameraColliders();
       },
     });
     if (settings.get().showPhysics) attachPhysicsDebug(expanded, built.objects);
     refreshPhysicsDebugVisibility();
+    refreshCameraColliders();
     // sky component sets its own background; this is only the no-sky fallback
     if (!built.scene.background) built.scene.background = new THREE.Color(0x0b0e14);
     for (const sceneCam of built.cameras.values()) {
@@ -632,14 +651,19 @@ async function main(): Promise<void> {
       canvas.requestPointerLock();
     }
   });
+  const editorMinDistance = controls.minDistance;
   playMode.subscribe(() => {
     if (playMode.get() === "playing") {
       controls.maxPolarAngle = 1.45; // don't let the game camera dive underground
+      controls.minDistance = 2; // collision dolly-in stops at arm's length
+      void controls.dollyTo(8, true); // game framing: tighter than editor zoom
       canvas.requestPointerLock(); // the play-button click is our user gesture
     } else {
       controls.maxPolarAngle = editorMaxPolar;
+      controls.minDistance = editorMinDistance;
       if (document.pointerLockElement === canvas) document.exitPointerLock();
     }
+    refreshCameraColliders();
   });
   rebuild();
 

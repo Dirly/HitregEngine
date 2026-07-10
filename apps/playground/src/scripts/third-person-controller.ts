@@ -16,6 +16,7 @@ export default class ThirdPersonController extends Script {
     runClip: { default: "Run" },
     modelYaw: { default: 0, min: -3.1416, max: 3.1416, description: "extra yaw if the model faces backwards" },
     turnSpeed: { default: 14, min: 1, max: 40, description: "how snappily the character turns" },
+    face: { default: "camera", description: "camera = always face the aim (strafe shooter); movement = face where you run" },
   };
 
   private yaw = 0;
@@ -71,9 +72,13 @@ export default class ThirdPersonController extends Script {
     if (input.isDown("Space") && grounded) vy = this.param<number>("jump");
     sim.setLinvel(this.entityId, [x, vy, z]);
 
-    // face movement (body rotations are locked; the visual is ours to steer)
-    if (len > 0) {
-      const target = Math.atan2(x, z) + this.param<number>("modelYaw");
+    // steer the visual (body rotations are locked): shooter mode tracks the
+    // camera aim even while strafing; movement mode faces where you run
+    const faceCamera = this.param<string>("face") === "camera";
+    if (faceCamera || len > 0) {
+      const target = faceCamera
+        ? Math.atan2(fx, fz) + this.param<number>("modelYaw")
+        : Math.atan2(x, z) + this.param<number>("modelYaw");
       let diff = target - this.yaw;
       while (diff > Math.PI) diff -= Math.PI * 2;
       while (diff < -Math.PI) diff += Math.PI * 2;

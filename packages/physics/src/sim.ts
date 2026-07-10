@@ -115,9 +115,14 @@ export class PhysicsSim {
       if (kind !== "static") this.moving.set(id, body);
 
       if (col) {
+        // file-authored scenes may omit fields the zod schema would default —
+        // never trust a component doc to be fully populated
+        const size = col.size ?? [1, 1, 1];
+        const offset = col.offset ?? [0, 0, 0];
         const sx = Math.abs(world.scale[0]);
         const sy = Math.abs(world.scale[1]);
-        const [w, h, d] = [col.size[0] * sx, col.size[1] * sy, col.size[2] * Math.abs(world.scale[2])];
+        const sz = Math.abs(world.scale[2]);
+        const [w, h, d] = [size[0] * sx, size[1] * sy, size[2] * sz];
         let shape: RAPIER.ColliderDesc;
         switch (col.shape) {
           case "heightmap": {
@@ -146,11 +151,11 @@ export class PhysicsSim {
             shape = RAPIER.ColliderDesc.cuboid(w / 2, h / 2, d / 2);
         }
         shape
-          .setTranslation(col.offset[0] * sx, col.offset[1] * sy, col.offset[2] * Math.abs(world.scale[2]))
-          .setFriction(col.friction)
-          .setRestitution(col.restitution)
-          .setDensity(col.density)
-          .setSensor(col.isTrigger)
+          .setTranslation(offset[0] * sx, offset[1] * sy, offset[2] * sz)
+          .setFriction(col.friction ?? 0.5)
+          .setRestitution(col.restitution ?? 0)
+          .setDensity(col.density ?? 1)
+          .setSensor(col.isTrigger ?? false)
           .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS);
         const created = this.world.createCollider(shape, body);
         this.colliderToEntity.set(created.handle, id);

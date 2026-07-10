@@ -55,7 +55,7 @@ interface Upgrade {
 
 const BLINK_RED = 0xff2222;
 const BLINK_WHITE = 0xffffff;
-const ARENA_HALF = 14.5; // bullets die at the walls
+const ARENA_HALF = 19.5; // bullets die at the barriers
 
 export default class SurvivorsManager extends Script {
   static override scriptName = "survivors-manager";
@@ -76,11 +76,11 @@ export default class SurvivorsManager extends Script {
     botMaxSpeed: { default: 6.5, min: 1, max: 20 },
     botBaseDamage: { default: 8, min: 0, max: 100 },
     botDamagePerWave: { default: 2, min: 0, max: 50 },
-    botAttackRange: { default: 1.9, min: 0.5, max: 10 },
+    botAttackRange: { default: 2.3, min: 0.5, max: 10 },
     botAttackCooldown: { default: 1.1, min: 0.1, max: 10 },
     firstWaveBots: { default: 3, min: 1, max: 10 },
     botsPerWave: { default: 1, min: 0, max: 5, description: "extra bots each wave" },
-    spawnRadius: { default: 12.5, min: 5, max: 19 },
+    spawnRadius: { default: 17, min: 5, max: 24 },
     breatherSeconds: { default: 4, min: 0, max: 30, description: "pause between waves" },
     xpPerKill: { default: 10, min: 1, max: 100 },
     restartAfter: { default: 6, min: 1, max: 30 },
@@ -256,7 +256,7 @@ export default class SurvivorsManager extends Script {
 
     const playerId = this.ctx.findByTag("player")[0];
     if (playerId) {
-      this.ctx.sim?.setPosition?.(playerId, [0, 0.2, 6]);
+      this.ctx.sim?.setPosition?.(playerId, [0, 0.9, 6]);
       const obj = this.ctx.getObject(playerId);
       if (obj) {
         obj.userData.speedMult = 1;
@@ -298,9 +298,9 @@ export default class SurvivorsManager extends Script {
     if (!s) return;
     const angle = Math.random() * Math.PI * 2;
     const r = this.param<number>("spawnRadius") * (0.85 + Math.random() * 0.15);
-    const x = Math.max(-13.5, Math.min(13.5, Math.cos(angle) * r));
-    const z = Math.max(-13.5, Math.min(13.5, Math.sin(angle) * r));
-    this.ctx.sim?.setPosition?.(id, [x, 0.6, z]);
+    const x = Math.max(-18.5, Math.min(18.5, Math.cos(angle) * r));
+    const z = Math.max(-18.5, Math.min(18.5, Math.sin(angle) * r));
+    this.ctx.sim?.setPosition?.(id, [x, 1.8, z]); // drop onto the terrain
     const obj = this.ctx.getObject(id);
     if (obj) obj.visible = true;
     const w = this.wave - 1;
@@ -741,7 +741,7 @@ export default class SurvivorsManager extends Script {
 
     this.elapsed += dt;
     if (this.regen > 0) this.playerHp = Math.min(this.playerMaxHp, this.playerHp + this.regen * dt);
-    if (player.position.y < -5) sim.setPosition?.(playerId, [0, 0.2, 6]);
+    if (player.position.y < -5) sim.setPosition?.(playerId, [0, 0.9, 6]);
 
     // wave director
     const activeBots = this.botIds().filter((id) => this.bots.get(id)?.active);
@@ -790,7 +790,7 @@ export default class SurvivorsManager extends Script {
         this.hurtFlashUntil = t + 0.45;
         this.blink(player, BLINK_RED);
         this.burst(player.position.clone().setY(1.2), 0xf85149, 6, 3);
-        this.banner("💀 OUCH!", 0.6);
+        this.banner("🤖 OUCH!", 0.6);
         this.ctx.playSound?.("thud.wav");
       }
     }

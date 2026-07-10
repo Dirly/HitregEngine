@@ -39,7 +39,9 @@ pnpm typecheck                   # all packages
 - `apps/playground` — dev sandbox; the street scene doubles as a living example
   of scene authoring.
 
-Use the `scene-authoring` skill when creating or editing scene/prefab documents.
+Scene/prefab format reference: **docs/scene-authoring.md** (tool-neutral; the
+`scene-authoring` skill wraps it for Claude sessions — non-Claude agents read
+the doc directly, plus AGENTS.md).
 
 ## AI workflow (file-first)
 
