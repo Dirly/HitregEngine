@@ -41,6 +41,23 @@ export const meshSchema = z.object({
         })
         .optional(),
     }),
+    z.object({
+      /** Procedural noise terrain (see core/terrain.ts). Pair with a
+       * collider of shape "heightmap" for matching physics. */
+      kind: z.literal("heightmap"),
+      /** World extent [width, depth], centered on the entity origin. */
+      size: z.tuple([z.number().positive(), z.number().positive()]).default([80, 80]),
+      amplitude: z.number().min(0).default(1.5),
+      /** Noise feature scale — higher = smaller, busier hills. */
+      frequency: z.number().positive().default(0.08),
+      seed: z.number().int().default(1),
+      /** Grid subdivisions per side. */
+      resolution: z.number().int().min(8).max(256).default(96),
+      /** Radius of a flat disc at the center (a playfield); 0 = none. */
+      flatRadius: z.number().min(0).default(0),
+      /** Distance over which the flat disc blends up to full height. */
+      flatFalloff: z.number().positive().default(8),
+    }),
   ]),
   /** Material asset GUID; omitted = engine default material. */
   material: z.string().optional(),

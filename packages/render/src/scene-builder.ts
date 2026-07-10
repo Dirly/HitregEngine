@@ -1,7 +1,7 @@
 import * as THREE from "three/webgpu";
 import { GLTFLoader, type GLTF } from "three/addons/loaders/GLTFLoader.js";
 import { clone as skeletonClone } from "three/addons/utils/SkeletonUtils.js";
-import type { SceneDoc } from "@hitreg/core";
+import { heightmapMesh, type HeightmapParams, type SceneDoc } from "@hitreg/core";
 
 // kits load once and instance many times
 const gltfCache = new Map<string, Promise<GLTF>>();
@@ -80,7 +80,8 @@ interface MeshData {
         points: Array<[number, number]>;
         height: number;
         bevel?: { size: number; segments: number };
-      };
+      }
+    | ({ kind: "heightmap" } & HeightmapParams);
   material?: string;
   castShadow: boolean;
   receiveShadow: boolean;
@@ -317,6 +318,20 @@ export function buildScene(doc: SceneDoc, options: BuildOptions = {}): BuiltScen
         polygonGeometry(meshData.source),
         resolveMaterialFor(meshData, options, materialCache),
       );
+      mesh.castShadow = meshData.castShadow;
+      mesh.receiveShadow = meshData.receiveShadow;
+      mesh.userData["entityId"] = id;
+      group.add(mesh);
+    }
+
+    if (meshData && meshData.source.kind === "heightmap") {
+      // the SAME grid the physics trimesh is cooked from (core/terrain.ts)
+      const grid = heightmapMesh(meshData.source);
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.BufferAttribute(grid.positions, 3));
+      geometry.setIndex(new THREE.BufferAttribute(grid.indices, 1));
+      geometry.computeVertexNormals();
+      const mesh = new THREE.Mesh(geometry, resolveMaterialFor(meshData, options, materialCache));
       mesh.castShadow = meshData.castShadow;
       mesh.receiveShadow = meshData.receiveShadow;
       mesh.userData["entityId"] = id;

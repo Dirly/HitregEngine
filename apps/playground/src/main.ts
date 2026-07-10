@@ -274,12 +274,37 @@ async function main(): Promise<void> {
   // editor fly-cam: hold LEFT mouse + WASD (QE = down/up, Shift = boost);
   // left-drag keeps orbiting, so drag-to-look + WASD flies like Unity
   let flyBtnDown = false;
+  let flyLookMode = false;
   canvas.addEventListener("pointerdown", (e) => {
     if (e.button === 0) flyBtnDown = true;
   });
   window.addEventListener("pointerup", (e) => {
-    if (e.button === 0) flyBtnDown = false;
+    if (e.button === 0) {
+      flyBtnDown = false;
+      exitFlyLook();
+    }
   });
+
+  // FPS look while flying: pivot at the camera (drag = turn in place),
+  // restored to normal orbit when the button releases
+  function enterFlyLook(): void {
+    if (flyLookMode) return;
+    flyLookMode = true;
+    camera.getWorldDirection(flyDir);
+    const p = camera.position;
+    void controls.setLookAt(p.x, p.y, p.z, p.x + flyDir.x * 0.6, p.y + flyDir.y * 0.6, p.z + flyDir.z * 0.6, false);
+    controls.azimuthRotateSpeed = -0.35;
+    controls.polarRotateSpeed = -0.35;
+  }
+  function exitFlyLook(): void {
+    if (!flyLookMode) return;
+    flyLookMode = false;
+    camera.getWorldDirection(flyDir);
+    const p = camera.position;
+    void controls.setLookAt(p.x, p.y, p.z, p.x + flyDir.x * 12, p.y + flyDir.y * 12, p.z + flyDir.z * 12, false);
+    controls.azimuthRotateSpeed = 1;
+    controls.polarRotateSpeed = 1;
+  }
   const flyDir = new THREE.Vector3();
   const flyRight = new THREE.Vector3();
   const flyDelta = new THREE.Vector3();
@@ -300,16 +325,12 @@ async function main(): Promise<void> {
     if (input.isDown("KeyE")) flyDelta.addScaledVector(WORLD_UP, move);
     if (input.isDown("KeyQ")) flyDelta.addScaledVector(WORLD_UP, -move);
     if (flyDelta.lengthSq() === 0) return;
-    controls.getTarget(flyTarget);
-    void controls.setLookAt(
-      camera.position.x + flyDelta.x,
-      camera.position.y + flyDelta.y,
-      camera.position.z + flyDelta.z,
-      flyTarget.x + flyDelta.x,
-      flyTarget.y + flyDelta.y,
-      flyTarget.z + flyDelta.z,
-      false,
-    );
+    enterFlyLook(); // first fly key switches drag to turn-in-place
+    const px = camera.position.x + flyDelta.x;
+    const py = camera.position.y + flyDelta.y;
+    const pz = camera.position.z + flyDelta.z;
+    // keep the look pivot glued just ahead so dragging keeps steering
+    void controls.setLookAt(px, py, pz, px + flyDir.x * 0.6, py + flyDir.y * 0.6, pz + flyDir.z * 0.6, false);
   }
 
   // -- editor ----------------------------------------------------------------

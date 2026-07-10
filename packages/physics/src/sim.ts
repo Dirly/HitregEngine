@@ -1,6 +1,8 @@
 import RAPIER from "@dimforge/rapier3d-compat";
 import {
+  heightmapMesh,
   worldTransforms,
+  type HeightmapParams,
   type Quat,
   type SceneDoc,
   type Vec3,
@@ -17,13 +19,17 @@ interface RigidbodyData {
 }
 
 interface ColliderData {
-  shape: "box" | "sphere" | "capsule" | "cylinder";
+  shape: "box" | "sphere" | "capsule" | "cylinder" | "heightmap";
   size: Vec3;
   offset: Vec3;
   friction: number;
   restitution: number;
   density: number;
   isTrigger: boolean;
+}
+
+interface HeightmapMeshData {
+  source: { kind: string } & Partial<HeightmapParams>;
 }
 
 interface JointData {
@@ -114,6 +120,18 @@ export class PhysicsSim {
         const [w, h, d] = [col.size[0] * sx, col.size[1] * sy, col.size[2] * Math.abs(world.scale[2])];
         let shape: RAPIER.ColliderDesc;
         switch (col.shape) {
+          case "heightmap": {
+            // cook a static trimesh from the SAME grid the renderer draws
+            // (core/terrain.ts) — visual ground and physical ground can't drift
+            const mesh = entity.components["mesh"] as HeightmapMeshData | undefined;
+            if (mesh?.source.kind !== "heightmap") {
+              console.warn(`[physics] ${id}: heightmap collider needs a heightmap mesh component`);
+              continue;
+            }
+            const grid = heightmapMesh(mesh.source as HeightmapParams);
+            shape = RAPIER.ColliderDesc.trimesh(grid.positions, grid.indices);
+            break;
+          }
           case "sphere":
             shape = RAPIER.ColliderDesc.ball(w / 2);
             break;

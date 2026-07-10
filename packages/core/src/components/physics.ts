@@ -23,8 +23,10 @@ export const rigidbodySchema = z.object({
 });
 
 export const colliderSchema = z.object({
-  // convex/trimesh arrive with the asset pipeline's collision cooking
-  shape: z.enum(["box", "sphere", "capsule", "cylinder"]).default("box"),
+  // convex/trimesh arrive with the asset pipeline's collision cooking.
+  // "heightmap" cooks a static trimesh from the SAME entity's heightmap mesh
+  // component (single source of truth — no size/offset needed).
+  shape: z.enum(["box", "sphere", "capsule", "cylinder", "heightmap"]).default("box"),
   /** Full extents (box) / diameter+height (sphere, capsule, cylinder use x and y). */
   size: vec3.default([1, 1, 1]),
   /** Local offset from the entity origin. */

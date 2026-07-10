@@ -169,4 +169,46 @@ describe("PhysicsSim (headless Node — the server story)", () => {
     expect(moved).toBeGreaterThan(0.2);
     sim.free();
   });
+
+  it('a ball rests ON a heightmap terrain, not inside it', async () => {
+    const { sampleHeightmap } = await import('@hitreg/core');
+    const params = {
+      size: [40, 40] as [number, number], amplitude: 2, frequency: 0.1, seed: 3,
+      resolution: 48, flatRadius: 0, flatFalloff: 8,
+    };
+    const doc = scene([
+      {
+        op: 'add-entity',
+        id: 'terrain',
+        entity: {
+          name: 'Terrain', parent: null, tags: [],
+          components: {
+            transform: {},
+            mesh: { source: { kind: 'heightmap', ...params } },
+            collider: { shape: 'heightmap' },
+          },
+        },
+      },
+      {
+        op: 'add-entity',
+        id: 'ball',
+        entity: {
+          name: 'Ball', parent: null, tags: [],
+          components: {
+            transform: { position: [5, 8, 5] },
+            rigidbody: {},
+            collider: { shape: 'sphere', size: [1, 1, 1] },
+          },
+        },
+      },
+    ]);
+    const sim = new PhysicsSim(doc);
+    simulateSeconds(sim, 3);
+    const pos = sim.states().get('ball')!.position;
+    // resting height = terrain height under the ball + radius (0.5), roughly
+    const groundY = sampleHeightmap(params, pos[0], pos[2]);
+    expect(pos[1]).toBeGreaterThan(groundY - 0.1);
+    expect(pos[1]).toBeLessThan(groundY + 1.5);
+    sim.free();
+  });
 });

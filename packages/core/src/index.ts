@@ -64,3 +64,9 @@ export {
   colliderSchema,
   jointSchema,
 } from "./components/physics.js";
+export {
+  sampleHeightmap,
+  heightmapMesh,
+  type HeightmapParams,
+  type HeightmapMesh,
+} from "./terrain.js";
