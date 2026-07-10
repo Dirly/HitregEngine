@@ -18,6 +18,8 @@ export interface ViewportOptions {
   settings: Observable<EditorSettings>;
   gizmoMode: Observable<GizmoMode>;
   contextMenu?: ContextMenu;
+  /** While the graybox tool is active, picking and gizmos stand down. */
+  grayboxActive?: Observable<boolean>;
   /** Current (possibly rebuilt) scene + entity object lookup. */
   getScene(): THREE.Scene;
   getObject(id: string): THREE.Object3D | undefined;
@@ -50,6 +52,7 @@ export class ViewportTools {
       this.pointerDown = { x: e.clientX, y: e.clientY };
     };
     const onPointerUp = (e: PointerEvent) => {
+      if (this.opts.grayboxActive?.get()) return;
       if (!this.opts.enabled.get() || !this.pointerDown) return;
       const moved =
         Math.abs(e.clientX - this.pointerDown.x) + Math.abs(e.clientY - this.pointerDown.y);
@@ -102,6 +105,7 @@ export class ViewportTools {
         this.syncAttachment();
         this.refreshGrid();
       }),
+      ...(opts.grayboxActive ? [opts.grayboxActive.subscribe(() => this.syncAttachment())] : []),
       opts.settings.subscribe(() => {
         this.applySnaps();
         this.refreshGrid();
@@ -160,7 +164,10 @@ export class ViewportTools {
 
   private syncAttachment(): void {
     const id = this.opts.selection.get();
-    const object = id && this.opts.enabled.get() ? this.opts.getObject(id) : undefined;
+    const object =
+      id && this.opts.enabled.get() && !this.opts.grayboxActive?.get()
+        ? this.opts.getObject(id)
+        : undefined;
     if (object) this.controls.attach(object);
     else this.controls.detach();
   }
@@ -170,7 +177,7 @@ export class ViewportTools {
   }
 
   /** Raycast a screen point to a SOURCE-doc entity id (prefab instances pick as one unit). */
-  private pickAt(clientX: number, clientY: number): string | null {
+  pickAt(clientX: number, clientY: number): string | null {
     const rect = this.opts.canvas.getBoundingClientRect();
     const ndc = new THREE.Vector2(
       ((clientX - rect.left) / rect.width) * 2 - 1,

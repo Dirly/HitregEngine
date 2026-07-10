@@ -39,6 +39,8 @@ export interface EditorSettings {
   scaleSnap: number;
   grid: boolean;
   gridSize: number;
+  /** X-ray collider wireframes + joint anchors/axes in the viewport. */
+  showPhysics: boolean;
 }
 
 /** Selected asset in the Assets panel (mutually exclusive with entity selection). */
@@ -66,4 +68,5 @@ export const defaultEditorSettings: EditorSettings = {
   scaleSnap: 0.1,
   grid: true,
   gridSize: 1,
+  showPhysics: true,
 };

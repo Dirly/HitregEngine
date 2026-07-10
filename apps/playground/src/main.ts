@@ -12,13 +12,14 @@ import {
   validateScene,
   type SceneDoc,
 } from "@hitreg/core";
-import { buildScene, EngineRenderer, type BuiltScene } from "@hitreg/render";
+import { attachPhysicsDebug, buildScene, EngineRenderer, type BuiltScene } from "@hitreg/render";
 import { initPhysics, PhysicsSim, type BodyState } from "@hitreg/physics";
 import {
   createAssetSelection,
   createContextMenu,
   createSelection,
   defaultEditorSettings,
+  GrayboxTool,
   mountEditor,
   observable,
   ViewportTools,
@@ -123,10 +124,12 @@ async function main(): Promise<void> {
   let built: BuiltScene;
   function rebuild(): void {
     // v1: full rebuild per change — fine at this scale; diffing comes with ECS
-    built = buildScene(expandScene(store.doc, assets, registry), {
+    const expanded = expandScene(store.doc, assets, registry);
+    built = buildScene(expanded, {
       resolveModel: (assetId) => assets.getModel(assetId)?.url,
       resolveMaterial: (assetId) => assets.getDataAsset(assetId)?.data,
     });
+    if (settings.get().showPhysics) attachPhysicsDebug(expanded, built.objects);
     built.scene.background = new THREE.Color(0x0b0e14);
     viewport?.onSceneRebuilt();
   }
@@ -152,8 +155,10 @@ async function main(): Promise<void> {
   const playMode = observable<PlayMode>("edit");
   const contextMenu = createContextMenu();
   const assetSelection = createAssetSelection();
+  const grayboxActive = observable(false);
   const assetsVersion = observable(0);
   assetsVersion.subscribe(() => rebuild()); // material/prefab edits re-render the scene
+  settings.subscribe(() => rebuild()); // physics-debug toggle takes effect immediately
 
   const viewport: ViewportTools = new ViewportTools({
     canvas,
@@ -164,8 +169,23 @@ async function main(): Promise<void> {
     settings,
     gizmoMode,
     contextMenu,
+    grayboxActive,
     getScene: () => built.scene,
     getObject: (id) => built.objects.get(id),
+    onDraggingChanged: (dragging) => {
+      controls.enabled = !dragging;
+    },
+  });
+
+  new GrayboxTool({
+    canvas,
+    camera,
+    store,
+    selection,
+    settings,
+    enabled: editorVisible,
+    active: grayboxActive,
+    getScene: () => built.scene,
     onDraggingChanged: (dragging) => {
       controls.enabled = !dragging;
     },
@@ -185,13 +205,41 @@ async function main(): Promise<void> {
     playMode,
     contextMenu,
     assetSelection,
+    grayboxActive,
     assetsVersion,
     saveAsset,
   });
 
   window.addEventListener("keydown", (e) => {
-    if (e.code === "Backquote" && !(e.target instanceof HTMLInputElement)) {
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
+    if (e.code === "Backquote") {
       editorVisible.set(!editorVisible.get());
+    }
+    // Unity F: frame the selection
+    if (e.code === "KeyF" && editorVisible.get()) {
+      const id = selection.get();
+      const object = id ? built.objects.get(id) : undefined;
+      if (object) {
+        void controls.fitToBox(new THREE.Box3().setFromObject(object), true, {
+          paddingLeft: 1,
+          paddingRight: 1,
+          paddingTop: 1,
+          paddingBottom: 1,
+        });
+      }
+    }
+  });
+
+  // Unity gesture: double-click a prefab instance in the viewport opens its definition
+  canvas.addEventListener("dblclick", (e) => {
+    if (!editorVisible.get() || grayboxActive.get()) return;
+    const id = viewport.pickAt(e.clientX, e.clientY);
+    if (!id) return;
+    const prefabId = (store.doc.entities[id]?.components["prefab"] as { prefabId?: string } | undefined)
+      ?.prefabId;
+    if (prefabId) {
+      selection.set(null);
+      assetSelection.set({ kind: "prefab", id: prefabId });
     }
   });
 

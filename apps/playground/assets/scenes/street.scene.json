@@ -577,7 +577,7 @@
           "position": [
             4.1,
             4.5,
-            -5.8
+            -0.5
           ],
           "rotation": [
             0,
@@ -604,6 +604,384 @@
         },
         "rigidbody": {},
         "collider": {}
+      }
+    },
+    "775b2183-af3c-4cba-a71c-e59bfa4a5767": {
+      "name": "Pillar",
+      "parent": null,
+      "tags": [
+        "graybox"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            1.5,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "cylinder",
+            "size": [
+              0.6,
+              3,
+              0.6
+            ]
+          },
+          "castShadow": true,
+          "receiveShadow": true,
+          "renderMode": "auto",
+          "static": false
+        }
+      }
+    },
+    "e9b78e04-cdbb-444a-9978-12e1145454c5": {
+      "name": "Platform",
+      "parent": null,
+      "tags": [
+        "graybox"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            1,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              4,
+              0.2,
+              4
+            ]
+          },
+          "castShadow": true,
+          "receiveShadow": true,
+          "renderMode": "auto",
+          "static": false
+        }
+      }
+    },
+    "70143229-e04f-46af-8eed-3663a3795083": {
+      "name": "Platform",
+      "parent": null,
+      "tags": [
+        "graybox"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            1,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              4,
+              0.2,
+              4
+            ]
+          },
+          "castShadow": true,
+          "receiveShadow": true,
+          "renderMode": "auto",
+          "static": false
+        }
+      }
+    },
+    "e24ac203-367f-4b14-b47c-635c44b9dbf0": {
+      "name": "Platform",
+      "parent": null,
+      "tags": [
+        "graybox"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            1,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              4,
+              0.2,
+              4
+            ]
+          },
+          "castShadow": true,
+          "receiveShadow": true,
+          "renderMode": "auto",
+          "static": false
+        }
+      }
+    },
+    "5d29ab5e-5eaf-4dfb-a52f-969e4e60c868": {
+      "name": "Platform",
+      "parent": null,
+      "tags": [
+        "graybox"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            1,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              4,
+              0.2,
+              4
+            ]
+          },
+          "castShadow": true,
+          "receiveShadow": true,
+          "renderMode": "auto",
+          "static": false
+        }
+      }
+    },
+    "b2115071-f6e0-402d-945a-ab161ef8dde1": {
+      "name": "Platform",
+      "parent": null,
+      "tags": [
+        "graybox"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            1,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              4,
+              0.2,
+              4
+            ]
+          },
+          "castShadow": true,
+          "receiveShadow": true,
+          "renderMode": "auto",
+          "static": false
+        }
+      }
+    },
+    "5d59dda7-4c9f-488b-a700-e9581cf48a24": {
+      "name": "Platform",
+      "parent": null,
+      "tags": [
+        "graybox"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            1,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              4,
+              0.2,
+              4
+            ]
+          },
+          "castShadow": true,
+          "receiveShadow": true,
+          "renderMode": "auto",
+          "static": false
+        }
+      }
+    },
+    "23cb3512-3c35-440a-afc6-098a93fd852c": {
+      "name": "Platform",
+      "parent": null,
+      "tags": [
+        "graybox"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            1,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              4,
+              0.2,
+              4
+            ]
+          },
+          "castShadow": true,
+          "receiveShadow": true,
+          "renderMode": "auto",
+          "static": false
+        }
+      }
+    },
+    "35c29ac2-7627-4239-b027-1e5dea0ac617": {
+      "name": "Wall",
+      "parent": null,
+      "tags": [
+        "graybox"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            1.5,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              4,
+              3,
+              0.2
+            ]
+          },
+          "castShadow": true,
+          "receiveShadow": true,
+          "renderMode": "auto",
+          "static": false
+        }
       }
     }
   }

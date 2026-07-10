@@ -43,6 +43,8 @@ export interface AppProps {
   playMode: Observable<PlayMode>;
   contextMenu: ContextMenu;
   assetSelection: AssetSelection;
+  /** Graybox draw mode (✏ / G key). */
+  grayboxActive: Observable<boolean>;
   /** Bumped whenever the AssetLibrary changes (panels re-render, host rebuilds). */
   assetsVersion: Observable<number>;
   /** Persist an asset file under the project's assets/ dir (dev server writes it). */
@@ -145,7 +147,7 @@ export function App(props: AppProps) {
         />
       </Panel>
 
-      <GrayboxBar store={props.store} selection={props.selection} />
+      <GrayboxBar store={props.store} selection={props.selection} active={props.grayboxActive} />
 
       <HierarchyPanel
         store={props.store}
@@ -271,6 +273,17 @@ function Toolbar(props: {
           <input type="checkbox" checked={settings.grid} onChange={(e) => set({ grid: e.target.checked })} />
           grid
         </label>
+        <label
+          style={{ display: "flex", gap: 3, alignItems: "center", cursor: "pointer" }}
+          title="Show collider wireframes and joint anchors/axes"
+        >
+          <input
+            type="checkbox"
+            checked={settings.showPhysics}
+            onChange={(e) => set({ showPhysics: e.target.checked })}
+          />
+          phys
+        </label>
         <span style={{ display: "flex", gap: 3, alignItems: "center", color: "#8b949e" }}>
           size
           <span style={{ width: 40 }}>
@@ -311,8 +324,13 @@ function grayboxEntity(
   };
 }
 
-/** ProBuilder-lite: one-click blockout shapes. Everything is plain entities — rescale, snap, prefab at will. */
-function GrayboxBar(props: { store: SceneStore; selection: Selection }) {
+/** ProBuilder-style blockout: draw-to-create + face push/pull, plus one-click shapes. */
+function GrayboxBar(props: {
+  store: SceneStore;
+  selection: Selection;
+  active: Observable<boolean>;
+}) {
+  const active = useObservable(props.active);
   const spawn = (ops: Op[], selectId: string) => {
     apply(props.store, ops);
     props.selection.set(selectId);
@@ -381,8 +399,22 @@ function GrayboxBar(props: { store: SceneStore; selection: Selection }) {
     <Panel
       id="graybox"
       title="Graybox"
-      defaultRect={() => ({ x: 12, y: 8, w: 300, h: 66 })}
+      defaultRect={() => ({ x: 12, y: 8, w: 300, h: 108 })}
     >
+      <button
+        style={{ ...(active ? activeButtonStyle : buttonStyle), width: "100%", marginBottom: 6 }}
+        title="Drag on the ground to draw a box, release, move up for height, click to place. Drag any box face to push/pull it. Esc cancels."
+        onClick={() => props.active.set(!active)}
+      >
+        ✏ draw mode (G) {active ? "— ON" : ""}
+      </button>
+      {active && (
+        <div style={{ color: "#8b949e", fontSize: 10, marginBottom: 6 }}>
+          drag ground → footprint · release, move up → height · click → place
+          <br />
+          drag any box face → push/pull · Esc cancels
+        </div>
+      )}
       <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
         {kits.map((kit) => (
           <button
@@ -542,6 +574,15 @@ function TreeRow(props: Omit<TreeProps, "parent"> & { id: string }) {
       onClick={() => {
         props.assetSelection.set(null);
         props.selection.set(props.id);
+      }}
+      onDoubleClick={() => {
+        // Unity gesture: double-click a prefab instance opens its definition
+        const prefabId = (entity.components["prefab"] as { prefabId?: string } | undefined)
+          ?.prefabId;
+        if (prefabId) {
+          props.selection.set(null);
+          props.assetSelection.set({ kind: "prefab", id: prefabId });
+        }
       }}
       onContextMenu={(e) => {
         e.preventDefault();

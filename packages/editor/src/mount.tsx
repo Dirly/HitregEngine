@@ -23,6 +23,7 @@ export interface MountOptions {
   playMode: Observable<PlayMode>;
   contextMenu: ContextMenu;
   assetSelection: AssetSelection;
+  grayboxActive: Observable<boolean>;
   assetsVersion: Observable<number>;
   saveAsset?: (file: string, content: string) => void;
 }
@@ -42,6 +43,7 @@ export function mountEditor(options: MountOptions): { unmount(): void } {
       playMode={options.playMode}
       contextMenu={options.contextMenu}
       assetSelection={options.assetSelection}
+      grayboxActive={options.grayboxActive}
       assetsVersion={options.assetsVersion}
       saveAsset={options.saveAsset}
     />,
