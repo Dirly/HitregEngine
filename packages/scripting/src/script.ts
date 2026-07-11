@@ -44,6 +44,12 @@ export interface ScriptContext {
    */
   events?: ScriptEvents;
   /**
+   * Replicated session state — facts every tab agrees on (enemy HP, chest
+   * opened, score). Reads everywhere; writes on the authority only. Dies
+   * with the room; commit durable results into ctx.playerData.
+   */
+  netState?: ScriptNetState;
+  /**
    * Experience-scoped persistence for the local player (async — use from
    * onStart or fire-and-forget; never block onFixedUpdate on it):
    * `ctx.playerData?.set("primary", "wood", 42)`. Quotas, rate limits, and
@@ -66,6 +72,29 @@ export interface ScriptEvents {
   emit(name: string, payload: unknown): void;
   on(name: string, cb: (payload: unknown, meta?: { from?: string }) => void): () => void;
   once(name: string, cb: (payload: unknown, meta?: { from?: string }) => void): () => void;
+}
+
+/**
+ * Replicated session state (the NetworkVariables analog): facts every tab
+ * must agree on — enemy HP, "chest opened", round score. Keys are
+ * "namespace/rest". Reads work everywhere; writes only apply on the
+ * session authority (peers get a warning no-op — request the change
+ * through a to-authority event instead). Everything here dies with the
+ * room: commit durable results into ctx.playerData explicitly.
+ */
+export interface ScriptNetState {
+  /** True when this session may write (host or single-player). */
+  isAuthority(): boolean;
+  get(key: string): unknown;
+  keys(prefix?: string): string[];
+  /** Authority only. Returns false when refused (peer / invalid). */
+  set(key: string, value: unknown): boolean;
+  /** Authority only. Returns the new value, or null when refused. */
+  increment(key: string, delta?: number): number | null;
+  /** Authority only. */
+  delete(key: string): boolean;
+  /** Fires on every change, local or replicated. Auto-unsubscribed on dispose. */
+  onChange(cb: (key: string, value: unknown) => void): () => void;
 }
 
 /** The physics surface scripts may use (implemented by @hitreg/physics.PhysicsSim). */

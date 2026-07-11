@@ -172,9 +172,9 @@ async function main(): Promise<void> {
     { replicate: "to-authority" },
   );
   events.register(
-    "npc.defeated",
-    z.object({ npc: z.string(), name: z.string().default("Enemy") }),
-    { replicate: "to-peers" },
+    "item.taken",
+    z.object({ item: z.string() }),
+    { replicate: "to-authority" },
   );
   const assets = new AssetLibrary();
   registerCoreAssetTypes(assets);
@@ -1010,6 +1010,10 @@ async function main(): Promise<void> {
     onRoleChanged: (role) =>
       eventBus?.setNetRole(role === "host" ? "authority" : role === "peer" ? "peer" : "local"),
   });
+  // session-state contracts for the demo game (schemas = the AI-facing spec)
+  netPresence.netState.define("enemyHp", z.number());
+  netPresence.netState.define("defeated", z.literal(true));
+  netPresence.netState.define("taken", z.literal(true));
 
   // "unpack model parts": each named sub-object of a loaded kit becomes a child
   // entity referencing that node; the original keeps only the group transform
@@ -1149,6 +1153,9 @@ async function main(): Promise<void> {
     // the net session may already be live — seed the bus with the current role
     const netRole = netPresence?.stats().role ?? "off";
     eventBus.setNetRole(netRole === "host" ? "authority" : netRole === "peer" ? "peer" : "local");
+    // alone in the room = fresh single-player run = clean session state;
+    // with others present the state belongs to the ROOM and must survive
+    netPresence?.resetSessionStateIfSolo();
     scripts = new ScriptRuntime({
       doc: lastExpanded,
       objects: built.objects,
@@ -1165,6 +1172,8 @@ async function main(): Promise<void> {
       setAnimation: (entityId, clip, fade) =>
         animations.play(entityId, clip, fade ?? 0.3),
       setBillboard: (entityId, opts) => billboards.setValue(entityId, opts),
+      // replicated session state (ctx.netState) — facts every tab agrees on
+      ...(netPresence ? { netState: netPresence.netState } : {}),
       playSound: (entityId, soundId) => {
         const comp = lastExpanded.entities[entityId]?.components["audio"] as
           | AudioComponentData
@@ -1576,6 +1585,10 @@ async function main(): Promise<void> {
         // last gameplay events delivered this play session ({ tick, name, payload })
         recentEvents: eventBus ? eventBus.trace().slice(-20) : null,
         net: netPresence?.debug() ?? null,
+        // replicated session state (first 60 keys) — what every tab agrees on
+        netState: netPresence
+          ? Object.fromEntries(Object.entries(netPresence.netState.snapshot()).slice(0, 60))
+          : null,
         // per-NPC sim probe: which layer is alive on THIS tab (net debugging)
         netProbe:
           playMode.get() === "playing"

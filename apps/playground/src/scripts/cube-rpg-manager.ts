@@ -26,6 +26,7 @@ export default class CubeRpgManager extends Script {
 
   private hp = 100;
   private collected = new Set<string>();
+  private requestedTaken = new Set<string>(); // in-flight item.taken requests
   private inventory = new Set<string>();
   private enemyHp = new Map<string, number>();
   private defeated = new Set<string>();
@@ -99,19 +100,45 @@ export default class CubeRpgManager extends Script {
       this.enemyHp.set(id, this.ctx.getEntity(id)?.tags.includes("elite") ? 120 : 80);
     }
 
-    // Multiplayer combat contracts. "npc.hit" is a to-authority request:
-    // peers' attacks route to the session host, which applies damage from
-    // ITS hp table (never trusting the sender). "npc.defeated" broadcasts
-    // back to-peers so every tab hides the corpse and counts the kill.
-    // Single-player: both simply deliver locally — same code either way.
+    // Multiplayer contracts. Requests ("npc.hit", "item.taken") are
+    // to-authority events: peers ask, the session host applies from ITS
+    // state. Results live in ctx.netState ("enemyHp/*", "defeated/*",
+    // "taken/*") — replicated to every tab, inherited on host migration,
+    // and full-synced to late joiners. Single-player: requests deliver
+    // locally and netState is a local store — identical code either way.
     this.ctx.events?.on("npc.hit", (payload) => {
       const p = payload as { npc: string; damage: number };
       this.applyNpcHit(p.npc, p.damage);
     });
-    this.ctx.events?.on("npc.defeated", (payload) => {
-      const p = payload as { npc: string; name: string };
-      this.applyNpcDefeated(p.npc, p.name);
+    this.ctx.events?.on("item.taken", (payload) => {
+      const p = payload as { item: string };
+      if (this.ctx.netState) this.ctx.netState.set(`taken/${p.item}`, true);
+      else this.applyTaken(p.item);
     });
+    // react to replicated facts — ours or another tab's
+    this.ctx.netState?.onChange((key, value) => {
+      if (value !== true) return;
+      if (key.startsWith("defeated/")) this.applyNpcDefeated(key.slice("defeated/".length));
+      if (key.startsWith("taken/")) this.applyTaken(key.slice("taken/".length));
+    });
+    // the authority seeds enemy HP once per room session (a promoted host
+    // inherits the previous host's values — never re-seed over them)
+    if (this.ctx.netState?.isAuthority()) {
+      for (const id of this.ctx.findByTag(this.param<string>("enemyTag"))) {
+        if (this.ctx.netState.get(`enemyHp/${id}`) === undefined) {
+          this.ctx.netState.set(`enemyHp/${id}`, this.enemyHp.get(id) ?? 80);
+        }
+      }
+    }
+    // late join / rejoin: replicated facts may already exist — apply them
+    if (this.ctx.netState) {
+      for (const key of this.ctx.netState.keys("defeated/")) {
+        this.applyNpcDefeated(key.slice("defeated/".length));
+      }
+      for (const key of this.ctx.netState.keys("taken/")) {
+        this.applyTaken(key.slice("taken/".length));
+      }
+    }
 
     this.refreshWeaponVisuals();
     this.render();
@@ -288,8 +315,13 @@ export default class CubeRpgManager extends Script {
   /** AUTHORITY-side damage: runs from our own swings and peers' requests. */
   private applyNpcHit(targetId: string, damage: number): void {
     if (this.defeated.has(targetId)) return;
-    const hp = (this.enemyHp.get(targetId) ?? 80) - damage;
-    this.enemyHp.set(targetId, hp);
+    // replicated hp when netState is present; private map otherwise
+    const current = this.ctx.netState
+      ? ((this.ctx.netState.get(`enemyHp/${targetId}`) as number | undefined) ?? 80)
+      : (this.enemyHp.get(targetId) ?? 80);
+    const hp = current - damage;
+    if (this.ctx.netState) this.ctx.netState.set(`enemyHp/${targetId}`, hp);
+    else this.enemyHp.set(targetId, hp);
 
     // knock the enemy away from whoever is closest (good enough for a shove)
     const target = this.ctx.getObject(targetId);
@@ -314,23 +346,32 @@ export default class CubeRpgManager extends Script {
     }
 
     if (hp <= 0) {
-      // broadcast the kill — every tab (including us) buries it identically
-      this.ctx.events?.emit("npc.defeated", {
-        npc: targetId,
-        name: this.ctx.getEntity(targetId)?.name ?? "Enemy",
-      });
+      // the kill becomes a replicated FACT — every tab (and any future
+      // host, and any late joiner) buries it identically off the state
+      if (this.ctx.netState) this.ctx.netState.set(`defeated/${targetId}`, true);
+      else this.applyNpcDefeated(targetId);
     }
   }
 
-  /** Runs on EVERY tab (to-peers): hide the corpse, count the kill. */
-  private applyNpcDefeated(targetId: string, name: string): void {
+  /** Runs on EVERY tab (netState change): hide the corpse, count the kill. */
+  private applyNpcDefeated(targetId: string): void {
     if (this.defeated.has(targetId)) return;
     this.defeated.add(targetId);
     const target = this.ctx.getObject(targetId);
     if (target) target.visible = false;
     this.ctx.sim?.setPosition?.(targetId, [0, -30, 0]); // no body locally = no-op
-    this.message = `${name} defeated.`;
+    this.message = `${this.ctx.getEntity(targetId)?.name ?? "Enemy"} defeated.`;
     this.messageUntil = this.ctx.now() / 1000 + 1;
+  }
+
+  /** Runs on EVERY tab (netState change): a crystal someone grabbed is gone. */
+  private applyTaken(itemId: string): void {
+    if (this.collected.has(itemId)) return;
+    this.collected.add(itemId);
+    const object = this.ctx.getObject(itemId);
+    if (object) object.visible = false;
+    this.message = "Crystal recovered.";
+    this.messageUntil = this.ctx.now() / 1000 + 1.5;
   }
 
   private usePotion(): void {
@@ -397,12 +438,16 @@ export default class CubeRpgManager extends Script {
 
     this.pickup(playerId, this.param<string>("itemTag"));
     for (const id of this.ctx.findByTag(this.param<string>("relicTag"))) {
-      if (this.collected.has(id) || this.dist(playerId, id) > this.param<number>("collectRange")) continue;
-      this.collected.add(id);
-      const object = this.ctx.getObject(id);
-      if (object) object.visible = false;
-      this.message = "Crystal recovered.";
-      this.messageUntil = t + 1.5;
+      if (this.collected.has(id) || this.requestedTaken.has(id)) continue;
+      if (this.dist(playerId, id) > this.param<number>("collectRange")) continue;
+      // grabbing a crystal is a shared-world mutation: a REQUEST — the
+      // authority flips "taken/<id>" and every tab hides it via netState
+      if (this.ctx.events) {
+        this.requestedTaken.add(id);
+        this.ctx.events.emit("item.taken", { item: id });
+      } else {
+        this.applyTaken(id); // no bus (headless) — plain local behavior
+      }
     }
     this.attack(playerId);
     this.usePotion();

@@ -243,6 +243,14 @@ transport (swappable adapters behind one interface)
   trades freshness for bandwidth per entity (phase-staggered). Entities
   with script+rigidbody replicate by implicit default so zero-config scenes
   are multiplayer-correct; the component tunes or opts out.
+- **Replicated session state (2026-07-10, per Derek):** the third leg after
+  transforms (netObject) and messages (events) — `NetStateStore` /
+  `ctx.netState`, the NetworkVariables analog. Authority-written,
+  read-replicated (reliable deltas + joiner full-syncs), schema-validated
+  per namespace. Because every peer holds the full replica, a promoted
+  host inherits it — session state (enemy HP, quest progress, taken items)
+  survives host migration by construction. Session-scoped (§3c category
+  4); games commit durable results into playerData explicitly.
 - **Dev relay fallback (2026-07-10):** environments that block WebRTC UDP
   (privacy extensions/shields) get a Transport over the dev signaling relay
   itself; the host listens on RTC + relay simultaneously (`mergeTransports`).

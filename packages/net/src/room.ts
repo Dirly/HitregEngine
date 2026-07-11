@@ -99,6 +99,26 @@ export class RoomHost {
     }
   }
 
+  /** Full session-state sync to one peer (joiner sync), reliable-ordered. */
+  sendStateTo(peerId: string, full: Record<string, unknown>): void {
+    if (this.closed || !this.joined.has(peerId)) return;
+    this.transport.send(
+      peerId,
+      "reliable",
+      encodeMessage({ t: "state", tick: this.currentTick, full }),
+    );
+  }
+
+  /** Session-state delta to every joined peer, reliable-ordered. */
+  broadcastState(delta: { set: Record<string, unknown>; removed: string[] }): void {
+    if (this.closed || this.joined.size === 0) return;
+    if (Object.keys(delta.set).length === 0 && delta.removed.length === 0) return;
+    const packet = encodeMessage({ t: "state", tick: this.currentTick, delta });
+    for (const peerId of this.joined.keys()) {
+      this.transport.send(peerId, "reliable", packet);
+    }
+  }
+
   /**
    * Advance to tick `now`. Broadcasts a snapshot on the unreliable channel
    * every `snapshotEvery` ticks.
@@ -232,6 +252,13 @@ export interface RoomEvents {
   events: Array<{ name: string; payload: unknown }>;
 }
 
+/** A session-state sync from the authority (full replaces, delta merges). */
+export interface RoomStateSync {
+  tick: number;
+  full?: Record<string, unknown>;
+  delta?: { set: Record<string, unknown>; removed: string[] };
+}
+
 export interface RoomClientOptions {}
 
 export class RoomClient {
@@ -239,6 +266,7 @@ export class RoomClient {
   private readonly hostId: string;
   private readonly snapshotHandlers = new Set<(snapshot: RoomSnapshot) => void>();
   private readonly eventsHandlers = new Set<(events: RoomEvents) => void>();
+  private readonly stateHandlers = new Set<(sync: RoomStateSync) => void>();
   private readonly peersHandlers = new Set<(peers: RoomPeer[]) => void>();
   private readonly roster = new Map<string, string>(); // peerId -> name
   private readonly unsubscribes: Array<() => void> = [];
@@ -300,6 +328,12 @@ export class RoomClient {
     return () => this.eventsHandlers.delete(cb);
   }
 
+  /** Subscribe to session-state syncs from the authority. */
+  onState(cb: (sync: RoomStateSync) => void): () => void {
+    this.stateHandlers.add(cb);
+    return () => this.stateHandlers.delete(cb);
+  }
+
   onPeers(cb: (peers: RoomPeer[]) => void): () => void {
     this.peersHandlers.add(cb);
     return () => this.peersHandlers.delete(cb);
@@ -337,6 +371,14 @@ export class RoomClient {
         if (this._state !== "joined") return;
         for (const cb of [...this.eventsHandlers]) cb({ tick: msg.tick, events: msg.events });
         return;
+      case "state": {
+        if (this._state !== "joined") return;
+        const sync: RoomStateSync = { tick: msg.tick };
+        if (msg.full) sync.full = msg.full;
+        if (msg.delta) sync.delta = msg.delta;
+        for (const cb of [...this.stateHandlers]) cb(sync);
+        return;
+      }
       case "peerJoined":
         this.roster.set(msg.peerId, msg.name);
         this.emitPeers();

@@ -1,4 +1,5 @@
 import * as THREE from "three/webgpu";
+import { NetStateStore } from "@hitreg/core";
 import {
   computeView,
   dueThisTick,
@@ -216,6 +217,14 @@ export class NetPresence {
   private members: string[] = [];
   private signaling: RoomSignaling | null = null;
 
+  /**
+   * Replicated session state (NetStateStore). Lives with the ROOM, not a
+   * play session: peers hold a read-replica; a promoted host inherits the
+   * replica's contents as its authoritative state (migration for free).
+   * Cleared on room change, and by the app when starting a solo session.
+   */
+  readonly netState = new NetStateStore();
+
   // active P2P session
   private role: "host" | "peer" | "off" = "off";
   private sessionHost: string | null = null;
@@ -299,6 +308,8 @@ export class NetPresence {
       replicatedEntities: this.replicatedNow.length,
       // replication health: host replica count / peer ghost streams
       replicaCount: this.lastReplicas ? this.lastReplicas.length : null,
+      netStateKeys: this.netState.keys().length,
+      netStateAuthority: this.netState.isAuthority(),
       ghostStreams: this.entitiesInterp.ids().length,
       snapshotTick: this.entitiesInterp.newestTick() ?? this.playersInterp.newestTick(),
       renderTick: this.lastRenderTick === null ? null : Math.round(this.lastRenderTick * 10) / 10,
@@ -421,8 +432,19 @@ export class NetPresence {
   private joinRoom(room: string): void {
     this.leaveRoom();
     this.room = room;
+    this.netState.clear(); // session state belongs to the room we just left
     this.signaling = this.makeSignaling(room);
     import.meta.hot?.send("hitreg:net-signal", { kind: "join", room, peerId: this.selfId });
+  }
+
+  /**
+   * Called by the app when a play session starts and this tab is alone in
+   * the room — a fresh single-player run starts from clean session state.
+   * With others present the state is the ROOM's; joining play must not
+   * wipe it.
+   */
+  resetSessionStateIfSolo(): void {
+    if (this.members.length <= 1) this.netState.clear();
   }
 
   private leaveRoom(): void {
@@ -522,6 +544,9 @@ export class NetPresence {
     const relay = new RelayHostTransport(this.signaling!, { trace: this.makeTrace() });
     const transport = mergeTransports([rtc, relay]);
     this.opts.onRoleChanged?.("host");
+    // authority over session state — a promoted peer KEEPS its replica's
+    // contents here: that is the host-migration state transfer
+    this.netState.setAuthority(true);
     this.via = "rtc+relay";
     this.rtcDiag = () => rtc.linkStates();
     this.relayTransport = relay;
@@ -549,7 +574,12 @@ export class NetPresence {
       // roster deltas become replicated player.joined / player.left events
       const roster = new Map(host.peers().map((p) => [p.peerId, p.name]));
       for (const [peerId, name] of roster) {
-        if (!prevRoster.has(peerId)) this.opts.emitLocalEvent?.("player.joined", { peerId, name });
+        if (!prevRoster.has(peerId)) {
+          this.opts.emitLocalEvent?.("player.joined", { peerId, name });
+          // joiners get the full session state before any delta (reliable
+          // channel is per-peer ordered, so this always lands first)
+          host.sendStateTo(peerId, this.netState.snapshot());
+        }
       }
       for (const peerId of prevRoster.keys()) {
         if (!roster.has(peerId)) this.opts.emitLocalEvent?.("player.left", { peerId });
@@ -562,6 +592,9 @@ export class NetPresence {
       // replicate-flagged events delivered on the host bus this tick go out
       const outbox = this.opts.collectNetEvents?.() ?? [];
       if (outbox.length > 0) host.broadcastEvents(outbox);
+      // session-state changes this tick ship as a reliable delta
+      const stateDelta = this.netState.takeDelta();
+      if (stateDelta) host.broadcastState(stateDelta);
       this.applyPlayers(this.buildPlayers()); // the host renders its own snapshot
     }, HOST_TICK_MS);
   }
@@ -649,6 +682,7 @@ export class NetPresence {
     this.roomClient = client;
     this.role = "peer";
     this.opts.onRoleChanged?.("peer");
+    this.netState.setAuthority(false); // read-only replica while a host exists
     this.clock = new InterpolationClock({
       hz: 1000 / HOST_TICK_MS,
       delayTicks: INTERP_DELAY_TICKS,
@@ -665,6 +699,7 @@ export class NetPresence {
       }),
       client.onSnapshot((snapshot) => this.ingestSnapshot(snapshot.tick, snapshot.state)),
       client.onEvents(({ events }) => this.opts.onNetEvents?.(events)),
+      client.onState((sync) => this.netState.applyRemote(sync)),
     );
     // movement intent up at 20 Hz while playing — never a transform claim;
     // the host simulates a proxy from these and snapshots the result back.
@@ -715,6 +750,9 @@ export class NetPresence {
     this.tick = 0;
     this.role = "off";
     this.opts.onRoleChanged?.("off");
+    // no session = local authority; a former replica keeps its contents,
+    // so a promotion right after this inherits the world's state
+    this.netState.setAuthority(true);
     this.targets = new Map();
     this.opts.onRosterChanged?.();
     // hand every ghost back to the local sim and drop the buffers

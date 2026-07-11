@@ -53,6 +53,7 @@ export type {
   RoomPeer,
   RoomSnapshot,
   RoomEvents,
+  RoomStateSync,
   CommandHandler,
 } from "./room.js";
 export { RoomHost, RoomClient } from "./room.js";

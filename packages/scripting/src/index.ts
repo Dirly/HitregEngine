@@ -4,6 +4,7 @@ export {
   type ScriptClass,
   type ScriptContext,
   type ScriptEvents,
+  type ScriptNetState,
   type ScriptParamSpec,
   type SimLike,
 } from "./script.js";

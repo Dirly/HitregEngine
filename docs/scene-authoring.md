@@ -111,7 +111,19 @@ the same schema gate there, and the authoritative handler receives
 "interaction.requested"; the ServerRpc-analog). On the host and in single-player,
 to-authority events simply deliver locally — game code is identical either way.
 Peers can never inject broadcast/local events upward; results flow back via
-snapshots or to-peers events. `events.jsonSchemas()` is the AI-facing spec; the context bridge posts
+snapshots or to-peers events.
+Session state — `ctx.netState` (the NetworkVariables analog): facts every tab
+must agree on (enemy HP, "chest opened", "crystal taken", round score) live in
+a replicated key-value store, keys `"namespace/rest"`. Reads work everywhere;
+writes apply only on the session authority (`ctx.netState.isAuthority()`) —
+peers request changes through a to-authority event and the authoritative
+handler writes. `onChange(cb)` fires on every change, local or replicated
+(auto-unsubscribed on dispose). Deltas ride the reliable channel, joiners get
+a full sync, and a promoted host INHERITS the replica — state survives host
+migration. It all dies with the room: commit durable results into
+`ctx.playerData`. Reference: cube-rpg's `enemyHp/*`, `defeated/*`, `taken/*`
+(shared pickups + migration-proof combat in ~30 lines).
+`events.jsonSchemas()` is the AI-facing spec; the context bridge posts
 `recentEvents` (last delivered `{ tick, name, payload }`) while playing. Minimal
 example: `apps/playground/src/scripts/event-demo.ts`.
 

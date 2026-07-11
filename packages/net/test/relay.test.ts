@@ -212,6 +212,25 @@ describe("relay transports", () => {
     expect(snapshots).toEqual([{ score: 42 }, { score: 42 }]);
   });
 
+  it("syncs session state: full to joiners, deltas broadcast, reliable-ordered", () => {
+    const host = new RelayHostTransport(hub.channel("h"));
+    const client = new RelayClientTransport(hub.channel("c"), "h");
+    const roomHost = new RoomHost(host);
+    const roomClient = new RoomClient(client, "h");
+    const synced: Array<{ full?: unknown; delta?: unknown }> = [];
+    roomClient.onState((s) => synced.push({ full: s.full, delta: s.delta }));
+
+    roomHost.broadcastState({ set: { "a/x": 1 }, removed: [] }); // nobody joined yet
+    roomClient.join("derek");
+    roomHost.sendStateTo("c", { "enemyHp/wolf-1": 40, "taken/crystal-1": true });
+    roomHost.broadcastState({ set: { "enemyHp/wolf-1": 25 }, removed: ["taken/crystal-1"] });
+    roomHost.broadcastState({ set: {}, removed: [] }); // empty deltas never hit the wire
+    expect(synced).toEqual([
+      { full: { "enemyHp/wolf-1": 40, "taken/crystal-1": true }, delta: undefined },
+      { full: undefined, delta: { set: { "enemyHp/wolf-1": 25 }, removed: ["taken/crystal-1"] } },
+    ]);
+  });
+
   it("replicates gameplay events reliable-ordered, host → peer", () => {
     const host = new RelayHostTransport(hub.channel("h"));
     const client = new RelayClientTransport(hub.channel("c"), "h");

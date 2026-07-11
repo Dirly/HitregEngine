@@ -124,3 +124,8 @@ export {
   type EventReplication,
   type EventRegistrationOptions,
 } from "./events.js";
+export {
+  NetStateStore,
+  type NetStateDelta,
+  type NetStateChangeHandler,
+} from "./net-state.js";

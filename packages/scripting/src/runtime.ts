@@ -1,5 +1,5 @@
 import type * as THREE from "three";
-import type { PlayerDataService, SceneDoc } from "@hitreg/core";
+import type { NetStateStore, PlayerDataService, SceneDoc } from "@hitreg/core";
 import type { InputLike, Script, ScriptContext, SimLike } from "./script.js";
 import type { ScriptRegistry } from "./registry.js";
 import type { EventBus } from "./events.js";
@@ -31,6 +31,11 @@ export interface RuntimeOptions {
    * and drains it once per fixedUpdate after the script loop.
    */
   events?: EventBus;
+  /**
+   * Replicated session state, exposed to scripts as ctx.netState
+   * (onChange subscriptions auto-unsubscribe on script dispose).
+   */
+  netState?: NetStateStore;
 }
 
 interface ScriptComponentData {
@@ -204,6 +209,7 @@ export class ScriptRuntime {
           : {}),
         ...(this.opts.playerData ? { playerData: this.opts.playerData } : {}),
         ...(this.opts.events ? { events: this.scopedEvents(id, this.opts.events) } : {}),
+        ...(this.opts.netState ? { netState: this.scopedNetState(id, this.opts.netState) } : {}),
       };
       const script = new cls();
       script.ctx = context;
@@ -237,6 +243,32 @@ export class ScriptRuntime {
       emit: (name, payload) => bus.emit(name, payload),
       on: (name, cb) => track(bus.on(name, cb)),
       once: (name, cb) => track(bus.once(name, cb)),
+    };
+  }
+
+  /** ctx.netState for one script: onChange subscriptions auto-unsubscribe. */
+  private scopedNetState(id: string, store: NetStateStore): NonNullable<ScriptContext["netState"]> {
+    const track = (off: () => void): (() => void) => {
+      let subs = this.subscriptions.get(id);
+      if (!subs) {
+        subs = new Set();
+        this.subscriptions.set(id, subs);
+      }
+      const tracked = (): void => {
+        off();
+        this.subscriptions.get(id)?.delete(tracked);
+      };
+      subs.add(tracked);
+      return tracked;
+    };
+    return {
+      isAuthority: () => store.isAuthority(),
+      get: (key) => store.get(key),
+      keys: (prefix) => store.keys(prefix),
+      set: (key, value) => store.set(key, value),
+      increment: (key, delta) => store.increment(key, delta),
+      delete: (key) => store.delete(key),
+      onChange: (cb) => track(store.onChange(cb)),
     };
   }
 

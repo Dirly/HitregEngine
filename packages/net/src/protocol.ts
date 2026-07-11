@@ -79,13 +79,26 @@ export interface EventsMessage {
   events: Array<{ name: string; payload: unknown }>;
 }
 
+/**
+ * Replicated session state (NetStateStore sync). Reliable-ordered per peer:
+ * `full` replaces the replica (joiner sync), `delta` merges. A dropped
+ * delta would corrupt the replica forever — this never rides unreliable.
+ */
+export interface StateMessage {
+  t: "state";
+  tick: number;
+  full?: Record<string, unknown>;
+  delta?: { set: Record<string, unknown>; removed: string[] };
+}
+
 export type HostMessage =
   | WelcomeMessage
   | SnapshotMessage
   | PeerJoinedMessage
   | PeerLeftMessage
   | RejectMessage
-  | EventsMessage;
+  | EventsMessage
+  | StateMessage;
 
 export type Message = ClientMessage | HostMessage;
 
@@ -153,6 +166,32 @@ export function decodeMessage(data: Uint8Array): Message | null {
         events.push({ name: e.name, payload: e.payload });
       }
       return { t: "events", tick: msg.tick, events };
+    }
+    case "state": {
+      if (typeof msg.tick !== "number") return null;
+      const out: StateMessage = { t: "state", tick: msg.tick };
+      if (msg.full !== undefined) {
+        if (typeof msg.full !== "object" || msg.full === null || Array.isArray(msg.full)) {
+          return null;
+        }
+        out.full = msg.full as Record<string, unknown>;
+      }
+      if (msg.delta !== undefined) {
+        const d = msg.delta as { set?: unknown; removed?: unknown } | null;
+        if (
+          typeof d !== "object" ||
+          d === null ||
+          typeof d.set !== "object" ||
+          d.set === null ||
+          Array.isArray(d.set) ||
+          !Array.isArray(d.removed) ||
+          d.removed.some((r) => typeof r !== "string")
+        ) {
+          return null;
+        }
+        out.delta = { set: d.set as Record<string, unknown>, removed: d.removed as string[] };
+      }
+      return out;
     }
     default:
       return null;
