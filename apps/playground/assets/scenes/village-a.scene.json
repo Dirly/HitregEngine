@@ -10,6 +10,14 @@
         "sky": {
           "top": "#87b8ff",
           "bottom": "#eef6ff",
+          "cubemap": {
+            "px": "cube/bridge2/px.jpg",
+            "nx": "cube/bridge2/nx.jpg",
+            "py": "cube/bridge2/py.jpg",
+            "ny": "cube/bridge2/ny.jpg",
+            "pz": "cube/bridge2/pz.jpg",
+            "nz": "cube/bridge2/nz.jpg"
+          },
           "light": 0.8
         }
       }

@@ -165,6 +165,17 @@ export const skySchema = z.object({
   bottom: hexColor.default("#101522"),
   /** Equirectangular panorama texture asset id — replaces the gradient dome. */
   texture: z.string().optional(),
+  /** Six-face cubemap texture asset ids — wins over both `texture` and the gradient dome. */
+  cubemap: z
+    .object({
+      px: z.string(),
+      nx: z.string(),
+      py: z.string(),
+      ny: z.string(),
+      pz: z.string(),
+      nz: z.string(),
+    })
+    .optional(),
   /** Hemisphere fill light tinted by the sky colors. 0 disables. */
   light: z.number().min(0).default(0.5),
   fog: z
