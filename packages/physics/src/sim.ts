@@ -95,6 +95,9 @@ export class PhysicsSim {
   private readonly events = new RAPIER.EventQueue(true);
   private readonly colliderToEntity = new Map<number, string>();
   private pendingCollisions: Array<[string, string]> = [];
+  private pendingCollisionEnds: Array<[string, string]> = [];
+  /** Entity ids whose collider was created as a sensor (isTrigger). */
+  private readonly sensors = new Set<string>();
   private readonly options: PhysicsSimOptions;
   private disposed = false;
   private readonly warned = new Set<string>();
@@ -265,6 +268,7 @@ export class PhysicsSim {
       this.world.removeRigidBody(body); // attached colliders/joints go with it
       this.bodies.delete(id);
       this.moving.delete(id);
+      this.sensors.delete(id);
     }
   }
 
@@ -285,6 +289,7 @@ export class PhysicsSim {
       .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS);
     const created = this.world.createCollider(shape, body);
     this.colliderToEntity.set(created.handle, id);
+    if (col.isTrigger ?? false) this.sensors.add(id);
   }
 
   /**
@@ -389,10 +394,11 @@ export class PhysicsSim {
     this.world.timestep = dt;
     this.world.step(this.events);
     this.events.drainCollisionEvents((h1, h2, started) => {
-      if (!started) return;
       const a = this.colliderToEntity.get(h1);
       const b = this.colliderToEntity.get(h2);
-      if (a && b) this.pendingCollisions.push([a, b]);
+      if (!a || !b) return;
+      if (started) this.pendingCollisions.push([a, b]);
+      else this.pendingCollisionEnds.push([a, b]);
     });
   }
 
@@ -401,6 +407,18 @@ export class PhysicsSim {
     const out = this.pendingCollisions;
     this.pendingCollisions = [];
     return out;
+  }
+
+  /** Collision-ended pairs since the last call (entity ids, expanded scene). */
+  takeCollisionEnds(): Array<[string, string]> {
+    const out = this.pendingCollisionEnds;
+    this.pendingCollisionEnds = [];
+    return out;
+  }
+
+  /** Whether the entity's collider was created as a sensor (isTrigger). */
+  isTrigger(id: string): boolean {
+    return this.sensors.has(id);
   }
 
   getLinvel(id: string): Vec3 | null {
@@ -416,6 +434,11 @@ export class PhysicsSim {
 
   applyImpulse(id: string, v: Vec3): void {
     this.moving.get(id)?.applyImpulse({ x: v[0], y: v[1], z: v[2] }, true);
+  }
+
+  /** Move a body WITHOUT touching velocities (net soft corrections). */
+  setTranslation(id: string, p: Vec3): void {
+    this.moving.get(id)?.setTranslation({ x: p[0], y: p[1], z: p[2] }, true);
   }
 
   /** Teleport a body (respawns): position set, velocities zeroed. */
