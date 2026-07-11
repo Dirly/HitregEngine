@@ -102,6 +102,11 @@ export class EventRegistry {
  * - "player.joined"/"player.left" fire on the session authority when a
  *   remote player joins/leaves the room, and REPLICATE to every peer —
  *   every tab hears the same roster changes through the same bus.
+ * - "animation.completed" fires when a one-shot clip (played with loop:false)
+ *   reaches its end, carrying the entity and clip name. LOCAL-only: each
+ *   client's animator runs on its own render clock and remote entities are
+ *   ghosted, so completion is a presentation fact, never a networked one —
+ *   scripts use it to chain animations (attack → idle) or gate follow-up work.
  *
  * Physics events stay local-only: each machine's sim emits its own (a
  * peer's partial sim only collides with what it simulates).
@@ -112,6 +117,7 @@ export function registerCoreEvents(registry: EventRegistry): void {
   registry.register("collision", z.object({ a: z.string(), b: z.string() }));
   registry.register("trigger.enter", z.object({ trigger: z.string(), other: z.string() }));
   registry.register("trigger.exit", z.object({ trigger: z.string(), other: z.string() }));
+  registry.register("animation.completed", z.object({ entityId: z.string(), clip: z.string() }));
   registry.register("player.joined", z.object({ peerId: z.string(), name: z.string() }), {
     replicate: true,
   });

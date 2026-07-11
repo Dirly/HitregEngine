@@ -44,8 +44,12 @@ export interface ScriptContext {
   viewForward?(): [number, number];
   /** Switch the render camera to another camera-component entity (runtime-only). */
   setActiveCamera?(entityId: string | null): void;
-  /** Crossfade this entity's animator to a clip (Unity-style blending). */
-  setAnimation?(clip: string, fadeSeconds?: number): void;
+  /**
+   * Crossfade this entity's animator to a clip (Unity-style blending).
+   * `loop: false` plays it once and emits "animation.completed" at the end
+   * (for one-shots like attack/emote); the default loops.
+   */
+  setAnimation?(clip: string, fadeSeconds?: number, opts?: { loop?: boolean }): void;
   /** Play this entity's audio component, or any sound asset id, at this entity. */
   playSound?(soundId?: string): void;
   /** Mutate this entity's billboard at runtime (HP bar fill, label text) — never the document. */

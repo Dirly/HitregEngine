@@ -1164,6 +1164,9 @@ async function main(): Promise<void> {
     chunkManager.setSim(sim); // loaded chunks collide too
     subsceneManager.setSim(sim);
     eventBus = new EventBus(events); // one bus per play session — trace starts clean
+    // one-shot animations end → a local "animation.completed" on this session's bus
+    animations.onClipFinished = (entityId, clip) =>
+      eventBus?.emit("animation.completed", { entityId, clip });
     // the net session may already be live — seed the bus with the current role
     const netRole = netPresence?.stats().role ?? "off";
     eventBus.setNetRole(netRole === "host" ? "authority" : netRole === "peer" ? "peer" : "local");
@@ -1183,8 +1186,8 @@ async function main(): Promise<void> {
       registry: scriptRegistry,
       input,
       viewForward,
-      setAnimation: (entityId, clip, fade) =>
-        animations.play(entityId, clip, fade ?? 0.3),
+      setAnimation: (entityId, clip, fade, opts) =>
+        animations.play(entityId, clip, fade ?? 0.3, opts?.loop ?? true),
       setBillboard: (entityId, opts) => billboards.setValue(entityId, opts),
       // replicated session state (ctx.netState) — facts every tab agrees on
       ...(netPresence ? { netState: netPresence.netState } : {}),

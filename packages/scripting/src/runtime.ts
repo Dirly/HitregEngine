@@ -13,8 +13,8 @@ export interface RuntimeOptions {
   input: InputLike;
   /** Horizontal camera forward [x, z] — enables camera-relative controls. */
   viewForward?: () => [number, number];
-  /** Host animation hook: crossfade an entity's animator to a clip. */
-  setAnimation?: (entityId: string, clip: string, fadeSeconds?: number) => void;
+  /** Host animation hook: crossfade an entity's animator to a clip (loop:false = one-shot). */
+  setAnimation?: (entityId: string, clip: string, fadeSeconds?: number, opts?: { loop?: boolean }) => void;
   /** Host audio hook: play an entity's audio component or a sound asset id. */
   playSound?: (entityId: string, soundId?: string) => void;
   /** Host billboard hook: mutate an entity's billboard (fill/text/visible). */
@@ -212,7 +212,10 @@ export class ScriptRuntime {
           this.activeCameraId = cameraId;
         },
         ...(this.opts.setAnimation
-          ? { setAnimation: (clip: string, fade?: number) => this.opts.setAnimation!(id, clip, fade) }
+          ? {
+              setAnimation: (clip: string, fade?: number, opts?: { loop?: boolean }) =>
+                this.opts.setAnimation!(id, clip, fade, opts),
+            }
           : {}),
         ...(this.opts.playSound
           ? { playSound: (soundId?: string) => this.opts.playSound!(id, soundId) }

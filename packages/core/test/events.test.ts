@@ -12,6 +12,7 @@ describe("EventRegistry", () => {
   it("registers the built-in engine events", () => {
     const registry = setup();
     expect(registry.names().sort()).toEqual([
+      "animation.completed",
       "collision",
       "entity.destroyed",
       "entity.spawned",
