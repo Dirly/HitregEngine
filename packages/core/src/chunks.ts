@@ -29,14 +29,23 @@ export type ChunkDoc = z.infer<typeof chunkDocSchema>;
  * (conventionally a root "world" entity); one per scene (first wins).
  */
 export const chunkStreamerSchema = z.object({
-  /** World folder under assets/chunks/ that holds the *.chunk.json cells. */
-  source: z.string().min(1),
-  /** World-units width of one square chunk cell. */
-  cellSize: z.number().positive().default(16),
-  /** Load every cell whose center is within this many cells of the focus. */
-  radius: z.number().min(1).max(16).default(2),
-  /** Extra cells beyond radius to keep alive before unloading (hysteresis). */
-  keepPadding: z.number().min(0).max(8).default(1),
+  source: z
+    .string()
+    .min(1)
+    .describe("World folder under assets/chunks/ holding the <cx>_<cz>.chunk.json cells (positions local to the cell; cell world origin = [cx*cellSize,0,cz*cellSize])."),
+  cellSize: z.number().positive().default(16).describe("World-units width of one square chunk cell."),
+  radius: z
+    .number()
+    .min(1)
+    .max(16)
+    .default(2)
+    .describe("Legacy binary residency: load cells within this many cells of the focus. Ignored when `rings` is set."),
+  keepPadding: z
+    .number()
+    .min(0)
+    .max(8)
+    .default(1)
+    .describe("Extra cells beyond a boundary to hold before downgrading/unloading (hysteresis — stops boundary thrashing)."),
   /**
    * Distance-based level-of-detail rings, in CELLS from the focus (see §4 of
    * docs/open-world-streaming-plan.md). Each cell renders at the highest-detail
@@ -49,12 +58,13 @@ export const chunkStreamerSchema = z.object({
    */
   rings: z
     .object({
-      simulation: z.number().min(0).default(2),
-      fullRender: z.number().min(0).default(3),
-      hlod: z.number().min(0).default(10),
-      farTerrain: z.number().min(0).default(32),
+      simulation: z.number().min(0).default(2).describe("Cells within this radius render + simulate (physics + scripts)."),
+      fullRender: z.number().min(0).default(3).describe("Out to here: full meshes, no physics/scripts."),
+      hlod: z.number().min(0).default(10).describe("Out to here: cheap merged proxy (one draw call per material)."),
+      farTerrain: z.number().min(0).default(32).describe("Out to here: coarse far proxy. Beyond: unloaded."),
     })
-    .optional(),
+    .optional()
+    .describe("Distance LOD rings in CELLS from the focus. Keep `simulation` >= your play area or NPCs in outer cells freeze. Omit for legacy binary `radius` behavior."),
 });
 
 export type ChunkStreamerData = z.infer<typeof chunkStreamerSchema>;
@@ -440,14 +450,16 @@ export function parseChunkKey(key: string): [number, number] | null {
  * instance.
  */
 export const subsceneSchema = z.object({
-  /** Scene name (assets/scenes/<scene>.scene.json), sans extension. */
-  scene: z.string().min(1),
-  /** always = resident while the world is open; proximity = streamed by distance. */
-  mode: z.enum(["always", "proximity"]).default("proximity"),
-  /** proximity mode: load when the focus is within this world-unit radius. */
-  radius: z.number().positive().default(75),
-  /** Extra distance beyond radius before unloading (hysteresis). */
-  keepPadding: z.number().min(0).default(15),
+  scene: z
+    .string()
+    .min(1)
+    .describe("Scene to compose in (assets/scenes/<scene>.scene.json, sans extension); its sky/postfx/nested subscenes are stripped."),
+  mode: z
+    .enum(["always", "proximity"])
+    .default("proximity")
+    .describe("always = resident while the world is open; proximity = streamed by distance to the focus."),
+  radius: z.number().positive().default(75).describe("proximity mode: load when the focus is within this world-unit radius."),
+  keepPadding: z.number().min(0).default(15).describe("Extra distance beyond radius before unloading (hysteresis)."),
 });
 
 export type SubsceneData = z.infer<typeof subsceneSchema>;

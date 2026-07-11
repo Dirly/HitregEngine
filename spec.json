@@ -352,6 +352,7 @@
           ]
         },
         "material": {
+          "description": "Material asset GUID (assets/materials/); omitted = engine default material.",
           "type": "string"
         },
         "castShadow": {
@@ -364,6 +365,7 @@
         },
         "renderMode": {
           "default": "auto",
+          "description": "\"instanced\" collapses all users of the same prefab into one InstancedMesh.",
           "type": "string",
           "enum": [
             "auto",
@@ -372,6 +374,7 @@
         },
         "static": {
           "default": false,
+          "description": "Marks geometry static: eligible for HLOD/batch merge into distant proxies. No effect on gameplay; set it for scenery, not for anything a script moves.",
           "type": "boolean"
         }
       },
@@ -444,6 +447,7 @@
         },
         "active": {
           "default": false,
+          "description": "Marks this the active camera. Exactly one camera should be active; the render layer enforces first-wins.",
           "type": "boolean"
         },
         "rig": {
@@ -525,10 +529,12 @@
       "properties": {
         "name": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "description": "Registered behavior name (built-ins + assets/scripts/); GET /__hitreg/spec `scripts` lists them and their params."
         },
         "params": {
           "default": {},
+          "description": "Per-instance tuning for the behavior's declared params.",
           "type": "object",
           "propertyNames": {
             "type": "string"
@@ -865,6 +871,7 @@
         },
         "space": {
           "default": "world",
+          "description": "world = particles trail behind a moving emitter; local = they ride it.",
           "type": "string",
           "enum": [
             "local",
@@ -969,6 +976,7 @@
       "properties": {
         "authority": {
           "default": "host",
+          "description": "host = the session authority simulates it. \"owner\" is RESERVED (ownership wiring lands later) — use \"host\".",
           "type": "string",
           "enum": [
             "host",
@@ -991,6 +999,7 @@
         },
         "relevancy": {
           "default": "always",
+          "description": "\"proximity\" transmits only to peers within `radius` (interest management, with leave hysteresis).",
           "type": "string",
           "enum": [
             "always",
@@ -999,11 +1008,13 @@
         },
         "radius": {
           "default": 50,
+          "description": "Proximity relevancy range in world units.",
           "type": "number",
           "exclusiveMinimum": 0
         },
         "sendEvery": {
           "default": 1,
+          "description": "Transmit on every Nth snapshot (staggered per entity); raise for ambient/distant things.",
           "type": "integer",
           "minimum": 1,
           "maximum": 10
@@ -1016,6 +1027,7 @@
       "properties": {
         "kind": {
           "default": "dynamic",
+          "description": "dynamic = physics-driven; kinematic = script-driven, pushes others; static = immovable. A collider with NO rigidbody is already static scenery.",
           "type": "string",
           "enum": [
             "dynamic",
@@ -1058,6 +1070,7 @@
       "properties": {
         "shape": {
           "default": "box",
+          "description": "heightmap/trimesh/convex COOK from the same entity's mesh component (no size needed); box/sphere/capsule/cylinder are sized primitives.",
           "type": "string",
           "enum": [
             "box",
@@ -1075,6 +1088,7 @@
             1,
             1
           ],
+          "description": "Full extents (box) / diameter+height (sphere, capsule, cylinder use x,y). IGNORED for cooked shapes (heightmap/trimesh/convex).",
           "type": "array",
           "prefixItems": [
             {
@@ -1094,6 +1108,7 @@
             0,
             0
           ],
+          "description": "Local offset from the entity origin.",
           "type": "array",
           "prefixItems": [
             {
@@ -1124,6 +1139,7 @@
         },
         "isTrigger": {
           "default": false,
+          "description": "Detect overlap without physical response — fires trigger.enter/exit events instead of colliding.",
           "type": "boolean"
         }
       }
@@ -1249,45 +1265,54 @@
       "properties": {
         "source": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "description": "World folder under assets/chunks/ holding the <cx>_<cz>.chunk.json cells (positions local to the cell; cell world origin = [cx*cellSize,0,cz*cellSize])."
         },
         "cellSize": {
           "default": 16,
+          "description": "World-units width of one square chunk cell.",
           "type": "number",
           "exclusiveMinimum": 0
         },
         "radius": {
           "default": 2,
+          "description": "Legacy binary residency: load cells within this many cells of the focus. Ignored when `rings` is set.",
           "type": "number",
           "minimum": 1,
           "maximum": 16
         },
         "keepPadding": {
           "default": 1,
+          "description": "Extra cells beyond a boundary to hold before downgrading/unloading (hysteresis — stops boundary thrashing).",
           "type": "number",
           "minimum": 0,
           "maximum": 8
         },
         "rings": {
+          "description": "Distance LOD rings in CELLS from the focus. Keep `simulation` >= your play area or NPCs in outer cells freeze. Omit for legacy binary `radius` behavior.",
           "type": "object",
           "properties": {
             "simulation": {
               "default": 2,
+              "description": "Cells within this radius render + simulate (physics + scripts).",
               "type": "number",
               "minimum": 0
             },
             "fullRender": {
               "default": 3,
+              "description": "Out to here: full meshes, no physics/scripts.",
               "type": "number",
               "minimum": 0
             },
             "hlod": {
               "default": 10,
+              "description": "Out to here: cheap merged proxy (one draw call per material).",
               "type": "number",
               "minimum": 0
             },
             "farTerrain": {
               "default": 32,
+              "description": "Out to here: coarse far proxy. Beyond: unloaded.",
               "type": "number",
               "minimum": 0
             }
@@ -1304,10 +1329,12 @@
       "properties": {
         "scene": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "description": "Scene to compose in (assets/scenes/<scene>.scene.json, sans extension); its sky/postfx/nested subscenes are stripped."
         },
         "mode": {
           "default": "proximity",
+          "description": "always = resident while the world is open; proximity = streamed by distance to the focus.",
           "type": "string",
           "enum": [
             "always",
@@ -1316,11 +1343,13 @@
         },
         "radius": {
           "default": 75,
+          "description": "proximity mode: load when the focus is within this world-unit radius.",
           "type": "number",
           "exclusiveMinimum": 0
         },
         "keepPadding": {
           "default": 15,
+          "description": "Extra distance beyond radius before unloading (hysteresis).",
           "type": "number",
           "minimum": 0
         }
@@ -1337,6 +1366,7 @@
       "properties": {
         "shader": {
           "default": "standard",
+          "description": "Built-in shader. unlit = flat/PS1-style, ignores lights; toon = banded; standard = PBR.",
           "type": "string",
           "enum": [
             "standard",
@@ -1351,6 +1381,7 @@
           "pattern": "^#[0-9a-fA-F]{6}$"
         },
         "map": {
+          "description": "Texture asset id (assets/textures/) used as the color map.",
           "type": "string"
         },
         "repeat": {
@@ -1358,6 +1389,7 @@
             1,
             1
           ],
+          "description": "Texture tiling [u, v].",
           "type": "array",
           "prefixItems": [
             {
@@ -1387,6 +1419,7 @@
         },
         "emissiveIntensity": {
           "default": 1,
+          "description": "Emissive glow strength. Only visibly blooms when a scene postfx bloom pass is enabled.",
           "type": "number",
           "minimum": 0
         },
@@ -1398,6 +1431,7 @@
         },
         "transparent": {
           "default": false,
+          "description": "Enable alpha blending. Auto-on when opacity < 1; set true for textures with alpha.",
           "type": "boolean"
         }
       }

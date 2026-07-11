@@ -12,4 +12,7 @@ The full reference lives in the tool-neutral doc **docs/scene-authoring.md**
   file Write — never a partial edit that leaves invalid JSON on disk.
 - While `pnpm dev` runs, saved asset/scene files live-sync into the running
   browser; `GET /__hitreg/context` shows what the user currently sees.
+- For exact component/event/data-type/script fields, `GET /__hitreg/spec`
+  (generated from the live schemas — ground truth, never drifts) or read the
+  committed `spec.json` at the repo root. Don't guess field names from memory.
 - Working examples: `apps/playground/assets/scenes/*.scene.json`.

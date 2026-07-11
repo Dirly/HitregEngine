@@ -10,7 +10,10 @@ const vec3 = z.tuple([z.number(), z.number(), z.number()]);
  */
 
 export const rigidbodySchema = z.object({
-  kind: z.enum(["dynamic", "kinematic", "static"]).default("dynamic"),
+  kind: z
+    .enum(["dynamic", "kinematic", "static"])
+    .default("dynamic")
+    .describe("dynamic = physics-driven; kinematic = script-driven, pushes others; static = immovable. A collider with NO rigidbody is already static scenery."),
   /** Extra mass on top of collider density-derived mass. */
   mass: z.number().min(0).default(0),
   linearDamping: z.number().min(0).default(0),
@@ -30,16 +33,19 @@ export const colliderSchema = z.object({
   // ignored for all three cooked shapes.
   shape: z
     .enum(["box", "sphere", "capsule", "cylinder", "heightmap", "trimesh", "convex"])
-    .default("box"),
-  /** Full extents (box) / diameter+height (sphere, capsule, cylinder use x and y). */
-  size: vec3.default([1, 1, 1]),
-  /** Local offset from the entity origin. */
-  offset: vec3.default([0, 0, 0]),
+    .default("box")
+    .describe("heightmap/trimesh/convex COOK from the same entity's mesh component (no size needed); box/sphere/capsule/cylinder are sized primitives."),
+  size: vec3
+    .default([1, 1, 1])
+    .describe("Full extents (box) / diameter+height (sphere, capsule, cylinder use x,y). IGNORED for cooked shapes (heightmap/trimesh/convex)."),
+  offset: vec3.default([0, 0, 0]).describe("Local offset from the entity origin."),
   friction: z.number().min(0).default(0.5),
   restitution: z.number().min(0).default(0),
   density: z.number().positive().default(1),
-  /** Triggers detect overlap without physical response. */
-  isTrigger: z.boolean().default(false),
+  isTrigger: z
+    .boolean()
+    .default(false)
+    .describe("Detect overlap without physical response — fires trigger.enter/exit events instead of colliding."),
 });
 
 export const jointSchema = z.object({

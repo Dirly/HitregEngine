@@ -71,14 +71,22 @@ export const meshSchema = z.object({
         .optional(),
     }),
   ]),
-  /** Material asset GUID; omitted = engine default material. */
-  material: z.string().optional(),
+  material: z
+    .string()
+    .optional()
+    .describe("Material asset GUID (assets/materials/); omitted = engine default material."),
   castShadow: z.boolean().default(true),
   receiveShadow: z.boolean().default(true),
-  /** "instanced" collapses all users of the same prefab into one InstancedMesh. */
-  renderMode: z.enum(["auto", "instanced"]).default("auto"),
-  /** Static geometry is eligible for publish-time merge/batch baking. */
-  static: z.boolean().default(false),
+  renderMode: z
+    .enum(["auto", "instanced"])
+    .default("auto")
+    .describe('"instanced" collapses all users of the same prefab into one InstancedMesh.'),
+  static: z
+    .boolean()
+    .default(false)
+    .describe(
+      "Marks geometry static: eligible for HLOD/batch merge into distant proxies. No effect on gameplay; set it for scenery, not for anything a script moves.",
+    ),
 });
 
 export const lightSchema = z.object({
@@ -96,8 +104,10 @@ export const cameraSchema = z.object({
   fov: z.number().min(1).max(179).default(60),
   near: z.number().positive().default(0.1),
   far: z.number().positive().default(1000),
-  /** Exactly one camera should be active at runtime; enforced by the render layer. */
-  active: z.boolean().default(false),
+  active: z
+    .boolean()
+    .default(false)
+    .describe("Marks this the active camera. Exactly one camera should be active; the render layer enforces first-wins."),
   /** Play-mode camera rig. follow = orbit-follow the first entity with targetTag. */
   rig: z
     .object({
@@ -112,25 +122,35 @@ export const cameraSchema = z.object({
 
 /** PBR material — a data asset referenced by mesh.material GUID. */
 export const materialSchema = z.object({
-  /** Built-in shader set; custom TSL node-graph shaders are the planned upgrade path. */
-  shader: z.enum(["standard", "unlit", "toon", "wireframe"]).default("standard"),
+  shader: z
+    .enum(["standard", "unlit", "toon", "wireframe"])
+    .default("standard")
+    .describe("Built-in shader. unlit = flat/PS1-style, ignores lights; toon = banded; standard = PBR."),
   color: hexColor.default("#9aa0a8"),
-  /** Texture asset id (assets/textures/) used as the color map. */
-  map: z.string().optional(),
-  /** Texture tiling [u, v]. */
-  repeat: z.tuple([z.number(), z.number()]).default([1, 1]),
+  map: z.string().optional().describe("Texture asset id (assets/textures/) used as the color map."),
+  repeat: z.tuple([z.number(), z.number()]).default([1, 1]).describe("Texture tiling [u, v]."),
   roughness: z.number().min(0).max(1).default(0.85),
   metalness: z.number().min(0).max(1).default(0.05),
   emissive: hexColor.default("#000000"),
-  emissiveIntensity: z.number().min(0).default(1),
+  emissiveIntensity: z
+    .number()
+    .min(0)
+    .default(1)
+    .describe("Emissive glow strength. Only visibly blooms when a scene postfx bloom pass is enabled."),
   opacity: z.number().min(0).max(1).default(1),
-  transparent: z.boolean().default(false),
+  transparent: z
+    .boolean()
+    .default(false)
+    .describe("Enable alpha blending. Auto-on when opacity < 1; set true for textures with alpha."),
 });
 
 /** Attach behavior: a registered script by name + its tuning params. */
 export const scriptSchema = z.object({
-  name: z.string().min(1),
-  params: z.record(z.string(), z.unknown()).default({}),
+  name: z
+    .string()
+    .min(1)
+    .describe("Registered behavior name (built-ins + assets/scripts/); GET /__hitreg/spec `scripts` lists them and their params."),
+  params: z.record(z.string(), z.unknown()).default({}).describe("Per-instance tuning for the behavior's declared params."),
 });
 
 /**
@@ -246,8 +266,10 @@ export const particlesSchema = z.object({
   blending: z.enum(["normal", "additive"]).default("additive"),
   /** Texture asset id; omitted = procedural soft round sprite. */
   texture: z.string().optional(),
-  /** world = particles trail behind a moving emitter; local = they ride it. */
-  space: z.enum(["local", "world"]).default("world"),
+  space: z
+    .enum(["local", "world"])
+    .default("world")
+    .describe("world = particles trail behind a moving emitter; local = they ride it."),
 });
 
 /**
@@ -299,18 +321,28 @@ export const netObjectSchema = z.object({
    * (vehicles, carried props) — reserved; engine wiring lands with
    * ownership assignment.
    */
-  authority: z.enum(["host", "owner"]).default("host"),
+  authority: z
+    .enum(["host", "owner"])
+    .default("host")
+    .describe('host = the session authority simulates it. "owner" is RESERVED (ownership wiring lands later) — use "host".'),
   sync: z
     .object({
       transform: z.boolean().default(true),
       animation: z.boolean().default(true),
     })
     .prefault({}),
-  relevancy: z.enum(["always", "proximity"]).default("always"),
-  /** Proximity relevancy range in world units. */
-  radius: z.number().positive().default(50),
-  /** Transmit on every Nth snapshot (1 = every; staggered per entity). */
-  sendEvery: z.number().int().min(1).max(10).default(1),
+  relevancy: z
+    .enum(["always", "proximity"])
+    .default("always")
+    .describe('"proximity" transmits only to peers within `radius` (interest management, with leave hysteresis).'),
+  radius: z.number().positive().default(50).describe("Proximity relevancy range in world units."),
+  sendEvery: z
+    .number()
+    .int()
+    .min(1)
+    .max(10)
+    .default(1)
+    .describe("Transmit on every Nth snapshot (staggered per entity); raise for ambient/distant things."),
 });
 
 export type NetObjectData = z.infer<typeof netObjectSchema>;
