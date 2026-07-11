@@ -23,6 +23,8 @@ export interface HeightmapParams {
   flatFalloff: number;
   /** Optional world-space river channel running parallel to the Z axis. */
   river?: { centerX: number; width: number; depth: number };
+  /** Runtime-resolved editable samples, row-major, (resolution + 1)^2. */
+  heights?: readonly number[];
 }
 
 /** Deterministic lattice hash → [0, 1). Same bits in browser and Node (V8). */
@@ -50,6 +52,17 @@ function valueNoise(x: number, z: number, seed: number): number {
 
 /** Terrain height at local (x, z) — entity-local, origin at the center. */
 export function sampleHeightmap(p: HeightmapParams, x: number, z: number): number {
+  if (p.heights?.length === (p.resolution + 1) ** 2) {
+    const [w, d] = p.size;
+    const gx = Math.min(p.resolution, Math.max(0, (x / w + 0.5) * p.resolution));
+    const gz = Math.min(p.resolution, Math.max(0, (z / d + 0.5) * p.resolution));
+    const x0 = Math.floor(gx), z0 = Math.floor(gz);
+    const x1 = Math.min(p.resolution, x0 + 1), z1 = Math.min(p.resolution, z0 + 1);
+    const tx = gx - x0, tz = gz - z0, row = p.resolution + 1;
+    const a = p.heights[z0 * row + x0]!, b = p.heights[z0 * row + x1]!;
+    const c = p.heights[z1 * row + x0]!, d0 = p.heights[z1 * row + x1]!;
+    return a + (b - a) * tx + (c - a) * tz + (a - b - c + d0) * tx * tz;
+  }
   const [offsetX, offsetZ] = p.offset ?? [0, 0];
   const worldX = x + offsetX;
   const worldZ = z + offsetZ;

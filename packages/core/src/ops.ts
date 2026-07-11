@@ -30,12 +30,80 @@ export interface ApplyResult {
   doc: SceneDoc;
   /** Applying these (in order) to `doc` restores the input document. */
   inverse: Op[];
+  /**
+   * Entities that existed before the batch and were modified by it (name,
+   * tags, parent, or components). Disjoint from added/removed: an entity
+   * added in this batch is only in `addedEntities`, even if later ops touch
+   * it; an entity removed and re-added in the same batch counts as changed.
+   */
+  changedEntities: Set<string>;
+  /** Entities created by this batch (and still present at the end of it). */
+  addedEntities: Set<string>;
+  /**
+   * Entities removed by this batch, including cascaded subtree removals.
+   * Entities added and removed within the same batch appear in neither set.
+   */
+  removedEntities: Set<string>;
+  /**
+   * entityId -> component names set/removed on it. Keys are a subset of
+   * `changedEntities` (components of freshly added entities are not listed —
+   * the whole entity is new).
+   */
+  changedComponents: Map<string, Set<string>>;
+}
+
+/**
+ * Batch-level bookkeeping for ApplyResult's affected sets. Keeps the three
+ * entity sets disjoint and net-of-the-batch (add-then-remove cancels out).
+ */
+class AffectedSets {
+  readonly changed = new Set<string>();
+  readonly added = new Set<string>();
+  readonly removed = new Set<string>();
+  readonly components = new Map<string, Set<string>>();
+
+  markAdded(id: string): void {
+    if (this.removed.has(id)) {
+      // existed before the batch, removed, now re-added: net effect is change
+      this.removed.delete(id);
+      this.changed.add(id);
+    } else {
+      this.added.add(id);
+    }
+  }
+
+  markRemoved(id: string): void {
+    this.changed.delete(id);
+    this.components.delete(id);
+    if (this.added.has(id)) {
+      // created and destroyed within the batch: net no-op
+      this.added.delete(id);
+    } else {
+      this.removed.add(id);
+    }
+  }
+
+  markChanged(id: string): void {
+    if (!this.added.has(id)) this.changed.add(id);
+  }
+
+  markComponent(id: string, component: string): void {
+    this.markChanged(id);
+    if (this.added.has(id)) return;
+    let set = this.components.get(id);
+    if (!set) {
+      set = new Set();
+      this.components.set(id, set);
+    }
+    set.add(component);
+  }
 }
 
 /**
  * Apply a batch of ops atomically: either every op validates and applies, or
  * an OpError is thrown and the input document is untouched. The input is never
- * mutated; a new document is returned along with the inverse batch (undo).
+ * mutated; a new document is returned along with the inverse batch (undo) and
+ * the affected sets (which entities/components the batch touched, net).
  */
 export function applyOps(
   input: SceneDoc,
@@ -44,14 +112,22 @@ export function applyOps(
 ): ApplyResult {
   const doc = structuredClone(input);
   const inverse: Op[] = [];
+  const affected = new AffectedSets();
 
   ops.forEach((op, i) => {
-    const undo = applyOne(doc, op, registry, i);
+    const undo = applyOne(doc, op, registry, i, affected);
     // inverse batch runs in reverse op order
     inverse.unshift(...undo);
   });
 
-  return { doc, inverse };
+  return {
+    doc,
+    inverse,
+    changedEntities: affected.changed,
+    addedEntities: affected.added,
+    removedEntities: affected.removed,
+    changedComponents: affected.components,
+  };
 }
 
 function requireEntity(doc: SceneDoc, id: EntityId, i: number): EntityDoc {
@@ -77,6 +153,7 @@ function applyOne(
   op: Op,
   registry: ComponentRegistry,
   i: number,
+  affected: AffectedSets,
 ): Op[] {
   switch (op.op) {
     case "add-entity": {
@@ -91,6 +168,7 @@ function applyOne(
       }
       validateComponents(entity, registry, i);
       doc.entities[op.id] = entity;
+      affected.markAdded(op.id);
       return [{ op: "remove-entity", id: op.id }];
     }
 
@@ -103,7 +181,10 @@ function applyOne(
         id,
         entity: structuredClone(doc.entities[id]!),
       }));
-      for (const id of removed) delete doc.entities[id];
+      for (const id of removed) {
+        delete doc.entities[id];
+        affected.markRemoved(id);
+      }
       // restores are already parent-first, so they replay in given order
       return restores;
     }
@@ -123,6 +204,7 @@ function applyOne(
       }
       const prev = entity.parent;
       entity.parent = op.parent;
+      affected.markChanged(op.id);
       return [{ op: "reparent", id: op.id, parent: prev }];
     }
 
@@ -131,6 +213,7 @@ function applyOne(
       if (op.name.length === 0) throw new OpError("name must be non-empty", i);
       const prev = entity.name;
       entity.name = op.name;
+      affected.markChanged(op.id);
       return [{ op: "rename", id: op.id, name: prev }];
     }
 
@@ -138,6 +221,7 @@ function applyOne(
       const entity = requireEntity(doc, op.id, i);
       const prev = entity.tags;
       entity.tags = [...op.tags];
+      affected.markChanged(op.id);
       return [{ op: "set-tags", id: op.id, tags: prev }];
     }
 
@@ -148,6 +232,7 @@ function applyOne(
       const had = op.component in entity.components;
       const prev = had ? structuredClone(entity.components[op.component]) : null;
       entity.components[op.component] = result.data;
+      affected.markComponent(op.id, op.component);
       return had
         ? [{ op: "set-component", id: op.id, component: op.component, data: prev }]
         : [{ op: "remove-component", id: op.id, component: op.component }];
@@ -163,6 +248,7 @@ function applyOne(
       }
       const prev = structuredClone(entity.components[op.component]);
       delete entity.components[op.component];
+      affected.markComponent(op.id, op.component);
       return [
         { op: "set-component", id: op.id, component: op.component, data: prev },
       ];

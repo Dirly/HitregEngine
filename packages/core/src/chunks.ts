@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { entityDocSchema, type SceneDoc } from "./scene.js";
 import type { ComponentRegistry } from "./components/registry.js";
+import type { Quat, Vec3 } from "./math.js";
 
 /**
  * Chunk streaming: large worlds split into grid-cell files that load and
@@ -42,6 +43,7 @@ export type ChunkStreamerData = z.infer<typeof chunkStreamerSchema>;
 
 export function registerChunkComponents(registry: ComponentRegistry): void {
   registry.register("chunkStreamer", chunkStreamerSchema);
+  registry.register("subscene", subsceneSchema);
 }
 
 /** Grid coords encoded in a chunk filename: "3_-2.chunk.json" -> [3, -2]. */
@@ -86,4 +88,77 @@ export function chunkToSceneDoc(
     };
   }
   return { doc: { version: 1, name: key, entities }, rootId: key };
+}
+
+/**
+ * Subscenes: whole scene FILES as additive, streamable modules (micro-scenes).
+ * A world scene places named scenes — villages, dungeons, UI layers — as
+ * one-line entities; the runtime loads/unloads them like chunks. The scene
+ * file stays a normal scene: open it from the picker and press play to test
+ * it in isolation. Same runtime-only rules as chunks: composed content never
+ * enters the world doc, and editing the subscene file hot-swaps every loaded
+ * instance.
+ */
+export const subsceneSchema = z.object({
+  /** Scene name (assets/scenes/<scene>.scene.json), sans extension. */
+  scene: z.string().min(1),
+  /** always = resident while the world is open; proximity = streamed by distance. */
+  mode: z.enum(["always", "proximity"]).default("proximity"),
+  /** proximity mode: load when the focus is within this world-unit radius. */
+  radius: z.number().positive().default(75),
+  /** Extra distance beyond radius before unloading (hysteresis). */
+  keepPadding: z.number().min(0).default(15),
+});
+
+export type SubsceneData = z.infer<typeof subsceneSchema>;
+
+/**
+ * Components that only make sense when a scene runs standalone (its authoring
+ * preview environment) — stripped when it loads as a subscene so the world's
+ * own sky/postfx aren't fought over. Nested `subscene` is stripped too (no
+ * recursive streaming in v1).
+ */
+const SUBSCENE_STRIPPED_COMPONENTS = ["sky", "postfx", "subscene"] as const;
+
+/**
+ * A loaded subscene becomes a SceneDoc fragment: ids prefixed with the
+ * placing entity's id (so one scene can be placed many times), re-rooted onto
+ * a synthetic origin carrying the instance's WORLD transform.
+ */
+export function subsceneToSceneDoc(
+  instanceId: string,
+  world: { position: Vec3; rotation: Quat; scale: Vec3 },
+  scene: SceneDoc,
+): { doc: SceneDoc; rootId: string; stripped: string[] } {
+  const key = `__sub:${instanceId}`;
+  const stripped: string[] = [];
+  const entities: SceneDoc["entities"] = {
+    [key]: {
+      name: key,
+      parent: null,
+      tags: ["subscene"],
+      components: {
+        transform: {
+          position: [...world.position],
+          rotation: [...world.rotation],
+          scale: [...world.scale],
+        },
+      },
+    },
+  };
+  for (const [id, entity] of Object.entries(scene.entities)) {
+    const components = { ...entity.components };
+    for (const name of SUBSCENE_STRIPPED_COMPONENTS) {
+      if (name in components) {
+        delete components[name];
+        stripped.push(`${id}.${name}`);
+      }
+    }
+    entities[`${key}/${id}`] = {
+      ...entity,
+      components,
+      parent: entity.parent === null ? key : `${key}/${entity.parent}`,
+    };
+  }
+  return { doc: { version: 1, name: key, entities }, rootId: key, stripped };
 }

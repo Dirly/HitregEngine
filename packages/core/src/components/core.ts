@@ -45,6 +45,8 @@ export const meshSchema = z.object({
       /** Procedural noise terrain (see core/terrain.ts). Pair with a
        * collider of shape "heightmap" for matching physics. */
       kind: z.literal("heightmap"),
+      /** Optional file-backed editable heightfield from assets/terrain/. */
+      terrainAsset: z.string().min(1).optional(),
       /** World extent [width, depth], centered on the entity origin. */
       size: z.tuple([z.number().positive(), z.number().positive()]).default([80, 80]),
       amplitude: z.number().min(0).default(1.5),
@@ -237,6 +239,71 @@ export const particlesSchema = z.object({
   space: z.enum(["local", "world"]).default("world"),
 });
 
+/**
+ * World-space, always-camera-facing UI attached to an entity: HP bars, name
+ * labels, icon sprites. All fields are defaulted so `{ "billboard": {} }` is a
+ * full green bar floating above the entity. Scripts mutate fill/text/visible
+ * at runtime via ctx.setBillboard (never the document).
+ */
+export const billboardSchema = z.object({
+  kind: z.enum(["bar", "text", "sprite"]).default("bar"),
+  /** Position above the entity origin, entity-local units. */
+  offset: vec3.default([0, 1.4, 0]),
+  /** World-space [width, height]. Default is bar-ish; text/sprite authors override. */
+  size: z.tuple([z.number().positive(), z.number().positive()]).default([1, 0.14]),
+  /** Bar kind only: filled fraction of the track. */
+  fill: z.number().min(0).max(1).default(1),
+  /** Bar fill / text color. */
+  color: hexColor.default("#4ade80"),
+  background: hexColor.default("#101522"),
+  backgroundOpacity: z.number().min(0).max(1).default(0.65),
+  /** Text kind only: the label. */
+  text: z.string().default(""),
+  /** Sprite kind only: texture asset id (assets/textures/) — the whole image. */
+  texture: z.string().optional(),
+  /** Sprite kind only: spritesheet data-asset id + frame name (wins over texture). */
+  sheet: z.string().optional(),
+  frame: z.string().optional(),
+  visible: z.boolean().default(true),
+});
+
+/**
+ * Declares an entity as network-replicated (the engine's NetworkObject).
+ * `{ "netObject": {} }` is a sane default: host-simulated, transform +
+ * animation synced, relevant to everyone, transmitted every snapshot.
+ *
+ * Interest management ("need to know"): `relevancy: "proximity"` transmits
+ * only to peers whose player is within `radius` (with leave hysteresis);
+ * `sendEvery: 4` transmits on every 4th snapshot — distant/slow things
+ * (patrolling guards, ambient animals) don't deserve full bandwidth.
+ *
+ * Entities with a script + rigidbody and NO netObject component get these
+ * exact defaults implicitly (zero-config multiplayer); add the component
+ * to opt out of a field or tune it.
+ */
+export const netObjectSchema = z.object({
+  /**
+   * host = the session authority simulates it (NPCs, world objects).
+   * owner = the owning peer simulates it and the host validates/clamps
+   * (vehicles, carried props) — reserved; engine wiring lands with
+   * ownership assignment.
+   */
+  authority: z.enum(["host", "owner"]).default("host"),
+  sync: z
+    .object({
+      transform: z.boolean().default(true),
+      animation: z.boolean().default(true),
+    })
+    .prefault({}),
+  relevancy: z.enum(["always", "proximity"]).default("always"),
+  /** Proximity relevancy range in world units. */
+  radius: z.number().positive().default(50),
+  /** Transmit on every Nth snapshot (1 = every; staggered per entity). */
+  sendEvery: z.number().int().min(1).max(10).default(1),
+});
+
+export type NetObjectData = z.infer<typeof netObjectSchema>;
+
 export function registerCoreComponents(registry: ComponentRegistry): void {
   registry.register("transform", transformSchema);
   registry.register("mesh", meshSchema);
@@ -249,5 +316,7 @@ export function registerCoreComponents(registry: ComponentRegistry): void {
   registry.register("sky", skySchema);
   registry.register("postfx", postfxSchema);
   registry.register("particles", particlesSchema);
+  registry.register("billboard", billboardSchema);
+  registry.register("netObject", netObjectSchema);
   registerPhysicsComponents(registry);
 }

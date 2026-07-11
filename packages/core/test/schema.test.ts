@@ -101,17 +101,48 @@ describe("ComponentRegistry", () => {
     if (!badShape.ok) expect(badShape.error).toMatch(/shape/);
   });
 
+  it("defaults billboard to a full green bar above the entity", () => {
+    const registry = setup();
+    const result = registry.validate("billboard", {});
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data).toEqual({
+        kind: "bar",
+        offset: [0, 1.4, 0],
+        size: [1, 0.14],
+        fill: 1,
+        color: "#4ade80",
+        background: "#101522",
+        backgroundOpacity: 0.65,
+        text: "",
+        visible: true,
+      });
+    }
+  });
+
+  it("rejects out-of-range billboard fill", () => {
+    const registry = setup();
+    const over = registry.validate("billboard", { fill: 1.5 });
+    expect(over.ok).toBe(false);
+    if (!over.ok) expect(over.error).toMatch(/fill/);
+    const under = registry.validate("billboard", { fill: -0.1 });
+    expect(under.ok).toBe(false);
+    if (!under.ok) expect(under.error).toMatch(/fill/);
+  });
+
   it("exports JSON Schema for every registered component", () => {
     const registry = setup();
     const schemas = registry.jsonSchemas();
     expect(Object.keys(schemas).sort()).toEqual([
       "animator",
       "audio",
+      "billboard",
       "camera",
       "collider",
       "joint",
       "light",
       "mesh",
+      "netObject",
       "particles",
       "postfx",
       "prefab",

@@ -1,7 +1,24 @@
 import { describe, expect, it } from "vitest";
 import { sampleHeightmap } from "../src/terrain.js";
+import { terrainHeightfieldSchema } from "../src/assets.js";
 
 describe("heightmap terrain", () => {
+  it("validates file-backed heightfields and samples them bilinearly", () => {
+    const data = terrainHeightfieldSchema.parse({
+      version: 1,
+      size: [8, 8],
+      resolution: 8,
+      heights: Array.from({ length: 81 }, (_, i) => Math.floor(i / 9)),
+    });
+    expect(sampleHeightmap({
+      ...data,
+      amplitude: 0,
+      frequency: 1,
+      seed: 1,
+      flatRadius: 0,
+      flatFalloff: 1,
+    }, 0, 0)).toBeCloseTo(4);
+  });
   it("is continuous at the boundary of adjacent offset chunks", () => {
     const shared = {
       size: [160, 160] as [number, number],

@@ -1,10 +1,27 @@
 import { z } from "zod";
 import { prefabDocSchema, validatePrefab, PrefabError, type PrefabDoc } from "./prefab.js";
 import { materialSchema } from "./components/core.js";
+import { spritesheetSchema } from "./spritesheet.js";
 
-/** Register the engine's built-in data-asset types (currently: material). */
+export const terrainHeightfieldSchema = z.object({
+  version: z.literal(1).default(1),
+  size: z.tuple([z.number().positive(), z.number().positive()]),
+  resolution: z.number().int().min(8).max(256),
+  heights: z.array(z.number()).min(81),
+}).superRefine((data, ctx) => {
+  const expected = (data.resolution + 1) ** 2;
+  if (data.heights.length !== expected) {
+    ctx.addIssue({ code: "custom", path: ["heights"], message: `expected ${expected} height samples` });
+  }
+});
+
+export type TerrainHeightfield = z.infer<typeof terrainHeightfieldSchema>;
+
+/** Register the engine's built-in data-asset types. */
 export function registerCoreAssetTypes(assets: AssetLibrary): void {
   assets.defineDataType("material", materialSchema);
+  assets.defineDataType("terrain-heightfield", terrainHeightfieldSchema);
+  assets.defineDataType("spritesheet", spritesheetSchema);
 }
 
 /**

@@ -27,6 +27,9 @@ export {
   skySchema,
   postfxSchema,
   particlesSchema,
+  billboardSchema,
+  netObjectSchema,
+  type NetObjectData,
   vec3,
   quat,
   hexColor,
@@ -72,6 +75,7 @@ export {
   type HeightmapParams,
   type HeightmapMesh,
 } from "./terrain.js";
+export { terrainHeightfieldSchema, type TerrainHeightfield } from "./assets.js";
 export {
   PlayerDataService,
   PlayerDataError,
@@ -90,6 +94,33 @@ export {
   parseChunkCoords,
   chunkFileName,
   chunkToSceneDoc,
+  subsceneSchema,
+  subsceneToSceneDoc,
   type ChunkDoc,
   type ChunkStreamerData,
+  type SubsceneData,
 } from "./chunks.js";
+export {
+  buildSceneIndex,
+  updateSceneIndex,
+  indexChildrenOf,
+  indexSubtreeOf,
+  type SceneIndex,
+} from "./scene-index.js";
+export { diffSceneDocs } from "./diff.js";
+export {
+  spritesheetSchema,
+  resolveSpriteFrames,
+  resolveSpriteFrame,
+  gridFrameRect,
+  frameToUv,
+  nearestFrameName,
+  type SpritesheetDoc,
+  type SpriteFrame,
+} from "./spritesheet.js";
+export {
+  EventRegistry,
+  registerCoreEvents,
+  type EventReplication,
+  type EventRegistrationOptions,
+} from "./events.js";

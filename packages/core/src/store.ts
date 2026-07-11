@@ -1,5 +1,10 @@
 import type { ComponentRegistry } from "./components/registry.js";
-import { applyOps, type Op } from "./ops.js";
+import { applyOps, type ApplyResult, type Op } from "./ops.js";
+import {
+  buildSceneIndex,
+  updateSceneIndex,
+  type SceneIndex,
+} from "./scene-index.js";
 import type { SceneDoc } from "./scene.js";
 
 /**
@@ -12,6 +17,8 @@ export class SceneStore {
   private undoStack: Op[][] = [];
   private redoStack: Op[][] = [];
   private listeners = new Set<() => void>();
+  /** Lazily built, incrementally maintained. null = stale, rebuild on demand. */
+  private cachedIndex: SceneIndex | null = null;
 
   constructor(
     initial: SceneDoc,
@@ -24,13 +31,38 @@ export class SceneStore {
     return this.current;
   }
 
+  /**
+   * Derived lookup index over the current doc (children/tags/components/
+   * prefab instances). Built lazily on first access, then kept in sync with
+   * every apply/undo/redo — incrementally for non-structural batches, via
+   * full rebuild otherwise. Treat it as read-only and disposable.
+   */
+  get index(): SceneIndex {
+    if (this.cachedIndex === null) {
+      this.cachedIndex = buildSceneIndex(this.current);
+    }
+    return this.cachedIndex;
+  }
+
   /** Throws OpError (leaving the doc untouched) if any op in the batch is invalid. */
   apply(ops: Op[]): void {
-    const { doc, inverse } = applyOps(this.current, ops, this.registry);
-    this.current = doc;
-    this.undoStack.push(inverse);
+    const result = applyOps(this.current, ops, this.registry);
+    this.commit(result);
+    this.undoStack.push(result.inverse);
     this.redoStack = [];
     this.emit();
+  }
+
+  /** Advance the doc and keep the cached index (if any) consistent with it. */
+  private commit(result: ApplyResult): void {
+    const prev = this.current;
+    this.current = result.doc;
+    if (this.cachedIndex === null) return; // nobody asked yet; stay lazy
+    if (!updateSceneIndex(this.cachedIndex, prev, result.doc, result)) {
+      // structural batch (removals/reparents): rebuild — still cheap, and
+      // guaranteed to match buildSceneIndex output exactly
+      this.cachedIndex = buildSceneIndex(result.doc);
+    }
   }
 
   get canUndo(): boolean {
@@ -44,18 +76,18 @@ export class SceneStore {
   undo(): void {
     const batch = this.undoStack.pop();
     if (!batch) return;
-    const { doc, inverse } = applyOps(this.current, batch, this.registry);
-    this.current = doc;
-    this.redoStack.push(inverse);
+    const result = applyOps(this.current, batch, this.registry);
+    this.commit(result);
+    this.redoStack.push(result.inverse);
     this.emit();
   }
 
   redo(): void {
     const batch = this.redoStack.pop();
     if (!batch) return;
-    const { doc, inverse } = applyOps(this.current, batch, this.registry);
-    this.current = doc;
-    this.undoStack.push(inverse);
+    const result = applyOps(this.current, batch, this.registry);
+    this.commit(result);
+    this.undoStack.push(result.inverse);
     this.emit();
   }
 
@@ -68,6 +100,7 @@ export class SceneStore {
     this.current = doc;
     this.undoStack = [];
     this.redoStack = [];
+    this.cachedIndex = null; // arbitrary new doc: rebuild lazily on demand
     this.emit();
   }
 

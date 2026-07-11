@@ -5,6 +5,7 @@ import {
   chunkToSceneDoc,
   parseChunkCoords,
   registerChunkComponents,
+  subsceneToSceneDoc,
   ComponentRegistry,
   validateScene,
   registerCoreComponents,
@@ -46,6 +47,41 @@ describe("chunk files", () => {
     expect(doc.entities[`${rootId}/ground`]!.parent).toBe(rootId);
     expect(doc.entities[`${rootId}/child`]!.parent).toBe(`${rootId}/ground`);
     // the result is a structurally valid scene
+    const registry = new ComponentRegistry();
+    registerCoreComponents(registry);
+    registerChunkComponents(registry);
+    expect(validateScene(doc, registry)).toEqual([]);
+  });
+
+  it("re-roots a subscene at the instance world transform, namespaced, standalone components stripped", () => {
+    const scene = {
+      version: 1 as const,
+      name: "village-a",
+      entities: {
+        sky: { name: "Sky", parent: null, tags: [], components: { sky: { top: "#fff", bottom: "#eee" } } },
+        house: {
+          name: "House",
+          parent: null,
+          tags: ["static"],
+          components: { transform: {}, subscene: { scene: "nested" } },
+        },
+        door: { name: "Door", parent: "house", tags: [], components: { transform: {} } },
+      },
+    };
+    const { doc, rootId, stripped } = subsceneToSceneDoc(
+      "world-marker",
+      { position: [10, 0, -5], rotation: [0, 0, 0, 1], scale: [1, 1, 1] },
+      scene,
+    );
+    expect(rootId).toBe("__sub:world-marker");
+    expect(
+      (doc.entities[rootId]!.components["transform"] as { position: number[] }).position,
+    ).toEqual([10, 0, -5]);
+    expect(doc.entities[`${rootId}/door`]!.parent).toBe(`${rootId}/house`);
+    // standalone-only components stripped: sky + nested subscene (no recursion v1)
+    expect(stripped.sort()).toEqual(["house.subscene", "sky.sky"]);
+    expect(doc.entities[`${rootId}/sky`]!.components["sky"]).toBeUndefined();
+    expect(doc.entities[`${rootId}/house`]!.components["subscene"]).toBeUndefined();
     const registry = new ComponentRegistry();
     registerCoreComponents(registry);
     registerChunkComponents(registry);
