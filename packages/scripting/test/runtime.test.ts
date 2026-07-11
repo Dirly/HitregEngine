@@ -231,3 +231,39 @@ describe("ScriptRuntime object-map ownership", () => {
     expect(renderObjects.get("npc")!.rotation.y).not.toBe(0); // spinner runs again
   });
 });
+
+describe("ScriptRuntime net suspension (suspend/resume)", () => {
+  it("suspended entities stop simulating but stay targetable; resume restarts", () => {
+    const doc = scene([
+      {
+        op: "add-entity",
+        id: "npc",
+        entity: {
+          name: "NPC",
+          parent: null,
+          tags: ["rpg-enemy"],
+          components: { transform: {}, script: { name: "spinner", params: { speed: 1 } } },
+        },
+      },
+    ]);
+    const objects = new Map([["npc", new THREE.Object3D()]]);
+    const runtime = new ScriptRuntime({
+      doc,
+      objects,
+      sim: null,
+      registry: scriptRegistry(),
+      input: noInput,
+    });
+    runtime.start();
+    runtime.suspendEntities(["npc"]);
+    for (let i = 0; i < 30; i++) runtime.fixedUpdate(1 / 60);
+    expect(objects.get("npc")!.rotation.y).toBe(0); // script is not running
+
+    // still visible to other scripts: interactions/targeting keep working
+    expect(runtime.findByTag("rpg-enemy")).toContain("npc");
+
+    runtime.resumeEntities(["npc"]);
+    for (let i = 0; i < 30; i++) runtime.fixedUpdate(1 / 60);
+    expect(objects.get("npc")!.rotation.y).not.toBe(0); // spinning again
+  });
+});

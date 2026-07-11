@@ -98,6 +98,21 @@ export default class CubeRpgManager extends Script {
     for (const id of this.ctx.findByTag(this.param<string>("enemyTag"))) {
       this.enemyHp.set(id, this.ctx.getEntity(id)?.tags.includes("elite") ? 120 : 80);
     }
+
+    // Multiplayer combat contracts. "npc.hit" is a to-authority request:
+    // peers' attacks route to the session host, which applies damage from
+    // ITS hp table (never trusting the sender). "npc.defeated" broadcasts
+    // back to-peers so every tab hides the corpse and counts the kill.
+    // Single-player: both simply deliver locally — same code either way.
+    this.ctx.events?.on("npc.hit", (payload) => {
+      const p = payload as { npc: string; damage: number };
+      this.applyNpcHit(p.npc, p.damage);
+    });
+    this.ctx.events?.on("npc.defeated", (payload) => {
+      const p = payload as { npc: string; name: string };
+      this.applyNpcDefeated(p.npc, p.name);
+    });
+
     this.refreshWeaponVisuals();
     this.render();
   }
@@ -262,24 +277,60 @@ export default class CubeRpgManager extends Script {
       ? this.weaponDamage.get(this.equippedWeapon) ?? this.param<number>("swordBonus")
       : 0;
     const damage = this.param<number>("attackDamage") + weaponBonus;
-    const hp = (this.enemyHp.get(targetId) ?? 80) - damage;
-    this.enemyHp.set(targetId, hp);
-    this.message = hp > 0 ? `Hit for ${damage}.` : `${this.ctx.getEntity(targetId)?.name ?? "Enemy"} defeated.`;
+    this.message = `Hit for ${damage}.`;
     this.messageUntil = t + 1;
 
-    const player = this.ctx.getObject(playerId);
+    // the swing is a REQUEST — the authority applies it (on the host and in
+    // single-player this delivers straight to our own applyNpcHit)
+    this.ctx.events?.emit("npc.hit", { npc: targetId, damage });
+  }
+
+  /** AUTHORITY-side damage: runs from our own swings and peers' requests. */
+  private applyNpcHit(targetId: string, damage: number): void {
+    if (this.defeated.has(targetId)) return;
+    const hp = (this.enemyHp.get(targetId) ?? 80) - damage;
+    this.enemyHp.set(targetId, hp);
+
+    // knock the enemy away from whoever is closest (good enough for a shove)
     const target = this.ctx.getObject(targetId);
-    if (player && target) {
-      const dx = target.position.x - player.position.x;
-      const dz = target.position.z - player.position.z;
-      const len = Math.hypot(dx, dz) || 1;
-      this.ctx.sim?.setLinvel(targetId, [(dx / len) * 8, 3, (dz / len) * 8]);
+    let nearest: { x: number; z: number } | null = null;
+    let nearestDist = Infinity;
+    if (target) {
+      for (const pid of this.ctx.findByTag("player")) {
+        const p = this.ctx.getObject(pid);
+        if (!p) continue;
+        const dx = target.position.x - p.position.x;
+        const dz = target.position.z - p.position.z;
+        const d = dx * dx + dz * dz;
+        if (d < nearestDist) {
+          nearestDist = d;
+          nearest = { x: dx, z: dz };
+        }
+      }
     }
+    if (nearest) {
+      const len = Math.hypot(nearest.x, nearest.z) || 1;
+      this.ctx.sim?.setLinvel(targetId, [(nearest.x / len) * 8, 3, (nearest.z / len) * 8]);
+    }
+
     if (hp <= 0) {
-      this.defeated.add(targetId);
-      if (target) target.visible = false;
-      this.ctx.sim?.setPosition?.(targetId, [0, -30, 0]);
+      // broadcast the kill — every tab (including us) buries it identically
+      this.ctx.events?.emit("npc.defeated", {
+        npc: targetId,
+        name: this.ctx.getEntity(targetId)?.name ?? "Enemy",
+      });
     }
+  }
+
+  /** Runs on EVERY tab (to-peers): hide the corpse, count the kill. */
+  private applyNpcDefeated(targetId: string, name: string): void {
+    if (this.defeated.has(targetId)) return;
+    this.defeated.add(targetId);
+    const target = this.ctx.getObject(targetId);
+    if (target) target.visible = false;
+    this.ctx.sim?.setPosition?.(targetId, [0, -30, 0]); // no body locally = no-op
+    this.message = `${name} defeated.`;
+    this.messageUntil = this.ctx.now() / 1000 + 1;
   }
 
   private usePotion(): void {

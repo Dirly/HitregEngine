@@ -1,5 +1,6 @@
 import CameraControls from "camera-controls";
 import * as THREE from "three/webgpu";
+import { z } from "zod";
 import {
   AssetLibrary,
   ComponentRegistry,
@@ -161,6 +162,20 @@ async function main(): Promise<void> {
   // is the AI-facing spec of what can be emitted/listened to)
   const events = new EventRegistry();
   registerCoreEvents(events);
+  // project combat contracts (cube-rpg): shared-world mutations go through
+  // the authority. A peer's "npc.hit" ships UP as a request (validated,
+  // sender-attributed); the authoritative manager applies damage and
+  // broadcasts "npc.defeated" DOWN so every tab agrees who died.
+  events.register(
+    "npc.hit",
+    z.object({ npc: z.string(), damage: z.number().min(0).max(500) }),
+    { replicate: "to-authority" },
+  );
+  events.register(
+    "npc.defeated",
+    z.object({ npc: z.string(), name: z.string().default("Enemy") }),
+    { replicate: "to-peers" },
+  );
   const assets = new AssetLibrary();
   registerCoreAssetTypes(assets);
   // trimesh/convex colliders cook their geometry from the entity's GLB model
@@ -829,7 +844,9 @@ async function main(): Promise<void> {
       console.log(`[net] host-simulated entities: +${toSuspend.length} -${toResume.length}`);
     }
     if (toSuspend.length > 0) {
-      scripts.removeEntities(toSuspend, { silent: true }); // ghosts, not deaths
+      // scripts SUSPEND (entities stay registered — peers can still target
+      // ghosts for interactions); physics bodies come off entirely
+      scripts.suspendEntities(toSuspend);
       sim.removeEntities(toSuspend);
       for (const id of toSuspend) {
         // stale render-smoothing entries would keep writing old positions
@@ -846,7 +863,7 @@ async function main(): Promise<void> {
       }
       const partial: SceneDoc = { ...lastExpanded, entities };
       sim.addEntities(partial);
-      scripts.addEntities(partial, built.objects, { silent: true });
+      scripts.resumeEntities(toResume);
       // continuity: resume each body where its ghost stood (host migration,
       // host stopped playing) — NOT at its scene-doc spawn position
       for (const id of toResume) {

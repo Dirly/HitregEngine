@@ -97,9 +97,44 @@ export class ScriptRuntime {
   }
 
   /**
+   * Net suspension: the session authority simulates these entities now.
+   * Their scripts stop (disposed, subscriptions dropped) but the entities
+   * and objects STAY registered — other scripts still target them
+   * (findByTag/getObject) and the net layer drives their ghost objects.
+   */
+  suspendEntities(ids: Iterable<string>): void {
+    for (const id of ids) {
+      const script = this.instances.get(id);
+      if (script) {
+        try {
+          script.onDispose?.();
+        } catch (error) {
+          console.warn(`[scripts] ${id} onDispose failed:`, error);
+        }
+        this.instances.delete(id);
+      }
+      this.dropSubscriptions(id);
+    }
+  }
+
+  /** Ids of entities carrying a tag — the same lookup scripts get via ctx. */
+  findByTag(tag: string): string[] {
+    return [...this.entities].filter(([, e]) => e.tags.includes(tag)).map(([eid]) => eid);
+  }
+
+  /** Restart scripts suspended earlier (the authority handed them back). */
+  resumeEntities(ids: Iterable<string>): void {
+    if (!this.started) return;
+    for (const id of ids) {
+      const entity = this.entities.get(id);
+      if (entity) this.startEntity(id, entity);
+    }
+  }
+
+  /**
    * Dispose scripts and forget entities removed with an unloaded chunk.
-   * `silent` skips the entity.destroyed events — for net ghost suspension,
-   * where the entity still exists but the host now simulates it.
+   * `silent` skips the entity.destroyed events — for runtime plumbing
+   * (net proxies), where nothing gameplay-visible was destroyed.
    */
   removeEntities(ids: Iterable<string>, opts?: { silent?: boolean }): void {
     for (const id of ids) {
@@ -149,10 +184,7 @@ export class ScriptRuntime {
         sim: this.opts.sim,
         getEntity: (eid) => this.entities.get(eid),
         getObject: (eid) => this.objects.get(eid),
-        findByTag: (tag) =>
-          [...this.entities]
-            .filter(([, e]) => e.tags.includes(tag))
-            .map(([eid]) => eid),
+        findByTag: (tag) => this.findByTag(tag),
         now: () => this.timeMs,
         ...(this.opts.viewForward ? { viewForward: this.opts.viewForward } : {}),
         setActiveCamera: (cameraId) => {
