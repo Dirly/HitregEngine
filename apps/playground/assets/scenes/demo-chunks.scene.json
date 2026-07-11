@@ -181,6 +181,66 @@
           "space": "world"
         }
       }
+    },
+    "village-north": {
+      "name": "Village North",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            0,
+            -36
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "subscene": {
+          "scene": "village-a",
+          "mode": "proximity",
+          "radius": 70,
+          "keepPadding": 15
+        }
+      }
+    },
+    "village-east": {
+      "name": "Village East (always loaded)",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            40,
+            0,
+            10
+          ],
+          "rotation": [
+            0,
+            0.3827,
+            0,
+            0.9239
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "subscene": {
+          "scene": "village-a",
+          "mode": "always"
+        }
+      }
     }
   }
 }

@@ -33,7 +33,11 @@ minimal data is idiomatic: `transform: {}` is a valid identity transform.
 - `audio` — `{ src: soundAssetId, volume, loop, autoplay, positional, refDistance }` (files in assets/audio/).
 - `postfx` — scene post-processing, one entity per scene: `{ bloom: { enabled, strength, radius, threshold } }`. Bloom makes emissive materials actually glow; materials also support `shader: standard|unlit|toon|wireframe` (`unlit` = flat/PS1-style, ignores lights).
 - `particles` — data-driven emitter: `{ emitting, rate, max, lifetime: [min,max], shape: point|sphere|box|cone, shapeSize, direction, speed: [min,max], gravity, drag, sizeStart/End, colorStart/End, opacityStart/End, blending: normal|additive, space: local|world, texture? }`. All fields defaulted — `particles: {}` is a valid starter.
+- `billboard` — camera-facing world-space UI above an entity (HP bar, name label, icon): `{ kind: bar|text|sprite, offset, size: [w,h], fill: 0..1, color, background, backgroundOpacity, text, texture?, sheet?, frame?, visible }`. All fields defaulted — `billboard: {}` is a full green bar at [0, 1.4, 0]; scripts drive it at runtime via `ctx.setBillboard({ fill?, text?, visible? })`. Sprite kind takes a whole `texture` OR a `sheet` + `frame`.
+- Spritesheets — data assets in `assets/spritesheets/*.json`: `{ texture: <texture asset id>, grid?: { cols, rows, frameWidth, frameHeight, margin, spacing }, frames?: { name: { index } | { x, y, w, h } } }`. The grid auto-splices into frames `f0..fN` (row-major); named entries alias grid cells or define explicit rects. Referencing a missing frame never crashes: the renderer shows a magenta placeholder, warns with a did-you-mean suggestion, and reports it in the context bridge `diagnostics` — editing the sheet JSON re-resolves all consumers live.
 - `chunkStreamer` — opts the scene into streamed chunk worlds: `{ source, cellSize, radius, keepPadding }`. Chunk files live in `assets/chunks/<source>/<cx>_<cz>.chunk.json` (`{ version: 1, entities: {...} }`, positions local to the cell origin; cell world pos = `[cx*cellSize, 0, cz*cellSize]`). Chunks load/unload around the player (play) or camera (edit), render + collide, but never enter the scene doc — they hot-swap when their file changes. Keep chunk content static (no scripts/dynamic bodies) for now.
+- `subscene` — micro-scenes as additive modules: `{ scene, mode: always|proximity, radius, keepPadding }` on a positioned entity loads a whole scene FILE (`assets/scenes/<scene>.scene.json`) at that transform — the Skyrim pattern: each village/dungeon is its own small scene, the world composes them as one-liners. Same scene can be placed many times (ids are namespaced per placing entity). The subscene file stays a normal scene: open it in the picker and press play to test it in isolation; its `sky`/`postfx` (and nested `subscene`s) are stripped when composed. Loaded content renders + collides + runs scripts, hot-swaps when its file changes, and never enters the world doc. Prefer small scenes — they're the AI-context unit ("add a blacksmith to Riverwood" edits a 300-line file, not the world). Demo: `demo-chunks` places `village-a` twice.
+- `netObject` — declares the entity network-replicated (Unity NetworkObject analog): `{ authority: host|owner, sync: { transform, animation }, relevancy: always|proximity, radius, sendEvery }`. `netObject: {}` = host-simulated, everything synced, relevant to all peers, every snapshot. Interest management: `relevancy: "proximity"` transmits only to peers within `radius` (need-to-know, with leave hysteresis); `sendEvery: 4` sends every 4th snapshot (staggered) — tune both down for ambient/distant things. IMPLICIT DEFAULT: any entity with a script + rigidbody (and no `netObject`) replicates as `netObject: {}` automatically, so moving NPCs are multiplayer-correct with zero config. In multiplayer sessions the host simulates these; other tabs suspend their local copy and render interpolated ghosts. `authority: "owner"` is reserved (ownership assignment lands later).
 - Bone attachment: parent an entity under a rigged model entity and give it `script: { name: "bone-socket", params: { bone, offset, rotationDeg } }`. The editor's "bones" toolbar toggle draws skeletons with bone names; the inspector's `bone` param is a dropdown of the rig's real bones.
 - Scenes: multiple `assets/scenes/<name>.scene.json` files; the editor toolbar picks between them. Only the scene being edited live-syncs; creating a new scene file adds it to the picker.
 
@@ -82,6 +86,34 @@ assets.addDataAsset({ id: "pistol", type: "weapon-stats", name: "Pistol", data: 
 
 Reference by GUID from components/scripts. `updateDataAsset` = every referent
 sees new values. Schemas for AI: `assets.dataTypeJsonSchemas()`.
+
+## Events (typed, deterministic)
+
+Scripts talk through `ctx.events` — `emit(name, payload)`, `on(name, cb)` (returns
+unsubscribe; auto-unsubscribed when the script disposes), `once(name, cb)`.
+Determinism: `emit` never dispatches synchronously — events queue and are drained
+in FIFO order at one fixed point per tick (inside fixedUpdate, after scripts run);
+handler emissions cascade same-tick, capped at 8 passes. Built-in engine events:
+`entity.spawned` / `entity.destroyed` `{ entityId }` (runtime additions/removals
+only — play start is not spawning), `collision` `{ a, b }`, and `trigger.enter` /
+`trigger.exit` `{ trigger, other }` for `isTrigger` colliders (all local-only),
+plus `player.joined` `{ peerId, name }` / `player.left` `{ peerId }` — emitted on
+the session authority and REPLICATED to every peer. Custom events: register a Zod
+schema on the `EventRegistry` (`events.register("wave-cleared", schema)`, names
+`/^[a-z][a-z0-9-.]*$/`) — registered payloads are validated on emit (invalid =
+dropped with a warning); unregistered names warn once but still deliver.
+Multiplayer directions (`replicate` option): `true` / `"to-peers"` = emitted on
+the host, delivered into every peer's bus reliable-ordered (announcements —
+"round.started", "chest.opened"; the ClientRpc-analog). `"to-authority"` = a
+peer's emit is NOT delivered locally; it ships to the host as a request, passes
+the same schema gate there, and the authoritative handler receives
+`(payload, meta)` with `meta.from` = the requesting peer (requests — "npc.hit",
+"interaction.requested"; the ServerRpc-analog). On the host and in single-player,
+to-authority events simply deliver locally — game code is identical either way.
+Peers can never inject broadcast/local events upward; results flow back via
+snapshots or to-peers events. `events.jsonSchemas()` is the AI-facing spec; the context bridge posts
+`recentEvents` (last delivered `{ tick, name, payload }`) while playing. Minimal
+example: `apps/playground/src/scripts/event-demo.ts`.
 
 ## Pitfalls
 

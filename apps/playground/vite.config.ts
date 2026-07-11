@@ -57,6 +57,8 @@ function hitregBridge(): Plugin {
           scenes: [],
           prefabs: [],
           materials: [],
+          terrain: [],
+          spritesheets: [],
           models: [],
           textures: [],
           audio: [],
@@ -243,6 +245,11 @@ function hitregBridge(): Plugin {
       server.ws.on("hitreg:net-signal", (payload, client) => {
         try {
           const msg = payload as NetSignalUp;
+          if ((msg as { kind?: string }).kind === "trace") {
+            const t = msg as unknown as { peerId?: string; event?: string; detail?: string };
+            logNet({ kind: "trace", peerId: t.peerId, event: t.event, detail: t.detail });
+            return; // debug tap only — never rebroadcast
+          }
           if (msg.kind === "signal") {
             logNet({
               kind: "signal",

@@ -198,7 +198,7 @@ independent layers:
 ```
 game simulation (fixed-step, headless-capable)
   ↓ input commands up / snapshots down
-replication protocol (rooms, membership, seq/dedup, interest mgmt later)
+replication protocol (rooms, membership, seq/dedup, interest mgmt)
   ↓ two channels: reliable-ordered | unreliable-sequenced
 transport (swappable adapters behind one interface)
   ├── loopback            single-player + tests (zero network)
@@ -224,6 +224,29 @@ transport (swappable adapters behind one interface)
   exactly where our binary-delta-against-ECS-tables snapshots live and
   duplicate them. We borrow the shape (rooms, matchmaking-as-a-service),
   not the dependency.
+- **Interpolation + prediction are baseline, not optional (2026-07-10, per
+  Derek):** remote motion renders through snapshot interpolation buffers
+  (~2 ticks behind, capped extrapolation — `TransformInterpolator` /
+  `InterpolationClock` in @hitreg/net); the local player is client-side
+  predicted (the local controller runs ahead) and reconciled against the
+  authority's snapshot with dead-band / soft-nudge / hard-snap thresholds.
+  Movement commands carry intent (desired velocity + jump) that the host
+  clamps and applies to a per-peer physics proxy — never claimed transforms.
+  Host-simulated entities (script+rigidbody NPCs) are suspended on peers and
+  ghosted from snapshots.
+- **Replication is declarative, per-entity (2026-07-10, per Derek):** the
+  `netObject` component (schema-validated like everything else) is the
+  engine's NetworkObject — authority, what-to-sync, relevancy, cadence.
+  Interest management is a first-class policy: `relevancy: "proximity"`
+  entities transmit on a need-to-know basis (per-peer snapshot views with
+  enter/leave hysteresis — `computeView` in @hitreg/net), and `sendEvery`
+  trades freshness for bandwidth per entity (phase-staggered). Entities
+  with script+rigidbody replicate by implicit default so zero-config scenes
+  are multiplayer-correct; the component tunes or opts out.
+- **Dev relay fallback (2026-07-10):** environments that block WebRTC UDP
+  (privacy extensions/shields) get a Transport over the dev signaling relay
+  itself; the host listens on RTC + relay simultaneously (`mergeTransports`).
+  Dev-only — production peers use WebRTC or a real edge.
 
 ### 3c. Persistence taxonomy (added 2026-07-10, per Derek)
 

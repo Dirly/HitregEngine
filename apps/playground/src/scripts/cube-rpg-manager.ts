@@ -73,7 +73,7 @@ export default class CubeRpgManager extends Script {
     this.hud = document.createElement("div");
     this.hud.id = "cube-rpg-hud";
     this.hud.style.cssText =
-      "position:fixed;left:18px;top:18px;z-index:800;width:330px;" +
+      "position:fixed;left:18px;bottom:18px;z-index:800;width:330px;" +
       "font:600 14px ui-monospace,monospace;color:#f4f7fb;background:rgba(15,20,28,.78);" +
       "border:1px solid rgba(255,255,255,.16);border-radius:8px;padding:12px 14px;pointer-events:none;" +
       "box-shadow:0 12px 32px rgba(0,0,0,.28)";

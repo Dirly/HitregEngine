@@ -1,0 +1,276 @@
+{
+  "version": 1,
+  "name": "village-a",
+  "entities": {
+    "sky": {
+      "name": "Preview Sky (standalone only)",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "sky": {
+          "top": "#87b8ff",
+          "bottom": "#eef6ff",
+          "light": 0.8
+        }
+      }
+    },
+    "plaza": {
+      "name": "Plaza",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            0.05,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              14,
+              0.1,
+              14
+            ]
+          },
+          "material": "demo-world/pillar"
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            14,
+            0.1,
+            14
+          ]
+        }
+      }
+    },
+    "house-1": {
+      "name": "House 1",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            -4,
+            1.25,
+            -4
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              3,
+              2.5,
+              3
+            ]
+          },
+          "material": "demo-world/ground-b"
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            3,
+            2.5,
+            3
+          ]
+        }
+      }
+    },
+    "house-1-roof": {
+      "name": "House 1 Roof",
+      "parent": "house-1",
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            1.85,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "cone",
+            "size": [
+              2.4,
+              1.2,
+              2.4
+            ]
+          },
+          "material": "demo-world/ground-c"
+        }
+      }
+    },
+    "house-2": {
+      "name": "House 2",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            4.5,
+            1.25,
+            -3
+          ],
+          "rotation": [
+            0,
+            0.2588,
+            0,
+            0.9659
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              3,
+              2.5,
+              3
+            ]
+          },
+          "material": "demo-world/ground-a"
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            3,
+            2.5,
+            3
+          ]
+        }
+      }
+    },
+    "well": {
+      "name": "Well",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            0.6,
+            3
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "cylinder",
+            "size": [
+              1.4,
+              1.2,
+              1.4
+            ]
+          },
+          "material": "demo-world/pillar"
+        },
+        "collider": {
+          "shape": "cylinder",
+          "size": [
+            1.4,
+            1.2,
+            1.4
+          ]
+        }
+      }
+    },
+    "lamp": {
+      "name": "Village Lamp",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            3.2,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "light": {
+          "kind": "point",
+          "color": "#ffd9a0",
+          "intensity": 14,
+          "range": 18
+        }
+      }
+    }
+  }
+}
