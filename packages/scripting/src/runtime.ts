@@ -43,6 +43,18 @@ interface ScriptComponentData {
   params: Record<string, unknown>;
 }
 
+/** A sim-stepped timer (ctx.after / ctx.every). Times are in accumulated ms. */
+interface Timer {
+  dueAtMs: number;
+  /** null = one-shot; otherwise the repeat period in ms. */
+  intervalMs: number | null;
+  cb: () => void;
+  /** Cleared when fired-and-done or cancelled — makes stale handles no-ops. */
+  live: boolean;
+  /** Idempotent teardown: drops the timer from the run set and its script scope. */
+  dispose: () => void;
+}
+
 /**
  * Play-mode script host: instantiates a Script per entity carrying a `script`
  * component, dispatches collisions, and steps onFixedUpdate. Lives and dies
@@ -54,6 +66,8 @@ export class ScriptRuntime {
   private readonly objects: Map<string, THREE.Object3D>;
   /** Per-script event unsubscribers — cleared when the script disposes. */
   private readonly subscriptions = new Map<string, Set<() => void>>();
+  /** Live sim-stepped timers, insertion-ordered (deterministic fire order). */
+  private readonly timers = new Set<Timer>();
   private timeMs = 0;
   private tickCount = 0;
   private started = false;
@@ -191,6 +205,8 @@ export class ScriptRuntime {
         getObject: (eid) => this.objects.get(eid),
         findByTag: (tag) => this.findByTag(tag),
         now: () => this.timeMs,
+        after: (seconds, cb) => this.scheduleTimer(id, seconds, cb, false),
+        every: (seconds, cb) => this.scheduleTimer(id, seconds, cb, true),
         ...(this.opts.viewForward ? { viewForward: this.opts.viewForward } : {}),
         setActiveCamera: (cameraId) => {
           this.activeCameraId = cameraId;
@@ -272,9 +288,72 @@ export class ScriptRuntime {
     };
   }
 
+  /**
+   * Register a sim-stepped timer scoped to entity `id`. The returned cancel is
+   * also tracked in the script's subscription set, so suspend/dispose/remove
+   * cancels any timers the script left running (like ctx.events subscriptions).
+   */
+  private scheduleTimer(
+    id: string,
+    seconds: number,
+    cb: () => void,
+    repeating: boolean,
+  ): () => void {
+    const delayMs = Math.max(seconds, 0) * 1000;
+    const timer: Timer = {
+      dueAtMs: this.timeMs + delayMs,
+      intervalMs: repeating ? delayMs : null,
+      cb,
+      live: true,
+      dispose: () => {},
+    };
+    let subs = this.subscriptions.get(id);
+    if (!subs) {
+      subs = new Set();
+      this.subscriptions.set(id, subs);
+    }
+    const dispose = (): void => {
+      timer.live = false;
+      this.timers.delete(timer);
+      this.subscriptions.get(id)?.delete(dispose);
+    };
+    timer.dispose = dispose;
+    this.timers.add(timer);
+    subs.add(dispose);
+    return dispose;
+  }
+
+  /**
+   * Fire every timer due at the current sim time. A repeating timer fires at
+   * most once per tick — sub-tick periods collapse to one-per-tick and a
+   * long-stalled timer never bursts a backlog (both would be non-determinism
+   * hazards). snapshot the set first: a callback may schedule or cancel timers.
+   */
+  private stepTimers(dt: number): void {
+    if (this.timers.size === 0) return;
+    const minIncMs = dt * 1000;
+    for (const timer of [...this.timers]) {
+      if (!timer.live || timer.dueAtMs > this.timeMs) continue;
+      try {
+        timer.cb();
+      } catch (error) {
+        console.warn(`[scripts] timer callback failed:`, error);
+      }
+      if (!timer.live) continue; // the callback cancelled it
+      if (timer.intervalMs === null) {
+        timer.dispose();
+        continue;
+      }
+      // reschedule strictly past now: on-cadence normally, once/tick if sub-tick
+      timer.dueAtMs = Math.max(timer.dueAtMs + timer.intervalMs, this.timeMs + minIncMs);
+    }
+  }
+
   fixedUpdate(dt: number): void {
     this.timeMs += dt * 1000;
     this.tickCount++;
+    // timers first: their callbacks emit onto the bus, which drains this tick
+    this.stepTimers(dt);
     const collisions = this.opts.sim?.takeCollisions?.() ?? [];
     for (const [a, b] of collisions) {
       this.instances.get(a)?.onCollision?.(b);
@@ -319,5 +398,6 @@ export class ScriptRuntime {
     }
     this.instances.clear();
     for (const id of [...this.subscriptions.keys()]) this.dropSubscriptions(id);
+    this.timers.clear();
   }
 }

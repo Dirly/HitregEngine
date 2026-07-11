@@ -25,6 +25,21 @@ export interface ScriptContext {
   findByTag(tag: string): string[];
   /** Milliseconds of simulated time (fixed-step accumulated, replay-safe). */
   now(): number;
+  /**
+   * Run `cb` once after `seconds` of SIMULATED time — fixed-step accumulated,
+   * so it is replay- and multiplayer-safe (never `setTimeout`, which is
+   * wall-clock and render-paced). Callbacks fire inside fixedUpdate, so
+   * emitting events or mutating gameplay from them is legal. Returns a cancel
+   * function; all of a script's timers are auto-cancelled when it disposes or
+   * is net-suspended. A non-positive delay fires on the next tick.
+   */
+  after(seconds: number, cb: () => void): () => void;
+  /**
+   * Like {@link after} but repeats every `seconds`. Intervals shorter than one
+   * sim tick fire once per tick; long intervals never fire more than once per
+   * tick (no catch-up storms). Returns a cancel function.
+   */
+  every(seconds: number, cb: () => void): () => void;
   /** Horizontal camera forward [x, z], normalized — for camera-relative movement. */
   viewForward?(): [number, number];
   /** Switch the render camera to another camera-component entity (runtime-only). */
