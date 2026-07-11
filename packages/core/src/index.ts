@@ -94,10 +94,16 @@ export {
   parseChunkCoords,
   chunkFileName,
   chunkToSceneDoc,
+  chunkOrigin,
+  chunkLocalToWorld,
+  worldToChunkLocal,
+  moveEntityAcrossChunks,
   subsceneSchema,
   subsceneToSceneDoc,
   type ChunkDoc,
   type ChunkStreamerData,
+  type ChunkCell,
+  type ChunkMoveResult,
   type SubsceneData,
 } from "./chunks.js";
 export {

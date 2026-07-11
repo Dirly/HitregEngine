@@ -90,6 +90,127 @@ export function chunkToSceneDoc(
   return { doc: { version: 1, name: key, entities }, rootId: key };
 }
 
+// -- chunk-local <-> world transforms + cross-cell moves ---------------------
+//
+// A chunk cell's synthetic origin sits at [cx*cellSize, 0, cz*cellSize] with no
+// rotation or scale (see chunkToSceneDoc), so a top-level chunk entity's world
+// position is simply its local position plus that origin. That makes moving an
+// entity between cells a pure translation of its local coordinates — no matrix
+// math — which is exactly the atomic multi-document edit the streaming plan's
+// virtual world hierarchy needs (remove from one chunk file, add to another,
+// convert the transform to the destination cell's local space).
+
+/** World-space position of a chunk cell's origin. Cells only translate. */
+export function chunkOrigin(cx: number, cz: number, cellSize: number): Vec3 {
+  return [cx * cellSize, 0, cz * cellSize];
+}
+
+/** A position local to cell (cx,cz) expressed in world space. */
+export function chunkLocalToWorld(local: Vec3, cx: number, cz: number, cellSize: number): Vec3 {
+  const o = chunkOrigin(cx, cz, cellSize);
+  return [local[0] + o[0], local[1] + o[1], local[2] + o[2]];
+}
+
+/** A world-space position expressed local to cell (cx,cz). */
+export function worldToChunkLocal(world: Vec3, cx: number, cz: number, cellSize: number): Vec3 {
+  const o = chunkOrigin(cx, cz, cellSize);
+  return [world[0] - o[0], world[1] - o[1], world[2] - o[2]];
+}
+
+/** One chunk cell: its grid coords and its (source) document. */
+export interface ChunkCell {
+  cx: number;
+  cz: number;
+  doc: ChunkDoc;
+}
+
+export interface ChunkMoveResult {
+  /** The source chunk with the moved entity + its subtree removed. */
+  source: ChunkDoc;
+  /** The destination chunk with the entity added, root re-localized. */
+  dest: ChunkDoc;
+  /** Ids that moved (the entity and every descendant), in the order removed. */
+  moved: string[];
+}
+
+type ChunkEntities = ChunkDoc["entities"];
+
+/** The entity and every transitive descendant within one chunk. */
+function collectSubtree(entities: ChunkEntities, rootId: string): string[] {
+  const out = [rootId];
+  for (let i = 0; i < out.length; i++) {
+    const parent = out[i]!;
+    for (const [id, e] of Object.entries(entities)) {
+      if (e.parent === parent && !out.includes(id)) out.push(id);
+    }
+  }
+  return out;
+}
+
+/** A chunk entity's local position, defaulting to origin when unset. */
+function localPosition(entity: ChunkEntities[string]): Vec3 {
+  const p = (entity.components["transform"] as { position?: Vec3 } | undefined)?.position;
+  return Array.isArray(p) && p.length === 3 ? [p[0], p[1], p[2]] : [0, 0, 0];
+}
+
+/**
+ * Move a top-level chunk entity (and its whole subtree) from one cell file to
+ * another, converting the root's transform to the destination cell's local
+ * space so its WORLD position is preserved. Ids are stable across the move.
+ *
+ * Pure and atomic: it never mutates the inputs and returns `{ error }` — with
+ * both source documents left untouched — for anything it can't do safely
+ * (unknown id, a NESTED entity whose world transform would need its parent
+ * chain baked, an id already present in the destination, or output that fails
+ * validation). Callers write both files only on success, so an invalid move
+ * writes nothing.
+ */
+export function moveEntityAcrossChunks(
+  entityId: string,
+  source: ChunkCell,
+  dest: ChunkCell,
+  cellSize: number,
+): ChunkMoveResult | { error: string } {
+  const srcEntities = source.doc.entities;
+  const entity = srcEntities[entityId];
+  if (!entity) {
+    return { error: `entity "${entityId}" is not in source chunk ${source.cx}_${source.cz}` };
+  }
+  if (entity.parent != null) {
+    return {
+      error: `entity "${entityId}" is nested under "${entity.parent}"; only top-level chunk entities move across cells (unpack or reparent to the chunk root first)`,
+    };
+  }
+  const subtree = collectSubtree(srcEntities, entityId);
+  for (const id of subtree) {
+    if (dest.doc.entities[id]) {
+      return { error: `id "${id}" already exists in dest chunk ${dest.cx}_${dest.cz}` };
+    }
+  }
+
+  // build both documents on copies — inputs stay pristine on any later failure
+  const nextSource: ChunkDoc = { version: 1, entities: {} };
+  for (const [id, e] of Object.entries(srcEntities)) {
+    if (!subtree.includes(id)) nextSource.entities[id] = structuredClone(e);
+  }
+  const nextDest: ChunkDoc = { version: 1, entities: structuredClone(dest.doc.entities) };
+  for (const id of subtree) nextDest.entities[id] = structuredClone(entity && srcEntities[id]!);
+
+  // re-localize the moved ROOT: same world position, destination-local coords
+  const world = chunkLocalToWorld(localPosition(entity), source.cx, source.cz, cellSize);
+  const newLocal = worldToChunkLocal(world, dest.cx, dest.cz, cellSize);
+  const root = nextDest.entities[entityId]!;
+  root.components = {
+    ...root.components,
+    transform: { ...(root.components["transform"] as object), position: newLocal },
+  };
+
+  const a = chunkDocSchema.safeParse(nextSource);
+  const b = chunkDocSchema.safeParse(nextDest);
+  if (!a.success || !b.success) return { error: "resulting chunk document failed validation" };
+  return { source: a.data, dest: b.data, moved: subtree };
+}
+
 /**
  * Subscenes: whole scene FILES as additive, streamable modules (micro-scenes).
  * A world scene places named scenes — villages, dungeons, UI layers — as
