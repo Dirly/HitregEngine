@@ -33,6 +33,16 @@ export interface ScriptContext {
   setAnimation?(clip: string, fadeSeconds?: number): void;
   /** Play this entity's audio component, or any sound asset id, at this entity. */
   playSound?(soundId?: string): void;
+  /** Mutate this entity's billboard at runtime (HP bar fill, label text) — never the document. */
+  setBillboard?(opts: { fill?: number; text?: string; visible?: boolean }): void;
+  /**
+   * Typed gameplay events (deterministic pub/sub). `emit` queues — nothing
+   * dispatches synchronously; the runtime drains the queue in FIFO order at a
+   * fixed point each tick, so emit from onFixedUpdate stays replay/multiplayer
+   * safe. Subscriptions made here are auto-unsubscribed when this script is
+   * disposed. Registered event payloads are schema-validated on emit.
+   */
+  events?: ScriptEvents;
   /**
    * Experience-scoped persistence for the local player (async — use from
    * onStart or fire-and-forget; never block onFixedUpdate on it):
@@ -47,6 +57,17 @@ export interface InputLike {
   isDown(code: string): boolean;
 }
 
+/**
+ * The event surface handed to scripts (a scoped wrapper over the session
+ * EventBus). `meta.from` identifies the requesting peer when a handler runs
+ * on the authority for a "to-authority" event.
+ */
+export interface ScriptEvents {
+  emit(name: string, payload: unknown): void;
+  on(name: string, cb: (payload: unknown, meta?: { from?: string }) => void): () => void;
+  once(name: string, cb: (payload: unknown, meta?: { from?: string }) => void): () => void;
+}
+
 /** The physics surface scripts may use (implemented by @hitreg/physics.PhysicsSim). */
 export interface SimLike {
   getLinvel(id: string): [number, number, number] | null;
@@ -55,6 +76,10 @@ export interface SimLike {
   /** Teleport (respawns): position set, velocities zeroed. */
   setPosition?(id: string, p: [number, number, number]): void;
   takeCollisions?(): Array<[string, string]>;
+  /** Collision-ended pairs since the last call (drives "trigger.exit"). */
+  takeCollisionEnds?(): Array<[string, string]>;
+  /** Whether the entity's collider is a sensor (isTrigger). */
+  isTrigger?(id: string): boolean;
 }
 
 /**
