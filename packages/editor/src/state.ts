@@ -31,6 +31,10 @@ export type GizmoMode = "translate" | "rotate" | "scale";
 
 export type GrayboxShape = "box" | "cylinder" | "sphere" | "wedge" | "poly";
 
+export type TerrainBrushMode = "raise" | "lower" | "flatten" | "smooth";
+export interface TerrainBrushSettings { mode: TerrainBrushMode; radius: number; strength: number; }
+export const defaultTerrainBrush: TerrainBrushSettings = { mode: "raise", radius: 5, strength: 0.35 };
+
 /** Docked-layout panel sizes (px). Resizable via splitters, persisted. */
 export interface DockSizes {
   top: number;
@@ -84,6 +88,13 @@ export interface AssetSelectionState {
 export type AssetSelection = Observable<AssetSelectionState | null>;
 export const createAssetSelection = (): AssetSelection =>
   observable<AssetSelectionState | null>(null);
+
+/**
+ * Prefab isolation editing (Unity-style): the prefab id whose definition is
+ * open as the working doc in the viewport, or null when editing a scene.
+ */
+export type EditingPrefab = Observable<string | null>;
+export const createEditingPrefab = (): EditingPrefab => observable<string | null>(null);
 
 /** Open context menu (screen position + target entity), or null. */
 export interface ContextMenuState {

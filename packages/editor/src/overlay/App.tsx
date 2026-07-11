@@ -22,6 +22,7 @@ import type {
   Observable,
   PlayMode,
   Selection,
+  TerrainBrushSettings,
 } from "../state.js";
 import { ColorField, NumberField, Row, SliderField, TextField, ValueField } from "./fields.js";
 
@@ -53,6 +54,8 @@ export interface AppProps {
   grayboxActive: Observable<boolean>;
   grayboxShape: Observable<GrayboxShape>;
   grayboxBevel: Observable<number>;
+  terrainActive: Observable<boolean>;
+  terrainBrush: Observable<TerrainBrushSettings>;
   /** prefab id -> data-url thumbnail rendered by the host. */
   thumbnails: Observable<Record<string, string>>;
   /** Resizable dock sizes; the host resizes the viewport canvas from these. */
@@ -69,7 +72,19 @@ export interface AppProps {
   scenes?: Observable<string[]>;
   onSwitchScene?: (name: string) => void;
   onNewScene?: (name: string) => void;
+  /** Prefab isolation editing: id of the prefab open in the viewport, or null. */
+  editingPrefab?: Observable<string | null>;
+  /** Open a prefab definition alone in the viewport (host swaps the working doc). */
+  onEditPrefab?: (id: string) => void;
+  /** Leave prefab isolation: save=true flushes to the definition, false discards. */
+  onClosePrefabEdit?: (save: boolean) => void;
 }
+
+const nullEditingPrefab: Observable<string | null> = {
+  get: () => null,
+  set: () => undefined,
+  subscribe: () => () => undefined,
+};
 
 function useObservable<T>(obs: Observable<T>): T {
   return useSyncExternalStore(
@@ -153,6 +168,7 @@ function Splitter(props: {
 export function App(props: AppProps) {
   const visible = useObservable(props.visible);
   const docks = useObservable(props.dockSizes);
+  const editingPrefab = useObservable(props.editingPrefab ?? nullEditingPrefab);
   if (!visible) return null;
 
   const bumpAssets = () => props.assetsVersion.set(props.assetsVersion.get() + 1);
@@ -239,10 +255,13 @@ export function App(props: AppProps) {
             grayboxActive={props.grayboxActive}
             grayboxShape={props.grayboxShape}
             grayboxBevel={props.grayboxBevel}
+            terrainActive={props.terrainActive}
+            terrainBrush={props.terrainBrush}
             scenes={props.scenes}
             onSwitchScene={props.onSwitchScene}
             onNewScene={props.onNewScene}
             onEnvironment={selectEnvironment}
+            editingPrefab={editingPrefab}
           />
         </div>
 
@@ -257,7 +276,25 @@ export function App(props: AppProps) {
         </div>
 
         {/* center = the live viewport; the canvas is sized to this hole */}
-        <div style={{ gridColumn: 2, gridRow: 2, pointerEvents: "none" }} />
+        <div
+          style={{
+            gridColumn: 2,
+            gridRow: 2,
+            minWidth: 0,
+            pointerEvents: "none",
+            display: "flex",
+            flexDirection: "column",
+          }}
+        >
+          {editingPrefab && (
+            <PrefabEditBanner
+              prefabId={editingPrefab}
+              assets={props.assets}
+              assetsVersion={props.assetsVersion}
+              onClose={props.onClosePrefabEdit}
+            />
+          )}
+        </div>
 
         <div style={{ ...dockStyle, gridColumn: 2, gridRow: 3 }}>
           <AssetsDock
@@ -317,6 +354,7 @@ export function App(props: AppProps) {
             modelBones={props.modelBones}
             saveAsset={props.saveAsset}
             thumbnails={props.thumbnails}
+            onEditPrefab={props.onEditPrefab}
           />
         </div>
       </div>
@@ -410,6 +448,59 @@ const emptyScenesObservable: Observable<string[]> = {
   subscribe: () => () => undefined,
 };
 
+/**
+ * Prefab isolation mode indicator: a slim bar across the top of the viewport.
+ * Muted accent so the mode is unmistakable without shouting; edits autosave
+ * to the definition live, the buttons decide how the session ends.
+ */
+function PrefabEditBanner(props: {
+  prefabId: string;
+  assets: AssetLibrary;
+  assetsVersion: Observable<number>;
+  onClose?: (save: boolean) => void;
+}) {
+  useObservable(props.assetsVersion); // prefab rename mid-edit updates the title
+  const name = props.assets.getPrefab(props.prefabId)?.name ?? props.prefabId;
+  return (
+    <div
+      style={{
+        pointerEvents: "auto",
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "4px 10px",
+        background: "rgba(31, 58, 95, 0.92)",
+        borderBottom: "1px solid #79c0ff",
+        color: "#e6edf3",
+        font: "12px ui-monospace, monospace",
+      }}
+    >
+      <span style={{ color: "#79c0ff" }} aria-hidden>
+        ◆
+      </span>
+      <span
+        style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+      >
+        Editing prefab <strong>{name}</strong> — saves apply to every instance
+      </span>
+      <button
+        style={activeButtonStyle}
+        title="Save the definition and return to the scene"
+        onClick={() => props.onClose?.(true)}
+      >
+        ✓ save &amp; close
+      </button>
+      <button
+        style={buttonStyle}
+        title="Return to the scene without saving pending changes"
+        onClick={() => props.onClose?.(false)}
+      >
+        ✕ discard
+      </button>
+    </div>
+  );
+}
+
 function Toolbar(props: {
   store: SceneStore;
   playMode: Observable<PlayMode>;
@@ -418,10 +509,14 @@ function Toolbar(props: {
   grayboxActive: Observable<boolean>;
   grayboxShape: Observable<GrayboxShape>;
   grayboxBevel: Observable<number>;
+  terrainActive: Observable<boolean>;
+  terrainBrush: Observable<TerrainBrushSettings>;
   scenes?: Observable<string[]>;
   onSwitchScene?: (name: string) => void;
   onNewScene?: (name: string) => void;
   onEnvironment?: () => void;
+  /** While isolation-editing a prefab the scene switcher is hidden (switching mid-edit is incoherent). */
+  editingPrefab?: string | null;
 }) {
   const doc = useStoreDoc(props.store);
   const scenes = useObservable(props.scenes ?? emptyScenesObservable);
@@ -431,6 +526,8 @@ function Toolbar(props: {
   const grayboxOn = useObservable(props.grayboxActive);
   const shape = useObservable(props.grayboxShape);
   const bevel = useObservable(props.grayboxBevel);
+  const terrainOn = useObservable(props.terrainActive);
+  const terrain = useObservable(props.terrainBrush);
   const set = (patch: Partial<EditorSettings>) => props.settings.set({ ...settings, ...patch });
 
   const group: React.CSSProperties = {
@@ -453,7 +550,12 @@ function Toolbar(props: {
       <div style={{ display: "flex", alignItems: "center", flexWrap: "nowrap", overflowX: "auto" }}>
         <span style={group}>
           <strong style={{ color: "#e6edf3", marginRight: 4 }}>HitReg</strong>
-          {props.scenes && (
+          {props.editingPrefab && (
+            <span style={{ color: "#79c0ff" }} title="Prefab isolation mode — close it from the viewport banner">
+              ◆ prefab
+            </span>
+          )}
+          {props.scenes && !props.editingPrefab && (
             <>
               <select
                 style={{ ...buttonStyle, padding: "4px 6px", maxWidth: 140 }}
@@ -496,6 +598,27 @@ function Toolbar(props: {
           <button style={buttonStyle} disabled={play === "edit"} onClick={() => props.playMode.set("edit")}>
             ⏹
           </button>
+        </span>
+
+        <span style={group}>
+          <button
+            style={terrainOn ? activeButtonStyle : buttonStyle}
+            title="Terrain sculpt mode: drag on selected heightmap terrain"
+            onClick={() => props.terrainActive.set(!terrainOn)}
+          >
+            terrain
+          </button>
+          <select
+            style={{ ...buttonStyle, padding: "4px 6px" }}
+            value={terrain.mode}
+            onChange={(e) => props.terrainBrush.set({ ...terrain, mode: e.target.value as TerrainBrushSettings["mode"] })}
+          >
+            {(["raise", "lower", "flatten", "smooth"] as const).map((mode) => <option key={mode}>{mode}</option>)}
+          </select>
+          <span style={{ color: "#8b949e" }}>r</span>
+          <span style={{ width: 42 }}><NumberField value={terrain.radius} onCommit={(radius) => radius > 0 && props.terrainBrush.set({ ...terrain, radius })} /></span>
+          <span style={{ color: "#8b949e" }}>str</span>
+          <span style={{ width: 42 }}><NumberField value={terrain.strength} onCommit={(strength) => strength > 0 && props.terrainBrush.set({ ...terrain, strength })} /></span>
         </span>
 
         <span style={group}>
@@ -1419,6 +1542,7 @@ function InspectorDock(props: {
   modelBones?: Observable<Record<string, string[]>>;
   saveAsset?: (file: string, content: string) => void;
   thumbnails: Observable<Record<string, string>>;
+  onEditPrefab?: (id: string) => void;
 }) {
   const doc = useStoreDoc(props.store);
   const selected = useObservable(props.selection);
@@ -1453,6 +1577,7 @@ function InspectorDock(props: {
             assetsVersion={props.assetsVersion}
             saveAsset={props.saveAsset}
             thumbnails={thumbnails}
+            onEditPrefab={props.onEditPrefab}
           />
         ) : (
           <div style={{ color: "#8b949e" }}>
@@ -1627,6 +1752,7 @@ function AssetInspector(props: {
   assetsVersion: Observable<number>;
   saveAsset?: (file: string, content: string) => void;
   thumbnails: Record<string, string>;
+  onEditPrefab?: (id: string) => void;
 }) {
   const bump = () => props.assetsVersion.set(props.assetsVersion.get() + 1);
   const { kind, id } = props.selection;
@@ -1741,14 +1867,25 @@ function AssetInspector(props: {
     const prefab = props.assets.getPrefab(id);
     if (!prefab) return <div style={{ color: "#8b949e" }}>Missing prefab {id}</div>;
     return (
-      <PrefabInspector
-        id={id}
-        assets={props.assets}
-        onSaved={(stored) => {
-          props.saveAsset?.(`prefabs/${id}.json`, JSON.stringify(stored, null, 2));
-          bump();
-        }}
-      />
+      <div>
+        {props.onEditPrefab && (
+          <button
+            style={{ ...activeButtonStyle, width: "100%", marginBottom: 8 }}
+            title="Open this prefab alone in the viewport — full toolset; saving propagates to all instances"
+            onClick={() => props.onEditPrefab?.(id)}
+          >
+            ✎ edit in viewport
+          </button>
+        )}
+        <PrefabInspector
+          id={id}
+          assets={props.assets}
+          onSaved={(stored) => {
+            props.saveAsset?.(`prefabs/${id}.json`, JSON.stringify(stored, null, 2));
+            bump();
+          }}
+        />
+      </div>
     );
   }
 
