@@ -19,3 +19,9 @@ coverage/
 
 # local dev player-data (never authoritative, never committed)
 .hitreg/
+
+# binary art assets — kept out of the engine repo; installed separately.
+# see apps/playground/assets/README.md
+apps/playground/assets/models/
+apps/playground/assets/textures/
+apps/playground/assets/audio/
