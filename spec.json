@@ -1,0 +1,1679 @@
+{
+  "version": "1",
+  "ops": [
+    {
+      "op": "add-entity",
+      "fields": [
+        "id",
+        "entity"
+      ],
+      "summary": "Create an entity; its components are schema-validated and its parent (if any) must already exist."
+    },
+    {
+      "op": "remove-entity",
+      "fields": [
+        "id"
+      ],
+      "summary": "Delete an entity and its whole subtree."
+    },
+    {
+      "op": "reparent",
+      "fields": [
+        "id",
+        "parent"
+      ],
+      "summary": "Move an entity under a new parent (null = scene root); may not create a cycle."
+    },
+    {
+      "op": "rename",
+      "fields": [
+        "id",
+        "name"
+      ],
+      "summary": "Set an entity's display name (must be non-empty)."
+    },
+    {
+      "op": "set-tags",
+      "fields": [
+        "id",
+        "tags"
+      ],
+      "summary": "Replace an entity's tag list."
+    },
+    {
+      "op": "set-component",
+      "fields": [
+        "id",
+        "component",
+        "data"
+      ],
+      "summary": "Add or replace a component; data is validated against that component's schema."
+    },
+    {
+      "op": "remove-component",
+      "fields": [
+        "id",
+        "component"
+      ],
+      "summary": "Remove a component from an entity."
+    }
+  ],
+  "components": {
+    "transform": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "position": {
+          "default": [
+            0,
+            0,
+            0
+          ],
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ]
+        },
+        "rotation": {
+          "default": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ]
+        },
+        "scale": {
+          "default": [
+            1,
+            1,
+            1
+          ],
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ]
+        }
+      }
+    },
+    "mesh": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "source": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "primitive"
+                },
+                "shape": {
+                  "type": "string",
+                  "enum": [
+                    "box",
+                    "sphere",
+                    "plane",
+                    "cylinder",
+                    "capsule",
+                    "cone",
+                    "torus",
+                    "wedge"
+                  ]
+                },
+                "size": {
+                  "default": [
+                    1,
+                    1,
+                    1
+                  ],
+                  "type": "array",
+                  "prefixItems": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "number"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "shape"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "asset"
+                },
+                "assetId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "node": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "assetId"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "polygon"
+                },
+                "points": {
+                  "minItems": 3,
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "prefixItems": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "number"
+                      }
+                    ]
+                  }
+                },
+                "height": {
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                },
+                "bevel": {
+                  "type": "object",
+                  "properties": {
+                    "size": {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    "segments": {
+                      "default": 2,
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 8
+                    }
+                  },
+                  "required": [
+                    "size"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "points",
+                "height"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "heightmap"
+                },
+                "terrainAsset": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "size": {
+                  "default": [
+                    80,
+                    80
+                  ],
+                  "type": "array",
+                  "prefixItems": [
+                    {
+                      "type": "number",
+                      "exclusiveMinimum": 0
+                    },
+                    {
+                      "type": "number",
+                      "exclusiveMinimum": 0
+                    }
+                  ]
+                },
+                "amplitude": {
+                  "default": 1.5,
+                  "type": "number",
+                  "minimum": 0
+                },
+                "frequency": {
+                  "default": 0.08,
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                },
+                "seed": {
+                  "default": 1,
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991
+                },
+                "offset": {
+                  "default": [
+                    0,
+                    0
+                  ],
+                  "type": "array",
+                  "prefixItems": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "number"
+                    }
+                  ]
+                },
+                "resolution": {
+                  "default": 96,
+                  "type": "integer",
+                  "minimum": 8,
+                  "maximum": 256
+                },
+                "flatRadius": {
+                  "default": 0,
+                  "type": "number",
+                  "minimum": 0
+                },
+                "flatFalloff": {
+                  "default": 8,
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                },
+                "river": {
+                  "type": "object",
+                  "properties": {
+                    "centerX": {
+                      "type": "number"
+                    },
+                    "width": {
+                      "type": "number",
+                      "exclusiveMinimum": 0
+                    },
+                    "depth": {
+                      "type": "number",
+                      "exclusiveMinimum": 0
+                    }
+                  },
+                  "required": [
+                    "centerX",
+                    "width",
+                    "depth"
+                  ]
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            }
+          ]
+        },
+        "material": {
+          "type": "string"
+        },
+        "castShadow": {
+          "default": true,
+          "type": "boolean"
+        },
+        "receiveShadow": {
+          "default": true,
+          "type": "boolean"
+        },
+        "renderMode": {
+          "default": "auto",
+          "type": "string",
+          "enum": [
+            "auto",
+            "instanced"
+          ]
+        },
+        "static": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "source"
+      ]
+    },
+    "light": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "directional",
+            "point",
+            "spot",
+            "ambient"
+          ]
+        },
+        "color": {
+          "default": "#ffffff",
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "intensity": {
+          "default": 1,
+          "type": "number",
+          "minimum": 0
+        },
+        "range": {
+          "default": 10,
+          "type": "number",
+          "minimum": 0
+        },
+        "angle": {
+          "default": 0.5235987755982988,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1.5707963267948966
+        },
+        "castShadow": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind"
+      ]
+    },
+    "camera": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "fov": {
+          "default": 60,
+          "type": "number",
+          "minimum": 1,
+          "maximum": 179
+        },
+        "near": {
+          "default": 0.1,
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "far": {
+          "default": 1000,
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "active": {
+          "default": false,
+          "type": "boolean"
+        },
+        "rig": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "follow"
+              ]
+            },
+            "targetTag": {
+              "default": "player",
+              "type": "string"
+            },
+            "distance": {
+              "default": 7,
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "height": {
+              "default": 3.5,
+              "type": "number"
+            },
+            "damping": {
+              "default": 5,
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          },
+          "required": [
+            "mode"
+          ]
+        }
+      }
+    },
+    "prefab": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "prefabId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "props": {
+          "default": {},
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {}
+        },
+        "overrides": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "value": {}
+            },
+            "required": [
+              "path",
+              "value"
+            ]
+          }
+        }
+      },
+      "required": [
+        "prefabId"
+      ]
+    },
+    "script": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "params": {
+          "default": {},
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {}
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "animator": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "play": {
+          "type": "string"
+        },
+        "fade": {
+          "default": 0.3,
+          "type": "number",
+          "minimum": 0
+        },
+        "speed": {
+          "default": 1,
+          "type": "number"
+        }
+      }
+    },
+    "audio": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "src": {
+          "type": "string",
+          "minLength": 1
+        },
+        "volume": {
+          "default": 1,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "loop": {
+          "default": false,
+          "type": "boolean"
+        },
+        "autoplay": {
+          "default": false,
+          "type": "boolean"
+        },
+        "positional": {
+          "default": true,
+          "type": "boolean"
+        },
+        "refDistance": {
+          "default": 8,
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      },
+      "required": [
+        "src"
+      ]
+    },
+    "sky": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "top": {
+          "default": "#39598f",
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "bottom": {
+          "default": "#101522",
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "texture": {
+          "type": "string"
+        },
+        "cubemap": {
+          "type": "object",
+          "properties": {
+            "px": {
+              "type": "string"
+            },
+            "nx": {
+              "type": "string"
+            },
+            "py": {
+              "type": "string"
+            },
+            "ny": {
+              "type": "string"
+            },
+            "pz": {
+              "type": "string"
+            },
+            "nz": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "px",
+            "nx",
+            "py",
+            "ny",
+            "pz",
+            "nz"
+          ]
+        },
+        "light": {
+          "default": 0.5,
+          "type": "number",
+          "minimum": 0
+        },
+        "fog": {
+          "type": "object",
+          "properties": {
+            "color": {
+              "default": "#101522",
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$"
+            },
+            "near": {
+              "default": 40,
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "far": {
+              "default": 180,
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          }
+        }
+      }
+    },
+    "postfx": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "bloom": {
+          "default": {},
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": false,
+              "type": "boolean"
+            },
+            "strength": {
+              "default": 0.5,
+              "type": "number",
+              "minimum": 0,
+              "maximum": 3
+            },
+            "radius": {
+              "default": 0.4,
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "threshold": {
+              "default": 0.85,
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    "particles": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "emitting": {
+          "default": true,
+          "type": "boolean"
+        },
+        "rate": {
+          "default": 20,
+          "type": "number",
+          "minimum": 0
+        },
+        "max": {
+          "default": 200,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2000
+        },
+        "lifetime": {
+          "default": [
+            0.8,
+            1.6
+          ],
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "number",
+              "minimum": 0
+            }
+          ]
+        },
+        "shape": {
+          "default": "point",
+          "type": "string",
+          "enum": [
+            "point",
+            "sphere",
+            "box",
+            "cone"
+          ]
+        },
+        "shapeSize": {
+          "default": [
+            0.2,
+            0.2,
+            0.2
+          ],
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ]
+        },
+        "coneAngle": {
+          "default": 25,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 90
+        },
+        "direction": {
+          "default": [
+            0,
+            1,
+            0
+          ],
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ]
+        },
+        "speed": {
+          "default": [
+            1,
+            2
+          ],
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ]
+        },
+        "gravity": {
+          "default": 0,
+          "type": "number"
+        },
+        "drag": {
+          "default": 0,
+          "type": "number",
+          "minimum": 0
+        },
+        "sizeStart": {
+          "default": 0.15,
+          "type": "number",
+          "minimum": 0
+        },
+        "sizeEnd": {
+          "default": 0.02,
+          "type": "number",
+          "minimum": 0
+        },
+        "spin": {
+          "default": 0,
+          "type": "number"
+        },
+        "colorStart": {
+          "default": "#ffffff",
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "colorEnd": {
+          "default": "#ffffff",
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "opacityStart": {
+          "default": 1,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "opacityEnd": {
+          "default": 0,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "blending": {
+          "default": "additive",
+          "type": "string",
+          "enum": [
+            "normal",
+            "additive"
+          ]
+        },
+        "texture": {
+          "type": "string"
+        },
+        "space": {
+          "default": "world",
+          "type": "string",
+          "enum": [
+            "local",
+            "world"
+          ]
+        }
+      }
+    },
+    "billboard": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "default": "bar",
+          "type": "string",
+          "enum": [
+            "bar",
+            "text",
+            "sprite"
+          ]
+        },
+        "offset": {
+          "default": [
+            0,
+            1.4,
+            0
+          ],
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ]
+        },
+        "size": {
+          "default": [
+            1,
+            0.14
+          ],
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          ]
+        },
+        "fill": {
+          "default": 1,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "color": {
+          "default": "#4ade80",
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "background": {
+          "default": "#101522",
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "backgroundOpacity": {
+          "default": 0.65,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "text": {
+          "default": "",
+          "type": "string"
+        },
+        "texture": {
+          "type": "string"
+        },
+        "sheet": {
+          "type": "string"
+        },
+        "frame": {
+          "type": "string"
+        },
+        "visible": {
+          "default": true,
+          "type": "boolean"
+        }
+      }
+    },
+    "netObject": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "authority": {
+          "default": "host",
+          "type": "string",
+          "enum": [
+            "host",
+            "owner"
+          ]
+        },
+        "sync": {
+          "default": {},
+          "type": "object",
+          "properties": {
+            "transform": {
+              "default": true,
+              "type": "boolean"
+            },
+            "animation": {
+              "default": true,
+              "type": "boolean"
+            }
+          }
+        },
+        "relevancy": {
+          "default": "always",
+          "type": "string",
+          "enum": [
+            "always",
+            "proximity"
+          ]
+        },
+        "radius": {
+          "default": 50,
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "sendEvery": {
+          "default": 1,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        }
+      }
+    },
+    "rigidbody": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "default": "dynamic",
+          "type": "string",
+          "enum": [
+            "dynamic",
+            "kinematic",
+            "static"
+          ]
+        },
+        "mass": {
+          "default": 0,
+          "type": "number",
+          "minimum": 0
+        },
+        "linearDamping": {
+          "default": 0,
+          "type": "number",
+          "minimum": 0
+        },
+        "angularDamping": {
+          "default": 0.05,
+          "type": "number",
+          "minimum": 0
+        },
+        "gravityScale": {
+          "default": 1,
+          "type": "number"
+        },
+        "ccd": {
+          "default": false,
+          "type": "boolean"
+        },
+        "lockRotations": {
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    },
+    "collider": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "shape": {
+          "default": "box",
+          "type": "string",
+          "enum": [
+            "box",
+            "sphere",
+            "capsule",
+            "cylinder",
+            "heightmap",
+            "trimesh",
+            "convex"
+          ]
+        },
+        "size": {
+          "default": [
+            1,
+            1,
+            1
+          ],
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ]
+        },
+        "offset": {
+          "default": [
+            0,
+            0,
+            0
+          ],
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ]
+        },
+        "friction": {
+          "default": 0.5,
+          "type": "number",
+          "minimum": 0
+        },
+        "restitution": {
+          "default": 0,
+          "type": "number",
+          "minimum": 0
+        },
+        "density": {
+          "default": 1,
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "isTrigger": {
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    },
+    "joint": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "fixed",
+            "hinge",
+            "slider",
+            "ball"
+          ]
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1
+        },
+        "anchorA": {
+          "default": [
+            0,
+            0,
+            0
+          ],
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ]
+        },
+        "anchorB": {
+          "default": [
+            0,
+            0,
+            0
+          ],
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ]
+        },
+        "axis": {
+          "default": [
+            0,
+            1,
+            0
+          ],
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ]
+        },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "min": {
+              "type": "number"
+            },
+            "max": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "min",
+            "max"
+          ]
+        },
+        "contactsEnabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "motor": {
+          "type": "object",
+          "properties": {
+            "targetVelocity": {
+              "type": "number"
+            },
+            "maxForce": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          },
+          "required": [
+            "targetVelocity",
+            "maxForce"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "target"
+      ]
+    },
+    "chunkStreamer": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cellSize": {
+          "default": 16,
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "radius": {
+          "default": 2,
+          "type": "number",
+          "minimum": 1,
+          "maximum": 16
+        },
+        "keepPadding": {
+          "default": 1,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 8
+        },
+        "rings": {
+          "type": "object",
+          "properties": {
+            "simulation": {
+              "default": 2,
+              "type": "number",
+              "minimum": 0
+            },
+            "fullRender": {
+              "default": 3,
+              "type": "number",
+              "minimum": 0
+            },
+            "hlod": {
+              "default": 10,
+              "type": "number",
+              "minimum": 0
+            },
+            "farTerrain": {
+              "default": 32,
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        }
+      },
+      "required": [
+        "source"
+      ]
+    },
+    "subscene": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "scene": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mode": {
+          "default": "proximity",
+          "type": "string",
+          "enum": [
+            "always",
+            "proximity"
+          ]
+        },
+        "radius": {
+          "default": 75,
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "keepPadding": {
+          "default": 15,
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "scene"
+      ]
+    }
+  },
+  "dataAssets": {
+    "material": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "shader": {
+          "default": "standard",
+          "type": "string",
+          "enum": [
+            "standard",
+            "unlit",
+            "toon",
+            "wireframe"
+          ]
+        },
+        "color": {
+          "default": "#9aa0a8",
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "map": {
+          "type": "string"
+        },
+        "repeat": {
+          "default": [
+            1,
+            1
+          ],
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ]
+        },
+        "roughness": {
+          "default": 0.85,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "metalness": {
+          "default": 0.05,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "emissive": {
+          "default": "#000000",
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "emissiveIntensity": {
+          "default": 1,
+          "type": "number",
+          "minimum": 0
+        },
+        "opacity": {
+          "default": 1,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "transparent": {
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    },
+    "terrain-heightfield": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "version": {
+          "default": 1,
+          "type": "number",
+          "const": 1
+        },
+        "size": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          ]
+        },
+        "resolution": {
+          "type": "integer",
+          "minimum": 8,
+          "maximum": 256
+        },
+        "heights": {
+          "minItems": 81,
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        }
+      },
+      "required": [
+        "size",
+        "resolution",
+        "heights"
+      ]
+    },
+    "spritesheet": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "texture": {
+          "type": "string",
+          "minLength": 1
+        },
+        "grid": {
+          "type": "object",
+          "properties": {
+            "cols": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "rows": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "frameWidth": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "frameHeight": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "margin": {
+              "default": 0,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "spacing": {
+              "default": 0,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "cols",
+            "rows",
+            "frameWidth",
+            "frameHeight"
+          ]
+        },
+        "frames": {
+          "default": {},
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "index": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "index"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "y": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "w": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "h": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "x",
+                  "y",
+                  "w",
+                  "h"
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "required": [
+        "texture"
+      ]
+    }
+  },
+  "events": {
+    "entity.spawned": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "entityId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "entityId"
+      ]
+    },
+    "entity.destroyed": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "entityId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "entityId"
+      ]
+    },
+    "collision": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "a": {
+          "type": "string"
+        },
+        "b": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "a",
+        "b"
+      ]
+    },
+    "trigger.enter": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "trigger": {
+          "type": "string"
+        },
+        "other": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "trigger",
+        "other"
+      ]
+    },
+    "trigger.exit": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "trigger": {
+          "type": "string"
+        },
+        "other": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "trigger",
+        "other"
+      ]
+    },
+    "animation.completed": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "entityId": {
+          "type": "string"
+        },
+        "clip": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "entityId",
+        "clip"
+      ]
+    },
+    "player.joined": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "peerId": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "peerId",
+        "name"
+      ]
+    },
+    "player.left": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "peerId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "peerId"
+      ]
+    }
+  },
+  "netState": {},
+  "scripts": {},
+  "prefabs": []
+}

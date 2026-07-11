@@ -16,6 +16,23 @@ export type Op =
   | { op: "set-component"; id: EntityId; component: string; data: unknown }
   | { op: "remove-component"; id: EntityId; component: string };
 
+/**
+ * Machine-readable summary of the ops vocabulary, for the engine spec handed to
+ * AI tools. Co-located with the `Op` union so the two can't drift apart. Each
+ * entry mirrors one variant: its discriminant, the fields it carries, and what
+ * it does. Component/entity *data* shapes come from the component schemas — this
+ * only describes the mutation envelope.
+ */
+export const OP_SPECS = [
+  { op: "add-entity", fields: ["id", "entity"], summary: "Create an entity; its components are schema-validated and its parent (if any) must already exist." },
+  { op: "remove-entity", fields: ["id"], summary: "Delete an entity and its whole subtree." },
+  { op: "reparent", fields: ["id", "parent"], summary: "Move an entity under a new parent (null = scene root); may not create a cycle." },
+  { op: "rename", fields: ["id", "name"], summary: "Set an entity's display name (must be non-empty)." },
+  { op: "set-tags", fields: ["id", "tags"], summary: "Replace an entity's tag list." },
+  { op: "set-component", fields: ["id", "component", "data"], summary: "Add or replace a component; data is validated against that component's schema." },
+  { op: "remove-component", fields: ["id", "component"], summary: "Remove a component from an entity." },
+] as const satisfies ReadonlyArray<{ op: Op["op"]; fields: string[]; summary: string }>;
+
 export class OpError extends Error {
   constructor(
     message: string,

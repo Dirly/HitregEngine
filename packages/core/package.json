@@ -8,7 +8,8 @@
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "demo": "tsx examples/build-a-street.ts"
+    "demo": "tsx examples/build-a-street.ts",
+    "spec": "tsx examples/write-spec.ts"
   },
   "dependencies": {
     "zod": "^4.0.0"

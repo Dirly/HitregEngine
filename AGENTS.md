@@ -21,5 +21,10 @@ Claude sessions get the same content via CLAUDE.md and `.claude/skills/`).
 - Always write complete, valid JSON files; never leave a file mid-edit.
 - Runtime context (what the user sees, selection, camera, kit model contents):
   `curl -s http://localhost:5173/__hitreg/context`.
+- Capability spec (every component/data-type/event/script + the ops protocol,
+  as JSON Schema generated from the live schemas — plus the full endpoint list):
+  `curl -s http://localhost:5173/__hitreg/spec`. This is ground truth for what
+  you can build; the committed `spec.json` (repo root, `pnpm spec`) mirrors the
+  engine surface for offline reading and drift-as-diff.
 - Client-side errors from the running app appear in the dev server's log.
 - Verify with `pnpm test` and `pnpm typecheck` before finishing.

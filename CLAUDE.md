@@ -67,6 +67,13 @@ The primary AI channel is **direct file editing** — no MCP required:
   → `{ scene, playMode, selection: {id, entity}, camera: {position, target},
   inView: [{id, name, distance}...] }`. Use it to resolve "this/the one I'm
   looking at" references before editing.
+- **Capability spec** (what you can build): `curl -s http://localhost:5173/__hitreg/spec`
+  → `{ components, dataAssets, events, netState, scripts, ops, prefabs, endpoints }`,
+  every field a JSON Schema generated from the live Zod definitions, so it can't
+  drift from what validates. Prefer it over prose when you need exact fields for
+  a component/script/event. Committed snapshot of the engine surface: `spec.json`
+  at the repo root (regenerate with `pnpm spec`); a schema change shows up there
+  as a diff.
 
 ## Design Context
 

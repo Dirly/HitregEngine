@@ -34,7 +34,13 @@ export {
   quat,
   hexColor,
 } from "./components/core.js";
-export { applyOps, OpError, type Op, type ApplyResult } from "./ops.js";
+export { applyOps, OpError, OP_SPECS, type Op, type ApplyResult } from "./ops.js";
+export {
+  buildEngineSpec,
+  ENGINE_SPEC_VERSION,
+  type EngineSpec,
+  type EngineSpecInputs,
+} from "./spec.js";
 export { FixedTimestepLoop, type LoopOptions } from "./loop.js";
 export {
   expandScene,

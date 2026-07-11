@@ -3,6 +3,7 @@ import * as THREE from "three/webgpu";
 import { z } from "zod";
 import {
   AssetLibrary,
+  buildEngineSpec,
   ComponentRegistry,
   diffSceneDocs,
   EventRegistry,
@@ -1698,6 +1699,26 @@ async function main(): Promise<void> {
     }).catch(() => undefined);
   }
   setInterval(postContext, 1000);
+
+  // Publish the live capability spec once — registrations are fixed after boot.
+  // This is the running app's FULL surface (core + chunk components, core + app
+  // events, built-in behaviors, data types, the ops protocol), generated from
+  // the same Zod schemas that validate; an AI GETs /__hitreg/spec to learn what
+  // it can build without reading docs that might have drifted.
+  void fetch("/__hitreg/spec", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(
+      buildEngineSpec({
+        registry,
+        assets,
+        events,
+        netState: netPresence?.netState,
+        scripts: scriptRegistry.describe(),
+      }),
+    ),
+  }).catch(() => undefined);
+
   clientLog(`boot: ready (backend=${backend}, sceneSource=${seeded ? "code" : "file"})`);
 
   // -- loop --------------------------------------------------------------------

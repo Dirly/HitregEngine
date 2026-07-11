@@ -13,12 +13,30 @@ import path from "node:path";
  * - GET/POST /__hitreg/context — the running app posts what the user sees
  *   (selection, camera, in-view entities, play mode); AI tools GET it to
  *   resolve "the thing I'm looking at" tasks.
+ * - GET/POST /__hitreg/spec — the running app posts its capability spec
+ *   (buildEngineSpec: every component/event/data-type/script + the ops
+ *   protocol, generated from the live Zod schemas); AI tools GET it to learn
+ *   what they can build, always current. GET also lists these HTTP endpoints.
  *
  * assets/ is excluded from Vite's own watcher so writes never trigger a full
  * reload; the in-place sync above replaces it.
  */
+
+/** The bridge's own HTTP surface, surfaced through GET /__hitreg/spec so an AI
+ * can discover the tooling without reading this file. */
+const BRIDGE_ENDPOINTS = [
+  { method: "GET", path: "/__hitreg/spec", purpose: "This capability spec + endpoint list." },
+  { method: "GET", path: "/__hitreg/context", purpose: "What the user currently sees: scene, selection, camera, in-view entities, play mode, diagnostics." },
+  { method: "GET", path: "/__hitreg/assets-index", purpose: "Every asset file on disk, bucketed by kind (scenes, prefabs, materials, models, chunks, …)." },
+  { method: "GET", path: "/__hitreg/asset-file?file=<rel>", purpose: "Read one asset file fresh from disk (bypasses Vite's cache)." },
+  { method: "POST", path: "/__hitreg/write-asset", purpose: "Write an asset file ({file, content}); live-syncs into the running app." },
+  { method: "GET", path: "/__hitreg/player-data", purpose: "Read experience-scoped player-data records (dev backend)." },
+  { method: "GET", path: "/__hitreg/net-debug", purpose: "Multiplayer signaling rooms + a ring buffer of relayed traffic." },
+] as const;
+
 function hitregBridge(): Plugin {
   let latestContext: unknown = null;
+  let latestSpec: unknown = null;
 
   return {
     name: "hitreg-bridge",
@@ -190,6 +208,35 @@ function hitregBridge(): Plugin {
           req.on("end", () => {
             try {
               latestContext = JSON.parse(body);
+              res.end(JSON.stringify({ ok: true }));
+            } catch {
+              res.statusCode = 400;
+              res.end(JSON.stringify({ ok: false }));
+            }
+          });
+          return;
+        }
+        res.statusCode = 405;
+        res.end();
+      });
+
+      // the running app posts its live capability spec; AI tools GET it to learn
+      // the current component/event/script/data-type surface + these endpoints.
+      server.middlewares.use("/__hitreg/spec", (req, res) => {
+        if (req.method === "GET") {
+          res.setHeader("content-type", "application/json");
+          res.setHeader("cache-control", "no-store");
+          const base =
+            latestSpec ?? { note: "open the app once so it can post its spec" };
+          res.end(JSON.stringify({ ...(base as object), endpoints: BRIDGE_ENDPOINTS }));
+          return;
+        }
+        if (req.method === "POST") {
+          let body = "";
+          req.on("data", (chunk: Buffer) => (body += chunk));
+          req.on("end", () => {
+            try {
+              latestSpec = JSON.parse(body);
               res.end(JSON.stringify({ ok: true }));
             } catch {
               res.statusCode = 400;
