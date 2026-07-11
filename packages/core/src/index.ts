@@ -98,12 +98,17 @@ export {
   chunkLocalToWorld,
   worldToChunkLocal,
   moveEntityAcrossChunks,
+  computeChunkStates,
+  resolveChunkRings,
+  chunkKey,
+  parseChunkKey,
   subsceneSchema,
   subsceneToSceneDoc,
   type ChunkDoc,
   type ChunkStreamerData,
   type ChunkCell,
   type ChunkMoveResult,
+  type ChunkRep,
   type SubsceneData,
 } from "./chunks.js";
 export {

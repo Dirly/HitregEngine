@@ -37,6 +37,24 @@ export const chunkStreamerSchema = z.object({
   radius: z.number().min(1).max(16).default(2),
   /** Extra cells beyond radius to keep alive before unloading (hysteresis). */
   keepPadding: z.number().min(0).max(8).default(1),
+  /**
+   * Distance-based level-of-detail rings, in CELLS from the focus (see §4 of
+   * docs/open-world-streaming-plan.md). Each cell renders at the highest-detail
+   * ring it falls inside: within `simulation` it is fully simulated; out to
+   * `fullRender` it renders without physics/scripts; out to `hlod` it is a
+   * merged low-detail proxy; out to `farTerrain` a coarse far proxy; beyond
+   * that, unloaded. Omit to keep the legacy binary behavior (load within
+   * `radius`, else unloaded). Values need not be ordered — they are clamped
+   * non-decreasing at resolve time.
+   */
+  rings: z
+    .object({
+      simulation: z.number().min(0).default(2),
+      fullRender: z.number().min(0).default(3),
+      hlod: z.number().min(0).default(10),
+      farTerrain: z.number().min(0).default(32),
+    })
+    .optional(),
 });
 
 export type ChunkStreamerData = z.infer<typeof chunkStreamerSchema>;
@@ -209,6 +227,110 @@ export function moveEntityAcrossChunks(
   const b = chunkDocSchema.safeParse(nextDest);
   if (!a.success || !b.success) return { error: "resulting chunk document failed validation" };
   return { source: a.data, dest: b.data, moved: subtree };
+}
+
+// -- distance-based representation state machine (LOD rings) ------------------
+//
+// The runtime keeps each cell at a representation matched to its distance from
+// the focus, upgrading detail as you approach and shedding it as you leave —
+// the streaming plan's `unloaded -> far -> hlod -> fullRender -> simulation`
+// ladder (§4). This is the pure decision core: given the focus and the last
+// states, it returns each cell's new state. Hysteresis (a dead-band of
+// `keepPadding` cells on the way OUT) keeps a cell hovering on a ring boundary
+// from thrashing between two representations. The renderer/streamer consumes
+// the diff of two results to know what to build, demote, or drop.
+
+/** A cell's representation, most detail to least; absent from the map = unloaded. */
+export type ChunkRep = "simulation" | "fullRender" | "hlod" | "far";
+
+const REP_LEVEL: Record<ChunkRep, number> = { far: 1, hlod: 2, fullRender: 3, simulation: 4 };
+const LEVEL_REP: readonly (ChunkRep | null)[] = [null, "far", "hlod", "fullRender", "simulation"];
+
+interface ResolvedRings {
+  simulation: number;
+  fullRender: number;
+  hlod: number;
+  farTerrain: number;
+  padding: number;
+}
+
+/**
+ * Concrete ring radii (cells) for a streamer. With `rings` set they are used
+ * as-is but clamped non-decreasing (simulation <= fullRender <= hlod <=
+ * farTerrain); without it, every ring collapses to `radius`, reproducing the
+ * legacy binary "loaded within radius, else unloaded" behavior exactly.
+ */
+export function resolveChunkRings(config: ChunkStreamerData): ResolvedRings {
+  const padding = config.keepPadding;
+  if (config.rings) {
+    const simulation = config.rings.simulation;
+    const fullRender = Math.max(config.rings.fullRender, simulation);
+    const hlod = Math.max(config.rings.hlod, fullRender);
+    const farTerrain = Math.max(config.rings.farTerrain, hlod);
+    return { simulation, fullRender, hlod, farTerrain, padding };
+  }
+  const r = config.radius;
+  return { simulation: r, fullRender: r, hlod: r, farTerrain: r, padding };
+}
+
+/** Detail level (0=unloaded..4=simulation) for a cell `d` cells away, with `extra` slack on every ring. */
+function levelByDistance(d: number, rings: ResolvedRings, extra: number): number {
+  if (d <= rings.simulation + extra) return 4;
+  if (d <= rings.fullRender + extra) return 3;
+  if (d <= rings.hlod + extra) return 2;
+  if (d <= rings.farTerrain + extra) return 1;
+  return 0;
+}
+
+/**
+ * Every cell's representation for a focus at world (x,z), given its previous
+ * states (pass an empty map on the first call). Only non-unloaded cells appear
+ * in the result — a key present in `prev` but absent here has unloaded.
+ *
+ * Upgrades apply immediately at a ring boundary; downgrades wait until the cell
+ * is `keepPadding` cells beyond the boundary, so a cell parked on a ring holds
+ * its representation instead of flickering.
+ */
+export function computeChunkStates(
+  focus: { x: number; z: number },
+  config: ChunkStreamerData,
+  prev: ReadonlyMap<string, ChunkRep>,
+): Map<string, ChunkRep> {
+  const rings = resolveChunkRings(config);
+  const fcx = Math.round(focus.x / config.cellSize);
+  const fcz = Math.round(focus.z / config.cellSize);
+  const reach = Math.ceil(rings.farTerrain + rings.padding);
+
+  const candidates = new Set<string>(prev.keys());
+  for (let dz = -reach; dz <= reach; dz++) {
+    for (let dx = -reach; dx <= reach; dx++) candidates.add(chunkKey(fcx + dx, fcz + dz));
+  }
+
+  const out = new Map<string, ChunkRep>();
+  for (const key of candidates) {
+    const coords = parseChunkKey(key);
+    if (!coords) continue;
+    const d = Math.hypot(coords[0] - fcx, coords[1] - fcz);
+    const prevLevel = REP_LEVEL[prev.get(key) as ChunkRep] ?? 0;
+    const rising = levelByDistance(d, rings, 0);
+    // rising/steady snaps up immediately; falling holds until beyond the pad
+    const level =
+      rising >= prevLevel ? rising : Math.min(prevLevel, levelByDistance(d, rings, rings.padding));
+    const rep = LEVEL_REP[level];
+    if (rep) out.set(key, rep);
+  }
+  return out;
+}
+
+/** Grid key for a cell, matching the `<cx>_<cz>` filename convention. */
+export function chunkKey(cx: number, cz: number): string {
+  return `${cx}_${cz}`;
+}
+
+/** Inverse of chunkKey; null for anything not two integers around one underscore. */
+export function parseChunkKey(key: string): [number, number] | null {
+  const m = /^(-?\d+)_(-?\d+)$/.exec(key);
+  return m ? [Number(m[1]), Number(m[2])] : null;
 }
 
 /**
