@@ -206,30 +206,48 @@ function hitregBridge(): Plugin {
       // The dev server is a signaling relay ONLY: it brokers room membership
       // and forwards SDP/ICE envelopes between tabs over the vite websocket.
       // Game traffic never touches it — that flows P2P over DataChannels.
-      // Host = FIRST joiner still present; when the host leaves, the
-      // next-oldest member inherits (clients tear down and re-dial).
+      // Host election: the first PLAYING member (join order) — the authority
+      // must be a tab that actually simulates; a tab sitting in edit mode
+      // never hosts while someone else plays. Falls back to the first member
+      // when nobody plays. On host change, clients tear down and re-dial.
       type NetSignalUp =
         | { kind: "join"; room: string; peerId: string }
         | { kind: "leave"; room: string; peerId: string }
+        | { kind: "state"; room: string; peerId: string; playing: boolean }
         | { kind: "signal"; room: string; from: string; to: string; data: unknown };
       const netRooms = new Map<string, string[]>(); // room -> peerIds in join order
+      const netPlaying = new Map<string, Set<string>>(); // room -> peerIds in play mode
+      const netHosts = new Map<string, string>(); // room -> current authority (sticky)
       // socket -> (room -> peerId), so a dead tab's memberships get cleaned up
       const netSockets = new WeakMap<object, Map<string, string>>();
       const broadcastMembers = (room: string) => {
         const members = netRooms.get(room) ?? [];
-        server.ws.send("hitreg:net-signal", {
-          kind: "members",
-          room,
-          members,
-          host: members[0] ?? null,
-        });
+        const playing = netPlaying.get(room) ?? new Set<string>();
+        // STICKY election: the host only moves when it becomes invalid —
+        // it left, or it stopped playing while someone else still plays.
+        // (A playing host never loses the room to a later play-presser.)
+        const current = netHosts.get(room);
+        const currentValid =
+          current !== undefined &&
+          members.includes(current) &&
+          (playing.has(current) || playing.size === 0);
+        const host = currentValid
+          ? current
+          : (members.find((id) => playing.has(id)) ?? members[0] ?? null);
+        if (host === null) netHosts.delete(room);
+        else netHosts.set(room, host);
+        server.ws.send("hitreg:net-signal", { kind: "members", room, members, host });
       };
       const leaveNetRoom = (room: string, peerId: string) => {
+        netPlaying.get(room)?.delete(peerId);
         const members = netRooms.get(room);
         if (!members?.includes(peerId)) return;
         const next = members.filter((id) => id !== peerId);
-        if (next.length === 0) netRooms.delete(room);
-        else netRooms.set(room, next);
+        if (next.length === 0) {
+          netRooms.delete(room);
+          netPlaying.delete(room);
+          netHosts.delete(room);
+        } else netRooms.set(room, next);
         broadcastMembers(room);
       };
       // ring buffer of relayed traffic — GET /__hitreg/net-debug (AI debugging)
@@ -282,6 +300,17 @@ function hitregBridge(): Plugin {
             }
             owned.set(msg.room, msg.peerId);
             broadcastMembers(msg.room);
+            return;
+          }
+          if (msg.kind === "state") {
+            let playing = netPlaying.get(msg.room);
+            if (!playing) {
+              playing = new Set();
+              netPlaying.set(msg.room, playing);
+            }
+            if (msg.playing) playing.add(msg.peerId);
+            else playing.delete(msg.peerId);
+            broadcastMembers(msg.room); // host may have moved to a playing tab
             return;
           }
           if (msg.kind === "leave") {

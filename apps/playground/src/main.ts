@@ -1559,6 +1559,27 @@ async function main(): Promise<void> {
         // last gameplay events delivered this play session ({ tick, name, payload })
         recentEvents: eventBus ? eventBus.trace().slice(-20) : null,
         net: netPresence?.debug() ?? null,
+        // per-NPC sim probe: which layer is alive on THIS tab (net debugging)
+        netProbe:
+          playMode.get() === "playing"
+            ? {
+                docCount: Object.keys(lastExpanded.entities).length,
+                objCount: built.objects.size,
+                npcs: ["pet-dog", "elder", "sheep", "enemy-wolf-1"].map((id) => {
+                  const object = built.objects.get(id);
+                  return {
+                    id,
+                    inDoc: lastExpanded.entities[id] !== undefined,
+                    inStore: store.doc.entities[id] !== undefined,
+                    body: sim ? sim.getLinvel(id) !== null : false,
+                    suspended: netSuspended.has(id),
+                    pos: object
+                      ? object.position.toArray().map((v) => Number(v.toFixed(2)))
+                      : null,
+                  };
+                }),
+              }
+            : null,
         debug: {
           sceneSource: seeded ? "code-fallback" : "file",
           sceneLoadError: sceneLoadError || undefined,

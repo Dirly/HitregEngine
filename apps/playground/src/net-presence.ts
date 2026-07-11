@@ -249,7 +249,7 @@ export class NetPresence {
   private readonly entitiesInterp = new TransformInterpolator();
   private clock: InterpolationClock | null = null; // per client session
   private lastRenderTick: number | null = null;
-  private appliedAnims = new Map<string, string>();
+  private reportedPlaying = false;
   private replicatedKey = ""; // sorted id-set fingerprint, to detect set changes
   private replicatedNow: string[] = [];
 
@@ -297,7 +297,8 @@ export class NetPresence {
       inputsRecorded: [...this.remoteInputs.keys()],
       remoteTargets: [...this.targets.keys()],
       replicatedEntities: this.replicatedNow.length,
-      // interpolation health (peer): snapshots arriving? render clock moving?
+      // replication health: host replica count / peer ghost streams
+      replicaCount: this.lastReplicas ? this.lastReplicas.length : null,
       ghostStreams: this.entitiesInterp.ids().length,
       snapshotTick: this.entitiesInterp.newestTick() ?? this.playersInterp.newestTick(),
       renderTick: this.lastRenderTick === null ? null : Math.round(this.lastRenderTick * 10) / 10,
@@ -309,6 +310,19 @@ export class NetPresence {
     if (!this.enabled) return;
     const room = `scene:${this.opts.getSceneName()}`;
     if (room !== this.room) this.joinRoom(room);
+
+    // report play-state flips — the relay elects the first PLAYING member
+    // as host (the authority must be a tab that actually simulates)
+    const playing = this.opts.getLocalPlayer() !== null;
+    if (playing !== this.reportedPlaying && this.room) {
+      this.reportedPlaying = playing;
+      import.meta.hot?.send("hitreg:net-signal", {
+        kind: "state",
+        room: this.room,
+        peerId: this.selfId,
+        playing,
+      });
+    }
 
     // peer: advance the render clock and sample the interpolation buffers —
     // remote motion is a true interpolation between bracketing snapshots
@@ -368,10 +382,10 @@ export class NetPresence {
       object.position.set(s.p[0], s.p[1], s.p[2]);
       if (s.q) object.quaternion.set(s.q[0], s.q[1], s.q[2], s.q[3]);
       const anim = (s.data as { anim?: string } | undefined)?.anim;
-      if (anim && this.appliedAnims.get(id) !== anim) {
-        this.appliedAnims.set(id, anim);
-        this.opts.setEntityAnim?.(id, anim);
-      }
+      // applied every frame, NOT cached here: the animation system is the
+      // source of truth (its play() no-ops on the current clip) — a cache
+      // in this layer goes stale whenever the app's play session restarts
+      if (anim) this.opts.setEntityAnim?.(id, anim);
     }
   }
 
@@ -449,13 +463,15 @@ export class NetPresence {
     if (payload.kind === "members") {
       if (payload.room !== this.room) return;
       this.members = payload.members ?? [];
-      // dev server restarted and lost us? best-effort re-join
+      // dev server restarted and lost us? best-effort re-join (and re-report
+      // play state on the next update — the relay's election needs it)
       if (!this.members.includes(this.selfId)) {
         import.meta.hot?.send("hitreg:net-signal", {
           kind: "join",
           room: this.room,
           peerId: this.selfId,
         });
+        this.reportedPlaying = false;
       }
       const host = payload.host ?? null;
       if (host !== this.sessionHost) {
@@ -705,7 +721,7 @@ export class NetPresence {
     this.playersInterp.clear();
     this.entitiesInterp.clear();
     this.clock = null;
-    this.appliedAnims.clear();
+    this.lastRenderTick = null;
     if (this.replicatedKey !== "") {
       this.replicatedKey = "";
       this.replicatedNow = [];
@@ -836,9 +852,7 @@ export class NetPresence {
     // stays suspended because it is still in the managed set)
     if (Array.isArray(entities.removed)) {
       for (const id of entities.removed) {
-        if (typeof id !== "string") continue;
-        this.entitiesInterp.remove(id);
-        this.appliedAnims.delete(id);
+        if (typeof id === "string") this.entitiesInterp.remove(id);
       }
     }
 
@@ -850,10 +864,6 @@ export class NetPresence {
     if (key !== this.replicatedKey) {
       this.replicatedKey = key;
       this.replicatedNow = managed;
-      const managedSet = new Set(managed);
-      for (const id of [...this.appliedAnims.keys()]) {
-        if (!managedSet.has(id)) this.appliedAnims.delete(id);
-      }
       this.opts.onWorldEntities?.(managed);
     }
   }
