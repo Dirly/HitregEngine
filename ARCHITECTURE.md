@@ -285,6 +285,15 @@ under `.hitreg/`) now; the platform backend implements the same contract in
 Phase 3. Browser storage (IndexedDB) is cache/drafts/offline only — never
 authoritative for published player data.
 
+**Persistence is deferred until dedicated servers exist (2026-07-11, per
+Derek).** While sessions are P2P, real persistence is out of scope by
+decision, not omission: SERVERS are the authority on what gets saved and
+when it hits the database. A P2P host must never be the writer of record
+for durable data (it is only trusted with session state, §3a). Until the
+server milestone: netState carries everything a running session needs and
+dies with the room; the dev playerData bridge remains a local-machine
+convenience for single-player prototyping, nothing more.
+
 ## 3b. Physics data model (designed now, implemented with the Rapier package)
 
 - `rigidbody` — `{ kind: dynamic|kinematic|static, mass, linearDamping, angularDamping, ccd }`
