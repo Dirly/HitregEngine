@@ -102,6 +102,8 @@ export {
   resolveChunkRings,
   chunkKey,
   parseChunkKey,
+  partitionScene,
+  DEFAULT_GLOBAL_COMPONENTS,
   subsceneSchema,
   subsceneToSceneDoc,
   type ChunkDoc,
@@ -109,6 +111,8 @@ export {
   type ChunkCell,
   type ChunkMoveResult,
   type ChunkRep,
+  type PartitionOptions,
+  type PartitionResult,
   type SubsceneData,
 } from "./chunks.js";
 export {

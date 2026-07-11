@@ -327,6 +327,103 @@ export function chunkKey(cx: number, cz: number): string {
   return `${cx}_${cz}`;
 }
 
+// -- partitioning a flat scene into chunk cells ------------------------------
+//
+// The inverse of streaming: take a scene authored in one file and split its
+// SPATIAL content into per-cell chunk documents (streaming plan §5's "Partition
+// Scene"), leaving global/non-spatial entities — cameras, sky, postfx, session
+// managers, the streamer itself — in the scene. Each spatial top-level entity
+// (with its whole subtree) is routed to the cell containing its world origin
+// and its root transform rebased to that cell's local space, so nothing visibly
+// moves and world positions round-trip. Pure: callers write the files only
+// after inspecting the result. Cross-entity references by GUID (e.g. a joint
+// target) are left as-is — resolving them across cells needs a deferred-
+// resolution component, per §3 of the plan.
+
+/** Components that keep a top-level entity in the scene (not chunked). */
+export const DEFAULT_GLOBAL_COMPONENTS = [
+  "camera",
+  "sky",
+  "postfx",
+  "chunkStreamer",
+  "subscene",
+] as const;
+
+export interface PartitionOptions {
+  /** Cell size (world units) — must match the streamer that will load the chunks. */
+  cellSize: number;
+  /**
+   * Classify a TOP-LEVEL entity as global (kept in the scene) vs spatial (moved
+   * into a chunk). Default: global if it has no `transform`, or carries any of
+   * DEFAULT_GLOBAL_COMPONENTS.
+   */
+  isGlobal?: (id: string, entity: SceneDoc["entities"][string]) => boolean;
+}
+
+export interface PartitionResult {
+  /** The residual scene: global/non-spatial entities and their subtrees. */
+  scene: SceneDoc;
+  /** Spatial content keyed by cell ("cx_cz"), root transforms rebased to cell-local. */
+  chunks: Map<string, ChunkDoc>;
+  /** Non-fatal notes (e.g. a spatial entity with no position → cell 0,0). */
+  warnings: string[];
+}
+
+function isGlobalByDefault(entity: SceneDoc["entities"][string]): boolean {
+  if (!("transform" in entity.components)) return true;
+  return DEFAULT_GLOBAL_COMPONENTS.some((c) => c in entity.components);
+}
+
+/** Split a scene's spatial entities into chunk cells; keep globals in the scene. */
+export function partitionScene(scene: SceneDoc, options: PartitionOptions): PartitionResult {
+  const classify = options.isGlobal ?? ((_id, e) => isGlobalByDefault(e));
+  const entities = scene.entities;
+  const warnings: string[] = [];
+  const sceneEntities: SceneDoc["entities"] = {};
+  const chunks = new Map<string, ChunkDoc>();
+
+  for (const [id, entity] of Object.entries(entities)) {
+    if (entity.parent != null) continue; // a subtree travels with its top-level root
+    const subtree = collectSubtree(entities, id);
+
+    if (classify(id, entity)) {
+      for (const sid of subtree) sceneEntities[sid] = structuredClone(entities[sid]!);
+      continue;
+    }
+
+    const transform = entity.components["transform"] as { position?: Vec3 } | undefined;
+    if (!Array.isArray(transform?.position)) {
+      warnings.push(`spatial entity "${id}" has no transform position; routed to cell 0_0`);
+    }
+    const pos = localPosition(entity);
+    const cx = Math.round(pos[0] / options.cellSize);
+    const cz = Math.round(pos[2] / options.cellSize);
+    const key = chunkKey(cx, cz);
+
+    let chunk = chunks.get(key);
+    if (!chunk) {
+      chunk = { version: 1, entities: {} };
+      chunks.set(key, chunk);
+    }
+    for (const sid of subtree) chunk.entities[sid] = structuredClone(entities[sid]!);
+    // rebase only the ROOT to cell-local; descendants stay local to their parent
+    const root = chunk.entities[id]!;
+    root.components = {
+      ...root.components,
+      transform: {
+        ...(root.components["transform"] as object),
+        position: worldToChunkLocal(pos, cx, cz, options.cellSize),
+      },
+    };
+  }
+
+  return {
+    scene: { version: scene.version, name: scene.name, entities: sceneEntities },
+    chunks,
+    warnings,
+  };
+}
+
 /** Inverse of chunkKey; null for anything not two integers around one underscore. */
 export function parseChunkKey(key: string): [number, number] | null {
   const m = /^(-?\d+)_(-?\d+)$/.exec(key);
