@@ -28,3 +28,17 @@ Claude sessions get the same content via CLAUDE.md and `.claude/skills/`).
   engine surface for offline reading and drift-as-diff.
 - Client-side errors from the running app appear in the dev server's log.
 - Verify with `pnpm test` and `pnpm typecheck` before finishing.
+
+**Extending the engine — keep it self-describing (so docs can't drift):**
+
+- The AI-facing surface is generated from the Zod schemas that validate. A new
+  component/event/data-type/net-state = register its schema; put non-obvious
+  meaning or footguns in `.describe()` on the field (it rides into the spec),
+  not in prose. Run `pnpm spec` so the committed `spec.json` diff shows it.
+- A new dev-bridge endpoint = add it to `BRIDGE_ENDPOINTS` (apps/playground/
+  vite.config.ts) so `/__hitreg/spec` self-lists it. A new behavior/script =
+  register it (name + params surface automatically); document only its runtime
+  `ctx` API in `docs/scene-authoring.md` — that's not a schema.
+- Prose (this file, CLAUDE.md, `docs/`) is for judgment only: invariants, mental
+  models, pitfalls. Never re-list fields the spec already defines — point at it.
+  A new subsystem gets a `docs/` doc, linked from "Read first" if foundational.

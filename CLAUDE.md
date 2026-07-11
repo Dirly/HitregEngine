@@ -22,7 +22,10 @@ pnpm typecheck                   # all packages
   runtime structures (`expandScene` resolves prefabs; ECS tables come later).
 - **Component data is always schema-validated.** New component types register a
   Zod schema in the `ComponentRegistry`; the schema drives validation, the
-  future inspector UI, and the AI-facing JSON Schema spec.
+  future inspector UI, and the AI-facing JSON Schema spec. When adding any
+  capability (component, event, endpoint, behavior), keep the engine
+  self-describing — see **AGENTS.md → "Extending the engine"** (facts go in
+  schemas/`.describe()` → `spec.json`; prose stays judgment-only).
 - **Latency budgets are hard**: data-op batch < 50ms, script hot-reload < 1s,
   no compile step in any data path. Don't add synchronous stalls to the AI/editor loop.
 - **3D only. Multiplayer-compatible by default**: gameplay state changes belong
