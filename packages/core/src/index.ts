@@ -116,6 +116,19 @@ export {
   type SubsceneData,
 } from "./chunks.js";
 export {
+  supercellForCell,
+  supercellOrigin,
+  groupCellsBySupercell,
+  isStaticRenderEntity,
+  assembleHlodBuildDoc,
+  hlodCacheKey,
+  HLOD_GENERATOR_VERSION,
+  type HlodDependencies,
+  type HlodBuildResult,
+  type AssembleHlodOptions,
+  type HlodCacheKeyInput,
+} from "./hlod.js";
+export {
   buildSceneIndex,
   updateSceneIndex,
   indexChildrenOf,
