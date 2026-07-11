@@ -108,9 +108,118 @@ class Collectible extends Script {
   }
 }
 
+/**
+ * Moving platform: ping-pongs between its start and start+`distance` at a
+ * constant `speed`, pausing `dwell` seconds at each end. Kinematic (drives
+ * the transform directly, like Oscillator) — pair with a kinematic rigidbody
+ * so riders are carried. Motion is a pure function of accumulated sim time,
+ * so it never drifts and replays identically on every client.
+ */
+class PlatformMover extends Script {
+  static override scriptName = "platform-mover";
+  static override params = {
+    distance: { default: [0, 3, 0], description: "offset from start to the far end" },
+    speed: { default: 2, min: 0, max: 50, description: "units/sec along the path" },
+    dwell: { default: 1, min: 0, max: 60, description: "seconds paused at each end" },
+  };
+
+  private origin: [number, number, number] = [0, 0, 0];
+
+  override onStart(): void {
+    const p = this.object.position;
+    this.origin = [p.x, p.y, p.z];
+  }
+
+  override onFixedUpdate(): void {
+    const d = this.param<[number, number, number]>("distance");
+    const length = Math.hypot(d[0], d[1], d[2]);
+    const speed = this.param<number>("speed");
+    if (length === 0 || speed === 0) return; // degenerate: nowhere to go
+    const travel = length / speed; // seconds for one A→B leg
+    const dwell = this.param<number>("dwell");
+    const cycle = 2 * (travel + dwell);
+    const u = (this.ctx.now() / 1000) % cycle;
+    let s: number; // 0 at A, 1 at B
+    if (u < dwell) s = 0;
+    else if (u < dwell + travel) s = (u - dwell) / travel;
+    else if (u < 2 * dwell + travel) s = 1;
+    else s = 1 - (u - 2 * dwell - travel) / travel;
+    this.object.position.set(
+      this.origin[0] + d[0] * s,
+      this.origin[1] + d[1] * s,
+      this.origin[2] + d[2] * s,
+    );
+  }
+}
+
+/**
+ * Proximity door: opens while any entity tagged `openerTag` is within `range`
+ * and closes when they leave, easing `open` 0→1 at `speed`/sec. Opening
+ * slides by `move` and/or spins by `rotateY` degrees about local Y. Pure
+ * transform animation — no physics, no events — so it is trivially authored
+ * ("make this a door the player opens") and multiplayer-correct by suspension.
+ */
+class Door extends Script {
+  static override scriptName = "door";
+  static override params = {
+    openerTag: { default: "player", description: "tag that opens the door when near" },
+    range: { default: 3, min: 0, max: 50, description: "open when an opener is within this" },
+    move: { default: [0, 3, 0], description: "slide offset when fully open" },
+    rotateY: { default: 0, min: -180, max: 180, description: "spin (deg) about Y when open" },
+    speed: { default: 3, min: 0.1, max: 20, description: "open/close rate (fraction/sec)" },
+  };
+
+  private origin: [number, number, number] = [0, 0, 0];
+  private originYaw = 0;
+  private open = 0;
+
+  override onStart(): void {
+    const p = this.object.position;
+    this.origin = [p.x, p.y, p.z];
+    this.originYaw = this.object.rotation.y;
+  }
+
+  override onFixedUpdate(dt: number): void {
+    const target = this.anyOpenerNear() ? 1 : 0;
+    const step = this.param<number>("speed") * dt;
+    // ease toward the target, clamped so it settles exactly at 0 or 1
+    if (this.open < target) this.open = Math.min(target, this.open + step);
+    else if (this.open > target) this.open = Math.max(target, this.open - step);
+
+    const move = this.param<[number, number, number]>("move");
+    this.object.position.set(
+      this.origin[0] + move[0] * this.open,
+      this.origin[1] + move[1] * this.open,
+      this.origin[2] + move[2] * this.open,
+    );
+    const yaw = (this.param<number>("rotateY") * Math.PI) / 180;
+    this.object.rotation.y = this.originYaw + yaw * this.open;
+  }
+
+  private anyOpenerNear(): boolean {
+    const range = this.param<number>("range");
+    const rangeSq = range * range;
+    // measure from the REST position, never the animated one — otherwise the
+    // door slides out of its own range as it opens and oscillates
+    const [hx, hy, hz] = this.origin;
+    for (const id of this.ctx.findByTag(this.param<string>("openerTag"))) {
+      if (id === this.entityId) continue;
+      const other = this.ctx.getObject(id);
+      if (!other) continue;
+      const dx = other.position.x - hx;
+      const dy = other.position.y - hy;
+      const dz = other.position.z - hz;
+      if (dx * dx + dy * dy + dz * dz <= rangeSq) return true;
+    }
+    return false;
+  }
+}
+
 export function registerBuiltinScripts(registry: ScriptRegistry): void {
   registry.register(Spinner);
   registry.register(Oscillator);
   registry.register(PlayerController);
   registry.register(Collectible);
+  registry.register(PlatformMover);
+  registry.register(Door);
 }
