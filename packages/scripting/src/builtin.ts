@@ -275,6 +275,58 @@ class FaceTarget extends Script {
   }
 }
 
+/**
+ * Damageable: hit points that drop when a collider tagged `hazardTag` touches
+ * this entity (spikes, lava, projectiles), with `invulnMs` i-frames between
+ * hits so one contact isn't billed every tick. Drives this entity's health
+ * billboard (fill = hp/maxHp) if it has one, and hides the entity at 0 hp.
+ *
+ * Self-contained and LOCAL, exactly like `collectible` — no networked combat
+ * contract is presumed here (that stays game-specific, e.g. cube-rpg's
+ * authority-validated npc.hit). Good as a single-player / local hazard
+ * primitive; graduate to a networked version when the combat model is settled.
+ */
+class Damageable extends Script {
+  static override scriptName = "damageable";
+  static override params = {
+    maxHp: { default: 100, min: 1, max: 100000 },
+    hazardTag: { default: "hazard", description: "colliders with this tag deal damage" },
+    damagePerHit: { default: 10, min: 0, max: 100000 },
+    invulnMs: { default: 500, min: 0, max: 10000, description: "i-frames between hits" },
+  };
+
+  private hp = 0;
+  private invulnerable = false;
+
+  override onStart(): void {
+    this.hp = this.param<number>("maxHp");
+    this.ctx.setBillboard?.({ fill: 1 });
+  }
+
+  override onCollision(otherId: string): void {
+    if (this.invulnerable || this.hp <= 0) return;
+    // colliders can be sub-entities ("id:childIndex") — resolve the root too
+    const other = this.ctx.getEntity(otherId.split(":")[0]!) ?? this.ctx.getEntity(otherId);
+    if (!other?.tags.includes(this.param<string>("hazardTag"))) return;
+
+    this.hp = Math.max(0, this.hp - this.param<number>("damagePerHit"));
+    this.ctx.setBillboard?.({ fill: this.hp / this.param<number>("maxHp") });
+
+    if (this.hp <= 0) {
+      this.object.visible = false;
+      return;
+    }
+    // i-frames: use the sim-stepped timer, not wall-clock, so it replays
+    const invulnMs = this.param<number>("invulnMs");
+    if (invulnMs > 0) {
+      this.invulnerable = true;
+      this.ctx.after(invulnMs / 1000, () => {
+        this.invulnerable = false;
+      });
+    }
+  }
+}
+
 export function registerBuiltinScripts(registry: ScriptRegistry): void {
   registry.register(Spinner);
   registry.register(Oscillator);
@@ -283,4 +335,5 @@ export function registerBuiltinScripts(registry: ScriptRegistry): void {
   registry.register(PlatformMover);
   registry.register(Door);
   registry.register(FaceTarget);
+  registry.register(Damageable);
 }

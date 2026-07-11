@@ -13,6 +13,7 @@ import {
   ScriptRegistry,
   ScriptRuntime,
   type InputLike,
+  type SimLike,
 } from "../src/index.js";
 
 const coreRegistry = new ComponentRegistry();
@@ -250,5 +251,110 @@ describe("face-target", () => {
     runtime.start();
     step(runtime, 30); // 0.5s at 1 rad/s → 0.5 rad toward -π/2, not there yet
     expect(objects.get("turret")!.rotation.y).toBeCloseTo(-0.5, 2);
+  });
+});
+
+describe("damageable", () => {
+  function hazardScene(params: Record<string, unknown>) {
+    const doc = scene([
+      {
+        op: "add-entity",
+        id: "mob",
+        entity: {
+          name: "Mob",
+          parent: null,
+          tags: [],
+          components: {
+            transform: {},
+            billboard: {},
+            script: { name: "damageable", params },
+          },
+        },
+      },
+      {
+        op: "add-entity",
+        id: "spike",
+        entity: { name: "Spike", parent: null, tags: ["hazard"], components: { transform: {} } },
+      },
+      {
+        op: "add-entity",
+        id: "leaf",
+        entity: { name: "Leaf", parent: null, tags: ["decor"], components: { transform: {} } },
+      },
+    ]);
+    let pending: Array<[string, string]> = [];
+    const sim: SimLike = {
+      getLinvel: () => null,
+      setLinvel: () => undefined,
+      applyImpulse: () => undefined,
+      takeCollisions: () => {
+        const p = pending;
+        pending = [];
+        return p;
+      },
+    };
+    const fills: number[] = [];
+    const mob = new THREE.Object3D();
+    const runtime = new ScriptRuntime({
+      doc,
+      objects: new Map([
+        ["mob", mob],
+        ["spike", new THREE.Object3D()],
+        ["leaf", new THREE.Object3D()],
+      ]),
+      sim,
+      registry: registry(),
+      input: noInput,
+      setBillboard: (_id, opts) => {
+        if (opts.fill !== undefined) fills.push(opts.fill);
+      },
+    });
+    const hit = (otherId: string) => {
+      pending = [["mob", otherId]];
+    };
+    return { runtime, mob, fills, hit };
+  }
+
+  it("takes damage from a hazard collider and drives its health bar", () => {
+    const { runtime, fills, hit } = hazardScene({ maxHp: 100, damagePerHit: 25, invulnMs: 500 });
+    runtime.start();
+    expect(fills).toEqual([1]); // full on start
+
+    hit("spike");
+    step(runtime, 1);
+    expect(fills.at(-1)).toBeCloseTo(0.75, 5);
+  });
+
+  it("ignores repeat hits during i-frames, then takes damage again after they lapse", () => {
+    const { runtime, fills, hit } = hazardScene({ maxHp: 100, damagePerHit: 25, invulnMs: 500 });
+    runtime.start();
+
+    hit("spike");
+    step(runtime, 1); // → 0.75
+    hit("spike");
+    step(runtime, 1); // still in i-frames → no change
+    expect(fills.at(-1)).toBeCloseTo(0.75, 5);
+
+    step(runtime, 31); // ~0.52s → i-frames (timer) lapse
+    hit("spike");
+    step(runtime, 1);
+    expect(fills.at(-1)).toBeCloseTo(0.5, 5);
+  });
+
+  it("hides the entity at zero hp", () => {
+    const { runtime, mob, fills, hit } = hazardScene({ maxHp: 30, damagePerHit: 30, invulnMs: 0 });
+    runtime.start();
+    hit("spike");
+    step(runtime, 1);
+    expect(fills.at(-1)).toBe(0);
+    expect(mob.visible).toBe(false);
+  });
+
+  it("ignores collisions from non-hazard entities", () => {
+    const { runtime, fills, hit } = hazardScene({ maxHp: 100, damagePerHit: 25, invulnMs: 500 });
+    runtime.start();
+    hit("leaf"); // tagged "decor", not "hazard"
+    step(runtime, 1);
+    expect(fills).toEqual([1]); // untouched
   });
 });
