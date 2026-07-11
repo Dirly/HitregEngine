@@ -86,6 +86,12 @@ export class AnimationSystem {
     for (const entry of this.entries.values()) entry.mixer.update(dt);
   }
 
+  /** Drop one entity's mixer (its visuals were rebuilt or removed). */
+  unregister(entityId: string): void {
+    this.entries.get(entityId)?.mixer.stopAllAction();
+    this.entries.delete(entityId);
+  }
+
   clear(): void {
     this.entries.clear();
   }

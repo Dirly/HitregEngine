@@ -351,6 +351,12 @@ export class ParticleSystem {
     for (const emitter of this.emitters.values()) emitter.update(dt);
   }
 
+  /** Dispose one entity's emitter (its visuals were rebuilt or removed). */
+  unregister(entityId: string): void {
+    this.emitters.get(entityId)?.dispose();
+    this.emitters.delete(entityId);
+  }
+
   clear(): void {
     for (const emitter of this.emitters.values()) emitter.dispose();
     this.emitters.clear();

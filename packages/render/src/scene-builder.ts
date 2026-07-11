@@ -29,11 +29,11 @@ export interface BuildOptions {
   /** Fired for each `particles` entity — the app registers it with its
    * ParticleSystem (the builder stays free of the simulation). `group` is the
    * entity's anchor group; the system parents its InstancedMesh under it. */
-  onParticles?(entityId: string, group: THREE.Group, data: ParticlesData): void;
+  onParticles?(entityId: string, group: THREE.Object3D, data: ParticlesData): void;
   /** Fired for each `billboard` entity — the app registers it with its
    * BillboardSystem (the builder stays free of the canvas drawing). `group` is
    * the entity's anchor group; the system parents its Sprite under it. */
-  onBillboard?(entityId: string, group: THREE.Group, data: BillboardData): void;
+  onBillboard?(entityId: string, group: THREE.Object3D, data: BillboardData): void;
 }
 
 export interface MaterialData {
@@ -292,25 +292,54 @@ function resolveMaterialFor(
   return material;
 }
 
-export function buildScene(doc: SceneDoc, options: BuildOptions = {}): BuiltScene {
-  const scene = new THREE.Scene();
-  const objects = new Map<string, THREE.Object3D>();
-  const cameras = new Map<string, THREE.PerspectiveCamera>();
-  const materialCache = new Map<string, THREE.Material>();
-  let activeCamera: THREE.PerspectiveCamera | null = null;
+/**
+ * Set an entity group's local transform from its (optional) transform
+ * component. No component means identity — reconcile relies on that reset
+ * when a transform component is removed.
+ */
+export function applyEntityTransform(
+  group: THREE.Object3D,
+  entity: { components: Record<string, unknown> },
+): void {
+  const transform = entity.components["transform"] as TransformData | undefined;
+  if (transform) {
+    group.position.fromArray(transform.position);
+    group.quaternion.fromArray(transform.rotation);
+    group.scale.fromArray(transform.scale);
+  } else {
+    group.position.set(0, 0, 0);
+    group.quaternion.identity();
+    group.scale.set(1, 1, 1);
+  }
+}
 
-  for (const [id, entity] of Object.entries(doc.entities)) {
-    const group = new THREE.Group();
-    group.name = entity.name;
-    group.userData["entityId"] = id;
+interface PopulateContext {
+  options: BuildOptions;
+  materialCache: Map<string, THREE.Material>;
+  /** buildScene only — sky components write scene background/fog; reconcile
+   * bails on sky entities before ever getting here. */
+  scene: THREE.Scene | null;
+}
 
-    const transform = entity.components["transform"] as TransformData | undefined;
-    if (transform) {
-      group.position.fromArray(transform.position);
-      group.quaternion.fromArray(transform.rotation);
-      group.scale.fromArray(transform.scale);
-    }
-
+/**
+ * Create one entity's component visuals under its anchor group. Shared by the
+ * full build and per-entity reconcile. Returns the created camera, if any.
+ *
+ * Async model loads are epoch-guarded: rebuilding an entity's visuals bumps
+ * `visualsEpoch` on the group, so a load that started before the rebuild
+ * discards itself instead of double-attaching.
+ */
+function populateEntityGroup(
+  group: THREE.Object3D,
+  id: string,
+  entity: { components: Record<string, unknown> },
+  ctx: PopulateContext,
+): THREE.PerspectiveCamera | null {
+  const { options, materialCache, scene } = ctx;
+  const epoch = ((group.userData["visualsEpoch"] as number | undefined) ?? 0) + 1;
+  group.userData["visualsEpoch"] = epoch;
+  let createdCamera: THREE.PerspectiveCamera | null = null;
+  {
     const meshData = entity.components["mesh"] as MeshData | undefined;
     if (meshData && meshData.source.kind === "primitive") {
       const mesh = new THREE.Mesh(
@@ -355,6 +384,8 @@ export function buildScene(doc: SceneDoc, options: BuildOptions = {}): BuiltScen
         // async: the model pops in when loaded; group placement is already correct
         loadGltf(url).then(
           (gltf) => {
+            // the entity's visuals were rebuilt while we loaded — stand down
+            if (group.userData["visualsEpoch"] !== epoch) return;
             let source: THREE.Object3D = gltf.scene;
             if (nodeName) {
               const found = gltf.scene.getObjectByName(nodeName);
@@ -448,13 +479,30 @@ export function buildScene(doc: SceneDoc, options: BuildOptions = {}): BuiltScen
           top: string;
           bottom: string;
           texture?: string;
+          cubemap?: { px: string; nx: string; py: string; ny: string; pz: string; nz: string };
           light: number;
           fog?: { color: string; near: number; far: number };
         }
       | undefined;
-    if (skyData && !scene.background) {
+    if (skyData && scene && !scene.background) {
+      const cubemapUrls = skyData.cubemap
+        ? (["px", "nx", "py", "ny", "pz", "nz"] as const).map((face) =>
+            options.resolveTexture?.(skyData.cubemap![face]),
+          )
+        : undefined;
       const panoramaUrl = skyData.texture ? options.resolveTexture?.(skyData.texture) : undefined;
-      if (panoramaUrl) {
+      if (cubemapUrls?.every((url): url is string => !!url)) {
+        scene.background = new THREE.Color(skyData.bottom); // until the faces land
+        new THREE.CubeTextureLoader().load(
+          cubemapUrls,
+          (cubeTexture) => {
+            cubeTexture.colorSpace = THREE.SRGBColorSpace;
+            scene.background = cubeTexture;
+          },
+          undefined,
+          (error) => console.warn(`[render] sky cubemap failed`, error),
+        );
+      } else if (panoramaUrl) {
         scene.background = new THREE.Color(skyData.bottom); // until the image lands
         new THREE.TextureLoader().load(
           panoramaUrl,
@@ -493,8 +541,30 @@ export function buildScene(doc: SceneDoc, options: BuildOptions = {}): BuiltScen
         cameraData.far,
       );
       group.add(camera);
+      createdCamera = camera;
+    }
+  }
+  return createdCamera;
+}
+
+export function buildScene(doc: SceneDoc, options: BuildOptions = {}): BuiltScene {
+  const scene = new THREE.Scene();
+  const objects = new Map<string, THREE.Object3D>();
+  const cameras = new Map<string, THREE.PerspectiveCamera>();
+  const materialCache = new Map<string, THREE.Material>();
+  let activeCamera: THREE.PerspectiveCamera | null = null;
+
+  for (const [id, entity] of Object.entries(doc.entities)) {
+    const group = new THREE.Group();
+    group.name = entity.name;
+    group.userData["entityId"] = id;
+    applyEntityTransform(group, entity);
+
+    const camera = populateEntityGroup(group, id, entity, { options, materialCache, scene });
+    if (camera) {
       cameras.set(id, camera);
-      if (cameraData.active && !activeCamera) activeCamera = camera;
+      const cameraData = entity.components["camera"] as CameraData | undefined;
+      if (cameraData?.active && !activeCamera) activeCamera = camera;
     }
 
     objects.set(id, group);
@@ -508,4 +578,30 @@ export function buildScene(doc: SceneDoc, options: BuildOptions = {}): BuiltScen
   }
 
   return { scene, objects, activeCamera, cameras };
+}
+
+/**
+ * Rebuild ONE entity's component visuals in place: strip everything under its
+ * anchor group that isn't a child entity's group, then repopulate from the
+ * entity doc. The group object itself survives, so selections, gizmo
+ * attachments, physics-body bindings, and child entities are undisturbed.
+ */
+export function rebuildEntityVisuals(
+  built: BuiltScene,
+  id: string,
+  entity: { components: Record<string, unknown> },
+  options: BuildOptions,
+  materialCache: Map<string, THREE.Material>,
+): void {
+  const group = built.objects.get(id);
+  if (!group) return;
+  for (const child of [...group.children]) {
+    const childEntity = child.userData["entityId"] as string | undefined;
+    // a child whose entityId maps back to itself IS an entity group — keep it;
+    // everything else (meshes, lights + targets, model roots, debug viz) goes
+    if (typeof childEntity === "string" && built.objects.get(childEntity) === child) continue;
+    group.remove(child);
+  }
+  applyEntityTransform(group, entity);
+  populateEntityGroup(group, id, entity, { options, materialCache, scene: null });
 }

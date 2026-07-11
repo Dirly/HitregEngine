@@ -4,6 +4,7 @@ import {
   createScene,
   registerCoreComponents,
   SceneStore,
+  type StoreChange,
 } from "../src/index.js";
 
 function setup() {
@@ -66,6 +67,33 @@ describe("SceneStore", () => {
     expect(store.doc.name).toBe("other");
     expect(store.canUndo).toBe(false);
     expect(store.canRedo).toBe(false);
+  });
+
+  it("notifies with the batch's ApplyResult so subscribers can reconcile", () => {
+    const store = setup();
+    const changes: StoreChange[] = [];
+    store.subscribe((change) => changes.push(change));
+
+    store.apply([addBox]);
+    expect(changes[0]!.kind).toBe("ops");
+    const applied = changes[0] as Extract<StoreChange, { kind: "ops" }>;
+    expect([...applied.result.addedEntities]).toEqual(["box"]);
+
+    store.apply([
+      { op: "set-component", id: "box", component: "transform", data: { position: [1, 2, 3] } },
+    ]);
+    const edited = changes[1] as Extract<StoreChange, { kind: "ops" }>;
+    expect([...edited.result.changedEntities]).toEqual(["box"]);
+    expect([...edited.result.changedComponents.get("box")!]).toEqual(["transform"]);
+
+    // undo pops the last batch (the transform edit) — its inverse is a change
+    store.undo();
+    const undone = changes[2] as Extract<StoreChange, { kind: "ops" }>;
+    expect([...undone.result.changedEntities]).toEqual(["box"]);
+    expect(undone.result.removedEntities.size).toBe(0);
+
+    store.replace(createScene("other"));
+    expect(changes[3]).toEqual({ kind: "replace" });
   });
 
   it("failed batches do not touch the doc or the undo stack", () => {

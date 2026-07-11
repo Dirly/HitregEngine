@@ -20,6 +20,7 @@ import {
   validateScene,
   sampleHeightmap,
   worldTransforms,
+  type ApplyResult,
   type TerrainHeightfield,
   type ChunkStreamerData,
   type NetObjectData,
@@ -40,7 +41,9 @@ import {
   makeMaterial,
   makeMeshGeometryProvider,
   ParticleSystem,
+  reconcileScene,
   type AnimatorData,
+  type BuildOptions,
   type BuiltScene,
   type MaterialData,
 } from "@hitreg/render";
@@ -437,6 +440,9 @@ async function main(): Promise<void> {
 
   let built: BuiltScene;
   let lastExpanded: SceneDoc;
+  // doc-change telemetry for the context bridge: in-place patches vs full rebuilds
+  let reconcileCount = 0;
+  let rebuildCount = 0;
   let netPresence: NetPresence | null = null; // constructed after the editor mounts
   const animations = new AnimationSystem();
   const particles = new ParticleSystem();
@@ -477,11 +483,10 @@ async function main(): Promise<void> {
     }
     controls.colliderMeshes = meshes;
   }
-  function rebuild(): void {
-    // v1: full rebuild per change — fine at this scale; diffing comes with ECS
+  /** Expand the doc and hydrate runtime-only data (editable terrain lives in
+   * a standalone file; renderer and physics must consume the same samples). */
+  function expandForRuntime(): SceneDoc {
     const expanded = expandScene(store.doc, assets, registry);
-    // Editable terrain stays in a standalone file. Hydrate a runtime-only copy
-    // so renderer and physics consume exactly the same samples.
     for (const entity of Object.values(expanded.entities)) {
       const mesh = entity.components["mesh"] as { source?: Record<string, unknown> } | undefined;
       if (mesh?.source?.["kind"] !== "heightmap") continue;
@@ -489,48 +494,57 @@ async function main(): Promise<void> {
       const terrain = terrainId ? assets.getDataAsset(terrainId)?.data as { size: [number, number]; resolution: number; heights: number[] } | undefined : undefined;
       if (terrain) mesh.source = { ...mesh.source, size: terrain.size, resolution: terrain.resolution, heights: terrain.heights };
     }
-    lastExpanded = expanded;
+    return expanded;
+  }
+
+  // shared by the full rebuild and per-entity reconcile: callbacks read
+  // `built`/`lastExpanded` at call time, so one options object serves both
+  const sceneBuildOptions: BuildOptions = {
+    resolveModel: (assetId) => assets.getModel(assetId)?.url,
+    resolveMaterial: (assetId) => assets.getDataAsset(assetId)?.data,
+    resolveTexture: (assetId) => assets.getTexture(assetId)?.url,
+    onParticles: (entityId, group, data) =>
+      particles.register(entityId, group, data, (assetId) => assets.getTexture(assetId)?.url),
+    onBillboard: (entityId, group, data) =>
+      billboards.register(entityId, group, data, {
+        texture: (assetId) => assets.getTexture(assetId)?.url,
+        sheet: (assetId) => {
+          const doc = assets.getDataAsset(assetId);
+          return doc?.type === "spritesheet" ? (doc.data as SpritesheetDoc) : undefined;
+        },
+      }),
+    onModelLoaded: (entityId, root, clips) => {
+      const entity = lastExpanded.entities[entityId];
+      const animator = entity?.components["animator"] as AnimatorData | undefined;
+      animations.register(entityId, root, clips, animator ?? null);
+      // report kit contents so AI (and unpack) can see what's inside a model
+      const source = (
+        entity?.components["mesh"] as { source?: { assetId?: string; node?: string } } | undefined
+      )?.source;
+      if (source?.assetId && !source.node) {
+        modelNodes[source.assetId] = root.children.map((c) => c.name).filter(Boolean);
+      }
+      // rigged models: expose bone names to the inspector + skeleton overlay
+      const bones = collectBones(root);
+      if (bones.length > 0) {
+        modelBones.set({ ...modelBones.get(), [entityId]: bones });
+        if (built) {
+          attachSkeletonDebug(built.objects); // idempotent — one call per async load
+          refreshSkeletonDebugVisibility();
+        }
+      }
+      // late-loading static models (rocks, trees) must block the camera too
+      if (playMode.get() !== "edit") refreshCameraColliders();
+    },
+  };
+
+  function rebuild(): void {
+    lastExpanded = expandForRuntime();
     animations.clear();
     particles.clear();
     billboards.clear();
-    built = buildScene(expanded, {
-      resolveModel: (assetId) => assets.getModel(assetId)?.url,
-      resolveMaterial: (assetId) => assets.getDataAsset(assetId)?.data,
-      resolveTexture: (assetId) => assets.getTexture(assetId)?.url,
-      onParticles: (entityId, group, data) =>
-        particles.register(entityId, group, data, (assetId) => assets.getTexture(assetId)?.url),
-      onBillboard: (entityId, group, data) =>
-        billboards.register(entityId, group, data, {
-          texture: (assetId) => assets.getTexture(assetId)?.url,
-          sheet: (assetId) => {
-            const doc = assets.getDataAsset(assetId);
-            return doc?.type === "spritesheet" ? (doc.data as SpritesheetDoc) : undefined;
-          },
-        }),
-      onModelLoaded: (entityId, root, clips) => {
-        const entity = lastExpanded.entities[entityId];
-        const animator = entity?.components["animator"] as AnimatorData | undefined;
-        animations.register(entityId, root, clips, animator ?? null);
-        // report kit contents so AI (and unpack) can see what's inside a model
-        const source = (
-          entity?.components["mesh"] as { source?: { assetId?: string; node?: string } } | undefined
-        )?.source;
-        if (source?.assetId && !source.node) {
-          modelNodes[source.assetId] = root.children.map((c) => c.name).filter(Boolean);
-        }
-        // rigged models: expose bone names to the inspector + skeleton overlay
-        const bones = collectBones(root);
-        if (bones.length > 0) {
-          modelBones.set({ ...modelBones.get(), [entityId]: bones });
-          if (built) {
-            attachSkeletonDebug(built.objects); // idempotent — one call per async load
-            refreshSkeletonDebugVisibility();
-          }
-        }
-        // late-loading static models (rocks, trees) must block the camera too
-        if (playMode.get() !== "edit") refreshCameraColliders();
-      },
-    });
+    built = buildScene(lastExpanded, sceneBuildOptions);
+    const expanded = lastExpanded;
     if (settings.get().showPhysics) attachPhysicsDebug(expanded, built.objects);
     refreshPhysicsDebugVisibility();
     refreshCameraColliders();
@@ -1229,7 +1243,64 @@ async function main(): Promise<void> {
     audio.stopAll();
   }
 
-  store.subscribe(rebuild);
+  // Incremental path: a batch that only edits EXISTING entities' data patches
+  // the live scene in place — no rebuild, no async model reload, no flicker.
+  // Anything structural (add/remove/reparent), prefab-shaped (props/overrides
+  // change the expanded subtree), or scene-level (sky, cameras, postfx,
+  // streaming) falls back to the full rebuild.
+  function tryReconcile(result: ApplyResult): boolean {
+    if (!built) return false;
+    if (result.addedEntities.size > 0 || result.removedEntities.size > 0) return false;
+    if (result.changedEntities.size === 0) return true; // no-op batch
+    for (const id of result.changedEntities) {
+      if (result.changedComponents.get(id)?.has("prefab")) return false;
+    }
+    // debug overlays are children of entity groups; an in-place visual rebuild
+    // would strip them, so let the full rebuild reattach everything
+    const debugDecorated = settings.get().showPhysics || settings.get().showSkeletons;
+    // scripting/net/audio have no render visuals; physics components join them
+    // only while their debug wireframes aren't being drawn — with the overlay
+    // on, a collider edit must take the full rebuild that redraws its shape
+    const dataOnly = new Set(["script", "netObject", "audio"]);
+    if (!settings.get().showPhysics) {
+      dataOnly.add("rigidbody").add("collider").add("joint");
+    }
+    const expanded = expandForRuntime();
+    const ok = reconcileScene(
+      built,
+      lastExpanded,
+      expanded,
+      result.changedEntities,
+      sceneBuildOptions,
+      {
+        onEntityReset: (id) => {
+          animations.unregister(id);
+          particles.unregister(id);
+          billboards.unregister(id);
+          if (id in modelBones.get()) {
+            const next = { ...modelBones.get() };
+            delete next[id];
+            modelBones.set(next);
+          }
+        },
+        allowVisualRebuild: () => !debugDecorated,
+        dataOnlyComponents: dataOnly,
+      },
+    );
+    if (!ok) return false;
+    lastExpanded = expanded;
+    refreshCameraColliders(); // static-tagged scenery may have moved or changed
+    return true;
+  }
+
+  store.subscribe((change) => {
+    if (change.kind === "ops" && tryReconcile(change.result)) {
+      reconcileCount++;
+      return;
+    }
+    rebuildCount++;
+    rebuild();
+  });
   store.subscribe(() => {
     if (sim) startPlaySession(); // edits during play restart the session on the new doc
   });
@@ -1613,6 +1684,10 @@ async function main(): Promise<void> {
         debug: {
           sceneSource: seeded ? "code-fallback" : "file",
           sceneLoadError: sceneLoadError || undefined,
+          // doc-change handling since boot: reconciled = patched in place,
+          // rebuilt = full scene reconstruction (structural/scene-level edits)
+          reconciled: reconcileCount,
+          rebuilt: rebuildCount,
         },
         updatedAt: performance.now(),
       }),

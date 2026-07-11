@@ -311,6 +311,12 @@ export class BillboardSystem {
     return this.issues;
   }
 
+  /** Dispose one entity's billboard (its visuals were rebuilt or removed). */
+  unregister(entityId: string): void {
+    this.billboards.get(entityId)?.dispose();
+    this.billboards.delete(entityId);
+  }
+
   clear(): void {
     for (const billboard of this.billboards.values()) billboard.dispose();
     this.billboards.clear();

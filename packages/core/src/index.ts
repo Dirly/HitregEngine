@@ -53,7 +53,7 @@ export {
   type DataAssetDoc,
   type ModelAssetDoc,
 } from "./assets.js";
-export { SceneStore } from "./store.js";
+export { SceneStore, type StoreChange } from "./store.js";
 export { duplicateSubtree } from "./duplicate.js";
 export {
   quatMultiply,

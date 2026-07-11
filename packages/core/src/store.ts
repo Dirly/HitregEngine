@@ -8,6 +8,16 @@ import {
 import type { SceneDoc } from "./scene.js";
 
 /**
+ * What a store notification is about. `ops` changes carry the batch's
+ * ApplyResult so subscribers can reconcile incrementally (affected sets say
+ * exactly which entities/components moved); `replace` means the whole document
+ * was swapped and derived state must be rebuilt from scratch.
+ */
+export type StoreChange =
+  | { kind: "ops"; result: ApplyResult }
+  | { kind: "replace" };
+
+/**
  * The live scene document: single source of truth shared by every frontend
  * (editor panels, gizmos, AI apply_ops). All mutation flows through apply(),
  * which is atomic and feeds the undo/redo stacks.
@@ -16,7 +26,7 @@ export class SceneStore {
   private current: SceneDoc;
   private undoStack: Op[][] = [];
   private redoStack: Op[][] = [];
-  private listeners = new Set<() => void>();
+  private listeners = new Set<(change: StoreChange) => void>();
   /** Lazily built, incrementally maintained. null = stale, rebuild on demand. */
   private cachedIndex: SceneIndex | null = null;
 
@@ -50,7 +60,7 @@ export class SceneStore {
     this.commit(result);
     this.undoStack.push(result.inverse);
     this.redoStack = [];
-    this.emit();
+    this.emit({ kind: "ops", result });
   }
 
   /** Advance the doc and keep the cached index (if any) consistent with it. */
@@ -79,7 +89,7 @@ export class SceneStore {
     const result = applyOps(this.current, batch, this.registry);
     this.commit(result);
     this.redoStack.push(result.inverse);
-    this.emit();
+    this.emit({ kind: "ops", result });
   }
 
   redo(): void {
@@ -88,7 +98,7 @@ export class SceneStore {
     const result = applyOps(this.current, batch, this.registry);
     this.commit(result);
     this.undoStack.push(result.inverse);
-    this.emit();
+    this.emit({ kind: "ops", result });
   }
 
   /**
@@ -101,15 +111,15 @@ export class SceneStore {
     this.undoStack = [];
     this.redoStack = [];
     this.cachedIndex = null; // arbitrary new doc: rebuild lazily on demand
-    this.emit();
+    this.emit({ kind: "replace" });
   }
 
-  subscribe(listener: () => void): () => void {
+  subscribe(listener: (change: StoreChange) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
 
-  private emit(): void {
-    for (const listener of this.listeners) listener();
+  private emit(change: StoreChange): void {
+    for (const listener of this.listeners) listener(change);
   }
 }

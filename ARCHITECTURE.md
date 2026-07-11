@@ -150,6 +150,18 @@ discovery round trip. Hard budgets, enforced from day one:
 Any feature that would put a stall in this loop (sync asset imports, blocking
 validation passes, editor-side recompiles) must be redesigned or made async.
 
+**Amendment (2026-07-11, incremental reconciliation).** Ops batches that only
+edit existing entities' data are folded into the live Three.js scene in place
+(`reconcileScene` in `@hitreg/render`, driven by `ApplyResult`'s affected sets
+carried on every store notification): transform edits set the group's TRS,
+component-data edits strip and repopulate one entity's visuals, and async
+model loads are epoch-guarded against double-attach. Structural batches
+(add/remove/reparent), prefab prop/override changes, and scene-level
+components (sky, cameras, postfx, streaming) still take the full rebuild.
+The practical win: gizmo commits, inspector edits, and AI file edits no
+longer re-trigger every GLB load in the scene. The context bridge reports
+`debug.reconciled` / `debug.rebuilt` counters.
+
 ## 2b. Creator tooling (JSON-driven, browser-based, AI-drivable)
 
 Beyond the core editor panels, the roadmap includes — each as a document type
