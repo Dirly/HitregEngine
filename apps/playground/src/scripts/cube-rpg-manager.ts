@@ -259,6 +259,8 @@ export default class CubeRpgManager extends Script {
     for (const id of this.ctx.findByTag(tag)) {
       const object = this.ctx.getObject(id);
       if (!object?.visible || this.dist(playerId, id) > this.param<number>("collectRange")) continue;
+      // someone else already claimed it (replicated fact) — never double-grant
+      if (this.ctx.netState?.get(`taken/${id}`) !== undefined) continue;
       object.visible = false;
       const entity = this.ctx.getEntity(id);
       if (entity?.tags.includes(this.param<string>("potionTag"))) {
@@ -274,6 +276,9 @@ export default class CubeRpgManager extends Script {
         this.message = `${entity?.name ?? "Item"} added to inventory.`;
       }
       this.messageUntil = t + 1.6;
+      // the grant is OURS (inventory is per-player), but the item leaving
+      // the WORLD is a shared fact — request it so every tab hides it
+      this.ctx.events?.emit("item.taken", { item: id });
     }
   }
 
@@ -364,14 +369,26 @@ export default class CubeRpgManager extends Script {
     this.messageUntil = this.ctx.now() / 1000 + 1;
   }
 
-  /** Runs on EVERY tab (netState change): a crystal someone grabbed is gone. */
+  /** Runs on EVERY tab (netState change): an item someone grabbed is gone. */
   private applyTaken(itemId: string): void {
-    if (this.collected.has(itemId)) return;
-    this.collected.add(itemId);
+    const entity = this.ctx.getEntity(itemId);
+    const isCrystal = entity?.tags.includes(this.param<string>("relicTag")) ?? false;
+    if (isCrystal) {
+      if (this.collected.has(itemId)) return;
+      this.collected.add(itemId); // crystals count toward the shared quest
+      this.message = "Crystal recovered.";
+      this.messageUntil = this.ctx.now() / 1000 + 1.5;
+    }
     const object = this.ctx.getObject(itemId);
-    if (object) object.visible = false;
-    this.message = "Crystal recovered.";
-    this.messageUntil = this.ctx.now() / 1000 + 1.5;
+    if (object?.visible) {
+      object.visible = false;
+      // equipment still visible here = ANOTHER player claimed it (the
+      // picker hid it locally when it granted itself the inventory)
+      if (!isCrystal) {
+        this.message = `${entity?.name ?? "An item"} was taken.`;
+        this.messageUntil = this.ctx.now() / 1000 + 1.2;
+      }
+    }
   }
 
   private usePotion(): void {
