@@ -185,3 +185,70 @@ describe("door", () => {
     expect(gate.position.y).toBeCloseTo(0, 5);
   });
 });
+
+describe("face-target", () => {
+  function turretScene(params: Record<string, unknown>, targets: Array<[string, [number, number, number]]>) {
+    const ops: Op[] = [
+      {
+        op: "add-entity",
+        id: "turret",
+        entity: {
+          name: "Turret",
+          parent: null,
+          tags: [],
+          components: { transform: {}, script: { name: "face-target", params } },
+        },
+      },
+    ];
+    const objects = new Map<string, THREE.Object3D>([["turret", new THREE.Object3D()]]);
+    for (const [id, pos] of targets) {
+      ops.push({
+        op: "add-entity",
+        id,
+        entity: { name: id, parent: null, tags: ["player"], components: { transform: {} } },
+      });
+      const obj = new THREE.Object3D();
+      obj.position.set(...pos);
+      objects.set(id, obj);
+    }
+    const runtime = new ScriptRuntime({
+      doc: scene(ops),
+      objects,
+      sim: null,
+      registry: registry(),
+      input: noInput,
+    });
+    return { runtime, objects };
+  }
+
+  it("snaps its yaw to point local -Z at the target (turnSpeed 0)", () => {
+    const { runtime, objects } = turretScene({}, [["mark", [5, 0, 0]]]); // +X
+    runtime.start();
+    step(runtime, 1);
+    expect(objects.get("turret")!.rotation.y).toBeCloseTo(-Math.PI / 2, 4);
+  });
+
+  it("picks the nearest tagged target", () => {
+    const { runtime, objects } = turretScene({}, [
+      ["far", [0, 0, -20]], // -Z, distance 20
+      ["near", [-3, 0, 0]], // -X, distance 3 → wins
+    ]);
+    runtime.start();
+    step(runtime, 1);
+    expect(objects.get("turret")!.rotation.y).toBeCloseTo(Math.PI / 2, 4); // faces -X
+  });
+
+  it("ignores targets beyond range and holds heading", () => {
+    const { runtime, objects } = turretScene({ range: 5 }, [["mark", [10, 0, 0]]]);
+    runtime.start();
+    step(runtime, 5);
+    expect(objects.get("turret")!.rotation.y).toBe(0); // never turned
+  });
+
+  it("eases toward the target at turnSpeed rad/sec along the shortest arc", () => {
+    const { runtime, objects } = turretScene({ turnSpeed: 1 }, [["mark", [5, 0, 0]]]);
+    runtime.start();
+    step(runtime, 30); // 0.5s at 1 rad/s → 0.5 rad toward -π/2, not there yet
+    expect(objects.get("turret")!.rotation.y).toBeCloseTo(-0.5, 2);
+  });
+});

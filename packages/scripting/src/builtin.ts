@@ -215,6 +215,66 @@ class Door extends Script {
   }
 }
 
+/**
+ * Face-target: yaws to look at the nearest entity tagged `targetTag`
+ * (turrets, security cameras, NPCs tracking the player). `turnSpeed` 0 snaps
+ * instantly; otherwise it eases at that many radians/sec along the shortest
+ * arc. `range` 0 means unlimited; a positive range ignores targets farther
+ * than that (and holds the last heading). Yaw-only — the entity stays upright.
+ */
+class FaceTarget extends Script {
+  static override scriptName = "face-target";
+  static override params = {
+    targetTag: { default: "player", description: "tag of the entity to face" },
+    range: { default: 0, min: 0, max: 500, description: "0 = unlimited; else max look distance" },
+    turnSpeed: { default: 0, min: 0, max: 20, description: "rad/sec (0 = instant snap)" },
+  };
+
+  override onFixedUpdate(dt: number): void {
+    const target = this.nearestTarget();
+    if (!target) return; // nobody in range — hold heading
+    const here = this.object.position;
+    const dx = target[0] - here.x;
+    const dz = target[2] - here.z;
+    if (dx === 0 && dz === 0) return; // directly above/below — yaw undefined
+    // default forward is local -Z; this yaw points it at (dx, dz)
+    const desired = Math.atan2(-dx, -dz);
+    const turnSpeed = this.param<number>("turnSpeed");
+    if (turnSpeed <= 0) {
+      this.object.rotation.y = desired;
+      return;
+    }
+    // shortest-arc ease toward the desired heading
+    let delta = desired - this.object.rotation.y;
+    delta = Math.atan2(Math.sin(delta), Math.cos(delta)); // wrap to [-π, π]
+    const maxStep = turnSpeed * dt;
+    this.object.rotation.y +=
+      Math.abs(delta) <= maxStep ? delta : Math.sign(delta) * maxStep;
+  }
+
+  private nearestTarget(): [number, number, number] | null {
+    const range = this.param<number>("range");
+    const rangeSq = range > 0 ? range * range : Infinity;
+    const here = this.object.position;
+    let best: [number, number, number] | null = null;
+    let bestSq = rangeSq;
+    for (const id of this.ctx.findByTag(this.param<string>("targetTag"))) {
+      if (id === this.entityId) continue;
+      const other = this.ctx.getObject(id);
+      if (!other) continue;
+      const dx = other.position.x - here.x;
+      const dy = other.position.y - here.y;
+      const dz = other.position.z - here.z;
+      const distSq = dx * dx + dy * dy + dz * dz;
+      if (distSq <= bestSq) {
+        bestSq = distSq;
+        best = [other.position.x, other.position.y, other.position.z];
+      }
+    }
+    return best;
+  }
+}
+
 export function registerBuiltinScripts(registry: ScriptRegistry): void {
   registry.register(Spinner);
   registry.register(Oscillator);
@@ -222,4 +282,5 @@ export function registerBuiltinScripts(registry: ScriptRegistry): void {
   registry.register(Collectible);
   registry.register(PlatformMover);
   registry.register(Door);
+  registry.register(FaceTarget);
 }
