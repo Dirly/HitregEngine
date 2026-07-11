@@ -196,3 +196,38 @@ describe("InputService", () => {
     expect(listeners.size).toBe(0);
   });
 });
+
+describe("ScriptRuntime object-map ownership", () => {
+  it("removeEntities never mutates the caller's render-object map", () => {
+    const doc = scene([
+      {
+        op: "add-entity",
+        id: "npc",
+        entity: {
+          name: "NPC",
+          parent: null,
+          tags: [],
+          components: { transform: {}, script: { name: "spinner" } },
+        },
+      },
+    ]);
+    const renderObjects = new Map([["npc", new THREE.Object3D()]]);
+    const runtime = new ScriptRuntime({
+      doc,
+      objects: renderObjects,
+      sim: null,
+      registry: scriptRegistry(),
+      input: noInput,
+    });
+    runtime.start();
+    // net suspension path: scripts stop, but the RENDERER (and the net
+    // ghost-writer) must keep the object — aliasing the map broke this
+    runtime.removeEntities(["npc"], { silent: true });
+    expect(renderObjects.has("npc")).toBe(true);
+
+    // and resuming from the same map finds the object again
+    runtime.addEntities(doc, renderObjects, { silent: true });
+    for (let i = 0; i < 60; i++) runtime.fixedUpdate(1 / 60);
+    expect(renderObjects.get("npc")!.rotation.y).not.toBe(0); // spinner runs again
+  });
+});

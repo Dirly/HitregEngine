@@ -56,7 +56,11 @@ export class ScriptRuntime {
 
   constructor(private readonly opts: RuntimeOptions) {
     this.entities = new Map(Object.entries(opts.doc.entities));
-    this.objects = opts.objects;
+    // COPY, never alias: the runtime deletes from this map when entities are
+    // removed/suspended — aliasing the caller's render-object map would
+    // silently destroy renderer/net entries too (a suspended NPC's ghost
+    // must still find its object to write interpolated transforms to).
+    this.objects = new Map(opts.objects);
   }
 
   /** Camera-entity id a script switched to, or null for the scene default. */
