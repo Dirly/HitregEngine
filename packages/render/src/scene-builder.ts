@@ -3,6 +3,7 @@ import { GLTFLoader, type GLTF } from "three/addons/loaders/GLTFLoader.js";
 import { clone as skeletonClone } from "three/addons/utils/SkeletonUtils.js";
 import { heightmapMesh, type HeightmapParams, type SceneDoc } from "@hitreg/core";
 import type { ParticlesData } from "./particles.js";
+import type { BillboardData } from "./billboards.js";
 
 // kits load once and instance many times
 const gltfCache = new Map<string, Promise<GLTF>>();
@@ -29,6 +30,10 @@ export interface BuildOptions {
    * ParticleSystem (the builder stays free of the simulation). `group` is the
    * entity's anchor group; the system parents its InstancedMesh under it. */
   onParticles?(entityId: string, group: THREE.Group, data: ParticlesData): void;
+  /** Fired for each `billboard` entity — the app registers it with its
+   * BillboardSystem (the builder stays free of the canvas drawing). `group` is
+   * the entity's anchor group; the system parents its Sprite under it. */
+  onBillboard?(entityId: string, group: THREE.Group, data: BillboardData): void;
 }
 
 export interface MaterialData {
@@ -475,6 +480,9 @@ export function buildScene(doc: SceneDoc, options: BuildOptions = {}): BuiltScen
 
     const particlesData = entity.components["particles"] as ParticlesData | undefined;
     if (particlesData) options.onParticles?.(id, group, particlesData);
+
+    const billboardData = entity.components["billboard"] as BillboardData | undefined;
+    if (billboardData) options.onBillboard?.(id, group, billboardData);
 
     const cameraData = entity.components["camera"] as CameraData | undefined;
     if (cameraData) {
