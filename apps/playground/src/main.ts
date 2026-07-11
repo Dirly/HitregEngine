@@ -189,9 +189,10 @@ async function main(): Promise<void> {
     resolveMaterial: (assetId) => assets.getDataAsset(assetId)?.data,
     resolveTexture: (assetId) => assets.getTexture(assetId)?.url,
   }, {
-    onLoaded: (doc, objects) => {
+    onLoaded: (doc, objects, simulated) => {
       for (const [id, object] of objects) built.objects.set(id, object);
-      scripts?.addEntities(doc, objects);
+      // render-only LOD rings (fullRender/hlod/far) render but never simulate
+      if (simulated) scripts?.addEntities(doc, objects);
     },
     onUnloaded: (ids) => {
       for (const id of ids) built.objects.delete(id);

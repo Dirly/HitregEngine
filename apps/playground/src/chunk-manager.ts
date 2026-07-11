@@ -2,10 +2,12 @@ import * as THREE from "three/webgpu";
 import {
   chunkDocSchema,
   chunkToSceneDoc,
+  computeChunkStates,
   expandScene,
   parseChunkCoords,
   validateScene,
   type AssetLibrary,
+  type ChunkRep,
   type ChunkStreamerData,
   type ComponentRegistry,
   type SceneDoc,
@@ -18,10 +20,19 @@ interface LoadedChunk {
   /** Expanded doc — physics bodies re-attach from this on every play session. */
   expanded: SceneDoc;
   objects: Map<string, THREE.Object3D>;
+  /** Current LOD representation from the ring state machine. */
+  rep: ChunkRep;
+  /** rep === "simulation": carries physics + scripts. Otherwise render-only. */
+  simulated: boolean;
 }
 
 export interface ChunkLifecycle {
-  onLoaded?: (doc: SceneDoc, objects: Map<string, THREE.Object3D>) => void;
+  /**
+   * A chunk entered the runtime. `simulated` is false for render-only LOD
+   * rings (fullRender/hlod/far) — the caller renders them but must NOT start
+   * scripts or gameplay for them.
+   */
+  onLoaded?: (doc: SceneDoc, objects: Map<string, THREE.Object3D>, simulated: boolean) => void;
   onUnloaded?: (ids: Iterable<string>) => void;
 }
 
@@ -31,6 +42,12 @@ export interface ChunkLifecycle {
  * but never enters the scene document, so autosave/undo/diff stay clean.
  * Chunk JSON is validated with the same component schemas as scenes — invalid
  * files are rejected with a warning and load nothing.
+ *
+ * Residency is distance-based LOD (streaming plan §4): each cell's state comes
+ * from `computeChunkStates` — `simulation` cells render + simulate, the outer
+ * `fullRender`/`hlod`/`far` rings render only (no physics/scripts). With no
+ * `rings` configured every cell resolves to `simulation`, i.e. the original
+ * binary load-within-radius behavior, unchanged.
  */
 export class ChunkManager {
   private streamer: ChunkStreamerData | null = null;
@@ -49,16 +66,22 @@ export class ChunkManager {
     private readonly lifecycle: ChunkLifecycle = {},
   ) {}
 
-  /** Entity count of loaded chunks (HUD/diagnostics). */
-  get stats(): { chunks: number; entities: number } {
+  /** Chunk/entity counts split by residency, for diagnostics. */
+  get stats(): { chunks: number; entities: number; simulated: number } {
     let entities = 0;
-    for (const chunk of this.loaded.values()) entities += Object.keys(chunk.expanded.entities).length;
-    return { chunks: this.loaded.size, entities };
+    let simulated = 0;
+    for (const chunk of this.loaded.values()) {
+      entities += Object.keys(chunk.expanded.entities).length;
+      if (chunk.simulated) simulated += 1;
+    }
+    return { chunks: this.loaded.size, entities, simulated };
   }
 
-  /** Visit currently resident chunks when a play-session runtime starts. */
+  /** Visit currently SIMULATED chunks when a play-session runtime starts. */
   forEachLoaded(fn: (doc: SceneDoc, objects: Map<string, THREE.Object3D>) => void): void {
-    for (const chunk of this.loaded.values()) fn(chunk.expanded, chunk.objects);
+    for (const chunk of this.loaded.values()) {
+      if (chunk.simulated) fn(chunk.expanded, chunk.objects);
+    }
   }
 
   /** Called from rebuild(): the streamer component (or null) and the new scene. */
@@ -71,7 +94,7 @@ export class ChunkManager {
     // re-parent surviving groups into the rebuilt scene
     for (const chunk of this.loaded.values()) {
       scene.add(chunk.group);
-      this.lifecycle.onLoaded?.(chunk.expanded, chunk.objects);
+      this.lifecycle.onLoaded?.(chunk.expanded, chunk.objects, chunk.simulated);
     }
     await this.refreshIndex();
     this.lastFocus = null; // force a re-evaluation on the next update
@@ -100,10 +123,12 @@ export class ChunkManager {
   setSim(sim: PhysicsSim | null): void {
     this.sim = sim;
     if (!sim) return;
-    for (const chunk of this.loaded.values()) sim.addEntities(chunk.expanded);
+    for (const chunk of this.loaded.values()) {
+      if (chunk.simulated) sim.addEntities(chunk.expanded);
+    }
   }
 
-  /** Drive loading from the focus position. Cheap unless the focus changed cells. */
+  /** Drive residency from the focus position. Cheap unless the focus changed cells. */
   update(fx: number, fz: number): void {
     const s = this.streamer;
     if (!s || !this.scene) return;
@@ -112,22 +137,28 @@ export class ChunkManager {
     if (this.lastFocus && this.lastFocus[0] === cx && this.lastFocus[1] === cz) return;
     this.lastFocus = [cx, cz];
 
-    const wanted = new Set<string>();
-    const r = Math.ceil(s.radius);
-    for (let x = cx - r; x <= cx + r; x++) {
-      for (let z = cz - r; z <= cz + r; z++) {
-        if (Math.hypot(x - cx, z - cz) <= s.radius) wanted.add(`${x}_${z}`);
+    // feed current reps back in so the ring hysteresis holds cells on a boundary
+    const prev = new Map<string, ChunkRep>();
+    for (const [key, chunk] of this.loaded) prev.set(key, chunk.rep);
+    const target = computeChunkStates({ x: fx, z: fz }, s, prev);
+
+    for (const [key, rep] of target) {
+      if (!this.available.has(key)) continue; // no file for this cell
+      const chunk = this.loaded.get(key);
+      const simulated = rep === "simulation";
+      if (!chunk) {
+        if (!this.inFlight.has(key)) void this.load(key, rep);
+      } else if (chunk.simulated !== simulated) {
+        // crossed the simulation boundary — reload at the new residency
+        this.unload(key, chunk);
+        void this.load(key, rep);
+      } else {
+        chunk.rep = rep; // detail label shifted but render/sim behavior is the same
       }
     }
-    for (const key of wanted) {
-      if (this.available.has(key) && !this.loaded.has(key) && !this.inFlight.has(key)) {
-        void this.load(key);
-      }
-    }
-    const keep = s.radius + s.keepPadding;
+    // cells that fell out of every ring unload
     for (const [key, chunk] of this.loaded) {
-      const [x, z] = key.split("_").map(Number) as [number, number];
-      if (Math.hypot(x - cx, z - cz) > keep) this.unload(key, chunk);
+      if (!target.has(key)) this.unload(key, chunk);
     }
   }
 
@@ -147,14 +178,15 @@ export class ChunkManager {
     this.available.set(key, file);
     const chunk = this.loaded.get(key);
     if (chunk) {
+      const rep = chunk.rep; // hot-swap keeps its current residency
       this.unload(key, chunk);
-      await this.load(key, content);
+      await this.load(key, rep, content);
     } else {
       this.lastFocus = null; // new file may be in range — re-evaluate
     }
   }
 
-  private async load(key: string, rawContent?: string): Promise<void> {
+  private async load(key: string, rep: ChunkRep, rawContent?: string): Promise<void> {
     const s = this.streamer;
     const file = this.available.get(key);
     if (!s || !file || !this.scene) return;
@@ -185,10 +217,11 @@ export class ChunkManager {
       group.name = `chunk:${key}`;
       group.add(built.scene);
       this.scene.add(group);
-      const chunk: LoadedChunk = { group, expanded, objects: built.objects };
+      const simulated = rep === "simulation";
+      const chunk: LoadedChunk = { group, expanded, objects: built.objects, rep, simulated };
       this.loaded.set(key, chunk);
-      this.sim?.addEntities(expanded);
-      this.lifecycle.onLoaded?.(expanded, built.objects);
+      if (simulated) this.sim?.addEntities(expanded); // render-only rings never collide
+      this.lifecycle.onLoaded?.(expanded, built.objects, simulated);
     } catch (error) {
       console.warn(`[chunks] failed to load ${file}:`, error);
     } finally {
@@ -207,7 +240,7 @@ export class ChunkManager {
         else material?.dispose();
       }
     });
-    this.sim?.removeEntities(Object.keys(chunk.expanded.entities));
+    if (chunk.simulated) this.sim?.removeEntities(Object.keys(chunk.expanded.entities));
     this.lifecycle.onUnloaded?.(Object.keys(chunk.expanded.entities));
     this.loaded.delete(key);
   }
