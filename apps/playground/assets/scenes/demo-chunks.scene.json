@@ -59,7 +59,13 @@
           "source": "demo-world",
           "cellSize": 16,
           "radius": 2,
-          "keepPadding": 1
+          "keepPadding": 1,
+          "rings": {
+            "simulation": 2,
+            "fullRender": 3,
+            "hlod": 5,
+            "farTerrain": 8
+          }
         }
       }
     },

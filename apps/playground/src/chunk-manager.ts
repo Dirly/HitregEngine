@@ -1,5 +1,6 @@
 import * as THREE from "three/webgpu";
 import {
+  assembleHlodBuildDoc,
   chunkDocSchema,
   chunkToSceneDoc,
   computeChunkStates,
@@ -12,7 +13,7 @@ import {
   type ComponentRegistry,
   type SceneDoc,
 } from "@hitreg/core";
-import { buildScene, type BuildOptions } from "@hitreg/render";
+import { buildScene, buildHlodProxy, type BuildOptions } from "@hitreg/render";
 import type { PhysicsSim } from "@hitreg/physics";
 
 interface LoadedChunk {
@@ -24,6 +25,18 @@ interface LoadedChunk {
   rep: ChunkRep;
   /** rep === "simulation": carries physics + scripts. Otherwise render-only. */
   simulated: boolean;
+  /** rep is "hlod"/"far": rendered as a merged proxy, not full per-entity meshes. */
+  proxy: boolean;
+}
+
+/** simulation cells render full meshes AND run physics + scripts. */
+function isSimulated(rep: ChunkRep): boolean {
+  return rep === "simulation";
+}
+
+/** hlod/far cells render as a cheap merged proxy (no physics/scripts/picking). */
+function isProxy(rep: ChunkRep): boolean {
+  return rep === "hlod" || rep === "far";
 }
 
 export interface ChunkLifecycle {
@@ -67,14 +80,16 @@ export class ChunkManager {
   ) {}
 
   /** Chunk/entity counts split by residency, for diagnostics. */
-  get stats(): { chunks: number; entities: number; simulated: number } {
+  get stats(): { chunks: number; entities: number; simulated: number; proxied: number } {
     let entities = 0;
     let simulated = 0;
+    let proxied = 0;
     for (const chunk of this.loaded.values()) {
       entities += Object.keys(chunk.expanded.entities).length;
       if (chunk.simulated) simulated += 1;
+      if (chunk.proxy) proxied += 1;
     }
-    return { chunks: this.loaded.size, entities, simulated };
+    return { chunks: this.loaded.size, entities, simulated, proxied };
   }
 
   /** Visit currently SIMULATED chunks when a play-session runtime starts. */
@@ -145,11 +160,11 @@ export class ChunkManager {
     for (const [key, rep] of target) {
       if (!this.available.has(key)) continue; // no file for this cell
       const chunk = this.loaded.get(key);
-      const simulated = rep === "simulation";
       if (!chunk) {
         if (!this.inFlight.has(key)) void this.load(key, rep);
-      } else if (chunk.simulated !== simulated) {
-        // crossed the simulation boundary — reload at the new residency
+      } else if (chunk.simulated !== isSimulated(rep) || chunk.proxy !== isProxy(rep)) {
+        // crossed a boundary that changes physics (simulation) or how it renders
+        // (full meshes <-> merged proxy) — reload at the new residency
         this.unload(key, chunk);
         void this.load(key, rep);
       } else {
@@ -212,16 +227,35 @@ export class ChunkManager {
       const expanded = expandScene(doc, this.assets, this.registry);
       // streamer may have been reconfigured while we fetched
       if (this.streamer !== s || !this.scene) return;
-      const built = buildScene(expanded, this.buildOptions);
       const group = new THREE.Group();
       group.name = `chunk:${key}`;
-      group.add(built.scene);
+      const proxy = isProxy(rep);
+      let objects: Map<string, THREE.Object3D>;
+      if (proxy) {
+        // hlod/far: render one merged proxy per material instead of full meshes.
+        // factor 1 => this single cell IS its own supercell (positions rebased
+        // to the cell origin); no physics, no scripts, no per-entity picking.
+        const build = assembleHlodBuildDoc(
+          coords[0],
+          coords[1],
+          [{ cx: coords[0], cz: coords[1], doc: parsed.data }],
+          { cellSize: s.cellSize, factor: 1, world: s.source, assets: this.assets, registry: this.registry },
+        );
+        const built = buildHlodProxy(build.doc, this.buildOptions);
+        built.group.position.set(build.origin[0], build.origin[1], build.origin[2]);
+        group.add(built.group);
+        objects = new Map(); // merged geometry has no per-entity objects
+      } else {
+        const built = buildScene(expanded, this.buildOptions);
+        group.add(built.scene);
+        objects = built.objects;
+      }
       this.scene.add(group);
-      const simulated = rep === "simulation";
-      const chunk: LoadedChunk = { group, expanded, objects: built.objects, rep, simulated };
+      const simulated = isSimulated(rep);
+      const chunk: LoadedChunk = { group, expanded, objects, rep, simulated, proxy };
       this.loaded.set(key, chunk);
       if (simulated) this.sim?.addEntities(expanded); // render-only rings never collide
-      this.lifecycle.onLoaded?.(expanded, built.objects, simulated);
+      this.lifecycle.onLoaded?.(expanded, objects, simulated);
     } catch (error) {
       console.warn(`[chunks] failed to load ${file}:`, error);
     } finally {

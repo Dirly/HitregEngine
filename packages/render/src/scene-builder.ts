@@ -207,7 +207,7 @@ function wedgeGeometry(w: number, h: number, d: number): THREE.BufferGeometry {
   return geometry;
 }
 
-function geometryFor(shape: string, size: [number, number, number]): THREE.BufferGeometry {
+export function geometryFor(shape: string, size: [number, number, number]): THREE.BufferGeometry {
   const [x, y, z] = size;
   switch (shape) {
     case "wedge":
@@ -265,12 +265,17 @@ export function makeMaterial(data: MaterialData): THREE.Material {
   }
 }
 
-function resolveMaterialFor(
-  meshData: MeshData,
+/**
+ * Resolve a material asset id to a Three material, caching per build. Undefined
+ * id (or a missing asset) returns the shared engine default. Color maps attach
+ * asynchronously once their image loads. Shared by the scene builder and the
+ * HLOD proxy merge so both honor the same material/texture pipeline.
+ */
+export function materialForId(
+  id: string | undefined,
   options: BuildOptions,
   cache: Map<string, THREE.Material>,
 ): THREE.Material {
-  const id = meshData.material;
   if (!id) return defaultMaterial;
   const cached = cache.get(id);
   if (cached) return cached;
@@ -290,6 +295,14 @@ function resolveMaterialFor(
   }
   cache.set(id, material);
   return material;
+}
+
+function resolveMaterialFor(
+  meshData: MeshData,
+  options: BuildOptions,
+  cache: Map<string, THREE.Material>,
+): THREE.Material {
+  return materialForId(meshData.material, options, cache);
 }
 
 /**
