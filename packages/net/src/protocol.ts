@@ -68,12 +68,24 @@ export interface RejectMessage {
   reason: string;
 }
 
+/**
+ * Replicated gameplay events (registered with `replicate: true` on the
+ * authority's EventRegistry). Reliable-ordered — unlike snapshots, an event
+ * missed is an event lost, so these never ride the unreliable channel.
+ */
+export interface EventsMessage {
+  t: "events";
+  tick: number;
+  events: Array<{ name: string; payload: unknown }>;
+}
+
 export type HostMessage =
   | WelcomeMessage
   | SnapshotMessage
   | PeerJoinedMessage
   | PeerLeftMessage
-  | RejectMessage;
+  | RejectMessage
+  | EventsMessage;
 
 export type Message = ClientMessage | HostMessage;
 
@@ -131,6 +143,17 @@ export function decodeMessage(data: Uint8Array): Message | null {
       return typeof msg.peerId === "string" ? { t: "peerLeft", peerId: msg.peerId } : null;
     case "reject":
       return typeof msg.reason === "string" ? { t: "reject", reason: msg.reason } : null;
+    case "events": {
+      if (typeof msg.tick !== "number" || !Array.isArray(msg.events)) return null;
+      const events: Array<{ name: string; payload: unknown }> = [];
+      for (const raw of msg.events) {
+        if (typeof raw !== "object" || raw === null) return null;
+        const e = raw as Record<string, unknown>;
+        if (typeof e.name !== "string") return null;
+        events.push({ name: e.name, payload: e.payload });
+      }
+      return { t: "events", tick: msg.tick, events };
+    }
     default:
       return null;
   }

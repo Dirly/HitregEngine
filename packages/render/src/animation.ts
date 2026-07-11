@@ -42,6 +42,11 @@ export class AnimationSystem {
     return [...(this.entries.get(entityId)?.actions.keys() ?? [])];
   }
 
+  /** The clip currently playing (net replication reads this per tick). */
+  currentClip(entityId: string): string | null {
+    return this.entries.get(entityId)?.current ?? null;
+  }
+
   /** Crossfade to a clip (fade seconds). The core blending primitive. */
   play(entityId: string, clip: string, fade = 0.3): void {
     const entry = this.entries.get(entityId);

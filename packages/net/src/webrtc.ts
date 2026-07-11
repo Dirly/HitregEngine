@@ -34,6 +34,8 @@ export interface SignalingChannel {
 export interface WebRtcTransportOptions {
   /** Override the ICE servers (default: Google public STUN, no TURN). */
   iceServers?: RTCIceServer[];
+  /** Lifecycle tap for debugging (event name + short detail). Never throws. */
+  trace?: (event: string, detail?: string) => void;
 }
 
 // -- signal envelope -----------------------------------------------------------
@@ -98,21 +100,33 @@ class RtcLink {
     sendSignal: (data: RtcSignal) => void,
     events: LinkEvents,
     iceServers: RTCIceServer[],
+    private readonly trace: (event: string, detail?: string) => void = () => undefined,
   ) {
     this.peerId = peerId;
     this.sendSignal = sendSignal;
     this.events = events;
     this.pc = new RTCPeerConnection({ iceServers });
+    this.trace("link-created", peerId);
     this.pc.onicecandidate = (ev) => {
       // trickle ICE: forward candidates as they surface (null = gathering done)
       try {
+        this.trace("ice-candidate", ev.candidate ? (ev.candidate.candidate ?? "").slice(0, 40) : "end");
         this.sendSignal({ rtc: "ice", candidate: ev.candidate ? ev.candidate.toJSON() : null });
       } catch (error) {
         console.warn(`[webrtc] failed to signal ICE candidate to "${this.peerId}":`, error);
       }
     };
+    this.pc.onicecandidateerror = (ev) => {
+      const e = ev as unknown as { errorCode?: number; errorText?: string };
+      this.trace("ice-error", `${e.errorCode ?? "?"} ${e.errorText ?? ""}`.slice(0, 60));
+    };
+    this.pc.onicegatheringstatechange = () =>
+      this.trace("ice-gathering", this.pc.iceGatheringState);
+    this.pc.oniceconnectionstatechange = () =>
+      this.trace("ice-connection", this.pc.iceConnectionState);
     this.pc.onconnectionstatechange = () => {
       const state = this.pc.connectionState;
+      this.trace("connection", state);
       if (state === "failed" || state === "closed" || state === "disconnected") this.close();
     };
     // non-initiator side receives the channels the initiator created
@@ -168,6 +182,7 @@ class RtcLink {
     if (this.closed) return;
     this.closed = true;
     const wasOpen = this.opened;
+    this.trace("link-close", wasOpen ? "was-open" : "never-opened");
     try {
       this.pc.close();
     } catch {
@@ -253,6 +268,7 @@ class RtcLink {
     if (this.opened || this.closed) return;
     if (this.reliable?.readyState !== "open" || this.unreliable?.readyState !== "open") return;
     this.opened = true;
+    this.trace("link-open");
     try {
       this.events.onOpen();
     } catch (error) {
@@ -268,6 +284,7 @@ abstract class WebRtcTransportBase implements Transport {
   protected readonly signaling: SignalingChannel;
   protected readonly iceServers: RTCIceServer[];
   protected readonly unsubSignal: () => void;
+  protected readonly trace: (event: string, detail?: string) => void;
   protected closed = false;
   private readonly messageHandlers = new Set<
     (from: string, channel: Channel, data: Uint8Array) => void
@@ -278,6 +295,7 @@ abstract class WebRtcTransportBase implements Transport {
     this.localId = signaling.selfId;
     this.signaling = signaling;
     this.iceServers = options.iceServers ?? DEFAULT_ICE_SERVERS;
+    this.trace = options.trace ?? (() => undefined);
     this.unsubSignal = signaling.onMessage((from, data) => {
       // Signaling callbacks must never throw back into the relay.
       try {
@@ -388,6 +406,7 @@ export class WebRtcHostTransport extends WebRtcTransportBase {
         onMessage: (channel, data) => this.dispatchMessage(peerId, channel, data),
       },
       this.iceServers,
+      this.trace,
     );
     return link;
   }
@@ -414,6 +433,7 @@ export class WebRtcClientTransport extends WebRtcTransportBase {
         onMessage: (channel, data) => this.dispatchMessage(hostId, channel, data),
       },
       this.iceServers,
+      this.trace,
     );
     this.link.openAsInitiator();
   }

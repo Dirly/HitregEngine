@@ -41,8 +41,8 @@ export class RoomHost {
   private readonly commandHandlers = new Set<CommandHandler>();
   private readonly warned = new Set<string>();
   private readonly unsubscribes: Array<() => void> = [];
-  private fullSource: (() => unknown) | null = null;
-  private deltaSource: ((baseTick: number) => unknown) | null = null;
+  private fullSource: ((peerId?: string) => unknown) | null = null;
+  private deltaSource: ((baseTick: number, peerId?: string) => unknown) | null = null;
   private currentTick = 0;
   private lastSnapshotTick: number | null = null;
   private closed = false;
@@ -65,12 +65,17 @@ export class RoomHost {
   }
 
   /**
-   * Inject the authoritative state source. `full()` produces a complete
-   * snapshot (welcome + v1 snapshots); `delta(baseTick)` is the hook for
-   * delta encoding — wired now, may simply return full state until the
-   * ECS-table milestone lands.
+   * Inject the authoritative state source. `full(peerId?)` produces a
+   * complete snapshot (welcome + v1 snapshots) — when it uses the peerId,
+   * each peer gets its own VIEW (interest management: entities transmit on
+   * a need-to-know basis); ignore the argument for identical broadcasts.
+   * `delta(baseTick, peerId?)` is the hook for delta encoding — wired now,
+   * may simply return full state until the ECS-table milestone lands.
    */
-  setStateSource(full: () => unknown, delta?: (baseTick: number) => unknown): void {
+  setStateSource(
+    full: (peerId?: string) => unknown,
+    delta?: (baseTick: number, peerId?: string) => unknown,
+  ): void {
     this.fullSource = full;
     this.deltaSource = delta ?? null;
   }
@@ -82,6 +87,19 @@ export class RoomHost {
   }
 
   /**
+   * Replicate gameplay events to every joined peer, reliable-ordered.
+   * (The authority's event bus collects replicate-flagged events per tick;
+   * this ships them.) No-op with nothing to send or nobody to hear it.
+   */
+  broadcastEvents(events: Array<{ name: string; payload: unknown }>): void {
+    if (this.closed || events.length === 0 || this.joined.size === 0) return;
+    const packet = encodeMessage({ t: "events", tick: this.currentTick, events });
+    for (const peerId of this.joined.keys()) {
+      this.transport.send(peerId, "reliable", packet);
+    }
+  }
+
+  /**
    * Advance to tick `now`. Broadcasts a snapshot on the unreliable channel
    * every `snapshotEvery` ticks.
    */
@@ -90,17 +108,17 @@ export class RoomHost {
     this.currentTick = now;
     if (now % this.snapshotEvery !== 0) return;
     if (this.joined.size === 0) return;
-    let baseTick: number | null = null;
-    let state: unknown;
-    if (this.deltaSource !== null && this.lastSnapshotTick !== null) {
-      baseTick = this.lastSnapshotTick;
-      state = this.deltaSource(baseTick);
-    } else {
-      state = this.fullSource ? this.fullSource() : null;
-    }
-    const packet = encodeMessage({ t: "snapshot", tick: now, baseTick, state });
+    // per-peer encode: state sources may return a different view per peer
     for (const peerId of this.joined.keys()) {
-      this.transport.send(peerId, "unreliable", packet);
+      let baseTick: number | null = null;
+      let state: unknown;
+      if (this.deltaSource !== null && this.lastSnapshotTick !== null) {
+        baseTick = this.lastSnapshotTick;
+        state = this.deltaSource(baseTick, peerId);
+      } else {
+        state = this.fullSource ? this.fullSource(peerId) : null;
+      }
+      this.transport.send(peerId, "unreliable", encodeMessage({ t: "snapshot", tick: now, baseTick, state }));
     }
     this.lastSnapshotTick = now;
   }
@@ -160,7 +178,7 @@ export class RoomHost {
         t: "welcome",
         peerId: from,
         tick: this.currentTick,
-        full: this.fullSource ? this.fullSource() : null,
+        full: this.fullSource ? this.fullSource(from) : null,
       }),
     );
     const joinedPacket = encodeMessage({ t: "peerJoined", peerId: from, name });
@@ -208,12 +226,19 @@ export interface RoomSnapshot {
   state: unknown;
 }
 
+/** A batch of replicated gameplay events from the authority. */
+export interface RoomEvents {
+  tick: number;
+  events: Array<{ name: string; payload: unknown }>;
+}
+
 export interface RoomClientOptions {}
 
 export class RoomClient {
   private readonly transport: Transport;
   private readonly hostId: string;
   private readonly snapshotHandlers = new Set<(snapshot: RoomSnapshot) => void>();
+  private readonly eventsHandlers = new Set<(events: RoomEvents) => void>();
   private readonly peersHandlers = new Set<(peers: RoomPeer[]) => void>();
   private readonly roster = new Map<string, string>(); // peerId -> name
   private readonly unsubscribes: Array<() => void> = [];
@@ -269,6 +294,12 @@ export class RoomClient {
     return () => this.snapshotHandlers.delete(cb);
   }
 
+  /** Subscribe to replicated gameplay events from the authority. */
+  onEvents(cb: (events: RoomEvents) => void): () => void {
+    this.eventsHandlers.add(cb);
+    return () => this.eventsHandlers.delete(cb);
+  }
+
   onPeers(cb: (peers: RoomPeer[]) => void): () => void {
     this.peersHandlers.add(cb);
     return () => this.peersHandlers.delete(cb);
@@ -301,6 +332,10 @@ export class RoomClient {
         if (this._state !== "joined") return;
         this.serverTick = msg.tick;
         this.emitSnapshot({ tick: msg.tick, baseTick: msg.baseTick, state: msg.state });
+        return;
+      case "events":
+        if (this._state !== "joined") return;
+        for (const cb of [...this.eventsHandlers]) cb({ tick: msg.tick, events: msg.events });
         return;
       case "peerJoined":
         this.roster.set(msg.peerId, msg.name);
