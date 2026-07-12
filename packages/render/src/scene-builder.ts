@@ -823,7 +823,15 @@ const midTierGeometryCache = new Map<THREE.BufferGeometry, THREE.BufferGeometry 
  * LOD distance — a genuinely lower triangle count instead of just relying on
  * mipmapped textures (which only cut sampling cost, not the per-instance
  * vertex-shader cost that dominates at high instance counts). Returns null
- * for geometry too small to bother with.
+ * for geometry too small to bother with, OR when simplification isn't
+ * possible for this geometry (see below) — never throws.
+ *
+ * SimplifyModifier's edge-collapse algorithm is known to fail on some
+ * real-world topologies (confirmed: it throws on this project's actual tree
+ * models, unrelated to their vertex-color attribute) — it is NOT safe to
+ * assume it always succeeds. A throw here must not take down the far/
+ * billboard tier construction that runs after this, so failure degrades to
+ * "no mid tier for this submesh" instead of propagating.
  */
 function buildMidTierGeometry(geometry: THREE.BufferGeometry): THREE.BufferGeometry | null {
   if (midTierGeometryCache.has(geometry)) return midTierGeometryCache.get(geometry)!;
@@ -834,7 +842,12 @@ function buildMidTierGeometry(geometry: THREE.BufferGeometry): THREE.BufferGeome
   }
   simplifyModifier ??= new SimplifyModifier();
   const removeCount = Math.floor(vertexCount * (1 - MID_TIER_KEEP_RATIO));
-  const simplified = simplifyModifier.modify(geometry, removeCount);
+  let simplified: THREE.BufferGeometry | null = null;
+  try {
+    simplified = simplifyModifier.modify(geometry, removeCount);
+  } catch (error) {
+    console.warn(`[render] mesh simplification failed, skipping the mid LOD tier for this prop:`, error);
+  }
   midTierGeometryCache.set(geometry, simplified);
   return simplified;
 }
