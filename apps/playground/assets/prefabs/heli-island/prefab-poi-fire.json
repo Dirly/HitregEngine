@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "name": "Fire Site",
+  "root": "scorch",
+  "entities": {
+    "scorch": {
+      "name": "Scorch",
+      "parent": null,
+      "tags": ["poi-fire", "static"],
+      "components": {
+        "transform": { "position": [0, 0.05, 0] },
+        "mesh": {
+          "source": { "kind": "primitive", "shape": "box", "size": [4, 0.1, 4] },
+          "material": "heli-island/rubble",
+          "static": true
+        }
+      }
+    },
+    "fire-fx": {
+      "name": "Fire FX",
+      "parent": "scorch",
+      "tags": [],
+      "components": {
+        "transform": { "position": [0, 0.2, 0] },
+        "particles": {
+          "emitting": true,
+          "rate": 60,
+          "max": 260,
+          "lifetime": [0.5, 1.1],
+          "shape": "cone",
+          "shapeSize": [0.6, 0.1, 0.6],
+          "coneAngle": 18,
+          "direction": [0, 1, 0],
+          "speed": [1.2, 2.4],
+          "gravity": -0.3,
+          "sizeStart": 0.4,
+          "sizeEnd": 0.05,
+          "colorStart": "#ffdd66",
+          "colorEnd": "#ff2200",
+          "blending": "additive",
+          "space": "world"
+        },
+        "light": { "kind": "point", "color": "#ff5a1f", "intensity": 3, "range": 16 }
+      }
+    },
+    "beacon": {
+      "name": "Beacon",
+      "parent": "scorch",
+      "tags": [],
+      "components": {
+        "transform": { "position": [0, 4, 0] },
+        "billboard": { "kind": "text", "text": "FIRE", "visible": false, "color": "#ff5a1f" }
+      }
+    }
+  },
+  "props": {}
+}

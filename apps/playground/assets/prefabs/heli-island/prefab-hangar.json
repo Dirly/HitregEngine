@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "name": "Hangar",
+  "root": "body",
+  "entities": {
+    "body": {
+      "name": "Body",
+      "parent": null,
+      "tags": ["static"],
+      "components": {
+        "transform": { "position": [0, 2, 0] },
+        "mesh": {
+          "source": { "kind": "primitive", "shape": "box", "size": [7, 4, 5] },
+          "material": "heli-island/building-wall",
+          "static": true
+        },
+        "collider": { "shape": "box", "size": [7, 4, 5] }
+      }
+    },
+    "roof": {
+      "name": "Roof",
+      "parent": "body",
+      "tags": [],
+      "components": {
+        "transform": { "position": [0, 2.2, 0] },
+        "mesh": {
+          "source": { "kind": "primitive", "shape": "box", "size": [7.4, 0.4, 5.4] },
+          "material": "heli-island/building-roof"
+        }
+      }
+    },
+    "door": {
+      "name": "Door",
+      "parent": "body",
+      "tags": [],
+      "components": {
+        "transform": { "position": [0, -0.7, -2.55] },
+        "mesh": {
+          "source": { "kind": "primitive", "shape": "box", "size": [2.4, 2.6, 0.15] },
+          "material": "heli-island/rotor"
+        }
+      }
+    }
+  },
+  "props": {}
+}

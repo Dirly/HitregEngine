@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "name": "Common Tree 1",
+  "root": "tree",
+  "entities": {
+    "tree": {
+      "name": "Common Tree",
+      "parent": null,
+      "tags": ["scenery", "static"],
+      "components": {
+        "transform": { "position": [0, 0, 0] },
+        "mesh": {
+          "source": { "kind": "asset", "assetId": "nature/commontree-1.glb" },
+          "static": true,
+          "renderMode": "instanced"
+        }
+      }
+    }
+  },
+  "props": {}
+}

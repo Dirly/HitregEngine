@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "name": "Snow Cap",
+  "root": "cap",
+  "entities": {
+    "cap": {
+      "name": "Snow Cap",
+      "parent": null,
+      "tags": ["scenery", "static"],
+      "components": {
+        "transform": { "position": [0, 0, 0] },
+        "mesh": {
+          "source": { "kind": "primitive", "shape": "cone", "size": [14, 10, 14] },
+          "material": "heli-island/snow",
+          "static": true
+        }
+      }
+    }
+  },
+  "props": {}
+}

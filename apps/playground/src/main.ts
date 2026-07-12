@@ -38,6 +38,7 @@ import {
   buildScene,
   collectBones,
   EngineRenderer,
+  FoliageLodSystem,
   loadGltf,
   makeMaterial,
   makeMeshGeometryProvider,
@@ -184,11 +185,17 @@ async function main(): Promise<void> {
   registerCoreAssetTypes(assets);
   // trimesh/convex colliders cook their geometry from the entity's GLB model
   const meshGeometry = makeMeshGeometryProvider((assetId) => assets.getModel(assetId)?.url);
+  // distance LOD for renderMode:"instanced" props — shared across the main
+  // scene build AND both streamers, so every source registers into the same
+  // system and gets updated from the same camera each frame
+  const foliageLod = new FoliageLodSystem();
   // streamed chunk worlds: runtime-only content loaded by distance to the focus
   const chunkManager = new ChunkManager(assets, registry, {
     resolveModel: (assetId) => assets.getModel(assetId)?.url,
     resolveMaterial: (assetId) => assets.getDataAsset(assetId)?.data,
     resolveTexture: (assetId) => assets.getTexture(assetId)?.url,
+    onInstancedBatch: (batch) => foliageLod.register(batch),
+    bakeBillboardTexture,
   }, {
     onLoaded: (doc, objects, simulated) => {
       for (const [id, object] of objects) built.objects.set(id, object);
@@ -199,6 +206,7 @@ async function main(): Promise<void> {
       for (const id of ids) built.objects.delete(id);
       scripts?.removeEntities(ids);
     },
+    onDisposeInstancedBatch: (batch) => foliageLod.unregister(batch),
   });
   // additive scene modules: whole scene files placed as one-line `subscene`
   // entities, streamed by proximity (or resident with mode "always")
@@ -206,6 +214,8 @@ async function main(): Promise<void> {
     resolveModel: (assetId) => assets.getModel(assetId)?.url,
     resolveMaterial: (assetId) => assets.getDataAsset(assetId)?.data,
     resolveTexture: (assetId) => assets.getTexture(assetId)?.url,
+    onInstancedBatch: (batch) => foliageLod.register(batch),
+    bakeBillboardTexture,
   }, {
     onLoaded: (doc, objects) => {
       for (const [id, object] of objects) built.objects.set(id, object);
@@ -215,6 +225,7 @@ async function main(): Promise<void> {
       for (const id of ids) built.objects.delete(id);
       scripts?.removeEntities(ids);
     },
+    onDisposeInstancedBatch: (batch) => foliageLod.unregister(batch),
   });
 
   // -- scene: files are the source of truth (fetched fresh, never bundled) ----
@@ -515,6 +526,8 @@ async function main(): Promise<void> {
           return doc?.type === "spritesheet" ? (doc.data as SpritesheetDoc) : undefined;
         },
       }),
+    onInstancedBatch: (batch) => foliageLod.register(batch),
+    bakeBillboardTexture,
     onModelLoaded: (entityId, root, clips) => {
       const entity = lastExpanded.entities[entityId];
       const animator = entity?.components["animator"] as AnimatorData | undefined;
@@ -1153,6 +1166,9 @@ async function main(): Promise<void> {
   let scripts: ScriptRuntime | null = null;
   let eventBus: EventBus | null = null;
   let followTargetId: string | null = null;
+  let followRigMode: "follow" | "chase" | null = null;
+  let followRigDistance = 8;
+  let followRigHeight = 1;
   function startPlaySession(): void {
     sim?.free();
     scripts?.dispose();
@@ -1219,16 +1235,23 @@ async function main(): Promise<void> {
     netSuspended.clear();
     if (netPresence) suspendForHost(netPresence.replicatedIds());
 
-    // data-driven follow cam: an active camera with a follow rig tracks its target tag
+    // data-driven follow cam: an active camera with a follow/chase rig tracks its target tag
     followTargetId = null;
+    followRigMode = null;
     for (const entity of Object.values(lastExpanded.entities)) {
       const cam = entity.components["camera"] as
-        | { active?: boolean; rig?: { mode: string; targetTag: string } }
+        | {
+            active?: boolean;
+            rig?: { mode: string; targetTag: string; distance?: number; height?: number };
+          }
         | undefined;
-      if (cam?.active && cam.rig?.mode === "follow") {
+      if (cam?.active && (cam.rig?.mode === "follow" || cam.rig?.mode === "chase")) {
         const tag = cam.rig.targetTag;
         followTargetId =
           Object.entries(lastExpanded.entities).find(([, e]) => e.tags.includes(tag))?.[0] ?? null;
+        followRigMode = cam.rig.mode as "follow" | "chase";
+        followRigDistance = cam.rig.distance ?? 8;
+        followRigHeight = cam.rig.height ?? 1;
         break;
       }
     }
@@ -1244,6 +1267,7 @@ async function main(): Promise<void> {
     sim?.free();
     sim = null;
     followTargetId = null;
+    followRigMode = null;
     animations.setRunning(false);
     audio.stopAll();
   }
@@ -1336,6 +1360,13 @@ async function main(): Promise<void> {
   document.addEventListener("pointerlockchange", syncPointerLockState);
   document.addEventListener("mousemove", (e) => {
     if (document.pointerLockElement !== canvas) return;
+    // chase rig: the mouse steers the TARGET (e.g. a vehicle's nose) via
+    // ctx.input.mouseDelta(), not the camera — it rigidly tracks the target's
+    // own heading instead of free-orbiting (see the update loop below).
+    if (followRigMode === "chase") {
+      input.addMouseDelta(e.movementX, e.movementY);
+      return;
+    }
     void controls.rotate(-e.movementX * MOUSE_LOOK_SPEED, -e.movementY * MOUSE_LOOK_SPEED, false);
   });
   canvas.addEventListener("mousedown", () => {
@@ -1373,6 +1404,89 @@ async function main(): Promise<void> {
     object.quaternion.copy(
       parentQuat.multiply(bodyQuat.set(state.rotation[0], state.rotation[1], state.rotation[2], state.rotation[3])),
     );
+  }
+
+  // -- billboard proxy baking: a real snapshot instead of a color guess ------
+  // Same render-to-texture technique as the prefab thumbnails just below,
+  // minus the CPU pixel readback — this stays entirely GPU-side, since the
+  // caller only needs the render target's own texture as another material's
+  // input, not a displayable image. `object` is always a throwaway clone
+  // (the render package never hands over its shared cached model), so
+  // reparenting it into a temp scene here is safe.
+  const BILLBOARD_BAKE_SIZE = 128;
+
+  /** Read the CURRENT scene's actual sky/sun instead of a generic studio
+   * rig, so a baked billboard's shading matches the real trees standing next
+   * to it instead of looking lit from a different scene entirely. Falls back
+   * to reasonable defaults if the scene has neither (e.g. street.scene.json,
+   * which has no sky at all). */
+  function currentSceneLightRig(): { hemisphere: THREE.HemisphereLight; sun: THREE.DirectionalLight } {
+    let skyData: { top: string; bottom: string; light: number } | undefined;
+    let sunData: { color: string; intensity: number } | undefined;
+    for (const entity of Object.values(lastExpanded?.entities ?? {})) {
+      const sky = entity.components["sky"] as typeof skyData | undefined;
+      if (sky && !skyData) skyData = sky;
+      const light = entity.components["light"] as
+        | { kind: string; color: string; intensity: number }
+        | undefined;
+      if (light?.kind === "directional" && !sunData) sunData = light;
+    }
+    const hemisphere = new THREE.HemisphereLight(
+      new THREE.Color(skyData?.top ?? "#5fa9ff"),
+      new THREE.Color(skyData?.bottom ?? "#dff1ff"),
+      skyData?.light ?? 0.75,
+    );
+    const sun = new THREE.DirectionalLight(
+      new THREE.Color(sunData?.color ?? "#fff3d9"),
+      sunData?.intensity ?? 2.4,
+    );
+    // the real sun's exact direction constantly changes (it follows the
+    // helicopter) — a fixed "from above and to one side" angle is enough to
+    // read as consistent lighting without re-baking every time it moves.
+    sun.position.set(1, 2, 1);
+    return { hemisphere, sun };
+  }
+
+  function bakeBillboardTexture(
+    object: THREE.Object3D,
+    aspect: { width: number; height: number },
+  ): THREE.Texture | null {
+    try {
+      const scene = new THREE.Scene();
+      const { hemisphere, sun } = currentSceneLightRig();
+      scene.add(hemisphere);
+      scene.add(sun);
+      scene.add(object);
+
+      const halfW = Math.max(aspect.width, 0.1) / 2;
+      const halfH = Math.max(aspect.height, 0.1) / 2;
+      const box = new THREE.Box3().setFromObject(object);
+      const center = box.getCenter(new THREE.Vector3());
+      const depth = Math.max(halfW, halfH) * 4;
+      const cam = new THREE.OrthographicCamera(-halfW, halfW, halfH, -halfH, 0.01, depth * 2);
+      cam.position.copy(center).add(new THREE.Vector3(0, 0, depth));
+      cam.lookAt(center);
+
+      const aspectRatio = aspect.width / aspect.height;
+      const texW = aspectRatio >= 1 ? BILLBOARD_BAKE_SIZE : Math.max(16, Math.round(BILLBOARD_BAKE_SIZE * aspectRatio));
+      const texH = aspectRatio >= 1 ? Math.max(16, Math.round(BILLBOARD_BAKE_SIZE / aspectRatio)) : BILLBOARD_BAKE_SIZE;
+      const target = new THREE.RenderTarget(texW, texH);
+
+      const prevClear = new THREE.Color();
+      renderer.renderer.getClearColor(prevClear);
+      const prevAlpha = renderer.renderer.getClearAlpha();
+      renderer.renderer.setClearColor(0x000000, 0); // transparent, not chroma-keyed — no green fringing
+      renderer.renderer.setRenderTarget(target);
+      renderer.renderer.render(scene, cam);
+      renderer.renderer.setRenderTarget(null);
+      renderer.renderer.setClearColor(prevClear, prevAlpha);
+
+      scene.remove(object); // release our hold; the clone itself can be gc'd
+      return target.texture;
+    } catch (error) {
+      console.warn("[billboard] bake failed, falling back to material color:", error);
+      return null;
+    }
   }
 
   // -- prefab thumbnails: render each prefab to a tiny offscreen target -------
@@ -1751,7 +1865,14 @@ async function main(): Promise<void> {
       sceneCam.aspect = w / h;
       sceneCam.updateProjectionMatrix();
     }
-    renderer.setSize(w, h, window.devicePixelRatio);
+    // uncapped devicePixelRatio renders at 4-9x the pixel count on common
+    // hi-DPI displays (2x-3x scaling) — every per-pixel cost (bloom's blur
+    // chain, the custom terrain-splat/water shaders, standard PBR lighting)
+    // scales directly with that, so an uncapped ratio can turn "moderate"
+    // scene cost into an unplayable one. 1.5 keeps most of the sharpness
+    // benefit without the full 2x-3x fill-rate hit.
+    const pixelRatio = Math.min(window.devicePixelRatio, 1.5);
+    renderer.setSize(w, h, pixelRatio);
   }
   window.addEventListener("resize", onResize);
   editorVisible.subscribe(applyCanvasLayout);
@@ -1760,6 +1881,12 @@ async function main(): Promise<void> {
 
   let lastFrameMs = 0;
   const followPos = new THREE.Vector3();
+  const foliageLodCameraPos = new THREE.Vector3();
+  const chaseForward = new THREE.Vector3();
+  const chaseUpAxis = new THREE.Vector3(0, 1, 0);
+  const chaseOffset = new THREE.Vector3();
+  const chaseEye = new THREE.Vector3();
+  const chaseYawQuat = new THREE.Quaternion();
   // render-side smoothing: bodies step at the fixed rate, frames don't — draw
   // them interpolated between the last two sim states (scripts still read the
   // exact stepped state inside fixedUpdate)
@@ -1880,12 +2007,24 @@ async function main(): Promise<void> {
         }
       }
       // follow cam: keep the orbit center on the target; the pointer-lock
-      // mouse look (play) or drag-orbit (paused) supplies the rotation
+      // mouse look (play) or drag-orbit (paused) supplies the rotation.
+      // chase cam: rigid third-person — camera sits behind the target's own
+      // current YAW (roll/pitch ignored so it never tips with the vehicle) at
+      // rig.distance/height; the mouse is free for a script to steer instead.
       if (playMode.get() !== "edit" && followTargetId) {
         const target = built.objects.get(followTargetId);
         if (target) {
           const p = target.getWorldPosition(followPos);
-          void controls.moveTo(p.x, p.y + 1, p.z, true);
+          if (followRigMode === "chase") {
+            chaseForward.set(0, 0, -1).applyQuaternion(target.quaternion);
+            const yaw = Math.atan2(-chaseForward.x, -chaseForward.z);
+            chaseYawQuat.setFromAxisAngle(chaseUpAxis, yaw);
+            chaseOffset.set(0, followRigHeight, followRigDistance).applyQuaternion(chaseYawQuat);
+            chaseEye.copy(p).add(chaseOffset);
+            void controls.setLookAt(chaseEye.x, chaseEye.y, chaseEye.z, p.x, p.y + 1, p.z, true);
+          } else {
+            void controls.moveTo(p.x, p.y + 1, p.z, true);
+          }
         }
       }
       if (playMode.get() === "playing") animations.update(dt);
@@ -1918,6 +2057,7 @@ async function main(): Promise<void> {
         }
       }
       particles.update(dt, renderCamera); // billboards face the camera actually used
+      foliageLod.update(renderCamera.getWorldPosition(foliageLodCameraPos));
       netPresence?.update(dt); // remote avatars lerp toward their snapshot targets
       renderer.render(built.scene, renderCamera);
       lastFrameMs = dt * 1000;
@@ -1935,6 +2075,9 @@ async function main(): Promise<void> {
     const chunkStats = chunkManager.stats;
     const subStats = subsceneManager.stats;
     const netStats = netPresence?.stats();
+    // GPU-side reality check: entity counts don't tell you what actually got
+    // submitted to the renderer this frame — draw calls / triangles do.
+    const info = renderer.renderer.info;
     hud.textContent =
       `backend: ${backend}\n` +
       `entities: ${Object.keys(store.doc.entities).length} (source)\n` +
@@ -1947,6 +2090,7 @@ async function main(): Promise<void> {
       (netStats && netStats.role !== "off"
         ? `net: ${netStats.role}${netStats.via ? ` (${netStats.via})` : ""} · ${netStats.players} players\n`
         : "") +
+      `draw calls: ${info.render.drawCalls}  ·  tris: ${info.render.triangles.toLocaleString()}\n` +
       `frame: ${lastFrameMs.toFixed(1)}ms\n` +
       `mode: ${mode}  ·  ${hint}`;
   }, 500);

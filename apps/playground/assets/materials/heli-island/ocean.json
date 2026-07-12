@@ -1,0 +1,13 @@
+{
+  "shader": "water",
+  "opacity": 0.9,
+  "transparent": true,
+  "water": {
+    "shallowColor": "#3fa8c9",
+    "deepColor": "#0b3150",
+    "rimColor": "#eaf6ff",
+    "waveFrequency": 0.28,
+    "waveSpeed": 0.55,
+    "fresnelPower": 3
+  }
+}

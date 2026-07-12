@@ -1,0 +1,188 @@
+{
+  "version": 1,
+  "name": "heli-depot",
+  "entities": {
+    "sky": {
+      "name": "Sky",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "sky": {
+          "top": "#5fa9ff",
+          "bottom": "#dff1ff",
+          "light": 0.75,
+          "fog": {
+            "color": "#cfe9ff",
+            "near": 220,
+            "far": 620
+          },
+          "sun": {
+            "direction": [
+              0.42,
+              0.62,
+              0.28
+            ],
+            "color": "#fff6df",
+            "size": 0.9975,
+            "intensity": 1.6
+          }
+        }
+      }
+    },
+    "sun": {
+      "name": "Sun",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            140,
+            220,
+            80
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ]
+        },
+        "light": {
+          "kind": "directional",
+          "color": "#fff3d9",
+          "intensity": 2.4,
+          "castShadow": true
+        }
+      }
+    },
+    "postfx": {
+      "name": "PostFX",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "postfx": {
+          "bloom": {
+            "enabled": true,
+            "strength": 0.4,
+            "radius": 0.4,
+            "threshold": 1.2
+          }
+        }
+      }
+    },
+    "pad": {
+      "name": "Depot Pad",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            0,
+            0
+          ]
+        },
+        "prefab": {
+          "prefabId": "heli-island/prefab-helipad",
+          "props": {},
+          "overrides": []
+        }
+      }
+    },
+    "hangar": {
+      "name": "Hangar",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            9.5,
+            0,
+            -1
+          ],
+          "rotation": [
+            0,
+            0.70710678,
+            0,
+            0.70710678
+          ]
+        },
+        "prefab": {
+          "prefabId": "heli-island/prefab-hangar",
+          "props": {},
+          "overrides": []
+        }
+      }
+    },
+    "crate-1": {
+      "name": "Depot Crate 1",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            5.5,
+            0,
+            3.2
+          ]
+        },
+        "prefab": {
+          "prefabId": "heli-island/prefab-cargo-crate",
+          "props": {},
+          "overrides": []
+        }
+      }
+    },
+    "crate-2": {
+      "name": "Depot Crate 2",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            6.6,
+            0,
+            3.2
+          ]
+        },
+        "prefab": {
+          "prefabId": "heli-island/prefab-cargo-crate",
+          "props": {},
+          "overrides": []
+        }
+      }
+    },
+    "sign-light": {
+      "name": "Depot Sign Light",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            6,
+            -2.2
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              3.2,
+              0.7,
+              0.15
+            ]
+          },
+          "material": "heli-island/beacon-glow"
+        },
+        "light": {
+          "kind": "point",
+          "color": "#ffd23f",
+          "intensity": 1.6,
+          "range": 10
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "name": "Rock 1",
+  "root": "rock",
+  "entities": {
+    "rock": {
+      "name": "Rock",
+      "parent": null,
+      "tags": ["scenery", "static"],
+      "components": {
+        "transform": { "position": [0, 0, 0] },
+        "mesh": {
+          "source": { "kind": "asset", "assetId": "nature/rock-medium-1.glb" },
+          "static": true,
+          "renderMode": "instanced"
+        },
+        "collider": { "shape": "convex" }
+      }
+    }
+  },
+  "props": {}
+}

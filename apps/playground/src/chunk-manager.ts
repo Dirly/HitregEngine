@@ -13,7 +13,7 @@ import {
   type ComponentRegistry,
   type SceneDoc,
 } from "@hitreg/core";
-import { buildScene, buildHlodProxy, type BuildOptions } from "@hitreg/render";
+import { buildScene, buildHlodProxy, type BuildOptions, type InstancedPropBatch } from "@hitreg/render";
 import type { PhysicsSim } from "@hitreg/physics";
 
 interface LoadedChunk {
@@ -47,6 +47,9 @@ export interface ChunkLifecycle {
    */
   onLoaded?: (doc: SceneDoc, objects: Map<string, THREE.Object3D>, simulated: boolean) => void;
   onUnloaded?: (ids: Iterable<string>) => void;
+  /** A `renderMode: "instanced"` batch's chunk unloaded — unregister it from
+   * whatever FoliageLodSystem tracks it before its meshes get disposed. */
+  onDisposeInstancedBatch?: (batch: InstancedPropBatch) => void;
 }
 
 /**
@@ -272,6 +275,13 @@ export class ChunkManager {
         const material = mesh.material as THREE.Material | THREE.Material[];
         if (Array.isArray(material)) material.forEach((m) => m.dispose());
         else material?.dispose();
+        // InstancedMesh (renderMode: "instanced" props) owns its own
+        // instance-matrix GPU buffer separately from `geometry` — without
+        // this it leaks one buffer per unload, worse the longer a session
+        // streams chunks in and out.
+        if ((mesh as THREE.InstancedMesh).isInstancedMesh) (mesh as THREE.InstancedMesh).dispose();
+        const batch = mesh.userData["foliageLodBatch"] as InstancedPropBatch | undefined;
+        if (batch) this.lifecycle.onDisposeInstancedBatch?.(batch);
       }
     });
     if (chunk.simulated) this.sim?.removeEntities(Object.keys(chunk.expanded.entities));

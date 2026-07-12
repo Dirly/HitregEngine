@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "name": "Mushroom",
+  "root": "mushroom",
+  "entities": {
+    "mushroom": {
+      "name": "Mushroom",
+      "parent": null,
+      "tags": ["scenery", "static"],
+      "components": {
+        "transform": { "position": [0, 0, 0] },
+        "mesh": {
+          "source": { "kind": "asset", "assetId": "nature/mushroom-common.glb" },
+          "static": true,
+          "renderMode": "instanced",
+          "lod": false,
+          "castShadow": false
+        }
+      }
+    }
+  },
+  "props": {}
+}

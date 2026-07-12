@@ -10,7 +10,7 @@ import {
   type SubsceneData,
   type WorldTransform,
 } from "@hitreg/core";
-import { buildScene, type BuildOptions } from "@hitreg/render";
+import { buildScene, type BuildOptions, type InstancedPropBatch } from "@hitreg/render";
 import type { PhysicsSim } from "@hitreg/physics";
 
 /** A `subscene` component instance found in the expanded world doc. */
@@ -30,6 +30,9 @@ interface LoadedSubscene {
 export interface SubsceneLifecycle {
   onLoaded?: (doc: SceneDoc, objects: Map<string, THREE.Object3D>) => void;
   onUnloaded?: (ids: Iterable<string>) => void;
+  /** A `renderMode: "instanced"` batch's subscene unloaded — unregister it
+   * from whatever FoliageLodSystem tracks it before its meshes get disposed. */
+  onDisposeInstancedBatch?: (batch: InstancedPropBatch) => void;
 }
 
 /**
@@ -192,6 +195,9 @@ export class SubsceneManager {
         const material = mesh.material as THREE.Material | THREE.Material[];
         if (Array.isArray(material)) material.forEach((m) => m.dispose());
         else material?.dispose();
+        if ((mesh as THREE.InstancedMesh).isInstancedMesh) (mesh as THREE.InstancedMesh).dispose();
+        const batch = mesh.userData["foliageLodBatch"] as InstancedPropBatch | undefined;
+        if (batch) this.lifecycle.onDisposeInstancedBatch?.(batch);
       }
     });
     this.sim?.removeEntities(Object.keys(sub.expanded.entities));

@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "name": "Cargo Pad",
+  "root": "pad",
+  "entities": {
+    "pad": {
+      "name": "Pad",
+      "parent": null,
+      "tags": ["poi-cargo", "static"],
+      "components": {
+        "transform": { "position": [0, 0, 0] },
+        "mesh": {
+          "source": { "kind": "primitive", "shape": "cylinder", "size": [3.2, 0.3, 3.2] },
+          "material": "heli-island/pad-concrete",
+          "static": true
+        }
+      }
+    },
+    "stripe": {
+      "name": "Stripe",
+      "parent": "pad",
+      "tags": [],
+      "components": {
+        "transform": { "position": [0, 0.16, 0] },
+        "mesh": {
+          "source": { "kind": "primitive", "shape": "box", "size": [2.2, 0.05, 0.4] },
+          "material": "heli-island/pad-stripe"
+        }
+      }
+    },
+    "crate": {
+      "name": "Crate",
+      "parent": "pad",
+      "tags": [],
+      "components": {
+        "transform": { "position": [-1.05, 0.6, -1.05] },
+        "mesh": {
+          "source": { "kind": "primitive", "shape": "box", "size": [0.9, 0.9, 0.9] },
+          "material": "heli-island/crate"
+        }
+      }
+    },
+    "beacon": {
+      "name": "Beacon",
+      "parent": "pad",
+      "tags": [],
+      "components": {
+        "transform": { "position": [0, 3, 0] },
+        "billboard": { "kind": "text", "text": "CARGO", "visible": false, "color": "#ffe066" },
+        "light": { "kind": "point", "color": "#ffe066", "intensity": 2.2, "range": 15 }
+      }
+    }
+  },
+  "props": {}
+}
