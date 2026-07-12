@@ -78,6 +78,29 @@ The primary AI channel is **direct file editing** — no MCP required:
   at the repo root (regenerate with `pnpm spec`); a schema change shows up there
   as a diff.
 
+## Building a full game vs. extending the engine
+
+Small illustrative scenes (`street`, `sumo`, `cube-rpg`, etc.) live under
+`apps/playground/assets/` + `apps/playground/src/scripts/` and stay
+committed — they double as scene-authoring/scripting examples. A **complete
+game** (its own economy/job loop, many scenes, a dedicated script suite) is
+different: it does not belong in the engine repo at all, committed or not —
+see `apps/playground/projects/README.md`. It lives entirely under
+`apps/playground/projects/<name>/{assets/,scripts/}`, gitignored wholesale
+(except that README). Default to building there, not under the flat
+`assets/`/`src/scripts/` trees, whenever the ask is "build me a game," not
+"add an example." A script needing its own gameplay events declares them on
+itself (`static events` — see `ScriptEventDecl` in `@hitreg/scripting`)
+instead of editing the shared `apps/playground/src/main.ts` bootstrap; that
+file should stay generic across every scene/project it serves.
+
+**Why this matters for you as an AI agent**: a full game's scripts/scenes
+read like engine content if left in the flat trees, and a future session
+extending a *different* game can mistake its patterns (a specific job
+economy, a specific enemy-hit contract) for canonical engine usage. Keeping
+games in their own gitignored folder keeps what you see when exploring this
+repo scoped to what's actually general-purpose.
+
 ## Design Context
 
 UI work (editor overlay, panels, future graph editors) follows PRODUCT.md

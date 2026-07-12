@@ -29,6 +29,18 @@ Claude sessions get the same content via CLAUDE.md and `.claude/skills/`).
 - Client-side errors from the running app appear in the dev server's log.
 - Verify with `pnpm test` and `pnpm typecheck` before finishing.
 
+**Building a game vs. extending the engine — keep the two apart:**
+
+- A small illustrative scene (a few entities, one scripting pattern) can live
+  in the tracked `apps/playground/assets/` / `src/scripts/` trees. A
+  *complete game* (its own economy, many scenes, a dedicated script suite)
+  goes entirely under `apps/playground/projects/<name>/{assets/,scripts/}`
+  instead — gitignored, self-contained, see `apps/playground/projects/README.md`.
+  Don't ask whether to commit a full game there; it isn't meant to be.
+- A project's own gameplay events are declared on the owning script itself
+  (`static events`, see `ScriptEventDecl` in `@hitreg/scripting`), not added
+  to the shared `apps/playground/src/main.ts` bootstrap.
+
 **Extending the engine — keep it self-describing (so docs can't drift):**
 
 - The AI-facing surface is generated from the Zod schemas that validate. A new
