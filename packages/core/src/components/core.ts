@@ -81,6 +81,13 @@ export const meshSchema = z.object({
     .enum(["auto", "instanced"])
     .default("auto")
     .describe('"instanced" collapses all users of the same prefab into one InstancedMesh.'),
+  lod: z
+    .boolean()
+    .default(true)
+    .describe(
+      "instanced only: swap to a cheap distance proxy when far from camera. Turn off for props " +
+        "already too small/cheap to benefit (grass, small clutter) — the proxy swap only hurts those visually.",
+    ),
   static: z
     .boolean()
     .default(false)
@@ -108,10 +115,17 @@ export const cameraSchema = z.object({
     .boolean()
     .default(false)
     .describe("Marks this the active camera. Exactly one camera should be active; the render layer enforces first-wins."),
-  /** Play-mode camera rig. follow = orbit-follow the first entity with targetTag. */
+  /**
+   * Play-mode camera rig, tracking the first entity tagged `targetTag`.
+   * follow = free mouse-orbit around the target (default; shooters/characters).
+   * chase = rigid third-person: camera stays behind the target's own current
+   * yaw at `distance`/`height`, no free orbit — the mouse is freed up for a
+   * script to steer the target itself (e.g. vehicle nose direction) via
+   * `ctx.input.mouseDelta()` instead of orbiting the camera.
+   */
   rig: z
     .object({
-      mode: z.enum(["follow"]),
+      mode: z.enum(["follow", "chase"]),
       targetTag: z.string().default("player"),
       distance: z.number().positive().default(7),
       height: z.number().default(3.5),
@@ -120,12 +134,31 @@ export const cameraSchema = z.object({
     .optional(),
 });
 
+/** One splat layer: a flat color/roughness that fades in over a height band. */
+const splatLayerSchema = z.object({
+  color: hexColor.default("#9aa0a8"),
+  roughness: z.number().min(0).max(1).default(0.9),
+  heightStart: z.number().default(0).describe("Local Y where this layer starts blending in."),
+  heightEnd: z.number().default(10).describe("Local Y where this layer is fully blended in."),
+  grassy: z
+    .boolean()
+    .default(false)
+    .describe(
+      "Adds cheap procedural mottling (no textures/geometry — a per-pixel color variation) so this " +
+        "layer reads as grass texture instead of a flat tint. Meant for exactly one grass-colored layer.",
+    ),
+});
+
 /** PBR material — a data asset referenced by mesh.material GUID. */
 export const materialSchema = z.object({
   shader: z
-    .enum(["standard", "unlit", "toon", "wireframe"])
+    .enum(["standard", "unlit", "toon", "wireframe", "terrain-splat", "water"])
     .default("standard")
-    .describe("Built-in shader. unlit = flat/PS1-style, ignores lights; toon = banded; standard = PBR."),
+    .describe(
+      "Built-in shader. unlit = flat/PS1-style, ignores lights; toon = banded; standard = PBR; " +
+        "terrain-splat = blends `splat.layers` by height/slope (seamless heightmap terrain, no per-tile hard edges); " +
+        "water = animated fresnel/ripple shader driven by `water` (bounded brightness — safe under bloom).",
+    ),
   color: hexColor.default("#9aa0a8"),
   map: z.string().optional().describe("Texture asset id (assets/textures/) used as the color map."),
   repeat: z.tuple([z.number(), z.number()]).default([1, 1]).describe("Texture tiling [u, v]."),
@@ -142,6 +175,36 @@ export const materialSchema = z.object({
     .boolean()
     .default(false)
     .describe("Enable alpha blending. Auto-on when opacity < 1; set true for textures with alpha."),
+  splat: z
+    .object({
+      layers: z
+        .array(splatLayerSchema)
+        .min(2)
+        .max(4)
+        .describe("Ascending-height bands blended in sequence (each overtakes the previous through its band)."),
+      slopeRock: z
+        .object({
+          color: hexColor.default("#8a8378"),
+          roughness: z.number().min(0).max(1).default(0.95),
+          start: z.number().min(0).max(1).default(0.55).describe("Steepness (0=flat,1=vertical) where rock starts."),
+          end: z.number().min(0).max(1).default(0.8),
+        })
+        .optional()
+        .describe("Blends a rock color over steep slopes regardless of height band (cliffs, crater rims)."),
+    })
+    .optional()
+    .describe("Only read when shader is 'terrain-splat'."),
+  water: z
+    .object({
+      shallowColor: hexColor.default("#3fa8c9"),
+      deepColor: hexColor.default("#0b3150"),
+      rimColor: hexColor.default("#eaf6ff"),
+      waveFrequency: z.number().positive().default(0.35),
+      waveSpeed: z.number().default(0.6),
+      fresnelPower: z.number().positive().default(3),
+    })
+    .optional()
+    .describe("Only read when shader is 'water'. Fully procedural (no textures needed)."),
 });
 
 /** Attach behavior: a registered script by name + its tuning params. */
@@ -203,6 +266,17 @@ export const skySchema = z.object({
       color: hexColor.default("#101522"),
       near: z.number().positive().default(40),
       far: z.number().positive().default(180),
+    })
+    .optional(),
+  /** Gradient-dome only (no effect with `texture`/`cubemap`): adds a soft
+   * horizon haze band and directional sun glow — a fixed direction, not tied
+   * to any actual light in the scene. */
+  sun: z
+    .object({
+      direction: vec3.default([0.4, 0.55, 0.3]),
+      color: hexColor.default("#fff6df"),
+      size: z.number().min(0.9).max(0.9999).default(0.997).describe("Closer to 1 = a smaller, sharper glow."),
+      intensity: z.number().min(0).default(1.5),
     })
     .optional(),
 });

@@ -80,6 +80,15 @@ export interface ScriptContext {
 
 export interface InputLike {
   isDown(code: string): boolean;
+  /**
+   * Mouse movement accumulated since the last call, in pixels (x, y) —
+   * consumed-and-reset semantics, like a delta poll. Only accumulates while
+   * the pointer is locked AND the active follow camera's rig is NOT the
+   * default free-orbit "follow" mode (that mode owns the mouse for camera
+   * orbit instead) — see `camera.rig.mode: "chase"`. Absent/unimplemented
+   * hosts may omit this; scripts should treat a missing method as [0, 0].
+   */
+  mouseDelta?(): [number, number];
 }
 
 /**

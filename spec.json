@@ -372,6 +372,11 @@
             "instanced"
           ]
         },
+        "lod": {
+          "default": true,
+          "description": "instanced only: swap to a cheap distance proxy when far from camera. Turn off for props already too small/cheap to benefit (grass, small clutter) — the proxy swap only hurts those visually.",
+          "type": "boolean"
+        },
         "static": {
           "default": false,
           "description": "Marks geometry static: eligible for HLOD/batch merge into distant proxies. No effect on gameplay; set it for scenery, not for anything a script moves.",
@@ -456,7 +461,8 @@
             "mode": {
               "type": "string",
               "enum": [
-                "follow"
+                "follow",
+                "chase"
               ]
             },
             "targetTag": {
@@ -670,6 +676,47 @@
               "default": 180,
               "type": "number",
               "exclusiveMinimum": 0
+            }
+          }
+        },
+        "sun": {
+          "type": "object",
+          "properties": {
+            "direction": {
+              "default": [
+                0.4,
+                0.55,
+                0.3
+              ],
+              "type": "array",
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                }
+              ]
+            },
+            "color": {
+              "default": "#fff6df",
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$"
+            },
+            "size": {
+              "default": 0.997,
+              "description": "Closer to 1 = a smaller, sharper glow.",
+              "type": "number",
+              "minimum": 0.9,
+              "maximum": 0.9999
+            },
+            "intensity": {
+              "default": 1.5,
+              "type": "number",
+              "minimum": 0
             }
           }
         }
@@ -1366,13 +1413,15 @@
       "properties": {
         "shader": {
           "default": "standard",
-          "description": "Built-in shader. unlit = flat/PS1-style, ignores lights; toon = banded; standard = PBR.",
+          "description": "Built-in shader. unlit = flat/PS1-style, ignores lights; toon = banded; standard = PBR; terrain-splat = blends `splat.layers` by height/slope (seamless heightmap terrain, no per-tile hard edges); water = animated fresnel/ripple shader driven by `water` (bounded brightness — safe under bloom).",
           "type": "string",
           "enum": [
             "standard",
             "unlit",
             "toon",
-            "wireframe"
+            "wireframe",
+            "terrain-splat",
+            "water"
           ]
         },
         "color": {
@@ -1433,6 +1482,117 @@
           "default": false,
           "description": "Enable alpha blending. Auto-on when opacity < 1; set true for textures with alpha.",
           "type": "boolean"
+        },
+        "splat": {
+          "description": "Only read when shader is 'terrain-splat'.",
+          "type": "object",
+          "properties": {
+            "layers": {
+              "minItems": 2,
+              "maxItems": 4,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "color": {
+                    "default": "#9aa0a8",
+                    "type": "string",
+                    "pattern": "^#[0-9a-fA-F]{6}$"
+                  },
+                  "roughness": {
+                    "default": 0.9,
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "heightStart": {
+                    "default": 0,
+                    "description": "Local Y where this layer starts blending in.",
+                    "type": "number"
+                  },
+                  "heightEnd": {
+                    "default": 10,
+                    "description": "Local Y where this layer is fully blended in.",
+                    "type": "number"
+                  },
+                  "grassy": {
+                    "default": false,
+                    "description": "Adds cheap procedural mottling (no textures/geometry — a per-pixel color variation) so this layer reads as grass texture instead of a flat tint. Meant for exactly one grass-colored layer.",
+                    "type": "boolean"
+                  }
+                }
+              },
+              "description": "Ascending-height bands blended in sequence (each overtakes the previous through its band)."
+            },
+            "slopeRock": {
+              "description": "Blends a rock color over steep slopes regardless of height band (cliffs, crater rims).",
+              "type": "object",
+              "properties": {
+                "color": {
+                  "default": "#8a8378",
+                  "type": "string",
+                  "pattern": "^#[0-9a-fA-F]{6}$"
+                },
+                "roughness": {
+                  "default": 0.95,
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "start": {
+                  "default": 0.55,
+                  "description": "Steepness (0=flat,1=vertical) where rock starts.",
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "end": {
+                  "default": 0.8,
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                }
+              }
+            }
+          },
+          "required": [
+            "layers"
+          ]
+        },
+        "water": {
+          "description": "Only read when shader is 'water'. Fully procedural (no textures needed).",
+          "type": "object",
+          "properties": {
+            "shallowColor": {
+              "default": "#3fa8c9",
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$"
+            },
+            "deepColor": {
+              "default": "#0b3150",
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$"
+            },
+            "rimColor": {
+              "default": "#eaf6ff",
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$"
+            },
+            "waveFrequency": {
+              "default": 0.35,
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "waveSpeed": {
+              "default": 0.6,
+              "type": "number"
+            },
+            "fresnelPower": {
+              "default": 3,
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          }
         }
       }
     },

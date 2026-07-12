@@ -20,3 +20,4 @@ export { AnimationSystem, type AnimatorData } from "./animation.js";
 export { ParticleSystem, type ParticlesData } from "./particles.js";
 export { BillboardSystem, type BillboardData, type BillboardValue, type BillboardResolvers } from "./billboards.js";
 export { EngineRenderer, type Backend, type BloomOptions } from "./renderer.js";
+export { FoliageLodSystem, type InstancedPropBatch } from "./foliage-lod.js";

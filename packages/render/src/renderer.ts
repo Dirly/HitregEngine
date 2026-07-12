@@ -1,6 +1,12 @@
 import * as THREE from "three/webgpu";
-import { pass } from "three/tsl";
+import { pass, min, mrt, output, emissive } from "three/tsl";
 import { bloom } from "three/addons/tsl/display/BloomNode.js";
+
+/**
+ * Belt-and-suspenders cap on top of the MRT split below — even the emissive
+ * channel shouldn't be able to blow bloom out arbitrarily far past 1.0.
+ */
+const BLOOM_INPUT_CEILING = 4;
 
 export type Backend = "webgpu" | "webgl";
 
@@ -88,8 +94,27 @@ export class EngineRenderer {
   private buildPipeline(scene: THREE.Scene, camera: THREE.Camera, options: BloomOptions): void {
     this.disposePipeline();
     const scenePass = pass(scene, camera);
-    const scenePassColor = scenePass.getTextureNode();
-    const bloomPass = bloom(scenePassColor, options.strength, options.radius, options.threshold);
+    // selective bloom: split the scene pass into its normal lit "output" and
+    // the material's own "emissive" contribution (MRT — one pass, two
+    // targets). Bloom samples ONLY the emissive channel — a sunlit terrain
+    // slope or a grazing-angle water highlight can never feed it, no matter
+    // how bright, because ordinary PBR materials never write to `emissive`
+    // unless a material explicitly sets one. This is what fixed a repeatable
+    // freeze-and-flare at one hillside: threshold/ceiling tuning on the whole
+    // scene color couldn't win against a wide-enough bright area, because
+    // bloom's cost scales with area above threshold, not peak brightness —
+    // excluding lit surfaces from the bloom input entirely removes that
+    // failure mode structurally instead of just raising the bar.
+    scenePass.setMRT(mrt({ output, emissive }));
+    const scenePassColor = scenePass.getTextureNode("output");
+    const emissiveColor = scenePass.getTextureNode("emissive");
+    const bloomInput = min(emissiveColor, BLOOM_INPUT_CEILING);
+    const bloomPass = bloom(bloomInput, options.strength, options.radius, options.threshold);
+    // bloom's 5-level mip blur chain is a FIXED per-frame cost regardless of
+    // scene complexity — its default resolutionScale (0.5, i.e. half the
+    // render target) is the single biggest lever to cut that without
+    // changing the visible effect much; drop it further for headroom.
+    bloomPass.setResolutionScale(0.35);
     const pipeline = new THREE.RenderPipeline(this.renderer);
     // additive bloom in working space; the pipeline's output transform then
     // applies renderer.toneMapping + color space once
