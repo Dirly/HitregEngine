@@ -25,3 +25,14 @@ coverage/
 apps/playground/assets/models/
 apps/playground/assets/textures/
 apps/playground/assets/audio/
+
+# full one-off game builds (not scene-authoring showcases) — engine-repo
+# content should stay engine-specific and game-agnostic; a complete game's
+# scripts/scenes/prefabs bloat AI context and can be mistaken for canonical
+# engine patterns by an agent building an unrelated game. Each one lives
+# entirely under projects/<name>/ (assets/ + scripts/, see
+# apps/playground/projects/README.md) so the whole folder is what you'd
+# save/share as its own git repo. Kept locally, not tracked — except the
+# README documenting the convention itself.
+apps/playground/projects/*
+!apps/playground/projects/README.md

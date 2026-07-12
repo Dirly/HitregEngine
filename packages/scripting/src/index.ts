@@ -3,6 +3,7 @@ export {
   type InputLike,
   type ScriptClass,
   type ScriptContext,
+  type ScriptEventDecl,
   type ScriptEvents,
   type ScriptNetState,
   type ScriptParamSpec,

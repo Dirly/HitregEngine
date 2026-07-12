@@ -165,22 +165,11 @@ async function main(): Promise<void> {
   registerChunkComponents(registry);
   // typed gameplay events: schema-validated like components (registry.jsonSchemas
   // is the AI-facing spec of what can be emitted/listened to)
+  // core events only — project-specific contracts (e.g. cube-rpg's
+  // "npc.hit"/"item.taken") self-register from the owning script's static
+  // `events` field when it loads, see the project-script loop below.
   const events = new EventRegistry();
   registerCoreEvents(events);
-  // project combat contracts (cube-rpg): shared-world mutations go through
-  // the authority. A peer's "npc.hit" ships UP as a request (validated,
-  // sender-attributed); the authoritative manager applies damage and
-  // broadcasts "npc.defeated" DOWN so every tab agrees who died.
-  events.register(
-    "npc.hit",
-    z.object({ npc: z.string(), damage: z.number().min(0).max(500) }),
-    { replicate: "to-authority" },
-  );
-  events.register(
-    "item.taken",
-    z.object({ item: z.string() }),
-    { replicate: "to-authority" },
-  );
   const assets = new AssetLibrary();
   registerCoreAssetTypes(assets);
   // trimesh/convex colliders cook their geometry from the entity's GLB model
@@ -1136,13 +1125,18 @@ async function main(): Promise<void> {
 
   const scriptRegistry = new ScriptRegistry();
   registerBuiltinScripts(scriptRegistry);
-  // project-defined scripts: any default-exported Script class in src/scripts/
-  const projectScripts = import.meta.glob("./scripts/*.ts", { eager: true });
+  // any default-exported Script class in src/scripts/ (engine-illustrative,
+  // committed) or projects/<game>/scripts/ (self-contained game builds,
+  // gitignored — see PROJECTS.md). Both are outside assets/, so Vite's normal
+  // watcher/HMR covers them like any other source file, no bridge needed.
+  const projectScripts = import.meta.glob(["./scripts/*.ts", "../projects/*/scripts/*.ts"], {
+    eager: true,
+  });
   for (const [path, mod] of Object.entries(projectScripts)) {
     const cls = (mod as { default?: Parameters<ScriptRegistry["register"]>[0] }).default;
     if (cls) {
       try {
-        scriptRegistry.register(cls);
+        scriptRegistry.register(cls, events);
       } catch (error) {
         console.warn(`[scripts] failed to register ${path}:`, error);
       }

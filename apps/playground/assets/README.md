@@ -17,3 +17,8 @@ cp -r /tmp/hitreg-demo-assets/assets/* apps/playground/assets/
 Without that step, `pnpm -F playground dev` still runs — scenes referencing
 missing model/texture/audio ids just render without them (console warning,
 no crash).
+
+A **complete game** (its own scripts, economy, dozens of scenes/prefabs) is
+different from the small showcases above — it doesn't belong in this
+tracked tree at all. See `../projects/README.md` (`apps/playground/projects/`,
+gitignored) for that convention.

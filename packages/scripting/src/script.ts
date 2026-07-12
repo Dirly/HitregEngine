@@ -1,5 +1,6 @@
 import type * as THREE from "three";
-import type { EntityDoc, PlayerDataService } from "@hitreg/core";
+import type { z } from "zod";
+import type { EntityDoc, EventRegistrationOptions, PlayerDataService } from "@hitreg/core";
 
 /** Declared tuning value — drives inspector fields and the AI-facing spec. */
 export interface ScriptParamSpec {
@@ -147,6 +148,7 @@ export interface SimLike {
 export abstract class Script {
   static scriptName = "";
   static params: Record<string, ScriptParamSpec> = {};
+  static events: ScriptEventDecl[] = [];
 
   ctx!: ScriptContext;
 
@@ -169,7 +171,19 @@ export abstract class Script {
   onDispose?(): void;
 }
 
+/** A gameplay event contract a script type owns (name, payload schema,
+ * network direction) — declared on the script itself instead of hand-added
+ * to the shared app bootstrap, so a project-specific script (its own
+ * request/response contracts, e.g. "npc.hit") stays self-contained: loading
+ * the script is enough to register its events, see `ScriptRegistry.register`. */
+export interface ScriptEventDecl {
+  name: string;
+  schema: z.ZodType;
+  options?: EventRegistrationOptions;
+}
+
 export type ScriptClass = (new () => Script) & {
   scriptName: string;
   params?: Record<string, ScriptParamSpec>;
+  events?: ScriptEventDecl[];
 };

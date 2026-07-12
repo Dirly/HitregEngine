@@ -20,6 +20,16 @@ import path from "node:path";
  *
  * assets/ is excluded from Vite's own watcher so writes never trigger a full
  * reload; the in-place sync above replaces it.
+ *
+ * projects/<name>/ is a self-contained game built on the engine (see
+ * apps/playground/PROJECTS.md): projects/<name>/assets/ merges into the same
+ * kind buckets as the flat assets/ tree above (same live-sync, same
+ * read/write endpoints — this file just also looks there). projects/<name>/
+ * scripts/ is NOT part of that — it's a sibling of assets/, so it's outside
+ * the assets-watch-ignore pattern below and gets Vite's completely normal
+ * HMR, no bridge involvement at all (see main.ts's script glob).
+ * Gitignored wholesale: a project folder is meant to be its own git repo,
+ * not engine-repo content.
  */
 
 /** The bridge's own HTTP surface, surfaced through GET /__hitreg/spec so an AI
@@ -42,7 +52,39 @@ function hitregBridge(): Plugin {
     name: "hitreg-bridge",
     configureServer(server) {
       const assetsRoot = path.resolve(server.config.root, "assets");
+      const projectsRoot = path.resolve(server.config.root, "projects");
       fs.mkdirSync(assetsRoot, { recursive: true });
+
+      const ASSET_KINDS = [
+        "scenes",
+        "prefabs",
+        "materials",
+        "terrain",
+        "spritesheets",
+        "models",
+        "textures",
+        "audio",
+        "chunks",
+      ] as const;
+
+      // A virtual path like "materials/heli-island/beacon-glow.json" may live
+      // under the flat assets/ tree OR under some projects/<name>/assets/ tree
+      // — try the flat location first, then search each project. New files
+      // (neither exists yet) default to the flat tree.
+      const resolveAssetPath = (file: string): string => {
+        const flat = path.resolve(assetsRoot, file);
+        if (fs.existsSync(flat)) return flat;
+        if (fs.existsSync(projectsRoot)) {
+          for (const entry of fs.readdirSync(projectsRoot, { withFileTypes: true })) {
+            if (!entry.isDirectory()) continue;
+            const candidate = path.resolve(projectsRoot, entry.name, "assets", file);
+            if (fs.existsSync(candidate)) return candidate;
+          }
+        }
+        return flat;
+      };
+      const withinKnownRoot = (target: string): boolean =>
+        target.startsWith(assetsRoot + path.sep) || target.startsWith(projectsRoot + path.sep);
 
       server.middlewares.use("/__hitreg/write-asset", (req, res) => {
         if (req.method !== "POST") {
@@ -55,8 +97,8 @@ function hitregBridge(): Plugin {
         req.on("end", () => {
           try {
             const { file, content } = JSON.parse(body) as { file: string; content: string };
-            const target = path.resolve(assetsRoot, file);
-            if (!target.startsWith(assetsRoot + path.sep)) throw new Error("path outside assets/");
+            const target = resolveAssetPath(file);
+            if (!withinKnownRoot(target)) throw new Error("path outside assets/ or projects/");
             fs.mkdirSync(path.dirname(target), { recursive: true });
             fs.writeFileSync(target, content, "utf8");
             res.setHeader("content-type", "application/json");
@@ -71,17 +113,7 @@ function hitregBridge(): Plugin {
       // fresh-from-disk asset reads: dev NEVER trusts vite's module cache for
       // assets (the watcher ignores assets/, so cached imports go stale)
       server.middlewares.use("/__hitreg/assets-index", (_req, res) => {
-        const index: Record<string, string[]> = {
-          scenes: [],
-          prefabs: [],
-          materials: [],
-          terrain: [],
-          spritesheets: [],
-          models: [],
-          textures: [],
-          audio: [],
-          chunks: [],
-        };
+        const index: Record<string, string[]> = Object.fromEntries(ASSET_KINDS.map((k) => [k, []]));
         const walk = (dir: string, bucket: string[], base: string) => {
           if (!fs.existsSync(dir)) return;
           for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -90,8 +122,21 @@ function hitregBridge(): Plugin {
             else bucket.push(path.relative(base, full).split(path.sep).join("/"));
           }
         };
-        for (const kind of Object.keys(index)) {
+        for (const kind of ASSET_KINDS) {
           walk(path.join(assetsRoot, kind), index[kind]!, path.join(assetsRoot, kind));
+        }
+        // merge in every projects/<name>/assets/<kind>/ tree — same virtual
+        // path meaning as the flat layout (a project's own materials/ already
+        // namespaces itself, e.g. materials/heli-island/beacon-glow.json)
+        if (fs.existsSync(projectsRoot)) {
+          for (const entry of fs.readdirSync(projectsRoot, { withFileTypes: true })) {
+            if (!entry.isDirectory()) continue;
+            const projectAssets = path.join(projectsRoot, entry.name, "assets");
+            for (const kind of ASSET_KINDS) {
+              const kindDir = path.join(projectAssets, kind);
+              walk(kindDir, index[kind]!, kindDir);
+            }
+          }
         }
         res.setHeader("content-type", "application/json");
         res.end(JSON.stringify(index));
@@ -101,8 +146,8 @@ function hitregBridge(): Plugin {
         try {
           const url = new URL(req.url ?? "", "http://x");
           const file = url.searchParams.get("file") ?? "";
-          const target = path.resolve(assetsRoot, file);
-          if (!target.startsWith(assetsRoot + path.sep)) throw new Error("path outside assets/");
+          const target = resolveAssetPath(file);
+          if (!withinKnownRoot(target)) throw new Error("path outside assets/ or projects/");
           const data = fs.readFileSync(target);
           res.setHeader(
             "content-type",
@@ -370,22 +415,42 @@ function hitregBridge(): Plugin {
       });
 
       // live-sync: push asset file changes into the running app
+      const pushAssetChange = (root: string, filename: string): void => {
+        const file = filename.split(path.sep).join("/");
+        const full = path.join(root, filename);
+        let content: string | null = null;
+        try {
+          content = fs.readFileSync(full, "utf8");
+        } catch {
+          return; // deleted or mid-write; next event will catch it
+        }
+        console.log(`[hitreg] asset changed: ${file} (${content.length}b) -> ws push`);
+        server.ws.send("hitreg:asset-changed", { file, content });
+      };
       try {
         fs.watch(assetsRoot, { recursive: true }, (_event, filename) => {
           if (!filename || !filename.endsWith(".json")) return;
-          const file = filename.split(path.sep).join("/");
-          const full = path.join(assetsRoot, filename);
-          let content: string | null = null;
-          try {
-            content = fs.readFileSync(full, "utf8");
-          } catch {
-            return; // deleted or mid-write; next event will catch it
-          }
-          console.log(`[hitreg] asset changed: ${file} (${content.length}b) -> ws push`);
-          server.ws.send("hitreg:asset-changed", { file, content });
+          pushAssetChange(assetsRoot, filename);
         });
       } catch (error) {
         console.warn("[hitreg] assets watcher failed:", error);
+      }
+      // same live-sync for projects/<name>/assets/ — filename is relative to
+      // projectsRoot (e.g. "heli-island/assets/materials/heli-island/x.json"),
+      // strip the "<project>/assets/" prefix to get the same virtual "file"
+      // path the flat watcher above sends (e.g. "materials/heli-island/x.json")
+      try {
+        fs.mkdirSync(projectsRoot, { recursive: true });
+        fs.watch(projectsRoot, { recursive: true }, (_event, filename) => {
+          if (!filename || !filename.endsWith(".json")) return;
+          const parts = filename.split(path.sep);
+          const assetsIdx = parts.indexOf("assets");
+          if (assetsIdx === -1 || assetsIdx === parts.length - 1) return;
+          const projectAssetsDir = path.join(projectsRoot, ...parts.slice(0, assetsIdx + 1));
+          pushAssetChange(projectAssetsDir, parts.slice(assetsIdx + 1).join(path.sep));
+        });
+      } catch (error) {
+        console.warn("[hitreg] projects watcher failed:", error);
       }
     },
   };

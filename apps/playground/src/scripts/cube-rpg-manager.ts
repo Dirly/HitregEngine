@@ -1,8 +1,26 @@
 import * as THREE from "three/webgpu";
+import { z } from "zod";
 import { Script } from "@hitreg/scripting";
 
 export default class CubeRpgManager extends Script {
   static override scriptName = "cube-rpg-manager";
+  // Shared-world mutations go through the authority: a peer's "npc.hit" ships
+  // UP as a request (validated, sender-attributed); the authoritative manager
+  // applies damage and the result comes back down via netState. Declared here
+  // (not the shared app bootstrap) so this script is self-contained — see
+  // ScriptRegistry.register in @hitreg/scripting.
+  static override events = [
+    {
+      name: "npc.hit",
+      schema: z.object({ npc: z.string(), damage: z.number().min(0).max(500) }),
+      options: { replicate: "to-authority" as const },
+    },
+    {
+      name: "item.taken",
+      schema: z.object({ item: z.string() }),
+      options: { replicate: "to-authority" as const },
+    },
+  ];
   static override params = {
     maxHp: { default: 100, min: 10, max: 500 },
     relicTag: { default: "rpg-relic" },
