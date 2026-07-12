@@ -28,6 +28,7 @@ import {
 import { GLTFLoader, type GLTF } from "three/addons/loaders/GLTFLoader.js";
 import { clone as skeletonClone } from "three/addons/utils/SkeletonUtils.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
+import { SimplifyModifier } from "three/addons/modifiers/SimplifyModifier.js";
 import { heightmapMesh, type HeightmapParams, type SceneDoc } from "@hitreg/core";
 import type { ParticlesData } from "./particles.js";
 import type { BillboardData } from "./billboards.js";
@@ -802,6 +803,42 @@ function flushInstancedPending(pending: Map<string, PendingInstance[]>, options:
 const instanceMatrixScratch = new THREE.Matrix4();
 const sourceInverseScratch = new THREE.Matrix4();
 
+// Below this vertex count, a submesh's own vertex-shader cost is already
+// cheap enough that decimating it isn't worth the one-time simplification
+// pass (rocks, mushrooms, small clutter) — those stay a plain near/far swap.
+const MID_TIER_MIN_VERTS = 1500;
+// Keep ~35% of the original vertices for the mid tier — enough to still read
+// as a real 3D tree at the range it's used (between the near and far
+// thresholds), while cutting the per-instance vertex-shader cost roughly 3x.
+const MID_TIER_KEEP_RATIO = 0.35;
+
+let simplifyModifier: SimplifyModifier | undefined;
+// SimplifyModifier's reduction pass is a genuine one-time cost (tens to
+// hundreds of ms per unique model) — cache by source geometry so re-flushing
+// the same (assetId, node) group never re-decimates it.
+const midTierGeometryCache = new Map<THREE.BufferGeometry, THREE.BufferGeometry | null>();
+
+/**
+ * Decimated stand-in for a submesh's near-tier geometry, used at the "mid"
+ * LOD distance — a genuinely lower triangle count instead of just relying on
+ * mipmapped textures (which only cut sampling cost, not the per-instance
+ * vertex-shader cost that dominates at high instance counts). Returns null
+ * for geometry too small to bother with.
+ */
+function buildMidTierGeometry(geometry: THREE.BufferGeometry): THREE.BufferGeometry | null {
+  if (midTierGeometryCache.has(geometry)) return midTierGeometryCache.get(geometry)!;
+  const vertexCount = geometry.attributes["position"]?.count ?? 0;
+  if (vertexCount < MID_TIER_MIN_VERTS) {
+    midTierGeometryCache.set(geometry, null);
+    return null;
+  }
+  simplifyModifier ??= new SimplifyModifier();
+  const removeCount = Math.floor(vertexCount * (1 - MID_TIER_KEEP_RATIO));
+  const simplified = simplifyModifier.modify(geometry, removeCount);
+  midTierGeometryCache.set(geometry, simplified);
+  return simplified;
+}
+
 /**
  * Cheap distance-LOD stand-in for a whole model, sized/centered to the
  * model's own bounding box so the SAME instance matrix that places the real
@@ -1008,6 +1045,34 @@ function instanceGltfInto(
   // detail, still batched (the draw-call win), no proxy-vs-real downgrade
   if (!first.lod) return;
 
+  // mid tier: a decimated stand-in for whichever submeshes are heavy enough
+  // to be worth it (see MID_TIER_MIN_VERTS) — cheap submeshes (a thin bark
+  // cylinder next to a dense leaf canopy) just reuse their near geometry
+  // rather than being decimated pointlessly. Only built at all when at least
+  // one submesh actually qualifies, so light props (rocks, mushrooms) keep
+  // the exact 2-tier near/far behavior they had before.
+  const midGeometries = submeshes.map((sub) => buildMidTierGeometry(sub.geometry));
+  const midMeshes: THREE.InstancedMesh[] | undefined = midGeometries.some((g) => g !== null)
+    ? submeshes.map((sub, index) => {
+        const geometry = midGeometries[index] ?? sub.geometry.clone();
+        const instanced = new THREE.InstancedMesh(
+          geometry,
+          Array.isArray(sub.material) ? sub.material.map((m) => m.clone()) : sub.material.clone(),
+          entries.length,
+        );
+        instanced.castShadow = first.castShadow;
+        instanced.receiveShadow = first.receiveShadow;
+        for (let i = 0; i < entries.length; i++) {
+          instanceMatrixScratch.copy(matrices[i]!).multiply(sub.localMatrix);
+          instanced.setMatrixAt(i, instanceMatrixScratch);
+        }
+        instanced.instanceMatrix.needsUpdate = true;
+        instanced.computeBoundingSphere();
+        root.add(instanced);
+        return instanced;
+      })
+    : undefined;
+
   // far tier: one cheap proxy standing in for the whole model. Its look comes
   // from the LARGEST submesh by vertex count, not just the first one — a
   // tree's bark/trunk material is typically submesh 0 but a thin sliver next
@@ -1031,8 +1096,9 @@ function instanceGltfInto(
   far.computeBoundingSphere();
   root.add(far);
 
-  const batch: InstancedPropBatch = { near: nearMeshes, far, positions, matrices };
+  const batch: InstancedPropBatch = { near: nearMeshes, mid: midMeshes, far, positions, matrices };
   for (const mesh of nearMeshes) mesh.userData["foliageLodBatch"] = batch;
+  if (midMeshes) for (const mesh of midMeshes) mesh.userData["foliageLodBatch"] = batch;
   far.userData["foliageLodBatch"] = batch;
   options.onInstancedBatch?.(batch);
 }

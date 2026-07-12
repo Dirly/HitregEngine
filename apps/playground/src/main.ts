@@ -2078,6 +2078,7 @@ async function main(): Promise<void> {
     // GPU-side reality check: entity counts don't tell you what actually got
     // submitted to the renderer this frame — draw calls / triangles do.
     const info = renderer.renderer.info;
+    const tiers = foliageLod.tierCounts();
     hud.textContent =
       `backend: ${backend}\n` +
       `entities: ${Object.keys(store.doc.entities).length} (source)\n` +
@@ -2090,7 +2091,11 @@ async function main(): Promise<void> {
       (netStats && netStats.role !== "off"
         ? `net: ${netStats.role}${netStats.via ? ` (${netStats.via})` : ""} · ${netStats.players} players\n`
         : "") +
+      (tiers.near + tiers.mid + tiers.far > 0
+        ? `foliage LOD: ${tiers.near} near · ${tiers.mid} mid · ${tiers.far} far\n`
+        : "") +
       `draw calls: ${info.render.drawCalls}  ·  tris: ${info.render.triangles.toLocaleString()}\n` +
+      `geometries: ${info.memory.geometries}  ·  textures: ${info.memory.textures}\n` +
       `frame: ${lastFrameMs.toFixed(1)}ms\n` +
       `mode: ${mode}  ·  ${hint}`;
   }, 500);

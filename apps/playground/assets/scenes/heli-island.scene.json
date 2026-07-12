@@ -781,8 +781,8 @@
         "subscene": {
           "scene": "heli-outpost",
           "mode": "proximity",
-          "radius": 160,
-          "keepPadding": 30
+          "radius": 90,
+          "keepPadding": 20
         }
       }
     },
