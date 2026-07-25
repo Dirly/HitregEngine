@@ -13,6 +13,7 @@ export type Op =
   | { op: "reparent"; id: EntityId; parent: EntityId | null }
   | { op: "rename"; id: EntityId; name: string }
   | { op: "set-tags"; id: EntityId; tags: string[] }
+  | { op: "set-locked"; id: EntityId; locked: boolean }
   | { op: "set-component"; id: EntityId; component: string; data: unknown }
   | { op: "remove-component"; id: EntityId; component: string };
 
@@ -29,6 +30,7 @@ export const OP_SPECS = [
   { op: "reparent", fields: ["id", "parent"], summary: "Move an entity under a new parent (null = scene root); may not create a cycle." },
   { op: "rename", fields: ["id", "name"], summary: "Set an entity's display name (must be non-empty)." },
   { op: "set-tags", fields: ["id", "tags"], summary: "Replace an entity's tag list." },
+  { op: "set-locked", fields: ["id", "locked"], summary: "Lock/unlock an entity against viewport click-selection and gizmo dragging (editor-only; cascades to descendants when picking)." },
   { op: "set-component", fields: ["id", "component", "data"], summary: "Add or replace a component; data is validated against that component's schema." },
   { op: "remove-component", fields: ["id", "component"], summary: "Remove a component from an entity." },
 ] as const satisfies ReadonlyArray<{ op: Op["op"]; fields: string[]; summary: string }>;
@@ -240,6 +242,14 @@ function applyOne(
       entity.tags = [...op.tags];
       affected.markChanged(op.id);
       return [{ op: "set-tags", id: op.id, tags: prev }];
+    }
+
+    case "set-locked": {
+      const entity = requireEntity(doc, op.id, i);
+      const prev = entity.locked === true;
+      entity.locked = op.locked;
+      affected.markChanged(op.id);
+      return [{ op: "set-locked", id: op.id, locked: prev }];
     }
 
     case "set-component": {

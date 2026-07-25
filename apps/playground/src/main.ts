@@ -1,11 +1,13 @@
 import CameraControls from "camera-controls";
 import * as THREE from "three/webgpu";
-import { z } from "zod";
 import {
   AssetLibrary,
-  buildEngineSpec,
+  chunkDocSchema,
+  chunkFileName,
+  chunkLocalToWorld,
+  worldToChunkLocal,
+  moveEntityAcrossChunks,
   ComponentRegistry,
-  diffSceneDocs,
   EventRegistry,
   expandScene,
   FixedTimestepLoop,
@@ -18,12 +20,13 @@ import {
   sceneDocSchema,
   SceneStore,
   validatePrefab,
-  validateScene,
   sampleHeightmap,
   worldTransforms,
   type ApplyResult,
   type TerrainHeightfield,
+  type ChunkDoc,
   type ChunkStreamerData,
+  type EntityDoc,
   type NetObjectData,
   type PrefabDoc,
   type SceneDoc,
@@ -34,24 +37,28 @@ import {
   AnimationSystem,
   attachPhysicsDebug,
   attachSkeletonDebug,
+  attachLightDebug,
   BillboardSystem,
   buildScene,
   collectBones,
   EngineRenderer,
   FoliageLodSystem,
-  loadGltf,
-  makeMaterial,
+  gltfLoadingCount,
+  GrassSystem,
+  LightBudgetSystem,
   makeMeshGeometryProvider,
   ParticleSystem,
+  patchMaterial,
+  pathGeometry,
   reconcileScene,
   type AnimatorData,
   type BuildOptions,
   type BuiltScene,
   type MaterialData,
+  type PathMeshSource,
 } from "@hitreg/render";
-import { clone as skeletonClone } from "three/addons/utils/SkeletonUtils.js";
 import { AudioSystem, type AudioComponentData } from "./audio-system.js";
-import { initPhysics, PhysicsSim, type BodyState } from "@hitreg/physics";
+import { initPhysics, PhysicsSim } from "@hitreg/physics";
 import {
   EventBus,
   InputService,
@@ -64,11 +71,14 @@ import {
   createContextMenu,
   createDockSizes,
   createEditingPrefab,
+  createEditingChunk,
   createModelBones,
   createSelection,
+  createMultiSelection,
   defaultEditorSettings,
   GrayboxTool,
   TerrainTool,
+  PathTool,
   defaultTerrainBrush,
   mountEditor,
   observable,
@@ -77,96 +87,38 @@ import {
   type GrayboxShape,
   type PlayMode,
   type TerrainBrushSettings,
+  type PathCrossSection,
 } from "@hitreg/editor";
-import { buildStarterDoc, buildStreetDoc } from "./street-scene.js";
+import { buildStarterDoc } from "./starter-scene.js";
 import { ChunkManager } from "./chunk-manager.js";
 import { SubsceneManager, type SubsceneInstance } from "./subscene-manager.js";
 import { BridgePlayerDataBackend } from "./player-data-bridge.js";
 import { NetPresence, type NetReplica } from "./net-presence.js";
+import { loadAssets } from "./asset-loader.js";
+import { saveAsset, clientLog } from "./dev-log.js";
+import { applyBodyState } from "./physics-sync.js";
+import { bakeBillboardTexture as bakeBillboardTextureImpl } from "./billboard-bake.js";
+import { renderThumbnails } from "./thumbnails.js";
+import { initProjectScripts } from "./project-scripts.js";
+import { installLiveSync } from "./live-sync.js";
+import { postContext, publishEngineSpec } from "./dev-bridge.js";
 
 CameraControls.install({ THREE });
-
-/**
- * assets/ is the project content folder. In dev everything is fetched FRESH
- * from disk through the bridge — vite's module cache must never serve assets
- * (its watcher ignores assets/, so cached imports go stale across reloads).
- * Returns the freshest scene doc content found, if any.
- */
-async function loadAssets(assets: AssetLibrary): Promise<string | null> {
-  const index = (await fetch("/__hitreg/assets-index").then((r) => r.json())) as Record<
-    string,
-    string[]
-  >;
-  const fileUrl = (kind: string, file: string) =>
-    `/__hitreg/asset-file?file=${encodeURIComponent(`${kind}/${file}`)}`;
-  const readJson = (kind: string, file: string) =>
-    fetch(fileUrl(kind, file)).then((r) => r.json());
-
-  for (const file of index["prefabs"] ?? []) {
-    const id = file.replace(/\.json$/, "");
-    assets.addPrefab(id, await readJson("prefabs", file));
-  }
-  for (const file of index["materials"] ?? []) {
-    const id = file.replace(/\.json$/, "");
-    assets.addDataAsset({ id, type: "material", name: id, data: await readJson("materials", file) });
-  }
-  for (const file of index["terrain"] ?? []) {
-    if (!file.endsWith(".json")) continue;
-    const id = file.replace(/\.json$/, "");
-    assets.addDataAsset({ id, type: "terrain-heightfield", name: id, data: await readJson("terrain", file) });
-  }
-  for (const file of index["spritesheets"] ?? []) {
-    if (!file.endsWith(".json")) continue;
-    const id = file.replace(/\.json$/, "");
-    assets.addDataAsset({ id, type: "spritesheet", name: id, data: await readJson("spritesheets", file) });
-  }
-  for (const file of index["models"] ?? []) {
-    if (!/\.(glb|gltf)$/.test(file)) continue;
-    assets.addModel({ id: file, name: file.split("/").pop()!, url: fileUrl("models", file) });
-  }
-  for (const file of index["textures"] ?? []) {
-    if (!/\.(png|jpe?g|webp)$/i.test(file)) continue;
-    assets.addTexture({ id: file, name: file.split("/").pop()!, url: fileUrl("textures", file) });
-  }
-  for (const file of index["audio"] ?? []) {
-    if (!/\.(wav|mp3|ogg)$/i.test(file)) continue;
-    assets.addSound({ id: file, name: file.split("/").pop()!, url: fileUrl("audio", file) });
-  }
-
-  const sceneFile = (index["scenes"] ?? []).find((f) => f.endsWith(".scene.json"));
-  if (!sceneFile) return null;
-  return fetch(fileUrl("scenes", sceneFile)).then((r) => r.text());
-}
-
-/** Persist an asset file through the dev server's write endpoint. */
-function saveAsset(file: string, content: string): void {
-  void fetch("/__hitreg/write-asset", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ file, content }),
-  }).then((res) => {
-    if (!res.ok) console.warn("[playground] asset save failed:", file);
-  });
-}
-
-function clientLog(message: string): void {
-  void fetch("/__hitreg/log", { method: "POST", body: message }).catch(() => undefined);
-}
-window.addEventListener("error", (e) => clientLog(`window.error: ${e.message} @ ${e.filename}:${e.lineno}`));
-window.addEventListener("unhandledrejection", (e) => clientLog(`unhandledrejection: ${String(e.reason)}`));
 
 async function main(): Promise<void> {
   clientLog("boot: main() start");
   const canvas = document.getElementById("app") as HTMLCanvasElement;
   const hud = document.getElementById("hud")!;
+  const sceneLoadingEl = document.getElementById("scene-loading")!;
+  const sceneLoadingTextEl = document.getElementById("scene-loading-text")!;
 
   const registry = new ComponentRegistry();
   registerCoreComponents(registry);
   registerChunkComponents(registry);
   // typed gameplay events: schema-validated like components (registry.jsonSchemas
   // is the AI-facing spec of what can be emitted/listened to)
-  // core events only — project-specific contracts (e.g. cube-rpg's
-  // "npc.hit"/"item.taken") self-register from the owning script's static
+  // core events only — project-specific contracts (a game's own
+  // gameplay events) self-register from the owning script's static
   // `events` field when it loads, see the project-script loop below.
   const events = new EventRegistry();
   registerCoreEvents(events);
@@ -178,24 +130,48 @@ async function main(): Promise<void> {
   // scene build AND both streamers, so every source registers into the same
   // system and gets updated from the same camera each frame
   const foliageLod = new FoliageLodSystem();
+  // Forward-rendered point lights multiply fragment work. Share one
+  // camera-relative budget across the main scene and both streamers.
+  const lightBudget = new LightBudgetSystem(8);
+  // "chunk sections" list for the hierarchy dock — updated on load/unload
+  // (below), not per-frame: loaded cells only change when the focus crosses
+  // a cell boundary, so this stays a rare React update, not a 60/sec one.
+  const loadedChunkCells = observable<Array<{ world: string; cx: number; cz: number; count: number }>>([]);
   // streamed chunk worlds: runtime-only content loaded by distance to the focus
   const chunkManager = new ChunkManager(assets, registry, {
     resolveModel: (assetId) => assets.getModel(assetId)?.url,
     resolveMaterial: (assetId) => assets.getDataAsset(assetId)?.data,
     resolveTexture: (assetId) => assets.getTexture(assetId)?.url,
+    resolveMaxAnisotropy: () => renderer.getMaxAnisotropy(),
     onInstancedBatch: (batch) => foliageLod.register(batch),
-    bakeBillboardTexture,
+    onLight: (_entityId, light, importance) => lightBudget.register(light, importance),
+    bakeBillboardTexture: (object, aspect) => bakeBillboardTextureImpl(renderer, () => lastExpanded, object, aspect),
   }, {
     onLoaded: (doc, objects, simulated) => {
       for (const [id, object] of objects) built.objects.set(id, object);
       // render-only LOD rings (fullRender/hlod/far) render but never simulate
       if (simulated) scripts?.addEntities(doc, objects);
+      loadedChunkCells.set(chunkManager.loadedCells());
+    },
+    // re-parented into a freshly rebuilt scene, NOT a fresh load — every doc
+    // edit triggers rebuild(), so this must stay cheap bookkeeping only (see
+    // ChunkLifecycle.onReattached). Re-running scripts.addEntities here was
+    // re-registering every streamed entity's scripts on every single edit —
+    // for a large loaded chunk, that's the "one edit -> grinding halt" bug.
+    onReattached: (doc, objects) => {
+      for (const [id, object] of objects) built.objects.set(id, object);
     },
     onUnloaded: (ids) => {
       for (const id of ids) built.objects.delete(id);
       scripts?.removeEntities(ids);
+      loadedChunkCells.set(chunkManager.loadedCells());
     },
     onDisposeInstancedBatch: (batch) => foliageLod.unregister(batch),
+    // simulation/fullRender retier in place (chunk-manager.ts's retier()) —
+    // objects are already built and already in `built.objects`; only scripts
+    // need to (de)register, same as onLoaded/onUnloaded's script half.
+    onSimulationGained: (doc, objects) => scripts?.addEntities(doc, objects),
+    onSimulationLost: (ids) => scripts?.removeEntities(ids),
   });
   // additive scene modules: whole scene files placed as one-line `subscene`
   // entities, streamed by proximity (or resident with mode "always")
@@ -203,12 +179,18 @@ async function main(): Promise<void> {
     resolveModel: (assetId) => assets.getModel(assetId)?.url,
     resolveMaterial: (assetId) => assets.getDataAsset(assetId)?.data,
     resolveTexture: (assetId) => assets.getTexture(assetId)?.url,
+    resolveMaxAnisotropy: () => renderer.getMaxAnisotropy(),
     onInstancedBatch: (batch) => foliageLod.register(batch),
-    bakeBillboardTexture,
+    onLight: (_entityId, light, importance) => lightBudget.register(light, importance),
+    bakeBillboardTexture: (object, aspect) => bakeBillboardTextureImpl(renderer, () => lastExpanded, object, aspect),
   }, {
     onLoaded: (doc, objects) => {
       for (const [id, object] of objects) built.objects.set(id, object);
       scripts?.addEntities(doc, objects);
+    },
+    // see chunkManager's onReattached above — same fix, same reason
+    onReattached: (doc, objects) => {
+      for (const [id, object] of objects) built.objects.set(id, object);
     },
     onUnloaded: (ids) => {
       for (const id of ids) built.objects.delete(id);
@@ -218,13 +200,31 @@ async function main(): Promise<void> {
   });
 
   // -- scene: files are the source of truth (fetched fresh, never bundled) ----
-  // otherwise the code-built street seeds the first scene file.
+  // otherwise a minimal code-built starter seeds the first scene file.
+
+  // reopen the scene the user was last editing (persisted on every switch);
+  // falls back to the first scene in the index when unset or missing.
+  const LAST_SCENE_KEY = "hitreg-editor-last-scene";
+  const rememberLastScene = (name: string) => {
+    try {
+      localStorage.setItem(LAST_SCENE_KEY, name);
+    } catch {
+      /* private mode / storage disabled — non-fatal */
+    }
+  };
 
   let initialDoc: SceneDoc | null = null;
   let sceneLoadError = "";
   let loadedSceneContent = "";
   try {
-    const content = await loadAssets(assets);
+    const preferredScene = (() => {
+      try {
+        return localStorage.getItem(LAST_SCENE_KEY);
+      } catch {
+        return null;
+      }
+    })();
+    const content = await loadAssets(assets, preferredScene);
     if (content) {
       const parsed = sceneDocSchema.safeParse(JSON.parse(content));
       if (parsed.success) {
@@ -240,7 +240,8 @@ async function main(): Promise<void> {
     console.warn("[assets] fresh load failed:", error);
   }
   const seeded = initialDoc === null;
-  const store = new SceneStore(initialDoc ?? buildStreetDoc(registry), registry);
+  const store = new SceneStore(initialDoc ?? buildStarterDoc("Untitled", registry), registry);
+  rememberLastScene(store.doc.name);
 
   let lastWrittenScene = loadedSceneContent;
   const sceneList = observable<string[]>([]);
@@ -266,6 +267,24 @@ async function main(): Promise<void> {
   const editingPrefab = createEditingPrefab();
   let prefabEditReturn: { scene: string } | null = null;
   let lastWrittenPrefab = "";
+
+  // -- chunk-cell isolation editing: same Unity-style mechanism as prefab
+  // editing above, but the rest of the streamed world stays visible around
+  // the cell being edited (chunkManager.suppressCell hides just this one
+  // cell's normal read-only copy so it isn't drawn twice; rebuild()'s
+  // chunkManager.configure() call keeps the ORIGINAL streamer config alive
+  // for the duration instead of losing it along with the working doc — see
+  // below). Declared here (ahead of persistScene) so persistScene's first
+  // call, a few lines down, doesn't hit these before they're initialized.
+  const CHUNK_EDIT_SCENE = "__chunk-edit";
+  const editingChunk = createEditingChunk();
+  let chunkEditReturn: { scene: string; streamer: ChunkStreamerData } | null = null;
+  let lastWrittenChunk = "";
+  // ids relocated to a different cell already this session — moveEntityAcrossChunks
+  // isn't idempotent (the destination file already has the entity after the
+  // first save), so re-running it on the next autosave tick would collide;
+  // skip anything already moved instead of re-attempting it every 500ms.
+  let chunkEditRelocated = new Set<string>();
 
   /**
    * Convert the working doc back into the prefab definition. Only `entities`
@@ -331,8 +350,14 @@ async function main(): Promise<void> {
       persistPrefabEdit(editingId);
       return;
     }
-    // the isolation working doc must NEVER be written to assets/scenes/
-    if (store.doc.name === PREFAB_EDIT_SCENE) return;
+    const editingCell = editingChunk.get();
+    if (editingCell) {
+      const streamer = chunkEditReturn?.streamer;
+      if (streamer) void persistChunkEdit(editingCell.world, editingCell.cx, editingCell.cz, streamer.cellSize);
+      return;
+    }
+    // an isolation working doc must NEVER be written to assets/scenes/
+    if (store.doc.name === PREFAB_EDIT_SCENE || store.doc.name === CHUNK_EDIT_SCENE) return;
     const content = JSON.stringify(store.doc, null, 2);
     if (content === lastWrittenScene) return;
     lastWrittenScene = content;
@@ -361,6 +386,7 @@ async function main(): Promise<void> {
     prefabEditReturn = { scene: store.doc.name };
     playMode.set("edit");
     selection.set(null);
+    multiSelection.set([]);
     assetSelection.set(null);
     editingPrefab.set(id); // set BEFORE replace so the autosave it triggers redirects
     lastWrittenScene = "";
@@ -392,13 +418,189 @@ async function main(): Promise<void> {
     }
   }
 
+  function chunkFilePath(world: string, cx: number, cz: number): string {
+    return `chunks/${world}/${chunkFileName(cx, cz)}`;
+  }
+
+  /** Read one chunk cell's raw file fresh (not the running ChunkManager's
+   * expanded/id-prefixed copy) — an empty doc if the cell doesn't exist yet
+   * (opening or saving into brand new territory past the current grid). */
+  async function fetchChunkDoc(world: string, cx: number, cz: number): Promise<ChunkDoc> {
+    try {
+      const res = await fetch(
+        `/__hitreg/asset-file?file=${encodeURIComponent(chunkFilePath(world, cx, cz))}`,
+      );
+      if (!res.ok) throw new Error(String(res.status));
+      const parsed = chunkDocSchema.safeParse(JSON.parse(await res.text()));
+      if (parsed.success) return parsed.data;
+      console.warn(
+        `[chunk-edit] ${world} ${cx}_${cz} failed validation, treating as empty:`,
+        parsed.error.message,
+      );
+    } catch {
+      /* cell file doesn't exist yet */
+    }
+    return { version: 1, entities: {} };
+  }
+
+  function entityPosition(entity: EntityDoc): [number, number, number] {
+    const transform = entity.components["transform"] as { position?: [number, number, number] } | undefined;
+    return transform?.position ?? [0, 0, 0];
+  }
+
+  function withPosition(entity: EntityDoc, position: [number, number, number]): EntityDoc {
+    const transform = entity.components["transform"] as object | undefined;
+    return { ...entity, components: { ...entity.components, transform: { ...transform, position } } };
+  }
+
+  /** Open one chunk cell for isolation editing (double-clicked in the hierarchy's
+   * chunk-sections list). Neighboring cells keep streaming normally around it —
+   * see the editingChunk branch in rebuild(), below. */
+  async function editChunkCell(world: string, cx: number, cz: number): Promise<void> {
+    const already = editingChunk.get();
+    if (already && already.world === world && already.cx === cx && already.cz === cz) return;
+    if (already || editingPrefab.get()) {
+      console.warn("[chunk-edit] already isolation-editing something — save or discard it first");
+      return;
+    }
+    let streamer: ChunkStreamerData | null = null;
+    for (const entity of Object.values(lastExpanded.entities)) {
+      const cs = entity.components["chunkStreamer"] as ChunkStreamerData | undefined;
+      if (cs) {
+        streamer = cs;
+        break;
+      }
+    }
+    if (!streamer || streamer.source !== world) {
+      console.warn(`[chunk-edit] no active chunkStreamer for world "${world}" in the current scene`);
+      return;
+    }
+    const raw = await fetchChunkDoc(world, cx, cz);
+    // only TOP-LEVEL entities are chunk-local; children stay local to their
+    // parent, same convention chunkToSceneDoc/partitionScene already use
+    const entities: Record<string, EntityDoc> = {};
+    for (const [id, entity] of Object.entries(raw.entities)) {
+      entities[id] =
+        entity.parent === null
+          ? withPosition(entity, chunkLocalToWorld(entityPosition(entity), cx, cz, streamer.cellSize))
+          : structuredClone(entity);
+    }
+
+    persistScene(); // flush the scene we're leaving
+    chunkEditReturn = { scene: store.doc.name, streamer };
+    chunkEditRelocated = new Set();
+    chunkManager.suppressCell(cx, cz);
+    playMode.set("edit");
+    selection.set(null);
+    multiSelection.set([]);
+    assetSelection.set(null);
+    editingChunk.set({ world, cx, cz }); // set BEFORE replace so the autosave it triggers redirects
+    lastWrittenScene = "";
+    lastWrittenChunk = JSON.stringify(raw); // untouched doc round-trips as-is
+    store.replace({ version: 1, name: CHUNK_EDIT_SCENE, entities });
+  }
+
+  /** Autosave path while isolation-editing a cell: converts the world-positioned
+   * working doc back to this cell's local space, relocates anything dragged
+   * into a different cell (moveEntityAcrossChunks), and writes every file touched. */
+  async function persistChunkEdit(world: string, cx: number, cz: number, cellSize: number): Promise<boolean> {
+    let home: ChunkDoc = { version: 1, entities: {} };
+    for (const [id, entity] of Object.entries(store.doc.entities)) {
+      home.entities[id] =
+        entity.parent === null
+          ? withPosition(entity, worldToChunkLocal(entityPosition(entity), cx, cz, cellSize))
+          : structuredClone(entity);
+    }
+    const parsedHome = chunkDocSchema.safeParse(home);
+    if (!parsedHome.success) {
+      console.warn("[chunk-edit] edited cell failed validation, not saved:", parsedHome.error.message);
+      return false;
+    }
+    home = parsedHome.data;
+
+    const destDocs = new Map<string, { cx: number; cz: number; doc: ChunkDoc }>();
+    for (const [id, entity] of Object.entries(store.doc.entities)) {
+      if (entity.parent !== null || chunkEditRelocated.has(id)) continue;
+      const worldPos = entityPosition(entity);
+      const destCx = Math.round(worldPos[0] / cellSize);
+      const destCz = Math.round(worldPos[2] / cellSize);
+      if (destCx === cx && destCz === cz) continue; // still home
+      const destKey = `${destCx}_${destCz}`;
+      let dest = destDocs.get(destKey);
+      if (!dest) {
+        dest = { cx: destCx, cz: destCz, doc: await fetchChunkDoc(world, destCx, destCz) };
+        destDocs.set(destKey, dest);
+      }
+      const result = moveEntityAcrossChunks(id, { cx, cz, doc: home }, dest, cellSize);
+      if ("error" in result) {
+        console.warn(`[chunk-edit] couldn't move "${id}" to cell ${destKey}:`, result.error);
+        continue;
+      }
+      home = result.source;
+      dest.doc = result.dest;
+      chunkEditRelocated.add(id);
+    }
+
+    const content = JSON.stringify(home, null, 2);
+    if (content !== lastWrittenChunk) {
+      lastWrittenChunk = content;
+      saveAsset(chunkFilePath(world, cx, cz), content);
+    }
+    for (const dest of destDocs.values()) {
+      saveAsset(chunkFilePath(world, dest.cx, dest.cz), JSON.stringify(dest.doc, null, 2));
+    }
+    return true;
+  }
+
+  /** Leave chunk-cell isolation. save=true flushes to its file(s) first (stays open on failure). */
+  async function closeChunkEdit(save: boolean): Promise<void> {
+    const editing = editingChunk.get();
+    if (!editing) return;
+    clearTimeout(sceneSaveTimer); // the pending autosave dies with the mode
+    const streamer = chunkEditReturn?.streamer;
+    if (save && streamer) {
+      const ok = await persistChunkEdit(editing.world, editing.cx, editing.cz, streamer.cellSize);
+      if (!ok) return; // warned inside; stays open on failure, same as prefab-edit
+    }
+    const returnScene = chunkEditReturn?.scene;
+    chunkEditReturn = null;
+    editingChunk.set(null);
+    lastWrittenChunk = "";
+    chunkManager.unsuppressCell(editing.cx, editing.cz);
+    if (returnScene) void switchScene(returnScene);
+  }
+
+  // scene-switch loading overlay: covers the gap between "clicked a scene"
+  // and "it's actually here" — the scene-doc fetch itself is usually quick,
+  // but the rebuild it triggers can kick off a burst of chunk/subscene/glTF
+  // loads (see gltfLoadingCount et al. in the stats-tick loop below) that
+  // used to leave the viewport looking frozen/empty with no feedback at all.
+  let sceneSwitchPending = false;
+  let sceneSwitchStartedAt = 0;
+  const SCENE_SWITCH_TIMEOUT_MS = 10000; // don't stay stuck forever if something never resolves
+  function showSceneLoading(name: string): void {
+    sceneSwitchPending = true;
+    sceneSwitchStartedAt = performance.now();
+    sceneLoadingTextEl.textContent = `loading ${name}…`;
+    sceneLoadingEl.classList.add("visible");
+  }
+  function hideSceneLoading(): void {
+    sceneSwitchPending = false;
+    sceneLoadingEl.classList.remove("visible");
+  }
+
   async function switchScene(name: string): Promise<void> {
     if (editingPrefab.get()) {
       console.warn("[prefab-edit] save or discard the prefab edit before switching scenes");
       return;
     }
+    if (editingChunk.get()) {
+      console.warn("[chunk-edit] save or discard the chunk edit before switching scenes");
+      return;
+    }
     if (name === store.doc.name) return;
     persistScene(); // save where we were
+    showSceneLoading(name);
     try {
       const content = await fetch(
         `/__hitreg/asset-file?file=${encodeURIComponent(`scenes/${name}.scene.json`)}`,
@@ -406,20 +608,31 @@ async function main(): Promise<void> {
       const parsed = sceneDocSchema.safeParse(JSON.parse(content));
       if (!parsed.success) {
         console.warn(`[scene] ${name} failed validation:`, parsed.error);
+        hideSceneLoading();
         return;
       }
       playMode.set("edit");
       selection.set(null);
+      multiSelection.set([]);
       lastWrittenScene = content;
       store.replace(parsed.data);
+      rememberLastScene(name);
+      // hideSceneLoading() fires once the stats tick sees loadingCount hit 0
+      // (or the timeout, below) — the doc fetch above is done, but chunks/
+      // models the rebuild just kicked off are very likely still streaming in.
     } catch (error) {
       console.warn(`[scene] failed to load ${name}:`, error);
+      hideSceneLoading();
     }
   }
 
   function newScene(rawName: string): void {
     if (editingPrefab.get()) {
       console.warn("[prefab-edit] save or discard the prefab edit before creating a scene");
+      return;
+    }
+    if (editingChunk.get()) {
+      console.warn("[chunk-edit] save or discard the chunk edit before creating a scene");
       return;
     }
     const name = rawName.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
@@ -431,10 +644,13 @@ async function main(): Promise<void> {
     persistScene();
     playMode.set("edit");
     selection.set(null);
+    multiSelection.set([]);
+    showSceneLoading(name);
     const starter = buildStarterDoc(name, registry);
     lastWrittenScene = "";
     store.replace(starter);
     persistScene();
+    rememberLastScene(name);
     sceneList.set([...sceneList.get(), name].sort());
   }
 
@@ -442,6 +658,81 @@ async function main(): Promise<void> {
 
   let built: BuiltScene;
   let lastExpanded: SceneDoc;
+  // the sky dome (scene-builder.ts's buildSkyDome) is a fixed-radius BackSide
+  // sphere that only reads as an infinite background while the camera stays
+  // inside it — re-found after every rebuild() (a fresh scene graph each
+  // time) and recentered on the camera every frame, below.
+  let skyDomeMesh: THREE.Object3D | null = null;
+  // cached terrain tiles for ground-height queries (grass placement, camera
+  // height-above-ground fade) — rebuilt alongside `lastExpanded`, not on every
+  // query, since it only covers the base scene doc's handful of heightmap
+  // tiles (chunk-streamed props are separate and irrelevant here)
+  interface SplatLayerBand {
+    heightStart: number;
+    heightEnd: number;
+    grassy?: boolean;
+  }
+  let terrainTiles: Array<{
+    params: Parameters<typeof sampleHeightmap>[0];
+    x: number;
+    y: number;
+    z: number;
+    halfW: number;
+    halfD: number;
+    /** terrain-splat layers (if any) — see grassBlendWeight/sampleGrassyGround. */
+    splatLayers: SplatLayerBand[] | null;
+  }> = [];
+  /** World (x, z) -> ground height under whichever terrain tile covers that
+   * point, or null if nothing is loaded there. */
+  function sampleTerrainHeight(x: number, z: number): number | null {
+    for (const tile of terrainTiles) {
+      const lx = x - tile.x;
+      const lz = z - tile.z;
+      if (Math.abs(lx) > tile.halfW || Math.abs(lz) > tile.halfD) continue;
+      return tile.y + sampleHeightmap(tile.params, lx, lz);
+    }
+    return null;
+  }
+  /** How much of the terrain-splat's final blended color at `height` is the
+   * layer flagged `grassy`, in [0, 1] — mirrors scene-builder.ts's
+   * buildTerrainSplatMaterial mix chain exactly (each layer above the base
+   * mixes in by smoothstep(heightStart, heightEnd, height), scaling down
+   * every layer mixed in before it), so this is the true blended color
+   * weight, not just "is height inside the layer's own authored band". */
+  function grassBlendWeight(layers: SplatLayerBand[], height: number): number {
+    const grassyIndex = layers.findIndex((l) => l.grassy);
+    if (grassyIndex < 0) return 0;
+    const weights = new Array(layers.length).fill(0);
+    weights[0] = 1;
+    for (let i = 1; i < layers.length; i++) {
+      const layer = layers[i]!;
+      const span = Math.max(1e-6, layer.heightEnd - layer.heightStart);
+      const raw = Math.min(1, Math.max(0, (height - layer.heightStart) / span));
+      const t = raw * raw * (3 - 2 * raw); // smoothstep, matches the TSL node
+      for (let j = 0; j < i; j++) weights[j] *= 1 - t;
+      weights[i] = t;
+    }
+    return weights[grassyIndex] as number;
+  }
+  // only place blades where the grass layer is the MAJORITY blended color —
+  // excludes ground that still reads visually as tan/sand or brown/moss, but
+  // without shrinking to just the sliver right at the band's exact peak
+  const GRASS_BLEND_THRESHOLD = 0.5;
+  /** Same as sampleTerrainHeight, but returns null unless the ground there is
+   * solidly the terrain's grassy splat color — so the grass field only grows
+   * where the terrain actually reads as green (not sand/rock/moss). */
+  function sampleGrassyGround(x: number, z: number): number | null {
+    for (const tile of terrainTiles) {
+      const lx = x - tile.x;
+      const lz = z - tile.z;
+      if (Math.abs(lx) > tile.halfW || Math.abs(lz) > tile.halfD) continue;
+      if (!tile.splatLayers) return null;
+      const h = sampleHeightmap(tile.params, lx, lz);
+      if (grassBlendWeight(tile.splatLayers, h) < GRASS_BLEND_THRESHOLD) return null;
+      return tile.y + h;
+    }
+    return null;
+  }
   // doc-change telemetry for the context bridge: in-place patches vs full rebuilds
   let reconcileCount = 0;
   let rebuildCount = 0;
@@ -449,6 +740,66 @@ async function main(): Promise<void> {
   const animations = new AnimationSystem();
   const particles = new ParticleSystem();
   const billboards = new BillboardSystem();
+  const grass = new GrassSystem();
+  const pathPointsInverse = new THREE.Matrix4();
+  const pathPointScratch = new THREE.Vector3();
+  /** entity id -> its last-applied LOCAL points, so a near-static rope (the
+   * common case: a wrecking ball chain hanging still between swings) skips
+   * the rebuild instead of disposing+reallocating a GPU buffer every single
+   * physics tick for a shape that hasn't visibly moved. */
+  const lastPathPoints = new Map<string, Array<[number, number, number]>>();
+  const PATH_POINTS_EPSILON_SQ = 0.0004; // 2cm — well below anything visible
+  /** ctx.setPathPoints host hook: rebuild a live-simulated rope/chain's path
+   * geometry from new WORLD-space points, reusing every other authored field
+   * (crossSection/width/radius/...) off the mesh's original source — see
+   * scene-builder.ts's "pathMesh"/"pathSource" userData tags. */
+  function setRuntimeLight(
+    entityId: string,
+    opts: { enabled?: boolean; intensity?: number; color?: string },
+  ): void {
+    const object = built.objects.get(entityId);
+    if (!object) return;
+    object.traverse((node) => {
+      const light = node as THREE.Light;
+      if (!light.isLight) return;
+      if (opts.enabled !== undefined) {
+        light.userData["runtimeEnabled"] = opts.enabled;
+        light.visible = opts.enabled;
+      }
+      if (opts.intensity !== undefined) light.intensity = Math.max(0, opts.intensity);
+      if (opts.color !== undefined) light.color.set(opts.color);
+    });
+  }
+
+  function setPathPoints(entityId: string, points: Array<[number, number, number]>): void {
+    const group = built.objects.get(entityId);
+    if (!group) return;
+    const mesh = group.children.find((c) => c.userData["pathMesh"] === true) as
+      | THREE.Mesh
+      | undefined;
+    const source = mesh?.userData["pathSource"] as PathMeshSource | undefined;
+    if (!mesh || !source) return;
+    group.updateWorldMatrix(true, false);
+    pathPointsInverse.copy(group.matrixWorld).invert();
+    const localPoints = points.map(([x, y, z]) => {
+      pathPointScratch.set(x, y, z).applyMatrix4(pathPointsInverse);
+      return [pathPointScratch.x, pathPointScratch.y, pathPointScratch.z] as [number, number, number];
+    });
+    const prev = lastPathPoints.get(entityId);
+    if (
+      prev &&
+      prev.length === localPoints.length &&
+      prev.every(([px, py, pz], i) => {
+        const [x, y, z] = localPoints[i]!;
+        return (x - px) ** 2 + (y - py) ** 2 + (z - pz) ** 2 < PATH_POINTS_EPSILON_SQ;
+      })
+    ) {
+      return;
+    }
+    lastPathPoints.set(entityId, localPoints);
+    mesh.geometry.dispose();
+    mesh.geometry = pathGeometry({ ...source, points: localPoints });
+  }
   /** model asset id -> its named sub-objects (kits) — exposed to the AI bridge. */
   const modelNodes: Record<string, string[]> = {};
   /** entity id -> bone names of its loaded skinned model (inspector bone dropdowns). */
@@ -469,18 +820,48 @@ async function main(): Promise<void> {
       if (node.userData["skeletonDebug"]) node.visible = visible;
     });
   }
+  function refreshLightDebugVisibility(): void {
+    if (!built) return;
+    const visible = playMode.get() === "edit" && settings.get().showLights;
+    built.scene.traverse((node) => {
+      if (node.userData["lightDebug"]) node.visible = visible;
+    });
+  }
   // camera collision: in play mode the follow camera dollies in instead of
-  // clipping through static scenery (terrain, rocks, trees)
+  // clipping through static scenery (terrain, rocks, trees).
+  // camera-controls' dolly-collision test raycasts this ENTIRE list, every
+  // frame, brute-force (no BVH/acceleration structure) — confirmed via CPU
+  // profiling to be the single dominant per-frame cost once terrain/ocean
+  // triangle counts get large (70%+ of total frame time: 16 full-resolution
+  // terrain tiles + the ocean's 200x200-segment plane, checked in full
+  // regardless of where the camera actually is). Dolly-collision only needs
+  // to catch what the camera could plausibly clip into RIGHT NOW, not every
+  // static mesh in the loaded world — cap it to a generous radius around the
+  // camera (comfortably covers the current 175-unit terrain tile plus its
+  // immediate neighbors) instead of the unbounded, unfiltered list.
+  const COLLIDER_RADIUS_SQ = 200 * 200;
   function refreshCameraColliders(): void {
-    if (!built || playMode.get() === "edit") {
+    // A chase rig writes an exact camera pose every frame. camera-controls'
+    // four-ray dolly collision would brute-force nearby terrain triangles for
+    // a result that the next exact chase pose immediately overwrites.
+    if (!built || playMode.get() === "edit" || followRigMode === "chase") {
       controls.colliderMeshes = [];
       return;
     }
     const meshes: THREE.Object3D[] = [];
+    const scratch = new THREE.Vector3();
     for (const [id, entity] of Object.entries(lastExpanded.entities)) {
       if (!entity.tags.includes("static")) continue;
-      built.objects.get(id)?.traverse((node) => {
-        if ((node as THREE.Mesh).isMesh) meshes.push(node);
+      const object = built.objects.get(id);
+      if (!object) continue;
+      object.getWorldPosition(scratch);
+      if (scratch.distanceToSquared(camera.position) > COLLIDER_RADIUS_SQ) continue;
+      object.traverse((node) => {
+        // a coarse collision-only proxy (scene-builder.ts's heightmap build)
+        // stands in for the real terrain mesh — same raycast result for
+        // "don't clip through the ground", far fewer triangles to check
+        if (node.userData["isColliderProxy"]) meshes.push(node);
+        else if ((node as THREE.Mesh).isMesh && !node.userData["hasColliderProxy"]) meshes.push(node);
       });
     }
     controls.colliderMeshes = meshes;
@@ -505,8 +886,10 @@ async function main(): Promise<void> {
     resolveModel: (assetId) => assets.getModel(assetId)?.url,
     resolveMaterial: (assetId) => assets.getDataAsset(assetId)?.data,
     resolveTexture: (assetId) => assets.getTexture(assetId)?.url,
+    resolveMaxAnisotropy: () => renderer.getMaxAnisotropy(),
     onParticles: (entityId, group, data) =>
       particles.register(entityId, group, data, (assetId) => assets.getTexture(assetId)?.url),
+    onLight: (_entityId, light, importance) => lightBudget.register(light, importance),
     onBillboard: (entityId, group, data) =>
       billboards.register(entityId, group, data, {
         texture: (assetId) => assets.getTexture(assetId)?.url,
@@ -515,8 +898,9 @@ async function main(): Promise<void> {
           return doc?.type === "spritesheet" ? (doc.data as SpritesheetDoc) : undefined;
         },
       }),
+    onGrass: (entityId, group, data) => grass.register(entityId, group, data),
     onInstancedBatch: (batch) => foliageLod.register(batch),
-    bakeBillboardTexture,
+    bakeBillboardTexture: (object, aspect) => bakeBillboardTextureImpl(renderer, () => lastExpanded, object, aspect),
     onModelLoaded: (entityId, root, clips) => {
       const entity = lastExpanded.entities[entityId];
       const animator = entity?.components["animator"] as AnimatorData | undefined;
@@ -547,10 +931,17 @@ async function main(): Promise<void> {
     animations.clear();
     particles.clear();
     billboards.clear();
+    grass.clear();
     built = buildScene(lastExpanded, sceneBuildOptions);
+    skyDomeMesh = null;
+    built.scene.traverse((node) => {
+      if (!skyDomeMesh && node.userData["skyDome"] === true) skyDomeMesh = node;
+    });
     const expanded = lastExpanded;
     if (settings.get().showPhysics) attachPhysicsDebug(expanded, built.objects);
     refreshPhysicsDebugVisibility();
+    if (settings.get().showLights) attachLightDebug(expanded, built.objects);
+    refreshLightDebugVisibility();
     refreshCameraColliders();
     // sky component sets its own background; this is only the no-sky fallback
     if (!built.scene.background) built.scene.background = new THREE.Color(0x0b0e14);
@@ -575,13 +966,41 @@ async function main(): Promise<void> {
         break;
       }
     }
+    // isolation-editing a chunk cell: the working doc has no chunkStreamer of
+    // its own (it's a synthetic single-cell doc), but the rest of the
+    // streamed world should stay visible around it — keep the ORIGINAL
+    // scene's streamer config alive instead of losing it with the doc swap.
+    if (editingChunk.get() && chunkEditReturn) streamer = chunkEditReturn.streamer;
     void chunkManager.configure(streamer, built.scene);
     // subscene components: whole scene files composed additively at runtime
     const subscenes: SubsceneInstance[] = [];
     const worlds = worldTransforms(expanded);
+    terrainTiles = [];
     for (const [id, entity] of Object.entries(expanded.entities)) {
       const sub = entity.components["subscene"] as SubsceneData | undefined;
       if (sub) subscenes.push({ id, world: worlds.get(id)!, data: sub });
+      const mesh = entity.components["mesh"] as
+        | { source?: Record<string, unknown>; material?: string }
+        | undefined;
+      if (mesh?.source?.["kind"] === "heightmap") {
+        const size = mesh.source["size"] as [number, number] | undefined;
+        if (size) {
+          const pos = worlds.get(id)?.position ?? [0, 0, 0];
+          const materialData = mesh.material ? assets.getDataAsset(mesh.material)?.data : undefined;
+          const splatMaterial = materialData as
+            | { shader?: string; splat?: { layers?: SplatLayerBand[] } }
+            | undefined;
+          terrainTiles.push({
+            params: mesh.source as unknown as Parameters<typeof sampleHeightmap>[0],
+            x: pos[0],
+            y: pos[1],
+            z: pos[2],
+            halfW: size[0] / 2,
+            halfD: size[1] / 2,
+            splatLayers: splatMaterial?.shader === "terrain-splat" ? splatMaterial.splat?.layers ?? null : null,
+          });
+        }
+      }
     }
     subsceneManager.configure(store.doc.name, subscenes, built.scene);
     for (const sceneCam of built.cameras.values()) {
@@ -682,6 +1101,7 @@ async function main(): Promise<void> {
   // -- editor ----------------------------------------------------------------
 
   const selection = createSelection();
+  const multiSelection = createMultiSelection();
   // Authoring is the default state. The editor stays available whenever the
   // game is not actively running; play mode is the clean fullscreen view.
   const editorVisible = observable(true);
@@ -693,24 +1113,42 @@ async function main(): Promise<void> {
   const grayboxActive = observable(false);
   const grayboxShape = observable<GrayboxShape>("box");
   const grayboxBevel = observable(0);
+  const grayboxMaterial = observable(""); // "" = engine default; else a material GUID
   const terrainActive = observable(false);
   const terrainBrush = observable<TerrainBrushSettings>({ ...defaultTerrainBrush });
+  const pathActive = observable(false);
+  const pathCrossSection = observable<PathCrossSection>("ribbon");
+  const pathWidth = observable(4);
+  const pathRadius = observable(0.15);
   const thumbnails = observable<Record<string, string>>({});
   const dockSizes = createDockSizes();
   const assetsVersion = observable(0);
   assetsVersion.subscribe(() => rebuild()); // material/prefab edits re-render the scene
-  settings.subscribe(() => rebuild()); // physics-debug toggle takes effect immediately
+  // Scene-affecting debug overlays (physics/lights/skeleton wireframes) attach
+  // during a rebuild, so flipping them must rebuild. View-only flags — the
+  // stats HUD — must NOT: compare a signature of the rebuild-relevant fields so
+  // toggling stats doesn't tear down and rebuild the whole scene.
+  const rebuildKey = (s: ReturnType<typeof settings.get>) => JSON.stringify({ ...s, showStats: 0 });
+  let lastRebuildKey = rebuildKey(settings.get());
+  settings.subscribe(() => {
+    const key = rebuildKey(settings.get());
+    if (key === lastRebuildKey) return;
+    lastRebuildKey = key;
+    rebuild();
+  });
 
   const viewport: ViewportTools = new ViewportTools({
     canvas,
     camera,
     store,
     selection,
+    multiSelection,
     enabled: editorVisible,
     settings,
     gizmoMode,
     contextMenu,
     grayboxActive,
+    pathActive,
     assets,
     getScene: () => built.scene,
     getObject: (id) => built.objects.get(id),
@@ -730,6 +1168,25 @@ async function main(): Promise<void> {
     active: grayboxActive,
     shape: grayboxShape,
     bevel: grayboxBevel,
+    material: grayboxMaterial,
+    getScene: () => built.scene,
+    onDraggingChanged: (dragging) => {
+      gizmoDragging = dragging;
+      controls.enabled = !dragging;
+    },
+  });
+
+  new PathTool({
+    canvas,
+    camera,
+    store,
+    selection,
+    settings,
+    enabled: editorVisible,
+    active: pathActive,
+    crossSection: pathCrossSection,
+    width: pathWidth,
+    radius: pathRadius,
     getScene: () => built.scene,
     onDraggingChanged: (dragging) => {
       gizmoDragging = dragging;
@@ -804,6 +1261,7 @@ async function main(): Promise<void> {
     registry,
     assets,
     selection,
+    multiSelection,
     visible: editorVisible,
     settings,
     gizmoMode,
@@ -813,8 +1271,13 @@ async function main(): Promise<void> {
     grayboxActive,
     grayboxShape,
     grayboxBevel,
+    grayboxMaterial,
     terrainActive,
     terrainBrush,
+    pathActive,
+    pathCrossSection,
+    pathWidth,
+    pathRadius,
     thumbnails,
     dockSizes,
     assetsVersion,
@@ -828,6 +1291,10 @@ async function main(): Promise<void> {
     editingPrefab,
     onEditPrefab: editPrefab,
     onClosePrefabEdit: closePrefabEdit,
+    editingChunk,
+    loadedChunkCells,
+    onEditChunkCell: (world, cx, cz) => void editChunkCell(world, cx, cz),
+    onCloseChunkEdit: (save) => void closeChunkEdit(save),
   });
 
   // -- multiplayer presence (dev): other tabs on this scene appear as avatars --
@@ -1028,11 +1495,6 @@ async function main(): Promise<void> {
     onRoleChanged: (role) =>
       eventBus?.setNetRole(role === "host" ? "authority" : role === "peer" ? "peer" : "local"),
   });
-  // session-state contracts for the demo game (schemas = the AI-facing spec)
-  netPresence.netState.define("enemyHp", z.number());
-  netPresence.netState.define("defeated", z.literal(true));
-  netPresence.netState.define("taken", z.literal(true));
-
   // "unpack model parts": each named sub-object of a loaded kit becomes a child
   // entity referencing that node; the original keeps only the group transform
   function unpackModel(id: string): void {
@@ -1108,12 +1570,16 @@ async function main(): Promise<void> {
       const id = selection.get();
       if (id) frameEntity(id);
     }
+    // H: toggle the perf/stats HUD (mirrors the toolbar "stats" checkbox)
+    if (e.code === "KeyH" && editorVisible.get()) {
+      settings.set({ ...settings.get(), showStats: !settings.get().showStats });
+    }
   });
 
   // Unity gesture: double-click a prefab instance in the viewport opens its
   // definition in isolation (full toolset; saving propagates to all instances)
   canvas.addEventListener("dblclick", (e) => {
-    if (!editorVisible.get() || grayboxActive.get()) return;
+    if (!editorVisible.get() || grayboxActive.get() || pathActive.get()) return;
     const id = viewport.pickAt(e.clientX, e.clientY);
     if (!id) return;
     const prefabId = (store.doc.entities[id]?.components["prefab"] as { prefabId?: string } | undefined)
@@ -1129,19 +1595,16 @@ async function main(): Promise<void> {
   // committed) or projects/<game>/scripts/ (self-contained game builds,
   // gitignored — see PROJECTS.md). Both are outside assets/, so Vite's normal
   // watcher/HMR covers them like any other source file, no bridge needed.
-  const projectScripts = import.meta.glob(["./scripts/*.ts", "../projects/*/scripts/*.ts"], {
-    eager: true,
+  // project-scripts.js owns the glob AND is the HMR boundary for it: a script
+  // edit re-registers in place (no full page reload). onReload restarts a live
+  // play session so already-running instances pick up the new code.
+  initProjectScripts({
+    registry: scriptRegistry,
+    events,
+    onReload: () => {
+      if (sim) startPlaySession();
+    },
   });
-  for (const [path, mod] of Object.entries(projectScripts)) {
-    const cls = (mod as { default?: Parameters<ScriptRegistry["register"]>[0] }).default;
-    if (cls) {
-      try {
-        scriptRegistry.register(cls, events);
-      } catch (error) {
-        console.warn(`[scripts] failed to register ${path}:`, error);
-      }
-    }
-  }
   const input = new InputService();
 
   const viewDir = new THREE.Vector3();
@@ -1201,6 +1664,9 @@ async function main(): Promise<void> {
       setAnimation: (entityId, clip, fade, opts) =>
         animations.play(entityId, clip, fade ?? 0.3, opts?.loop ?? true),
       setBillboard: (entityId, opts) => billboards.setValue(entityId, opts),
+      setParticles: (entityId, opts) => particles.setValue(entityId, opts),
+      setLight: setRuntimeLight,
+      setPathPoints,
       // replicated session state (ctx.netState) — facts every tab agrees on
       ...(netPresence ? { netState: netPresence.netState } : {}),
       playSound: (entityId, soundId) => {
@@ -1278,9 +1744,20 @@ async function main(): Promise<void> {
     for (const id of result.changedEntities) {
       if (result.changedComponents.get(id)?.has("prefab")) return false;
     }
-    // debug overlays are children of entity groups; an in-place visual rebuild
-    // would strip them, so let the full rebuild reattach everything
-    const debugDecorated = settings.get().showPhysics || settings.get().showSkeletons;
+    // debug overlays (attachPhysicsDebug/attachSkeletonDebug/attachLightDebug,
+    // called only from rebuild(), never from this reconcile path) are children
+    // of entity groups; an in-place visual rebuild of a DECORATED entity would
+    // strip its overlay without anything reattaching it, so those specific
+    // entities must take the full rebuild that redraws it. Gating on entity
+    // relevance rather than "is any overlay category on anywhere in the
+    // scene" matters: with showPhysics/showLights on by default, the blanket
+    // form forced every material/mesh/light edit into a full buildScene()
+    // teardown+rebuild of the WHOLE doc, regardless of scene size.
+    const isDebugRelevant = (doc: EntityDoc): boolean =>
+      (settings.get().showPhysics &&
+        ("rigidbody" in doc.components || "collider" in doc.components || "joint" in doc.components)) ||
+      (settings.get().showLights && "light" in doc.components) ||
+      (settings.get().showSkeletons && "animator" in doc.components);
     // scripting/net/audio have no render visuals; physics components join them
     // only while their debug wireframes aren't being drawn — with the overlay
     // on, a collider edit must take the full rebuild that redraws its shape
@@ -1306,7 +1783,7 @@ async function main(): Promise<void> {
             modelBones.set(next);
           }
         },
-        allowVisualRebuild: () => !debugDecorated,
+        allowVisualRebuild: (_id, before, after) => !isDebugRelevant(before) && !isDebugRelevant(after),
         dataOnlyComponents: dataOnly,
       },
     );
@@ -1330,6 +1807,7 @@ async function main(): Promise<void> {
   // stop restores the scene from the document — sim/script state is runtime-only
   playMode.subscribe(refreshPhysicsDebugVisibility);
   playMode.subscribe(refreshSkeletonDebugVisibility);
+  playMode.subscribe(refreshLightDebugVisibility);
   settings.subscribe(refreshSkeletonDebugVisibility);
   playMode.subscribe(() => {
     const mode = playMode.get();
@@ -1365,7 +1843,11 @@ async function main(): Promise<void> {
   });
   canvas.addEventListener("mousedown", () => {
     if (playMode.get() === "playing" && document.pointerLockElement !== canvas) {
-      canvas.requestPointerLock();
+      // best-effort: modern browsers return a Promise that rejects if the
+      // document isn't focused yet (e.g. this click is what's focusing it) —
+      // nothing to recover, the next click retries, just don't let it surface
+      // as an uncaught rejection
+      void canvas.requestPointerLock()?.catch(() => undefined);
     }
   });
   const editorMinDistance = controls.minDistance;
@@ -1374,7 +1856,11 @@ async function main(): Promise<void> {
       controls.maxPolarAngle = 1.45; // don't let the game camera dive underground
       controls.minDistance = 2; // collision dolly-in stops at arm's length
       void controls.dollyTo(8, true); // game framing: tighter than editor zoom
-      canvas.requestPointerLock(); // the play-button click is our user gesture
+      // the play-button click is our user gesture, but this fires from a
+      // store subscription (async relative to that click), so the browser
+      // can still see it as "document not focused" and reject — best-effort,
+      // the mousedown handler above retries on the player's next click
+      void canvas.requestPointerLock()?.catch(() => undefined);
     } else {
       controls.maxPolarAngle = editorMaxPolar;
       controls.minDistance = editorMinDistance;
@@ -1384,448 +1870,77 @@ async function main(): Promise<void> {
   });
   rebuild();
 
-  const bodyWorldPos = new THREE.Vector3();
-  const parentQuat = new THREE.Quaternion();
-  const bodyQuat = new THREE.Quaternion();
-  function applyBodyState(object: THREE.Object3D, state: BodyState): void {
-    const parent = object.parent;
-    if (!parent) return;
-    parent.updateWorldMatrix(true, false);
-    object.position.copy(
-      parent.worldToLocal(bodyWorldPos.set(state.position[0], state.position[1], state.position[2])),
-    );
-    parent.getWorldQuaternion(parentQuat).invert();
-    object.quaternion.copy(
-      parentQuat.multiply(bodyQuat.set(state.rotation[0], state.rotation[1], state.rotation[2], state.rotation[3])),
-    );
+  void renderThumbnails({ assets, registry, renderer, backend, thumbnails });
+  assetsVersion.subscribe(() => void renderThumbnails({ assets, registry, renderer, backend, thumbnails }));
+
+  // A live material-file edit: patch the already-built material instance in
+  // place when the change is a plain property tweak (color/PBR scalars on a
+  // material still in the scene), and only refresh that one swatch. Returns
+  // false — meaning "take the full rebuild" — for shader-class/texture changes
+  // or a material not currently instanced. This spares the common AI edit (nudge
+  // a color) the whole-scene teardown + pipeline recompile it used to trigger.
+  function patchMaterialLive(id: string, data: unknown): boolean {
+    if (!built) return false;
+    const material = built.materials.get(id);
+    if (!material) return false;
+    if (!patchMaterial(material, data as MaterialData)) return false;
+    void renderThumbnails({ assets, registry, renderer, backend, thumbnails });
+    return true;
   }
 
-  // -- billboard proxy baking: a real snapshot instead of a color guess ------
-  // Same render-to-texture technique as the prefab thumbnails just below,
-  // minus the CPU pixel readback — this stays entirely GPU-side, since the
-  // caller only needs the render target's own texture as another material's
-  // input, not a displayable image. `object` is always a throwaway clone
-  // (the render package never hands over its shared cached model), so
-  // reparenting it into a temp scene here is safe.
-  const BILLBOARD_BAKE_SIZE = 128;
+  installLiveSync({
+    assets,
+    registry,
+    store,
+    selection,
+    sceneList,
+    chunkManager,
+    subsceneManager,
+    editingPrefab,
+    assetsVersion,
+    patchMaterialLive,
+    getLastWrittenScene: () => lastWrittenScene,
+    setLastWrittenScene: (content) => {
+      lastWrittenScene = content;
+    },
+    getLastWrittenPrefab: () => lastWrittenPrefab,
+  });
 
-  /** Read the CURRENT scene's actual sky/sun instead of a generic studio
-   * rig, so a baked billboard's shading matches the real trees standing next
-   * to it instead of looking lit from a different scene entirely. Falls back
-   * to reasonable defaults if the scene has neither (e.g. street.scene.json,
-   * which has no sky at all). */
-  function currentSceneLightRig(): { hemisphere: THREE.HemisphereLight; sun: THREE.DirectionalLight } {
-    let skyData: { top: string; bottom: string; light: number } | undefined;
-    let sunData: { color: string; intensity: number } | undefined;
-    for (const entity of Object.values(lastExpanded?.entities ?? {})) {
-      const sky = entity.components["sky"] as typeof skyData | undefined;
-      if (sky && !skyData) skyData = sky;
-      const light = entity.components["light"] as
-        | { kind: string; color: string; intensity: number }
-        | undefined;
-      if (light?.kind === "directional" && !sunData) sunData = light;
-    }
-    const hemisphere = new THREE.HemisphereLight(
-      new THREE.Color(skyData?.top ?? "#5fa9ff"),
-      new THREE.Color(skyData?.bottom ?? "#dff1ff"),
-      skyData?.light ?? 0.75,
-    );
-    const sun = new THREE.DirectionalLight(
-      new THREE.Color(sunData?.color ?? "#fff3d9"),
-      sunData?.intensity ?? 2.4,
-    );
-    // the real sun's exact direction constantly changes (it follows the
-    // helicopter) — a fixed "from above and to one side" angle is enough to
-    // read as consistent lighting without re-baking every time it moves.
-    sun.position.set(1, 2, 1);
-    return { hemisphere, sun };
-  }
-
-  function bakeBillboardTexture(
-    object: THREE.Object3D,
-    aspect: { width: number; height: number },
-  ): THREE.Texture | null {
-    try {
-      const scene = new THREE.Scene();
-      const { hemisphere, sun } = currentSceneLightRig();
-      scene.add(hemisphere);
-      scene.add(sun);
-      scene.add(object);
-
-      const halfW = Math.max(aspect.width, 0.1) / 2;
-      const halfH = Math.max(aspect.height, 0.1) / 2;
-      const box = new THREE.Box3().setFromObject(object);
-      const center = box.getCenter(new THREE.Vector3());
-      const depth = Math.max(halfW, halfH) * 4;
-      const cam = new THREE.OrthographicCamera(-halfW, halfW, halfH, -halfH, 0.01, depth * 2);
-      cam.position.copy(center).add(new THREE.Vector3(0, 0, depth));
-      cam.lookAt(center);
-
-      const aspectRatio = aspect.width / aspect.height;
-      const texW = aspectRatio >= 1 ? BILLBOARD_BAKE_SIZE : Math.max(16, Math.round(BILLBOARD_BAKE_SIZE * aspectRatio));
-      const texH = aspectRatio >= 1 ? Math.max(16, Math.round(BILLBOARD_BAKE_SIZE / aspectRatio)) : BILLBOARD_BAKE_SIZE;
-      const target = new THREE.RenderTarget(texW, texH);
-
-      const prevClear = new THREE.Color();
-      renderer.renderer.getClearColor(prevClear);
-      const prevAlpha = renderer.renderer.getClearAlpha();
-      renderer.renderer.setClearColor(0x000000, 0); // transparent, not chroma-keyed — no green fringing
-      renderer.renderer.setRenderTarget(target);
-      renderer.renderer.render(scene, cam);
-      renderer.renderer.setRenderTarget(null);
-      renderer.renderer.setClearColor(prevClear, prevAlpha);
-
-      scene.remove(object); // release our hold; the clone itself can be gc'd
-      return target.texture;
-    } catch (error) {
-      console.warn("[billboard] bake failed, falling back to material color:", error);
-      return null;
-    }
-  }
-
-  // -- prefab thumbnails: render each prefab to a tiny offscreen target -------
-
-  const THUMB = 96;
-
-  /** Frame `object` in a 3/4 studio view and rasterize it to a PNG data URL. */
-  async function snapshotObject(object: THREE.Object3D): Promise<string> {
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x0b0e14);
-    scene.add(new THREE.AmbientLight(0xffffff, 1.2));
-    const sun = new THREE.DirectionalLight(0xfff5e0, 2);
-    sun.position.set(3, 5, 4);
-    scene.add(sun);
-    scene.add(object);
-
-    const box = new THREE.Box3().setFromObject(object);
-    const size = box.getSize(new THREE.Vector3()).length() || 1;
-    const center = box.getCenter(new THREE.Vector3());
-    const cam = new THREE.PerspectiveCamera(45, 1, 0.01, size * 10);
-    cam.position.copy(center).add(new THREE.Vector3(size * 0.7, size * 0.55, size * 0.7));
-    cam.lookAt(center);
-
-    const target = new THREE.RenderTarget(THUMB, THUMB);
-    renderer.renderer.setRenderTarget(target);
-    renderer.renderer.render(scene, cam);
-    const pixels = (await renderer.renderer.readRenderTargetPixelsAsync(
-      target,
-      0,
-      0,
-      THUMB,
-      THUMB,
-    )) as Uint8Array;
-    renderer.renderer.setRenderTarget(null);
-    target.dispose();
-
-    const canvas2d = document.createElement("canvas");
-    canvas2d.width = THUMB;
-    canvas2d.height = THUMB;
-    const ctx = canvas2d.getContext("2d")!;
-    const image = ctx.createImageData(THUMB, THUMB);
-    // WebGPU copies each row into a buffer aligned to 256 bytes;
-    // `readRenderTargetPixelsAsync()` returns that padded buffer verbatim.
-    // Treating it as tightly packed RGBA made every following row start 128
-    // bytes early at our 96px thumbnail size, producing horizontal strips.
-    // WebGPU uses top-left row order, while the WebGL fallback is bottom-up.
-    const bytesPerPixel = 4; // RenderTarget's default RGBA UnsignedByteType
-    const sourceRowStride = Math.ceil((THUMB * bytesPerPixel) / 256) * 256;
-    const destinationRowStride = THUMB * bytesPerPixel;
-    for (let y = 0; y < THUMB; y++) {
-      const sourceY = backend === "webgl" ? THUMB - 1 - y : y;
-      const src = sourceY * sourceRowStride;
-      image.data.set(
-        pixels.subarray(src, src + destinationRowStride),
-        y * destinationRowStride,
-      );
-    }
-    ctx.putImageData(image, 0, 0);
-    return canvas2d.toDataURL();
-  }
-
-  async function renderThumbnails(): Promise<void> {
-    const out: Record<string, string> = { ...thumbnails.get() };
-    let changed = false;
-    for (const pid of assets.prefabIds()) {
-      try {
-        const key = `${pid}:${JSON.stringify(assets.getPrefab(pid)).length}`;
-        if (out[`__key_${pid}`] === key) continue;
-        const thumbDoc = buildStreetDocEmpty(pid);
-        const expanded = expandScene(thumbDoc, assets, registry);
-        const thumb = buildScene(expanded, {
-          resolveMaterial: (id) => assets.getDataAsset(id)?.data,
-        });
-        out[pid] = await snapshotObject(thumb.scene);
-        out[`__key_${pid}`] = key;
-        changed = true;
-      } catch (error) {
-        console.warn(`[thumbnails] failed for prefab ${pid}:`, error);
-      }
-    }
-
-    for (const mid of assets.modelIds()) {
-      try {
-        const model = assets.getModel(mid);
-        if (!model) continue;
-        const key = model.url;
-        if (out[`__key_model_${mid}`] === key) continue;
-        const gltf = await loadGltf(model.url);
-        // the cache shares one loaded scene: always render a skeleton-safe clone
-        const instance = skeletonClone(gltf.scene);
-        out[mid] = await snapshotObject(instance);
-        out[`__key_model_${mid}`] = key;
-        changed = true;
-      } catch (error) {
-        console.warn(`[thumbnails] failed for model ${mid}:`, error);
-      }
-    }
-
-    for (const asset of assets.dataAssetsOfType("material")) {
-      try {
-        const key = JSON.stringify(asset.data);
-        if (out[`__key_material_${asset.id}`] === key) continue;
-        const data = asset.data as MaterialData;
-        const material = makeMaterial(data) as THREE.Material & { map?: THREE.Texture | null };
-        const textureUrl = data.map ? assets.getTexture(data.map)?.url : undefined;
-        if (textureUrl && data.shader !== "wireframe") {
-          // snapshot is one-shot (no render loop to pick up a later-arriving
-          // texture), so wait for it instead of the fire-and-forget helper
-          const texture = await new THREE.TextureLoader().loadAsync(textureUrl);
-          texture.colorSpace = THREE.SRGBColorSpace;
-          texture.wrapS = THREE.RepeatWrapping;
-          texture.wrapT = THREE.RepeatWrapping;
-          const [rx, ry] = data.repeat ?? [1, 1];
-          texture.repeat.set(rx, ry);
-          material.map = texture;
-          material.needsUpdate = true;
-        }
-        const sphere = new THREE.Mesh(new THREE.SphereGeometry(1, 48, 32), material);
-        out[asset.id] = await snapshotObject(sphere);
-        out[`__key_material_${asset.id}`] = key;
-        changed = true;
-      } catch (error) {
-        console.warn(`[thumbnails] failed for material ${asset.id}:`, error);
-      }
-    }
-
-    if (changed) thumbnails.set(out);
-  }
-
-  function buildStreetDocEmpty(prefabId: string) {
-    const { doc: d } = (() => {
-      const empty = { version: 1 as const, name: "thumb", entities: {} };
-      return {
-        doc: {
-          ...empty,
-          entities: {
-            subject: {
-              name: "Subject",
-              parent: null,
-              tags: [],
-              components: { transform: {}, prefab: { prefabId, props: {}, overrides: [] } },
-            },
-          },
-        },
-      };
-    })();
-    return d;
-  }
-
-  void renderThumbnails();
-  assetsVersion.subscribe(() => void renderThumbnails());
-
-  // -- live sync: file changes (AI edits, text editors) apply in place --------
-
-  if (import.meta.hot) {
-    import.meta.hot.on(
-      "hitreg:asset-changed",
-      (payload: { file: string; content: string | null }) => {
-        const { file, content } = payload;
-        if (!content) return;
-        try {
-          if (file.startsWith("scenes/")) {
-            const name = file.slice("scenes/".length).replace(/\.scene\.json$/, "");
-            if (!sceneList.get().includes(name)) {
-              sceneList.set([...sceneList.get(), name].sort()); // e.g. an agent made a scene
-            }
-            if (name !== store.doc.name) {
-              // not the scene being edited — but it may be loaded as a subscene
-              subsceneManager.onSceneFileChanged(name, content);
-              return;
-            }
-            if (content === lastWrittenScene) return; // our own autosave echo
-            const doc = sceneDocSchema.parse(JSON.parse(content));
-            const issues = validateScene(doc, registry);
-            if (issues.length > 0) {
-              console.warn("[live-sync] scene file invalid:", issues);
-              return;
-            }
-            // set BEFORE applying so the watcher echo of this exact content is
-            // suppressed; the autosave of the merged doc may canonicalize the
-            // file once (it updates lastWrittenScene itself, so no ping-pong)
-            lastWrittenScene = content;
-            if (doc.name !== store.doc.name) {
-              // different scene identity: merging is meaningless, take the file
-              selection.set(null);
-              store.replace(doc);
-              return;
-            }
-            const ops = diffSceneDocs(store.doc, doc);
-            if (ops.length > 0) {
-              try {
-                // one undo-able batch: non-overlapping concurrent edits merge
-                store.apply(ops);
-              } catch (error) {
-                console.warn("[live-sync] merge failed, falling back to replace:", error);
-                store.replace(doc);
-              }
-              const selected = selection.get();
-              if (selected && !(selected in store.doc.entities)) {
-                selection.set(null); // only drop selection if the entity vanished
-              }
-            }
-          } else if (file.startsWith("materials/")) {
-            const id = file.slice("materials/".length).replace(/\.json$/, "");
-            const data = JSON.parse(content);
-            const asset = { id, type: "material", name: id, data };
-            if (assets.getDataAsset(id)) assets.updateDataAsset(asset);
-            else assets.addDataAsset(asset);
-            assetsVersion.set(assetsVersion.get() + 1);
-          } else if (file.startsWith("terrain/")) {
-            const id = file.slice("terrain/".length).replace(/\.json$/, "");
-            const asset = { id, type: "terrain-heightfield", name: id, data: JSON.parse(content) };
-            if (assets.getDataAsset(id)) assets.updateDataAsset(asset);
-            else assets.addDataAsset(asset);
-            assetsVersion.set(assetsVersion.get() + 1);
-          } else if (file.startsWith("spritesheets/")) {
-            const id = file.slice("spritesheets/".length).replace(/\.json$/, "");
-            const asset = { id, type: "spritesheet", name: id, data: JSON.parse(content) };
-            if (assets.getDataAsset(id)) assets.updateDataAsset(asset);
-            else assets.addDataAsset(asset);
-            assetsVersion.set(assetsVersion.get() + 1); // re-resolves every consumer
-          } else if (file.startsWith("prefabs/")) {
-            const id = file.slice("prefabs/".length).replace(/\.json$/, "");
-            // isolation editing writes this file itself — skip our own echo
-            if (id === editingPrefab.get() && content === lastWrittenPrefab) return;
-            const doc = JSON.parse(content);
-            if (assets.getPrefab(id)) assets.updatePrefab(id, doc);
-            else assets.addPrefab(id, doc);
-            assetsVersion.set(assetsVersion.get() + 1);
-          } else if (file.startsWith("chunks/")) {
-            // hot-swap a loaded chunk in place (or pick up a brand-new cell)
-            void chunkManager.onFileChanged(file.slice("chunks/".length), content);
-          }
-        } catch (error) {
-          console.warn(`[live-sync] rejected change to ${file}:`, error);
-        }
-      },
-    );
-  }
-
-  // -- context bridge: post what the user sees for AI focus tasks -------------
-
-  const frustum = new THREE.Frustum();
-  const projScreen = new THREE.Matrix4();
-  function postContext(): void {
-    const inView: Array<{ id: string; name: string; distance: number }> = [];
-    projScreen.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-    frustum.setFromProjectionMatrix(projScreen);
-    const worldPos = new THREE.Vector3();
-    for (const [id, entity] of Object.entries(store.doc.entities)) {
-      const object = built.objects.get(id);
-      if (!object) continue;
-      object.getWorldPosition(worldPos);
-      if (frustum.containsPoint(worldPos)) {
-        inView.push({
-          id,
-          name: entity.name,
-          distance: Number(worldPos.distanceTo(camera.position).toFixed(2)),
-        });
-      }
-    }
-    inView.sort((a, b) => a.distance - b.distance);
-
-    const selectedId = selection.get();
-    void fetch("/__hitreg/context", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        scene: store.doc.name,
-        editingPrefab: editingPrefab.get(),
-        playMode: playMode.get(),
-        selection: selectedId
-          ? { id: selectedId, entity: store.doc.entities[selectedId] ?? null }
-          : null,
-        camera: {
-          position: camera.position.toArray().map((v) => Number(v.toFixed(2))),
-          target: controls.getTarget(new THREE.Vector3()).toArray().map((v) => Number(v.toFixed(2))),
-        },
-        inView: inView.slice(0, 25),
-        modelNodes,
-        modelBones: modelBones.get(),
-        chunks: chunkManager.stats,
-        subscenes: subsceneManager.stats,
-        // unresolved references (missing sheet frames etc.) — what an AI should fix
-        diagnostics: billboards.diagnostics(),
-        // last gameplay events delivered this play session ({ tick, name, payload })
-        recentEvents: eventBus ? eventBus.trace().slice(-20) : null,
-        net: netPresence?.debug() ?? null,
-        // replicated session state (first 60 keys) — what every tab agrees on
-        netState: netPresence
-          ? Object.fromEntries(Object.entries(netPresence.netState.snapshot()).slice(0, 60))
-          : null,
-        // per-NPC sim probe: which layer is alive on THIS tab (net debugging)
-        netProbe:
-          playMode.get() === "playing"
-            ? {
-                docCount: Object.keys(lastExpanded.entities).length,
-                objCount: built.objects.size,
-                npcs: ["pet-dog", "elder", "sheep", "enemy-wolf-1"].map((id) => {
-                  const object = built.objects.get(id);
-                  return {
-                    id,
-                    inDoc: lastExpanded.entities[id] !== undefined,
-                    inStore: store.doc.entities[id] !== undefined,
-                    body: sim ? sim.getLinvel(id) !== null : false,
-                    suspended: netSuspended.has(id),
-                    pos: object
-                      ? object.position.toArray().map((v) => Number(v.toFixed(2)))
-                      : null,
-                  };
-                }),
-              }
-            : null,
-        debug: {
-          sceneSource: seeded ? "code-fallback" : "file",
-          sceneLoadError: sceneLoadError || undefined,
-          // doc-change handling since boot: reconciled = patched in place,
-          // rebuilt = full scene reconstruction (structural/scene-level edits)
-          reconciled: reconcileCount,
-          rebuilt: rebuildCount,
-        },
-        updatedAt: performance.now(),
-      }),
-    }).catch(() => undefined);
-  }
-  setInterval(postContext, 1000);
-
-  // Publish the live capability spec once — registrations are fixed after boot.
-  // This is the running app's FULL surface (core + chunk components, core + app
-  // events, built-in behaviors, data types, the ops protocol), generated from
-  // the same Zod schemas that validate; an AI GETs /__hitreg/spec to learn what
-  // it can build without reading docs that might have drifted.
-  void fetch("/__hitreg/spec", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(
-      buildEngineSpec({
-        registry,
-        assets,
-        events,
-        netState: netPresence?.netState,
-        scripts: scriptRegistry.describe(),
-      }),
-    ),
-  }).catch(() => undefined);
+  const devBridgeDeps = {
+    registry,
+    assets,
+    events,
+    camera,
+    controls,
+    store,
+    selection,
+    editingPrefab,
+    playMode,
+    modelNodes,
+    modelBones,
+    chunkManager,
+    subsceneManager,
+    billboards,
+    scriptRegistry,
+    seeded,
+    sceneLoadError,
+    netSuspended,
+    getBuilt: () => built,
+    getLastExpanded: () => lastExpanded,
+    getSim: () => sim,
+    getEventBus: () => eventBus,
+    getNetPresence: () => netPresence,
+    getReconcileCount: () => reconcileCount,
+    getRebuildCount: () => rebuildCount,
+    getPerf: () => ({
+      frame: { ...frameTimings },
+      drawCalls: renderer.renderer.info.render.drawCalls,
+      triangles: renderer.renderer.info.render.triangles,
+      foliageTiers: foliageLod.tierCounts(),
+    }),
+  };
+  setInterval(() => postContext(devBridgeDeps), 1000);
+  publishEngineSpec(devBridgeDeps);
 
   clientLog(`boot: ready (backend=${backend}, sceneSource=${seeded ? "code" : "file"})`);
 
@@ -1841,11 +1956,17 @@ async function main(): Promise<void> {
       canvas.style.top = `${dock.top}px`;
       canvas.style.width = `calc(100vw - ${dock.left + dock.right}px)`;
       canvas.style.height = `calc(100vh - ${dock.top + dock.bottom}px)`;
+      // stats HUD lives in the canvas's own top-right corner, not the
+      // window's — otherwise it sits under the editor's right-side dock
+      hud.style.top = `${dock.top + 8}px`;
+      hud.style.right = `${dock.right + 8}px`;
     } else {
       canvas.style.left = "0px";
       canvas.style.top = "0px";
       canvas.style.width = "100vw";
       canvas.style.height = "100vh";
+      hud.style.top = "8px";
+      hud.style.right = "8px";
     }
     onResize();
   }
@@ -1863,9 +1984,12 @@ async function main(): Promise<void> {
     // hi-DPI displays (2x-3x scaling) — every per-pixel cost (bloom's blur
     // chain, the custom terrain-splat/water shaders, standard PBR lighting)
     // scales directly with that, so an uncapped ratio can turn "moderate"
-    // scene cost into an unplayable one. 1.5 keeps most of the sharpness
-    // benefit without the full 2x-3x fill-rate hit.
-    const pixelRatio = Math.min(window.devicePixelRatio, 1.5);
+    // scene cost into an unplayable one. Confirmed fill-rate/fragment-bound
+    // via real frame-timing data (JS submission cost stayed low while total
+    // frame time didn't move) — 1.0 trades hi-DPI sharpness for a guaranteed,
+    // resolution-proportional cut to every per-pixel cost in the scene at
+    // once, rather than guessing which specific shader is the heavy one.
+    const pixelRatio = Math.min(window.devicePixelRatio, 1.0);
     renderer.setSize(w, h, pixelRatio);
   }
   window.addEventListener("resize", onResize);
@@ -1874,7 +1998,27 @@ async function main(): Promise<void> {
   applyCanvasLayout();
 
   let lastFrameMs = 0;
+  /**
+   * Rolling (EMA) breakdown of where a frame's JS-side time actually goes —
+   * added because "triangles/draw calls dropped 21x but frame time didn't
+   * move" is unanswerable without this: those stats say nothing about
+   * physics, scripts, or chunk-streaming cost, which can dominate
+   * independently of anything the GPU submission stats capture. Smoothed
+   * (not last-frame-raw) so the HUD reads steadily instead of flickering.
+   */
+  const frameTimings = { physics: 0, scripts: 0, chunks: 0, foliage: 0, render: 0, other: 0, total: 0 };
+  const TIMING_EMA_ALPHA = 0.15;
+  function recordTiming(key: keyof typeof frameTimings, ms: number): void {
+    frameTimings[key] += (ms - frameTimings[key]) * TIMING_EMA_ALPHA;
+  }
   const followPos = new THREE.Vector3();
+  // camera colliders are now distance-limited (see refreshCameraColliders) —
+  // must stay synced with camera movement, not just scene/model-load events;
+  // throttled by distance (like chunkManager's cell-boundary check) since the
+  // refresh itself does real work (traverse per nearby static entity), just
+  // far less than the raycast cost it replaced.
+  let lastColliderRefreshPos: THREE.Vector3 | null = null;
+  const COLLIDER_REFRESH_DIST_SQ = 20 * 20;
   const foliageLodCameraPos = new THREE.Vector3();
   const chaseForward = new THREE.Vector3();
   const chaseUpAxis = new THREE.Vector3(0, 1, 0);
@@ -1969,6 +2113,7 @@ async function main(): Promise<void> {
         }
       }
       // sim/scripts mutate RUNTIME objects only — the document is authoring truth
+      const physicsStart = performance.now();
       sim.step(dt);
       for (const [id, state] of sim.states()) {
         const object = built.objects.get(id);
@@ -1986,9 +2131,13 @@ async function main(): Promise<void> {
           prevBodyPos.set(id, p.clone());
         }
       }
+      recordTiming("physics", performance.now() - physicsStart);
+      const scriptsStart = performance.now();
       scripts?.fixedUpdate(dt);
+      recordTiming("scripts", performance.now() - scriptsStart);
     },
     update: (dt, alpha) => {
+      const otherStart = performance.now();
       // draw dynamic bodies between their last two sim states
       if (playMode.get() === "playing" && sim) {
         for (const [id, curr] of currBodyPos) {
@@ -2015,15 +2164,17 @@ async function main(): Promise<void> {
             chaseYawQuat.setFromAxisAngle(chaseUpAxis, yaw);
             chaseOffset.set(0, followRigHeight, followRigDistance).applyQuaternion(chaseYawQuat);
             chaseEye.copy(p).add(chaseOffset);
-            void controls.setLookAt(chaseEye.x, chaseEye.y, chaseEye.z, p.x, p.y + 1, p.z, true);
+            void controls.setLookAt(chaseEye.x, chaseEye.y, chaseEye.z, p.x, p.y + 1, p.z, false);
           } else {
             void controls.moveTo(p.x, p.y + 1, p.z, true);
           }
         }
       }
       if (playMode.get() === "playing") animations.update(dt);
+      let otherMs = performance.now() - otherStart;
       // chunk streaming follows the player in play mode, the fly-cam in edit
       {
+        const chunksStart = performance.now();
         const focusObj =
           playMode.get() !== "edit" && followTargetId ? built.objects.get(followTargetId) : null;
         if (focusObj) {
@@ -2034,7 +2185,16 @@ async function main(): Promise<void> {
           chunkManager.update(camera.position.x, camera.position.z);
           subsceneManager.update(camera.position.x, camera.position.z);
         }
+        recordTiming("chunks", performance.now() - chunksStart);
       }
+      if (
+        playMode.get() !== "edit" &&
+        (!lastColliderRefreshPos || lastColliderRefreshPos.distanceToSquared(camera.position) > COLLIDER_REFRESH_DIST_SQ)
+      ) {
+        lastColliderRefreshPos = camera.position.clone();
+        refreshCameraColliders();
+      }
+      const camStart = performance.now();
       updateFlyCam(dt);
       // while flying, the fly-cam owns the camera — camera-controls' update
       // would overwrite our position/rotation from its own internal state
@@ -2050,15 +2210,33 @@ async function main(): Promise<void> {
           renderCamera = built.activeCamera;
         }
       }
+      otherMs += performance.now() - camStart;
+      const foliageStart = performance.now();
       particles.update(dt, renderCamera); // billboards face the camera actually used
+      grass.update(renderCamera, sampleTerrainHeight, sampleGrassyGround);
       foliageLod.update(renderCamera.getWorldPosition(foliageLodCameraPos));
+      lightBudget.update(built.scene, renderCamera);
+      recordTiming("foliage", performance.now() - foliageStart);
+      const netStart = performance.now();
+      // recenter the sky dome on whichever camera is actually rendering — a
+      // fixed-radius BackSide sphere only reads as an infinite background
+      // while the camera stays inside it (see scene-builder.ts's buildSkyDome)
+      if (skyDomeMesh) skyDomeMesh.position.copy(renderCamera.getWorldPosition(foliageLodCameraPos));
       netPresence?.update(dt); // remote avatars lerp toward their snapshot targets
+      otherMs += performance.now() - netStart;
+      recordTiming("other", otherMs);
+      const renderStart = performance.now();
       renderer.render(built.scene, renderCamera);
+      recordTiming("render", performance.now() - renderStart);
       lastFrameMs = dt * 1000;
     },
   });
 
   setInterval(() => {
+    // stats HUD is a view-only overlay toggled from the toolbar / H key
+    const statsOn = settings.get().showStats;
+    hud.style.display = statsOn ? "" : "none";
+    if (!statsOn) return;
     const mode = playMode.get();
     const hint =
       mode === "playing"
@@ -2073,7 +2251,22 @@ async function main(): Promise<void> {
     // submitted to the renderer this frame — draw calls / triangles do.
     const info = renderer.renderer.info;
     const tiers = foliageLod.tierCounts();
+    // "is it stuck or just loading" was previously invisible — chunk/subscene
+    // files streaming in and glTF models fetching/parsing (loadGltf) are the
+    // three async load sources that can leave props/geometry silently absent
+    // for a while; surface all three as one number, impossible to miss.
+    const loadingCount = chunkStats.loading + subStats.loading + gltfLoadingCount();
+    hud.style.color = loadingCount > 0 ? "#ffd633" : "";
+    if (sceneSwitchPending) {
+      const elapsed = performance.now() - sceneSwitchStartedAt;
+      // a brief grace period before "loadingCount === 0" counts as "done" —
+      // chunk/model loads kicked off by the rebuild take a beat (an
+      // animation frame or two) to actually register as in-flight; checking
+      // too early would read as "nothing loading" before anything's started
+      if ((elapsed > 300 && loadingCount === 0) || elapsed > SCENE_SWITCH_TIMEOUT_MS) hideSceneLoading();
+    }
     hud.textContent =
+      (loadingCount > 0 ? `⏳ loading: ${loadingCount}\n` : "") +
       `backend: ${backend}\n` +
       `entities: ${Object.keys(store.doc.entities).length} (source)\n` +
       (chunkStats.chunks > 0
@@ -2090,12 +2283,17 @@ async function main(): Promise<void> {
         : "") +
       `draw calls: ${info.render.drawCalls}  ·  tris: ${info.render.triangles.toLocaleString()}\n` +
       `geometries: ${info.memory.geometries}  ·  textures: ${info.memory.textures}\n` +
-      `frame: ${lastFrameMs.toFixed(1)}ms\n` +
+      `frame: ${lastFrameMs.toFixed(1)}ms  (JS total: ${frameTimings.total.toFixed(1)}ms)\n` +
+      `  phys ${frameTimings.physics.toFixed(1)} · scripts ${frameTimings.scripts.toFixed(1)} · ` +
+      `chunks ${frameTimings.chunks.toFixed(1)} · foliage ${frameTimings.foliage.toFixed(1)} · ` +
+      `render ${frameTimings.render.toFixed(1)} · other ${frameTimings.other.toFixed(1)}\n` +
       `mode: ${mode}  ·  ${hint}`;
   }, 500);
 
   function frame(t: number): void {
+    const start = performance.now();
     loop.tick(t);
+    recordTiming("total", performance.now() - start);
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);

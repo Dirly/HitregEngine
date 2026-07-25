@@ -1,5 +1,4 @@
 import { beforeAll, describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
 import {
   ComponentRegistry,
   registerCoreComponents,
@@ -9,86 +8,66 @@ import {
 } from "@hitreg/core";
 import { initPhysics, PhysicsSim } from "../src/index.js";
 
-// Regression guard for the playground scene: file-authored docs skip zod
-// default-filling, which once crashed PhysicsSim (heightmap collider without
-// `size`) and silently disabled ALL collision. Probes the real scene.
-
-const SCENE = "../../../apps/playground/assets/scenes/my-game.scene.json";
+// Regression guard: a heightmap terrain whose collider is authored WITHOUT an
+// explicit `size` (cooked shapes derive their geometry from the mesh, so size
+// is meant to be omitted) once crashed PhysicsSim and silently disabled ALL
+// collision. This builds that exact scenario inline — self-contained, no
+// dependency on any playground scene — and proves a dropped body is caught by
+// the cooked terrain instead of falling through it.
 
 let registry: ComponentRegistry;
-let doc: SceneDoc;
+
+const terrainDoc = (): SceneDoc => ({
+  version: 1,
+  name: "heightmap-probe",
+  entities: {
+    ground: {
+      name: "Terrain",
+      parent: null,
+      tags: ["static"],
+      components: {
+        transform: {},
+        // heightmap mesh the collider cooks from
+        mesh: { source: { kind: "heightmap", size: [80, 80], amplitude: 1.6, frequency: 0.06, seed: 12, resolution: 96, flatRadius: 14, flatFalloff: 10 } },
+        // the regression case: shape "heightmap", NO `size` field
+        collider: { shape: "heightmap", friction: 0.7 },
+      },
+    },
+  },
+});
 
 beforeAll(async () => {
   await initPhysics();
   registry = new ComponentRegistry();
   registerCoreComponents(registry);
-  const raw = JSON.parse(readFileSync(new URL(SCENE, import.meta.url), "utf8"));
-  const parsed = sceneDocSchema.safeParse(raw);
-  if (!parsed.success) throw new Error(`scene schema: ${parsed.error.message.slice(0, 500)}`);
-  doc = parsed.data;
 });
 
-describe("my-game scene physics probe", () => {
+describe("heightmap-collider physics probe", () => {
   it("scene document validates", () => {
-    const issues = validateScene(doc, registry);
-    expect(issues).toEqual([]);
+    const parsed = sceneDocSchema.safeParse(terrainDoc());
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(validateScene(parsed.data, registry)).toEqual([]);
   });
 
-  it("a probe walking east is stopped by the barrier, not at the rocks", () => {
-    const probe = structuredClone(doc);
-    probe.entities["probe"] = {
+  it("a body dropped onto a heightmap-collider terrain is caught, not dropped through", () => {
+    const doc = sceneDocSchema.parse(terrainDoc());
+    doc.entities["probe"] = {
       name: "Probe",
       parent: null,
       tags: [],
       components: {
-        transform: { position: [10, 1.2, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] },
-        rigidbody: { kind: "dynamic", lockRotations: true, mass: 0, linearDamping: 0, angularDamping: 1, gravityScale: 1, ccd: false },
-        collider: { shape: "capsule", size: [0.8, 1.8, 0.8], offset: [0, 0.9, 0], friction: 0, restitution: 0, density: 1, isTrigger: false },
+        transform: { position: [0, 8, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] },
+        rigidbody: { kind: "dynamic", lockRotations: true, mass: 0, linearDamping: 0, angularDamping: 1, gravityScale: 1, ccd: true },
+        collider: { shape: "capsule", size: [0.8, 1.8, 0.8], offset: [0, 0.9, 0], friction: 0.5, restitution: 0, density: 1, isTrigger: false },
       },
     };
-    const sim = new PhysicsSim(probe);
-    for (let i = 0; i < 60 * 5; i++) {
-      const v = sim.getLinvel("probe")!;
-      sim.setLinvel("probe", [8, v[1], 0]);
-      sim.step(1 / 60);
-    }
-    const x = sim.states().get("probe")!.position[0];
+    const sim = new PhysicsSim(doc);
+    for (let i = 0; i < 60 * 5; i++) sim.step(1 / 60); // 5s under gravity
+    const y = sim.states().get("probe")!.position[1];
     sim.free();
-    // barrier-east sits at x=20 (half thickness 0.5) — the probe must stop there
-    expect(x).toBeLessThan(20.2);
-    expect(x).toBeGreaterThan(17);
-  });
-
-  it("a probe dropped outside the barrier is stopped by a ring rock", () => {
-    const probe = structuredClone(doc);
-    // find an actual ring rock and aim straight at it from inside its radius
-    const rock = Object.values(probe.entities).find((e) => e.name?.startsWith("Ring Rock"))!;
-    const [rx, , rz] = (rock.components["transform"] as { position: [number, number, number] }).position;
-    const len = Math.hypot(rx, rz);
-    const dir: [number, number] = [rx / len, rz / len];
-    const start: [number, number] = [rx - dir[0] * 6, rz - dir[1] * 6];
-    probe.entities["probe"] = {
-      name: "Probe",
-      parent: null,
-      tags: [],
-      components: {
-        transform: { position: [start[0], 1.2, start[1]], rotation: [0, 0, 0, 1], scale: [1, 1, 1] },
-        rigidbody: { kind: "dynamic", lockRotations: true, mass: 0, linearDamping: 0, angularDamping: 1, gravityScale: 1, ccd: false },
-        collider: { shape: "capsule", size: [0.8, 1.8, 0.8], offset: [0, 0.9, 0], friction: 0, restitution: 0, density: 1, isTrigger: false },
-      },
-    };
-    // delete the barriers so only the rock can stop the probe
-    for (const id of Object.keys(probe.entities)) if (id.startsWith("barrier-")) delete probe.entities[id];
-    const sim = new PhysicsSim(probe);
-    for (let i = 0; i < 60 * 5; i++) {
-      const v = sim.getLinvel("probe")!;
-      sim.setLinvel("probe", [dir[0] * 8, v[1], dir[1] * 8]);
-      sim.step(1 / 60);
-    }
-    const pos = sim.states().get("probe")!.position;
-    const traveled = Math.hypot(pos[0], pos[2]);
-    sim.free();
-    // rock center is at radius ~len; the probe must be stopped near/before it
-    expect(traveled).toBeLessThan(len + 1);
+    // center is flat (~y=0); the probe must come to rest on the surface, not
+    // sink through it (collision disabled would send it to large negatives).
+    expect(y).toBeGreaterThan(-0.5);
+    expect(y).toBeLessThan(8);
   });
 });

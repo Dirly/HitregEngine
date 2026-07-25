@@ -99,6 +99,11 @@ describe("HLOD static-render eligibility", () => {
     expect(
       isStaticRenderEntity(withComponents({ mesh: box([1, 1, 1]), animator: {} })),
     ).toBe(false);
+    expect(
+      isStaticRenderEntity(
+        withComponents({ mesh: box([1, 1, 1]), visibility: { visible: false } }),
+      ),
+    ).toBe(false);
   });
 });
 

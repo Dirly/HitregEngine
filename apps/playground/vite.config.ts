@@ -36,7 +36,7 @@ import path from "node:path";
  * can discover the tooling without reading this file. */
 const BRIDGE_ENDPOINTS = [
   { method: "GET", path: "/__hitreg/spec", purpose: "This capability spec + endpoint list." },
-  { method: "GET", path: "/__hitreg/context", purpose: "What the user currently sees: scene, selection, camera, in-view entities, play mode, diagnostics." },
+  { method: "GET", path: "/__hitreg/context", purpose: "What the user currently sees: scene, selection, camera, in-view entities, play mode, diagnostics. Keyed per browser tab (bridgeSessionId) — with exactly one tab connected this just returns its data; with more than one, returns { multipleClients: true, clients: [...] } instead of guessing, pass ?id=<id> from that list to pick one." },
   { method: "GET", path: "/__hitreg/assets-index", purpose: "Every asset file on disk, bucketed by kind (scenes, prefabs, materials, models, chunks, …)." },
   { method: "GET", path: "/__hitreg/asset-file?file=<rel>", purpose: "Read one asset file fresh from disk (bypasses Vite's cache)." },
   { method: "POST", path: "/__hitreg/write-asset", purpose: "Write an asset file ({file, content}); live-syncs into the running app." },
@@ -45,7 +45,17 @@ const BRIDGE_ENDPOINTS = [
 ] as const;
 
 function hitregBridge(): Plugin {
-  let latestContext: unknown = null;
+  // keyed by the posting tab's bridgeSessionId (dev-bridge.ts) — a single
+  // shared variable here meant any second tab connected to this dev server
+  // (extremely common: multiple editor windows, or an agent driving its own
+  // Playwright session against the same port) silently overwrote whichever
+  // tab's context GET /__hitreg/context returned next, blending two
+  // unrelated sessions' state into responses that read exactly like engine
+  // corruption (impossible counts, frozen/bogus numbers) but were purely a
+  // debugging-bridge artifact — confirmed by CPU-profiling a live "corruption"
+  // and finding the offending POST body belonged to a different tab entirely.
+  const contextByClient = new Map<string, { data: Record<string, unknown>; lastSeen: number }>();
+  const CONTEXT_STALE_MS = 5000; // ~5 missed 1s posts = treat the tab as gone
   let latestSpec: unknown = null;
 
   return {
@@ -243,8 +253,37 @@ function hitregBridge(): Plugin {
 
       server.middlewares.use("/__hitreg/context", (req, res) => {
         if (req.method === "GET") {
+          const now = Date.now();
+          for (const [id, entry] of contextByClient) {
+            if (now - entry.lastSeen > CONTEXT_STALE_MS) contextByClient.delete(id);
+          }
+          const url = new URL(req.url ?? "", "http://x");
+          const requestedId = url.searchParams.get("id");
           res.setHeader("content-type", "application/json");
-          res.end(JSON.stringify(latestContext));
+          res.setHeader("cache-control", "no-store");
+          if (requestedId) {
+            res.end(JSON.stringify(contextByClient.get(requestedId)?.data ?? null));
+            return;
+          }
+          if (contextByClient.size <= 1) {
+            const only = contextByClient.values().next().value as { data: unknown } | undefined;
+            res.end(JSON.stringify(only?.data ?? null));
+            return;
+          }
+          // more than one live tab and no ?id= to disambiguate — say so
+          // explicitly instead of silently returning whichever posted last
+          res.end(
+            JSON.stringify({
+              multipleClients: true,
+              hint: "pass ?id=<id> to disambiguate",
+              clients: [...contextByClient.entries()].map(([id, entry]) => ({
+                id,
+                scene: (entry.data as { scene?: string }).scene,
+                playMode: (entry.data as { playMode?: string }).playMode,
+                lastSeen: new Date(entry.lastSeen).toISOString(),
+              })),
+            }),
+          );
           return;
         }
         if (req.method === "POST") {
@@ -252,7 +291,9 @@ function hitregBridge(): Plugin {
           req.on("data", (chunk: Buffer) => (body += chunk));
           req.on("end", () => {
             try {
-              latestContext = JSON.parse(body);
+              const data = JSON.parse(body) as Record<string, unknown>;
+              const id = typeof data["bridgeSessionId"] === "string" ? data["bridgeSessionId"] : "unknown";
+              contextByClient.set(id, { data, lastSeen: Date.now() });
               res.end(JSON.stringify({ ok: true }));
             } catch {
               res.statusCode = 400;
@@ -456,11 +497,19 @@ function hitregBridge(): Plugin {
   };
 }
 
+// GAME=1 builds ONLY the editor-free game runtime (play.html) with a RELATIVE
+// base, so the bundle is path-portable (works served at any URL, e.g. a CDN
+// subpath). Without it, a normal `vite build` builds the editor app as usual.
+const gameBuild = process.env["GAME"] === "1";
+
 export default defineConfig({
   plugins: [hitregBridge()],
+  base: gameBuild ? "./" : "/",
   server: {
     port: 5173,
     watch: { ignored: ["**/assets/**"] },
   },
-  build: { target: "esnext" },
+  build: gameBuild
+    ? { target: "esnext", outDir: "dist-game", emptyOutDir: true, rollupOptions: { input: { play: "play.html" } } }
+    : { target: "esnext" },
 });

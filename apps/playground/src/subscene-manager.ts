@@ -29,6 +29,9 @@ interface LoadedSubscene {
 
 export interface SubsceneLifecycle {
   onLoaded?: (doc: SceneDoc, objects: Map<string, THREE.Object3D>) => void;
+  /** Re-parented into a freshly rebuilt scene, not a fresh load — see
+   * ChunkLifecycle.onReattached in chunk-manager.ts for the full rationale. */
+  onReattached?: (doc: SceneDoc, objects: Map<string, THREE.Object3D>) => void;
   onUnloaded?: (ids: Iterable<string>) => void;
   /** A `renderMode: "instanced"` batch's subscene unloaded — unregister it
    * from whatever FoliageLodSystem tracks it before its meshes get disposed. */
@@ -61,10 +64,10 @@ export class SubsceneManager {
     private readonly lifecycle: SubsceneLifecycle = {},
   ) {}
 
-  get stats(): { loaded: number; entities: number } {
+  get stats(): { loaded: number; entities: number; loading: number } {
     let entities = 0;
     for (const sub of this.loaded.values()) entities += Object.keys(sub.expanded.entities).length;
-    return { loaded: this.loaded.size, entities };
+    return { loaded: this.loaded.size, entities, loading: this.inFlight.size };
   }
 
   /** Called from rebuild() with the world's current subscene instances. */
@@ -84,7 +87,7 @@ export class SubsceneManager {
       if (!alive.has(id)) this.unload(id, sub);
       else {
         scene.add(sub.group);
-        this.lifecycle.onLoaded?.(sub.expanded, sub.objects);
+        this.lifecycle.onReattached?.(sub.expanded, sub.objects);
       }
     }
     this.lastFocus = null;
@@ -191,10 +194,11 @@ export class SubsceneManager {
     sub.group.traverse((node) => {
       const mesh = node as THREE.Mesh;
       if (mesh.isMesh) {
-        mesh.geometry?.dispose();
-        const material = mesh.material as THREE.Material | THREE.Material[];
-        if (Array.isArray(material)) material.forEach((m) => m.dispose());
-        else material?.dispose();
+        // materials are never disposed here — see chunk-manager.ts's
+        // disposeGroup for the full rationale (they're shared, asset-id-keyed
+        // caches now; disposing one instance's reference would break every
+        // other loaded chunk/subscene still using the same compiled material)
+        if (!mesh.userData["sharedGeometry"]) mesh.geometry?.dispose();
         if ((mesh as THREE.InstancedMesh).isInstancedMesh) (mesh as THREE.InstancedMesh).dispose();
         const batch = mesh.userData["foliageLodBatch"] as InstancedPropBatch | undefined;
         if (batch) this.lifecycle.onDisposeInstancedBatch?.(batch);

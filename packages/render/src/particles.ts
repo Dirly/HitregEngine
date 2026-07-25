@@ -25,6 +25,15 @@ export interface ParticlesData {
   space: "local" | "world";
 }
 
+export interface ParticleValue {
+  emitting?: boolean;
+  visible?: boolean;
+  /** Clear all live particles and accumulated fractional spawn debt. */
+  restart?: boolean;
+  /** Spawn this many particles immediately, bounded by the emitter pool. */
+  burst?: number;
+}
+
 /** Renderer-side safety net on top of the schema's own cap. */
 const HARD_MAX = 2000;
 const MIN_LIFE = 0.01;
@@ -89,6 +98,8 @@ class Emitter {
   private readonly capacity: number;
   private alive = 0;
   private spawnDebt = 0;
+  private emitting: boolean;
+  private runtimeVisible = true;
   // struct-of-arrays pools, sized once at registration
   private readonly pos: Float32Array;
   private readonly vel: Float32Array;
@@ -104,6 +115,7 @@ class Emitter {
     private readonly data: ParticlesData,
     resolveTexture?: (assetId: string) => string | undefined,
   ) {
+    this.emitting = data.emitting;
     this.capacity = Math.min(Math.max(1, Math.floor(data.max)), HARD_MAX);
     this.pos = new Float32Array(this.capacity * 3);
     this.vel = new Float32Array(this.capacity * 3);
@@ -151,6 +163,32 @@ class Emitter {
     this.mesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
     this.mesh.raycast = () => {}; // particles are never click-selectable
     group.add(this.mesh);
+  }
+
+  setValue(value: ParticleValue): void {
+    if (value.restart) {
+      this.alive = 0;
+      this.spawnDebt = 0;
+      this.mesh.count = 0;
+    }
+    if (value.emitting !== undefined) this.emitting = value.emitting;
+    if (value.visible !== undefined) {
+      this.runtimeVisible = value.visible;
+      this.mesh.visible = value.visible;
+    }
+    if (value.burst && value.burst > 0 && this.runtimeVisible && this.isHierarchyVisible()) {
+      this.group.updateWorldMatrix(true, false);
+      this.spawn(Math.floor(value.burst));
+    }
+  }
+
+  private isHierarchyVisible(): boolean {
+    let current: THREE.Object3D | null = this.group;
+    while (current) {
+      if (!current.visible) return false;
+      current = current.parent;
+    }
+    return true;
   }
 
   /** Direction of a new particle, in emitter-local space, written to tmpDir. */
@@ -228,6 +266,14 @@ class Emitter {
 
   update(dt: number): void {
     const d = this.data;
+    // Authored-hidden and runtime-hidden effects are genuinely asleep: no
+    // births, integration, instance uploads, or invisible steady-state cloud.
+    if (!this.runtimeVisible || !this.isHierarchyVisible()) {
+      this.alive = 0;
+      this.spawnDebt = 0;
+      this.mesh.count = 0;
+      return;
+    }
     this.group.updateWorldMatrix(true, false);
 
     // integrate + retire (swap-remove keeps [0, alive) dense — no compaction)
@@ -264,7 +310,7 @@ class Emitter {
       if (d.spin !== 0) rot[i] = rot[i]! + d.spin * dt;
     }
 
-    if (d.emitting && d.rate > 0) {
+    if (this.emitting && d.rate > 0) {
       this.spawnDebt += d.rate * dt;
       const births = Math.floor(this.spawnDebt);
       if (births > 0) {
@@ -355,6 +401,11 @@ export class ParticleSystem {
   unregister(entityId: string): void {
     this.emitters.get(entityId)?.dispose();
     this.emitters.delete(entityId);
+  }
+
+  /** Runtime-only control; the authoring document remains untouched. */
+  setValue(entityId: string, value: ParticleValue): void {
+    this.emitters.get(entityId)?.setValue(value);
   }
 
   clear(): void {

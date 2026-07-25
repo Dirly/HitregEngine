@@ -76,6 +76,15 @@ describe("reconcileScene", () => {
     expect(built.objects.get("box")!.name).toBe("Crate");
   });
 
+  it("applies serialized visibility in full builds and reconciles", () => {
+    const prev = doc({ box: boxEntity({ visibility: { visible: false } }) });
+    const built = buildScene(prev);
+    expect(built.objects.get("box")!.visible).toBe(false);
+    const next = doc({ box: boxEntity({ visibility: { visible: true } }) });
+    expect(reconcileScene(built, prev, next, ["box"], {})).toBe(true);
+    expect(built.objects.get("box")!.visible).toBe(true);
+  });
+
   it("rebuilds visuals in place on a mesh change, keeping the group", () => {
     const prev = doc({ box: boxEntity() });
     const next = structuredClone(prev);

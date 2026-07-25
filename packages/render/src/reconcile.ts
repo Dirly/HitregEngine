@@ -101,8 +101,10 @@ export function reconcileScene(
     plan.push({ id, action, after });
   }
 
-  // mutate pass
-  const materialCache = new Map<string, THREE.Material>();
+  // mutate pass — reuse the build's material cache so instances stay stable
+  // across reconciles (a mesh keeps the same THREE.Material for a given id),
+  // which is what makes live material-file patching possible.
+  const materialCache = built.materials;
   for (const { id, action, after } of plan) {
     const group = built.objects.get(id)!;
     group.name = after.name;

@@ -41,6 +41,14 @@
       "summary": "Replace an entity's tag list."
     },
     {
+      "op": "set-locked",
+      "fields": [
+        "id",
+        "locked"
+      ],
+      "summary": "Lock/unlock an entity against viewport click-selection and gizmo dragging (editor-only; cascades to descendants when picking)."
+    },
+    {
       "op": "set-component",
       "fields": [
         "id",
@@ -126,6 +134,17 @@
         }
       }
     },
+    "visibility": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "visible": {
+          "default": true,
+          "description": "False hides this entity's complete render subtree in edit and play mode. Scripts may still reveal it at runtime through the entity Object3D.",
+          "type": "boolean"
+        }
+      }
+    },
     "mesh": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -168,6 +187,25 @@
                     },
                     {
                       "type": "number"
+                    }
+                  ]
+                },
+                "segments": {
+                  "default": [
+                    1,
+                    1
+                  ],
+                  "type": "array",
+                  "prefixItems": [
+                    {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    },
+                    {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
                     }
                   ]
                 }
@@ -348,6 +386,78 @@
               "required": [
                 "kind"
               ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "path"
+                },
+                "points": {
+                  "minItems": 2,
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "prefixItems": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "number"
+                      }
+                    ]
+                  },
+                  "description": "Control points in entity-local space."
+                },
+                "closed": {
+                  "default": false,
+                  "description": "Loop from the last point back to the first.",
+                  "type": "boolean"
+                },
+                "crossSection": {
+                  "default": "ribbon",
+                  "description": "ribbon = flat strip (roads, rivers, fences); tube = round (vines, cables, rope).",
+                  "type": "string",
+                  "enum": [
+                    "ribbon",
+                    "tube"
+                  ]
+                },
+                "width": {
+                  "default": 2,
+                  "description": "ribbon only: total width across the curve.",
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                },
+                "radius": {
+                  "default": 0.15,
+                  "description": "tube only: cross-section radius.",
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                },
+                "radialSegments": {
+                  "default": 6,
+                  "description": "tube only: roundness.",
+                  "type": "integer",
+                  "minimum": 3,
+                  "maximum": 16
+                },
+                "segmentsPerSpan": {
+                  "default": 8,
+                  "description": "Curve smoothness between each pair of control points.",
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 32
+                }
+              },
+              "required": [
+                "kind",
+                "points"
+              ]
             }
           ]
         },
@@ -424,6 +534,17 @@
         "castShadow": {
           "default": false,
           "type": "boolean"
+        },
+        "importance": {
+          "default": 1,
+          "description": "Relative priority when the camera's dynamic point-light budget is full. Raise for short critical flashes; distant decorative lights should stay at 1.",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "shadowSize": {
+          "default": 40,
+          "type": "number",
+          "exclusiveMinimum": 0
         }
       },
       "required": [
@@ -1017,6 +1138,62 @@
         }
       }
     },
+    "grass": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "bladeColor": {
+          "default": "#3f7d34",
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "tipColor": {
+          "default": "#8fd15c",
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "bladeWidth": {
+          "default": 0.06,
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "bladeHeight": {
+          "default": 0.55,
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "density": {
+          "default": 5,
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "radius": {
+          "default": 20,
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "windStrength": {
+          "default": 0.4,
+          "type": "number",
+          "minimum": 0
+        },
+        "windSpeed": {
+          "default": 1.3,
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "heightFadeStart": {
+          "default": 12,
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "heightFadeEnd": {
+          "default": 30,
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    },
     "netObject": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -1306,6 +1483,168 @@
         "target"
       ]
     },
+    "pathScatter": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "points": {
+          "minItems": 2,
+          "type": "array",
+          "items": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ]
+          },
+          "description": "Control points in entity-local space; Catmull-Rom through all of them."
+        },
+        "closed": {
+          "default": false,
+          "description": "Loop from the last point back to the first.",
+          "type": "boolean"
+        },
+        "prop": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "primitive"
+                },
+                "shape": {
+                  "type": "string",
+                  "enum": [
+                    "box",
+                    "sphere",
+                    "plane",
+                    "cylinder",
+                    "capsule",
+                    "cone",
+                    "torus",
+                    "wedge"
+                  ]
+                },
+                "size": {
+                  "default": [
+                    1,
+                    1,
+                    1
+                  ],
+                  "type": "array",
+                  "prefixItems": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "number"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "shape"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "asset"
+                },
+                "assetId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "node": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "assetId"
+              ]
+            }
+          ],
+          "description": "The mesh instanced at each placement along the curve."
+        },
+        "material": {
+          "description": "Material asset GUID (assets/materials/); omitted = engine default material.",
+          "type": "string"
+        },
+        "spacing": {
+          "default": 2,
+          "description": "Distance in world units between placements.",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "offset": {
+          "default": 0,
+          "description": "Shifts the first placement along the curve (world units) — stagger parallel scatters.",
+          "type": "number"
+        },
+        "alignToTangent": {
+          "default": true,
+          "description": "Rotate each instance to face the curve's direction of travel at its point.",
+          "type": "boolean"
+        },
+        "heightOffset": {
+          "default": 0,
+          "type": "number"
+        },
+        "sideOffset": {
+          "default": 0,
+          "description": "Perpendicular shift from the curve centerline (e.g. fence posts along a road's shoulder).",
+          "type": "number"
+        },
+        "scaleJitter": {
+          "default": 0,
+          "description": "Random per-instance uniform scale variance, 0-1.",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "rotationJitter": {
+          "default": 0,
+          "description": "Random yaw jitter around the aligned facing, 0-1 of a full turn.",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "seed": {
+          "default": 1,
+          "description": "Deterministic jitter seed — same seed, same layout.",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "castShadow": {
+          "default": true,
+          "type": "boolean"
+        },
+        "receiveShadow": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "points",
+        "prop"
+      ]
+    },
     "chunkStreamer": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -1364,6 +1703,13 @@
               "minimum": 0
             }
           }
+        },
+        "hlodSupercellFactor": {
+          "default": 4,
+          "description": "hlod/far ring cells per supercell edge (e.g. 4 => a 4x4 block of cells bakes into ONE merged proxy instead of one per cell). Keeps instanced batches (trees, etc.) from re-fragmenting per cell once a world is chunked finely — small cellSize needs a bigger factor to stay at roughly the same supercell world size.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16
         }
       },
       "required": [
@@ -1468,9 +1814,13 @@
         },
         "emissiveIntensity": {
           "default": 1,
-          "description": "Emissive glow strength. Only visibly blooms when a scene postfx bloom pass is enabled.",
+          "description": "Emissive glow strength (tints `emissive` on top of the base color). Applies to every shader, including unlit — unlit's own glow is otherwise invisible to lighting but still feeds bloom. Only visibly blooms when a scene postfx bloom pass is enabled.",
           "type": "number",
           "minimum": 0
+        },
+        "emissiveMap": {
+          "description": "Texture asset id (assets/textures/) used as a self-illumination mask, standard/toon shaders only (URP-style 'Emission map'): white areas of this texture glow at full `emissive`/`emissiveIntensity` regardless of scene lighting — dark areas stay fully lit/shaded. Lets one mesh mix lit PBR surface with unlit glowing detail (e.g. a lit robot body with unlit glowing eyes/screens/edge trim) without switching the whole material to the `unlit` shader.",
+          "type": "string"
         },
         "opacity": {
           "default": 1,
@@ -1560,11 +1910,16 @@
           ]
         },
         "water": {
-          "description": "Only read when shader is 'water'. Fully procedural (no textures needed).",
+          "description": "Only read when shader is 'water'. Fully procedural (no textures needed) — depth-based color and shoreline foam read the depth buffer against whatever's actually beneath the surface, so they need real opaque geometry (terrain/seafloor) there to work.",
           "type": "object",
           "properties": {
             "shallowColor": {
               "default": "#3fa8c9",
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$"
+            },
+            "midColor": {
+              "default": "#1f6f96",
               "type": "string",
               "pattern": "^#[0-9a-fA-F]{6}$"
             },
@@ -1578,6 +1933,11 @@
               "type": "string",
               "pattern": "^#[0-9a-fA-F]{6}$"
             },
+            "foamColor": {
+              "default": "#eaf6ff",
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$"
+            },
             "waveFrequency": {
               "default": 0.35,
               "type": "number",
@@ -1587,8 +1947,33 @@
               "default": 0.6,
               "type": "number"
             },
+            "waveAmplitude": {
+              "default": 0.15,
+              "type": "number",
+              "minimum": 0
+            },
             "fresnelPower": {
               "default": 3,
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "depthFadeDistance": {
+              "default": 6,
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "foamWidth": {
+              "default": 0.5,
+              "type": "number",
+              "minimum": 0
+            },
+            "edgeFadeStart": {
+              "default": 400,
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "edgeFadeEnd": {
+              "default": 600,
               "type": "number",
               "exclusiveMinimum": 0
             }

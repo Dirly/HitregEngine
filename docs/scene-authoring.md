@@ -37,7 +37,7 @@ follows is the map and the judgment the schema can't encode.
 
 **What exists** (fields → the spec):
 
-- Render: `transform`, `mesh` (primitive / glTF `asset` / extruded `polygon` /
+- Render: `transform`, `visibility`, `mesh` (primitive / glTF `asset` / extruded `polygon` /
   `heightmap` terrain), `light`, `camera` (+ optional follow `rig`), `material`
   (a data asset referenced by GUID), `sky`, `postfx`, `particles`, `billboard`.
 - Physics: `rigidbody`, `collider`, `joint`.
@@ -90,7 +90,10 @@ what the schema can't describe: `setAnimation(clip, fade, { loop })` —
 `setActiveCamera(id)`, `viewForward()`, sim velocity APIs; `ctx.after(s, cb)` /
 `ctx.every(s, cb)` — deterministic sim-stepped timers (replay/multiplayer-safe,
 NOT setTimeout; return a cancel fn, auto-cancelled on dispose/suspend);
-`ctx.setBillboard({ fill?, text?, visible? })`; and `ctx.playerData` —
+`ctx.setBillboard({ fill?, text?, visible? })`;
+`ctx.setParticles(entityId, { emitting?, visible?, restart?, burst? })` for
+sleeping and one-shot effects; `ctx.setLight(entityId, { enabled?, intensity?,
+color? })` for runtime flashes/toggles; and `ctx.playerData` —
 experience-scoped persistence (`get/set/increment/transaction/keys(namespace,
 …)`, async, quota+rate-limited, atomic; survives sessions, e.g.
 `ctx.playerData?.increment("stats", "sessions")`). Minimal example:
@@ -175,8 +178,10 @@ handler writes. `onChange(cb)` fires on every change, local or replicated
 (auto-unsubscribed on dispose). Deltas ride the reliable channel, joiners get
 a full sync, and a promoted host INHERITS the replica — state survives host
 migration. It all dies with the room: commit durable results into
-`ctx.playerData`. Reference: cube-rpg's `enemyHp/*`, `defeated/*`, `taken/*`
-(shared pickups + migration-proof combat in ~30 lines).
+`ctx.playerData`. Pattern: a manager script keeps shared facts (enemy HP,
+"chest opened", per-player score) under namespaced keys; peers request changes
+via to-authority events and the authority writes the result — shared pickups +
+migration-proof combat in ~30 lines.
 The `events` block of GET /__hitreg/spec is the AI-facing payload spec; the
 context bridge posts `recentEvents` (last delivered `{ tick, name, payload }`)
 while playing. Minimal example: `apps/playground/src/scripts/event-demo.ts`.
@@ -187,5 +192,5 @@ while playing. Minimal example: `apps/playground/src/scripts/event-demo.ts`.
 - Colors are strict `#rrggbb` strings; `rotation` is a quaternion, not Euler.
 - A failing op anywhere rejects the entire batch — build large batches
   confidently, but validate prop names against the prefab's declared props.
-- Working example: `apps/playground/src/street-scene.ts`; runnable pipeline
-  demo: `pnpm -F @hitreg/core demo`.
+- Runnable pipeline demo (ops → prefabs → undo): `pnpm -F @hitreg/core demo`
+  (`packages/core/examples/build-a-street.ts`).

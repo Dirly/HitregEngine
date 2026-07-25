@@ -7,6 +7,14 @@ export const entityDocSchema = z.object({
   parent: z.string().nullable().default(null),
   tags: z.array(z.string()).default([]),
   components: z.record(z.string(), z.unknown()).default({}),
+  /**
+   * Editor-only: excludes this entity (and, cascading, its descendants) from
+   * viewport click-to-select and gizmo dragging — see `packages/editor/src/
+   * selection-ops.ts`'s `isLockedCascading`. Left optional (not `.default()`)
+   * so the many existing `add-entity` call sites across the repo that build
+   * EntityDoc literals without this field keep type-checking.
+   */
+  locked: z.boolean().optional(),
 });
 
 export const sceneDocSchema = z.object({

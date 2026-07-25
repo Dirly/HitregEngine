@@ -46,6 +46,7 @@ describe("buildEngineSpec", () => {
       "reparent",
       "rename",
       "set-tags",
+      "set-locked",
       "set-component",
       "remove-component",
     ]);

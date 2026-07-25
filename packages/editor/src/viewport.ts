@@ -1,25 +1,32 @@
 import * as THREE from "three/webgpu";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
-import { duplicateSubtree, newId, type AssetLibrary, type SceneStore } from "@hitreg/core";
+import { newId, type AssetLibrary, type Op, type SceneStore } from "@hitreg/core";
 import type {
   ContextMenu,
   EditorSettings,
   GizmoMode,
+  MultiSelection,
   Observable,
   Selection,
 } from "./state.js";
+import { selectSingle, toggleSelection } from "./state.js";
+import { applyMaterialToMany, deleteMany, duplicateMany, isLockedCascading } from "./selection-ops.js";
 
 export interface ViewportOptions {
   canvas: HTMLCanvasElement;
   camera: THREE.PerspectiveCamera;
   store: SceneStore;
   selection: Selection;
+  /** Full selected set; `selection` is always its active/last-clicked member. */
+  multiSelection?: MultiSelection;
   enabled: Observable<boolean>;
   settings: Observable<EditorSettings>;
   gizmoMode: Observable<GizmoMode>;
   contextMenu?: ContextMenu;
   /** While the graybox tool is active, picking and gizmos stand down. */
   grayboxActive?: Observable<boolean>;
+  /** While the path tool is active, picking and gizmos stand down. */
+  pathActive?: Observable<boolean>;
   /** Needed to resolve names when assets are drag-dropped into the viewport. */
   assets?: AssetLibrary;
   /** Current (possibly rebuilt) scene + entity object lookup. */
@@ -46,14 +53,27 @@ export class ViewportTools {
   private flewDuringDrag = false;
   /** Alt-scale anchor: keep the object's lowest point fixed while scaling. */
   private scaleAnchor: { bottomY: number; k: number } | null = null;
+  /**
+   * Group-transform state (2+ selected): the gizmo attaches to a bare proxy
+   * object instead of a real entity so dragging never re-parents anything —
+   * each real object's transform is re-derived from the proxy's delta and
+   * written back into its OWN parent-local space.
+   */
+  private groupProxy: THREE.Object3D | null = null;
+  private groupIds: string[] | null = null;
+  private groupStart: Map<string, THREE.Matrix4> | null = null;
+  private proxyStartInverse: THREE.Matrix4 | null = null;
 
   constructor(private readonly opts: ViewportOptions) {
     this.controls = new TransformControls(opts.camera, opts.canvas);
     this.controls.addEventListener("dragging-changed", (event) => {
       const dragging = Boolean((event as { value: unknown }).value);
       opts.onDraggingChanged?.(dragging);
-      if (dragging && this.controls.mode === "scale" && this.controls.object) {
+      if (dragging && this.groupProxy && this.groupIds) {
+        this.snapshotGroupStart();
+      } else if (dragging && this.controls.mode === "scale" && this.controls.object) {
         // capture the lowest point so Alt can anchor scaling to the floor
+        // (single-object only — the proxy has no geometry to box)
         const object = this.controls.object;
         const box = new THREE.Box3().setFromObject(object);
         if (Number.isFinite(box.min.y) && object.scale.y !== 0) {
@@ -65,10 +85,15 @@ export class ViewportTools {
       }
       if (!dragging) {
         this.scaleAnchor = null;
-        this.commitTransform();
+        if (this.groupProxy && this.groupStart) this.commitGroupTransform();
+        else this.commitTransform();
       }
     });
     this.controls.addEventListener("objectChange", () => {
+      if (this.groupProxy) {
+        this.applyGroupDelta();
+        return;
+      }
       const object = this.controls.object;
       if (!object || !this.altDown || this.controls.mode !== "scale" || !this.scaleAnchor) return;
       object.position.y = this.scaleAnchor.bottomY + this.scaleAnchor.k * object.scale.y;
@@ -87,7 +112,7 @@ export class ViewportTools {
     window.addEventListener("pointerup", onWindowPointerUp);
     this.disposers.push(() => window.removeEventListener("pointerup", onWindowPointerUp));
     const onPointerUp = (e: PointerEvent) => {
-      if (this.opts.grayboxActive?.get()) return;
+      if (this.opts.grayboxActive?.get() || this.opts.pathActive?.get()) return;
       if (!this.opts.enabled.get() || !this.pointerDown) return;
       const moved =
         Math.abs(e.clientX - this.pointerDown.x) + Math.abs(e.clientY - this.pointerDown.y);
@@ -136,7 +161,13 @@ export class ViewportTools {
       if (!this.opts.enabled.get() || !this.opts.contextMenu) return;
       if (this.pointerDown) return; // mid-gesture
       const picked = this.pickAt(e.clientX, e.clientY);
-      if (picked) this.opts.selection.set(picked);
+      // keep an existing multi-selection intact when right-clicking one of
+      // its own members, so "duplicate"/"delete" from the menu act on the
+      // whole group; otherwise collapse to just the picked entity
+      if (picked && !(this.opts.multiSelection?.get().includes(picked) ?? false)) {
+        this.opts.selection.set(picked);
+        this.opts.multiSelection?.set([picked]);
+      }
       this.opts.contextMenu.set({ x: e.clientX, y: e.clientY, entityId: picked });
     };
 
@@ -182,6 +213,8 @@ export class ViewportTools {
         this.refreshGrid();
       }),
       ...(opts.grayboxActive ? [opts.grayboxActive.subscribe(() => this.syncAttachment())] : []),
+      ...(opts.pathActive ? [opts.pathActive.subscribe(() => this.syncAttachment())] : []),
+      ...(opts.multiSelection ? [opts.multiSelection.subscribe(() => this.syncAttachment())] : []),
       opts.settings.subscribe(() => {
         this.applySnaps();
         this.refreshGrid();
@@ -222,34 +255,137 @@ export class ViewportTools {
     }
   }
 
-  private deleteSelection(): void {
+  /** Currently selected ids: the full multi-selection if wired, else just the primary. */
+  private selectedIds(): string[] {
+    const multi = this.opts.multiSelection?.get();
+    if (multi && multi.length > 0) return multi;
     const id = this.opts.selection.get();
-    if (!id) return;
+    return id ? [id] : [];
+  }
+
+  private isLocked(id: string): boolean {
+    return isLockedCascading(this.opts.store.doc, id);
+  }
+
+  private deleteSelection(): void {
+    const ids = this.selectedIds();
+    if (ids.length === 0) return;
     this.opts.selection.set(null);
-    this.opts.store.apply([{ op: "remove-entity", id }]);
+    this.opts.multiSelection?.set([]);
+    deleteMany(this.opts.store, this.opts.store.doc, ids);
   }
 
   private duplicateSelection(): void {
-    const id = this.opts.selection.get();
-    if (!id) return;
-    const ops = duplicateSubtree(this.opts.store.doc, id);
-    if (ops.length === 0) return;
-    this.opts.store.apply(ops);
-    this.opts.selection.set(ops[0]!.op === "add-entity" ? (ops[0] as { id: string }).id : id);
+    const ids = this.selectedIds();
+    if (ids.length === 0) return;
+    const newRoots = duplicateMany(this.opts.store, this.opts.store.doc, ids);
+    if (newRoots.length === 0) return;
+    this.opts.selection.set(newRoots[newRoots.length - 1]!);
+    this.opts.multiSelection?.set(newRoots);
+  }
+
+  private teardownGroupProxy(): void {
+    this.groupProxy?.removeFromParent();
+    this.groupProxy = null;
+    this.groupIds = null;
+    this.groupStart = null;
+    this.proxyStartInverse = null;
   }
 
   private syncAttachment(): void {
-    const id = this.opts.selection.get();
-    const object =
-      id && this.opts.enabled.get() && !this.opts.grayboxActive?.get()
-        ? this.opts.getObject(id)
-        : undefined;
-    if (object) this.controls.attach(object);
-    else this.controls.detach();
+    this.teardownGroupProxy();
+    const enabled =
+      this.opts.enabled.get() && !this.opts.grayboxActive?.get() && !this.opts.pathActive?.get();
+    const ids = enabled ? this.selectedIds().filter((id) => !!this.opts.getObject(id) && !this.isLocked(id)) : [];
+    if (ids.length === 0) {
+      this.controls.detach();
+      return;
+    }
+    if (ids.length === 1) {
+      this.controls.attach(this.opts.getObject(ids[0]!)!);
+      return;
+    }
+    // group: pivot on the active selection (falling back to the last id) —
+    // a bare proxy so dragging never re-parents the real objects
+    const primary = this.opts.selection.get();
+    const pivotId = primary && ids.includes(primary) ? primary : ids[ids.length - 1]!;
+    const pivotObject = this.opts.getObject(pivotId)!;
+    pivotObject.updateWorldMatrix(true, false);
+    const proxy = new THREE.Object3D();
+    proxy.position.setFromMatrixPosition(pivotObject.matrixWorld);
+    proxy.quaternion.setFromRotationMatrix(pivotObject.matrixWorld);
+    this.opts.getScene().add(proxy);
+    this.groupProxy = proxy;
+    this.groupIds = ids;
+    this.controls.attach(proxy);
+  }
+
+  private snapshotGroupStart(): void {
+    if (!this.groupProxy || !this.groupIds) return;
+    this.groupProxy.updateMatrixWorld(true);
+    this.proxyStartInverse = this.groupProxy.matrixWorld.clone().invert();
+    this.groupStart = new Map();
+    for (const id of this.groupIds) {
+      const object = this.opts.getObject(id);
+      if (!object) continue;
+      object.updateMatrixWorld(true);
+      this.groupStart.set(id, object.matrixWorld.clone());
+    }
+  }
+
+  private applyGroupDelta(): void {
+    if (!this.groupProxy || !this.groupStart || !this.proxyStartInverse) return;
+    this.groupProxy.updateMatrixWorld(true);
+    const delta = new THREE.Matrix4().multiplyMatrices(this.groupProxy.matrixWorld, this.proxyStartInverse);
+    const position = new THREE.Vector3();
+    const quaternion = new THREE.Quaternion();
+    const scale = new THREE.Vector3();
+    for (const [id, startWorld] of this.groupStart) {
+      const object = this.opts.getObject(id);
+      if (!object || !object.parent) continue;
+      const newWorld = new THREE.Matrix4().multiplyMatrices(delta, startWorld);
+      object.parent.updateMatrixWorld(true);
+      const parentInverse = object.parent.matrixWorld.clone().invert();
+      new THREE.Matrix4().multiplyMatrices(parentInverse, newWorld).decompose(position, quaternion, scale);
+      object.position.copy(position);
+      object.quaternion.copy(quaternion);
+      object.scale.copy(scale);
+    }
+  }
+
+  private commitGroupTransform(): void {
+    if (!this.groupIds) return;
+    const ops: Op[] = [];
+    for (const id of this.groupIds) {
+      const object = this.opts.getObject(id);
+      if (!object) continue;
+      ops.push({
+        op: "set-component",
+        id,
+        component: "transform",
+        data: {
+          position: object.position.toArray(),
+          rotation: object.quaternion.toArray() as [number, number, number, number],
+          scale: object.scale.toArray(),
+        },
+      });
+    }
+    if (ops.length > 0) this.opts.store.apply(ops);
+    this.syncAttachment(); // rebuild the proxy fresh at the new pivot
   }
 
   private pick(e: PointerEvent): void {
-    this.opts.selection.set(this.pickAt(e.clientX, e.clientY));
+    const id = this.pickAt(e.clientX, e.clientY);
+    const multi = this.opts.multiSelection;
+    if (!multi) {
+      this.opts.selection.set(id);
+      return;
+    }
+    if (e.ctrlKey || e.metaKey) {
+      if (id) toggleSelection(this.opts.selection, multi, id);
+      return; // ctrl-click on empty space: leave the current selection alone
+    }
+    selectSingle(this.opts.selection, multi, id);
   }
 
   /** Raycast a screen point to a SOURCE-doc entity id (prefab instances pick as one unit). */
@@ -262,10 +398,17 @@ export class ViewportTools {
     this.raycaster.setFromCamera(ndc, this.opts.camera);
     const hits = this.raycaster.intersectObjects(this.opts.getScene().children, true);
     for (const hit of hits) {
+      // the sky dome (procedural gradient, no texture/cubemap configured)
+      // fills the whole background — never let it eat a deselect-click
+      if (hit.object.userData["skyDome"]) continue;
       let node: THREE.Object3D | null = hit.object;
       while (node) {
         const entityId = node.userData["entityId"] as string | undefined;
-        if (entityId) return entityId.split(":")[0]!;
+        if (entityId) {
+          const resolved = entityId.split(":")[0]!;
+          if (this.isLocked(resolved)) break; // locked: fall through to whatever's behind it
+          return resolved;
+        }
         node = node.parent;
       }
     }
@@ -278,17 +421,16 @@ export class ViewportTools {
     clientY: number,
     ctrl: boolean,
   ): void {
-    // material dropped onto an object: assign it
+    // material dropped onto an object: assign it (to the whole multi-selection
+    // when the drop target is one of its members, else just that one object)
     if (payload.kind === "material") {
       const target = this.pickAt(clientX, clientY);
       if (!target) return;
-      const entity = this.opts.store.doc.entities[target];
-      const mesh = entity?.components["mesh"] as Record<string, unknown> | undefined;
-      if (!mesh) return;
-      this.opts.store.apply([
-        { op: "set-component", id: target, component: "mesh", data: { ...mesh, material: payload.id } },
-      ]);
+      const multi = this.opts.multiSelection?.get() ?? [];
+      const ids = multi.length > 1 && multi.includes(target) ? multi : [target];
+      applyMaterialToMany(this.opts.store, this.opts.store.doc, ids, payload.id);
       this.opts.selection.set(target);
+      this.opts.multiSelection?.set(ids);
       return;
     }
 
@@ -351,6 +493,7 @@ export class ViewportTools {
   }
 
   dispose(): void {
+    this.teardownGroupProxy();
     for (const dispose of this.disposers) dispose();
     this.controls.dispose();
   }

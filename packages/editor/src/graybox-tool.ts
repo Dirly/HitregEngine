@@ -16,6 +16,8 @@ export interface GrayboxToolOptions {
   shape: Observable<GrayboxShape>;
   /** Bevel size applied to drawn boxes/polys (0 = off). */
   bevel: Observable<number>;
+  /** Material asset GUID stamped onto newly-drawn shapes ("" = engine default). */
+  material?: Observable<string>;
   getScene(): THREE.Scene;
   onDraggingChanged?(dragging: boolean): void;
 }
@@ -626,6 +628,10 @@ export class GrayboxTool {
     collider: unknown,
   ): void {
     const id = newId();
+    // paint-at-draw: the toolbar's material picker assigns to every new shape
+    const material = this.opts.material?.get();
+    const meshData =
+      material && typeof mesh === "object" && mesh !== null ? { ...mesh, material } : mesh;
     try {
       this.opts.store.apply([
         {
@@ -635,7 +641,7 @@ export class GrayboxTool {
             name,
             parent: null,
             tags: ["graybox"],
-            components: { transform: { position, rotation }, mesh, collider },
+            components: { transform: { position, rotation }, mesh: meshData, collider },
           },
         },
       ]);

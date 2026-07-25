@@ -17,6 +17,7 @@ export {
 export {
   registerCoreComponents,
   transformSchema,
+  visibilitySchema,
   meshSchema,
   lightSchema,
   cameraSchema,
@@ -28,6 +29,7 @@ export {
   postfxSchema,
   particlesSchema,
   billboardSchema,
+  grassSchema,
   netObjectSchema,
   type NetObjectData,
   vec3,
@@ -75,6 +77,11 @@ export {
   colliderSchema,
   jointSchema,
 } from "./components/physics.js";
+export {
+  registerPathComponents,
+  pathScatterSchema,
+  type PathScatterData,
+} from "./components/path.js";
 export {
   sampleHeightmap,
   heightmapMesh,
@@ -163,3 +170,11 @@ export {
   type NetStateDelta,
   type NetStateChangeHandler,
 } from "./net-state.js";
+export {
+  gameManifestSchema,
+  parseManifest,
+  RUNTIME_ENGINE,
+  RUNTIME_VERSION,
+  MANIFEST_VERSION,
+  type GameManifest,
+} from "./manifest.js";

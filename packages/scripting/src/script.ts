@@ -55,6 +55,25 @@ export interface ScriptContext {
   playSound?(soundId?: string): void;
   /** Mutate this entity's billboard at runtime (HP bar fill, label text) — never the document. */
   setBillboard?(opts: { fill?: number; text?: string; visible?: boolean }): void;
+  /** Start/stop, reveal, restart, or burst this entity's particle emitter at runtime. */
+  setParticles?(entityId: string, opts: {
+    emitting?: boolean;
+    visible?: boolean;
+    restart?: boolean;
+    burst?: number;
+  }): void;
+  /** Runtime-only control for this entity's light component. */
+  setLight?(entityId: string, opts: { enabled?: boolean; intensity?: number; color?: string }): void;
+  /**
+   * Rebuild THIS entity's `mesh.source.kind: "path"` geometry from new
+   * control points (world space) — for a rope/chain/cable whose shape comes
+   * from a live simulation (e.g. a joint chain's body positions) instead of
+   * the authored static curve. Every other field (crossSection, width,
+   * radius, ...) keeps the value authored on the entity's mesh component;
+   * only `points` changes, and only at runtime — the document is untouched.
+   * No-op if this entity has no path mesh.
+   */
+  setPathPoints?(points: Array<[number, number, number]>): void;
   /**
    * Typed gameplay events (deterministic pub/sub). `emit` queues — nothing
    * dispatches synchronously; the runtime drains the queue in FIFO order at a
@@ -133,6 +152,14 @@ export interface SimLike {
   applyImpulse(id: string, v: [number, number, number]): void;
   /** Teleport (respawns): position set, velocities zeroed. */
   setPosition?(id: string, p: [number, number, number]): void;
+  /**
+   * Drive a KINEMATIC body's position for the next step — NOT setPosition/
+   * setTranslation. Rapier estimates a kinematic body's velocity (what a
+   * dynamic body jointed to it actually feels) from this call, specifically;
+   * driving a kinematic joint anchor via setPosition each tick instead reads
+   * to anything attached as a fresh teleport every step — violent jitter.
+   */
+  setKinematicTarget?(id: string, p: [number, number, number]): void;
   takeCollisions?(): Array<[string, string]>;
   /** Collision-ended pairs since the last call (drives "trigger.exit"). */
   takeCollisionEnds?(): Array<[string, string]>;

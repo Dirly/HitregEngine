@@ -104,6 +104,19 @@ describe("applyOps", () => {
     expect(restored).toEqual(doc);
   });
 
+  it("set-locked toggles and the inverse restores the previous state", () => {
+    const registry = setup();
+    const doc = buildScene(registry);
+    const { doc: next, inverse } = applyOps(
+      doc,
+      [{ op: "set-locked", id: "child", locked: true }],
+      registry,
+    );
+    expect(next.entities["child"]!.locked).toBe(true);
+    const { doc: restored } = applyOps(next, inverse, registry);
+    expect(restored.entities["child"]!.locked).toBe(false);
+  });
+
   it("remove-entity cascades to the subtree, and inverse restores it", () => {
     const registry = setup();
     const doc = buildScene(registry);

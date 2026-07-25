@@ -254,6 +254,107 @@ describe("face-target", () => {
   });
 });
 
+describe("tweener", () => {
+  function tweenerScene(params: Record<string, unknown>) {
+    const doc = scene([
+      {
+        op: "add-entity",
+        id: "box",
+        entity: {
+          name: "Box",
+          parent: null,
+          tags: [],
+          components: { transform: {}, script: { name: "tweener", params } },
+        },
+      },
+    ]);
+    const box = new THREE.Object3D();
+    const runtime = new ScriptRuntime({
+      doc,
+      objects: new Map([["box", box]]),
+      sim: null,
+      registry: registry(),
+      input: noInput,
+    });
+    return { runtime, box };
+  }
+
+  it("moves position linearly from `from` to `to` over `duration`, once", () => {
+    const { runtime, box } = tweenerScene({
+      property: "position",
+      from: [0, 0, 0],
+      to: [0, 10, 0],
+      duration: 2,
+      ease: "linear",
+      loop: "once",
+    });
+    runtime.start();
+    step(runtime, 60); // t=1s -> halfway
+    expect(box.position.y).toBeCloseTo(5, 1);
+    step(runtime, 120); // t=3s -> past duration, clamped at `to`
+    expect(box.position.y).toBeCloseTo(10, 1);
+  });
+
+  it("ping-pongs back to `from` when loop is pingpong", () => {
+    const { runtime, box } = tweenerScene({
+      property: "position",
+      from: [0, 0, 0],
+      to: [0, 10, 0],
+      duration: 2,
+      ease: "linear",
+      loop: "pingpong",
+    });
+    runtime.start();
+    step(runtime, 120); // t=2s -> reached `to`
+    expect(box.position.y).toBeCloseTo(10, 1);
+    step(runtime, 120); // t=4s -> back at `from`
+    expect(box.position.y).toBeCloseTo(0, 1);
+  });
+
+  it("scales as a multiplier on the spawn scale", () => {
+    const { runtime, box } = tweenerScene({
+      property: "scale",
+      from: [1, 1, 1],
+      to: [2, 2, 2],
+      duration: 2,
+      ease: "linear",
+      loop: "once",
+    });
+    box.scale.set(3, 3, 3); // non-default spawn scale
+    runtime.start();
+    step(runtime, 120); // t=2s -> fully at `to` multiplier
+    expect(box.scale.x).toBeCloseTo(6, 1); // 3 * 2
+  });
+
+  it("rotates as a degree offset from the spawn rotation", () => {
+    const { runtime, box } = tweenerScene({
+      property: "rotation",
+      from: [0, 0, 0],
+      to: [0, 90, 0],
+      duration: 2,
+      ease: "linear",
+      loop: "once",
+    });
+    runtime.start();
+    step(runtime, 120); // t=2s -> fully rotated
+    expect(box.rotation.y).toBeCloseTo(Math.PI / 2, 2);
+  });
+
+  it("falls back to linear for an unknown ease name", () => {
+    const { runtime, box } = tweenerScene({
+      property: "position",
+      from: [0, 0, 0],
+      to: [0, 10, 0],
+      duration: 2,
+      ease: "not-a-real-curve",
+      loop: "once",
+    });
+    runtime.start();
+    step(runtime, 60); // t=1s -> halfway, same as linear
+    expect(box.position.y).toBeCloseTo(5, 1);
+  });
+});
+
 describe("damageable", () => {
   function hazardScene(params: Record<string, unknown>) {
     const doc = scene([

@@ -85,6 +85,11 @@ function isDynamic(entity: EntityDoc): boolean {
   return rb != null && rb.kind !== "static";
 }
 
+function isInitiallyHidden(entity: EntityDoc): boolean {
+  const visibility = entity.components["visibility"] as { visible?: boolean } | undefined;
+  return visibility?.visible === false;
+}
+
 /**
  * Whether an entity is an eligible static render entity for HLOD merge: it has
  * renderable geometry (a `mesh` that is not terrain — heightmaps belong to the
@@ -95,6 +100,7 @@ export function isStaticRenderEntity(entity: EntityDoc): boolean {
   const mesh = entity.components["mesh"] as { source?: { kind?: string } } | undefined;
   if (!mesh) return false;
   if (mesh.source?.kind === "heightmap") return false;
+  if (isInitiallyHidden(entity)) return false;
   return !isDynamic(entity);
 }
 
@@ -107,6 +113,20 @@ function hasDynamicAncestor(doc: SceneDoc, id: string): boolean {
     const entity = doc.entities[parent];
     if (!entity) break;
     if (isDynamic(entity)) return true;
+    parent = entity.parent;
+  }
+  return false;
+}
+
+/** Hidden authored subtrees are inactive source state, not distant scenery. */
+function hasHiddenAncestor(doc: SceneDoc, id: string): boolean {
+  let parent = doc.entities[id]?.parent ?? null;
+  const seen = new Set<string>();
+  while (parent !== null && !seen.has(parent)) {
+    seen.add(parent);
+    const entity = doc.entities[parent];
+    if (!entity) break;
+    if (isInitiallyHidden(entity)) return true;
     parent = entity.parent;
   }
   return false;
@@ -190,6 +210,7 @@ export function assembleHlodBuildDoc(
 
     for (const [id, entity] of Object.entries(expanded.entities)) {
       if (!isStaticRenderEntity(entity)) continue;
+      if (hasHiddenAncestor(expanded, id)) continue;
       if (hasDynamicAncestor(expanded, id)) {
         warnings.push(`entity ${id} (cell ${cell.cx}_${cell.cz}) skipped: dynamic ancestor`);
         continue;

@@ -2,7 +2,14 @@
 
 AI-native game engine on Three.js. **Read ARCHITECTURE.md before structural
 work — its decisions are binding.** VISION.md holds the product thesis and
-phased roadmap.
+phased roadmap. **Before any performance work on a chunk-streamed,
+instancing-heavy, or proximity-loaded (subscene) world, read
+`docs/performance-lessons.md`** — concrete bugs already found and fixed
+building the first real open-world game on this engine (shared-material/
+geometry caching across chunk loads, HLOD supercell wiring, subscene
+hysteresis, instanced-LOD buffer compaction, camera-collision raycast cost,
+a couple of sneaky main-thread-blocking browser APIs). Skipping it risks
+re-discovering the same bugs from scratch.
 
 ## Commands
 
@@ -39,8 +46,8 @@ pnpm typecheck                   # all packages
   fixed-timestep loop. Zero deps beyond Zod; runs headless.
 - `packages/render` — Three.js WebGPU adapter (`buildScene`, `EngineRenderer`).
   WebGL fallback is automatic; `init()` reports the backend.
-- `apps/playground` — dev sandbox; the street scene doubles as a living example
-  of scene authoring.
+- `apps/playground` — dev sandbox; the committed example scenes (e.g. `sumo`)
+  double as living examples of scene authoring.
 
 Scene/prefab format reference: **docs/scene-authoring.md** (tool-neutral; the
 `scene-authoring` skill wraps it for Claude sessions — non-Claude agents read
@@ -69,7 +76,12 @@ The primary AI channel is **direct file editing** — no MCP required:
 - **Runtime context** (what the user sees): `curl -s http://localhost:5173/__hitreg/context`
   → `{ scene, playMode, selection: {id, entity}, camera: {position, target},
   inView: [{id, name, distance}...] }`. Use it to resolve "this/the one I'm
-  looking at" references before editing.
+  looking at" references before editing. Keyed per browser tab: if more than
+  one tab is connected to the dev server (e.g. an agent's own Playwright
+  session alongside the user's), the response is instead
+  `{ multipleClients: true, clients: [{id, scene, playMode, lastSeen}...] }`
+  — pass `?id=<id>` to target one. Don't assume a single unlabeled response
+  is "the" session if you might not be the only client.
 - **Capability spec** (what you can build): `curl -s http://localhost:5173/__hitreg/spec`
   → `{ components, dataAssets, events, netState, scripts, ops, prefabs, endpoints }`,
   every field a JSON Schema generated from the live Zod definitions, so it can't
@@ -80,7 +92,7 @@ The primary AI channel is **direct file editing** — no MCP required:
 
 ## Building a full game vs. extending the engine
 
-Small illustrative scenes (`street`, `sumo`, `cube-rpg`, etc.) live under
+Small illustrative scenes (`sumo`, `village-a`, etc.) live under
 `apps/playground/assets/` + `apps/playground/src/scripts/` and stay
 committed — they double as scene-authoring/scripting examples. A **complete
 game** (its own economy/job loop, many scenes, a dedicated script suite) is

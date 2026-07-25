@@ -59,6 +59,17 @@ export class EngineRenderer {
     this.renderer.setSize(width, height, false);
   }
 
+  /**
+   * Hardware anisotropic filtering cap. Feed into `texture.anisotropy` so
+   * ground/road textures viewed at a shallow angle into the distance stay
+   * sharp — mipmapping alone (on by default) only fixes head-on minification,
+   * not the oblique-angle blur a receding road or floor gets. Only valid
+   * after init() resolves (backend must exist).
+   */
+  getMaxAnisotropy(): number {
+    return this.renderer.getMaxAnisotropy();
+  }
+
   /** Enable/retune bloom (null disables). Live retunes update uniforms in place. */
   setBloom(options: BloomOptions | null): void {
     this.bloomOptions = options;

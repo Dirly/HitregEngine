@@ -8,16 +8,31 @@
       html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0e14; }
       #app { display: block; width: 100vw; height: 100vh; }
       #hud {
-        position: fixed; top: 8px; left: 8px;
+        position: fixed; top: 8px; right: 8px;
         font: 12px/1.4 ui-monospace, monospace; color: #8b949e;
         background: rgba(13, 17, 23, 0.7); padding: 4px 8px; border-radius: 4px;
-        pointer-events: none; white-space: pre;
+        pointer-events: none; white-space: pre; text-align: right;
       }
+      #scene-loading {
+        position: fixed; inset: 0; display: none;
+        align-items: center; justify-content: center;
+        background: rgba(11, 14, 20, 0.72);
+        font: 600 15px ui-monospace, monospace; color: #e6edf3;
+        pointer-events: none; z-index: 1000;
+      }
+      #scene-loading.visible { display: flex; }
+      #scene-loading .spinner {
+        width: 14px; height: 14px; margin-right: 10px; border-radius: 50%;
+        border: 2px solid rgba(230, 237, 243, 0.25); border-top-color: #ffd633;
+        animation: scene-loading-spin 0.8s linear infinite;
+      }
+      @keyframes scene-loading-spin { to { transform: rotate(360deg); } }
     </style>
   </head>
   <body>
     <canvas id="app"></canvas>
     <div id="hud">loading…</div>
+    <div id="scene-loading"><span class="spinner"></span><span id="scene-loading-text">loading scene…</span></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

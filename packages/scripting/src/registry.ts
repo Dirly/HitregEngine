@@ -26,6 +26,25 @@ export class ScriptRegistry {
     }
   }
 
+  /**
+   * Hot-reload path: replace an already-registered class (or add a new one)
+   * instead of throwing on the duplicate name. `register`'s strict guard exists
+   * to catch two *different* scripts claiming one name — a real bug — but a
+   * file re-executing under HMR legitimately re-registers its own name with
+   * fresh code, so that route skips the guard and overwrites. Event decls are
+   * added the same way `register` does (already-registered names are skipped).
+   */
+  reregister(cls: ScriptClass, events?: EventRegistry): void {
+    if (!cls.scriptName) throw new Error("script class needs a static scriptName");
+    this.classes.set(cls.scriptName, cls);
+    if (events) {
+      for (const decl of cls.events ?? []) {
+        if (events.has(decl.name)) continue;
+        events.register(decl.name, decl.schema, decl.options);
+      }
+    }
+  }
+
   get(name: string): ScriptClass | undefined {
     return this.classes.get(name);
   }

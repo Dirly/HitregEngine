@@ -1,6 +1,7 @@
 import { createRoot } from "react-dom/client";
 import type { AssetLibrary, ComponentRegistry, SceneStore } from "@hitreg/core";
 import { App } from "./overlay/App.js";
+import type { LoadedChunkCell } from "./overlay/hierarchy-dock.js";
 import type {
   AssetSelection,
   ContextMenu,
@@ -9,11 +10,13 @@ import type {
   GizmoMode,
   GrayboxShape,
   ModelBones,
+  MultiSelection,
   Observable,
   PlayMode,
   Selection,
   TerrainBrushSettings,
 } from "./state.js";
+import type { PathCrossSection } from "./path-tool.js";
 
 export interface MountOptions {
   container: HTMLElement;
@@ -21,6 +24,7 @@ export interface MountOptions {
   registry: ComponentRegistry;
   assets: AssetLibrary;
   selection: Selection;
+  multiSelection: MultiSelection;
   visible: Observable<boolean>;
   settings: Observable<EditorSettings>;
   gizmoMode: Observable<GizmoMode>;
@@ -30,8 +34,14 @@ export interface MountOptions {
   grayboxActive: Observable<boolean>;
   grayboxShape: Observable<GrayboxShape>;
   grayboxBevel: Observable<number>;
+  /** Material GUID stamped onto newly-drawn graybox shapes ("" = engine default). */
+  grayboxMaterial: Observable<string>;
   terrainActive: Observable<boolean>;
   terrainBrush: Observable<TerrainBrushSettings>;
+  pathActive: Observable<boolean>;
+  pathCrossSection: Observable<PathCrossSection>;
+  pathWidth: Observable<number>;
+  pathRadius: Observable<number>;
   thumbnails: Observable<Record<string, string>>;
   dockSizes: Observable<DockSizes>;
   assetsVersion: Observable<number>;
@@ -49,6 +59,14 @@ export interface MountOptions {
   onEditPrefab?: (id: string) => void;
   /** Leave prefab isolation: save=true flushes to the definition, false discards. */
   onClosePrefabEdit?: (save: boolean) => void;
+  /** Chunk-cell isolation editing: the cell open in the viewport, or null. */
+  editingChunk?: Observable<{ world: string; cx: number; cz: number } | null>;
+  /** Currently-loaded chunk cells, for the hierarchy's "chunk sections" list. */
+  loadedChunkCells?: Observable<LoadedChunkCell[]>;
+  /** Open a chunk cell alone-but-in-context in the viewport (neighbors stay visible). */
+  onEditChunkCell?: (world: string, cx: number, cz: number) => void;
+  /** Leave chunk isolation: save=true flushes to the cell's file(s), false discards. */
+  onCloseChunkEdit?: (save: boolean) => void;
 }
 
 /** Mount the editor overlay panels. Dev-only: don't ship this in production builds. */
@@ -60,6 +78,7 @@ export function mountEditor(options: MountOptions): { unmount(): void } {
       registry={options.registry}
       assets={options.assets}
       selection={options.selection}
+      multiSelection={options.multiSelection}
       visible={options.visible}
       settings={options.settings}
       gizmoMode={options.gizmoMode}
@@ -69,8 +88,13 @@ export function mountEditor(options: MountOptions): { unmount(): void } {
       grayboxActive={options.grayboxActive}
       grayboxShape={options.grayboxShape}
       grayboxBevel={options.grayboxBevel}
+      grayboxMaterial={options.grayboxMaterial}
       terrainActive={options.terrainActive}
       terrainBrush={options.terrainBrush}
+      pathActive={options.pathActive}
+      pathCrossSection={options.pathCrossSection}
+      pathWidth={options.pathWidth}
+      pathRadius={options.pathRadius}
       thumbnails={options.thumbnails}
       dockSizes={options.dockSizes}
       assetsVersion={options.assetsVersion}
@@ -84,6 +108,10 @@ export function mountEditor(options: MountOptions): { unmount(): void } {
       editingPrefab={options.editingPrefab}
       onEditPrefab={options.onEditPrefab}
       onClosePrefabEdit={options.onClosePrefabEdit}
+      editingChunk={options.editingChunk}
+      loadedChunkCells={options.loadedChunkCells}
+      onEditChunkCell={options.onEditChunkCell}
+      onCloseChunkEdit={options.onCloseChunkEdit}
     />,
   );
   return { unmount: () => root.unmount() };

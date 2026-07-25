@@ -1,5 +1,14 @@
 import { Script } from "./script.js";
 import type { ScriptRegistry } from "./registry.js";
+import {
+  approach,
+  approachAngle,
+  easingByName,
+  lerpVec3,
+  loopProgress,
+  pingPongProgress,
+  type LoopMode,
+} from "./easing.js";
 
 /**
  * The standard interaction vocabulary, v1. Most gameplay requests should
@@ -121,6 +130,7 @@ class PlatformMover extends Script {
     distance: { default: [0, 3, 0], description: "offset from start to the far end" },
     speed: { default: 2, min: 0, max: 50, description: "units/sec along the path" },
     dwell: { default: 1, min: 0, max: 60, description: "seconds paused at each end" },
+    ease: { default: "linear", description: "easing curve name applied to each leg (e.g. easeInOutQuad)" },
   };
 
   private origin: [number, number, number] = [0, 0, 0];
@@ -137,13 +147,8 @@ class PlatformMover extends Script {
     if (length === 0 || speed === 0) return; // degenerate: nowhere to go
     const travel = length / speed; // seconds for one A→B leg
     const dwell = this.param<number>("dwell");
-    const cycle = 2 * (travel + dwell);
-    const u = (this.ctx.now() / 1000) % cycle;
-    let s: number; // 0 at A, 1 at B
-    if (u < dwell) s = 0;
-    else if (u < dwell + travel) s = (u - dwell) / travel;
-    else if (u < 2 * dwell + travel) s = 1;
-    else s = 1 - (u - 2 * dwell - travel) / travel;
+    const raw = pingPongProgress(this.ctx.now() / 1000, travel, dwell);
+    const s = easingByName(this.param<string>("ease"))(raw); // 0 at A, 1 at B
     this.object.position.set(
       this.origin[0] + d[0] * s,
       this.origin[1] + d[1] * s,
@@ -182,9 +187,7 @@ class Door extends Script {
   override onFixedUpdate(dt: number): void {
     const target = this.anyOpenerNear() ? 1 : 0;
     const step = this.param<number>("speed") * dt;
-    // ease toward the target, clamped so it settles exactly at 0 or 1
-    if (this.open < target) this.open = Math.min(target, this.open + step);
-    else if (this.open > target) this.open = Math.max(target, this.open - step);
+    this.open = approach(this.open, target, step);
 
     const move = this.param<[number, number, number]>("move");
     this.object.position.set(
@@ -245,11 +248,7 @@ class FaceTarget extends Script {
       return;
     }
     // shortest-arc ease toward the desired heading
-    let delta = desired - this.object.rotation.y;
-    delta = Math.atan2(Math.sin(delta), Math.cos(delta)); // wrap to [-π, π]
-    const maxStep = turnSpeed * dt;
-    this.object.rotation.y +=
-      Math.abs(delta) <= maxStep ? delta : Math.sign(delta) * maxStep;
+    this.object.rotation.y = approachAngle(this.object.rotation.y, desired, turnSpeed * dt);
   }
 
   private nearestTarget(): [number, number, number] | null {
@@ -276,14 +275,82 @@ class FaceTarget extends Script {
 }
 
 /**
+ * Generic property tweener: animates this entity's position, rotation (deg,
+ * offset from spawn per axis — like `door`'s rotateY), or scale (multiplier
+ * on spawn scale) from `from` to `to` over `duration` seconds along an easing
+ * curve, `loop`-ing once/repeating/ping-ponging. For anything a dedicated
+ * behavior (`oscillator`, `platform-mover`, `door`) doesn't already cover —
+ * pulsing props, growing/shrinking pickups, custom eased motion.
+ */
+class Tweener extends Script {
+  static override scriptName = "tweener";
+  static override params = {
+    property: { default: "position", description: "position | rotation (deg offset) | scale (multiplier)" },
+    from: { default: [0, 0, 0], description: "value at t=0" },
+    to: { default: [0, 1, 0], description: "value at t=1" },
+    duration: { default: 2, min: 0.05, max: 300, description: "seconds for one from→to pass" },
+    ease: { default: "linear", description: "easing curve name, e.g. easeInOutQuad, easeOutElastic" },
+    loop: { default: "loop", description: "once | loop | pingpong" },
+  };
+
+  private origin: [number, number, number] = [0, 0, 0];
+  private originEuler: [number, number, number] = [0, 0, 0];
+  private originScale: [number, number, number] = [1, 1, 1];
+
+  override onStart(): void {
+    const p = this.object.position;
+    this.origin = [p.x, p.y, p.z];
+    const r = this.object.rotation;
+    this.originEuler = [r.x, r.y, r.z];
+    const s = this.object.scale;
+    this.originScale = [s.x, s.y, s.z];
+  }
+
+  override onFixedUpdate(): void {
+    const duration = this.param<number>("duration");
+    const loop = this.param<LoopMode>("loop");
+    const raw = loopProgress(this.ctx.now() / 1000, duration, loop);
+    const eased = easingByName(this.param<string>("ease"))(raw);
+    const v = lerpVec3(
+      this.param<[number, number, number]>("from"),
+      this.param<[number, number, number]>("to"),
+      eased,
+    );
+
+    switch (this.param<string>("property")) {
+      case "rotation":
+        this.object.rotation.set(
+          this.originEuler[0] + (v[0] * Math.PI) / 180,
+          this.originEuler[1] + (v[1] * Math.PI) / 180,
+          this.originEuler[2] + (v[2] * Math.PI) / 180,
+        );
+        break;
+      case "scale":
+        this.object.scale.set(
+          this.originScale[0] * v[0],
+          this.originScale[1] * v[1],
+          this.originScale[2] * v[2],
+        );
+        break;
+      default:
+        this.object.position.set(
+          this.origin[0] + v[0],
+          this.origin[1] + v[1],
+          this.origin[2] + v[2],
+        );
+    }
+  }
+}
+
+/**
  * Damageable: hit points that drop when a collider tagged `hazardTag` touches
  * this entity (spikes, lava, projectiles), with `invulnMs` i-frames between
  * hits so one contact isn't billed every tick. Drives this entity's health
  * billboard (fill = hp/maxHp) if it has one, and hides the entity at 0 hp.
  *
  * Self-contained and LOCAL, exactly like `collectible` — no networked combat
- * contract is presumed here (that stays game-specific, e.g. cube-rpg's
- * authority-validated npc.hit). Good as a single-player / local hazard
+ * contract is presumed here (that stays game-specific, e.g. a game's
+ * authority-validated hit event). Good as a single-player / local hazard
  * primitive; graduate to a networked version when the combat model is settled.
  */
 class Damageable extends Script {
@@ -335,5 +402,6 @@ export function registerBuiltinScripts(registry: ScriptRegistry): void {
   registry.register(PlatformMover);
   registry.register(Door);
   registry.register(FaceTarget);
+  registry.register(Tweener);
   registry.register(Damageable);
 }

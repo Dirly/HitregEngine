@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { ComponentRegistry } from "./registry.js";
 import { prefabInstanceSchema } from "../prefab.js";
 import { registerPhysicsComponents } from "./physics.js";
+import { registerPathComponents } from "./path.js";
 
 export const vec3 = z.tuple([z.number(), z.number(), z.number()]);
 export const quat = z.tuple([z.number(), z.number(), z.number(), z.number()]);
@@ -15,12 +16,30 @@ export const transformSchema = z.object({
   scale: vec3.default([1, 1, 1]),
 });
 
+/**
+ * Serialized entity activation for render-side content. This belongs in the
+ * document instead of a play-mode script's onStart: edit mode does not run
+ * gameplay scripts, so initially inactive rubble/effects/lights must already
+ * be inactive when the scene is built.
+ */
+export const visibilitySchema = z.object({
+  visible: z
+    .boolean()
+    .default(true)
+    .describe("False hides this entity's complete render subtree in edit and play mode. Scripts may still reveal it at runtime through the entity Object3D."),
+});
+
 export const meshSchema = z.object({
   source: z.discriminatedUnion("kind", [
     z.object({
       kind: z.literal("primitive"),
       shape: z.enum(["box", "sphere", "plane", "cylinder", "capsule", "cone", "torus", "wedge"]),
       size: vec3.default([1, 1, 1]),
+      /** plane only: width/height subdivisions. Every other shape ignores this
+       * (their curvature already implies enough segments) — a plane is the
+       * one primitive that's otherwise a bare quad, with nothing for a vertex
+       * shader (e.g. the water shader's wave displacement) to actually move. */
+      segments: z.tuple([z.number().int().min(1), z.number().int().min(1)]).default([1, 1]),
     }),
     z.object({
       kind: z.literal("asset"),
@@ -70,6 +89,28 @@ export const meshSchema = z.object({
         })
         .optional(),
     }),
+    z.object({
+      /** Curve-following geometry: roads, rivers, fences (ribbon) or
+       * vines/cables/ropes (tube). Catmull-Rom through `points`; rises from
+       * no fixed origin — the curve IS the geometry, in entity-local space. */
+      kind: z.literal("path"),
+      points: z.array(vec3).min(2).describe("Control points in entity-local space."),
+      closed: z.boolean().default(false).describe("Loop from the last point back to the first."),
+      crossSection: z
+        .enum(["ribbon", "tube"])
+        .default("ribbon")
+        .describe("ribbon = flat strip (roads, rivers, fences); tube = round (vines, cables, rope)."),
+      width: z.number().positive().default(2).describe("ribbon only: total width across the curve."),
+      radius: z.number().positive().default(0.15).describe("tube only: cross-section radius."),
+      radialSegments: z.number().int().min(3).max(16).default(6).describe("tube only: roundness."),
+      segmentsPerSpan: z
+        .number()
+        .int()
+        .min(1)
+        .max(32)
+        .default(8)
+        .describe("Curve smoothness between each pair of control points."),
+    }),
   ]),
   material: z
     .string()
@@ -105,6 +146,24 @@ export const lightSchema = z.object({
   /** spot only, radians */
   angle: z.number().min(0).max(Math.PI / 2).default(Math.PI / 6),
   castShadow: z.boolean().default(false),
+  importance: z
+    .number()
+    .positive()
+    .default(1)
+    .describe("Relative priority when the camera's dynamic point-light budget is full. Raise for short critical flashes; distant decorative lights should stay at 1."),
+  /**
+   * directional + castShadow only: half-width of the shadow camera's square
+   * ortho frustum, world units (so the frustum spans `-shadowSize` to
+   * `+shadowSize` on each axis). Default (40) suits a small/medium scene —
+   * a large open world needs this raised, or content far from the frustum
+   * center renders with NO shadow at all, and — if something (a script)
+   * periodically re-centers the light to follow the player — the boundary
+   * between one frustum position and the next shows up as a visible seam:
+   * a hard-edged grid of shadowed/unshadowed patches. Bigger values trade
+   * shadow sharpness for coverage (fixed shadow-map resolution spread over
+   * more world space).
+   */
+  shadowSize: z.number().positive().default(40),
 });
 
 export const cameraSchema = z.object({
@@ -169,7 +228,21 @@ export const materialSchema = z.object({
     .number()
     .min(0)
     .default(1)
-    .describe("Emissive glow strength. Only visibly blooms when a scene postfx bloom pass is enabled."),
+    .describe(
+      "Emissive glow strength (tints `emissive` on top of the base color). Applies to every shader, " +
+        "including unlit — unlit's own glow is otherwise invisible to lighting but still feeds bloom. " +
+        "Only visibly blooms when a scene postfx bloom pass is enabled.",
+    ),
+  emissiveMap: z
+    .string()
+    .optional()
+    .describe(
+      "Texture asset id (assets/textures/) used as a self-illumination mask, standard/toon shaders only " +
+        "(URP-style 'Emission map'): white areas of this texture glow at full `emissive`/`emissiveIntensity` " +
+        "regardless of scene lighting — dark areas stay fully lit/shaded. Lets one mesh mix lit PBR surface " +
+        "with unlit glowing detail (e.g. a lit robot body with unlit glowing eyes/screens/edge trim) without " +
+        "switching the whole material to the `unlit` shader.",
+    ),
   opacity: z.number().min(0).max(1).default(1),
   transparent: z
     .boolean()
@@ -197,14 +270,40 @@ export const materialSchema = z.object({
   water: z
     .object({
       shallowColor: hexColor.default("#3fa8c9"),
+      /** Toon-ramp middle stop, between shallowColor and deepColor. */
+      midColor: hexColor.default("#1f6f96"),
       deepColor: hexColor.default("#0b3150"),
       rimColor: hexColor.default("#eaf6ff"),
+      foamColor: hexColor.default("#eaf6ff"),
       waveFrequency: z.number().positive().default(0.35),
       waveSpeed: z.number().default(0.6),
+      /** Vertical rise/fall of the surface geometry itself, world units — needs
+       * a subdivided mesh (mesh.source.segments) to actually show; 0 keeps the
+       * old cosmetic-shimmer-only look. */
+      waveAmplitude: z.number().min(0).default(0.15),
       fresnelPower: z.number().positive().default(3),
+      /** World units of water depth (camera-ray, not literal vertical depth —
+       * the standard real-time approximation) over which color fades from
+       * shallowColor to deepColor. Needs opaque geometry (seafloor/terrain)
+       * actually beneath the surface to read the depth against. */
+      depthFadeDistance: z.number().positive().default(6),
+      /** World units of water depth within which the surface blends toward
+       * foamColor — the shoreline-foam band. */
+      foamWidth: z.number().min(0).default(0.5),
+      /** Camera distance (world units) where the surface starts fading toward
+       * fully transparent — should end well before the mesh's own physical
+       * edge so a large-but-finite water plane never shows a hard cutoff, no
+       * matter which direction the camera approaches that edge from. */
+      edgeFadeStart: z.number().positive().default(400),
+      /** Camera distance where the fade finishes (fully transparent). */
+      edgeFadeEnd: z.number().positive().default(600),
     })
     .optional()
-    .describe("Only read when shader is 'water'. Fully procedural (no textures needed)."),
+    .describe(
+      "Only read when shader is 'water'. Fully procedural (no textures needed) — depth-based " +
+        "color and shoreline foam read the depth buffer against whatever's actually beneath the " +
+        "surface, so they need real opaque geometry (terrain/seafloor) there to work.",
+    ),
 });
 
 /** Attach behavior: a registered script by name + its tuning params. */
@@ -347,6 +446,33 @@ export const particlesSchema = z.object({
 });
 
 /**
+ * Procedural grass: thousands of camera-following triangle blades scattered
+ * within `radius` of the camera and laid onto whichever heightmap terrain is
+ * underfoot. Rendered by a custom instanced system in @hitreg/render (merged
+ * triangle-per-blade geometry, TSL wind sway) — one field per scene (first
+ * wins). `{ "grass": {} }` is a working default patch.
+ */
+export const grassSchema = z.object({
+  bladeColor: hexColor.default("#3f7d34"),
+  tipColor: hexColor.default("#8fd15c"),
+  bladeWidth: z.number().positive().default(0.06),
+  bladeHeight: z.number().positive().default(0.55),
+  /** Blades per square unit within the patch. */
+  density: z.number().positive().default(5),
+  /** Radius around the camera covered by grass, world units — the "sliding
+   * window" the patch re-centers within as the camera moves. */
+  radius: z.number().positive().default(20),
+  windStrength: z.number().min(0).default(0.4),
+  windSpeed: z.number().positive().default(1.3),
+  /** Camera height above the ground directly below it (world units) below
+   * which the field is fully visible; fades out between here and
+   * heightFadeEnd so grass is only rendered close to the ground (e.g. a
+   * helicopter flying low), not wastefully from altitude. */
+  heightFadeStart: z.number().positive().default(12),
+  heightFadeEnd: z.number().positive().default(30),
+});
+
+/**
  * World-space, always-camera-facing UI attached to an entity: HP bars, name
  * labels, icon sprites. All fields are defaulted so `{ "billboard": {} }` is a
  * full green bar floating above the entity. Scripts mutate fill/text/visible
@@ -423,6 +549,7 @@ export type NetObjectData = z.infer<typeof netObjectSchema>;
 
 export function registerCoreComponents(registry: ComponentRegistry): void {
   registry.register("transform", transformSchema);
+  registry.register("visibility", visibilitySchema);
   registry.register("mesh", meshSchema);
   registry.register("light", lightSchema);
   registry.register("camera", cameraSchema);
@@ -434,6 +561,8 @@ export function registerCoreComponents(registry: ComponentRegistry): void {
   registry.register("postfx", postfxSchema);
   registry.register("particles", particlesSchema);
   registry.register("billboard", billboardSchema);
+  registry.register("grass", grassSchema);
   registry.register("netObject", netObjectSchema);
   registerPhysicsComponents(registry);
+  registerPathComponents(registry);
 }

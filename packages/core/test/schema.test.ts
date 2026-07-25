@@ -29,8 +29,15 @@ describe("ComponentRegistry", () => {
         color: "#ffffff",
         intensity: 1,
         castShadow: false,
+        importance: 1,
       });
     }
+  });
+
+  it("defaults serialized entity visibility to visible", () => {
+    const registry = setup();
+    const result = registry.validate("visibility", {});
+    expect(result).toEqual({ ok: true, data: { visible: true } });
   });
 
   it("rejects out-of-range values with a readable error", () => {
@@ -139,17 +146,20 @@ describe("ComponentRegistry", () => {
       "billboard",
       "camera",
       "collider",
+      "grass",
       "joint",
       "light",
       "mesh",
       "netObject",
       "particles",
+      "pathScatter",
       "postfx",
       "prefab",
       "rigidbody",
       "script",
       "sky",
       "transform",
+      "visibility",
     ]);
     const transform = schemas["transform"] as { properties: Record<string, unknown> };
     expect(transform.properties).toHaveProperty("position");

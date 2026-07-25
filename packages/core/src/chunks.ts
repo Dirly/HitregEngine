@@ -65,6 +65,17 @@ export const chunkStreamerSchema = z.object({
     })
     .optional()
     .describe("Distance LOD rings in CELLS from the focus. Keep `simulation` >= your play area or NPCs in outer cells freeze. Omit for legacy binary `radius` behavior."),
+  hlodSupercellFactor: z
+    .number()
+    .int()
+    .min(1)
+    .max(16)
+    .default(4)
+    .describe(
+      "hlod/far ring cells per supercell edge (e.g. 4 => a 4x4 block of cells bakes into ONE merged proxy instead " +
+        "of one per cell). Keeps instanced batches (trees, etc.) from re-fragmenting per cell once a world is " +
+        "chunked finely — small cellSize needs a bigger factor to stay at roughly the same supercell world size.",
+    ),
 });
 
 export type ChunkStreamerData = z.infer<typeof chunkStreamerSchema>;

@@ -14,3 +14,15 @@ export { ScriptRegistry } from "./registry.js";
 export { InputService } from "./input.js";
 export { ScriptRuntime, type RuntimeOptions } from "./runtime.js";
 export { registerBuiltinScripts } from "./builtin.js";
+export {
+  Easings,
+  easingByName,
+  loopProgress,
+  pingPongProgress,
+  lerp,
+  lerpVec3,
+  approach,
+  approachAngle,
+  type EasingName,
+  type LoopMode,
+} from "./easing.js";

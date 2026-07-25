@@ -441,6 +441,21 @@ export class PhysicsSim {
     this.moving.get(id)?.setTranslation({ x: p[0], y: p[1], z: p[2] }, true);
   }
 
+  /**
+   * Drive a KINEMATIC body's position for the next step. Unlike setTranslation
+   * (an immediate hard reposition with no notion of "how did it get here"),
+   * this is what Rapier uses to estimate the body's velocity for that step —
+   * the only way a kinematic body transmits believable motion into anything
+   * jointed to it. Calling setTranslation every tick on a kinematic body
+   * (e.g. driving a joint anchor from a script) skips that estimate entirely,
+   * so attached dynamic bodies see it as discontinuously teleporting instead
+   * of moving — the joint solver reacts every tick as if to a fresh
+   * dislocation, which reads as violent jitter on anything hanging off it.
+   */
+  setKinematicTarget(id: string, p: Vec3): void {
+    this.moving.get(id)?.setNextKinematicTranslation({ x: p[0], y: p[1], z: p[2] });
+  }
+
   /** Teleport a body (respawns): position set, velocities zeroed. */
   setPosition(id: string, p: Vec3): void {
     const body = this.moving.get(id);

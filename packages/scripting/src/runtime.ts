@@ -22,6 +22,18 @@ export interface RuntimeOptions {
     entityId: string,
     opts: { fill?: number; text?: string; visible?: boolean },
   ) => void;
+  /** Host particle hook: runtime-only emitter control. */
+  setParticles?: (
+    entityId: string,
+    opts: { emitting?: boolean; visible?: boolean; restart?: boolean; burst?: number },
+  ) => void;
+  /** Host light hook: runtime-only enable/intensity/color control. */
+  setLight?: (
+    entityId: string,
+    opts: { enabled?: boolean; intensity?: number; color?: string },
+  ) => void;
+  /** Host path-mesh hook: rebuild an entity's path geometry from new (world-space) control points. */
+  setPathPoints?: (entityId: string, points: Array<[number, number, number]>) => void;
   /** Experience-scoped persistence for the local player (ARCHITECTURE §3c). */
   playerData?: PlayerDataService;
   /**
@@ -224,6 +236,30 @@ export class ScriptRuntime {
           ? {
               setBillboard: (opts: { fill?: number; text?: string; visible?: boolean }) =>
                 this.opts.setBillboard!(id, opts),
+            }
+          : {}),
+        ...(this.opts.setParticles
+          ? {
+              setParticles: (entityId: string, opts: {
+                emitting?: boolean;
+                visible?: boolean;
+                restart?: boolean;
+                burst?: number;
+              }) => this.opts.setParticles!(entityId, opts),
+            }
+          : {}),
+        ...(this.opts.setLight
+          ? {
+              setLight: (
+                entityId: string,
+                opts: { enabled?: boolean; intensity?: number; color?: string },
+              ) => this.opts.setLight!(entityId, opts),
+            }
+          : {}),
+        ...(this.opts.setPathPoints
+          ? {
+              setPathPoints: (points: Array<[number, number, number]>) =>
+                this.opts.setPathPoints!(id, points),
             }
           : {}),
         ...(this.opts.playerData ? { playerData: this.opts.playerData } : {}),

@@ -2,8 +2,11 @@ import * as THREE from "three/webgpu";
 import {
   positionWorld,
   positionLocal,
+  positionView,
   normalWorld,
   cameraPosition,
+  cameraNear,
+  cameraFar,
   time,
   color as tslColor,
   float,
@@ -14,9 +17,12 @@ import {
   add,
   sub,
   mul,
+  div,
   dot,
   pow,
+  max,
   sin,
+  cos,
   abs,
   normalize,
   uv,
@@ -24,6 +30,8 @@ import {
   vec3,
   length,
   texture as tslTexture,
+  viewportDepthTexture,
+  perspectiveDepthToViewZ,
 } from "three/tsl";
 import { GLTFLoader, type GLTF } from "three/addons/loaders/GLTFLoader.js";
 import { clone as skeletonClone } from "three/addons/utils/SkeletonUtils.js";
@@ -32,18 +40,33 @@ import { SimplifyModifier } from "three/addons/modifiers/SimplifyModifier.js";
 import { heightmapMesh, type HeightmapParams, type SceneDoc } from "@hitreg/core";
 import type { ParticlesData } from "./particles.js";
 import type { BillboardData } from "./billboards.js";
+import type { GrassData } from "./grass.js";
 import type { InstancedPropBatch } from "./foliage-lod.js";
+import { pathGeometry, type PathMeshSource } from "./path-mesh.js";
+import { pathScatterPlacements, type PathScatterData } from "./path-scatter.js";
 
 // kits load once and instance many times
 const gltfCache = new Map<string, Promise<GLTF>>();
+// urls currently fetching/parsing (not yet in gltfCache's resolved state) —
+// the host surfaces this count so "is it stuck or just loading" is visible
+// instead of a silent, indefinite freeze (see gltfLoadingCount).
+const gltfPending = new Set<string>();
 
 export function loadGltf(url: string): Promise<GLTF> {
   let pending = gltfCache.get(url);
   if (!pending) {
-    pending = (gltfLoader ??= new GLTFLoader()).loadAsync(url);
+    gltfPending.add(url);
+    pending = (gltfLoader ??= new GLTFLoader())
+      .loadAsync(url)
+      .finally(() => gltfPending.delete(url));
     gltfCache.set(url, pending);
   }
   return pending;
+}
+
+/** Number of glTF models currently being fetched/parsed, for a loading indicator. */
+export function gltfLoadingCount(): number {
+  return gltfPending.size;
 }
 
 export interface BuildOptions {
@@ -53,16 +76,31 @@ export interface BuildOptions {
   resolveMaterial?(assetId: string): unknown | undefined;
   /** Resolve a texture asset id to a fetchable image URL. */
   resolveTexture?(assetId: string): string | undefined;
+  /**
+   * Hardware anisotropic filtering cap (renderer.getMaxAnisotropy()) applied
+   * to material color/emissive maps, so ground/road textures stay sharp at
+   * shallow viewing angles. Omit to leave three.js's default (1, i.e. off) —
+   * used by lightweight preview builds (thumbnails) that don't need it.
+   */
+  resolveMaxAnisotropy?(): number;
   /** Fired when an asset mesh finishes loading (animation clips included). */
   onModelLoaded?(entityId: string, root: THREE.Object3D, clips: THREE.AnimationClip[]): void;
   /** Fired for each `particles` entity — the app registers it with its
    * ParticleSystem (the builder stays free of the simulation). `group` is the
    * entity's anchor group; the system parents its InstancedMesh under it. */
   onParticles?(entityId: string, group: THREE.Object3D, data: ParticlesData): void;
+  /** Fired for every real light so the host can apply a camera-relative
+   * dynamic-light budget without traversing the complete scene each frame. */
+  onLight?(entityId: string, light: THREE.Light, importance: number): void;
   /** Fired for each `billboard` entity — the app registers it with its
    * BillboardSystem (the builder stays free of the canvas drawing). `group` is
    * the entity's anchor group; the system parents its Sprite under it. */
   onBillboard?(entityId: string, group: THREE.Object3D, data: BillboardData): void;
+  /** Fired for each `grass` entity — the app registers it with its
+   * GrassSystem (the builder stays free of the placement/wind simulation).
+   * `group` is the entity's anchor group; the system parents its
+   * InstancedMesh under it, then treats it as world-space (see GrassSystem). */
+  onGrass?(entityId: string, group: THREE.Object3D, data: GrassData): void;
   /** Fired once per `renderMode: "instanced"` (assetId, node) group — the app
    * registers it with a FoliageLodSystem to drive near/far distance LOD. */
   onInstancedBatch?(batch: InstancedPropBatch): void;
@@ -97,6 +135,7 @@ export interface MaterialData {
   metalness: number;
   emissive: string;
   emissiveIntensity: number;
+  emissiveMap?: string;
   opacity: number;
   transparent: boolean;
   splat?: {
@@ -105,22 +144,35 @@ export interface MaterialData {
   };
   water?: {
     shallowColor: string;
+    midColor: string;
     deepColor: string;
     rimColor: string;
+    foamColor: string;
     waveFrequency: number;
     waveSpeed: number;
+    waveAmplitude: number;
     fresnelPower: number;
+    depthFadeDistance: number;
+    foamWidth: number;
+    edgeFadeStart: number;
+    edgeFadeEnd: number;
   };
 }
 
 /**
- * Attach a color map to a material once the image has actually loaded — the
- * WebGPU backend crashes rendering a texture whose image is still null.
+ * Load a texture into an arbitrary material slot (`map`, `emissiveMap`, ...)
+ * once the image has actually loaded — the WebGPU backend crashes rendering
+ * a texture whose image is still null.
+ * `slot` defaults to color space SRGB, which is correct for both color and
+ * emissive maps (both are authored as visible colors, not linear data like a
+ * normal/roughness map would be).
  */
-function applyTextureWhenReady(
-  material: THREE.Material & { map?: THREE.Texture | null },
+function applyTextureWhenReady<K extends string>(
+  material: THREE.Material & Partial<Record<K, THREE.Texture | null>>,
+  slot: K,
   url: string,
   repeat: [number, number],
+  maxAnisotropy?: number,
 ): void {
   new THREE.TextureLoader().load(
     url,
@@ -129,7 +181,8 @@ function applyTextureWhenReady(
       texture.wrapS = THREE.RepeatWrapping;
       texture.wrapT = THREE.RepeatWrapping;
       texture.repeat.set(repeat[0], repeat[1]);
-      material.map = texture;
+      if (maxAnisotropy) texture.anisotropy = maxAnisotropy;
+      (material as Record<K, THREE.Texture | null>)[slot] = texture;
       material.needsUpdate = true;
     },
     undefined,
@@ -147,7 +200,7 @@ interface TransformData {
 
 interface MeshData {
   source:
-    | { kind: "primitive"; shape: string; size: [number, number, number] }
+    | { kind: "primitive"; shape: string; size: [number, number, number]; segments?: [number, number] }
     | { kind: "asset"; assetId: string; node?: string }
     | {
         kind: "polygon";
@@ -155,7 +208,8 @@ interface MeshData {
         height: number;
         bevel?: { size: number; segments: number };
       }
-    | ({ kind: "heightmap" } & HeightmapParams);
+    | ({ kind: "heightmap" } & HeightmapParams)
+    | ({ kind: "path" } & PathMeshSource);
   material?: string;
   castShadow: boolean;
   receiveShadow: boolean;
@@ -190,6 +244,9 @@ interface LightData {
   range: number;
   angle: number;
   castShadow: boolean;
+  importance?: number;
+  /** directional + castShadow only — shadow camera ortho frustum half-width. */
+  shadowSize?: number;
 }
 
 interface CameraData {
@@ -207,6 +264,14 @@ export interface BuiltScene {
   activeCamera: THREE.PerspectiveCamera | null;
   /** Every camera-component entity — multi-camera switching at runtime. */
   cameras: Map<string, THREE.PerspectiveCamera>;
+  /**
+   * Material-asset id -> the shared THREE.Material instance built for it (the
+   * build/reconcile cache, deduped by id). Reused across reconciles so an
+   * instance stays stable, which lets a live material-file edit patch the
+   * running material in place (see `patchMaterial`) instead of forcing a full
+   * scene rebuild. Excludes GLB-embedded materials and the shared default.
+   */
+  materials: Map<string, THREE.Material>;
 }
 
 const defaultMaterial = new THREE.MeshStandardMaterial({
@@ -238,7 +303,19 @@ function buildSkyDome(
 
   const radius = 450;
   const geometry = new THREE.SphereGeometry(radius, 32, 20);
-  const material = new THREE.MeshBasicNodeMaterial({ side: THREE.BackSide, fog: false, depthWrite: false });
+  // depthWrite:false alone only means the dome never BLOCKS what's drawn
+  // after it — still correct only as long as it's genuinely drawn first
+  // every frame (renderOrder below) and nothing already occupies the depth
+  // buffer at those pixels. depthTest:false removes that assumption
+  // entirely: the dome always paints its background pixels regardless of
+  // whatever the depth buffer currently holds there, so it's guaranteed
+  // behind every other object unconditionally, not just by convention.
+  const material = new THREE.MeshBasicNodeMaterial({
+    side: THREE.BackSide,
+    fog: false,
+    depthWrite: false,
+    depthTest: false,
+  });
 
   const dir = normalize(positionLocal);
   const t = pow(clamp(mul(add(dir.y, float(0.35)), float(1 / 1.35)), 0, 1), float(0.9));
@@ -258,6 +335,12 @@ function buildSkyDome(
   const mesh = new THREE.Mesh(geometry, material);
   mesh.frustumCulled = false;
   mesh.renderOrder = -1000;
+  // a fixed-radius BackSide sphere only reads as an infinite background while
+  // the camera stays inside it — this mesh is never itself repositioned, so
+  // the host must recenter it on the camera every frame (the standard
+  // infinite-skybox trick); tag it so the host can find it after a rebuild
+  // recreates the whole scene graph (main.ts: userData["skyDome"] === true).
+  mesh.userData["skyDome"] = true;
   return mesh;
 }
 
@@ -287,7 +370,11 @@ function wedgeGeometry(w: number, h: number, d: number): THREE.BufferGeometry {
   return geometry;
 }
 
-export function geometryFor(shape: string, size: [number, number, number]): THREE.BufferGeometry {
+export function geometryFor(
+  shape: string,
+  size: [number, number, number],
+  segments?: [number, number],
+): THREE.BufferGeometry {
   const [x, y, z] = size;
   switch (shape) {
     case "wedge":
@@ -297,7 +384,7 @@ export function geometryFor(shape: string, size: [number, number, number]): THRE
     case "sphere":
       return new THREE.SphereGeometry(x / 2, 32, 16);
     case "plane":
-      return new THREE.PlaneGeometry(x, z);
+      return new THREE.PlaneGeometry(x, z, segments?.[0] ?? 1, segments?.[1] ?? 1);
     case "cylinder":
       return new THREE.CylinderGeometry(x / 2, x / 2, y, 24);
     case "capsule":
@@ -372,20 +459,62 @@ function buildTerrainSplatMaterial(data: MaterialData): THREE.MeshStandardNodeMa
 }
 
 /**
- * Procedural water: a bounded, art-directed fresnel rim + gentle shimmer
- * instead of relying on MeshStandardMaterial's physically-based specular —
- * deliberately, since an unclamped GGX highlight across a huge flat plane at
- * grazing angles is what was blowing bloom out at distance. Every term here
- * is hand-capped ([0,1] fresnel, a small shimmer band), so it can't spike.
+ * Procedural water: real vertex-displaced waves (not just a color shimmer),
+ * a toon-banded shallow/mid/deep depth ramp with a crisp shoreline foam
+ * edge (hard-ish cutoffs, not smooth gradients — the stylized-water look
+ * this was asked to read as), plus the original bounded, art-directed
+ * fresnel rim (deliberately hand-capped, not MeshStandardMaterial's
+ * physically-based specular: an unclamped GGX highlight across a huge flat
+ * plane at grazing angles is what was blowing bloom out at distance).
+ *
+ * Depth-based color/foam read `viewportDepthTexture()` — the already-
+ * rendered OPAQUE scene's depth at this fragment's screen position — and
+ * compare it to this fragment's own view-space depth (`positionView.z`) to
+ * get how much water is between the surface and the seafloor/terrain along
+ * this view ray (the standard real-time approximation: view-ray depth, not
+ * literal vertical depth, but reads correctly for any camera angle a flight
+ * game actually uses). This needs NO renderer changes — `viewportDepthTexture`
+ * is a self-contained TSL node backed by a shared depth texture that Three's
+ * WebGPU renderer populates automatically from ordinary opaque rendering, as
+ * long as this material renders AFTER the opaque pass (already true: it's
+ * `transparent: true`, and three.js always draws the transparent queue after
+ * the opaque one). Needs REAL geometry — terrain/seafloor — actually beneath
+ * the surface to compare against; open water with nothing in view behind it
+ * just reads as "very deep," which is the correct fallback.
+ *
+ * A large-but-finite water plane always has a physical edge somewhere; rather
+ * than chase that edge with an ever-bigger mesh (or recentering the whole
+ * plane on the camera every frame, which would also need the wave phases
+ * compensated for the resulting motion so they don't visibly "swim"), opacity
+ * fades to fully transparent by `edgeFadeEnd` — comfortably inside the
+ * mesh's actual bounds — so the edge itself is never in view from any
+ * direction the camera can approach it from.
+ *
+ * Wave displacement operates in the water mesh's own LOCAL space (before its
+ * -90°-X "lie the plane flat" rotation — see the `shape === "plane"` case
+ * below), where the flat plane spans local X/Y and its normal is local +Z;
+ * `positionLocal.x`/`.y` are the wave phase basis, and height is added along
+ * local Z (which becomes world Y once the mesh's own rotation is applied).
+ * Two summed waves at different frequencies/directions/speeds read as far
+ * less mechanical than one; the surface normal is perturbed by each wave's
+ * own analytic partial derivative (closed-form, not numerically sampled) so
+ * lighting responds to the bumps instead of the surface staying flat-shaded.
  */
 function buildWaterMaterial(data: MaterialData): THREE.MeshStandardNodeMaterial {
   const w = data.water ?? {
     shallowColor: "#3fa8c9",
+    midColor: "#1f6f96",
     deepColor: "#0b3150",
     rimColor: "#eaf6ff",
+    foamColor: "#eaf6ff",
     waveFrequency: 0.35,
     waveSpeed: 0.6,
+    waveAmplitude: 0.15,
     fresnelPower: 3,
+    depthFadeDistance: 6,
+    foamWidth: 0.5,
+    edgeFadeStart: 400,
+    edgeFadeEnd: 600,
   };
   const material = new THREE.MeshStandardNodeMaterial({
     transparent: true,
@@ -393,17 +522,61 @@ function buildWaterMaterial(data: MaterialData): THREE.MeshStandardNodeMaterial 
     metalness: 0,
     roughness: 0.35,
   });
-  const wave1 = sin(add(mul(positionWorld.x, float(w.waveFrequency)), mul(time, float(w.waveSpeed))));
-  const wave2 = sin(
-    add(mul(positionWorld.z, float(w.waveFrequency * 1.3)), mul(time, float(w.waveSpeed * 0.8))),
+
+  // -- waves: vertex displacement + analytic normal, in the plane's own local space --
+  const kA = float(w.waveFrequency);
+  const ampA = float(w.waveAmplitude);
+  const phaseA = add(mul(positionLocal.x, kA), mul(time, float(w.waveSpeed)));
+  const heightA = mul(sin(phaseA), ampA);
+
+  const kB = float(w.waveFrequency * 1.7);
+  const ampB = float(w.waveAmplitude * 0.5);
+  const dirBx = float(0.7071);
+  const dirBy = float(0.7071);
+  const phaseB = add(
+    mul(add(mul(positionLocal.x, dirBx), mul(positionLocal.y, dirBy)), kB),
+    mul(time, float(w.waveSpeed * 1.3)),
   );
-  const ripple = mul(add(wave1, wave2), float(0.5)); // [-1, 1]
+  const heightB = mul(sin(phaseB), ampB);
+
+  const waveHeight = add(heightA, heightB);
+  material.positionNode = add(positionLocal, vec3(float(0), float(0), waveHeight));
+
+  const dhdx = add(mul(mul(ampA, kA), cos(phaseA)), mul(mul(mul(ampB, kB), dirBx), cos(phaseB)));
+  const dhdy = mul(mul(mul(ampB, kB), dirBy), cos(phaseB));
+  material.normalNode = normalize(vec3(mul(dhdx, float(-1)), mul(dhdy, float(-1)), float(1)));
+
+  // -- toon-banded depth color: hard-ish steps, not a smooth gradient --
+  const sceneViewZ = perspectiveDepthToViewZ(viewportDepthTexture(), cameraNear, cameraFar);
+  const waterDepth = max(sub(positionView.z, sceneViewZ), float(0)); // world units, >= 0
+  const depthFadeDist = float(w.depthFadeDistance);
+  const bandWidth = mul(depthFadeDist, float(0.06)); // narrow = crisp but still anti-aliased
+  const shallowToMid = mul(depthFadeDist, float(0.35));
+  const t1 = smoothstep(sub(shallowToMid, bandWidth), add(shallowToMid, bandWidth), waterDepth);
+  const t2 = smoothstep(sub(depthFadeDist, bandWidth), add(depthFadeDist, bandWidth), waterDepth);
+  let base: THREE.Node<"vec3"> | THREE.Node<"color"> = mix(tslColor(w.shallowColor), tslColor(w.midColor), t1);
+  base = mix(base as THREE.Node<"vec3">, tslColor(w.deepColor), t2);
+
+  // shoreline foam: a crisp band, not a long gradual fade — full foam close to
+  // shore, cutting off sharply (rather than linearly trailing off) at foamWidth
+  const foamWidth = float(Math.max(w.foamWidth, 0.001));
+  const foamEdge = sub(float(1), smoothstep(mul(foamWidth, float(0.7)), foamWidth, waterDepth));
+  base = mix(base as THREE.Node<"vec3">, tslColor(w.foamColor), foamEdge);
+
+  // gentle shimmer driven by the SAME wave phases, so the color motion reads
+  // as coming from the same waves that are actually moving the geometry
+  const ripple = mul(add(sin(phaseA), sin(phaseB)), float(0.5)); // [-1, 1]
   const shimmer = add(mul(ripple, float(0.05)), float(1)); // ~[0.95, 1.05], bounded
-  const base = mix(tslColor(w.deepColor), tslColor(w.shallowColor), float(0.6));
-  const shaded = mul(base, shimmer);
+  const shaded = mul(base as THREE.Node<"vec3">, shimmer);
+
   const viewDir = normalize(sub(cameraPosition, positionWorld));
   const fresnel = pow(saturate(sub(float(1), saturate(dot(normalWorld, viewDir)))), float(w.fresnelPower));
   material.colorNode = mix(shaded, tslColor(w.rimColor), fresnel);
+
+  // -- edge fade: opacity to 0 well before the mesh's own physical boundary --
+  const camDist = length(sub(cameraPosition, positionWorld));
+  const edgeFade = sub(float(1), smoothstep(float(w.edgeFadeStart), float(w.edgeFadeEnd), camDist));
+  material.opacityNode = mul(float(data.opacity), edgeFade);
   material.roughnessNode = float(0.35);
   return material;
 }
@@ -415,8 +588,24 @@ export function makeMaterial(data: MaterialData): THREE.Material {
     transparent: data.transparent || data.opacity < 1,
   };
   switch (data.shader) {
-    case "unlit":
-      return new THREE.MeshBasicMaterial(common);
+    case "unlit": {
+      // MeshBasicMaterial has no emissive concept at all (it's not lit, so
+      // its own color already IS its brightness) — the bloom pipeline's MRT
+      // split (renderer.ts) only samples a material's `emissiveNode`, which
+      // plain MeshBasicMaterial never populates. Use the Node variant instead
+      // and set emissiveNode explicitly so `emissive`/`emissiveIntensity`
+      // (otherwise inert for a shader lighting never touches) can still
+      // drive bloom — e.g. a neon sign or energy shield that glows without
+      // ever being lit.
+      const material = new THREE.MeshBasicNodeMaterial(common);
+      // @types/three only declares `emissiveNode` on MeshStandardNodeMaterialNodeProperties,
+      // but NodeMaterial's own setupOutgoingLight() (materials/nodes/NodeMaterial.js) reads
+      // `this.emissiveNode` generically off any subclass — a type-decl gap, not a runtime one.
+      (material as THREE.MeshBasicNodeMaterial & { emissiveNode: THREE.Node | null }).emissiveNode = tslColor(
+        data.emissive,
+      ).mul(float(data.emissiveIntensity));
+      return material;
+    }
     case "toon":
       return new THREE.MeshToonMaterial({
         ...common,
@@ -442,6 +631,67 @@ export function makeMaterial(data: MaterialData): THREE.Material {
 }
 
 /**
+ * Update an existing material instance to match new material data, in place —
+ * for a live material-file edit that shouldn't tear down the whole scene.
+ * Returns false (patch declined; the caller should fall back to a rebuild) when
+ * the change can't be expressed as a plain property tweak: a different shader
+ * (a different material class), or anything involving a texture map — attaching
+ * or detaching a `map`/`emissiveMap` is left to the rebuild path, which owns
+ * async texture loading and repeat wiring. Only color/opacity/PBR scalars on
+ * standard/unlit/toon/wireframe are patched; terrain-splat and water are
+ * procedural and always decline.
+ */
+export function patchMaterial(existing: THREE.Material, data: MaterialData): boolean {
+  const shader = data.shader ?? "standard";
+  const hasMap = (m: THREE.Material) => {
+    const mm = m as { map?: unknown; emissiveMap?: unknown };
+    return !!mm.map || !!mm.emissiveMap;
+  };
+  if (data.map || data.emissiveMap || hasMap(existing)) return false;
+
+  const setCommon = (m: THREE.Material & { color?: THREE.Color }) => {
+    m.color?.set(data.color);
+    m.opacity = data.opacity;
+    m.transparent = data.transparent || data.opacity < 1;
+    m.needsUpdate = true;
+  };
+
+  switch (shader) {
+    case "standard": {
+      if (!(existing instanceof THREE.MeshStandardMaterial)) return false;
+      setCommon(existing);
+      existing.roughness = data.roughness;
+      existing.metalness = data.metalness;
+      existing.emissive.set(data.emissive);
+      existing.emissiveIntensity = data.emissiveIntensity;
+      return true;
+    }
+    case "toon": {
+      if (!(existing instanceof THREE.MeshToonMaterial)) return false;
+      setCommon(existing);
+      existing.emissive.set(data.emissive);
+      existing.emissiveIntensity = data.emissiveIntensity;
+      return true;
+    }
+    case "unlit": {
+      if (!(existing instanceof THREE.MeshBasicNodeMaterial)) return false;
+      setCommon(existing);
+      // mirror makeMaterial: unlit drives bloom through an explicit emissiveNode
+      (existing as THREE.MeshBasicNodeMaterial & { emissiveNode: THREE.Node | null }).emissiveNode =
+        tslColor(data.emissive).mul(float(data.emissiveIntensity));
+      return true;
+    }
+    case "wireframe": {
+      if (!(existing instanceof THREE.MeshBasicMaterial)) return false;
+      setCommon(existing);
+      return true;
+    }
+    default:
+      return false;
+  }
+}
+
+/**
  * Resolve a material asset id to a Three material, caching per build. Undefined
  * id (or a missing asset) returns the shared engine default. Color maps attach
  * asynchronously once their image loads. Shared by the scene builder and the
@@ -461,12 +711,22 @@ export function materialForId(
     return defaultMaterial;
   }
   const material = makeMaterial(data);
+  const maxAnisotropy = options.resolveMaxAnisotropy?.();
   const mapUrl = data.map ? options.resolveTexture?.(data.map) : undefined;
   if (mapUrl && data.shader !== "wireframe") {
+    applyTextureWhenReady(material, "map", mapUrl, data.repeat ?? [1, 1], maxAnisotropy);
+  }
+  // emissiveMap only means anything on shaders with a lighting model to mask
+  // against — standard/toon. unlit already renders its whole surface as if
+  // emissive; terrain-splat/water/wireframe drive color procedurally.
+  const emissiveMapUrl = data.emissiveMap ? options.resolveTexture?.(data.emissiveMap) : undefined;
+  if (emissiveMapUrl && (data.shader === "standard" || data.shader === "toon")) {
     applyTextureWhenReady(
-      material as THREE.Material & { map?: THREE.Texture | null },
-      mapUrl,
+      material as THREE.Material & { emissiveMap?: THREE.Texture | null },
+      "emissiveMap",
+      emissiveMapUrl,
       data.repeat ?? [1, 1],
+      maxAnisotropy,
     );
   }
   cache.set(id, material);
@@ -509,6 +769,19 @@ interface PendingInstance {
   castShadow: boolean;
   receiveShadow: boolean;
   lod: boolean;
+  /**
+   * Where the eventual shared InstancedMesh(es) get parented — `ctx.scene`
+   * for a whole build (buildScene), or the entity's own group for a single-
+   * entity rebuild (reconcile, ctx.scene: null). Captured at accumulation
+   * time: by the time the async gltf load resolves and actually creates the
+   * InstancedMesh, the caller has already reparented `ctx.scene` (a chunk's
+   * `built.scene` gets added under the chunk's own group, which gets added
+   * under the live THREE.Scene) — walking `.parent` at that point would climb
+   * past the intended anchor to whatever it's since been attached under,
+   * landing the batch outside the chunk's own subtree so unloading the chunk
+   * never finds it to dispose (a leak, and a lingering-ghost-props bug).
+   */
+  anchor: THREE.Object3D;
 }
 
 interface PopulateContext {
@@ -524,6 +797,68 @@ interface PopulateContext {
    * submesh (see `flushInstancedPending`), rather than one full mesh each.
    */
   instancedPending: Map<string, PendingInstance[]>;
+}
+
+/**
+ * `pathScatter`: one InstancedMesh holding every placement along the curve —
+ * one draw call regardless of instance count. Primitive props build
+ * synchronously; asset props load the glTF once and use its FIRST mesh found
+ * (single-mesh scatter props — fence posts, vine segments — are the common
+ * case; a multi-mesh model only contributes its first submesh here).
+ */
+function buildPathScatter(
+  data: PathScatterData,
+  group: THREE.Object3D,
+  id: string,
+  options: BuildOptions,
+  materialCache: Map<string, THREE.Material>,
+  epoch: number,
+): void {
+  const placements = pathScatterPlacements(data);
+  if (placements.length === 0) return;
+
+  const attach = (geometry: THREE.BufferGeometry) => {
+    const material = materialForId(data.material, options, materialCache);
+    const instanced = new THREE.InstancedMesh(geometry, material, placements.length);
+    instanced.castShadow = data.castShadow;
+    instanced.receiveShadow = data.receiveShadow;
+    instanced.userData["entityId"] = id;
+    const matrix = new THREE.Matrix4();
+    const scaleVec = new THREE.Vector3();
+    placements.forEach((placement, i) => {
+      scaleVec.set(placement.scale, placement.scale, placement.scale);
+      matrix.compose(placement.position, placement.quaternion, scaleVec);
+      instanced.setMatrixAt(i, matrix);
+    });
+    instanced.instanceMatrix.needsUpdate = true;
+    group.add(instanced);
+  };
+
+  if (data.prop.kind === "primitive") {
+    attach(geometryFor(data.prop.shape, data.prop.size));
+    return;
+  }
+  const url = options.resolveModel?.(data.prop.assetId);
+  if (!url) {
+    console.warn(`[render] pathScatter: no URL for mesh asset "${data.prop.assetId}"`);
+    return;
+  }
+  loadGltf(url).then(
+    (gltf) => {
+      if (group.userData["visualsEpoch"] !== epoch) return;
+      const root = data.prop.kind === "asset" && data.prop.node ? gltf.scene.getObjectByName(data.prop.node) : gltf.scene;
+      let found: THREE.BufferGeometry | undefined;
+      root?.traverse((node) => {
+        if (!found && (node as THREE.Mesh).isMesh) found = (node as THREE.Mesh).geometry;
+      });
+      if (!found) {
+        console.warn(`[render] pathScatter: no mesh found in ${url}`);
+        return;
+      }
+      attach(found);
+    },
+    (error) => console.warn(`[render] pathScatter: failed to load model:`, error),
+  );
 }
 
 /**
@@ -543,12 +878,14 @@ function populateEntityGroup(
   const { options, materialCache, scene } = ctx;
   const epoch = ((group.userData["visualsEpoch"] as number | undefined) ?? 0) + 1;
   group.userData["visualsEpoch"] = epoch;
+  const visibility = entity.components["visibility"] as { visible?: boolean } | undefined;
+  group.visible = visibility?.visible ?? true;
   let createdCamera: THREE.PerspectiveCamera | null = null;
   {
     const meshData = entity.components["mesh"] as MeshData | undefined;
     if (meshData && meshData.source.kind === "primitive") {
       const mesh = new THREE.Mesh(
-        geometryFor(meshData.source.shape, meshData.source.size),
+        geometryFor(meshData.source.shape, meshData.source.size, meshData.source.segments),
         resolveMaterialFor(meshData, options, materialCache),
       );
       if (meshData.source.shape === "plane") mesh.rotation.x = -Math.PI / 2;
@@ -568,6 +905,23 @@ function populateEntityGroup(
       group.add(mesh);
     }
 
+    if (meshData && meshData.source.kind === "path") {
+      const mesh = new THREE.Mesh(
+        pathGeometry(meshData.source),
+        resolveMaterialFor(meshData, options, materialCache),
+      );
+      mesh.castShadow = meshData.castShadow;
+      mesh.receiveShadow = meshData.receiveShadow;
+      mesh.userData["entityId"] = id;
+      // marks this mesh for ctx.setPathPoints (main.ts) — a live-simulated
+      // rope/chain rebuilds its geometry every tick from new control points,
+      // reusing every OTHER field (crossSection/width/radius/...) from the
+      // entity's authored source, which the doc never changes at runtime
+      mesh.userData["pathMesh"] = true;
+      mesh.userData["pathSource"] = meshData.source;
+      group.add(mesh);
+    }
+
     if (meshData && meshData.source.kind === "heightmap") {
       // the SAME grid the physics trimesh is cooked from (core/terrain.ts)
       const grid = heightmapMesh(meshData.source);
@@ -579,6 +933,25 @@ function populateEntityGroup(
       mesh.castShadow = meshData.castShadow;
       mesh.receiveShadow = meshData.receiveShadow;
       mesh.userData["entityId"] = id;
+      // main.ts's refreshCameraColliders() raycasts static geometry every
+      // frame for camera dolly-collision (no acceleration structure) — doing
+      // that against full render resolution (up to 256x256) is expensive even
+      // for just the 1-2 tiles typically in range, and gets MUCH worse while
+      // flying across multiple tiles at once. Same height FUNCTION, far fewer
+      // samples: visually identical terrain SHAPE for "don't clip through the
+      // ground" purposes, a small fraction of the raycast cost. Tagged, not
+      // added to the group directly — refreshCameraColliders swaps it in for
+      // the real mesh instead of adding both.
+      const proxyRes = Math.max(4, Math.min(16, meshData.source.resolution));
+      const proxyGrid = heightmapMesh({ ...meshData.source, resolution: proxyRes });
+      const proxyGeometry = new THREE.BufferGeometry();
+      proxyGeometry.setAttribute("position", new THREE.BufferAttribute(proxyGrid.positions, 3));
+      proxyGeometry.setIndex(new THREE.BufferAttribute(proxyGrid.indices, 1));
+      const colliderProxy = new THREE.Mesh(proxyGeometry);
+      colliderProxy.visible = false;
+      colliderProxy.userData["isColliderProxy"] = true;
+      mesh.userData["hasColliderProxy"] = true;
+      group.add(colliderProxy); // same group as `mesh` — inherits the same transform
       group.add(mesh);
     }
 
@@ -592,6 +965,7 @@ function populateEntityGroup(
         castShadow: meshData.castShadow,
         receiveShadow: meshData.receiveShadow,
         lod: meshData.lod ?? true,
+        anchor: scene ?? group,
       };
       if (list) list.push(entry);
       else ctx.instancedPending.set(assetId, [entry]);
@@ -642,6 +1016,11 @@ function populateEntityGroup(
       }
     }
 
+    const pathScatterData = entity.components["pathScatter"] as PathScatterData | undefined;
+    if (pathScatterData) {
+      buildPathScatter(pathScatterData, group, id, options, materialCache, epoch);
+    }
+
     const lightData = entity.components["light"] as LightData | undefined;
     if (lightData) {
       const color = new THREE.Color(lightData.color);
@@ -658,15 +1037,21 @@ function populateEntityGroup(
           dir.target.position.set(0, -1, 0);
           group.add(dir.target);
           if (lightData.castShadow) {
-            // default frustum is ~10 units — useless for a real scene
-            dir.shadow.mapSize.set(2048, 2048);
+            // default frustum is ~10 units — useless for a real scene.
+            // 1024 (not 2048): confirmed fill-rate/fragment-bound via real
+            // frame-timing data, and a large shadowSize already spreads 2048²
+            // thin (e.g. shadowSize 300 -> ~3.4 texels/world-unit, already
+            // soft) — halving resolution cuts shadow-pass fragment cost 4x
+            // for a quality loss that's marginal next to that existing blur.
+            dir.shadow.mapSize.set(1024, 1024);
             const cam = dir.shadow.camera;
-            cam.left = -40;
-            cam.right = 40;
-            cam.top = 40;
-            cam.bottom = -40;
+            const size = lightData.shadowSize ?? 40;
+            cam.left = -size;
+            cam.right = size;
+            cam.top = size;
+            cam.bottom = -size;
             cam.near = 0.5;
-            cam.far = 120;
+            cam.far = Math.max(120, size * 3);
             dir.shadow.bias = -0.0004;
             dir.shadow.normalBias = 0.02;
           }
@@ -688,7 +1073,10 @@ function populateEntityGroup(
       }
       if (light) {
         light.castShadow = lightData.castShadow;
+        light.userData["runtimeEnabled"] = true;
+        light.userData["lightImportance"] = lightData.importance ?? 1;
         group.add(light);
+        options.onLight?.(id, light, lightData.importance ?? 1);
       }
     }
 
@@ -751,6 +1139,9 @@ function populateEntityGroup(
     const billboardData = entity.components["billboard"] as BillboardData | undefined;
     if (billboardData) options.onBillboard?.(id, group, billboardData);
 
+    const grassData = entity.components["grass"] as GrassData | undefined;
+    if (grassData) options.onGrass?.(id, group, grassData);
+
     const cameraData = entity.components["camera"] as CameraData | undefined;
     if (cameraData) {
       const camera = new THREE.PerspectiveCamera(
@@ -793,7 +1184,7 @@ function flushInstancedPending(pending: Map<string, PendingInstance[]>, options:
           if (bucket) bucket.push(entry);
           else byNode.set(entry.node, [entry]);
         }
-        for (const [node, group] of byNode) instanceGltfInto(gltf, node, group, options);
+        for (const [node, group] of byNode) instanceGltfInto(assetId, gltf, node, group, options);
       },
       (error) => console.warn(`[render] failed to load instanced model "${assetId}":`, error),
     );
@@ -814,9 +1205,72 @@ const MID_TIER_KEEP_RATIO = 0.35;
 
 let simplifyModifier: SimplifyModifier | undefined;
 // SimplifyModifier's reduction pass is a genuine one-time cost (tens to
-// hundreds of ms per unique model) — cache by source geometry so re-flushing
-// the same (assetId, node) group never re-decimates it.
-const midTierGeometryCache = new Map<THREE.BufferGeometry, THREE.BufferGeometry | null>();
+// hundreds of ms per unique model, EVEN WHEN IT FAILS — the exception comes
+// from partway through mergeVertices, not an early bail-out) — cache by a
+// stable (assetId, node, submesh index) key, not the source geometry OBJECT.
+// A chunk-streamed world flushes this same (assetId, node) group once per
+// CHUNK CELL that references it (every cell independently loads its own glTF
+// instances), so an object-identity cache silently stops deduping the moment
+// those calls don't happen to observe the exact same geometry instance —
+// turning one one-time cost into one-per-chunk, which reads as "the editor
+// hangs" once enough cells are resident at once. The string key has no such
+// dependency on object identity surviving across separate build calls.
+const midTierGeometryCache = new Map<string, THREE.BufferGeometry | null>();
+// bakeBillboardTexture is a real GPU render-to-texture call — cache by the
+// same (assetId, node) key so a chunk-streamed world's far/billboard tier
+// only ever bakes each unique model once, not once per chunk cell.
+const billboardTextureCache = new Map<string, THREE.Texture | null>();
+// near/mid-tier instanced materials, keyed like midTierGeometryCache — CPU
+// profiling (a real ~40-53% of frame-time spikes during sustained flight)
+// found instanceGltfInto's per-submesh `sub.material.clone()` was creating a
+// BRAND NEW Material object — and therefore forcing a fresh WebGPU shader
+// pipeline compile — every single time a chunk streamed in, even for the
+// exact same tree/rock asset already compiled for a different chunk minutes
+// earlier. The source glTF (and its embedded materials) is already cached
+// forever by loadGltf's gltfCache; caching the CLONE too means the actual
+// compiled pipeline is reused across every chunk that ever needs it.
+const instancedMaterialCache = new Map<string, THREE.Material | THREE.Material[]>();
+
+/** Returns a cached clone of `source` for (near/mid tier, one submesh) —
+ * cloned once ever per key, not once per chunk build. Exported so
+ * hlod-proxy.ts's static merge path shares the exact same cache/key scheme
+ * — a supercell's merged copy of a model and any nearby instanced copy of
+ * the same model use the identical compiled material, never two pipelines
+ * for what's visually one material. */
+export function cachedInstancedMaterial(
+  cacheKey: string,
+  source: THREE.Material | THREE.Material[],
+): THREE.Material | THREE.Material[] {
+  const cached = instancedMaterialCache.get(cacheKey);
+  if (cached) return cached;
+  const cloned = Array.isArray(source) ? source.map((m) => m.clone()) : source.clone();
+  instancedMaterialCache.set(cacheKey, cloned);
+  return cloned;
+}
+
+/**
+ * glTF loaders commonly pack multiple attributes (position/normal/uv) into
+ * one shared `InterleavedBuffer` for efficiency — but `mergeVertices`
+ * (called internally by SimplifyModifier's edge-collapse pass) throws when
+ * it tries to write into an `InterleavedBufferAttribute` on this project's
+ * actual tree models ("Cannot set properties of undefined (setting 'NaN')"
+ * from `InterleavedBufferAttribute.setX`). De-interleaving into plain,
+ * dedicated `BufferAttribute`s first — copied out via `getComponent`, which
+ * both attribute types support — sidesteps that failure mode entirely.
+ */
+function deinterleaveGeometry(geometry: THREE.BufferGeometry): THREE.BufferGeometry {
+  const out = geometry.index ? geometry.toNonIndexed() : geometry.clone();
+  for (const name of Object.keys(out.attributes)) {
+    const attr = out.attributes[name]!;
+    if (!(attr as THREE.InterleavedBufferAttribute).isInterleavedBufferAttribute) continue;
+    const array = new Float32Array(attr.count * attr.itemSize);
+    for (let i = 0; i < attr.count; i++) {
+      for (let c = 0; c < attr.itemSize; c++) array[i * attr.itemSize + c] = attr.getComponent(i, c);
+    }
+    out.setAttribute(name, new THREE.BufferAttribute(array, attr.itemSize));
+  }
+  return out;
+}
 
 /**
  * Decimated stand-in for a submesh's near-tier geometry, used at the "mid"
@@ -828,27 +1282,29 @@ const midTierGeometryCache = new Map<THREE.BufferGeometry, THREE.BufferGeometry 
  *
  * SimplifyModifier's edge-collapse algorithm is known to fail on some
  * real-world topologies (confirmed: it throws on this project's actual tree
- * models, unrelated to their vertex-color attribute) — it is NOT safe to
- * assume it always succeeds. A throw here must not take down the far/
- * billboard tier construction that runs after this, so failure degrades to
- * "no mid tier for this submesh" instead of propagating.
+ * models, from mergeVertices choking on an interleaved attribute — see
+ * deinterleaveGeometry) — it is NOT safe to assume it always succeeds even
+ * after that fix. A throw here must not take down the far/billboard tier
+ * construction that runs after this, so failure degrades to "no mid tier
+ * for this submesh" instead of propagating.
  */
-function buildMidTierGeometry(geometry: THREE.BufferGeometry): THREE.BufferGeometry | null {
-  if (midTierGeometryCache.has(geometry)) return midTierGeometryCache.get(geometry)!;
+function buildMidTierGeometry(cacheKey: string, geometry: THREE.BufferGeometry): THREE.BufferGeometry | null {
+  const cached = midTierGeometryCache.get(cacheKey);
+  if (cached !== undefined) return cached;
   const vertexCount = geometry.attributes["position"]?.count ?? 0;
   if (vertexCount < MID_TIER_MIN_VERTS) {
-    midTierGeometryCache.set(geometry, null);
+    midTierGeometryCache.set(cacheKey, null);
     return null;
   }
   simplifyModifier ??= new SimplifyModifier();
   const removeCount = Math.floor(vertexCount * (1 - MID_TIER_KEEP_RATIO));
   let simplified: THREE.BufferGeometry | null = null;
   try {
-    simplified = simplifyModifier.modify(geometry, removeCount);
+    simplified = simplifyModifier.modify(deinterleaveGeometry(geometry), removeCount);
   } catch (error) {
     console.warn(`[render] mesh simplification failed, skipping the mid LOD tier for this prop:`, error);
   }
-  midTierGeometryCache.set(geometry, simplified);
+  midTierGeometryCache.set(cacheKey, simplified);
   return simplified;
 }
 
@@ -952,6 +1408,14 @@ function buildFarProxyMaterial(
       side: THREE.DoubleSide,
     });
     material.opacityNode = sampled.a;
+    // fake "mostly up" normal — a flat vertical card's REAL normal only ever
+    // faces one fixed horizontal direction, so whichever of the cross's two
+    // cards happens to face away from the sun goes to near-zero diffuse and
+    // reads as a near-black silhouette, at any camera angle that catches it.
+    // A synthetic up-facing normal (same trick as grass) lights both cards
+    // consistently from the sun's elevation instead of that per-card flicker,
+    // matching the ambient/diffuse level of everything else on screen.
+    if (isTall) material.normalNode = vec3(0, 1, 0);
     return material;
   }
   const base = look.map
@@ -964,6 +1428,7 @@ function buildFarProxyMaterial(
     depthWrite: false,
     side: THREE.DoubleSide,
   });
+  material.normalNode = vec3(0, 1, 0); // see the bakedTexture branch above
   const centered = sub(uv(), vec2(0.5, 0.5));
   const dist = length(centered);
   const roundMask = sub(float(1), smoothstep(float(0.3), float(0.5), dist));
@@ -975,29 +1440,34 @@ function buildFarProxyMaterial(
   return material;
 }
 
-function instanceGltfInto(
-  gltf: GLTF,
-  node: string | undefined,
-  entries: PendingInstance[],
-  options: BuildOptions,
-): void {
+export interface GltfSubmesh {
+  geometry: THREE.BufferGeometry;
+  material: THREE.Material | THREE.Material[];
+  /** This submesh's own transform relative to the model root (or `node`, if
+   * given) — compose with a placement's world matrix to get the submesh's
+   * final position, whether that's one instance's matrix or a static merge's
+   * baked-in-place geometry. */
+  localMatrix: THREE.Matrix4;
+}
+
+/**
+ * Every real (non-skinned) mesh under a loaded glTF's scene (or a named
+ * `node` within it), each with its OWN transform relative to that root —
+ * shared by the instancing path (`instanceGltfInto`) and HLOD static
+ * merging (`hlod-proxy.ts`), so both bake submesh-local transforms
+ * identically. Returns `null` if `node` doesn't resolve (caller warns).
+ */
+export function extractGltfSubmeshes(gltf: GLTF, node: string | undefined): GltfSubmesh[] | null {
   let source: THREE.Object3D = gltf.scene;
   if (node) {
     const found = gltf.scene.getObjectByName(node);
-    if (!found) {
-      console.warn(`[render] node "${node}" not found in instanced model`);
-      return;
-    }
+    if (!found) return null;
     source = found;
   }
   source.updateWorldMatrix(true, true);
   sourceInverseScratch.copy(source.matrixWorld).invert();
 
-  const submeshes: Array<{
-    geometry: THREE.BufferGeometry;
-    material: THREE.Material | THREE.Material[];
-    localMatrix: THREE.Matrix4;
-  }> = [];
+  const submeshes: GltfSubmesh[] = [];
   source.traverse((child) => {
     const mesh = child as THREE.Mesh;
     if (!mesh.isMesh) return;
@@ -1011,7 +1481,26 @@ function instanceGltfInto(
       localMatrix: new THREE.Matrix4().copy(sourceInverseScratch).multiply(mesh.matrixWorld),
     });
   });
+  return submeshes;
+}
+
+function instanceGltfInto(
+  assetId: string,
+  gltf: GLTF,
+  node: string | undefined,
+  entries: PendingInstance[],
+  options: BuildOptions,
+): void {
+  const submeshes = extractGltfSubmeshes(gltf, node);
+  if (submeshes === null) {
+    console.warn(`[render] node "${node}" not found in instanced model`);
+    return;
+  }
   if (submeshes.length === 0) return;
+  // extractGltfSubmeshes already validated `node` resolves when given, so this
+  // repeats a cheap lookup rather than threading the resolved root back out of
+  // a function shared with hlod-proxy.ts (which never needs it).
+  const source: THREE.Object3D = node ? gltf.scene.getObjectByName(node)! : gltf.scene;
 
   // per-instance world matrix/position, computed ONCE and shared by every
   // tier (near submeshes AND the far proxy all place identically)
@@ -1024,14 +1513,21 @@ function instanceGltfInto(
   }
 
   const first = entries[0]!;
-  let root: THREE.Object3D = first.group;
-  while (root.parent) root = root.parent;
+  // the anchor captured when this entry was queued (buildScene's own `scene`
+  // container, or the rebuilding entity's own group) — NOT a live `.parent`
+  // walk, which by now would climb past it to wherever the caller has since
+  // reparented that container (a chunk's `built.scene` under the chunk's own
+  // group under the live THREE.Scene), landing outside the subtree a chunk
+  // unload actually traverses to dispose. Every entry here shares one anchor
+  // (accumulated within a single buildScene/rebuildEntityVisuals call).
+  const root = first.anchor;
 
   const nearMeshes: THREE.InstancedMesh[] = [];
-  for (const sub of submeshes) {
+  for (let index = 0; index < submeshes.length; index++) {
+    const sub = submeshes[index]!;
     const instanced = new THREE.InstancedMesh(
       sub.geometry.clone(),
-      Array.isArray(sub.material) ? sub.material.map((m) => m.clone()) : sub.material.clone(),
+      cachedInstancedMaterial(`${assetId}#${node ?? ""}#${index}`, sub.material),
       entries.length,
     );
     instanced.castShadow = first.castShadow;
@@ -1064,16 +1560,28 @@ function instanceGltfInto(
   // rather than being decimated pointlessly. Only built at all when at least
   // one submesh actually qualifies, so light props (rocks, mushrooms) keep
   // the exact 2-tier near/far behavior they had before.
-  const midGeometries = submeshes.map((sub) => buildMidTierGeometry(sub.geometry));
+  const midGeometries = submeshes.map((sub, index) =>
+    buildMidTierGeometry(`${assetId}#${node ?? ""}#${index}`, sub.geometry),
+  );
   const midMeshes: THREE.InstancedMesh[] | undefined = midGeometries.some((g) => g !== null)
     ? submeshes.map((sub, index) => {
-        const geometry = midGeometries[index] ?? sub.geometry.clone();
+        // when a decimated geometry exists, it came from midTierGeometryCache
+        // — shared across every chunk that ever builds this (assetId, node,
+        // submesh), so it must never be disposed by any ONE chunk's unload.
+        const cachedGeometry = midGeometries[index];
+        const geometry = cachedGeometry ?? sub.geometry.clone();
         const instanced = new THREE.InstancedMesh(
           geometry,
-          Array.isArray(sub.material) ? sub.material.map((m) => m.clone()) : sub.material.clone(),
+          cachedInstancedMaterial(`${assetId}#${node ?? ""}#${index}`, sub.material),
           entries.length,
         );
-        instanced.castShadow = first.castShadow;
+        if (cachedGeometry) instanced.userData["sharedGeometry"] = true;
+        // mid tier is already a distance-culled compromise — a decimated
+        // shadow caster at this range reads as roughly the same dark blob a
+        // real one would, for the cost of a whole extra shadow-pass draw per
+        // instance. Only the near tier is close enough for the shadow shape
+        // itself to be worth the GPU pass (matches far tier's castShadow=false).
+        instanced.castShadow = false;
         instanced.receiveShadow = first.receiveShadow;
         for (let i = 0; i < entries.length; i++) {
           instanceMatrixScratch.copy(matrices[i]!).multiply(sub.localMatrix);
@@ -1095,11 +1603,22 @@ function instanceGltfInto(
     b.geometry.attributes["position"]!.count > a.geometry.attributes["position"]!.count ? b : a,
   );
   // a real snapshot of the model (see bakeBillboardTexture) beats any texture
-  // guess — pass a throwaway clone, never the shared cached `source` itself
-  const bakedTexture =
-    isTall && width && height
-      ? (options.bakeBillboardTexture?.(source.clone(true), { width, height }) ?? null)
-      : null;
+  // guess — pass a throwaway clone, never the shared cached `source` itself.
+  // This is an actual GPU render-to-texture call, not a CPU-cheap lookup —
+  // cache it by (assetId, node) the same way buildMidTierGeometry caches its
+  // decimation, and for the same reason: a chunk-streamed world flushes this
+  // same (assetId, node) group once per CELL that references it, so without
+  // caching, splitting one world into N chunks turns one bake into N bakes.
+  const billboardCacheKey = `${assetId}#${node ?? ""}`;
+  let bakedTexture: THREE.Texture | null = null;
+  if (isTall && width && height) {
+    if (billboardTextureCache.has(billboardCacheKey)) {
+      bakedTexture = billboardTextureCache.get(billboardCacheKey)!;
+    } else {
+      bakedTexture = options.bakeBillboardTexture?.(source.clone(true), { width, height }) ?? null;
+      billboardTextureCache.set(billboardCacheKey, bakedTexture);
+    }
+  }
   const farMaterial = buildFarProxyMaterial(isTall, materialLook(dominantSubmesh.material), bakedTexture);
   const far = new THREE.InstancedMesh(farGeometry, farMaterial, entries.length);
   far.castShadow = false; // a rough blob casting a shadow reads worse than no shadow
@@ -1116,11 +1635,19 @@ function instanceGltfInto(
   options.onInstancedBatch?.(batch);
 }
 
+// asset-id-keyed material cache (primitive/heightmap/polygon/path meshes,
+// via materialForId) — module-level for the SAME reason as
+// instancedMaterialCache above: buildScene() runs once per chunk cell, and a
+// per-call cache meant every newly-streamed chunk recompiled a WebGPU shader
+// pipeline for materials (terrain-splat, road, etc.) already compiled for a
+// different chunk. Shared across every buildScene()/reconcile call now.
+const sharedAssetMaterialCache = new Map<string, THREE.Material>();
+
 export function buildScene(doc: SceneDoc, options: BuildOptions = {}): BuiltScene {
   const scene = new THREE.Scene();
   const objects = new Map<string, THREE.Object3D>();
   const cameras = new Map<string, THREE.PerspectiveCamera>();
-  const materialCache = new Map<string, THREE.Material>();
+  const materialCache = sharedAssetMaterialCache;
   const instancedPending = new Map<string, PendingInstance[]>();
   let activeCamera: THREE.PerspectiveCamera | null = null;
 
@@ -1150,7 +1677,7 @@ export function buildScene(doc: SceneDoc, options: BuildOptions = {}): BuiltScen
   // every entity is placed now, so instanced batches can read stable matrixWorlds
   flushInstancedPending(instancedPending, options);
 
-  return { scene, objects, activeCamera, cameras };
+  return { scene, objects, activeCamera, cameras, materials: materialCache };
 }
 
 /**

@@ -1,9 +1,16 @@
 # Open-World Streaming and HLOD Plan
 
-**Status:** Proposed implementation plan  
+**Status:** Proposed implementation plan — §4's representation rings, §7's
+HLOD supercell merging, and parts of §11 Phase C/E are now built (see
+`apps/playground/src/chunk-manager.ts`, `packages/core/src/hlod.ts`); the
+rest (experience manifest, terrain LOD pyramid, publish pipeline) is not.
+**Read `docs/performance-lessons.md` before touching this system** — the
+concrete bugs hit building the first real chunk-streamed game on top of it,
+several matching risks this plan only names in the abstract (§13).  
 **Scope:** Browser-first, low-poly/PS1-style large worlds  
 **Primary workflow:** Files under `assets/`; no MCP dependency  
-**Related decisions:** `ARCHITECTURE.md`, `VISION.md`, `docs/scene-authoring.md`
+**Related decisions:** `ARCHITECTURE.md`, `VISION.md`, `docs/scene-authoring.md`,
+`docs/performance-lessons.md`
 
 ## 1. Outcome
 
