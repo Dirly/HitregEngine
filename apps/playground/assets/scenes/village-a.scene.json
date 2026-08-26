@@ -32,7 +32,7 @@
         "transform": {
           "position": [
             0,
-            0.05,
+            1.8,
             0
           ],
           "rotation": [
@@ -53,19 +53,37 @@
             "shape": "box",
             "size": [
               14,
-              0.1,
+              3.6,
               14
+            ],
+            "segments": [
+              1,
+              1
             ]
           },
-          "material": "demo-world/pillar"
+          "material": "demo-world/crystal-glow",
+          "castShadow": true,
+          "receiveShadow": true,
+          "renderMode": "auto",
+          "lod": true,
+          "static": false
         },
         "collider": {
           "shape": "box",
           "size": [
             14,
-            0.1,
+            3.6,
             14
-          ]
+          ],
+          "offset": [
+            0,
+            0,
+            0
+          ],
+          "friction": 0.5,
+          "restitution": 0,
+          "density": 1,
+          "isTrigger": false
         }
       }
     },
@@ -188,9 +206,18 @@
               3,
               2.5,
               3
+            ],
+            "segments": [
+              1,
+              1
             ]
           },
-          "material": "demo-world/ground-a"
+          "material": "arena/crate-wood",
+          "castShadow": true,
+          "receiveShadow": true,
+          "renderMode": "auto",
+          "lod": true,
+          "static": false
         },
         "collider": {
           "shape": "box",
@@ -277,6 +304,462 @@
           "color": "#ffd9a0",
           "intensity": 14,
           "range": 18
+        }
+      }
+    },
+    "0c415130-aa38-49bc-8f3b-ebb4176f2234": {
+      "name": "Box",
+      "parent": null,
+      "tags": [
+        "graybox"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            18.75,
+            3.3,
+            -1.75
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              3.5,
+              6.6,
+              3.5
+            ],
+            "segments": [
+              1,
+              1
+            ]
+          },
+          "castShadow": true,
+          "receiveShadow": true,
+          "renderMode": "auto",
+          "lod": true,
+          "static": false
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            3.5,
+            6.6,
+            3.5
+          ],
+          "offset": [
+            0,
+            0,
+            0
+          ],
+          "friction": 0.5,
+          "restitution": 0,
+          "density": 1,
+          "isTrigger": false
+        }
+      }
+    },
+    "010b3b7e-0e13-4d83-814d-8b22f350b3b5": {
+      "name": "Box",
+      "parent": null,
+      "tags": [
+        "graybox"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            12.5,
+            2,
+            1.75
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              4,
+              4,
+              1.5
+            ],
+            "segments": [
+              1,
+              1
+            ]
+          },
+          "castShadow": true,
+          "receiveShadow": true,
+          "renderMode": "auto",
+          "lod": true,
+          "static": false
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            4,
+            4,
+            1.5
+          ],
+          "offset": [
+            0,
+            0,
+            0
+          ],
+          "friction": 0.5,
+          "restitution": 0,
+          "density": 1,
+          "isTrigger": false
+        }
+      }
+    },
+    "eb9a503b-3823-4a19-ac90-72439709b824": {
+      "name": "Poly",
+      "parent": null,
+      "tags": [
+        "graybox"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            15.950000000000001,
+            0,
+            9.5
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "polygon",
+            "points": [
+              [
+                -0.45000000000000107,
+                -1.5500000000000007
+              ],
+              [
+                -4.950000000000001,
+                -0.05000000000000071
+              ],
+              [
+                -4.950000000000001,
+                2.4499999999999993
+              ],
+              [
+                -3.950000000000001,
+                5.449999999999999
+              ],
+              [
+                0.5499999999999989,
+                3.4499999999999993
+              ],
+              [
+                4.549999999999999,
+                0.4499999999999993
+              ],
+              [
+                5.049999999999999,
+                -2.0500000000000007
+              ],
+              [
+                3.049999999999999,
+                -2.0500000000000007
+              ],
+              [
+                1.049999999999999,
+                -3.0500000000000007
+              ],
+              [
+                0.049999999999998934,
+                -3.0500000000000007
+              ]
+            ],
+            "height": 3.5
+          },
+          "material": "demo-world/crystal-glow",
+          "castShadow": true,
+          "receiveShadow": true,
+          "renderMode": "auto",
+          "lod": true,
+          "static": false
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            10,
+            3.5,
+            8.5
+          ],
+          "offset": [
+            0.049999999999998934,
+            1.75,
+            -1.1999999999999993
+          ],
+          "friction": 0.5,
+          "restitution": 0,
+          "density": 1,
+          "isTrigger": false
+        }
+      }
+    },
+    "8342c606-b092-49ab-9463-b6e92ff47a0b": {
+      "name": "Box",
+      "parent": null,
+      "tags": [
+        "graybox"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            8,
+            0.05,
+            13
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              3,
+              0.1,
+              7
+            ],
+            "segments": [
+              1,
+              1
+            ]
+          },
+          "castShadow": true,
+          "receiveShadow": true,
+          "renderMode": "auto",
+          "lod": true,
+          "static": false
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            3,
+            0.1,
+            7
+          ],
+          "offset": [
+            0,
+            0,
+            0
+          ],
+          "friction": 0.5,
+          "restitution": 0,
+          "density": 1,
+          "isTrigger": false
+        }
+      }
+    },
+    "1ae48785-a199-45db-a5d0-7f5623b032d2": {
+      "name": "Road",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            5,
+            0.01,
+            18.5
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "path",
+            "points": [
+              [
+                0,
+                0,
+                0
+              ],
+              [
+                -8,
+                0.9975804349722448,
+                -2
+              ],
+              [
+                -14.5,
+                1.602531167314591,
+                2.5
+              ],
+              [
+                -11,
+                0,
+                6
+              ],
+              [
+                -5,
+                0,
+                5
+              ],
+              [
+                -4,
+                0,
+                4
+              ]
+            ],
+            "closed": false,
+            "crossSection": "ribbon",
+            "width": 4,
+            "radius": 0.15,
+            "radialSegments": 6,
+            "segmentsPerSpan": 8
+          },
+          "castShadow": true,
+          "receiveShadow": true,
+          "renderMode": "auto",
+          "lod": true,
+          "static": false
+        }
+      }
+    },
+    "69c20c25-3aaa-402e-881a-c884992b02cf": {
+      "name": "Road",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            3,
+            0.01,
+            20.5
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "path",
+            "points": [
+              [
+                0,
+                0,
+                0
+              ],
+              [
+                -2.5,
+                2.0620762859601833,
+                -6.5
+              ],
+              [
+                -6.5,
+                4.4044122323708255,
+                -5.5
+              ],
+              [
+                -8.5,
+                6.88789737735276,
+                -5
+              ],
+              [
+                -2.5,
+                10.331213430589417,
+                -6.5
+              ],
+              [
+                -3.5,
+                10.963360373707607,
+                -11
+              ],
+              [
+                0,
+                10.963360373707605,
+                -14
+              ],
+              [
+                4.5,
+                10.358408475366044,
+                -17
+              ],
+              [
+                7,
+                9.148505844682344,
+                -19
+              ],
+              [
+                8.5,
+                8.16147989165094,
+                -19.5
+              ]
+            ],
+            "closed": false,
+            "crossSection": "ribbon",
+            "width": 4,
+            "radius": 0.15,
+            "radialSegments": 6,
+            "segmentsPerSpan": 8
+          },
+          "castShadow": true,
+          "receiveShadow": true,
+          "renderMode": "auto",
+          "lod": true,
+          "static": false
         }
       }
     }
