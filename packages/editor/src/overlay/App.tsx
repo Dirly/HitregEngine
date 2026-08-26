@@ -61,6 +61,7 @@ export interface AppProps {
   camera?: THREE.PerspectiveCamera;
   canvas?: HTMLCanvasElement;
   onPinCreate?: (point: [number, number, number], entityId: string | null) => void;
+  onPinCreateForEntity?: (entityId: string) => void;
   onPinUpdate?: (id: string, patch: Partial<Pin>) => void;
   onPinDelete?: (id: string) => void;
   onFocusPoint?: (point: [number, number, number]) => void;
@@ -324,6 +325,10 @@ export function App(props: AppProps) {
 
         <div style={{ ...dockStyle, gridColumn: 3, gridRow: "2 / 4" }}>
           <InspectorDock
+            pins={props.pins}
+            onPinCreateForEntity={props.onPinCreateForEntity}
+            onPinUpdate={props.onPinUpdate}
+            onPinDelete={props.onPinDelete}
             store={props.store}
             registry={props.registry}
             selection={props.selection}

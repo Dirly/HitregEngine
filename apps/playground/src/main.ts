@@ -1300,6 +1300,18 @@ async function main(): Promise<void> {
     camera,
     canvas,
     onPinCreate: (point, entityId) => pinStore.create(point, entityId),
+    // from the inspector: anchor the note at the entity's own world origin, so
+    // it shows up in the viewport where the thing actually is
+    onPinCreateForEntity: (entityId) => {
+      const object = built.objects.get(entityId);
+      const at = object
+        ? object.getWorldPosition(new THREE.Vector3())
+        : new THREE.Vector3();
+      pinStore.create(
+        [Number(at.x.toFixed(3)), Number(at.y.toFixed(3)), Number(at.z.toFixed(3))],
+        entityId,
+      );
+    },
     onPinUpdate: (id, patch) => pinStore.update(id, patch),
     onPinDelete: (id) => pinStore.remove(id),
     onFocusPoint: (point) => void controls.setTarget(point[0], point[1], point[2], true),

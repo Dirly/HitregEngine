@@ -55,6 +55,8 @@ export interface MountOptions {
   camera?: THREE.PerspectiveCamera;
   canvas?: HTMLCanvasElement;
   onPinCreate?: (point: [number, number, number], entityId: string | null) => void;
+  /** Attach a note to an entity from its inspector (anchored at its origin). */
+  onPinCreateForEntity?: (entityId: string) => void;
   onPinUpdate?: (id: string, patch: Partial<Pin>) => void;
   onPinDelete?: (id: string) => void;
   onFocusPoint?: (point: [number, number, number]) => void;
@@ -114,6 +116,7 @@ export function mountEditor(options: MountOptions): { unmount(): void } {
       camera={options.camera}
       canvas={options.canvas}
       onPinCreate={options.onPinCreate}
+      onPinCreateForEntity={options.onPinCreateForEntity}
       onPinUpdate={options.onPinUpdate}
       onPinDelete={options.onPinDelete}
       onFocusPoint={options.onFocusPoint}

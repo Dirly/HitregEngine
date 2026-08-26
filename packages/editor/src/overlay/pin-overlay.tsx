@@ -97,7 +97,10 @@ export function PinOverlay(props: {
             }}
           >
             <div
-              title={pin.text}
+              title={
+                pin.text +
+                (pin.resolved ? " (resolved)" : pin.sentAt ? " (sent to AI)" : "")
+              }
               onClick={() => setOpenId(open ? null : pin.id)}
               onDoubleClick={() => props.onFocusPoint?.(pin.point)}
               style={{
@@ -116,7 +119,7 @@ export function PinOverlay(props: {
                 boxShadow: "0 1px 4px rgba(0,0,0,0.6)",
               }}
             >
-              {pin.resolved ? "✓" : index}
+              {pin.resolved ? "✓" : pin.sentAt ? "↑" : index}
             </div>
             {open && (
               <PinCard
@@ -180,7 +183,45 @@ function PinCard(props: {
           resize: "vertical",
         }}
       />
+      {props.pin.reply && (
+        <div
+          style={{
+            marginTop: 6,
+            padding: 6,
+            background: "#161b22",
+            borderLeft: "2px solid #79c0ff",
+            fontSize: 10,
+          }}
+        >
+          <div style={{ color: "#8b949e", marginBottom: 2 }}>agent replied</div>
+          {props.pin.reply}
+        </div>
+      )}
       <div style={{ display: "flex", gap: 4, marginTop: 6 }}>
+        {!props.pin.resolved && (
+          <button
+            style={{
+              ...buttonStyle,
+              flex: 1,
+              padding: "2px 6px",
+              ...(props.pin.sentAt
+                ? {}
+                : { borderColor: "#79c0ff", color: "#e6edf3" }),
+            }}
+            title={
+              props.pin.sentAt
+                ? `Sent ${new Date(props.pin.sentAt).toLocaleTimeString()} — press again to re-send`
+                : "Put this note in the agent inbox now"
+            }
+            disabled={text.trim().length === 0}
+            onClick={() => {
+              if (text !== props.pin.text) props.onUpdate({ text, sentAt: new Date().toISOString() });
+              else props.onUpdate({ sentAt: new Date().toISOString() });
+            }}
+          >
+            {props.pin.sentAt ? "↑ re-send" : "↑ send to AI"}
+          </button>
+        )}
         <button
           style={{ ...buttonStyle, flex: 1, padding: "2px 6px" }}
           onClick={() => props.onUpdate({ resolved: !props.pin.resolved })}

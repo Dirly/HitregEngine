@@ -6,11 +6,12 @@ import {
   type SceneDoc,
   type SceneStore,
 } from "@hitreg/core";
-import type { AssetSelection, Observable, Selection } from "../state.js";
+import type { AssetSelection, Observable, Pin, Pins, Selection } from "../state.js";
 import { apply, buttonStyle, DockHeader, useObservable, useStoreDoc } from "./common.js";
 import { Row, TextField, ValueField } from "./fields.js";
 import { PrefabKnobs } from "./prop-field.js";
 import { AssetInspector } from "./asset-inspector.js";
+import { EntityNotes } from "./entity-notes.js";
 
 /** Minimal valid data for components whose schemas have required fields. */
 const componentSeeds: Record<string, unknown> = {
@@ -44,6 +45,11 @@ export function InspectorDock(props: {
   saveAsset?: (file: string, content: string) => void;
   thumbnails: Observable<Record<string, string>>;
   onEditPrefab?: (id: string) => void;
+  /** World-anchored notes; the inspector shows the selected entity's. */
+  pins?: Pins;
+  onPinCreateForEntity?: (entityId: string) => void;
+  onPinUpdate?: (id: string, patch: Partial<Pin>) => void;
+  onPinDelete?: (id: string) => void;
 }) {
   const doc = useStoreDoc(props.store);
   const selected = useObservable(props.selection);
@@ -72,6 +78,10 @@ export function InspectorDock(props: {
             assets={props.assets}
             modelBones={props.modelBones}
             onEditPrefab={props.onEditPrefab}
+            pins={props.pins}
+            onPinCreateForEntity={props.onPinCreateForEntity}
+            onPinUpdate={props.onPinUpdate}
+            onPinDelete={props.onPinDelete}
           />
         ) : selectedAsset ? (
           <AssetInspector
@@ -256,6 +266,10 @@ function Inspector(props: {
   assets: AssetLibrary;
   modelBones?: Observable<Record<string, string[]>>;
   onEditPrefab?: (id: string) => void;
+  pins?: Pins;
+  onPinCreateForEntity?: (entityId: string) => void;
+  onPinUpdate?: (id: string, patch: Partial<Pin>) => void;
+  onPinDelete?: (id: string) => void;
 }) {
   const entity = props.doc.entities[props.id]!;
   const [addChoice, setAddChoice] = useState("");
@@ -335,6 +349,16 @@ function Inspector(props: {
           )}
         </div>
       ))}
+
+      {props.pins && props.onPinCreateForEntity && (
+        <EntityNotes
+          entityId={props.id}
+          pins={props.pins}
+          onCreate={props.onPinCreateForEntity}
+          onUpdate={(id, patch) => props.onPinUpdate?.(id, patch)}
+          onDelete={(id) => props.onPinDelete?.(id)}
+        />
+      )}
 
       <div style={{ display: "flex", gap: 6, marginTop: 12 }}>
         <select

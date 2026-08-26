@@ -78,6 +78,7 @@ export function createPinStore(): PinStore {
           createdAt: new Date().toISOString(),
           resolved: false,
           author: "human",
+          sentAt: null,
         },
       ]);
     },

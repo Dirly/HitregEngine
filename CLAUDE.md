@@ -86,6 +86,19 @@ The primary AI channel is **direct file editing** — no MCP required:
   `playing`, …), which is often the difference between a sensible edit and a
   destructive one. A stale `selection` with `strongest: "none"` means nobody
   is pointing at anything — ask rather than assume.
+  Context is keyed per browser tab: if more than one tab is connected to the
+  dev server (e.g. an agent's own Playwright session alongside the user's), the
+  response is instead `{ multipleClients: true, clients: [{id, scene, playMode,
+  mode, attending, lastSeen}...] }` — pass `?id=<id>` to target one. Don't
+  assume a single unlabeled response is "the" session if you might not be the
+  only client.
+- **The agent inbox** (`curl -s "http://localhost:5173/__hitreg/agent-inbox?scene=<name>&wait=60"`)
+  is how a human hands you work *right now*: they press **"send to AI"** on a
+  note and it lands here, carrying the pinned entity's full component JSON so
+  you can act without a second fetch. `wait` long-polls — block on it and you
+  wake within a second of the click instead of polling. Answer by POSTing the
+  scene's pins back with your `reply` and `resolved: true`; the reply shows
+  up in the editor on the note itself.
 - **Pins** (`focus.pins`, and `curl -s http://localhost:5173/__hitreg/pins?scene=<name>`)
   are notes anchored to a world point — the durable half of the focus channel.
   Someone right-clicked a spot and wrote what's wrong with it; unlike selection,
@@ -94,12 +107,8 @@ The primary AI channel is **direct file editing** — no MCP required:
   (`author` yourself, don't pose as `"human"`), and set `resolved: true`
   instead of deleting so the exchange stays readable. They live in
   `.hitreg/pins/` beside the scene, never inside it — a pin is a conversation
-  *about* the level, so it must never ship in one. Keyed per browser tab: if more than
-  one tab is connected to the dev server (e.g. an agent's own Playwright
-  session alongside the user's), the response is instead
-  `{ multipleClients: true, clients: [{id, scene, playMode, lastSeen}...] }`
-  — pass `?id=<id>` to target one. Don't assume a single unlabeled response
-  is "the" session if you might not be the only client.
+  *about* the level, so it must never ship in one. A note with no `sentAt` is
+  a private draft, not a request: read it for context, don't act on it.
 - **Capability spec** (what you can build): `curl -s http://localhost:5173/__hitreg/spec`
   → `{ components, dataAssets, events, netState, scripts, ops, prefabs, endpoints }`,
   every field a JSON Schema generated from the live Zod definitions, so it can't

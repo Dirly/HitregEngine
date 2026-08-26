@@ -238,6 +238,17 @@ export interface Pin {
   resolved: boolean;
   /** "human" | an agent's name — who left it. */
   author: string;
+  /**
+   * When the human pressed "send to AI", or null while it is a private note.
+   *
+   * The distinction matters: a scratch note to yourself and a request you are
+   * actually making of an agent are different acts, and conflating them means
+   * an agent either acts on half-formed thoughts or ignores the channel. Only
+   * sent pins reach the agent inbox.
+   */
+  sentAt: string | null;
+  /** An agent's written answer, posted back alongside `resolved`. */
+  reply?: string;
 }
 
 export type Pins = Observable<Pin[]>;

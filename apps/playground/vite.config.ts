@@ -42,6 +42,7 @@ const BRIDGE_ENDPOINTS = [
   { method: "POST", path: "/__hitreg/write-asset", purpose: "Write an asset file ({file, content}); live-syncs into the running app." },
   { method: "GET", path: "/__hitreg/pins?scene=<name>", purpose: "World-anchored notes for a scene: [{ id, point:[x,y,z], entityId, text, author, createdAt, resolved }]. A pin is a human (or agent) comment left AT a place — read them to find what someone flagged and where. Stored beside the scene (.hitreg/pins/), never inside it." },
   { method: "POST", path: "/__hitreg/pins", purpose: "Replace a scene's notes ({scene, pins}) — post the full array. Agents may add pins to answer or to flag something for the human; set resolved:true rather than deleting, so the exchange stays readable." },
+  { method: "GET", path: "/__hitreg/agent-inbox?scene=<name>&wait=<sec>", purpose: "Notes the human pressed \"send to AI\" on and that are not yet resolved — the requests actually addressed to you, each carrying the pinned entity's full component JSON so you can act without a second fetch. `wait` LONG-POLLS: the request is held open until a note arrives or the deadline passes (max 120s), so an idle agent wakes within ~0.5s of the click instead of polling on a timer. Answer by POSTing the scene's pins back with your `reply` and `resolved: true`." },
   { method: "GET", path: "/__hitreg/player-data", purpose: "Read experience-scoped player-data records (dev backend)." },
   { method: "GET", path: "/__hitreg/net-debug", purpose: "Multiplayer signaling rooms + a ring buffer of relayed traffic." },
 ] as const;
@@ -222,6 +223,106 @@ function hitregBridge(): Plugin {
           }
           res.statusCode = 405;
           res.end();
+        } catch (error) {
+          res.statusCode = 400;
+          res.end(JSON.stringify({ ok: false, error: String(error) }));
+        }
+      });
+
+      // The agent inbox: notes the human explicitly pressed "send to AI" on.
+      //
+      // `?wait=<sec>` long-polls — the request is held open until something is
+      // waiting or the deadline passes. That is the whole point: without it an
+      // agent has to poll on a timer and "send to AI" means "sometime in the
+      // next minute". With it, an idle agent is blocked on this request and
+      // wakes within the poll interval of the click. Implemented by watching
+      // the file's mtime rather than an fs watcher, so there is no listener to
+      // leak per request and a hung client costs nothing but a timer.
+      /**
+       * Attach what an agent needs to ACT on a note, not merely read it: the
+       * pinned entity's name, tags and full component JSON, read fresh from
+       * the scene file. Without this every inbox item costs a second round
+       * trip to find out what was even pinned — and the point of the inbox is
+       * that the request arrives complete.
+       */
+      const enrichPins = (
+        scene: string,
+        pins: Array<Record<string, unknown>>,
+      ): Array<Record<string, unknown>> => {
+        if (pins.length === 0) return pins;
+        let entities: Record<string, unknown> = {};
+        try {
+          const sceneFile = resolveAssetPath(`scenes/${scene}.scene.json`);
+          if (fs.existsSync(sceneFile)) {
+            const doc = JSON.parse(fs.readFileSync(sceneFile, "utf8")) as {
+              entities?: Record<string, unknown>;
+            };
+            entities = doc.entities ?? {};
+          }
+        } catch {
+          /* unreadable scene: the note itself is still worth delivering */
+        }
+        return pins.map((pin) => {
+          const id = typeof pin["entityId"] === "string" ? (pin["entityId"] as string) : null;
+          return { ...pin, entity: id ? (entities[id] ?? null) : null };
+        });
+      };
+
+      const INBOX_POLL_MS = 500;
+      const MAX_WAIT_MS = 120_000;
+      server.middlewares.use("/__hitreg/agent-inbox", (req, res) => {
+        try {
+          const url = new URL(req.url ?? "", "http://x");
+          const scene = url.searchParams.get("scene") ?? "";
+          const file = pinsPath(scene);
+          res.setHeader("content-type", "application/json");
+          res.setHeader("cache-control", "no-store");
+          if (req.method !== "GET") {
+            res.statusCode = 405;
+            res.end();
+            return;
+          }
+
+          const read = (): Array<Record<string, unknown>> => {
+            if (!fs.existsSync(file)) return [];
+            const all = JSON.parse(fs.readFileSync(file, "utf8")) as Array<{
+              sentAt?: string | null;
+              resolved?: boolean;
+            }>;
+            return all.filter((pin) => pin.sentAt && !pin.resolved) as Array<
+              Record<string, unknown>
+            >;
+          };
+
+          const waiting = read();
+          const waitMs = Math.min(Number(url.searchParams.get("wait") ?? 0) * 1000, MAX_WAIT_MS);
+          if (waiting.length > 0 || waitMs <= 0) {
+            res.end(JSON.stringify({ scene, pins: enrichPins(scene, waiting) }));
+            return;
+          }
+
+          const deadline = Date.now() + waitMs;
+          let closed = false;
+          req.on("close", () => (closed = true));
+          const poll = (): void => {
+            if (closed) return;
+            let now: Array<Record<string, unknown>> = [];
+            try {
+              now = read();
+            } catch {
+              /* mid-write: the next tick will read a complete file */
+            }
+            if (now.length > 0) {
+              res.end(JSON.stringify({ scene, pins: enrichPins(scene, now) }));
+              return;
+            }
+            if (Date.now() >= deadline) {
+              res.end(JSON.stringify({ scene, pins: [], timedOut: true }));
+              return;
+            }
+            setTimeout(poll, INBOX_POLL_MS);
+          };
+          setTimeout(poll, INBOX_POLL_MS);
         } catch (error) {
           res.statusCode = 400;
           res.end(JSON.stringify({ ok: false, error: String(error) }));
