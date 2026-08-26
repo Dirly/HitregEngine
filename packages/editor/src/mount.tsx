@@ -12,10 +12,13 @@ import type {
   ModelBones,
   MultiSelection,
   Observable,
+  Pin,
+  Pins,
   PlayMode,
   Selection,
   TerrainBrushSettings,
 } from "./state.js";
+import type * as THREE from "three/webgpu";
 import type { PathCrossSection } from "./path-tool.js";
 
 export interface MountOptions {
@@ -47,6 +50,14 @@ export interface MountOptions {
   assetsVersion: Observable<number>;
   /** Entity id -> bone names of its loaded skinned model (bone dropdowns). */
   modelBones?: ModelBones;
+  /** World-anchored notes; the host owns persistence (dev bridge pin store). */
+  pins?: Pins;
+  camera?: THREE.PerspectiveCamera;
+  canvas?: HTMLCanvasElement;
+  onPinCreate?: (point: [number, number, number], entityId: string | null) => void;
+  onPinUpdate?: (id: string, patch: Partial<Pin>) => void;
+  onPinDelete?: (id: string) => void;
+  onFocusPoint?: (point: [number, number, number]) => void;
   saveAsset?: (file: string, content: string) => void;
   onFocusEntity?: (entityId: string) => void;
   onUnpackModel?: (entityId: string) => void;
@@ -99,6 +110,13 @@ export function mountEditor(options: MountOptions): { unmount(): void } {
       dockSizes={options.dockSizes}
       assetsVersion={options.assetsVersion}
       modelBones={options.modelBones}
+      pins={options.pins}
+      camera={options.camera}
+      canvas={options.canvas}
+      onPinCreate={options.onPinCreate}
+      onPinUpdate={options.onPinUpdate}
+      onPinDelete={options.onPinDelete}
+      onFocusPoint={options.onFocusPoint}
       saveAsset={options.saveAsset}
       onFocusEntity={options.onFocusEntity}
       onUnpackModel={options.onUnpackModel}

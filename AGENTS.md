@@ -20,7 +20,13 @@ Claude sessions get the same content via CLAUDE.md and `.claude/skills/`).
   browser (schema-validated; invalid edits are rejected with a console warning).
 - Always write complete, valid JSON files; never leave a file mid-edit.
 - Runtime context (what the user sees, selection, camera, kit model contents):
-  `curl -s http://localhost:5173/__hitreg/context`.
+  `curl -s http://localhost:5173/__hitreg/context`. Its `focus` block is the
+  referent channel — `focus.strongest` ranks manipulating/hover/selection/asset
+  so "this one" resolves to an entity id (and `focus.hover.point`, a world
+  position) instead of a guess; `focus.mode` says what the user is doing.
+  `focus.pins` lists notes a human anchored to a world point — standing
+  requests that need nobody at the keyboard. Read them before asking what to
+  do; answer via `/__hitreg/pins` (set `resolved: true`, don't delete).
 - Capability spec (every component/data-type/event/script + the ops protocol,
   as JSON Schema generated from the live schemas — plus the full endpoint list):
   `curl -s http://localhost:5173/__hitreg/spec`. This is ground truth for what

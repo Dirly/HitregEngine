@@ -75,8 +75,26 @@ The primary AI channel is **direct file editing** — no MCP required:
   read the file fresh before editing after the user has been clicking around.
 - **Runtime context** (what the user sees): `curl -s http://localhost:5173/__hitreg/context`
   → `{ scene, playMode, selection: {id, entity}, camera: {position, target},
-  inView: [{id, name, distance}...] }`. Use it to resolve "this/the one I'm
-  looking at" references before editing. Keyed per browser tab: if more than
+  inView: [{id, name, distance}...], focus: {...} }`. Use it to resolve
+  "this/the one I'm looking at" references before editing.
+  **`focus` is the referent channel** — read it before guessing from `camera`
+  or `inView`. `focus.strongest` names which signal to trust
+  (`manipulating` > `hover` > `selection` > `asset` > `none`); `focus.hover`
+  carries the entity under the cursor *plus* the world point and surface
+  normal, so "put a bench here" has a "here"; `focus.mode` says what the user
+  is doing (`edit`, `graybox`, `terrain-sculpt`, `editing-prefab:<id>`,
+  `playing`, …), which is often the difference between a sensible edit and a
+  destructive one. A stale `selection` with `strongest: "none"` means nobody
+  is pointing at anything — ask rather than assume.
+- **Pins** (`focus.pins`, and `curl -s http://localhost:5173/__hitreg/pins?scene=<name>`)
+  are notes anchored to a world point — the durable half of the focus channel.
+  Someone right-clicked a spot and wrote what's wrong with it; unlike selection,
+  a pin is actionable with nobody at the keyboard. **Check open pins before
+  asking what to work on.** Post back to the same endpoint to answer one
+  (`author` yourself, don't pose as `"human"`), and set `resolved: true`
+  instead of deleting so the exchange stays readable. They live in
+  `.hitreg/pins/` beside the scene, never inside it — a pin is a conversation
+  *about* the level, so it must never ship in one. Keyed per browser tab: if more than
   one tab is connected to the dev server (e.g. an agent's own Playwright
   session alongside the user's), the response is instead
   `{ multipleClients: true, clients: [{id, scene, playMode, lastSeen}...] }`

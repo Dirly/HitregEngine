@@ -1,3 +1,5 @@
+import { useState } from "react";
+import type * as THREE from "three/webgpu";
 import {
   newId,
   prefabFromSubtree,
@@ -14,6 +16,8 @@ import type {
   GrayboxShape,
   MultiSelection,
   Observable,
+  Pin,
+  Pins,
   PlayMode,
   Selection,
   TerrainBrushSettings,
@@ -25,6 +29,7 @@ import { HierarchyDock, type LoadedChunkCell } from "./hierarchy-dock.js";
 import { AssetsDock } from "./assets-dock.js";
 import { InspectorDock } from "./inspector-dock.js";
 import { ContextMenuView } from "./context-menu-view.js";
+import { PinOverlay } from "./pin-overlay.js";
 
 export interface AppProps {
   store: SceneStore;
@@ -51,6 +56,14 @@ export interface AppProps {
   pathRadius: Observable<number>;
   /** prefab id -> data-url thumbnail rendered by the host. */
   thumbnails: Observable<Record<string, string>>;
+  /** World-anchored notes + the host's persistence callbacks (see PinOverlay). */
+  pins?: Pins;
+  camera?: THREE.PerspectiveCamera;
+  canvas?: HTMLCanvasElement;
+  onPinCreate?: (point: [number, number, number], entityId: string | null) => void;
+  onPinUpdate?: (id: string, patch: Partial<Pin>) => void;
+  onPinDelete?: (id: string) => void;
+  onFocusPoint?: (point: [number, number, number]) => void;
   /** Resizable dock sizes; the host resizes the viewport canvas from these. */
   dockSizes: Observable<DockSizes>;
   assetsVersion: Observable<number>;
@@ -96,6 +109,7 @@ const nullEditingChunk: Observable<{ world: string; cx: number; cz: number } | n
 export function App(props: AppProps) {
   const visible = useObservable(props.visible);
   const docks = useObservable(props.dockSizes);
+  const [showResolvedPins, setShowResolvedPins] = useState(false);
   const editingPrefab = useObservable(props.editingPrefab ?? nullEditingPrefab);
   const editingChunk = useObservable(props.editingChunk ?? nullEditingChunk);
   if (!visible) return null;
@@ -256,6 +270,7 @@ export function App(props: AppProps) {
             />
           )}
           {editingChunk && <ChunkEditBanner cell={editingChunk} onClose={props.onCloseChunkEdit} />}
+          {props.pins && <PinBadge pins={props.pins} showResolved={showResolvedPins} onToggle={() => setShowResolvedPins((v) => !v)} />}
         </div>
 
         <div style={{ ...dockStyle, gridColumn: 2, gridRow: 3 }}>
@@ -359,7 +374,20 @@ export function App(props: AppProps) {
         contextMenu={props.contextMenu}
         onCreatePrefab={createPrefabFrom}
         onUnpackModel={props.onUnpackModel}
+        onPinHere={props.onPinCreate}
       />
+
+      {props.pins && props.camera && props.canvas && (
+        <PinOverlay
+          pins={props.pins}
+          camera={props.camera}
+          canvas={props.canvas}
+          showResolved={showResolvedPins}
+          onUpdate={(id, patch) => props.onPinUpdate?.(id, patch)}
+          onDelete={(id) => props.onPinDelete?.(id)}
+          onFocusPoint={props.onFocusPoint}
+        />
+      )}
     </>
   );
 }
@@ -455,6 +483,39 @@ function ChunkEditBanner(props: {
         onClick={() => props.onClose?.(false)}
       >
         ✕ discard
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Unobtrusive count of open notes, with the show-resolved toggle. Sits in the
+ * viewport hole rather than the toolbar so pins stay a property of the world
+ * you're looking at, not another panel to go find.
+ */
+function PinBadge(props: { pins: Pins; showResolved: boolean; onToggle: () => void }) {
+  const pins = useObservable(props.pins);
+  if (pins.length === 0) return null;
+  const open = pins.filter((pin) => !pin.resolved).length;
+  return (
+    <div style={{ display: "flex", justifyContent: "flex-end", padding: 6 }}>
+      <button
+        onClick={props.onToggle}
+        title={
+          props.showResolved
+            ? "Showing resolved notes too — click to show only open ones"
+            : "Showing open notes — click to include resolved"
+        }
+        style={{
+          ...buttonStyle,
+          pointerEvents: "auto",
+          padding: "2px 8px",
+          font: "11px ui-monospace, monospace",
+          background: "rgba(13, 17, 23, 0.9)",
+        }}
+      >
+        {open} open note{open === 1 ? "" : "s"}
+        {pins.length > open ? ` · ${pins.length - open} resolved${props.showResolved ? " ✓" : ""}` : ""}
       </button>
     </div>
   );

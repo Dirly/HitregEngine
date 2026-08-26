@@ -10,6 +10,8 @@ export function ContextMenuView(props: {
   contextMenu: ContextMenu;
   onCreatePrefab: (entityId: string) => void;
   onUnpackModel?: (entityId: string) => void;
+  /** Drop a note at the right-clicked world point (see PinOverlay). */
+  onPinHere?: (point: [number, number, number], entityId: string | null) => void;
 }) {
   const menu = useObservable(props.contextMenu);
   if (!menu) return null;
@@ -118,6 +120,11 @@ export function ContextMenuView(props: {
             deleteMany(props.store, props.store.doc, ids);
           },
           ids.length === 0,
+        )}
+        {item(
+          "pin a note here",
+          () => menu.point && props.onPinHere?.(menu.point, id),
+          !props.onPinHere || !menu.point,
         )}
         {item("deselect", () => {
           props.selection.set(null);

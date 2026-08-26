@@ -87,6 +87,47 @@ export function rangeSelectTo(
 
 export type GizmoMode = "translate" | "rotate" | "scale";
 
+/**
+ * Where the cursor is pointing in the world: the entity under it (if any) plus
+ * the actual surface hit. The point matters as much as the id — "put a bench
+ * *here*" and "what is this?" are different questions about the same gesture,
+ * and an agent that only receives an entity id can answer the second but not
+ * the first.
+ */
+export interface FocusHit {
+  /** SOURCE-doc entity id under the cursor, or null over empty space/sky. */
+  id: string | null;
+  /** World-space surface point, rounded for legibility. */
+  point: [number, number, number] | null;
+  /** World-space surface normal at the hit, if the hit had a face. */
+  normal: [number, number, number] | null;
+  /** Distance from the camera, in metres. */
+  distance: number | null;
+}
+
+/**
+ * What the cursor is over right now. Sampled at a low rate (see
+ * `ViewportTools`), never per-frame — this feeds the AI focus channel and a
+ * future highlight, neither of which needs frame-perfect fidelity.
+ */
+export type Hover = Observable<FocusHit | null>;
+export const createHover = (): Hover => observable<FocusHit | null>(null);
+
+/** What the user has hold of right now, while a gizmo drag is in flight. */
+export interface Manipulation {
+  ids: string[];
+  mode: GizmoMode;
+}
+
+/**
+ * Non-null only between gizmo drag-start and drag-end. This is the strongest
+ * possible "the human means THIS one" signal — stronger than selection, which
+ * can be stale from ten minutes ago — so it is worth publishing even though it
+ * is true for only a second at a time.
+ */
+export type Manipulating = Observable<Manipulation | null>;
+export const createManipulating = (): Manipulating => observable<Manipulation | null>(null);
+
 export type GrayboxShape = "box" | "cylinder" | "sphere" | "wedge" | "poly";
 
 export type TerrainBrushMode = "raise" | "lower" | "flatten" | "smooth";
@@ -175,11 +216,40 @@ export interface EditingChunkCell {
 export type EditingChunk = Observable<EditingChunkCell | null>;
 export const createEditingChunk = (): EditingChunk => observable<EditingChunkCell | null>(null);
 
+/**
+ * A note a human pinned to a place in the world.
+ *
+ * The focus channel tells an agent what someone is pointing at *right now*;
+ * a pin is the durable version — "this doorway is too narrow" left at the
+ * doorway, still there tomorrow, still attached to the spot rather than to a
+ * chat message that scrolled away. It is deliberately NOT scene data: it is a
+ * conversation about the scene, so it lives beside it (see the dev bridge's
+ * pin store) and never ends up in a shipped level.
+ */
+export interface Pin {
+  id: string;
+  /** World-space anchor. */
+  point: [number, number, number];
+  /** Entity the pin was dropped on, if any — survives the entity moving away. */
+  entityId: string | null;
+  text: string;
+  createdAt: string;
+  /** Addressed. Kept rather than deleted so the exchange stays readable. */
+  resolved: boolean;
+  /** "human" | an agent's name — who left it. */
+  author: string;
+}
+
+export type Pins = Observable<Pin[]>;
+export const createPins = (): Pins => observable<Pin[]>([]);
+
 /** Open context menu (screen position + target entity), or null. */
 export interface ContextMenuState {
   x: number;
   y: number;
   entityId: string | null;
+  /** World point under the cursor when the menu opened, for place-based actions. */
+  point?: [number, number, number] | null;
 }
 export type ContextMenu = Observable<ContextMenuState | null>;
 export const createContextMenu = (): ContextMenu => observable<ContextMenuState | null>(null);

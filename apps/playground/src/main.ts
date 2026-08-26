@@ -75,6 +75,8 @@ import {
   createModelBones,
   createSelection,
   createMultiSelection,
+  createHover,
+  createManipulating,
   defaultEditorSettings,
   GrayboxTool,
   TerrainTool,
@@ -101,6 +103,7 @@ import { bakeBillboardTexture as bakeBillboardTextureImpl } from "./billboard-ba
 import { renderThumbnails } from "./thumbnails.js";
 import { initProjectScripts } from "./project-scripts.js";
 import { installLiveSync } from "./live-sync.js";
+import { createPinStore } from "./pins.js";
 import { postContext, publishEngineSpec } from "./dev-bridge.js";
 
 CameraControls.install({ THREE });
@@ -617,6 +620,7 @@ async function main(): Promise<void> {
       lastWrittenScene = content;
       store.replace(parsed.data);
       rememberLastScene(name);
+      void pinStore.load(name);
       // hideSceneLoading() fires once the stats tick sees loadingCount hit 0
       // (or the timeout, below) — the doc fetch above is done, but chunks/
       // models the rebuild just kicked off are very likely still streaming in.
@@ -1102,6 +1106,14 @@ async function main(): Promise<void> {
 
   const selection = createSelection();
   const multiSelection = createMultiSelection();
+  // attention signals — what the cursor is over and what a drag has hold of.
+  // Published to the AI context bridge so "this one" resolves to an entity and
+  // a world point instead of a guess from the camera pose.
+  const hover = createHover();
+  const manipulating = createManipulating();
+  // world-anchored notes, persisted per scene beside the scene file
+  const pinStore = createPinStore();
+  void pinStore.load(store.doc.name);
   // Authoring is the default state. The editor stays available whenever the
   // game is not actively running; play mode is the clean fullscreen view.
   const editorVisible = observable(true);
@@ -1149,6 +1161,8 @@ async function main(): Promise<void> {
     contextMenu,
     grayboxActive,
     pathActive,
+    hover,
+    manipulating,
     assets,
     getScene: () => built.scene,
     getObject: (id) => built.objects.get(id),
@@ -1282,6 +1296,13 @@ async function main(): Promise<void> {
     dockSizes,
     assetsVersion,
     modelBones,
+    pins: pinStore.pins,
+    camera,
+    canvas,
+    onPinCreate: (point, entityId) => pinStore.create(point, entityId),
+    onPinUpdate: (id, patch) => pinStore.update(id, patch),
+    onPinDelete: (id) => pinStore.remove(id),
+    onFocusPoint: (point) => void controls.setTarget(point[0], point[1], point[2], true),
     saveAsset,
     onFocusEntity: frameEntity,
     onUnpackModel: unpackModel,
@@ -1914,7 +1935,15 @@ async function main(): Promise<void> {
     controls,
     store,
     selection,
+    multiSelection,
+    hover,
+    manipulating,
+    editorVisible,
     editingPrefab,
+    editingChunk,
+    assetSelection,
+    tools: { graybox: grayboxActive, terrain: terrainActive, path: pathActive },
+    pins: pinStore.pins,
     playMode,
     modelNodes,
     modelBones,

@@ -36,10 +36,12 @@ import path from "node:path";
  * can discover the tooling without reading this file. */
 const BRIDGE_ENDPOINTS = [
   { method: "GET", path: "/__hitreg/spec", purpose: "This capability spec + endpoint list." },
-  { method: "GET", path: "/__hitreg/context", purpose: "What the user currently sees: scene, selection, camera, in-view entities, play mode, diagnostics. Keyed per browser tab (bridgeSessionId) — with exactly one tab connected this just returns its data; with more than one, returns { multipleClients: true, clients: [...] } instead of guessing, pass ?id=<id> from that list to pick one." },
+  { method: "GET", path: "/__hitreg/context", purpose: "What the user currently sees: scene, selection, camera, in-view entities, play mode, diagnostics, plus `focus` — where their attention is, ranked (focus.strongest names which of manipulating/hover/selection/asset to resolve \"this\" against, and focus.mode says what they are doing: edit, graybox, terrain-sculpt, editing-prefab:<id>, playing, …). Keyed per browser tab (bridgeSessionId) — with exactly one tab connected this just returns its data; with more than one, returns { multipleClients: true, clients: [...] } instead of guessing, pass ?id=<id> from that list to pick one." },
   { method: "GET", path: "/__hitreg/assets-index", purpose: "Every asset file on disk, bucketed by kind (scenes, prefabs, materials, models, chunks, …)." },
   { method: "GET", path: "/__hitreg/asset-file?file=<rel>", purpose: "Read one asset file fresh from disk (bypasses Vite's cache)." },
   { method: "POST", path: "/__hitreg/write-asset", purpose: "Write an asset file ({file, content}); live-syncs into the running app." },
+  { method: "GET", path: "/__hitreg/pins?scene=<name>", purpose: "World-anchored notes for a scene: [{ id, point:[x,y,z], entityId, text, author, createdAt, resolved }]. A pin is a human (or agent) comment left AT a place — read them to find what someone flagged and where. Stored beside the scene (.hitreg/pins/), never inside it." },
+  { method: "POST", path: "/__hitreg/pins", purpose: "Replace a scene's notes ({scene, pins}) — post the full array. Agents may add pins to answer or to flag something for the human; set resolved:true rather than deleting, so the exchange stays readable." },
   { method: "GET", path: "/__hitreg/player-data", purpose: "Read experience-scoped player-data records (dev backend)." },
   { method: "GET", path: "/__hitreg/net-debug", purpose: "Multiplayer signaling rooms + a ring buffer of relayed traffic." },
 ] as const;
@@ -181,6 +183,51 @@ function hitregBridge(): Plugin {
       };
       const recordPath = (experience: string, player: string, namespace: string) =>
         path.join(playerDataRoot, segment(experience), segment(player), `${segment(namespace)}.json`);
+      // World-anchored notes, one file per scene: .hitreg/pins/<scene>.json
+      //
+      // Deliberately NOT under assets/: a pin is a conversation *about* the
+      // scene, not part of it. Keeping it out of the asset tree means it never
+      // ships in a level, never trips the live-sync watcher, and never has to
+      // be stripped at publish time. Same `segment()` guard as player-data, so
+      // a scene name can't escape the directory.
+      const pinsRoot = path.resolve(server.config.root, ".hitreg", "pins");
+      const pinsPath = (scene: string) => path.join(pinsRoot, `${segment(scene)}.json`);
+      server.middlewares.use("/__hitreg/pins", (req, res) => {
+        try {
+          const url = new URL(req.url ?? "", "http://x");
+          res.setHeader("content-type", "application/json");
+          res.setHeader("cache-control", "no-store");
+          if (req.method === "GET") {
+            const file = pinsPath(url.searchParams.get("scene") ?? "");
+            res.end(fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "[]");
+            return;
+          }
+          if (req.method === "POST") {
+            let body = "";
+            req.on("data", (chunk: Buffer) => (body += chunk));
+            req.on("end", () => {
+              try {
+                const parsed = JSON.parse(body) as { scene?: string; pins?: unknown };
+                if (!Array.isArray(parsed.pins)) throw new Error("pins must be an array");
+                const file = pinsPath(parsed.scene ?? "");
+                fs.mkdirSync(path.dirname(file), { recursive: true });
+                fs.writeFileSync(file, JSON.stringify(parsed.pins, null, 2) + "\n", "utf8");
+                res.end(JSON.stringify({ ok: true, count: parsed.pins.length }));
+              } catch (error) {
+                res.statusCode = 400;
+                res.end(JSON.stringify({ ok: false, error: String(error) }));
+              }
+            });
+            return;
+          }
+          res.statusCode = 405;
+          res.end();
+        } catch (error) {
+          res.statusCode = 400;
+          res.end(JSON.stringify({ ok: false, error: String(error) }));
+        }
+      });
+
       server.middlewares.use("/__hitreg/player-data", (req, res) => {
         try {
           if (req.method === "GET") {
@@ -276,12 +323,23 @@ function hitregBridge(): Plugin {
             JSON.stringify({
               multipleClients: true,
               hint: "pass ?id=<id> to disambiguate",
-              clients: [...contextByClient.entries()].map(([id, entry]) => ({
-                id,
-                scene: (entry.data as { scene?: string }).scene,
-                playMode: (entry.data as { playMode?: string }).playMode,
-                lastSeen: new Date(entry.lastSeen).toISOString(),
-              })),
+              clients: [...contextByClient.entries()].map(([id, entry]) => {
+                const data = entry.data as {
+                  scene?: string;
+                  playMode?: string;
+                  focus?: { mode?: string; strongest?: string };
+                };
+                return {
+                  id,
+                  scene: data.scene,
+                  playMode: data.playMode,
+                  // enough of the focus block to tell the human's tab apart
+                  // from an agent's own headless one without a second GET
+                  mode: data.focus?.mode,
+                  attending: data.focus?.strongest,
+                  lastSeen: new Date(entry.lastSeen).toISOString(),
+                };
+              }),
             }),
           );
           return;

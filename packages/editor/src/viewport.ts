@@ -4,12 +4,16 @@ import { newId, type AssetLibrary, type Op, type SceneStore } from "@hitreg/core
 import type {
   ContextMenu,
   EditorSettings,
+  FocusHit,
   GizmoMode,
+  Hover,
+  Manipulating,
   MultiSelection,
   Observable,
   Selection,
 } from "./state.js";
 import { selectSingle, toggleSelection } from "./state.js";
+import { setRayFromScreen } from "./screen-ray.js";
 import { applyMaterialToMany, deleteMany, duplicateMany, isLockedCascading } from "./selection-ops.js";
 
 export interface ViewportOptions {
@@ -27,6 +31,10 @@ export interface ViewportOptions {
   grayboxActive?: Observable<boolean>;
   /** While the path tool is active, picking and gizmos stand down. */
   pathActive?: Observable<boolean>;
+  /** Published: what the cursor is over (entity + surface point), sampled. */
+  hover?: Hover;
+  /** Published: what a gizmo drag currently has hold of, while it lasts. */
+  manipulating?: Manipulating;
   /** Needed to resolve names when assets are drag-dropped into the viewport. */
   assets?: AssetLibrary;
   /** Current (possibly rebuilt) scene + entity object lookup. */
@@ -63,6 +71,13 @@ export class ViewportTools {
   private groupIds: string[] | null = null;
   private groupStart: Map<string, THREE.Matrix4> | null = null;
   private proxyStartInverse: THREE.Matrix4 | null = null;
+  /**
+   * Hover sampling clock. A raycast against the whole scene is far too
+   * expensive to run per pointermove in a streamed world, and nothing
+   * downstream needs it that often — the context bridge posts at 1Hz. 10Hz is
+   * already generous, and it costs nothing when the pointer is still.
+   */
+  private lastHoverSample = 0;
 
   constructor(private readonly opts: ViewportOptions) {
     this.controls = new TransformControls(opts.camera, opts.canvas);
@@ -88,6 +103,7 @@ export class ViewportTools {
         if (this.groupProxy && this.groupStart) this.commitGroupTransform();
         else this.commitTransform();
       }
+      opts.manipulating?.set(dragging ? { ids: this.selectedIds(), mode: this.controls.mode } : null);
     });
     this.controls.addEventListener("objectChange", () => {
       if (this.groupProxy) {
@@ -121,6 +137,32 @@ export class ViewportTools {
       if (this.flewDuringDrag) return;
       if (moved < 5 && !this.controls.dragging) this.pick(e);
     };
+    const onPointerMove = (e: PointerEvent) => {
+      if (!opts.hover) return;
+      // stand down for exactly the states where a hover reading would be
+      // meaningless or wasteful: overlay hidden, another tool owning the
+      // cursor, a drag in flight, or play-mode pointer lock
+      if (
+        !this.opts.enabled.get() ||
+        this.opts.grayboxActive?.get() ||
+        this.opts.pathActive?.get() ||
+        this.controls.dragging ||
+        this.pointerDown !== null ||
+        document.pointerLockElement === opts.canvas
+      ) {
+        if (opts.hover.get() !== null) opts.hover.set(null);
+        return;
+      }
+      const now = performance.now();
+      if (now - this.lastHoverSample < HOVER_SAMPLE_MS) return;
+      this.lastHoverSample = now;
+      const hit = this.pickDetailAt(e.clientX, e.clientY);
+      const previous = opts.hover.get();
+      // only publish real changes — a still cursor should not wake subscribers
+      if (previous?.id === hit?.id && sameishPoint(previous?.point, hit?.point)) return;
+      opts.hover.set(hit);
+    };
+    const onPointerLeave = () => opts.hover?.set(null);
     const onKeyUp = (e: KeyboardEvent) => {
       if (e.key === "Alt") this.altDown = false;
     };
@@ -160,7 +202,8 @@ export class ViewportTools {
       e.preventDefault();
       if (!this.opts.enabled.get() || !this.opts.contextMenu) return;
       if (this.pointerDown) return; // mid-gesture
-      const picked = this.pickAt(e.clientX, e.clientY);
+      const hit = this.pickDetailAt(e.clientX, e.clientY);
+      const picked = hit?.id ?? null;
       // keep an existing multi-selection intact when right-clicking one of
       // its own members, so "duplicate"/"delete" from the menu act on the
       // whole group; otherwise collapse to just the picked entity
@@ -168,7 +211,12 @@ export class ViewportTools {
         this.opts.selection.set(picked);
         this.opts.multiSelection?.set([picked]);
       }
-      this.opts.contextMenu.set({ x: e.clientX, y: e.clientY, entityId: picked });
+      this.opts.contextMenu.set({
+        x: e.clientX,
+        y: e.clientY,
+        entityId: picked,
+        point: hit?.point ?? null,
+      });
     };
 
     // drag & drop from the assets dock: prefabs/models spawn at the drop
@@ -194,6 +242,8 @@ export class ViewportTools {
 
     opts.canvas.addEventListener("pointerdown", onPointerDown);
     opts.canvas.addEventListener("pointerup", onPointerUp);
+    opts.canvas.addEventListener("pointermove", onPointerMove);
+    opts.canvas.addEventListener("pointerleave", onPointerLeave);
     opts.canvas.addEventListener("contextmenu", onContextMenu);
     opts.canvas.addEventListener("dragover", onDragOver);
     opts.canvas.addEventListener("drop", onDrop);
@@ -203,6 +253,8 @@ export class ViewportTools {
     this.disposers.push(
       () => opts.canvas.removeEventListener("pointerdown", onPointerDown),
       () => opts.canvas.removeEventListener("pointerup", onPointerUp),
+      () => opts.canvas.removeEventListener("pointermove", onPointerMove),
+      () => opts.canvas.removeEventListener("pointerleave", onPointerLeave),
       () => opts.canvas.removeEventListener("contextmenu", onContextMenu),
       () => opts.canvas.removeEventListener("dragover", onDragOver),
       () => opts.canvas.removeEventListener("drop", onDrop),
@@ -385,34 +437,65 @@ export class ViewportTools {
       if (id) toggleSelection(this.opts.selection, multi, id);
       return; // ctrl-click on empty space: leave the current selection alone
     }
+    if (e.shiftKey) {
+      // Shift in a 3D viewport means "add to what I have" — there is no
+      // rendered order here for the hierarchy's range-select to walk, and a
+      // dead modifier is worse than a simple additive one.
+      if (id && !multi.get().includes(id)) toggleSelection(this.opts.selection, multi, id);
+      return;
+    }
     selectSingle(this.opts.selection, multi, id);
   }
 
   /** Raycast a screen point to a SOURCE-doc entity id (prefab instances pick as one unit). */
   pickAt(clientX: number, clientY: number): string | null {
-    const rect = this.opts.canvas.getBoundingClientRect();
-    const ndc = new THREE.Vector2(
-      ((clientX - rect.left) / rect.width) * 2 - 1,
-      -((clientY - rect.top) / rect.height) * 2 + 1,
-    );
-    this.raycaster.setFromCamera(ndc, this.opts.camera);
+    return this.pickDetailAt(clientX, clientY)?.id ?? null;
+  }
+
+  /**
+   * The same raycast as `pickAt`, keeping what the hit actually carried: the
+   * surface point, its normal, and the distance. Callers that only want the
+   * id use `pickAt`; the focus channel wants the geometry, because "here" is
+   * half of most requests a person makes while pointing at something.
+   *
+   * Returns null only when the ray hit nothing at all. A hit on unowned
+   * geometry returns an entry with `id: null` but a real point — that is a
+   * legitimate "empty ground at (x,y,z)", not a miss.
+   */
+  pickDetailAt(clientX: number, clientY: number): FocusHit | null {
+    setRayFromScreen(this.raycaster, this.opts.canvas, this.opts.camera, clientX, clientY);
     const hits = this.raycaster.intersectObjects(this.opts.getScene().children, true);
+    // the nearest hit on geometry no entity owns — the answer to "where on the
+    // ground is the cursor" when nothing selectable is under it
+    let unowned: FocusHit | null = null;
     for (const hit of hits) {
       // the sky dome (procedural gradient, no texture/cubemap configured)
       // fills the whole background — never let it eat a deselect-click
       if (hit.object.userData["skyDome"]) continue;
+      if (hit.object.userData["physicsDebug"]) continue;
       let node: THREE.Object3D | null = hit.object;
       while (node) {
         const entityId = node.userData["entityId"] as string | undefined;
         if (entityId) {
           const resolved = entityId.split(":")[0]!;
           if (this.isLocked(resolved)) break; // locked: fall through to whatever's behind it
-          return resolved;
+          return this.hitDetail(hit, resolved);
         }
         node = node.parent;
       }
+      unowned ??= this.hitDetail(hit, null);
     }
-    return null;
+    return unowned;
+  }
+
+  private hitDetail(hit: THREE.Intersection, id: string | null): FocusHit {
+    let normal: [number, number, number] | null = null;
+    if (hit.face) {
+      // face normals are object-local; the focus channel speaks world space
+      normalMatrix.getNormalMatrix(hit.object.matrixWorld);
+      normal = round3(scratchNormal.copy(hit.face.normal).applyMatrix3(normalMatrix).normalize());
+    }
+    return { id, point: round3(hit.point), normal, distance: Number(hit.distance.toFixed(2)) };
   }
 
   private handleAssetDrop(
@@ -497,4 +580,25 @@ export class ViewportTools {
     for (const dispose of this.disposers) dispose();
     this.controls.dispose();
   }
+}
+
+/** Hover raycast rate. 10Hz — the context bridge downstream posts at 1Hz. */
+const HOVER_SAMPLE_MS = 100;
+
+const normalMatrix = new THREE.Matrix3();
+const scratchNormal = new THREE.Vector3();
+
+function round3(v: THREE.Vector3): [number, number, number] {
+  return [Number(v.x.toFixed(3)), Number(v.y.toFixed(3)), Number(v.z.toFixed(3))];
+}
+
+/** Sub-centimetre cursor drift is not a hover change worth publishing. */
+function sameishPoint(
+  a: [number, number, number] | null | undefined,
+  b: [number, number, number] | null | undefined,
+): boolean {
+  if (!a || !b) return a === b || (!a && !b);
+  return (
+    Math.abs(a[0] - b[0]) < 0.01 && Math.abs(a[1] - b[1]) < 0.01 && Math.abs(a[2] - b[2]) < 0.01
+  );
 }

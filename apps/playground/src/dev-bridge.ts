@@ -11,7 +11,19 @@ import {
 import type { BuiltScene } from "@hitreg/render";
 import type { PhysicsSim } from "@hitreg/physics";
 import type { EventBus, ScriptRegistry } from "@hitreg/scripting";
-import type { EditingPrefab, ModelBones, Observable, PlayMode, Selection } from "@hitreg/editor";
+import type {
+  AssetSelection,
+  EditingChunk,
+  EditingPrefab,
+  Hover,
+  Manipulating,
+  ModelBones,
+  MultiSelection,
+  Pins,
+  Observable,
+  PlayMode,
+  Selection,
+} from "@hitreg/editor";
 import type { ChunkManager } from "./chunk-manager.js";
 import type { SubsceneManager } from "./subscene-manager.js";
 import type { NetPresence } from "./net-presence.js";
@@ -25,7 +37,17 @@ export interface DevBridgeDeps {
   controls: CameraControls;
   store: SceneStore;
   selection: Selection;
+  multiSelection: MultiSelection;
+  hover: Hover;
+  manipulating: Manipulating;
+  editorVisible: Observable<boolean>;
   editingPrefab: EditingPrefab;
+  editingChunk: EditingChunk;
+  assetSelection: AssetSelection;
+  /** Modal authoring tools, for the synthesized `focus.mode`. */
+  tools: { graybox: Observable<boolean>; terrain: Observable<boolean>; path: Observable<boolean> };
+  /** World-anchored notes for the current scene. */
+  pins: Pins;
   playMode: Observable<PlayMode>;
   modelNodes: Record<string, string[]>;
   modelBones: ModelBones;
@@ -77,6 +99,110 @@ const worldPos = new THREE.Vector3();
  * corruption (impossible chunk counts, drawcall spikes) but aren't.
  */
 const bridgeSessionId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+
+/**
+ * One line naming what the user is actually doing, synthesized from the six
+ * independent observables that each know a fragment of it. Nothing else in the
+ * editor computes this — every consumer that wanted "what mode is this?" had to
+ * re-derive it from play mode plus three tool booleans plus two isolation
+ * states, and get the precedence right. Precedence here is deliberate: play
+ * mode wins over everything (the doc isn't being authored at all), then
+ * isolation contexts (the working doc isn't the scene), then modal tools.
+ */
+function describeMode(deps: DevBridgeDeps): string {
+  const play = deps.playMode.get();
+  if (play !== "edit") return play;
+  if (!deps.editorVisible.get()) return "viewing";
+  const chunk = deps.editingChunk.get();
+  if (chunk) return `editing-chunk:${chunk.world}/${chunk.cx}_${chunk.cz}`;
+  const prefab = deps.editingPrefab.get();
+  if (prefab) return `editing-prefab:${prefab}`;
+  if (deps.tools.graybox.get()) return "graybox";
+  if (deps.tools.terrain.get()) return "terrain-sculpt";
+  if (deps.tools.path.get()) return "path-draw";
+  return "edit";
+}
+
+/**
+ * What the human's attention is on, in the order an agent should trust it.
+ *
+ * The whole point: a request like "make this one taller" or "put a bench here"
+ * carries a referent the words don't. Selection alone is a weak signal — it can
+ * be ten minutes stale. A live gizmo drag is the strongest ("I have hold of
+ * THIS"), hover is next ("I'm pointing at it right now"), selection after that,
+ * and the camera/in-view list is the fallback the engine already published.
+ * Publishing the ranking rather than one blurred "focus" value lets the agent
+ * decide how much to trust it, and lets it say *why* it resolved a reference
+ * the way it did.
+ */
+function buildFocus(deps: DevBridgeDeps): Record<string, unknown> {
+  const manipulating = deps.manipulating.get();
+  const hover = deps.hover.get();
+  const selected = deps.multiSelection.get();
+  const asset = deps.assetSelection.get();
+
+  const strongest = manipulating
+    ? "manipulating"
+    : hover?.id
+      ? "hover"
+      : selected.length > 0
+        ? "selection"
+        : asset
+          ? "asset"
+          : "none";
+
+  const name = (id: string): string | null => deps.store.doc.entities[id]?.name ?? null;
+
+  return {
+    /** Which signal below an agent should resolve "this" against. */
+    strongest,
+    mode: describeMode(deps),
+    /** Live gizmo drag — the user physically has hold of these right now. */
+    manipulating: manipulating
+      ? { ids: manipulating.ids, mode: manipulating.mode, names: manipulating.ids.map(name) }
+      : null,
+    /** Cursor target: entity under it plus the world point and surface normal. */
+    hover: hover ? { ...hover, name: hover.id ? name(hover.id) : null } : null,
+    /** Full selected set (capped); `selection` above stays the active member. */
+    selected: selected.slice(0, 32).map((id) => ({ id, name: name(id) })),
+    selectedCount: selected.length,
+    /** Asset panel selection — "this material", not "this entity". */
+    asset: asset ?? null,
+    /**
+     * Open notes the human left in the world, nearest the camera first. These
+     * are standing requests: unlike selection, nobody has to be pointing at
+     * anything for them to be actionable, and they survive the session. An
+     * agent that reads context and ignores these is missing the part of the
+     * conversation that was written down on purpose.
+     */
+    pins: openPins(deps),
+    openPinCount: deps.pins.get().filter((pin) => !pin.resolved).length,
+  };
+}
+
+/** Unresolved notes, nearest-first, capped like every other context list. */
+function openPins(deps: DevBridgeDeps): Array<Record<string, unknown>> {
+  const camera = deps.camera.position;
+  return deps.pins
+    .get()
+    .filter((pin) => !pin.resolved)
+    .map((pin) => ({
+      id: pin.id,
+      text: pin.text,
+      point: pin.point,
+      entityId: pin.entityId,
+      entityName: pin.entityId
+        ? (deps.store.doc.entities[pin.entityId]?.name ?? null)
+        : null,
+      author: pin.author,
+      createdAt: pin.createdAt,
+      distance: Number(
+        Math.hypot(pin.point[0] - camera.x, pin.point[1] - camera.y, pin.point[2] - camera.z).toFixed(2),
+      ),
+    }))
+    .sort((a, b) => a.distance - b.distance)
+    .slice(0, 20);
+}
 
 export function postContext(deps: DevBridgeDeps): void {
   const {
@@ -138,6 +264,8 @@ export function postContext(deps: DevBridgeDeps): void {
       selection: selectedId
         ? { id: selectedId, entity: store.doc.entities[selectedId] ?? null }
         : null,
+      // where the user's attention is, ranked — see buildFocus
+      focus: buildFocus(deps),
       camera: {
         position: camera.position.toArray().map((v) => Number(v.toFixed(2))),
         target: controls.getTarget(new THREE.Vector3()).toArray().map((v) => Number(v.toFixed(2))),
