@@ -32,7 +32,38 @@
     "lightColor": {
       "default": "#ffcc88",
       "bindings": ["lamp/components/light/color"],
+      "label": "Bulb color",
+      "group": "Light",
       "description": "Color of the lamp's point light"
+    },
+    "intensity": {
+      "default": 30,
+      "bindings": ["lamp/components/light/intensity"],
+      "label": "Brightness",
+      "group": "Light",
+      "min": 0,
+      "max": 120,
+      "step": 1,
+      "unit": "cd",
+      "description": "How hard the bulb burns."
+    },
+    "range": {
+      "default": 18,
+      "bindings": ["lamp/components/light/range"],
+      "label": "Falloff",
+      "group": "Light",
+      "min": 1,
+      "max": 60,
+      "unit": "m",
+      "description": "Distance at which the light reaches zero."
+    },
+    "castShadow": {
+      "default": false,
+      "bindings": ["lamp/components/mesh/castShadow"],
+      "label": "Lamp casts shadow",
+      "group": "Light",
+      "advanced": true,
+      "description": "Off by default — a shadow per streetlight is rarely worth the draw."
     }
   }
 }

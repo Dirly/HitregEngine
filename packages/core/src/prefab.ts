@@ -17,23 +17,109 @@ import type { Op } from "./ops.js";
  * collapsed (one entity with a `prefab` component); expansion into full
  * entities happens at compile time, never in the source doc.
  */
+/**
+ * The control kinds an editor knows how to render for a prefab prop. Omitting
+ * `kind` infers it from the prop's `default` — declare it only to force a
+ * control the value shape can't imply (a `number` that is really an `enum`,
+ * a `string` that is really an `asset` id).
+ */
+export const PROP_KINDS = [
+  "number",
+  "boolean",
+  "string",
+  "color",
+  "vec3",
+  "enum",
+  "asset",
+  "json",
+] as const;
+
+export type PropKind = (typeof PROP_KINDS)[number];
+
+/**
+ * A prop declaration — the *knob*, not just the value. This is the contract
+ * that makes AI-generated content human-tweakable: whatever generated a
+ * prefab also declares which of its numbers are meant to be turned, in what
+ * range, in what unit, and under what human-readable label. The editor renders
+ * the control from this (no hand-written inspector), and the same declaration
+ * rides into the engine spec so an agent asked to "make the rifle kick harder"
+ * knows `recoil` exists, that it runs 0..1, and that it is grouped under
+ * "Handling" — instead of guessing at raw component paths.
+ *
+ * Every metadata field is optional: an untyped `{ default, bindings }` prop
+ * (the original shape) still validates and still infers a sensible control.
+ */
+export const propSpecSchema = z.object({
+  default: z.unknown().describe("Value used when an instance does not set this prop."),
+  /** Paths like "lamp/components/light/color" — first segment is a local entity id. */
+  bindings: z
+    .array(z.string().min(1))
+    .default([])
+    .describe(
+      'Where the value is written on expand: "<localEntityId>/components/<component>/<field>".',
+    ),
+  description: z
+    .string()
+    .optional()
+    .describe("What this knob does, in one line — shown as inspector help and read by agents."),
+  kind: z
+    .enum(PROP_KINDS)
+    .optional()
+    .describe("Control type. Omit to infer from `default` (and from `options`, which implies enum)."),
+  label: z.string().optional().describe("Human-facing name. Omit to use the prop key."),
+  group: z
+    .string()
+    .optional()
+    .describe('Inspector section, e.g. "Handling" or "Damage". Ungrouped knobs come first.'),
+  order: z.number().optional().describe("Sort order within a group (ascending)."),
+  min: z.number().optional().describe("Inclusive lower bound — with max, renders a slider."),
+  max: z.number().optional().describe("Inclusive upper bound — with min, renders a slider."),
+  step: z.number().positive().optional().describe("Slider/number increment."),
+  unit: z
+    .string()
+    .optional()
+    .describe('Unit suffix shown beside the value: "m", "m/s", "deg", "rpm", "%".'),
+  options: z
+    .array(z.union([z.string(), z.number()]))
+    .nonempty()
+    .optional()
+    .describe("Allowed values — presence implies an enum dropdown."),
+  assetKind: z
+    .string()
+    .optional()
+    .describe('For kind "asset": which library to pick from ("material", "model", "prefab", …).'),
+  advanced: z
+    .boolean()
+    .optional()
+    .describe("Hide behind the inspector's “advanced” disclosure; agents still see it."),
+});
+
+export type PropSpec = z.infer<typeof propSpecSchema>;
+
+const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
+
+/** The control kind implied by a prop declaration when it doesn't state one. */
+export function inferPropKind(spec: Pick<PropSpec, "default" | "kind" | "options" | "assetKind">): PropKind {
+  if (spec.kind) return spec.kind;
+  if (spec.options) return "enum";
+  if (spec.assetKind) return "asset";
+  const value = spec.default;
+  if (typeof value === "boolean") return "boolean";
+  if (typeof value === "number") return "number";
+  if (typeof value === "string") return HEX_COLOR.test(value) ? "color" : "string";
+  if (Array.isArray(value) && value.length === 3 && value.every((v) => typeof v === "number")) {
+    return "vec3";
+  }
+  return "json";
+}
+
 export const prefabDocSchema = z.object({
   version: z.literal(1),
   name: z.string().min(1),
   /** Local id of the root entity. Instances take the root's place in the scene. */
   root: z.string().min(1),
   entities: z.record(z.string(), entityDocSchema),
-  props: z
-    .record(
-      z.string(),
-      z.object({
-        default: z.unknown(),
-        /** Paths like "lamp/components/light/color" — first segment is a local entity id. */
-        bindings: z.array(z.string().min(1)).default([]),
-        description: z.string().optional(),
-      }),
-    )
-    .default({}),
+  props: z.record(z.string(), propSpecSchema).default({}),
 });
 
 export type PrefabDoc = z.infer<typeof prefabDocSchema>;
@@ -90,6 +176,119 @@ export function validatePrefab(prefab: PrefabDoc): void {
       );
     }
   }
+  validateProps(prefab);
+}
+
+/**
+ * Knob declarations are part of the authoring contract, so a malformed one is
+ * a validation error, not a silently-ignored hint. Catching it here means a
+ * generator that emits a bad range fails at write time — with a message naming
+ * the prop — instead of producing an inspector control nobody can use.
+ */
+function validateProps(prefab: PrefabDoc): void {
+  for (const [name, spec] of Object.entries(prefab.props)) {
+    const where = `prefab "${prefab.name}", prop "${name}"`;
+    const kind = inferPropKind(spec);
+
+    if (spec.min !== undefined && spec.max !== undefined && spec.min > spec.max) {
+      throw new PrefabError(`${where}: min (${spec.min}) is above max (${spec.max})`);
+    }
+    if (kind === "enum") {
+      if (!spec.options) throw new PrefabError(`${where}: kind "enum" requires options`);
+      if (spec.default !== undefined && !spec.options.includes(spec.default as string | number)) {
+        throw new PrefabError(
+          `${where}: default ${JSON.stringify(spec.default)} is not one of options ` +
+            JSON.stringify(spec.options),
+        );
+      }
+    }
+    if (kind === "number" && typeof spec.default === "number") {
+      if (spec.min !== undefined && spec.default < spec.min) {
+        throw new PrefabError(`${where}: default ${spec.default} is below min ${spec.min}`);
+      }
+      if (spec.max !== undefined && spec.default > spec.max) {
+        throw new PrefabError(`${where}: default ${spec.default} is above max ${spec.max}`);
+      }
+    }
+    for (const binding of spec.bindings) {
+      const localId = binding.split("/")[0];
+      if (!localId || !(localId in prefab.entities)) {
+        throw new PrefabError(
+          `${where}: binding "${binding}" does not start with a local entity id`,
+        );
+      }
+    }
+  }
+}
+
+/** One knob, with its metadata resolved (kind inferred, label defaulted). */
+export interface PrefabPropSpec extends Omit<PropSpec, "kind"> {
+  name: string;
+  kind: PropKind;
+  label: string;
+}
+
+/** One entity of a prefab definition, flattened for readers. */
+export interface PrefabPartSpec {
+  id: string;
+  name: string;
+  parent: string | null;
+  depth: number;
+  tags: string[];
+  components: string[];
+}
+
+/**
+ * A prefab's public surface: what it is made of (`parts`) and what may be
+ * turned without opening it up (`props`). This is the "break it down" view —
+ * the thing an agent reads to answer "what can I change about this rifle?"
+ * and the thing the editor reads to draw the instance's knob panel. Both
+ * consumers derive from one declaration, so they can never disagree.
+ */
+export interface PrefabSpec {
+  name: string;
+  root: string;
+  parts: PrefabPartSpec[];
+  props: PrefabPropSpec[];
+  /** Groups in declaration order, for stable inspector section ordering. */
+  groups: string[];
+}
+
+/** Resolve a prefab definition into its readable/tweakable surface (pure). */
+export function describePrefab(prefab: PrefabDoc): PrefabSpec {
+  const parts: PrefabPartSpec[] = [];
+  const walk = (parent: string | null, depth: number): void => {
+    for (const [id, entity] of Object.entries(prefab.entities)) {
+      if (entity.parent !== parent) continue;
+      parts.push({
+        id,
+        name: entity.name,
+        parent,
+        depth,
+        tags: [...entity.tags],
+        components: Object.keys(entity.components),
+      });
+      walk(id, depth + 1);
+    }
+  };
+  walk(null, 0);
+
+  const props = Object.entries(prefab.props).map(([name, spec], index) => ({
+    ...spec,
+    name,
+    kind: inferPropKind(spec),
+    label: spec.label ?? name,
+    order: spec.order ?? index,
+  }));
+  props.sort((a, b) => (a.group ?? "").localeCompare(b.group ?? "") || a.order - b.order);
+
+  const groups: string[] = [];
+  for (const prop of props) {
+    const group = prop.group ?? "";
+    if (!groups.includes(group)) groups.push(group);
+  }
+
+  return { name: prefab.name, root: prefab.root, parts, props, groups };
 }
 
 /**

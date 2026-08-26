@@ -1,8 +1,15 @@
 import { useState } from "react";
-import type { AssetLibrary, ComponentRegistry, SceneDoc, SceneStore } from "@hitreg/core";
+import {
+  describePrefab,
+  type AssetLibrary,
+  type ComponentRegistry,
+  type SceneDoc,
+  type SceneStore,
+} from "@hitreg/core";
 import type { AssetSelection, Observable, Selection } from "../state.js";
 import { apply, buttonStyle, DockHeader, useObservable, useStoreDoc } from "./common.js";
 import { Row, TextField, ValueField } from "./fields.js";
+import { PrefabKnobs } from "./prop-field.js";
 import { AssetInspector } from "./asset-inspector.js";
 
 /** Minimal valid data for components whose schemas have required fields. */
@@ -62,7 +69,9 @@ export function InspectorDock(props: {
             doc={doc}
             store={props.store}
             registry={props.registry}
+            assets={props.assets}
             modelBones={props.modelBones}
+            onEditPrefab={props.onEditPrefab}
           />
         ) : selectedAsset ? (
           <AssetInspector
@@ -129,12 +138,124 @@ function BoneField(props: { value: string; bones: string[]; onCommit: (v: string
   );
 }
 
+/**
+ * A prefab instance's inspector: the knobs its definition declares, not the
+ * raw `{ prefabId, props, overrides }` blob. This is the payoff of the whole
+ * prop contract — an agent generates a prefab and declares what's tunable, and
+ * a person lands on labelled sliders in the right units instead of guessing
+ * which number in a JSON tree is the recoil. The raw view stays one click away
+ * as the escape hatch for anything the declaration didn't anticipate.
+ */
+function PrefabInstancePanel(props: {
+  id: string;
+  data: unknown;
+  store: SceneStore;
+  assets: AssetLibrary;
+  onEditPrefab?: (id: string) => void;
+}) {
+  const [raw, setRaw] = useState(false);
+  const instance = (props.data ?? {}) as {
+    prefabId?: string;
+    props?: Record<string, unknown>;
+    overrides?: Array<{ path: string; value: unknown }>;
+  };
+  const definition = instance.prefabId ? props.assets.getPrefab(instance.prefabId) : undefined;
+
+  const commit = (next: unknown): void =>
+    apply(props.store, [
+      { op: "set-component", id: props.id, component: "prefab", data: next },
+    ]);
+
+  const setProp = (name: string, value: unknown): void =>
+    commit({ ...instance, props: { ...(instance.props ?? {}), [name]: value } });
+
+  const resetProp = (name: string): void => {
+    const nextProps = { ...(instance.props ?? {}) };
+    delete nextProps[name];
+    commit({ ...instance, props: nextProps });
+  };
+
+  const overrides = instance.overrides ?? [];
+  const setOverride = (index: number, value: unknown): void =>
+    commit({
+      ...instance,
+      overrides: overrides.map((o, i) => (i === index ? { ...o, value } : o)),
+    });
+  const removeOverride = (index: number): void =>
+    commit({ ...instance, overrides: overrides.filter((_, i) => i !== index) });
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, margin: "2px 0" }}>
+        <span style={{ color: "#8b949e", fontSize: 11, flex: 1 }}>
+          {definition ? definition.name : instance.prefabId || "(no prefab)"}
+          <span style={{ fontSize: 10 }}> · {instance.prefabId}</span>
+        </span>
+        {definition && props.onEditPrefab && (
+          <button
+            style={buttonStyle}
+            title="Open the definition — edits propagate to every instance"
+            onClick={() => props.onEditPrefab!(instance.prefabId!)}
+          >
+            edit definition
+          </button>
+        )}
+        <button
+          style={buttonStyle}
+          title="Raw component JSON"
+          onClick={() => setRaw((v) => !v)}
+        >
+          {raw ? "knobs" : "raw"}
+        </button>
+      </div>
+
+      {raw || !definition ? (
+        <ValueField value={props.data} onCommit={commit} />
+      ) : (
+        <PrefabKnobs
+          spec={describePrefab(definition)}
+          values={instance.props ?? {}}
+          assets={props.assets}
+          onSet={setProp}
+          onReset={resetProp}
+        />
+      )}
+
+      {!raw && overrides.length > 0 && (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ color: "#8b949e", fontSize: 11 }}>
+            OVERRIDES · {overrides.length} path{overrides.length === 1 ? "" : "s"} patched on this
+            instance only
+          </div>
+          {overrides.map((override, index) => (
+            <div key={`${override.path}:${index}`} style={{ margin: "3px 0" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ flex: 1, color: "#e3b341", fontSize: 10 }}>{override.path}</span>
+                <span
+                  style={{ color: "#8b949e", cursor: "pointer" }}
+                  title="Remove this override (falls back to the definition)"
+                  onClick={() => removeOverride(index)}
+                >
+                  ✕
+                </span>
+              </div>
+              <ValueField value={override.value} onCommit={(v) => setOverride(index, v)} />
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Inspector(props: {
   id: string;
   doc: SceneDoc;
   store: SceneStore;
   registry: ComponentRegistry;
+  assets: AssetLibrary;
   modelBones?: Observable<Record<string, string[]>>;
+  onEditPrefab?: (id: string) => void;
 }) {
   const entity = props.doc.entities[props.id]!;
   const [addChoice, setAddChoice] = useState("");
@@ -187,21 +308,31 @@ function Inspector(props: {
               ✕
             </span>
           </div>
-          <ValueField
-            value={data}
-            special={
-              name === "script" && bones.length > 0
-                ? {
-                    bone: (v, commit) => <BoneField value={v} bones={bones} onCommit={commit} />,
-                  }
-                : undefined
-            }
-            onCommit={(next) =>
-              apply(props.store, [
-                { op: "set-component", id: props.id, component: name, data: next },
-              ])
-            }
-          />
+          {name === "prefab" ? (
+            <PrefabInstancePanel
+              id={props.id}
+              data={data}
+              store={props.store}
+              assets={props.assets}
+              onEditPrefab={props.onEditPrefab}
+            />
+          ) : (
+            <ValueField
+              value={data}
+              special={
+                name === "script" && bones.length > 0
+                  ? {
+                      bone: (v, commit) => <BoneField value={v} bones={bones} onCommit={commit} />,
+                    }
+                  : undefined
+              }
+              onCommit={(next) =>
+                apply(props.store, [
+                  { op: "set-component", id: props.id, component: name, data: next },
+                ])
+              }
+            />
+          )}
         </div>
       ))}
 

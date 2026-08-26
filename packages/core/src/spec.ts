@@ -2,7 +2,9 @@ import type { ComponentRegistry } from "./components/registry.js";
 import type { AssetLibrary } from "./assets.js";
 import type { EventRegistry } from "./events.js";
 import type { NetStateStore } from "./net-state.js";
+import { propSpecSchema, type PrefabSpec } from "./prefab.js";
 import { OP_SPECS } from "./ops.js";
+import { z } from "zod";
 
 /**
  * The engine's self-describing capability spec: a single machine-readable
@@ -49,12 +51,23 @@ export interface EngineSpec {
   netState: Record<string, unknown>;
   /** behavior name -> its param specs (attachable via the `script` component). */
   scripts: Record<string, unknown>;
-  /** prefab asset ids currently registered. */
-  prefabs: string[];
+  /**
+   * prefab asset id -> its public surface: the entities it is made of and the
+   * knobs it exposes (kind, range, unit, group). Reading this is how an agent
+   * answers "what can I tune about this thing?" without opening the file.
+   */
+  prefabs: Record<string, PrefabSpec>;
+  /**
+   * JSON Schema of a single prefab prop declaration — the knob contract.
+   * Read it to learn what metadata a generated prefab may declare about each
+   * tunable value (kind, range, unit, group), so the thing you generate can be
+   * turned by a human afterward instead of being a black box.
+   */
+  prefabProp: unknown;
 }
 
 /** Current spec shape version — bump on a breaking change to EngineSpec. */
-export const ENGINE_SPEC_VERSION = "1";
+export const ENGINE_SPEC_VERSION = "2";
 
 /** Assemble the engine capability spec from the live registries (pure). */
 export function buildEngineSpec(inputs: EngineSpecInputs): EngineSpec {
@@ -66,6 +79,7 @@ export function buildEngineSpec(inputs: EngineSpecInputs): EngineSpec {
     events: inputs.events?.jsonSchemas() ?? {},
     netState: inputs.netState?.jsonSchemas() ?? {},
     scripts: inputs.scripts ?? {},
-    prefabs: inputs.assets?.prefabIds() ?? [],
+    prefabs: inputs.assets?.prefabSpecs() ?? {},
+    prefabProp: z.toJSONSchema(propSpecSchema, { io: "input" }),
   };
 }

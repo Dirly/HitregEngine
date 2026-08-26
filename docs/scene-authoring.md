@@ -124,6 +124,32 @@ components: {
 }
 ```
 
+### Props are knobs, not just values
+
+A prop declaration carries the metadata an editor needs to render a real
+control and an agent needs to know what it may safely turn — `kind`, `label`,
+`group`, `min`/`max`/`step`, `unit`, `options`, `assetKind`, `advanced`,
+`description`. Field meanings live in the spec (`propSpecSchema`); the judgment
+call is *when to bother*:
+
+- **Whatever generates a prefab declares its knobs.** A rifle that ships with
+  `{ default, bindings }` and nothing else is a black box: the human who asked
+  for it gets a raw JSON blob, and the next agent has to reverse-engineer which
+  number is the recoil. Declaring `min`/`max`/`unit`/`group` is what makes
+  one-shot output tweakable afterward.
+- **Everything else is inferred.** Omit `kind` and it comes from the default
+  (`"#ffcc88"` → color, `[0,1,0]` → vec3, presence of `options` → enum). The
+  bare `{ default, bindings }` shape still validates — declare metadata where
+  it earns its keep, not everywhere.
+- **Bad ranges are rejected at authoring time**, not silently ignored: a
+  default outside `min`/`max`, an enum default that isn't one of `options`, an
+  inverted range, or a binding whose first segment names no local entity all
+  throw from `validatePrefab`.
+- **One declaration, both audiences.** `describePrefab(doc)` resolves a
+  definition into `{ parts, props, groups }` — the breakdown the instance
+  inspector draws *and* what `/__hitreg/spec` publishes under `prefabs`. Read
+  the spec to learn a prefab's tunable surface; never re-derive it from prose.
+
 Rules:
 - Scene docs keep instances **collapsed**; `expandScene(doc, assets, registry)`
   resolves them (children namespaced `instanceId:localId`). Never store an

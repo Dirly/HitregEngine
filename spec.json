@@ -1,5 +1,5 @@
 {
-  "version": "1",
+  "version": "2",
   "ops": [
     {
       "op": "add-entity",
@@ -2254,5 +2254,96 @@
   },
   "netState": {},
   "scripts": {},
-  "prefabs": []
+  "prefabs": {},
+  "prefabProp": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "default": {
+        "description": "Value used when an instance does not set this prop."
+      },
+      "bindings": {
+        "default": [],
+        "description": "Where the value is written on expand: \"<localEntityId>/components/<component>/<field>\".",
+        "type": "array",
+        "items": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "description": {
+        "description": "What this knob does, in one line — shown as inspector help and read by agents.",
+        "type": "string"
+      },
+      "kind": {
+        "description": "Control type. Omit to infer from `default` (and from `options`, which implies enum).",
+        "type": "string",
+        "enum": [
+          "number",
+          "boolean",
+          "string",
+          "color",
+          "vec3",
+          "enum",
+          "asset",
+          "json"
+        ]
+      },
+      "label": {
+        "description": "Human-facing name. Omit to use the prop key.",
+        "type": "string"
+      },
+      "group": {
+        "description": "Inspector section, e.g. \"Handling\" or \"Damage\". Ungrouped knobs come first.",
+        "type": "string"
+      },
+      "order": {
+        "description": "Sort order within a group (ascending).",
+        "type": "number"
+      },
+      "min": {
+        "description": "Inclusive lower bound — with max, renders a slider.",
+        "type": "number"
+      },
+      "max": {
+        "description": "Inclusive upper bound — with min, renders a slider.",
+        "type": "number"
+      },
+      "step": {
+        "description": "Slider/number increment.",
+        "type": "number",
+        "exclusiveMinimum": 0
+      },
+      "unit": {
+        "description": "Unit suffix shown beside the value: \"m\", \"m/s\", \"deg\", \"rpm\", \"%\".",
+        "type": "string"
+      },
+      "options": {
+        "description": "Allowed values — presence implies an enum dropdown.",
+        "minItems": 1,
+        "type": "array",
+        "items": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "number"
+            }
+          ]
+        }
+      },
+      "assetKind": {
+        "description": "For kind \"asset\": which library to pick from (\"material\", \"model\", \"prefab\", …).",
+        "type": "string"
+      },
+      "advanced": {
+        "description": "Hide behind the inspector's “advanced” disclosure; agents still see it.",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "default"
+    ]
+  }
 }

@@ -1,5 +1,12 @@
 import { z } from "zod";
-import { prefabDocSchema, validatePrefab, PrefabError, type PrefabDoc } from "./prefab.js";
+import {
+  describePrefab,
+  prefabDocSchema,
+  validatePrefab,
+  PrefabError,
+  type PrefabDoc,
+  type PrefabSpec,
+} from "./prefab.js";
 import { materialSchema } from "./components/core.js";
 import { spritesheetSchema } from "./spritesheet.js";
 
@@ -87,6 +94,17 @@ export class AssetLibrary {
 
   prefabIds(): string[] {
     return [...this.prefabs.keys()];
+  }
+
+  /**
+   * Every prefab's public surface — parts plus knobs — keyed by asset id.
+   * Feeds the engine spec, so an agent learns what a prefab exposes from the
+   * same declaration the inspector renders.
+   */
+  prefabSpecs(): Record<string, PrefabSpec> {
+    const out: Record<string, PrefabSpec> = {};
+    for (const [id, doc] of this.prefabs) out[id] = describePrefab(doc);
+    return out;
   }
 
   // -- model assets (glTF/GLB files, resolved to URLs by the host app) -------

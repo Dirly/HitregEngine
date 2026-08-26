@@ -69,7 +69,7 @@ describe("buildEngineSpec", () => {
     expect(bare.events).toEqual({});
     expect(bare.netState).toEqual({});
     expect(bare.scripts).toEqual({});
-    expect(bare.prefabs).toEqual([]);
+    expect(bare.prefabs).toEqual({});
 
     const netState = new NetStateStore();
     netState.define("enemyHp", z.object({ hp: z.number() }));
@@ -90,6 +90,10 @@ describe("buildEngineSpec", () => {
     });
     expect(spec.netState["enemyHp"]).toBeTruthy();
     expect(spec.scripts["spinner"]).toBeTruthy();
-    expect(spec.prefabs).toEqual(["lamp"]);
+    expect(Object.keys(spec.prefabs)).toEqual(["lamp"]);
+    expect(spec.prefabs["lamp"]!.name).toBe("Lamp");
+    expect(spec.prefabs["lamp"]!.parts).toEqual([
+      { id: "r", name: "Lamp", parent: null, depth: 0, tags: [], components: [] },
+    ]);
   });
 });
