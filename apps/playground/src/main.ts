@@ -1174,6 +1174,7 @@ async function main(): Promise<void> {
   const pathActive = observable(false);
   const pathCrossSection = observable<PathCrossSection>("ribbon");
   const pathWidth = observable(4);
+  const pathThickness = observable(0);
   const pathRadius = observable(0.15);
   const thumbnails = observable<Record<string, string>>({});
   const dockSizes = createDockSizes();
@@ -1271,6 +1272,7 @@ async function main(): Promise<void> {
     active: pathActive,
     crossSection: pathCrossSection,
     width: pathWidth,
+    thickness: pathThickness,
     radius: pathRadius,
     getScene: () => built.scene,
     onDraggingChanged: (dragging) => {
@@ -1365,6 +1367,7 @@ async function main(): Promise<void> {
     pathActive,
     pathCrossSection,
     pathWidth,
+    pathThickness,
     pathRadius,
     thumbnails,
     dockSizes,

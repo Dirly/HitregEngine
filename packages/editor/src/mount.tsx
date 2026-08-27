@@ -52,6 +52,7 @@ export interface MountOptions {
   pathActive: Observable<boolean>;
   pathCrossSection: Observable<PathCrossSection>;
   pathWidth: Observable<number>;
+  pathThickness: Observable<number>;
   pathRadius: Observable<number>;
   thumbnails: Observable<Record<string, string>>;
   dockSizes: Observable<DockSizes>;
@@ -120,6 +121,7 @@ export function mountEditor(options: MountOptions): { unmount(): void } {
       pathActive={options.pathActive}
       pathCrossSection={options.pathCrossSection}
       pathWidth={options.pathWidth}
+      pathThickness={options.pathThickness}
       pathRadius={options.pathRadius}
       thumbnails={options.thumbnails}
       dockSizes={options.dockSizes}

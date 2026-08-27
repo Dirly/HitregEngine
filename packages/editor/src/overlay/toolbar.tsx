@@ -227,6 +227,7 @@ export function Toolbar(props: {
   pathActive: Observable<boolean>;
   pathCrossSection: Observable<PathCrossSection>;
   pathWidth: Observable<number>;
+  pathThickness: Observable<number>;
   pathRadius: Observable<number>;
   scenes?: Observable<string[]>;
   onSwitchScene?: (name: string) => void;
@@ -259,6 +260,7 @@ export function Toolbar(props: {
   const pathOn = useObservable(props.pathActive);
   const pathCrossSection = useObservable(props.pathCrossSection);
   const pathWidth = useObservable(props.pathWidth);
+  const pathThickness = useObservable(props.pathThickness);
   const pathRadius = useObservable(props.pathRadius);
   const set = (patch: Partial<EditorSettings>) => props.settings.set({ ...settings, ...patch });
 
@@ -521,6 +523,15 @@ export function Toolbar(props: {
                 <span style={labelStyle}>width</span>
                 <span style={{ width: 42 }}>
                   <NumberField value={pathWidth} onCommit={(v) => v > 0 && props.pathWidth.set(v)} />
+                </span>
+                <span style={labelStyle} title="0 = flat sheet; >0 extrudes a slab down from the drawn curve">
+                  thick
+                </span>
+                <span style={{ width: 42 }}>
+                  <NumberField
+                    value={pathThickness}
+                    onCommit={(v) => v >= 0 && props.pathThickness.set(v)}
+                  />
                 </span>
               </>
             ) : (

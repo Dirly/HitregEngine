@@ -63,6 +63,7 @@ export interface AppProps {
   pathActive: Observable<boolean>;
   pathCrossSection: Observable<PathCrossSection>;
   pathWidth: Observable<number>;
+  pathThickness: Observable<number>;
   pathRadius: Observable<number>;
   /** prefab id -> data-url thumbnail rendered by the host. */
   thumbnails: Observable<Record<string, string>>;
@@ -242,6 +243,7 @@ export function App(props: AppProps) {
             pathActive={props.pathActive}
             pathCrossSection={props.pathCrossSection}
             pathWidth={props.pathWidth}
+            pathThickness={props.pathThickness}
             pathRadius={props.pathRadius}
             scenes={props.scenes}
             onSwitchScene={props.onSwitchScene}

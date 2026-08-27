@@ -108,6 +108,17 @@ export const meshSchema = z.object({
         .default("ribbon")
         .describe("ribbon = flat strip (roads, rivers, fences); tube = round (vines, cables, rope)."),
       width: z.number().positive().default(2).describe("ribbon only: total width across the curve."),
+      thickness: z
+        .number()
+        .min(0)
+        .default(0)
+        .describe(
+          "ribbon only: extrude the strip DOWN into a closed slab this thick (curve = top surface). 0 = flat sheet.",
+        ),
+      doubleSided: z
+        .boolean()
+        .default(false)
+        .describe("ribbon only, flat sheet: also render the underside. Ignored when thickness > 0 (a slab is closed)."),
       radius: z.number().positive().default(0.15).describe("tube only: cross-section radius."),
       radialSegments: z.number().int().min(3).max(16).default(6).describe("tube only: roundness."),
       segmentsPerSpan: z

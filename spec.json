@@ -657,6 +657,17 @@
                   "type": "number",
                   "exclusiveMinimum": 0
                 },
+                "thickness": {
+                  "default": 0,
+                  "description": "ribbon only: extrude the strip DOWN into a closed slab this thick (curve = top surface). 0 = flat sheet.",
+                  "type": "number",
+                  "minimum": 0
+                },
+                "doubleSided": {
+                  "default": false,
+                  "description": "ribbon only, flat sheet: also render the underside. Ignored when thickness > 0 (a slab is closed).",
+                  "type": "boolean"
+                },
                 "radius": {
                   "default": 0.15,
                   "description": "tube only: cross-section radius.",

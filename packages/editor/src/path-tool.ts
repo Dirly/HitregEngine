@@ -16,6 +16,8 @@ export interface PathToolOptions {
   active: Observable<boolean>;
   crossSection: Observable<PathCrossSection>;
   width: Observable<number>;
+  /** ribbon only: 0 = flat sheet, >0 = slab extruded down from the curve. */
+  thickness: Observable<number>;
   radius: Observable<number>;
   getScene(): THREE.Scene;
   onDraggingChanged?(dragging: boolean): void;
@@ -180,6 +182,8 @@ export class PathTool {
                   closed,
                   crossSection,
                   width: this.opts.width.get(),
+                  thickness: this.opts.thickness.get(),
+                  doubleSided: false,
                   radius: this.opts.radius.get(),
                   radialSegments: 6,
                   segmentsPerSpan: 8,
