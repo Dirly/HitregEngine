@@ -3,6 +3,7 @@ import type { ComponentRegistry } from "./registry.js";
 import { prefabInstanceSchema } from "../prefab.js";
 import { registerPhysicsComponents } from "./physics.js";
 import { registerPathComponents } from "./path.js";
+import { polyMeshSourceSchema } from "../poly-mesh/types.js";
 
 export const vec3 = z.tuple([z.number(), z.number(), z.number()]);
 export const quat = z.tuple([z.number(), z.number(), z.number(), z.number()]);
@@ -60,6 +61,12 @@ export const meshSchema = z.object({
         })
         .optional(),
     }),
+    polyMeshSourceSchema.describe(
+      "Editable polygon mesh (ProBuilder-class): shared `vertices` + n-gon `faces` (CCW from outside) with per-face " +
+        "material slot / smoothing group / UV settings. The graybox shape tools create these; edit them with the " +
+        "poly-mesh ops in @hitreg/core (extrude, inset, bevel, subdivide, connect, bridge, ...) or by hand. " +
+        "`generator` records the parametric shape (cube/cylinder/stairs/arch/...) while the mesh is untouched.",
+    ),
     z.object({
       /** Procedural noise terrain (see core/terrain.ts). Pair with a
        * collider of shape "heightmap" for matching physics. */
@@ -119,9 +126,14 @@ export const meshSchema = z.object({
   castShadow: z.boolean().default(true),
   receiveShadow: z.boolean().default(true),
   renderMode: z
-    .enum(["auto", "instanced"])
+    .enum(["auto", "instanced", "clustered"])
     .default("auto")
-    .describe('"instanced" collapses all users of the same prefab into one InstancedMesh.'),
+    .describe(
+      '"instanced" collapses all users of the same prefab into one InstancedMesh (with distance LOD tiers). ' +
+        '"clustered" (asset sources only) gives a single large/hero mesh continuous, crack-free per-cluster LOD ' +
+        "and per-cluster frustum culling driven by screen-space error — no LOD authoring; use it for statues, " +
+        "buildings, scanned props, terrain patches, not for things placed hundreds of times (use instanced).",
+    ),
   lod: z
     .boolean()
     .default(true)

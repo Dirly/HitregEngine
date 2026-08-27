@@ -1,15 +1,19 @@
 import type { AssetLibrary, SceneStore } from "@hitreg/core";
 import type {
   EditorSettings,
+  ElementMode,
   GizmoMode,
   GrayboxShape,
+  MeshEditState,
   Observable,
   PlayMode,
   TerrainBrushSettings,
 } from "../state.js";
+import { GRAYBOX_SHAPES } from "../state.js";
 import type { PathCrossSection } from "../path-tool.js";
 import { NumberField } from "./fields.js";
-import { activeButtonStyle, buttonStyle, useObservable, useStoreDoc } from "./common.js";
+import { Kbd, Tooltip, buttonStyle, useObservable, useStoreDoc } from "./common.js";
+import { Icon, type IconName } from "./icons.js";
 
 const EMPTY_SCENES: string[] = [];
 const emptyScenesObservable: Observable<string[]> = {
@@ -17,6 +21,191 @@ const emptyScenesObservable: Observable<string[]> = {
   set: () => undefined,
   subscribe: () => () => undefined,
 };
+const trueObservable: Observable<boolean> = { get: () => true, set: () => undefined, subscribe: () => () => undefined };
+const falseObservable: Observable<boolean> = { get: () => false, set: () => undefined, subscribe: () => () => undefined };
+const objectModeObservable: Observable<ElementMode> = { get: () => "object", set: () => undefined, subscribe: () => () => undefined };
+const nullObservable: Observable<string | null> = { get: () => null, set: () => undefined, subscribe: () => () => undefined };
+
+// ---------------------------------------------------------------------------
+// Building blocks. The bar is a row of *segments* (bordered pill groups of
+// buttons that share edges) separated by hairline dividers; each button is an
+// icon with an optional text label. Active state = selection fill + inset
+// accent ring, and `aria-pressed` for toggles, so it never rides on hue alone.
+// Every button's hover tooltip carries its description and keycaps — there is
+// no separate cheat-sheet line; the `keyboard` button at the right end holds
+// the shortcuts that don't belong to any one button (camera, selection).
+// ---------------------------------------------------------------------------
+
+const MUTED = "#8b949e";
+const EMPHASIS = "#e6edf3";
+const SEG_BORDER = "#30363d";
+
+const segmentStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "stretch",
+  border: `1px solid ${SEG_BORDER}`,
+  borderRadius: 4,
+  overflow: "hidden",
+  background: "#21262d",
+  flexShrink: 0,
+};
+
+const dividerStyle: React.CSSProperties = {
+  width: 1,
+  height: 18,
+  background: "#21262d",
+  margin: "0 8px",
+  flexShrink: 0,
+};
+
+const labelStyle: React.CSSProperties = { color: MUTED, fontSize: 11, whiteSpace: "nowrap" };
+
+/** Compact select that sits flush inside the bar (same chrome as a button). */
+const selectStyle: React.CSSProperties = {
+  ...buttonStyle,
+  padding: "3px 6px",
+  height: 24,
+  borderRadius: 4,
+};
+
+function Divider() {
+  return <span aria-hidden="true" style={dividerStyle} />;
+}
+
+function Segment(props: { children: React.ReactNode; role?: string; label?: string }) {
+  return (
+    <span style={segmentStyle} role={props.role} aria-label={props.label}>
+      {props.children}
+    </span>
+  );
+}
+
+/** One shortcut line inside a tooltip: keycaps, then what they do. */
+function ShortcutRow(props: { keys: string[]; children: React.ReactNode }) {
+  return (
+    <span style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
+      <span style={{ display: "inline-flex", gap: 3, flexShrink: 0 }}>
+        {props.keys.map((k) => (
+          <Kbd key={k}>{k}</Kbd>
+        ))}
+      </span>
+      <span style={{ color: MUTED }}>{props.children}</span>
+    </span>
+  );
+}
+
+/** Tooltip body: a title, optional detail sentence, and keycap rows. */
+function Tip(props: { title: string; detail?: string; shortcuts?: Array<{ keys: string[]; does: string }> }) {
+  return (
+    <>
+      <span style={{ color: EMPHASIS, display: "block" }}>{props.title}</span>
+      {props.detail && <span style={{ display: "block", marginTop: 2 }}>{props.detail}</span>}
+      {props.shortcuts?.map((s) => (
+        <ShortcutRow key={s.keys.join("+")} keys={s.keys}>
+          {s.does}
+        </ShortcutRow>
+      ))}
+    </>
+  );
+}
+
+function ToolButton(props: {
+  icon: IconName;
+  /** Visible text; omit for icon-only (then `tip` doubles as the accessible name). */
+  label?: string;
+  /** Tooltip title — also the accessible name for icon-only buttons. */
+  tip: string;
+  /** Extra sentence under the tooltip title. */
+  detail?: string;
+  /** The button's own hotkey(s), shown as keycaps and exposed via `aria-keyshortcuts`. */
+  keys?: string[];
+  /** Additional shortcut rows (things you can do while this tool is active). */
+  shortcuts?: Array<{ keys: string[]; does: string }>;
+  /** Toggle semantics: rendered pressed + `aria-pressed`. Omit for plain actions. */
+  active?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  const pressed = props.active === true;
+  const rows = [...(props.keys ? [{ keys: props.keys, does: props.label ?? props.tip }] : []), ...(props.shortcuts ?? [])];
+  return (
+    <Tooltip width={rows.length > 4 ? 440 : 320} content={<Tip title={props.tip} detail={props.detail} shortcuts={rows} />}>
+      <button
+        type="button"
+        aria-label={props.label ? undefined : props.tip}
+        aria-keyshortcuts={props.keys?.join(" ")}
+        aria-pressed={props.active === undefined ? undefined : pressed}
+        disabled={props.disabled}
+        onClick={props.onClick}
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 5,
+          height: 24,
+          padding: props.label ? "0 8px 0 7px" : "0 6px",
+          background: pressed ? "#1f3a5f" : "transparent",
+          boxShadow: pressed ? "inset 0 0 0 1px #79c0ff" : "none",
+          border: "none",
+          borderLeft: `1px solid ${SEG_BORDER}`,
+          marginLeft: -1,
+          color: props.disabled ? "#484f58" : pressed ? EMPHASIS : "#c9d1d9",
+          cursor: props.disabled ? "default" : "pointer",
+          font: "12px ui-monospace, monospace",
+          whiteSpace: "nowrap",
+          opacity: props.disabled ? 0.7 : 1,
+        }}
+      >
+        <Icon name={props.icon} />
+        {props.label && <span>{props.label}</span>}
+      </button>
+    </Tooltip>
+  );
+}
+
+/** Contextual settings for whichever tool is active — a quiet well attached to the tool segment. */
+function OptionsWell(props: { children: React.ReactNode }) {
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        height: 24,
+        padding: "0 8px",
+        marginLeft: 6,
+        background: "#161b22",
+        border: "1px solid #21262d",
+        borderRadius: 4,
+        flexShrink: 0,
+      }}
+    >
+      {props.children}
+    </span>
+  );
+}
+
+function Check(props: { checked: boolean; onChange: (v: boolean) => void; title?: string; label: string }) {
+  return (
+    <label style={{ display: "flex", gap: 4, alignItems: "center", cursor: "pointer", whiteSpace: "nowrap" }} title={props.title}>
+      <input type="checkbox" checked={props.checked} onChange={(e) => props.onChange(e.target.checked)} style={{ margin: 0 }} />
+      {props.label}
+    </label>
+  );
+}
+
+/** Shortcuts owned by the viewport rather than any toolbar button. */
+const GLOBAL_SHORTCUTS: Array<{ keys: string[]; does: string }> = [
+  { keys: ["~"], does: "play · pause (hides the editor while playing)" },
+  { keys: ["LMB", "W A S D"], does: "hold to fly the camera · Q/E down/up · Shift boosts" },
+  { keys: ["F"], does: "frame the selection" },
+  { keys: ["Del"], does: "delete selection" },
+  { keys: ["Ctrl", "D"], does: "duplicate selection" },
+  { keys: ["Ctrl"], does: "held while dragging: inverts snap" },
+  { keys: ["Alt"], does: "held while scaling: anchor the floor" },
+  { keys: ["dbl-click"], does: "prefab instance → open it for editing" },
+];
+
+// ---------------------------------------------------------------------------
 
 export function Toolbar(props: {
   store: SceneStore;
@@ -29,6 +218,10 @@ export function Toolbar(props: {
   grayboxShape: Observable<GrayboxShape>;
   grayboxBevel: Observable<number>;
   grayboxMaterial: Observable<string>;
+  /** Drawn shapes commit as editable poly meshes (off = legacy sized primitives). */
+  grayboxEditable?: Observable<boolean>;
+  /** Mesh-edit mode state (element mode buttons live here too). */
+  meshEdit?: MeshEditState;
   terrainActive: Observable<boolean>;
   terrainBrush: Observable<TerrainBrushSettings>;
   pathActive: Observable<boolean>;
@@ -39,6 +232,8 @@ export function Toolbar(props: {
   onSwitchScene?: (name: string) => void;
   onNewScene?: (name: string) => void;
   onEnvironment?: () => void;
+  /** Open the frame profiler window (host-provided; see profiler-window.ts). */
+  onProfiler?: () => void;
   /** While isolation-editing a prefab the scene switcher is hidden (switching mid-edit is incoherent). */
   editingPrefab?: string | null;
   /** While isolation-editing a chunk cell the scene switcher is hidden too. */
@@ -53,6 +248,10 @@ export function Toolbar(props: {
   const shape = useObservable(props.grayboxShape);
   const bevel = useObservable(props.grayboxBevel);
   const grayboxMaterial = useObservable(props.grayboxMaterial);
+  const grayboxEditable = useObservable(props.grayboxEditable ?? trueObservable);
+  const meshEditActive = useObservable(props.meshEdit?.active ?? falseObservable);
+  const meshEditMode = useObservable(props.meshEdit?.mode ?? objectModeObservable);
+  const meshEditEntity = useObservable(props.meshEdit?.entityId ?? nullObservable);
   useObservable(props.assetsVersion); // re-render the material list as materials are created
   const materials = props.assets.dataAssetsOfType("material");
   const terrainOn = useObservable(props.terrainActive);
@@ -63,262 +262,368 @@ export function Toolbar(props: {
   const pathRadius = useObservable(props.pathRadius);
   const set = (patch: Partial<EditorSettings>) => props.settings.set({ ...settings, ...patch });
 
-  const group: React.CSSProperties = {
-    display: "flex",
-    gap: 5,
-    alignItems: "center",
-    paddingRight: 10,
-    marginRight: 10,
-    borderRight: "1px solid #21262d",
-  };
+  const gizmos: Array<{ key: GizmoMode; icon: IconName; tip: string; keys: string[]; shortcuts?: Array<{ keys: string[]; does: string }> }> = [
+    { key: "translate", icon: "move", tip: "move", keys: ["W"] },
+    { key: "rotate", icon: "rotate", tip: "rotate", keys: ["E"] },
+    { key: "scale", icon: "scale", tip: "scale", keys: ["R"], shortcuts: [{ keys: ["Alt"], does: "while dragging: anchor the floor" }] },
+  ];
 
-  const modes: Array<{ key: GizmoMode; label: string }> = [
-    { key: "translate", label: "move" },
-    { key: "rotate", label: "rotate" },
-    { key: "scale", label: "scale" },
+  const elementModes: Array<{ key: ElementMode; icon: IconName; label: string }> = [
+    { key: "object", icon: "object", label: "obj" },
+    { key: "vertex", icon: "vertex", label: "vert" },
+    { key: "edge", icon: "edge", label: "edge" },
+    { key: "face", icon: "face", label: "face" },
   ];
 
   return (
-    <div style={{ padding: "6px 10px", display: "flex", flexDirection: "column", gap: 3, height: "100%" }}>
-      <div style={{ display: "flex", alignItems: "center", flexWrap: "nowrap", overflowX: "auto" }}>
-        <span style={group}>
-          <strong style={{ color: "#e6edf3", marginRight: 4 }}>HitReg</strong>
-          {props.editingPrefab && (
-            <span style={{ color: "#79c0ff" }} title="Prefab isolation mode — close it from the viewport banner">
-              ◆ prefab
-            </span>
-          )}
-          {props.editingChunk && (
-            <span style={{ color: "#d29922" }} title="Chunk-cell isolation mode — close it from the viewport banner">
-              ▤ {props.editingChunk.world} {props.editingChunk.cx}_{props.editingChunk.cz}
-            </span>
-          )}
-          {props.scenes && !props.editingPrefab && !props.editingChunk && (
-            <>
-              <select
-                style={{ ...buttonStyle, padding: "4px 6px", maxWidth: 140 }}
-                title="Scene (saved automatically on switch)"
-                value={doc.name}
-                onChange={(e) => props.onSwitchScene?.(e.target.value)}
-              >
-                {[...new Set([doc.name, ...scenes])].map((name) => (
-                  <option key={name} value={name}>
-                    {name}
-                  </option>
-                ))}
-              </select>
-              <button
-                style={buttonStyle}
-                title="Create a new scene"
+    <div style={{ padding: "6px 10px", display: "flex", alignItems: "center", height: "100%", boxSizing: "border-box" }}>
+      <div style={{ display: "flex", alignItems: "center", flexWrap: "nowrap", overflowX: "auto", flex: 1, minHeight: 26 }}>
+        {/* ---- scene ---- */}
+        <strong style={{ color: EMPHASIS, marginRight: 8, flexShrink: 0 }}>HitReg</strong>
+        {props.editingPrefab && (
+          <span style={{ color: "#79c0ff", whiteSpace: "nowrap" }} title="Prefab isolation mode — close it from the viewport banner">
+            ◆ prefab
+          </span>
+        )}
+        {props.editingChunk && (
+          <span style={{ color: "#d29922", whiteSpace: "nowrap" }} title="Chunk-cell isolation mode — close it from the viewport banner">
+            ▤ {props.editingChunk.world} {props.editingChunk.cx}_{props.editingChunk.cz}
+          </span>
+        )}
+        {props.scenes && !props.editingPrefab && !props.editingChunk && (
+          <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+            <select
+              style={{ ...selectStyle, maxWidth: 140 }}
+              title="Scene (saved automatically on switch)"
+              aria-label="scene"
+              value={doc.name}
+              onChange={(e) => props.onSwitchScene?.(e.target.value)}
+            >
+              {[...new Set([doc.name, ...scenes])].map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+            <Segment>
+              <ToolButton
+                icon="plus"
+                tip="new scene"
                 onClick={() => {
                   const name = window.prompt("New scene name:");
                   if (name) props.onNewScene?.(name);
                 }}
-              >
-                +
-              </button>
-            </>
-          )}
-          <button
-            style={play === "playing" ? activeButtonStyle : buttonStyle}
+              />
+            </Segment>
+          </span>
+        )}
+
+        <Divider />
+
+        {/* ---- playback ---- */}
+        <Segment label="playback">
+          <ToolButton
+            icon="play"
+            tip="play"
+            detail="Runs the scene over runtime state; the doc is untouched. The editor hides while playing."
+            keys={["~"]}
+            active={play === "playing"}
             disabled={play === "playing"}
             onClick={() => props.playMode.set("playing")}
-          >
-            ▶ play
-          </button>
-          <button
-            style={play === "paused" ? activeButtonStyle : buttonStyle}
+          />
+          <ToolButton
+            icon="pause"
+            tip="pause"
+            keys={["~"]}
+            active={play === "paused"}
             disabled={play !== "playing"}
             onClick={() => props.playMode.set("paused")}
-          >
-            ⏸
-          </button>
-          <button style={buttonStyle} disabled={play === "edit"} onClick={() => props.playMode.set("edit")}>
-            ⏹
-          </button>
-        </span>
+          />
+          <ToolButton icon="stop" tip="stop" detail="Back to edit mode; runtime state is discarded." disabled={play === "edit"} onClick={() => props.playMode.set("edit")} />
+        </Segment>
 
-        <span style={group}>
-          <button
-            style={terrainOn ? activeButtonStyle : buttonStyle}
-            title="Terrain sculpt mode: drag on selected heightmap terrain"
-            onClick={() => props.terrainActive.set(!terrainOn)}
-          >
-            terrain
-          </button>
-          <select
-            style={{ ...buttonStyle, padding: "4px 6px" }}
-            value={terrain.mode}
-            onChange={(e) => props.terrainBrush.set({ ...terrain, mode: e.target.value as TerrainBrushSettings["mode"] })}
-          >
-            {(["raise", "lower", "flatten", "smooth"] as const).map((mode) => <option key={mode}>{mode}</option>)}
-          </select>
-          <span style={{ color: "#8b949e" }}>r</span>
-          <span style={{ width: 42 }}><NumberField value={terrain.radius} onCommit={(radius) => radius > 0 && props.terrainBrush.set({ ...terrain, radius })} /></span>
-          <span style={{ color: "#8b949e" }}>str</span>
-          <span style={{ width: 42 }}><NumberField value={terrain.strength} onCommit={(strength) => strength > 0 && props.terrainBrush.set({ ...terrain, strength })} /></span>
-        </span>
+        <Divider />
 
-        <span style={group}>
-          {modes.map((m) => (
-            <button
-              key={m.key}
-              style={mode === m.key ? activeButtonStyle : buttonStyle}
-              onClick={() => props.gizmoMode.set(m.key)}
-            >
-              {m.label}
-            </button>
+        {/* ---- transform gizmo ---- */}
+        <Segment role="radiogroup" label="gizmo">
+          {gizmos.map((g) => (
+            <ToolButton key={g.key} icon={g.icon} tip={g.tip} keys={g.keys} shortcuts={g.shortcuts} active={mode === g.key} onClick={() => props.gizmoMode.set(g.key)} />
           ))}
-        </span>
+        </Segment>
 
-        <span style={group}>
-          <label style={{ display: "flex", gap: 3, alignItems: "center", cursor: "pointer" }}>
-            <input type="checkbox" checked={settings.snap} onChange={(e) => set({ snap: e.target.checked })} />
-            snap
-          </label>
-          <span style={{ width: 46 }}>
-            <NumberField value={settings.translateSnap} onCommit={(v) => v > 0 && set({ translateSnap: v })} />
-          </span>
-          <label style={{ display: "flex", gap: 3, alignItems: "center", cursor: "pointer" }}>
-            <input type="checkbox" checked={settings.grid} onChange={(e) => set({ grid: e.target.checked })} />
-            grid
-          </label>
-          <label
-            style={{ display: "flex", gap: 3, alignItems: "center", cursor: "pointer" }}
-            title="Collider wireframes + joint anchors/axes"
-          >
-            <input
-              type="checkbox"
-              checked={settings.showPhysics}
-              onChange={(e) => set({ showPhysics: e.target.checked })}
-            />
-            phys
-          </label>
-          <label
-            style={{ display: "flex", gap: 3, alignItems: "center", cursor: "pointer" }}
-            title="Skeleton lines + bone-name labels on skinned models"
-          >
-            <input
-              type="checkbox"
-              checked={settings.showSkeletons}
-              onChange={(e) => set({ showSkeletons: e.target.checked })}
-            />
-            bones
-          </label>
-          <label
-            style={{ display: "flex", gap: 3, alignItems: "center", cursor: "pointer" }}
-            title="Direction arrows on directional/spot lights"
-          >
-            <input
-              type="checkbox"
-              checked={settings.showLights}
-              onChange={(e) => set({ showLights: e.target.checked })}
-            />
-            lights
-          </label>
-          <label
-            style={{ display: "flex", gap: 3, alignItems: "center", cursor: "pointer" }}
-            title="Perf/stats HUD in the viewport's top-right corner (H toggles it)"
-          >
-            <input
-              type="checkbox"
-              checked={settings.showStats}
-              onChange={(e) => set({ showStats: e.target.checked })}
-            />
-            stats
-          </label>
-        </span>
+        <Divider />
 
-        <span style={group}>
-          <button
-            style={grayboxOn ? activeButtonStyle : buttonStyle}
-            title="Graybox draw mode — drag footprint, pull height, click to place. Alt+drag box face = extrude. Ctrl inverts snap."
+        {/* ---- tools: one segment, options for the active one in a well beside it ---- */}
+        <Segment label="tools">
+          <ToolButton
+            icon="terrain"
+            label="terrain"
+            tip="terrain sculpt"
+            detail="Select a heightmap terrain, then drag on it. Brush mode, radius and strength appear beside the tool."
+            active={terrainOn}
+            onClick={() => props.terrainActive.set(!terrainOn)}
+          />
+          <ToolButton
+            icon="draw"
+            label="draw"
+            tip="shape draw"
+            detail="Drag a footprint, pull the height, click to place. Drag a face of an editable shape to push/pull it."
+            keys={["G"]}
+            shortcuts={[
+              { keys: ["Alt", "drag"], does: "extrude a block from a face" },
+              { keys: ["Ctrl"], does: "invert snap while dragging" },
+              { keys: ["Enter"], does: "close a poly outline" },
+              { keys: ["Esc"], does: "cancel the shape in progress" },
+            ]}
+            active={grayboxOn}
             onClick={() => props.grayboxActive.set(!grayboxOn)}
-          >
-            ✏ draw (G)
-          </button>
-          <select
-            style={{ ...buttonStyle, padding: "4px 6px" }}
-            value={shape}
-            onChange={(e) => props.grayboxShape.set(e.target.value as GrayboxShape)}
-          >
-            {(["box", "cylinder", "sphere", "wedge", "poly"] as GrayboxShape[]).map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
-          <span style={{ color: "#8b949e" }}>bevel</span>
-          <span style={{ width: 44 }} title="0 = off; boxes/polys extrude with rounded edges">
-            <NumberField value={bevel} onCommit={(v) => v >= 0 && props.grayboxBevel.set(v)} />
-          </span>
-          <select
-            style={{ ...buttonStyle, padding: "4px 6px", maxWidth: 120 }}
-            title="Material painted onto newly-drawn shapes (drag a material onto a shape, or use the Assets panel's 'apply to selection', to repaint existing ones)"
-            value={materials.some((m) => m.id === grayboxMaterial) ? grayboxMaterial : ""}
-            onChange={(e) => props.grayboxMaterial.set(e.target.value)}
-          >
-            <option value="">default mat</option>
-            {materials.map((mat) => (
-              <option key={mat.id} value={mat.id}>
-                {mat.name.split("/").pop()}
-              </option>
-            ))}
-          </select>
-        </span>
-
-        <span style={group}>
-          <button
-            style={pathOn ? activeButtonStyle : buttonStyle}
-            title="Path draw mode: click to drop curve points (follows terrain under the cursor), click near the first point (or Enter) to finish"
-            onClick={() => props.pathActive.set(!pathOn)}
-          >
-            〜 path (P)
-          </button>
-          <select
-            style={{ ...buttonStyle, padding: "4px 6px" }}
-            value={pathCrossSection}
-            onChange={(e) => props.pathCrossSection.set(e.target.value as PathCrossSection)}
-          >
-            <option value="ribbon">road</option>
-            <option value="tube">vine</option>
-          </select>
-          {pathCrossSection === "ribbon" ? (
-            <>
-              <span style={{ color: "#8b949e" }}>width</span>
-              <span style={{ width: 42 }}>
-                <NumberField value={pathWidth} onCommit={(v) => v > 0 && props.pathWidth.set(v)} />
-              </span>
-            </>
-          ) : (
-            <>
-              <span style={{ color: "#8b949e" }}>radius</span>
-              <span style={{ width: 42 }}>
-                <NumberField value={pathRadius} onCommit={(v) => v > 0 && props.pathRadius.set(v)} />
-              </span>
-            </>
+          />
+          {props.meshEdit && (
+            <ToolButton
+              icon="mesh"
+              label="mesh"
+              tip="mesh edit"
+              detail={
+                meshEditEntity || !meshEditActive
+                  ? "Vertex / edge / face editing of the selected editable mesh."
+                  : "On, but the selection has no editable mesh — draw one, or use 'make editable mesh' in the inspector."
+              }
+              shortcuts={[
+                { keys: ["1", "2", "3", "4"], does: "object · vertex · edge · face mode" },
+                { keys: ["Shift"], does: "click adds to selection · Ctrl toggles" },
+                { keys: ["Ctrl", "A"], does: "select all · Ctrl+I invert" },
+                { keys: ["Alt", "E"], does: "extrude · Alt+B bevel · Alt+I inset · Alt+S subdivide" },
+                { keys: ["Alt", "L"], does: "loop · Alt+R ring · Alt+G grow (Shift shrinks)" },
+                { keys: ["Alt", "M"], does: "merge · Alt+W weld · Alt+F fill · Alt+C connect · Alt+U insert loop" },
+                { keys: ["Del"], does: "delete elements" },
+                { keys: ["Esc"], does: "clear selection, then back to object mode" },
+              ]}
+              active={meshEditActive}
+              onClick={() => {
+                const next = !meshEditActive;
+                if (next && props.meshEdit!.mode.get() === "object") props.meshEdit!.mode.set("face");
+                props.meshEdit!.active.set(next);
+              }}
+            />
           )}
-        </span>
+          <ToolButton
+            icon="path"
+            label="path"
+            tip="path draw"
+            detail="Click to drop curve points; they follow the terrain under the cursor."
+            keys={["P"]}
+            shortcuts={[
+              { keys: ["Enter"], does: "finish (or click near the first point)" },
+              { keys: ["Esc"], does: "cancel the path in progress" },
+            ]}
+            active={pathOn}
+            onClick={() => props.pathActive.set(!pathOn)}
+          />
+        </Segment>
 
-        <span style={{ ...group, borderRight: "none" }}>
-          <button
-            style={buttonStyle}
-            title="Environment / lighting: edit the scene's sky, fog, and fill light"
-            onClick={props.onEnvironment}
-          >
-            ☀ env
-          </button>
-          <button style={buttonStyle} disabled={!props.store.canUndo} onClick={() => props.store.undo()}>
-            ⟲ undo
-          </button>
-          <button style={buttonStyle} disabled={!props.store.canRedo} onClick={() => props.store.redo()}>
-            ⟳ redo
-          </button>
-        </span>
-      </div>
-      <div style={{ color: "#8b949e", fontSize: 10 }}>
-        ~ close editor · hold LMB+WASD fly (QE up/down, Shift boost) · W/E/R gizmo · F frame · G draw · P path ·
-        H stats · Alt+scale anchors floor · Del · Ctrl+D dup · Ctrl+Z/Y · Ctrl inverts snap · dbl-click prefab opens
+        {terrainOn && (
+          <OptionsWell>
+            <select
+              style={selectStyle}
+              aria-label="brush mode"
+              value={terrain.mode}
+              onChange={(e) => props.terrainBrush.set({ ...terrain, mode: e.target.value as TerrainBrushSettings["mode"] })}
+            >
+              {(["raise", "lower", "flatten", "smooth"] as const).map((m) => <option key={m}>{m}</option>)}
+            </select>
+            <span style={labelStyle}>radius</span>
+            <span style={{ width: 42 }}>
+              <NumberField value={terrain.radius} onCommit={(radius) => radius > 0 && props.terrainBrush.set({ ...terrain, radius })} />
+            </span>
+            <span style={labelStyle}>strength</span>
+            <span style={{ width: 42 }}>
+              <NumberField value={terrain.strength} onCommit={(strength) => strength > 0 && props.terrainBrush.set({ ...terrain, strength })} />
+            </span>
+          </OptionsWell>
+        )}
+
+        {grayboxOn && (
+          <OptionsWell>
+            <select style={selectStyle} aria-label="shape" value={shape} onChange={(e) => props.grayboxShape.set(e.target.value as GrayboxShape)}>
+              {GRAYBOX_SHAPES.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+            <select
+              style={{ ...selectStyle, maxWidth: 120 }}
+              aria-label="material"
+              title="Material painted onto newly-drawn shapes (drag a material onto a shape, or use the Assets panel's 'apply to selection', to repaint existing ones)"
+              value={materials.some((m) => m.id === grayboxMaterial) ? grayboxMaterial : ""}
+              onChange={(e) => props.grayboxMaterial.set(e.target.value)}
+            >
+              <option value="">default mat</option>
+              {materials.map((mat) => (
+                <option key={mat.id} value={mat.id}>
+                  {mat.name.split("/").pop()}
+                </option>
+              ))}
+            </select>
+            {props.grayboxEditable && (
+              <Check
+                checked={grayboxEditable}
+                onChange={(v) => props.grayboxEditable!.set(v)}
+                label="editable"
+                title="Draw editable poly meshes (vertex/edge/face editing, UVs, per-face materials). Off = legacy sized primitives for box/cylinder/sphere/wedge."
+              />
+            )}
+            {!grayboxEditable && (
+              <>
+                <span style={labelStyle}>bevel</span>
+                <span style={{ width: 44 }} title="0 = off; boxes/polys extrude with rounded edges">
+                  <NumberField value={bevel} onCommit={(v) => v >= 0 && props.grayboxBevel.set(v)} />
+                </span>
+              </>
+            )}
+          </OptionsWell>
+        )}
+
+        {props.meshEdit && meshEditActive && (
+          <OptionsWell>
+            <Segment role="radiogroup" label="element mode">
+              {elementModes.map((m, i) => (
+                <ToolButton
+                  key={m.key}
+                  icon={m.icon}
+                  label={m.label}
+                  tip={`${m.key} mode`}
+                  keys={[String(i + 1)]}
+                  active={meshEditMode === m.key}
+                  onClick={() => {
+                    props.meshEdit!.mode.set(m.key);
+                    if (m.key !== "object") props.meshEdit!.active.set(true);
+                  }}
+                />
+              ))}
+            </Segment>
+          </OptionsWell>
+        )}
+
+        {pathOn && (
+          <OptionsWell>
+            <select
+              style={selectStyle}
+              aria-label="cross-section"
+              value={pathCrossSection}
+              onChange={(e) => props.pathCrossSection.set(e.target.value as PathCrossSection)}
+            >
+              <option value="ribbon">road</option>
+              <option value="tube">vine</option>
+            </select>
+            {pathCrossSection === "ribbon" ? (
+              <>
+                <span style={labelStyle}>width</span>
+                <span style={{ width: 42 }}>
+                  <NumberField value={pathWidth} onCommit={(v) => v > 0 && props.pathWidth.set(v)} />
+                </span>
+              </>
+            ) : (
+              <>
+                <span style={labelStyle}>radius</span>
+                <span style={{ width: 42 }}>
+                  <NumberField value={pathRadius} onCommit={(v) => v > 0 && props.pathRadius.set(v)} />
+                </span>
+              </>
+            )}
+          </OptionsWell>
+        )}
+
+        <Divider />
+
+        {/* ---- view / helpers ---- */}
+        <Segment label="view">
+          <ToolButton
+            icon="snap"
+            tip="snap to grid"
+            detail="Translate snaps to the step shown beside the toggle."
+            shortcuts={[{ keys: ["Ctrl"], does: "held while dragging: inverts snap" }]}
+            active={settings.snap}
+            onClick={() => set({ snap: !settings.snap })}
+          />
+          <ToolButton icon="grid" tip="ground grid" active={settings.grid} onClick={() => set({ grid: !settings.grid })} />
+          <ToolButton
+            icon="physics"
+            tip="physics gizmos"
+            detail="Collider wireframes + joint anchors/axes."
+            active={settings.showPhysics}
+            onClick={() => set({ showPhysics: !settings.showPhysics })}
+          />
+          <ToolButton
+            icon="bones"
+            tip="skeletons"
+            detail="Bone lines + bone-name labels on skinned models."
+            active={settings.showSkeletons}
+            onClick={() => set({ showSkeletons: !settings.showSkeletons })}
+          />
+          <ToolButton
+            icon="lights"
+            tip="light gizmos"
+            detail="Direction arrows on directional/spot lights."
+            active={settings.showLights}
+            onClick={() => set({ showLights: !settings.showLights })}
+          />
+          <ToolButton
+            icon="stats"
+            tip="stats HUD"
+            detail="Perf/stats readout in the viewport's top-right corner."
+            keys={["H"]}
+            active={settings.showStats}
+            onClick={() => set({ showStats: !settings.showStats })}
+          />
+        </Segment>
+        {settings.snap && (
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 4, marginLeft: 6 }} title="translate snap step">
+            <span style={{ width: 46 }}>
+              <NumberField value={settings.translateSnap} onCommit={(v) => v > 0 && set({ translateSnap: v })} />
+            </span>
+          </span>
+        )}
+
+        {/* ---- right: scene-level + history + help ---- */}
+        <span style={{ flex: 1, minWidth: 8 }} />
+        <Segment>
+          <ToolButton icon="sun" label="env" tip="environment / lighting" detail="Edit the scene's sky, fog, and fill light." onClick={() => props.onEnvironment?.()} />
+          {props.onProfiler && (
+            <ToolButton
+              icon="profiler"
+              label="profiler"
+              tip="frame profiler"
+              detail="Opens in its own window — per-system breakdown, spikes, and what caused them. Works in play mode too."
+              keys={["Shift", "P"]}
+              onClick={props.onProfiler}
+            />
+          )}
+        </Segment>
+        <span style={{ width: 6 }} />
+        <Segment label="history">
+          <ToolButton icon="undo" tip="undo" keys={["Ctrl", "Z"]} disabled={!props.store.canUndo} onClick={() => props.store.undo()} />
+          <ToolButton icon="redo" tip="redo" keys={["Ctrl", "Y"]} disabled={!props.store.canRedo} onClick={() => props.store.redo()} />
+        </Segment>
+        <span style={{ width: 6 }} />
+        <Segment>
+          <Tooltip width={440} content={<Tip title="viewport shortcuts" shortcuts={GLOBAL_SHORTCUTS} />}>
+            <span
+              tabIndex={0}
+              aria-label="viewport shortcuts"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                height: 24,
+                padding: "0 6px",
+                color: MUTED,
+                cursor: "help",
+              }}
+            >
+              <Icon name="keyboard" />
+            </span>
+          </Tooltip>
+        </Segment>
       </div>
     </div>
   );

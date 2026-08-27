@@ -6,7 +6,8 @@ import {
   type SceneDoc,
   type SceneStore,
 } from "@hitreg/core";
-import type { AssetSelection, Observable, Pin, Pins, Selection } from "../state.js";
+import type { AssetSelection, MeshEditState, Observable, Pin, Pins, Selection } from "../state.js";
+import { MeshComponentPanel } from "./poly-mesh-inspector.js";
 import { apply, buttonStyle, DockHeader, useObservable, useStoreDoc } from "./common.js";
 import { Row, TextField, ValueField } from "./fields.js";
 import { PrefabKnobs } from "./prop-field.js";
@@ -50,6 +51,8 @@ export function InspectorDock(props: {
   onPinCreateForEntity?: (entityId: string) => void;
   onPinUpdate?: (id: string, patch: Partial<Pin>) => void;
   onPinDelete?: (id: string) => void;
+  /** Mesh-edit mode state, for the poly-mesh panel's "edit mesh" button. */
+  meshEdit?: MeshEditState;
 }) {
   const doc = useStoreDoc(props.store);
   const selected = useObservable(props.selection);
@@ -82,6 +85,7 @@ export function InspectorDock(props: {
             onPinCreateForEntity={props.onPinCreateForEntity}
             onPinUpdate={props.onPinUpdate}
             onPinDelete={props.onPinDelete}
+            meshEdit={props.meshEdit}
           />
         ) : selectedAsset ? (
           <AssetInspector
@@ -270,6 +274,7 @@ function Inspector(props: {
   onPinCreateForEntity?: (entityId: string) => void;
   onPinUpdate?: (id: string, patch: Partial<Pin>) => void;
   onPinDelete?: (id: string) => void;
+  meshEdit?: MeshEditState;
 }) {
   const entity = props.doc.entities[props.id]!;
   const [addChoice, setAddChoice] = useState("");
@@ -329,6 +334,14 @@ function Inspector(props: {
               store={props.store}
               assets={props.assets}
               onEditPrefab={props.onEditPrefab}
+            />
+          ) : name === "mesh" ? (
+            <MeshComponentPanel
+              id={props.id}
+              data={data}
+              store={props.store}
+              assets={props.assets}
+              meshEdit={props.meshEdit}
             />
           ) : (
             <ValueField

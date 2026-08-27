@@ -17,6 +17,7 @@ import type {
   EditingPrefab,
   Hover,
   Manipulating,
+  MeshEditState,
   ModelBones,
   MultiSelection,
   Pins,
@@ -45,7 +46,13 @@ export interface DevBridgeDeps {
   editingChunk: EditingChunk;
   assetSelection: AssetSelection;
   /** Modal authoring tools, for the synthesized `focus.mode`. */
-  tools: { graybox: Observable<boolean>; terrain: Observable<boolean>; path: Observable<boolean> };
+  tools: {
+    graybox: Observable<boolean>;
+    terrain: Observable<boolean>;
+    path: Observable<boolean>;
+    /** Mesh-edit mode (vertex/edge/face); its element selection is published under `focus.meshEdit`. */
+    meshEdit?: MeshEditState;
+  };
   /** World-anchored notes for the current scene. */
   pins: Pins;
   playMode: Observable<PlayMode>;
@@ -65,23 +72,17 @@ export interface DevBridgeDeps {
   getNetPresence: () => NetPresence | null;
   getReconcileCount: () => number;
   getRebuildCount: () => number;
-  /** Rolling per-system frame-time breakdown (ms, smoothed) + the same
-   * draw-call/triangle/LOD-tier numbers the in-canvas HUD shows — so "where
-   * did the frame time go" is answerable via curl, not just a screenshot. */
-  getPerf: () => {
-    frame: {
-      physics: number;
-      scripts: number;
-      chunks: number;
-      foliage: number;
-      render: number;
-      other: number;
-      total: number;
-    };
-    drawCalls: number;
-    triangles: number;
-    foliageTiers: { near: number; mid: number; far: number };
-  };
+  /**
+   * The frame profiler, condensed: percentiles rather than means, the hottest
+   * scopes by self time, recent spikes with the marker that explains each.
+   * Shape is owned by main.ts's buildPerfReport — kept as its return type so
+   * adding a field there can't silently fail to reach the bridge.
+   *
+   * Percentiles specifically, because a mean cannot answer the question people
+   * actually ask ("why does it hitch"): a 40ms stall every two seconds is
+   * invisible in an average and obvious in a p99.
+   */
+  getPerf: () => unknown;
 }
 
 // -- context bridge: post what the user sees for AI focus tasks -------------
@@ -120,6 +121,10 @@ function describeMode(deps: DevBridgeDeps): string {
   if (deps.tools.graybox.get()) return "graybox";
   if (deps.tools.terrain.get()) return "terrain-sculpt";
   if (deps.tools.path.get()) return "path-draw";
+  const meshEdit = deps.tools.meshEdit;
+  if (meshEdit?.active.get() && meshEdit.mode.get() !== "object" && meshEdit.entityId.get()) {
+    return `mesh-edit:${meshEdit.mode.get()}`;
+  }
   return "edit";
 }
 
@@ -168,6 +173,28 @@ function buildFocus(deps: DevBridgeDeps): Record<string, unknown> {
     selectedCount: selected.length,
     /** Asset panel selection — "this material", not "this entity". */
     asset: asset ?? null,
+    /**
+     * Mesh-edit element selection while a poly mesh is open for editing:
+     * "bevel these edges" / "extrude this face" resolve to real indices into
+     * that entity's `mesh.source` (vertices/faces arrays). Edit the mesh with
+     * the @hitreg/core poly-mesh ops (or by hand) and write it back with one
+     * set-component op; the editor picks the change up live.
+     */
+    meshEdit: (() => {
+      const m = deps.tools.meshEdit;
+      const id = m?.entityId.get();
+      if (!m || !m.active.get() || !id) return null;
+      const sel = m.selection.get();
+      return {
+        entityId: id,
+        name: name(id),
+        mode: m.mode.get(),
+        vertices: sel.vertices.slice(0, 256),
+        edges: sel.edges.slice(0, 256),
+        faces: sel.faces.slice(0, 256),
+        counts: m.stats.get(),
+      };
+    })(),
     /**
      * Open notes the human left in the world, nearest the camera first. These
      * are standing requests: unlike selection, nobody has to be pointing at

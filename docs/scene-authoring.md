@@ -38,8 +38,8 @@ follows is the map and the judgment the schema can't encode.
 **What exists** (fields → the spec):
 
 - Render: `transform`, `visibility`, `mesh` (primitive / glTF `asset` / extruded `polygon` /
-  `heightmap` terrain), `light`, `camera` (+ optional follow `rig`), `material`
-  (a data asset referenced by GUID), `sky`, `postfx`, `particles`, `billboard`.
+  editable `poly` mesh / `heightmap` terrain), `light`, `camera` (+ optional follow `rig`),
+  `material` (a data asset referenced by GUID), `sky`, `postfx`, `particles`, `billboard`.
 - Physics: `rigidbody`, `collider`, `joint`.
 - Behavior / data: `script`, `animator`, `audio`, `prefab`, `netObject`.
 - Streaming: `chunkStreamer`, `subscene`.
@@ -79,6 +79,48 @@ follows is the map and the judgment the schema can't encode.
   dropdown of the rig's real bones.
 - **Scenes:** multiple `assets/scenes/<name>.scene.json`; the toolbar picks.
   Only the edited scene live-syncs; a new file joins the picker.
+
+### Editable meshes (`mesh.source.kind: "poly"`)
+
+The ProBuilder-class format: `vertices` (shared positions) + `faces` (n-gons,
+vertex indices counter-clockwise seen from outside) with per-face `mat`
+(material slot into `materials`), `smooth` (0 = hard, same nonzero group =
+smoothed together), `uv` (auto-unwrap settings, or `mode: "manual"` +
+`coords`), and `color`. `generator` records the parametric shape while the
+mesh is untouched. Fields → the spec; judgment:
+
+- **Never hand-triangulate.** Faces are n-gons; the renderer ear-clips them.
+  Keep n-gons planar; quads are what the loop/ring/insert-loop tools walk.
+- **Edit through the ops, not by index surgery.** `@hitreg/core` exports the
+  whole toolset as pure functions — `extrudeFaces`, `extrudeEdges`,
+  `insetFaces`, `bevelEdges`, `subdivideFaces`, `connectEdges`,
+  `insertEdgeLoop`, `deleteFaces`, `collapseVertices`, `weldVertices`,
+  `mergeFaces`, `bridgeEdges`, `fillHoles`, `flipFaces`, `conformNormals`,
+  `centerPivot`, `mirror`, `setFaceMaterial`, `setSmoothingGroup`,
+  `planarProjectFaces`, `transformUvs`, … — each returns `{ mesh, selection }`;
+  write `mesh` back with one `set-component`. Selection helpers
+  (`edgeLoop`, `edgeRing`, `growFaces`, `coplanarFaces`, `boundaryLoops`)
+  answer "which elements" questions. Shapes: `buildShape("stairs", { steps: 8 })`
+  (see `SHAPES` for every generator and its params); `polyFromPrimitive` /
+  `polyFromFootprint` convert the older sources.
+- **Resolve "this face" from the context bridge.** While a human is in mesh
+  edit mode, `focus.mode` is `mesh-edit:<vertex|edge|face>` and
+  `focus.meshEdit` carries the entity id plus the selected element indices —
+  those index the entity's `mesh.source.vertices` / `faces` directly.
+- **Colliders:** pair a poly mesh with `collider.shape: "convex"` (convex
+  shapes) or `"trimesh"` (concave, static scenery); a `"box"` collider is
+  auto-fitted to the bounds by the editor on every edit.
+- **Anything can become editable.** `polyFromGeometry(positions, indices)`
+  turns triangle soup (a glTF part, a path mesh, CSG output) into welded
+  n-gons with inferred smoothing groups — the editor's "make editable mesh"
+  and the boolean tools (union / subtract / intersect, `@hitreg/editor`'s
+  `booleanMeshes`) both end there, so a boolean result stays fully editable.
+- **Colors:** `face.color` tints a whole face; `face.colors` (one per corner)
+  is painted vertex color and wins where present. Both need a material that
+  shows vertex colors (the renderer enables it automatically on tinted meshes).
+- Cost model: a compile is cheap at the sizes a designer hand-edits
+  (hundreds–low thousands of faces); this is level geometry, not a sculpt
+  format — keep organic detail in glTF assets.
 
 ### Script context (a runtime API, not a schema)
 

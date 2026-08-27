@@ -14,6 +14,7 @@ import {
   type ChunkRep,
   type ChunkStreamerData,
   type ComponentRegistry,
+  type ProfilerLike,
   type SceneDoc,
 } from "@hitreg/core";
 import { buildScene, buildHlodProxy, type BuildOptions, type InstancedPropBatch } from "@hitreg/render";
@@ -24,6 +25,8 @@ interface LoadedChunk {
   group: THREE.Object3D;
   /** Expanded doc — physics bodies re-attach from this on every play session. */
   expanded: SceneDoc;
+  /** Cached Object.keys(expanded.entities).length — see the stats getter. */
+  entityCount: number;
   objects: Map<string, THREE.Object3D>;
   /** Current LOD representation from the ring state machine. */
   rep: ChunkRep;
@@ -128,6 +131,15 @@ export class ChunkManager {
    * isolation editing (main.ts's editChunkCell), which renders its own
    * editable copy in place of the normal streamed one. */
   private suppressed = new Set<string>();
+  /**
+   * Optional frame profiler. Chunk loads are async, so their cost lands in
+   * promise continuations BETWEEN frames — invisible to any scope timed
+   * inside the frame callback. They are recorded as spans instead, which is
+   * what makes "that 120ms stall was cell 4_-7 expanding and building" a
+   * readable line on the profiler's marker timeline rather than an
+   * unexplained gap in the frame graph.
+   */
+  profiler: ProfilerLike | undefined;
 
   constructor(
     private readonly assets: AssetLibrary,
@@ -136,12 +148,21 @@ export class ChunkManager {
     private readonly lifecycle: ChunkLifecycle = {},
   ) {}
 
-  /** Chunk/entity counts split by residency, for diagnostics. */
+  /**
+   * Chunk/entity counts split by residency, for diagnostics.
+   *
+   * Reads `chunk.entityCount` rather than `Object.keys(...).length`: this is
+   * polled every frame by the profiler's counter sampler, and materialising a
+   * key array per loaded cell made it O(total streamed entities) per read —
+   * 4,700 string allocations a frame on a fully-resident island, which showed
+   * up as 2% of total CPU in a real profile. An instrument must not be
+   * expensive enough to appear in its own measurements.
+   */
   get stats(): { chunks: number; entities: number; simulated: number; proxied: number; loading: number } {
     let entities = 0;
     let simulated = 0;
     for (const chunk of this.loaded.values()) {
-      entities += Object.keys(chunk.expanded.entities).length;
+      entities += chunk.entityCount;
       if (chunk.simulated) simulated += 1;
     }
     let proxiedCells = 0;
@@ -263,6 +284,13 @@ export class ChunkManager {
     }
     const target = computeChunkStates({ x: fx, z: fz }, s, prev);
 
+    // Everything below runs only on a cell crossing, so it never shows up in
+    // an average — but a crossing is exactly when the world hitches, and the
+    // dispose pass inside the per-cell loop is real synchronous GPU-resource
+    // work. Scoped separately from the supercell pass because they fail
+    // differently: cells stall on dispose, supercells on merge/rebake.
+    this.profiler?.begin("cells");
+
     // -- simulation/fullRender cells: per-cell load/unload, unchanged --
     for (const [key, rep] of target) {
       if (isProxy(rep)) continue; // handled by the supercell pass below
@@ -292,6 +320,8 @@ export class ChunkManager {
       const rep = target.get(key);
       if (!rep || isProxy(rep)) this.unload(key, chunk);
     }
+    this.profiler?.end();
+    this.profiler?.begin("supercells");
 
     // -- hlod/far cells: group into supercells, one merged proxy per group --
     const factor = Math.max(1, Math.floor(s.hlodSupercellFactor));
@@ -321,6 +351,7 @@ export class ChunkManager {
       if (this.loadedSupercells.has(scKey) || this.inFlightSupercells.has(scKey)) continue;
       void this.loadSupercell(scKey, members);
     }
+    this.profiler?.end();
   }
 
   /** Live-sync: a chunk file changed on disk — hot-swap it if relevant. */
@@ -366,6 +397,7 @@ export class ChunkManager {
     const file = this.available.get(key);
     if (!s || !file || !this.scene) return;
     this.inFlight.add(key);
+    const endLoad = this.profiler?.span("chunk.load", `${key} (${rep})`);
     try {
       const content: string =
         rawContent ??
@@ -387,20 +419,37 @@ export class ChunkManager {
       const expanded = expandScene(doc, this.assets, this.registry);
       // streamer may have been reconfigured while we fetched
       if (this.streamer !== s || !this.scene) return;
+      // Everything from here down is SYNCHRONOUS main-thread work — prefab
+      // expansion, geometry/material construction, collider creation. This
+      // is the part that actually drops a frame, so it gets its own span
+      // separate from the fetch it followed.
+      const endBuild = this.profiler?.span(
+        "chunk.build",
+        `${key} · ${Object.keys(expanded.entities).length} entities`,
+      );
       const group = new THREE.Group();
       group.name = `chunk:${key}`;
       const built = buildScene(expanded, this.buildOptions);
       group.add(built.scene);
       this.scene.add(group);
       const simulated = isSimulated(rep);
-      const chunk: LoadedChunk = { group, expanded, objects: built.objects, rep, simulated };
+      const chunk: LoadedChunk = {
+        group,
+        expanded,
+        entityCount: Object.keys(expanded.entities).length,
+        objects: built.objects,
+        rep,
+        simulated,
+      };
       this.loaded.set(key, chunk);
       if (simulated) this.sim?.addEntities(expanded); // render-only rings never collide
       this.lifecycle.onLoaded?.(expanded, built.objects, simulated);
+      endBuild?.();
     } catch (error) {
       console.warn(`[chunks] failed to load ${file}:`, error);
     } finally {
       this.inFlight.delete(key);
+      endLoad?.();
     }
   }
 
@@ -417,6 +466,7 @@ export class ChunkManager {
     if (!coords) return;
     const [scx, scz] = coords;
     this.inFlightSupercells.add(scKey);
+    const endLoad = this.profiler?.span("hlod.supercell", `${scKey} · ${memberKeys.size} cells`);
     const epoch = (this.supercellEpoch.get(scKey) ?? 0) + 1;
     this.supercellEpoch.set(scKey, epoch);
     try {
@@ -474,6 +524,7 @@ export class ChunkManager {
       });
     } finally {
       this.inFlightSupercells.delete(scKey);
+      endLoad?.();
     }
   }
 

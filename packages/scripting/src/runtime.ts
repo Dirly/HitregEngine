@@ -1,5 +1,5 @@
 import type * as THREE from "three";
-import type { NetStateStore, PlayerDataService, SceneDoc } from "@hitreg/core";
+import type { NetStateStore, PlayerDataService, ProfilerLike, SceneDoc } from "@hitreg/core";
 import type { InputLike, Script, ScriptContext, SimLike } from "./script.js";
 import type { ScriptRegistry } from "./registry.js";
 import type { EventBus } from "./events.js";
@@ -48,6 +48,14 @@ export interface RuntimeOptions {
    * (onChange subscriptions auto-unsubscribe on script dispose).
    */
   netState?: NetStateStore;
+  /**
+   * Optional frame profiler. When enabled, each script's onFixedUpdate is
+   * timed under its own scope name (`scripts/<script-name>`) rather than
+   * lumped into one "scripts" number — with dozens of NPCs running the same
+   * handful of behaviors, "which script" is the entire question, and a single
+   * aggregate can never answer it.
+   */
+  profiler?: ProfilerLike;
 }
 
 interface ScriptComponentData {
@@ -74,6 +82,8 @@ interface Timer {
  */
 export class ScriptRuntime {
   private readonly instances = new Map<string, Script>();
+  /** entity id -> its script component's name, for per-script profiler scopes. */
+  private readonly instanceNames = new Map<string, string>();
   private readonly entities: Map<string, SceneDoc["entities"][string]>;
   private readonly objects: Map<string, THREE.Object3D>;
   /** Per-script event unsubscribers — cleared when the script disposes. */
@@ -143,6 +153,7 @@ export class ScriptRuntime {
           console.warn(`[scripts] ${id} onDispose failed:`, error);
         }
         this.instances.delete(id);
+        this.instanceNames.delete(id);
       }
       this.dropSubscriptions(id);
     }
@@ -177,6 +188,7 @@ export class ScriptRuntime {
           console.warn(`[scripts] ${id} onDispose failed:`, error);
         }
         this.instances.delete(id);
+        this.instanceNames.delete(id);
       }
       this.dropSubscriptions(id);
       const known = this.entities.delete(id);
@@ -269,6 +281,7 @@ export class ScriptRuntime {
       const script = new cls();
       script.ctx = context;
       this.instances.set(id, script);
+      this.instanceNames.set(id, comp.name);
       try {
         script.onStart?.();
       } catch (error) {
@@ -416,15 +429,23 @@ export class ScriptRuntime {
         if (bTrigger) bus.emit("trigger.exit", { trigger: b, other: a });
       }
     }
+    const profiler = this.opts.profiler;
     for (const [id, script] of this.instances) {
+      // one scope per SCRIPT NAME, not per entity: 200 traffic cars are one
+      // useful row ("traffic-car: 4.1ms over 200 calls"), 200 rows of noise
+      // otherwise — and per-entity interning would exhaust the scope budget
+      if (profiler?.enabled) profiler.begin(this.instanceNames.get(id) ?? "unknown");
       try {
         script.onFixedUpdate?.(dt);
       } catch (error) {
         console.warn(`[scripts] ${id} onFixedUpdate failed:`, error);
       }
+      if (profiler?.enabled) profiler.end();
     }
     // fixed drain point: everything emitted up to here delivers this tick, FIFO
+    if (profiler?.enabled) profiler.begin("events.drain");
     bus?.drain(this.tickCount);
+    if (profiler?.enabled) profiler.end();
   }
 
   dispose(): void {
@@ -436,6 +457,7 @@ export class ScriptRuntime {
       }
     }
     this.instances.clear();
+    this.instanceNames.clear();
     for (const id of [...this.subscriptions.keys()]) this.dropSubscriptions(id);
     this.timers.clear();
   }

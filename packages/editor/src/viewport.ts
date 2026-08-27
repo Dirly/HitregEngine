@@ -8,6 +8,7 @@ import type {
   GizmoMode,
   Hover,
   Manipulating,
+  MeshEditState,
   MultiSelection,
   Observable,
   Selection,
@@ -15,6 +16,7 @@ import type {
 import { selectSingle, toggleSelection } from "./state.js";
 import { setRayFromScreen } from "./screen-ray.js";
 import { applyMaterialToMany, deleteMany, duplicateMany, isLockedCascading } from "./selection-ops.js";
+import { isTypingTarget } from "./mesh-edit-tool.js";
 
 export interface ViewportOptions {
   canvas: HTMLCanvasElement;
@@ -31,6 +33,8 @@ export interface ViewportOptions {
   grayboxActive?: Observable<boolean>;
   /** While the path tool is active, picking and gizmos stand down. */
   pathActive?: Observable<boolean>;
+  /** While mesh-edit mode is in an element mode, picking/gizmos/Delete stand down (the mesh tool owns them). */
+  meshEdit?: MeshEditState;
   /** Published: what the cursor is over (entity + surface point), sampled. */
   hover?: Hover;
   /** Published: what a gizmo drag currently has hold of, while it lasts. */
@@ -128,7 +132,7 @@ export class ViewportTools {
     window.addEventListener("pointerup", onWindowPointerUp);
     this.disposers.push(() => window.removeEventListener("pointerup", onWindowPointerUp));
     const onPointerUp = (e: PointerEvent) => {
-      if (this.opts.grayboxActive?.get() || this.opts.pathActive?.get()) return;
+      if (this.opts.grayboxActive?.get() || this.opts.pathActive?.get() || this.meshEditing()) return;
       if (!this.opts.enabled.get() || !this.pointerDown) return;
       const moved =
         Math.abs(e.clientX - this.pointerDown.x) + Math.abs(e.clientY - this.pointerDown.y);
@@ -146,6 +150,7 @@ export class ViewportTools {
         !this.opts.enabled.get() ||
         this.opts.grayboxActive?.get() ||
         this.opts.pathActive?.get() ||
+        this.meshEditing() ||
         this.controls.dragging ||
         this.pointerDown !== null ||
         document.pointerLockElement === opts.canvas
@@ -172,13 +177,8 @@ export class ViewportTools {
         e.preventDefault(); // keep browsers from stealing focus to the menu bar
       }
       if (!this.opts.enabled.get()) return;
-      if (
-        e.target instanceof HTMLInputElement ||
-        e.target instanceof HTMLTextAreaElement ||
-        e.target instanceof HTMLSelectElement
-      ) {
-        return;
-      }
+      // text entry swallows shortcuts; a just-clicked checkbox/button must not
+      if (isTypingTarget(e.target)) return;
       // while flying (mouse held + move keys), WASD/QE belong to the camera
       if (this.flyBtnDown) {
         if (/^Key[WASDQE]$/.test(e.code)) this.flewDuringDrag = true;
@@ -189,6 +189,8 @@ export class ViewportTools {
       if (e.code === "KeyR") this.opts.gizmoMode.set("scale");
       if (e.ctrlKey && e.code === "KeyZ") this.opts.store.undo();
       if (e.ctrlKey && e.code === "KeyY") this.opts.store.redo();
+      // in an element mode, Delete/Ctrl+D belong to the mesh tool (elements, not entities)
+      if (this.meshEditing()) return;
       if (e.code === "Delete" || e.code === "Backspace") this.deleteSelection();
       if (e.ctrlKey && e.code === "KeyD") {
         e.preventDefault();
@@ -266,6 +268,13 @@ export class ViewportTools {
       }),
       ...(opts.grayboxActive ? [opts.grayboxActive.subscribe(() => this.syncAttachment())] : []),
       ...(opts.pathActive ? [opts.pathActive.subscribe(() => this.syncAttachment())] : []),
+      ...(opts.meshEdit
+        ? [
+            opts.meshEdit.active.subscribe(() => this.syncAttachment()),
+            opts.meshEdit.mode.subscribe(() => this.syncAttachment()),
+            opts.meshEdit.entityId.subscribe(() => this.syncAttachment()),
+          ]
+        : []),
       ...(opts.multiSelection ? [opts.multiSelection.subscribe(() => this.syncAttachment())] : []),
       opts.settings.subscribe(() => {
         this.applySnaps();
@@ -344,10 +353,19 @@ export class ViewportTools {
     this.proxyStartInverse = null;
   }
 
+  /** True while the mesh tool owns the viewport (element mode on an editable mesh). */
+  private meshEditing(): boolean {
+    const m = this.opts.meshEdit;
+    return !!m && m.active.get() && m.mode.get() !== "object" && m.entityId.get() !== null;
+  }
+
   private syncAttachment(): void {
     this.teardownGroupProxy();
     const enabled =
-      this.opts.enabled.get() && !this.opts.grayboxActive?.get() && !this.opts.pathActive?.get();
+      this.opts.enabled.get() &&
+      !this.opts.grayboxActive?.get() &&
+      !this.opts.pathActive?.get() &&
+      !this.meshEditing();
     const ids = enabled ? this.selectedIds().filter((id) => !!this.opts.getObject(id) && !this.isLocked(id)) : [];
     if (ids.length === 0) {
       this.controls.detach();
@@ -474,6 +492,14 @@ export class ViewportTools {
       if (hit.object.userData["skyDome"]) continue;
       if (hit.object.userData["physicsDebug"]) continue;
       let node: THREE.Object3D | null = hit.object;
+      let overlay = false;
+      for (let n: THREE.Object3D | null = node; n; n = n.parent) {
+        if (n.userData["editorOverlay"]) {
+          overlay = true;
+          break;
+        }
+      }
+      if (overlay) continue; // mesh-edit handles are not scene geometry
       while (node) {
         const entityId = node.userData["entityId"] as string | undefined;
         if (entityId) {

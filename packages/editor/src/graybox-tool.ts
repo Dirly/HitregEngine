@@ -1,5 +1,16 @@
 import * as THREE from "three/webgpu";
-import { newId, type SceneStore } from "@hitreg/core";
+import {
+  buildShape,
+  buildTopology,
+  compilePolyMesh,
+  newId,
+  polyFromFootprint,
+  polyMeshBounds,
+  transformVertices,
+  type PolyMesh,
+  type SceneStore,
+  type ShapeParams,
+} from "@hitreg/core";
 import type { EditorSettings, GrayboxShape, Observable, Selection } from "./state.js";
 
 export interface GrayboxToolOptions {
@@ -18,6 +29,12 @@ export interface GrayboxToolOptions {
   bevel: Observable<number>;
   /** Material asset GUID stamped onto newly-drawn shapes ("" = engine default). */
   material?: Observable<string>;
+  /**
+   * Commit drawn shapes as EDITABLE poly meshes (vertex/edge/face editing,
+   * UVs, per-face materials). Off = the historic sized primitives for
+   * box/cylinder/sphere/wedge (cheaper analytic colliders, not editable).
+   */
+  editable?: Observable<boolean>;
   getScene(): THREE.Scene;
   onDraggingChanged?(dragging: boolean): void;
 }
@@ -25,7 +42,7 @@ export interface GrayboxToolOptions {
 type Vec3 = [number, number, number];
 
 interface MeshComponentData {
-  source: { kind: string; shape?: string; size?: Vec3 };
+  source: { kind: string; shape?: string; size?: Vec3 } | PolyMesh;
   [k: string]: unknown;
 }
 
@@ -47,6 +64,20 @@ type Phase =
       size: Vec3;
       delta: number;
       groupPos0: THREE.Vector3;
+    }
+  | {
+      /** Push/pull one face of an editable mesh along its normal (Alt = pull a new block out instead). */
+      kind: "poly-face";
+      entityId: string;
+      meshChild: THREE.Mesh;
+      mesh: PolyMesh;
+      face: number;
+      normalLocal: THREE.Vector3;
+      lineOrigin: THREE.Vector3;
+      lineDir: THREE.Vector3;
+      delta: number;
+      extrude: boolean;
+      preview: THREE.Mesh | null;
     }
   | {
       kind: "extrude";
@@ -73,37 +104,6 @@ function rayLineParam(ray: THREE.Ray, origin: THREE.Vector3, dir: THREE.Vector3)
   return (b * e - c * d) / denom;
 }
 
-/** Unit wedge (1x1x1, rises toward +Z) for previews. */
-function unitWedgeGeometry(): THREE.BufferGeometry {
-  const x = 0.5;
-  const z = 0.5;
-  const h = 1;
-  // prettier-ignore
-  const positions = new Float32Array([
-    -x, 0, -z,  x, 0,  z,  x, 0, -z,   -x, 0, -z, -x, 0,  z,  x, 0,  z,
-    -x, 0,  z, -x, h,  z,  x, h,  z,   -x, 0,  z,  x, h,  z,  x, 0,  z,
-    -x, 0, -z,  x, h,  z, -x, h,  z,   -x, 0, -z,  x, 0, -z,  x, h,  z,
-    -x, 0, -z, -x, h,  z, -x, 0,  z,    x, 0, -z,  x, 0,  z,  x, h,  z,
-  ]);
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-  geometry.computeVertexNormals();
-  return geometry;
-}
-
-function previewGeometry(shape: GrayboxShape): THREE.BufferGeometry {
-  switch (shape) {
-    case "cylinder":
-      return new THREE.CylinderGeometry(0.5, 0.5, 1, 20);
-    case "sphere":
-      return new THREE.SphereGeometry(0.5, 20, 12);
-    case "wedge":
-      return unitWedgeGeometry();
-    default:
-      return new THREE.BoxGeometry(1, 1, 1);
-  }
-}
-
 function previewMaterial(): THREE.MeshBasicMaterial {
   return new THREE.MeshBasicMaterial({
     color: 0x79c0ff,
@@ -111,6 +111,19 @@ function previewMaterial(): THREE.MeshBasicMaterial {
     opacity: 0.3,
     depthTest: false,
   });
+}
+
+/** Three geometry for a poly mesh (preview only — the renderer has its own path). */
+function polyGeometry(mesh: PolyMesh): THREE.BufferGeometry {
+  const compiled = compilePolyMesh(mesh);
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(compiled.positions, 3));
+  geometry.setAttribute("normal", new THREE.BufferAttribute(compiled.normals, 3));
+  geometry.setAttribute("uv", new THREE.BufferAttribute(compiled.uvs, 2));
+  geometry.setIndex(new THREE.BufferAttribute(compiled.indices, 1));
+  for (const g of compiled.groups) geometry.addGroup(g.start, g.count, g.materialIndex);
+  geometry.userData["triangleFace"] = compiled.triangleFace;
+  return geometry;
 }
 
 /** Extruded polygon geometry standing up along +Y (matches render's polygon source). */
@@ -132,15 +145,59 @@ function extrudedPolyGeometry(
   return geometry;
 }
 
+/** Shape params derived from a drawn footprint (w × d) and pulled height. */
+function shapeParamsFor(shape: GrayboxShape, w: number, d: number, h: number): { name: string; params: ShapeParams } {
+  const radius = Math.max(w, d) / 2;
+  switch (shape) {
+    case "cylinder":
+      return { name: "cylinder", params: { radius, height: h, sides: 24 } };
+    case "sphere":
+      return { name: "sphere", params: { radius, segments: 24, rings: 12 } };
+    case "wedge":
+      return { name: "prism", params: { width: w, height: h, depth: d } };
+    case "plane":
+      return { name: "plane", params: { width: w, depth: d, widthSegments: 1, depthSegments: 1 } };
+    case "cone":
+      return { name: "cone", params: { radius, height: h, sides: 24 } };
+    case "stairs":
+      return { name: "stairs", params: { width: w, height: h, depth: d, steps: Math.max(2, Math.round(h / 0.25)), sides: true } };
+    case "arch":
+      return { name: "arch", params: { radius: w / 2, thickness: Math.max(0.1, w * 0.15), depth: d, sides: 12, degrees: 180 } };
+    case "torus":
+      return { name: "torus", params: { radius: radius * 0.75, tube: radius * 0.25, segments: 32, tubeSegments: 16 } };
+    case "pipe":
+      return { name: "pipe", params: { radius, height: h, thickness: Math.max(0.05, radius * 0.2), sides: 24, heightSegments: 1 } };
+    case "door":
+      return { name: "door", params: { width: w, height: h, depth: d, legWidth: Math.max(0.1, w * 0.15), topWidth: Math.max(0.1, h * 0.12) } };
+    default:
+      return { name: "cube", params: { width: w, height: h, depth: d } };
+  }
+}
+
+/** Convex shapes get an exact convex hull; everything else a trimesh; boxes a sized box. */
+function colliderFor(shapeName: string, mesh: PolyMesh): Record<string, unknown> {
+  if (shapeName === "cube") {
+    const b = polyMeshBounds(mesh);
+    return { shape: "box", size: [b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]], offset: b.center };
+  }
+  if (["cylinder", "sphere", "prism", "cone", "icosphere"].includes(shapeName)) return { shape: "convex" };
+  return { shape: "trimesh" };
+}
+
+/** Shapes whose draw gesture has no height step. */
+const FLAT_SHAPES = new Set<GrayboxShape>(["sphere", "plane", "torus"]);
+
 /**
  * ProBuilder-style grayboxing:
- * - draw gesture: footprint -> height -> click commits (spheres commit on
- *   release; wedges face the drag direction; bevel > 0 turns boxes/polys
- *   into beveled extrusions).
+ * - draw gesture: footprint -> height -> click commits (flat shapes — sphere,
+ *   plane, torus — commit on release; wedges face the drag direction).
  * - poly shape: click base points on the ground, close near the first point
  *   (or Enter), pull up, click to commit.
- * - grab faces: drag box faces / cylinder caps+sides / sphere surface.
- * - ALT+drag a box face extrudes a NEW box out of it.
+ * - shapes commit as EDITABLE poly meshes (see `editable`): cube, cylinder,
+ *   sphere, prism, plane, cone, stairs, arch, torus, pipe, door, footprint.
+ * - grab faces: on an editable mesh, drag a face to push/pull it along its
+ *   normal; ALT+drag pulls a new block out of it (extrude). On legacy
+ *   primitives drag resizes box faces / cylinder caps+sides / sphere radius.
  * - Snapping follows the toolbar setting; holding CTRL inverts it. Esc cancels.
  */
 export class GrayboxTool {
@@ -157,7 +214,7 @@ export class GrayboxTool {
     const key = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
       if (e.code === "Escape") this.cancel();
-      if (e.code === "KeyG" && this.opts.enabled.get()) {
+      if (e.code === "KeyG" && !e.ctrlKey && !e.altKey && this.opts.enabled.get()) {
         this.opts.active.set(!this.opts.active.get());
       }
       if (e.code === "Enter" && this.phase.kind === "poly-points" && this.phase.points.length >= 3) {
@@ -181,6 +238,10 @@ export class GrayboxTool {
 
   private get isOn(): boolean {
     return this.opts.enabled.get() && this.opts.active.get();
+  }
+
+  private get editable(): boolean {
+    return this.opts.editable?.get() ?? true;
   }
 
   /** Toolbar snap setting, inverted while Ctrl is held. */
@@ -209,33 +270,20 @@ export class GrayboxTool {
     return ray.intersectPlane(this.dragPlane, point) ? point : null;
   }
 
+  /** Rebuild the draw preview from the current footprint/height. */
   private layoutPreview(preview: THREE.Mesh, base: THREE.Vector3, corner: THREE.Vector3, h: number): void {
     const shape = this.opts.shape.get();
     const w = Math.max(0.1, Math.abs(corner.x - base.x));
     const d = Math.max(0.1, Math.abs(corner.z - base.z));
     const cx = (base.x + corner.x) / 2;
     const cz = (base.z + corner.z) / 2;
-
-    if (shape === "sphere") {
-      const dia = Math.max(w, d, 0.1);
-      preview.scale.set(dia, dia, dia);
-      preview.position.set(cx, base.y + dia / 2, cz);
-      return;
-    }
-    if (shape === "cylinder") {
-      const dia = Math.max(w, d, 0.1);
-      preview.scale.set(dia, Math.max(0.05, h), dia);
-      preview.position.set(cx, base.y + Math.max(0.05, h) / 2, cz);
-      return;
-    }
-    if (shape === "wedge") {
-      preview.scale.set(w, Math.max(0.05, h), d);
-      preview.position.set(cx, base.y, cz);
-      preview.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), this.wedgeYaw(base, corner));
-      return;
-    }
-    preview.scale.set(w, Math.max(0.05, h), d);
-    preview.position.set(cx, base.y + Math.max(0.05, h) / 2, cz);
+    const height = FLAT_SHAPES.has(shape) ? Math.max(w, d) : Math.max(0.05, h);
+    const { name, params } = shapeParamsFor(shape, w, d, height);
+    preview.geometry.dispose();
+    preview.geometry = polyGeometry(buildShape(name, params));
+    preview.position.set(cx, base.y, cz);
+    preview.quaternion.identity();
+    if (shape === "wedge") preview.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), this.wedgeYaw(base, corner));
   }
 
   private wedgeYaw(base: THREE.Vector3, corner: THREE.Vector3): number {
@@ -283,34 +331,38 @@ export class GrayboxTool {
 
     const hits = this.raycaster.intersectObjects(this.opts.getScene().children, true);
     const hit = hits.find((h) => {
-      if (h.object.userData["physicsDebug"]) return false;
+      if (h.object.userData["physicsDebug"] || h.object.userData["skyDome"]) return false;
       let node: THREE.Object3D | null = h.object;
+      let owned = false;
       while (node) {
-        if (node.userData["entityId"]) return true;
+        if (node.userData["editorOverlay"]) return false;
+        if (node.userData["entityId"]) owned = true;
         node = node.parent;
       }
-      return false;
+      return owned;
     });
 
-    // face interactions on primitive entities (not inside prefab instances)
+    // face interactions on shape entities (not inside prefab instances)
     if (hit?.face) {
       const expandedId = this.findEntityId(hit.object);
       if (expandedId && !expandedId.includes(":")) {
         const entity = this.opts.store.doc.entities[expandedId];
         const mesh = entity?.components["mesh"] as MeshComponentData | undefined;
-        const shape = mesh?.source.shape;
-        if (
-          mesh?.source.kind === "primitive" &&
-          (shape === "box" || shape === "cylinder" || shape === "sphere") &&
-          !("prefab" in (entity?.components ?? {}))
-        ) {
-          e.stopPropagation();
-          if (e.altKey && shape === "box") {
-            this.beginExtrude(hit, mesh.source.size ?? [1, 1, 1]);
-          } else {
-            this.beginFaceDrag(expandedId, hit, shape, mesh.source.size ?? [1, 1, 1]);
+        const source = mesh?.source;
+        if (source && !("prefab" in (entity?.components ?? {}))) {
+          if (source.kind === "poly" && hit.object.userData["polyMesh"]) {
+            e.stopPropagation();
+            this.beginPolyFaceDrag(expandedId, hit, source as PolyMesh, e.altKey);
+            return;
           }
-          return;
+          const shape = (source as { shape?: string }).shape;
+          if (source.kind === "primitive" && (shape === "box" || shape === "cylinder" || shape === "sphere")) {
+            e.stopPropagation();
+            const size = (source as { size?: Vec3 }).size ?? [1, 1, 1];
+            if (e.altKey && shape === "box") this.beginExtrude(hit, size);
+            else this.beginFaceDrag(expandedId, hit, shape, size);
+            return;
+          }
         }
       }
     }
@@ -335,6 +387,7 @@ export class GrayboxTool {
         new THREE.LineBasicMaterial({ color: 0x79c0ff, depthTest: false }),
       );
       line.renderOrder = 998;
+      line.userData["editorOverlay"] = true;
       this.opts.getScene().add(line);
       this.phase = { kind: "poly-points", baseY: base.y, points: [base], line };
       this.updatePolyLine();
@@ -342,8 +395,9 @@ export class GrayboxTool {
       return;
     }
 
-    const preview = new THREE.Mesh(previewGeometry(this.opts.shape.get()), previewMaterial());
+    const preview = new THREE.Mesh(new THREE.BufferGeometry(), previewMaterial());
     preview.renderOrder = 998;
+    preview.userData["editorOverlay"] = true;
     this.opts.getScene().add(preview);
     this.layoutPreview(preview, base, base, 0.05);
     this.phase = { kind: "footprint", base, corner: base.clone(), preview };
@@ -368,6 +422,137 @@ export class GrayboxTool {
     }
     return null;
   }
+
+  // ---------------------------------------------------------------- editable-mesh face push/pull
+
+  private beginPolyFaceDrag(entityId: string, hit: THREE.Intersection, mesh: PolyMesh, extrude: boolean): void {
+    const meshChild = hit.object as THREE.Mesh;
+    const map = meshChild.geometry.userData["triangleFace"] as Uint32Array | undefined;
+    if (!map || hit.faceIndex === undefined || hit.faceIndex === null) return;
+    const face = map[hit.faceIndex];
+    if (face === undefined) return;
+    const topo = buildTopology(mesh);
+    const normalLocal = new THREE.Vector3(...topo.faceNormals[face]!);
+    const lineDir = normalLocal.clone().transformDirection(meshChild.matrixWorld).normalize();
+    let preview: THREE.Mesh | null = null;
+    if (extrude) {
+      preview = new THREE.Mesh(new THREE.BufferGeometry(), previewMaterial());
+      preview.renderOrder = 998;
+      preview.userData["editorOverlay"] = true;
+      this.opts.getScene().add(preview);
+    }
+    this.phase = {
+      kind: "poly-face",
+      entityId,
+      meshChild,
+      mesh,
+      face,
+      normalLocal,
+      lineOrigin: hit.point.clone(),
+      lineDir,
+      delta: 0,
+      extrude,
+      preview,
+    };
+    this.opts.onDraggingChanged?.(true);
+  }
+
+  /** The mesh with the dragged face pushed by `delta` (local units along its normal). */
+  private pushedMesh(phase: Extract<Phase, { kind: "poly-face" }>): PolyMesh {
+    const { mesh, face, normalLocal, delta } = phase;
+    const n: Vec3 = [normalLocal.x * delta, normalLocal.y * delta, normalLocal.z * delta];
+    return transformVertices(mesh, mesh.faces[face]!.v, (p) => [p[0] + n[0], p[1] + n[1], p[2] + n[2]]);
+  }
+
+  private layoutPolyFace(): void {
+    if (this.phase.kind !== "poly-face") return;
+    const { meshChild, preview } = this.phase;
+    if (this.phase.extrude && preview) {
+      // preview block: the face extruded by delta, drawn over the untouched mesh
+      const { mesh, face, normalLocal, delta } = this.phase;
+      const faceVerts = mesh.faces[face]!.v;
+      const lifted: PolyMesh = {
+        kind: "poly",
+        materials: [],
+        vertices: [
+          ...faceVerts.map((i) => mesh.vertices[i]!),
+          ...faceVerts.map((i) => {
+            const p = mesh.vertices[i]!;
+            return [p[0] + normalLocal.x * delta, p[1] + normalLocal.y * delta, p[2] + normalLocal.z * delta] as Vec3;
+          }),
+        ],
+        faces: [
+          { v: faceVerts.map((_, i) => i), mat: 0, smooth: 0 },
+          { v: faceVerts.map((_, i) => i + faceVerts.length), mat: 0, smooth: 0 },
+          ...faceVerts.map((_, i) => ({
+            v: [i, (i + 1) % faceVerts.length, ((i + 1) % faceVerts.length) + faceVerts.length, i + faceVerts.length],
+            mat: 0,
+            smooth: 0,
+          })),
+        ],
+      };
+      preview.geometry.dispose();
+      preview.geometry = polyGeometry(lifted);
+      meshChild.updateWorldMatrix(true, false);
+      preview.matrixAutoUpdate = false;
+      preview.matrix.copy(meshChild.matrixWorld);
+      preview.matrixWorld.copy(meshChild.matrixWorld);
+      return;
+    }
+    // push/pull: swap the rendered geometry live
+    const pushed = this.pushedMesh(this.phase);
+    meshChild.geometry.dispose();
+    meshChild.geometry = polyGeometry(pushed);
+  }
+
+  private commitPolyFace(): void {
+    if (this.phase.kind !== "poly-face") return;
+    const phase = this.phase;
+    this.phase = { kind: "idle" };
+    this.opts.onDraggingChanged?.(false);
+    phase.preview?.geometry.dispose();
+    phase.preview?.removeFromParent();
+    const entity = this.opts.store.doc.entities[phase.entityId];
+    const component = entity?.components["mesh"] as MeshComponentData | undefined;
+    if (!entity || !component) return;
+    if (Math.abs(phase.delta) < 1e-4) {
+      // restore the untouched geometry
+      phase.meshChild.geometry.dispose();
+      phase.meshChild.geometry = polyGeometry(phase.mesh);
+      return;
+    }
+    let next: PolyMesh;
+    if (phase.extrude) {
+      // a real extrude through the core op (keeps the mesh closed)
+      const { extrudeFaces } = extrudeOps;
+      next = extrudeFaces(phase.mesh, [phase.face], phase.delta, "vertex-normal").mesh;
+    } else {
+      next = this.pushedMesh(phase);
+      const { generator: _g, ...rest } = next;
+      next = rest;
+    }
+    const ops: Array<{ op: "set-component"; id: string; component: string; data: unknown }> = [
+      { op: "set-component", id: phase.entityId, component: "mesh", data: { ...component, source: next } },
+    ];
+    const collider = entity.components["collider"] as { shape?: string } | undefined;
+    if (collider?.shape === "box") {
+      const b = polyMeshBounds(next);
+      ops.push({
+        op: "set-component",
+        id: phase.entityId,
+        component: "collider",
+        data: { ...collider, size: [b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]], offset: b.center },
+      });
+    }
+    try {
+      this.opts.store.apply(ops);
+      this.opts.selection.set(phase.entityId);
+    } catch (error) {
+      console.warn("[graybox] face commit rejected:", error);
+    }
+  }
+
+  // ---------------------------------------------------------------- legacy primitive face drags
 
   private beginFaceDrag(
     entityId: string,
@@ -429,7 +614,7 @@ export class GrayboxTool {
     this.opts.onDraggingChanged?.(true);
   }
 
-  /** ALT+drag: pull a NEW box out of an existing box face. */
+  /** ALT+drag: pull a NEW box out of an existing primitive box face. */
   private beginExtrude(hit: THREE.Intersection, size: Vec3): void {
     const group = this.groupOf(hit.object);
     if (!group) return;
@@ -452,6 +637,7 @@ export class GrayboxTool {
 
     const preview = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), previewMaterial());
     preview.renderOrder = 998;
+    preview.userData["editorOverlay"] = true;
     preview.quaternion.copy(rotation);
     this.opts.getScene().add(preview);
 
@@ -481,6 +667,8 @@ export class GrayboxTool {
       .addScaledVector(lineDir, size[axis] / 2 + Math.max(0.1, delta) / 2);
   }
 
+  // ---------------------------------------------------------------- poly footprint
+
   private updatePolyLine(cursor?: THREE.Vector3): void {
     if (this.phase.kind !== "poly-points") return;
     const pts = [...this.phase.points];
@@ -499,6 +687,7 @@ export class GrayboxTool {
     line.removeFromParent();
     const preview = new THREE.Mesh(new THREE.BufferGeometry(), previewMaterial());
     preview.renderOrder = 998;
+    preview.userData["editorOverlay"] = true;
     this.opts.getScene().add(preview);
     this.phase = { kind: "poly-height", baseY, points, h: 0.1, preview };
     this.layoutPolyPreview();
@@ -518,9 +707,11 @@ export class GrayboxTool {
     if (this.phase.kind !== "poly-height") return;
     const { c, pts } = this.polyLocal();
     this.phase.preview.geometry.dispose();
-    this.phase.preview.geometry = extrudedPolyGeometry(pts, this.phase.h, this.opts.bevel.get());
+    this.phase.preview.geometry = extrudedPolyGeometry(pts, this.phase.h, this.editable ? 0 : this.opts.bevel.get());
     this.phase.preview.position.set(c.x, this.phase.baseY, c.z);
   }
+
+  // ---------------------------------------------------------------- move / up
 
   private onMove(e: PointerEvent): void {
     if (this.phase.kind === "idle") return;
@@ -577,7 +768,17 @@ export class GrayboxTool {
       return;
     }
 
-    // face drag
+    if (this.phase.kind === "poly-face") {
+      const t = this.snap(rayLineParam(ray, this.phase.lineOrigin, this.phase.lineDir));
+      // world drag distance -> local units (uniform scale assumed for the preview)
+      const scale = this.phase.meshChild.getWorldScale(new THREE.Vector3());
+      const k = (Math.abs(scale.x) + Math.abs(scale.y) + Math.abs(scale.z)) / 3 || 1;
+      this.phase.delta = this.phase.extrude ? Math.max(0.05, t / k) : t / k;
+      this.layoutPolyFace();
+      return;
+    }
+
+    // legacy face drag
     const t = this.snap(rayLineParam(ray, this.phase.lineOrigin, this.phase.lineDir));
     if (this.phase.mode === "radial") {
       const minDelta = (0.1 - this.phase.size[0]) / 2;
@@ -606,7 +807,7 @@ export class GrayboxTool {
         this.cancel();
         return;
       }
-      if (this.opts.shape.get() === "sphere") {
+      if (FLAT_SHAPES.has(this.opts.shape.get())) {
         this.phase = { ...this.phase, kind: "height", h: Math.max(w, d) };
         this.commitDraw();
         return;
@@ -616,6 +817,7 @@ export class GrayboxTool {
     }
     if (this.phase.kind === "face") this.commitFace();
     if (this.phase.kind === "extrude") this.commitExtrude();
+    if (this.phase.kind === "poly-face") this.commitPolyFace();
   }
 
   // ---------------------------------------------------------------- commits
@@ -665,6 +867,23 @@ export class GrayboxTool {
     const d = Math.max(0.1, Math.abs(corner.z - base.z));
     const cx = (base.x + corner.x) / 2;
     const cz = (base.z + corner.z) / 2;
+    const legacy = !this.editable && (shape === "box" || shape === "cylinder" || shape === "sphere" || shape === "wedge");
+
+    if (!legacy) {
+      const height = FLAT_SHAPES.has(shape) ? Math.max(w, d) : h;
+      const { name, params } = shapeParamsFor(shape, w, d, height);
+      const mesh = buildShape(name, params);
+      const yaw = shape === "wedge" ? this.wedgeYaw(base, corner) : 0;
+      const label = shape === "box" ? "Box" : shape === "wedge" ? "Ramp" : shape.charAt(0).toUpperCase() + shape.slice(1);
+      this.addEntity(
+        label,
+        [cx, base.y, cz],
+        [0, Math.sin(yaw / 2), 0, Math.cos(yaw / 2)],
+        { source: mesh },
+        colliderFor(name, mesh),
+      );
+      return;
+    }
 
     if (shape === "sphere") {
       const dia = Math.max(w, d);
@@ -735,6 +954,13 @@ export class GrayboxTool {
     this.phase = { kind: "idle" };
     this.opts.onDraggingChanged?.(false);
 
+    if (this.editable) {
+      // footprint points are extrude-space [x, -z]; polyFromFootprint wants [x, z]
+      const mesh = polyFromFootprint(pts.map(([x, y]) => [x, -y] as [number, number]), h);
+      this.addEntity("Poly", [c.x, baseY, c.z], [0, 0, 0, 1], { source: mesh }, { shape: "trimesh" });
+      return;
+    }
+
     const bevel = this.opts.bevel.get();
     // AABB collider approximation of the footprint
     let minX = Infinity,
@@ -800,7 +1026,7 @@ export class GrayboxTool {
 
     const entity = this.opts.store.doc.entities[entityId];
     if (!entity) return;
-    const mesh = structuredClone(entity.components["mesh"]) as MeshComponentData;
+    const mesh = structuredClone(entity.components["mesh"]) as { source: { shape?: string; size?: Vec3 } };
     const newSize = [...(mesh.source.size ?? [1, 1, 1])] as Vec3;
 
     const ops: Array<{ op: "set-component"; id: string; component: string; data: unknown }> = [];
@@ -862,6 +1088,12 @@ export class GrayboxTool {
       this.phase.meshChild.scale.set(1, 1, 1);
       this.phase.group.position.copy(this.phase.groupPos0);
     }
+    if (this.phase.kind === "poly-face") {
+      this.phase.preview?.geometry.dispose();
+      this.phase.preview?.removeFromParent();
+      this.phase.meshChild.geometry.dispose();
+      this.phase.meshChild.geometry = polyGeometry(this.phase.mesh);
+    }
     if (this.phase.kind !== "idle") {
       this.phase = { kind: "idle" };
       this.opts.onDraggingChanged?.(false);
@@ -873,3 +1105,7 @@ export class GrayboxTool {
     for (const dispose of this.disposers) dispose();
   }
 }
+
+// late-bound so the file reads top-down; the op is a plain core import
+import { extrudeFaces as coreExtrudeFaces } from "@hitreg/core";
+const extrudeOps = { extrudeFaces: coreExtrudeFaces };

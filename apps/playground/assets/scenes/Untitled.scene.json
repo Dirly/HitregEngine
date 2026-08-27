@@ -1,0 +1,122 @@
+{
+  "version": 1,
+  "name": "Untitled",
+  "entities": {
+    "ground": {
+      "name": "Ground",
+      "parent": null,
+      "tags": [
+        "static"
+      ],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "plane",
+            "size": [
+              40,
+              1,
+              40
+            ],
+            "segments": [
+              1,
+              1
+            ]
+          },
+          "castShadow": false,
+          "receiveShadow": true,
+          "renderMode": "auto",
+          "lod": true,
+          "static": true
+        },
+        "collider": {
+          "shape": "box",
+          "size": [
+            40,
+            0.2,
+            40
+          ],
+          "offset": [
+            0,
+            -0.1,
+            0
+          ],
+          "friction": 0.5,
+          "restitution": 0,
+          "density": 1,
+          "isTrigger": false
+        }
+      }
+    },
+    "sun": {
+      "name": "Sun",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            20,
+            30,
+            10
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "light": {
+          "kind": "directional",
+          "color": "#fff5e0",
+          "intensity": 1,
+          "range": 10,
+          "angle": 0.5235987755982988,
+          "castShadow": true,
+          "importance": 1,
+          "shadowSize": 40
+        }
+      }
+    },
+    "sky": {
+      "name": "Ambient",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "light": {
+          "kind": "ambient",
+          "color": "#334455",
+          "intensity": 0.6,
+          "range": 10,
+          "angle": 0.5235987755982988,
+          "castShadow": false,
+          "importance": 1,
+          "shadowSize": 40
+        }
+      }
+    }
+  }
+}

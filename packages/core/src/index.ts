@@ -187,3 +187,15 @@ export {
   MANIFEST_VERSION,
   type GameManifest,
 } from "./manifest.js";
+export * from "./poly-mesh/index.js";
+export {
+  Profiler,
+  noopProfiler,
+  type ProfilerLike,
+  type ProfilerOptions,
+  type ProfileSummary,
+  type ProfileMarker,
+  type ScopeStat,
+  type SpikeFrame,
+} from "./profiler.js";
+export { digestProfile, type ProfileDigest, type PerfVerdict } from "./profile-digest.js";

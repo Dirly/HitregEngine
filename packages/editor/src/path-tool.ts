@@ -44,7 +44,9 @@ export class PathTool {
     const key = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
       if (e.code === "Escape") this.cancel();
-      if (e.code === "KeyP" && this.opts.enabled.get()) {
+      // Shift+P is the profiler window (see main.ts) — guard the modifier so
+      // one keystroke can't both open a tool window and toggle a draw mode.
+      if (e.code === "KeyP" && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && this.opts.enabled.get()) {
         this.opts.active.set(!this.opts.active.get());
       }
       if (e.code === "Enter" && this.phase.kind === "points" && this.phase.points.length >= 2) {

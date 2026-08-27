@@ -1,13 +1,17 @@
 import { newId, type SceneStore } from "@hitreg/core";
-import type { ContextMenu, MultiSelection, Selection } from "../state.js";
+import type { ContextMenu, MeshEditActions, MeshEditState, MultiSelection, Selection } from "../state.js";
 import { deleteMany, duplicateMany, toggleLockMany } from "../selection-ops.js";
 import { apply, useObservable } from "./common.js";
+import { convertToPoly } from "./poly-mesh-inspector.js";
 
 export function ContextMenuView(props: {
   store: SceneStore;
   selection: Selection;
   multiSelection: MultiSelection;
   contextMenu: ContextMenu;
+  meshEdit?: MeshEditState;
+  /** For "make editable mesh" on glTF/path entities (needs the live geometry). */
+  meshEditActions?: MeshEditActions;
   onCreatePrefab: (entityId: string) => void;
   onUnpackModel?: (entityId: string) => void;
   /** Drop a note at the right-clicked world point (see PinOverlay). */
@@ -106,6 +110,36 @@ export function ContextMenuView(props: {
               return source?.kind !== "asset" || !!source.node;
             })(),
         )}
+        {(() => {
+          const source = (props.store.doc.entities[id ?? ""]?.components["mesh"] as { source?: { kind?: string } } | undefined)?.source;
+          if (!id || !props.meshEdit) return null;
+          if (source?.kind === "poly") {
+            return item("edit mesh  (2/3/4)", () => {
+              props.selection.set(id);
+              props.multiSelection.set([id]);
+              if (props.meshEdit!.mode.get() === "object") props.meshEdit!.mode.set("face");
+              props.meshEdit!.active.set(true);
+            });
+          }
+          if (source?.kind === "primitive" || source?.kind === "polygon") {
+            return item("make editable mesh", () => {
+              const component = props.store.doc.entities[id]?.components["mesh"];
+              if (!component) return;
+              props.selection.set(id);
+              props.multiSelection.set([id]);
+              convertToPoly(id, component as Parameters<typeof convertToPoly>[1], props.store, props.meshEdit);
+            });
+          }
+          if (source && props.meshEditActions) {
+            // glTF part / path / anything rendered: convert from the live geometry
+            return item("make editable mesh (from geometry)", () => {
+              props.selection.set(id);
+              props.multiSelection.set([id]);
+              props.meshEditActions!.makeEditable(id);
+            });
+          }
+          return null;
+        })()}
         {item(
           "lock" + (id && props.store.doc.entities[id]?.locked === true ? " ✓" : ""),
           () => toggleLockMany(props.store, props.store.doc, ids),

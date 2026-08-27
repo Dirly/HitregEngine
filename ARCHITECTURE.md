@@ -360,8 +360,16 @@ the file I/O). The overlay is tree-shaken out of production builds.
   rendered thumbnails with the asset viewer.
 - **Graybox kit** (ProBuilder-lite): one-click floor/wall/platform/pillar/ramp
   (wedge primitive)/stairs — plain entities, so they rescale, snap, and prefab
-  like anything else. Real mesh editing (face extrude, vertex tweaks, CSG
-  booleans via three-bvh-csg) is roadmap.
+  like anything else. *Amended 2026-08-26 (ProBuilder-class mesh editing):*
+  drawn shapes are now editable **poly meshes** (`mesh.source.kind: "poly"`,
+  `packages/core/src/poly-mesh/`) — shared vertices + n-gon faces with
+  per-face material slot / smoothing group / UV settings, compiled to
+  triangle buffers at build time (JSON stays authoring truth). Every edit
+  (extrude, inset, bevel, subdivide, connect, loop insert, bridge, merge,
+  weld, UV projection, …) is a pure headless op in core that returns a new
+  mesh, committed by the editor's `MeshEditTool` as ONE `set-component` — so
+  element editing is undoable, diffable, file-editable, and callable by an
+  agent without the viewport. CSG booleans (three-bvh-csg) remain roadmap.
 - **Material shaders v1**: `shader: standard | unlit | toon | wireframe` on the
   material asset — a built-in set as pure data. Custom shaders remain the TSL
   node-graph-as-JSON bet (§1); this enum is the forward-compatible stopgap.

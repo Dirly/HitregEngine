@@ -13,7 +13,8 @@
     "@hitreg/core": "workspace:*",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "three": "^0.185.1"
+    "three": "^0.185.1",
+    "three-bvh-csg": "^0.0.18"
   },
   "devDependencies": {
     "@types/react": "^19.2.17",

@@ -39,6 +39,9 @@ export class EngineRenderer {
   private pipelineCamera: THREE.Camera | null = null;
   /** Set when the pipeline throws (e.g. backend limitation) — degrade to no bloom. */
   private bloomUnavailable = false;
+  /** GPU timestamp queries: off unless the profiler asks for them (see setGpuTiming). */
+  private gpuTiming = false;
+  private gpuResolvePending = false;
 
   constructor(canvas: HTMLCanvasElement) {
     this.renderer = new THREE.WebGPURenderer({ canvas, antialias: true });
@@ -68,6 +71,73 @@ export class EngineRenderer {
    */
   getMaxAnisotropy(): number {
     return this.renderer.getMaxAnisotropy();
+  }
+
+  /**
+   * Turn GPU timestamp queries on/off; returns whether they're actually
+   * active. Returns false when the backend can't do it (no
+   * EXT_disjoint_timer_query_webgl2 on the WebGL fallback, no `timestamp-query`
+   * feature on the device).
+   *
+   * Why this is toggled rather than always on: timestamp queries cost a query
+   * pair plus a buffer copy/map per pass, every frame — real but not free, and
+   * a pool that is never resolved fills up and starts warning. So it's off
+   * until someone opens the profiler, and resolved every frame while it is.
+   *
+   * Why it's worth having at all: JS-side scope timing cannot tell "the GPU is
+   * the bottleneck" from "the main thread is". Those two have opposite fixes —
+   * cutting draw calls does nothing to a fill-rate-bound frame, and dropping
+   * resolution does nothing to a script-bound one — and without a GPU number
+   * you are guessing which one you have.
+   */
+  setGpuTiming(on: boolean): boolean {
+    // Three fixes backend.trackTimestamp at init() (WebGPU ANDs it with device
+    // feature support), but the device is always requested WITH every feature
+    // the adapter offers, so flipping the flag afterwards is safe and lets the
+    // toggle work without a page reload.
+    const backend = this.renderer.backend as unknown as {
+      trackTimestamp?: boolean;
+      disjoint?: unknown;
+      isWebGPUBackend?: boolean;
+      hasFeature?: (name: string) => boolean;
+    };
+    if (on) {
+      const supported = backend.isWebGPUBackend
+        ? (backend.hasFeature?.("timestamp-query") ?? false)
+        : Boolean(backend.disjoint);
+      if (!supported) {
+        this.gpuTiming = false;
+        return false;
+      }
+    }
+    backend.trackTimestamp = on;
+    this.gpuTiming = on;
+    return on;
+  }
+
+  get gpuTimingActive(): boolean {
+    return this.gpuTiming;
+  }
+
+  /**
+   * Last resolved GPU frame time in ms, or null while timing is off/unresolved.
+   * Kicks off the next resolve without blocking: timestamps land a frame or
+   * two late by nature, and awaiting them inside the frame loop would trade
+   * the thing being measured for the measurement.
+   */
+  gpuFrameMs(): number | null {
+    if (!this.gpuTiming) return null;
+    if (!this.gpuResolvePending) {
+      this.gpuResolvePending = true;
+      void this.renderer
+        .resolveTimestampsAsync(THREE.TimestampQuery.RENDER)
+        .catch(() => undefined)
+        .finally(() => {
+          this.gpuResolvePending = false;
+        });
+    }
+    const timestamp = this.renderer.info.render.timestamp;
+    return typeof timestamp === "number" && timestamp > 0 ? timestamp : null;
   }
 
   /** Enable/retune bloom (null disables). Live retunes update uniforms in place. */

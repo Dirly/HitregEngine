@@ -36,8 +36,18 @@ import {
 import { GLTFLoader, type GLTF } from "three/addons/loaders/GLTFLoader.js";
 import { clone as skeletonClone } from "three/addons/utils/SkeletonUtils.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
-import { SimplifyModifier } from "three/addons/modifiers/SimplifyModifier.js";
-import { heightmapMesh, type HeightmapParams, type SceneDoc } from "@hitreg/core";
+import { heightmapMesh, type HeightmapParams, type PolyMeshSource, type SceneDoc } from "@hitreg/core";
+import { simplifierReady, simplifyGeometry } from "./mesh-simplify.js";
+import {
+  impostorGeometry,
+  impostorInstanceData,
+  impostorMaterial,
+  type ImpostorAtlas,
+  type ImpostorInstanceData,
+} from "./impostor.js";
+import { clusterDagReady, type ClusterDag } from "./cluster-dag.js";
+import { ClusteredMesh, clusterDagFromGeometry } from "./clustered-mesh.js";
+import { polyMeshGeometry } from "./poly-mesh-geometry.js";
 import type { ParticlesData } from "./particles.js";
 import type { BillboardData } from "./billboards.js";
 import type { GrassData } from "./grass.js";
@@ -105,17 +115,24 @@ export interface BuildOptions {
    * registers it with a FoliageLodSystem to drive near/far distance LOD. */
   onInstancedBatch?(batch: InstancedPropBatch): void;
   /**
-   * Render a real front-view snapshot of `object` (a throwaway clone — safe to
-   * reparent/mutate/dispose) at roughly `aspect`'s proportions, with a
-   * transparent background, for use as a billboard proxy texture. The app
-   * owns the live renderer this needs (the same render-to-texture technique
-   * as the prefab/model thumbnail previews); returns null if unavailable, in
-   * which case the far tier falls back to the model's own material/color.
+   * Bake an octahedral impostor atlas of `object` (a throwaway clone — safe
+   * to reparent/mutate/dispose) whose model-space bounds are `bounds`: the
+   * model from a grid of directions over the upper hemisphere, as albedo +
+   * model-space normals (see impostor.ts). The app owns the live renderer
+   * this needs (the same render-to-texture technique as the prefab/model
+   * thumbnail previews); returns null if unavailable, in which case the far
+   * tier falls back to primitive proxies (cross-billboard / box) using the
+   * model's own material/color.
    */
-  bakeBillboardTexture?(
-    object: THREE.Object3D,
-    aspect: { width: number; height: number },
-  ): THREE.Texture | null;
+  bakeImpostor?(object: THREE.Object3D, bounds: THREE.Box3): ImpostorAtlas | null;
+  /**
+   * Fired for every mesh a `renderMode: "clustered"` asset entity turned
+   * into a `ClusteredMesh` (cluster-DAG continuous LOD, clustered-mesh.ts).
+   * The app registers it with its `ClusterLodSystem`, which re-selects the
+   * cut each frame; an unregistered ClusteredMesh still renders, at full
+   * detail. Meshes dropped from the scene are pruned by the system itself.
+   */
+  onClusteredMesh?(entityId: string, mesh: ClusteredMesh): void;
 }
 
 export interface SplatLayerData {
@@ -209,11 +226,12 @@ interface MeshData {
         bevel?: { size: number; segments: number };
       }
     | ({ kind: "heightmap" } & HeightmapParams)
-    | ({ kind: "path" } & PathMeshSource);
+    | ({ kind: "path" } & PathMeshSource)
+    | PolyMeshSource;
   material?: string;
   castShadow: boolean;
   receiveShadow: boolean;
-  renderMode?: "auto" | "instanced";
+  renderMode?: "auto" | "instanced" | "clustered";
   lod?: boolean;
 }
 
@@ -905,6 +923,30 @@ function populateEntityGroup(
       group.add(mesh);
     }
 
+    if (meshData && meshData.source.kind === "poly") {
+      const { geometry, compiled } = polyMeshGeometry(meshData.source);
+      // one material per slot; slot 0 (or an empty slot) is the component's own
+      // material. Face tints need vertexColors on, which a shared cached
+      // material can't carry — clone per entity only when a tint exists.
+      const slots = Math.max(1, ...compiled.groups.map((g) => g.materialIndex + 1));
+      const materials: THREE.Material[] = [];
+      for (let slot = 0; slot < slots; slot++) {
+        const id = meshData.source.materials?.[slot] || meshData.material;
+        let material = materialForId(id, options, materialCache);
+        if (compiled.colors) {
+          material = material.clone();
+          material.vertexColors = true;
+        }
+        materials.push(material);
+      }
+      const mesh = new THREE.Mesh(geometry, materials.length === 1 ? materials[0]! : materials);
+      mesh.castShadow = meshData.castShadow;
+      mesh.receiveShadow = meshData.receiveShadow;
+      mesh.userData["entityId"] = id;
+      mesh.userData["polyMesh"] = true;
+      group.add(mesh);
+    }
+
     if (meshData && meshData.source.kind === "path") {
       const mesh = new THREE.Mesh(
         pathGeometry(meshData.source),
@@ -970,12 +1012,15 @@ function populateEntityGroup(
       if (list) list.push(entry);
       else ctx.instancedPending.set(assetId, [entry]);
     } else if (meshData && meshData.source.kind === "asset") {
-      const url = options.resolveModel?.(meshData.source.assetId);
+      const assetId = meshData.source.assetId;
+      const url = options.resolveModel?.(assetId);
       const nodeName = meshData.source.node;
+      const clustered = meshData.renderMode === "clustered";
       if (url) {
         // async: the model pops in when loaded; group placement is already correct
-        loadGltf(url).then(
-          (gltf) => {
+        // (a clustered mesh also waits for the clusterizer's WASM, once per session)
+        Promise.all([loadGltf(url), clustered ? clusterDagReady() : undefined]).then(
+          ([gltf]) => {
             // the entity's visuals were rebuilt while we loaded — stand down
             if (group.userData["visualsEpoch"] !== epoch) return;
             let source: THREE.Object3D = gltf.scene;
@@ -1006,6 +1051,7 @@ function populateEntityGroup(
               }
               node.userData["entityId"] = id;
             });
+            if (clustered) clusterizeModel(instance, assetId, nodeName, id, options);
             group.add(instance);
             options.onModelLoaded?.(id, instance, gltf.animations ?? []);
           },
@@ -1157,6 +1203,59 @@ function populateEntityGroup(
   return createdCamera;
 }
 
+// Cluster DAGs are a one-time preprocess per unique (asset, node, mesh) —
+// ~90 ms per 16k triangles on the main thread — so they're cached with the
+// same stable string key discipline as the mid-tier decimation: a chunk-
+// streamed world that places the same hero model in several cells builds
+// its DAG once. `null` records "not worth clustering" so it isn't retried.
+const clusterDagCache = new Map<string, ClusterDag | null>();
+
+/**
+ * Replace every eligible mesh under `root` (a fresh clone of a loaded model)
+ * with a `ClusteredMesh` driving the same material through the model's
+ * cluster DAG. Skinned/morphing meshes are left alone — the DAG indexes fixed
+ * vertex positions, and those move theirs on the GPU.
+ */
+function clusterizeModel(
+  root: THREE.Object3D,
+  assetId: string,
+  node: string | undefined,
+  entityId: string,
+  options: BuildOptions,
+): void {
+  const meshes: THREE.Mesh[] = [];
+  root.traverse((child) => {
+    const mesh = child as THREE.Mesh;
+    if (!mesh.isMesh || (mesh as THREE.SkinnedMesh).isSkinnedMesh) return;
+    if (mesh.geometry.morphAttributes && Object.keys(mesh.geometry.morphAttributes).length > 0) return;
+    meshes.push(mesh);
+  });
+  meshes.forEach((mesh, ordinal) => {
+    const key = `${assetId}#${node ?? ""}#cluster#${ordinal}`;
+    let dag = clusterDagCache.get(key);
+    if (dag === undefined) {
+      dag = clusterDagFromGeometry(mesh.geometry);
+      clusterDagCache.set(key, dag);
+    }
+    if (!dag) return;
+    const clustered = new ClusteredMesh(mesh.geometry, mesh.material, dag);
+    clustered.name = mesh.name;
+    clustered.position.copy(mesh.position);
+    clustered.quaternion.copy(mesh.quaternion);
+    clustered.scale.copy(mesh.scale);
+    clustered.castShadow = mesh.castShadow;
+    clustered.receiveShadow = mesh.receiveShadow;
+    clustered.userData["entityId"] = entityId;
+    for (const child of [...mesh.children]) clustered.add(child);
+    const parent = mesh.parent;
+    if (parent) {
+      parent.add(clustered);
+      parent.remove(mesh);
+    }
+    options.onClusteredMesh?.(entityId, clustered);
+  });
+}
+
 /**
  * Turn every `renderMode: "instanced"` asset request collected this build
  * into real `THREE.InstancedMesh`es — one per (assetId, node, submesh)
@@ -1176,8 +1275,11 @@ function flushInstancedPending(pending: Map<string, PendingInstance[]>, options:
       console.warn(`[render] no URL for instanced mesh asset "${assetId}"`);
       continue;
     }
-    loadGltf(url).then(
-      (gltf) => {
+    // the simplifier's WASM is awaited here (not at first use) so the mid tier
+    // is built synchronously alongside the near/far ones — no batch ever gets
+    // registered without its mid tier and then patched later
+    Promise.all([loadGltf(url), simplifierReady()]).then(
+      ([gltf]) => {
         const byNode = new Map<string | undefined, PendingInstance[]>();
         for (const entry of entries) {
           const bucket = byNode.get(entry.node);
@@ -1198,28 +1300,37 @@ const sourceInverseScratch = new THREE.Matrix4();
 // cheap enough that decimating it isn't worth the one-time simplification
 // pass (rocks, mushrooms, small clutter) — those stay a plain near/far swap.
 const MID_TIER_MIN_VERTS = 1500;
-// Keep ~35% of the original vertices for the mid tier — enough to still read
+// Keep ~35% of the original triangles for the mid tier — enough to still read
 // as a real 3D tree at the range it's used (between the near and far
 // thresholds), while cutting the per-instance vertex-shader cost roughly 3x.
+// WHERE that range starts is no longer a constant: the simplifier reports
+// the geometric error of what it produced, and FoliageLodSystem turns that
+// into the distance at which the error is sub-pixel (see `midError`).
 const MID_TIER_KEEP_RATIO = 0.35;
 
-let simplifyModifier: SimplifyModifier | undefined;
-// SimplifyModifier's reduction pass is a genuine one-time cost (tens to
-// hundreds of ms per unique model, EVEN WHEN IT FAILS — the exception comes
-// from partway through mergeVertices, not an early bail-out) — cache by a
-// stable (assetId, node, submesh index) key, not the source geometry OBJECT.
-// A chunk-streamed world flushes this same (assetId, node) group once per
-// CHUNK CELL that references it (every cell independently loads its own glTF
-// instances), so an object-identity cache silently stops deduping the moment
-// those calls don't happen to observe the exact same geometry instance —
-// turning one one-time cost into one-per-chunk, which reads as "the editor
-// hangs" once enough cells are resident at once. The string key has no such
-// dependency on object identity surviving across separate build calls.
-const midTierGeometryCache = new Map<string, THREE.BufferGeometry | null>();
-// bakeBillboardTexture is a real GPU render-to-texture call — cache by the
-// same (assetId, node) key so a chunk-streamed world's far/billboard tier
-// only ever bakes each unique model once, not once per chunk cell.
-const billboardTextureCache = new Map<string, THREE.Texture | null>();
+// Decimation is cheap now (meshoptimizer WASM — single-digit ms per model,
+// see mesh-simplify.ts) but still cached by a stable (assetId, node, submesh
+// index) key, not the source geometry OBJECT: a chunk-streamed world flushes
+// this same (assetId, node) group once per CHUNK CELL that references it
+// (every cell independently loads its own glTF instances), so an
+// object-identity cache silently stops deduping the moment those calls don't
+// happen to observe the exact same geometry instance — and the cached
+// geometry is SHARED across every chunk's mid-tier InstancedMesh
+// (userData.sharedGeometry), so identity here is what keeps one GPU buffer
+// per unique submesh instead of one per cell.
+interface MidTier {
+  geometry: THREE.BufferGeometry;
+  /** Geometric deviation from the near-tier geometry, in submesh-local units. */
+  error: number;
+}
+const midTierGeometryCache = new Map<string, MidTier | null>();
+// bakeImpostor is a real GPU render-to-texture pass (72 small renders per
+// model) — cache by the same (assetId, node) key so a chunk-streamed world's
+// far tier only ever bakes each unique model once, not once per chunk cell.
+// The impostor material is cached alongside for the usual reason: one
+// compiled pipeline per unique model, never one per chunk.
+const impostorCache = new Map<string, ImpostorAtlas | null>();
+const impostorMaterialCache = new Map<string, THREE.Material>();
 // near/mid-tier instanced materials, keyed like midTierGeometryCache — CPU
 // profiling (a real ~40-53% of frame-time spikes during sustained flight)
 // found instanceGltfInto's per-submesh `sub.material.clone()` was creating a
@@ -1249,63 +1360,27 @@ export function cachedInstancedMaterial(
 }
 
 /**
- * glTF loaders commonly pack multiple attributes (position/normal/uv) into
- * one shared `InterleavedBuffer` for efficiency — but `mergeVertices`
- * (called internally by SimplifyModifier's edge-collapse pass) throws when
- * it tries to write into an `InterleavedBufferAttribute` on this project's
- * actual tree models ("Cannot set properties of undefined (setting 'NaN')"
- * from `InterleavedBufferAttribute.setX`). De-interleaving into plain,
- * dedicated `BufferAttribute`s first — copied out via `getComponent`, which
- * both attribute types support — sidesteps that failure mode entirely.
- */
-function deinterleaveGeometry(geometry: THREE.BufferGeometry): THREE.BufferGeometry {
-  const out = geometry.index ? geometry.toNonIndexed() : geometry.clone();
-  for (const name of Object.keys(out.attributes)) {
-    const attr = out.attributes[name]!;
-    if (!(attr as THREE.InterleavedBufferAttribute).isInterleavedBufferAttribute) continue;
-    const array = new Float32Array(attr.count * attr.itemSize);
-    for (let i = 0; i < attr.count; i++) {
-      for (let c = 0; c < attr.itemSize; c++) array[i * attr.itemSize + c] = attr.getComponent(i, c);
-    }
-    out.setAttribute(name, new THREE.BufferAttribute(array, attr.itemSize));
-  }
-  return out;
-}
-
-/**
  * Decimated stand-in for a submesh's near-tier geometry, used at the "mid"
  * LOD distance — a genuinely lower triangle count instead of just relying on
  * mipmapped textures (which only cut sampling cost, not the per-instance
  * vertex-shader cost that dominates at high instance counts). Returns null
- * for geometry too small to bother with, OR when simplification isn't
- * possible for this geometry (see below) — never throws.
- *
- * SimplifyModifier's edge-collapse algorithm is known to fail on some
- * real-world topologies (confirmed: it throws on this project's actual tree
- * models, from mergeVertices choking on an interleaved attribute — see
- * deinterleaveGeometry) — it is NOT safe to assume it always succeeds even
- * after that fix. A throw here must not take down the far/billboard tier
- * construction that runs after this, so failure degrades to "no mid tier
- * for this submesh" instead of propagating.
+ * for geometry too small to bother with, or that meshoptimizer couldn't
+ * meaningfully reduce — never throws (interleaved glTF attributes, the thing
+ * that used to crash three's SimplifyModifier here, are handled inside
+ * simplifyGeometry). Requires `simplifierReady()` to have resolved, which
+ * flushInstancedPending awaits alongside the glTF load.
  */
-function buildMidTierGeometry(cacheKey: string, geometry: THREE.BufferGeometry): THREE.BufferGeometry | null {
+function buildMidTier(cacheKey: string, geometry: THREE.BufferGeometry): MidTier | null {
   const cached = midTierGeometryCache.get(cacheKey);
   if (cached !== undefined) return cached;
   const vertexCount = geometry.attributes["position"]?.count ?? 0;
-  if (vertexCount < MID_TIER_MIN_VERTS) {
-    midTierGeometryCache.set(cacheKey, null);
-    return null;
+  let tier: MidTier | null = null;
+  if (vertexCount >= MID_TIER_MIN_VERTS) {
+    const simplified = simplifyGeometry(geometry, { targetRatio: MID_TIER_KEEP_RATIO });
+    if (simplified) tier = { geometry: simplified.geometry, error: simplified.error };
   }
-  simplifyModifier ??= new SimplifyModifier();
-  const removeCount = Math.floor(vertexCount * (1 - MID_TIER_KEEP_RATIO));
-  let simplified: THREE.BufferGeometry | null = null;
-  try {
-    simplified = simplifyModifier.modify(deinterleaveGeometry(geometry), removeCount);
-  } catch (error) {
-    console.warn(`[render] mesh simplification failed, skipping the mid LOD tier for this prop:`, error);
-  }
-  midTierGeometryCache.set(cacheKey, simplified);
-  return simplified;
+  midTierGeometryCache.set(cacheKey, tier);
+  return tier;
 }
 
 /**
@@ -1323,9 +1398,9 @@ function buildMidTierGeometry(cacheKey: string, geometry: THREE.BufferGeometry):
  * gives the tall case a soft round alpha mask instead of the quads' hard
  * rectangular edges.
  */
-function buildLodProxyGeometry(
-  submeshes: Array<{ geometry: THREE.BufferGeometry; localMatrix: THREE.Matrix4 }>,
-): { geometry: THREE.BufferGeometry; isTall: boolean; width?: number; height?: number } {
+/** Model-space bounds of a whole model: every submesh's box through its own
+ * local transform. */
+function submeshBounds(submeshes: Array<{ geometry: THREE.BufferGeometry; localMatrix: THREE.Matrix4 }>): THREE.Box3 {
   const bbox = new THREE.Box3();
   const scratchBox = new THREE.Box3();
   for (const sub of submeshes) {
@@ -1333,6 +1408,13 @@ function buildLodProxyGeometry(
     scratchBox.copy(sub.geometry.boundingBox!).applyMatrix4(sub.localMatrix);
     bbox.union(scratchBox);
   }
+  return bbox;
+}
+
+function buildLodProxyGeometry(
+  submeshes: Array<{ geometry: THREE.BufferGeometry; localMatrix: THREE.Matrix4 }>,
+): { geometry: THREE.BufferGeometry; isTall: boolean; width?: number; height?: number } {
+  const bbox = submeshBounds(submeshes);
   const size = new THREE.Vector3();
   const center = new THREE.Vector3();
   bbox.getSize(size);
@@ -1382,42 +1464,12 @@ function materialLook(material: THREE.Material | THREE.Material[]): MaterialLook
  * alpha mask instead of the quads' hard rectangular silhouette, so a field of
  * them at range reads as foliage clumps rather than a grid of visible cards.
  *
- * When a real baked snapshot of the model is available (`bakedTexture` — a
- * render-to-texture front view, see `bakeBillboardTexture` in BuildOptions),
- * that wins outright: it already has a correct, natural silhouette from its
- * own alpha channel, so the round mask (meant to soften an arbitrary flat
- * texture sample) would only clip real detail near the card edges. Absent a
- * bake, this falls back to the model's own material texture/color.
+ * This is the FALLBACK far tier, used only when no impostor atlas could be
+ * baked (headless builds, or an app that opted out — see `bakeImpostor` in
+ * BuildOptions); with a bake, the far tier is an octahedral impostor quad
+ * (impostor.ts) and none of this runs.
  */
-function buildFarProxyMaterial(
-  isTall: boolean,
-  look: MaterialLook,
-  bakedTexture: THREE.Texture | null,
-): THREE.MeshLambertNodeMaterial {
-  if (bakedTexture) {
-    // render-target textures come out V-flipped relative to a normal loaded
-    // image (the same top-left-vs-bottom-up row-order gotcha the prefab
-    // thumbnail readback has to correct for) — flip the sample here rather
-    // than fight the renderer's own convention.
-    const flippedUv = vec2(uv().x, sub(float(1), uv().y));
-    const sampled = tslTexture(bakedTexture, flippedUv);
-    const material = new THREE.MeshLambertNodeMaterial({
-      colorNode: sampled,
-      transparent: true,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-    });
-    material.opacityNode = sampled.a;
-    // fake "mostly up" normal — a flat vertical card's REAL normal only ever
-    // faces one fixed horizontal direction, so whichever of the cross's two
-    // cards happens to face away from the sun goes to near-zero diffuse and
-    // reads as a near-black silhouette, at any camera angle that catches it.
-    // A synthetic up-facing normal (same trick as grass) lights both cards
-    // consistently from the sun's elevation instead of that per-card flicker,
-    // matching the ambient/diffuse level of everything else on screen.
-    if (isTall) material.normalNode = vec3(0, 1, 0);
-    return material;
-  }
+function buildFarProxyMaterial(isTall: boolean, look: MaterialLook): THREE.MeshLambertNodeMaterial {
   const base = look.map
     ? { colorNode: tslTexture(look.map, uv()) }
     : { color: look.color };
@@ -1428,7 +1480,12 @@ function buildFarProxyMaterial(
     depthWrite: false,
     side: THREE.DoubleSide,
   });
-  material.normalNode = vec3(0, 1, 0); // see the bakedTexture branch above
+  // fake "mostly up" normal — a flat vertical card's REAL normal only ever
+  // faces one fixed horizontal direction, so whichever of the cross's two
+  // cards happens to face away from the sun goes to near-zero diffuse and
+  // reads as a near-black silhouette. A synthetic up-facing normal (same
+  // trick as grass) lights both cards consistently from the sun's elevation.
+  material.normalNode = vec3(0, 1, 0);
   const centered = sub(uv(), vec2(0.5, 0.5));
   const dist = length(centered);
   const roundMask = sub(float(1), smoothstep(float(0.3), float(0.5), dist));
@@ -1560,22 +1617,20 @@ function instanceGltfInto(
   // rather than being decimated pointlessly. Only built at all when at least
   // one submesh actually qualifies, so light props (rocks, mushrooms) keep
   // the exact 2-tier near/far behavior they had before.
-  const midGeometries = submeshes.map((sub, index) =>
-    buildMidTierGeometry(`${assetId}#${node ?? ""}#${index}`, sub.geometry),
-  );
-  const midMeshes: THREE.InstancedMesh[] | undefined = midGeometries.some((g) => g !== null)
+  const midTiers = submeshes.map((sub, index) => buildMidTier(`${assetId}#${node ?? ""}#${index}`, sub.geometry));
+  const midMeshes: THREE.InstancedMesh[] | undefined = midTiers.some((t) => t !== null)
     ? submeshes.map((sub, index) => {
         // when a decimated geometry exists, it came from midTierGeometryCache
         // — shared across every chunk that ever builds this (assetId, node,
         // submesh), so it must never be disposed by any ONE chunk's unload.
-        const cachedGeometry = midGeometries[index];
-        const geometry = cachedGeometry ?? sub.geometry.clone();
+        const cachedTier = midTiers[index];
+        const geometry = cachedTier?.geometry ?? sub.geometry.clone();
         const instanced = new THREE.InstancedMesh(
           geometry,
           cachedInstancedMaterial(`${assetId}#${node ?? ""}#${index}`, sub.material),
           entries.length,
         );
-        if (cachedGeometry) instanced.userData["sharedGeometry"] = true;
+        if (cachedTier) instanced.userData["sharedGeometry"] = true;
         // mid tier is already a distance-culled compromise — a decimated
         // shadow caster at this range reads as roughly the same dark blob a
         // real one would, for the cost of a whole extra shadow-pass draw per
@@ -1594,33 +1649,51 @@ function instanceGltfInto(
       })
     : undefined;
 
-  // far tier: one cheap proxy standing in for the whole model. Its look comes
-  // from the LARGEST submesh by vertex count, not just the first one — a
-  // tree's bark/trunk material is typically submesh 0 but a thin sliver next
-  // to the leaf canopy, which is what actually reads as "this is a tree".
-  const { geometry: farGeometry, isTall, width, height } = buildLodProxyGeometry(submeshes);
-  const dominantSubmesh = submeshes.reduce((a, b) =>
-    b.geometry.attributes["position"]!.count > a.geometry.attributes["position"]!.count ? b : a,
-  );
-  // a real snapshot of the model (see bakeBillboardTexture) beats any texture
-  // guess — pass a throwaway clone, never the shared cached `source` itself.
-  // This is an actual GPU render-to-texture call, not a CPU-cheap lookup —
-  // cache it by (assetId, node) the same way buildMidTierGeometry caches its
-  // decimation, and for the same reason: a chunk-streamed world flushes this
-  // same (assetId, node) group once per CELL that references it, so without
+  // far tier: one cheap proxy standing in for the whole model. Preferred: an
+  // octahedral impostor — a single camera-facing quad sampling an atlas of
+  // the model baked from 36 directions over the upper hemisphere (see
+  // impostor.ts), so a tree still looks like THAT tree from the side, from a
+  // helicopter, and everywhere between. The bake is a real GPU render pass,
+  // so it's cached by (assetId, node) the same way buildMidTier caches its
+  // decimation and for the same reason: a chunk-streamed world flushes this
+  // same (assetId, node) group once per CELL that references it — without
   // caching, splitting one world into N chunks turns one bake into N bakes.
-  const billboardCacheKey = `${assetId}#${node ?? ""}`;
-  let bakedTexture: THREE.Texture | null = null;
-  if (isTall && width && height) {
-    if (billboardTextureCache.has(billboardCacheKey)) {
-      bakedTexture = billboardTextureCache.get(billboardCacheKey)!;
-    } else {
-      bakedTexture = options.bakeBillboardTexture?.(source.clone(true), { width, height }) ?? null;
-      billboardTextureCache.set(billboardCacheKey, bakedTexture);
-    }
+  // Without a baker (headless build, or the app opted out) the primitive
+  // proxies stand in: a cross-billboard for tall props, a box for squat ones.
+  const bounds = submeshBounds(submeshes);
+  const impostorCacheKey = `${assetId}#${node ?? ""}`;
+  let atlas: ImpostorAtlas | null;
+  if (impostorCache.has(impostorCacheKey)) {
+    atlas = impostorCache.get(impostorCacheKey)!;
+  } else {
+    // a throwaway clone, never the shared cached `source` itself
+    atlas = options.bakeImpostor?.(source.clone(true), bounds) ?? null;
+    impostorCache.set(impostorCacheKey, atlas);
   }
-  const farMaterial = buildFarProxyMaterial(isTall, materialLook(dominantSubmesh.material), bakedTexture);
-  const far = new THREE.InstancedMesh(farGeometry, farMaterial, entries.length);
+  let far: THREE.InstancedMesh;
+  let impostor: ImpostorInstanceData | undefined;
+  if (atlas) {
+    let material = impostorMaterialCache.get(impostorCacheKey);
+    if (!material) {
+      material = impostorMaterial(atlas, bounds);
+      impostorMaterialCache.set(impostorCacheKey, material);
+    }
+    far = new THREE.InstancedMesh(impostorGeometry(bounds, entries.length), material, entries.length);
+    impostor = impostorInstanceData(matrices);
+  } else {
+    const { geometry: farGeometry, isTall } = buildLodProxyGeometry(submeshes);
+    // the fallback's look comes from the LARGEST submesh by vertex count, not
+    // the first — a tree's bark is typically submesh 0 but a thin sliver next
+    // to the leaf canopy, which is what actually reads as "this is a tree"
+    const dominantSubmesh = submeshes.reduce((a, b) =>
+      b.geometry.attributes["position"]!.count > a.geometry.attributes["position"]!.count ? b : a,
+    );
+    far = new THREE.InstancedMesh(
+      farGeometry,
+      buildFarProxyMaterial(isTall, materialLook(dominantSubmesh.material)),
+      entries.length,
+    );
+  }
   far.castShadow = false; // a rough blob casting a shadow reads worse than no shadow
   far.receiveShadow = first.receiveShadow;
   for (let i = 0; i < entries.length; i++) far.setMatrixAt(i, matrices[i]!);
@@ -1628,7 +1701,24 @@ function instanceGltfInto(
   far.computeBoundingSphere();
   root.add(far);
 
-  const batch: InstancedPropBatch = { near: nearMeshes, mid: midMeshes, far, positions, matrices };
+  // the batch's mid-tier error is its worst submesh's, in model units (each
+  // submesh's own localMatrix scale folded in; a submesh that reuses its near
+  // geometry contributes nothing) — FoliageLodSystem projects it to pixels
+  const midError = midMeshes
+    ? submeshes.reduce((worst, sub, index) => {
+        const tier = midTiers[index];
+        return tier ? Math.max(worst, tier.error * sub.localMatrix.getMaxScaleOnAxis()) : worst;
+      }, 0)
+    : undefined;
+  const batch: InstancedPropBatch = {
+    near: nearMeshes,
+    mid: midMeshes,
+    far,
+    positions,
+    matrices,
+    ...(midError !== undefined ? { midError } : {}),
+    ...(impostor ? { impostor } : {}),
+  };
   for (const mesh of nearMeshes) mesh.userData["foliageLodBatch"] = batch;
   if (midMeshes) for (const mesh of midMeshes) mesh.userData["foliageLodBatch"] = batch;
   far.userData["foliageLodBatch"] = batch;

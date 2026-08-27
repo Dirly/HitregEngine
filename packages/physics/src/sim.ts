@@ -1,8 +1,10 @@
 import RAPIER from "@dimforge/rapier3d-compat";
 import {
   heightmapMesh,
+  polyMeshCollision,
   worldTransforms,
   type HeightmapParams,
+  type PolyMeshSource,
   type Quat,
   type SceneDoc,
   type Vec3,
@@ -33,6 +35,7 @@ interface MeshComponentData {
     | ({ kind: "heightmap" } & Partial<HeightmapParams>)
     | { kind: "asset"; assetId: string; node?: string }
     | { kind: "primitive"; shape: string; size?: Vec3 }
+    | PolyMeshSource
     | { kind: string };
 }
 
@@ -352,6 +355,14 @@ export class PhysicsSim {
       return (
         this.cookShape(id, kind, scaleVertices(result.positions, scale), result.indices) ??
         boxFallback()
+      );
+    }
+
+    if (source?.kind === "poly") {
+      // editable meshes cook from the SAME faces the renderer triangulates
+      const geom = polyMeshCollision(source as PolyMeshSource);
+      return (
+        this.cookShape(id, kind, scaleVertices(geom.positions, scale), geom.indices) ?? boxFallback()
       );
     }
 

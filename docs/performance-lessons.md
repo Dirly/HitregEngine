@@ -35,7 +35,7 @@ module-level (or another scope that outlives any single `buildScene()`
 call), keyed by stable content identity (asset id, or
 `${assetId}#${node}#${submeshIndex}` for per-submesh instancing tiers — see
 `packages/render/src/scene-builder.ts`'s `instancedMaterialCache`,
-`sharedAssetMaterialCache`, `midTierGeometryCache`, `billboardTextureCache`).
+`sharedAssetMaterialCache`, `midTierGeometryCache`, `impostorCache`).
 Once a resource is shared across multiple loaded chunks like this, **the
 unload path must stop disposing it** — disposing a shared material/geometry
 when *one* consumer unloads breaks *every other* chunk/subscene still
@@ -143,6 +143,20 @@ de-interleave the geometry into plain `BufferAttribute`s before calling
 `.modify()` — copying each attribute out via `.getComponent()` sidesteps the
 crash rather than just catching it after the fact.
 
+**Postscript (2026-08):** `SimplifyModifier` is gone from the mid-tier path.
+`packages/render/src/mesh-simplify.ts` now wraps meshoptimizer's WASM
+simplifier instead — measured 0.3–12 ms per submesh on the nature pack and
+the 11k-tri soldier (vs. tens–hundreds of ms before), no topology crashes,
+and it reports the geometric **error** of its output, which
+`FoliageLodSystem` converts into a per-batch near→mid switch distance
+(screen-space error, not a fixed metre count). The attribute-aware quadric
+pass barely touches leaf-card canopies (76–100 % of triangles kept — every
+card edge is a border), so it falls back to `simplifySloppy` for those; the
+lesson above still applies to anything else that hands three.js addons
+interleaved glTF attributes. A worker and an on-disk bake cache were
+considered and rejected on those numbers — the module-level
+`midTierGeometryCache` already makes it once-per-unique-model.
+
 ## TSL instancing mutates `positionLocal` in place — read `positionGeometry` for the raw local vertex
 
 Three's WebGPU node-material instancing pass does
@@ -190,6 +204,60 @@ you're debugging via this endpoint (or `/__hitreg/spec`, which has the same
 single-shared-variable shape) and something looks impossible, check whether
 you're the only connected client before trusting the data.
 
+## The in-engine profiler: reach for it before the CDP profile
+
+`packages/core/src/profiler.ts` + the popup window (**Shift+P** in the app, or the
+toolbar's `profiler` button) answer the *engine-shaped* version of "why does
+it hitch" that a raw CPU profile answers badly. A CDP profile tells you which
+JS functions ran; it does not know what a frame is, so a 40ms stall every two
+seconds and a uniformly slow frame look similar in it. The engine profiler
+knows both, and the numbers it leads with are the ones that decide what to fix:
+
+- **Frame wall-clock p50/p95/p99, never a mean.** A mean is a machine for
+  hiding a hitch — the EMA HUD this replaced showed a calm 8ms while the game
+  visibly stuttered, because a spike every 120 frames barely moves an EMA.
+- **The JS / GPU / off-loop split.** These three have opposite fixes and are
+  routinely confused for each other. `off-loop` is wall-clock between frame
+  starts minus the JS the profiler could see — GC, shader compilation, async
+  chunk parsing landing in a promise continuation, a blocked GPU queue. **In
+  practice this is where the time goes**, and no scope timing can see it,
+  which is why the number is computed and displayed explicitly rather than
+  left as an unexplained gap. GPU time comes from real timestamp queries
+  (`EngineRenderer.setGpuTiming`), which is the only way to distinguish
+  fill-rate-bound from CPU-bound — see the `devicePixelRatio` note in
+  `main.ts`'s `onResize`, a fix that was found exactly this way.
+- **Self time per scope, not inclusive.** The leaf that burned the frame,
+  not the parent that contains it. Scripts are timed per script NAME
+  (`fixed/scripts/heli-chain-visual`), so "which behavior" is answerable with
+  200 NPCs running a handful of behaviors.
+- **Spike capture with markers.** Frames over the threshold are kept whole,
+  with the spans that overlapped them — `chunk.load`, `chunk.build`,
+  `hlod.supercell`, `scene.rebuild`, and `long-task` (PerformanceObserver).
+  A spike with `chunk.build` sitting under it on the timeline needs no
+  further analysis. Note the deliberate split of `chunk.load` (fetch, mostly
+  waiting, harmless) from `chunk.build` (synchronous expand + buildScene +
+  collider creation, the part that actually drops a frame) — conflating them
+  sends you optimizing network latency that was never the problem.
+
+It runs always-on, so the window opens with ~15 seconds of history already
+recorded: you look at the hitch that just happened rather than trying to
+reproduce it with the window open.
+
+**Snapshots** are the handoff. The window's **snapshot → AI** button writes
+`.hitreg/profiles/<timestamp>-<scene>.json` — a real file in the repo, so an
+agent reads it with no dev server running, and it survives the restart that
+debugging a perf problem usually involves. Each carries the human's `note`
+("choppy flying low over the north shore" — the context numbers can't
+supply), a plain-English `digest`, the condensed `report`, and the `full`
+ring. Snapshots ride the agent inbox alongside pins, so an agent long-polling
+`/__hitreg/agent-inbox` wakes within a second of the click, and are answered
+the same way (`{ file, resolved: true, reply }`) rather than deleted.
+
+Escalate to a CDP profile when the profiler says the cost is *inside* a scope
+you can't decompose further (three.js internals, Rapier's solver) — its job
+is to tell you which 200 lines to profile, not to replace function-level
+attribution.
+
 ## Methodology: profile before fixing, every time — reasoning got this session's own hypotheses wrong more than once
 
 Every confirmed root cause in this document was found via a real CPU profile
@@ -204,3 +272,28 @@ unrelated thumbnail-baking function. If a performance report is specific
 that specificity is a gift — it means the cause is findable, not that the
 engine is generically slow. Chase it with a profile spanning the exact
 reported condition before changing code.
+
+## The LOD toolbox as of 2026-08 (what exists, so you don't rebuild it)
+
+Three mechanisms, each with a headless test suite under `packages/render/test`:
+
+- **Instanced props** (`mesh.renderMode: "instanced"`, `FoliageLodSystem`):
+  near = real geometry, mid = meshoptimizer-decimated copy (`mesh-simplify.ts`,
+  switch distance derived per batch from the simplifier's reported error and
+  the live projection — `screenErrorPx`), far = a hemi-octahedral impostor
+  quad (`impostor.ts`; baked app-side by `impostor-bake.ts`, 6×6 views of
+  albedo + model-space normals, lit at runtime). Compacted instance buffers
+  per tier; per-slot impostor rotation/scale side-buffers.
+- **Clustered hero meshes** (`mesh.renderMode: "clustered"`, `cluster-dag.ts`
+  + `clustered-mesh.ts`, `ClusterLodSystem`): Nanite-style cluster DAG built
+  once per unique asset (~90 ms / 16k tris), crack-free by `LockBorder`
+  construction, selected per frame on the CPU by projected error with
+  per-cluster frustum culling, drawn as ONE index-buffer rewrite over the
+  original vertices. For statues/buildings/scans placed a few times — not
+  for thousands of instances (that's what the tiers above are for).
+- **HLOD supercells** (`hlod-proxy.ts`): distant static geometry merged per
+  cell/supercell — see the `factor` lesson above.
+
+Deliberately not built (WebGPU has no 64-bit atomics, and it would kill the
+WebGL fallback): GPU-driven cluster selection, a software rasteriser, a
+visibility buffer. Revisit if those platform gaps close.

@@ -42,9 +42,11 @@ const BRIDGE_ENDPOINTS = [
   { method: "POST", path: "/__hitreg/write-asset", purpose: "Write an asset file ({file, content}); live-syncs into the running app." },
   { method: "GET", path: "/__hitreg/pins?scene=<name>", purpose: "World-anchored notes for a scene: [{ id, point:[x,y,z], entityId, text, author, createdAt, resolved }]. A pin is a human (or agent) comment left AT a place — read them to find what someone flagged and where. Stored beside the scene (.hitreg/pins/), never inside it." },
   { method: "POST", path: "/__hitreg/pins", purpose: "Replace a scene's notes ({scene, pins}) — post the full array. Agents may add pins to answer or to flag something for the human; set resolved:true rather than deleting, so the exchange stays readable." },
-  { method: "GET", path: "/__hitreg/agent-inbox?scene=<name>&wait=<sec>", purpose: "Notes the human pressed \"send to AI\" on and that are not yet resolved — the requests actually addressed to you, each carrying the pinned entity's full component JSON so you can act without a second fetch. `wait` LONG-POLLS: the request is held open until a note arrives or the deadline passes (max 120s), so an idle agent wakes within ~0.5s of the click instead of polling on a timer. Answer by POSTing the scene's pins back with your `reply` and `resolved: true`." },
+  { method: "GET", path: "/__hitreg/agent-inbox?scene=<name>&wait=<sec>", purpose: "Notes the human pressed \"send to AI\" on and that are not yet resolved — the requests actually addressed to you, each carrying the pinned entity's full component JSON so you can act without a second fetch. `wait` LONG-POLLS: the request is held open until a note arrives or the deadline passes (max 120s), so an idle agent wakes within ~0.5s of the click instead of polling on a timer. Answer by POSTing the scene's pins back with your `reply` and `resolved: true`. Also returns `profiles: [...]` — frame-profiler snapshots the human sent, each with its `.hitreg/profiles/` file path, their note, and the plain-English verdict; answer those via POST /__hitreg/profile." },
   { method: "GET", path: "/__hitreg/player-data", purpose: "Read experience-scoped player-data records (dev backend)." },
   { method: "GET", path: "/__hitreg/net-debug", purpose: "Multiplayer signaling rooms + a ring buffer of relayed traffic." },
+  { method: "GET", path: "/__hitreg/profile", purpose: "The newest frame-profiler SNAPSHOT (press Shift+P in the app, then 'snapshot → AI'). Snapshots are files under .hitreg/profiles/ — you can also just read the file directly, which works with no dev server running. Each carries: `note` (what the human was doing — read this first), `digest` (the verdict in plain English: is it fast enough, and is the time going to JS, GPU, or off-loop), `report` (p50/p95/p99 wall-clock, hot scopes by SELF time, counters, recent spikes with the spans that overlapped them). ?full=1 adds the whole ring buffer; ?list=1 lists all snapshots; ?file=<name> picks one. `context.perf` carries the same live summary without a snapshot." },
+  { method: "POST", path: "/__hitreg/profile", purpose: "The profiler window saves a snapshot here. An agent ANSWERS one by POSTing { file, resolved: true, reply } — same convention as pins: resolve rather than delete, so the exchange stays readable and the snapshot stops waking agents." },
 ] as const;
 
 function hitregBridge(): Plugin {
@@ -60,6 +62,8 @@ function hitregBridge(): Plugin {
   const contextByClient = new Map<string, { data: Record<string, unknown>; lastSeen: number }>();
   const CONTEXT_STALE_MS = 5000; // ~5 missed 1s posts = treat the tab as gone
   let latestSpec: unknown = null;
+  /** Most recent frame-profiler capture ("send to agent" in the profiler window). */
+  let latestProfile: unknown = null;
 
   return {
     name: "hitreg-bridge",
@@ -294,10 +298,24 @@ function hitregBridge(): Plugin {
             >;
           };
 
+          // Profiler snapshots ride the SAME channel as pins, deliberately.
+          // "Here is a performance capture, look at it" is the same act as
+          // "here is a note about this doorway, look at it" — a human handing
+          // an agent a piece of work right now — and it would be perverse for
+          // one to wake a waiting agent within a second while the other sat
+          // in a file nobody was told about.
+          const payload = (
+            pins: Array<Record<string, unknown>>,
+            profiles: Array<Record<string, unknown>>,
+            extra: Record<string, unknown> = {},
+          ): string =>
+            JSON.stringify({ scene, pins: enrichPins(scene, pins), profiles, ...extra });
+
           const waiting = read();
+          let profiles = pendingProfiles();
           const waitMs = Math.min(Number(url.searchParams.get("wait") ?? 0) * 1000, MAX_WAIT_MS);
-          if (waiting.length > 0 || waitMs <= 0) {
-            res.end(JSON.stringify({ scene, pins: enrichPins(scene, waiting) }));
+          if (waiting.length > 0 || profiles.length > 0 || waitMs <= 0) {
+            res.end(payload(waiting, profiles));
             return;
           }
 
@@ -309,15 +327,16 @@ function hitregBridge(): Plugin {
             let now: Array<Record<string, unknown>> = [];
             try {
               now = read();
+              profiles = pendingProfiles();
             } catch {
               /* mid-write: the next tick will read a complete file */
             }
-            if (now.length > 0) {
-              res.end(JSON.stringify({ scene, pins: enrichPins(scene, now) }));
+            if (now.length > 0 || profiles.length > 0) {
+              res.end(payload(now, profiles));
               return;
             }
             if (Date.now() >= deadline) {
-              res.end(JSON.stringify({ scene, pins: [], timedOut: true }));
+              res.end(payload([], [], { timedOut: true }));
               return;
             }
             setTimeout(poll, INBOX_POLL_MS);
@@ -463,6 +482,185 @@ function hitregBridge(): Plugin {
         }
         res.statusCode = 405;
         res.end();
+      });
+
+      // Frame-profiler snapshots: .hitreg/profiles/<timestamp>-<scene>.json
+      //
+      // Modelled on pins, and for the same reason. A capture held only in
+      // server memory is a capture nobody can find: it dies with the dev
+      // server, it isn't in the working tree, and the human who pressed the
+      // button has no idea where it went. On disk it is a file an agent can
+      // just READ — no curl, no running server — and it survives the restart
+      // that debugging a performance problem usually involves.
+      //
+      // `.hitreg/` rather than `assets/`, exactly like pins: a profile is a
+      // conversation *about* the game, so it must never ship inside one.
+      const profilesRoot = path.resolve(server.config.root, ".hitreg", "profiles");
+      /** Newest-first snapshot files. */
+      const listProfiles = (): string[] => {
+        if (!fs.existsSync(profilesRoot)) return [];
+        return fs
+          .readdirSync(profilesRoot)
+          .filter((f) => f.endsWith(".json"))
+          .sort()
+          .reverse();
+      };
+      const readProfile = (file: string): Record<string, unknown> | null => {
+        try {
+          return JSON.parse(fs.readFileSync(path.join(profilesRoot, file), "utf8")) as Record<
+            string,
+            unknown
+          >;
+        } catch {
+          return null;
+        }
+      };
+      /** Snapshots the human sent and no agent has answered yet. */
+      const pendingProfiles = (): Array<Record<string, unknown>> =>
+        listProfiles()
+          .map((file) => ({ file, data: readProfile(file) }))
+          .filter((x) => x.data && x.data["resolved"] !== true)
+          .map(({ file, data }) => ({
+            file: `.hitreg/profiles/${file}`,
+            scene: data!["scene"],
+            note: data!["note"],
+            capturedAt: data!["capturedAt"],
+            playMode: data!["playMode"],
+            // the digest travels WITH the listing: an agent that only ever
+            // reads the inbox still gets the verdict, not just a filename
+            digest: data!["digest"],
+          }));
+      /** Keep the directory bounded; a capture is ~1MB with `full` attached. */
+      const KEEP_PROFILES = 20;
+      const pruneProfiles = (): void => {
+        for (const file of listProfiles().slice(KEEP_PROFILES)) {
+          try {
+            fs.unlinkSync(path.join(profilesRoot, file));
+          } catch {
+            /* best effort */
+          }
+        }
+      };
+
+      server.middlewares.use("/__hitreg/profile", (req, res) => {
+        try {
+          const url = new URL(req.url ?? "", "http://x");
+          res.setHeader("content-type", "application/json");
+          res.setHeader("cache-control", "no-store");
+
+          if (req.method === "GET") {
+            // ?list=1 -> just the index. ?file=<name> -> that one. Default:
+            // the newest, which is what "read the latest profile" means.
+            if (url.searchParams.get("list") === "1") {
+              res.end(
+                JSON.stringify({
+                  profiles: listProfiles().map((file) => {
+                    const data = readProfile(file);
+                    return {
+                      file: `.hitreg/profiles/${file}`,
+                      scene: data?.["scene"],
+                      note: data?.["note"],
+                      capturedAt: data?.["capturedAt"],
+                      resolved: data?.["resolved"] === true,
+                    };
+                  }),
+                }),
+              );
+              return;
+            }
+            const requested = url.searchParams.get("file");
+            const name = requested ? path.basename(requested) : listProfiles()[0];
+            const data = name ? readProfile(name) : null;
+            if (!data) {
+              res.end(
+                JSON.stringify({
+                  note:
+                    "No snapshot yet. In the app: press Shift+P to open the profiler, then press " +
+                    "'snapshot → AI'. Snapshots are written to .hitreg/profiles/.",
+                  profiles: [],
+                }),
+              );
+              return;
+            }
+            // `full` (the entire ring — every scope of every frame) is large
+            // and rarely what you want first; the digest + report answer the
+            // question on their own. ?full=1 opts in.
+            if (url.searchParams.get("full") === "1") {
+              res.end(JSON.stringify(data));
+              return;
+            }
+            const { full, ...rest } = data;
+            void full;
+            res.end(JSON.stringify({ ...rest, file: `.hitreg/profiles/${name}` }));
+            return;
+          }
+
+          if (req.method === "POST") {
+            let body = "";
+            req.on("data", (chunk: Buffer) => (body += chunk));
+            req.on("end", () => {
+              try {
+                const data = JSON.parse(body) as Record<string, unknown>;
+
+                // An agent answering a snapshot: { file, resolved, reply }.
+                // Same contract as pins — resolve rather than delete, so the
+                // exchange stays readable.
+                if (typeof data["file"] === "string" && data["report"] === undefined) {
+                  const name = path.basename(data["file"] as string);
+                  const existing = readProfile(name);
+                  if (!existing) throw new Error(`no such snapshot: ${name}`);
+                  const merged = {
+                    ...existing,
+                    resolved: data["resolved"] === true,
+                    ...(typeof data["reply"] === "string" ? { reply: data["reply"] } : {}),
+                  };
+                  fs.writeFileSync(
+                    path.join(profilesRoot, name),
+                    JSON.stringify(merged, null, 2) + "\n",
+                    "utf8",
+                  );
+                  res.end(JSON.stringify({ ok: true, file: `.hitreg/profiles/${name}` }));
+                  return;
+                }
+
+                // A new capture from the profiler window.
+                const scene = segment(String(data["scene"] ?? "scene"));
+                const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+                const name = `${stamp}-${scene}.json`;
+                fs.mkdirSync(profilesRoot, { recursive: true });
+                fs.writeFileSync(
+                  path.join(profilesRoot, name),
+                  JSON.stringify({ ...data, resolved: false }, null, 2) + "\n",
+                  "utf8",
+                );
+                pruneProfiles();
+                latestProfile = data;
+                const digest = data["digest"] as { headline?: string } | undefined;
+                const note = typeof data["note"] === "string" ? data["note"] : "";
+                // Printed loudly, because the dev-server log is where a human
+                // watching a terminal will look for confirmation.
+                console.log(
+                  `\n[profile] snapshot saved -> .hitreg/profiles/${name}` +
+                    (note ? `\n[profile]   note: ${note}` : "") +
+                    (digest?.headline ? `\n[profile]   ${digest.headline}` : "") +
+                    `\n[profile]   tell your agent: "read the latest profile snapshot"\n`,
+                );
+                res.end(
+                  JSON.stringify({ ok: true, file: `.hitreg/profiles/${name}` }),
+                );
+              } catch (error) {
+                res.statusCode = 400;
+                res.end(JSON.stringify({ ok: false, error: String(error) }));
+              }
+            });
+            return;
+          }
+          res.statusCode = 405;
+          res.end();
+        } catch (error) {
+          res.statusCode = 400;
+          res.end(JSON.stringify({ ok: false, error: String(error) }));
+        }
       });
 
       // the running app posts its live capability spec; AI tools GET it to learn

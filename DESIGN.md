@@ -61,6 +61,15 @@ saturated color belongs to the scene, not the chrome.
 - **Input/select** — `bg.surface`, 1px border, 3px radius, 11px mono.
 - **Button** — `bg.raised`, 1px border, quiet; no primary/filled buttons in
   the overlay (nothing screams).
+- **Segmented control** (toolbar) — related buttons share one 1px border /
+  4px radius pill; 24px tall; pressed = `accent.selection` fill + inset 1px
+  `accent.entity` ring + `aria-pressed`. Groups are separated by a hairline
+  divider. A tool's settings appear in an attached `bg.surface` well only
+  while that tool is active.
+- **Icons** — `packages/editor/src/overlay/icons.tsx`: 16px grid, 1.5px
+  stroke, `currentColor`, `aria-hidden`; the control's label or `title`
+  carries the name. Icon-only is fine for universal verbs (play, move,
+  undo); anything engine-specific (terrain, draw, mesh, path) keeps a label.
 - **Vector field** — N number inputs in a tight flex row (position/scale/quat).
 
 ## Motion

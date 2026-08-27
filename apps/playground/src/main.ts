@@ -11,7 +11,9 @@ import {
   EventRegistry,
   expandScene,
   FixedTimestepLoop,
+  digestProfile,
   newId,
+  Profiler,
   registerChunkComponents,
   PlayerDataService,
   registerCoreAssetTypes,
@@ -43,6 +45,7 @@ import {
   collectBones,
   EngineRenderer,
   FoliageLodSystem,
+  ClusterLodSystem,
   gltfLoadingCount,
   GrassSystem,
   LightBudgetSystem,
@@ -79,8 +82,10 @@ import {
   createManipulating,
   defaultEditorSettings,
   GrayboxTool,
+  MeshEditTool,
   TerrainTool,
   PathTool,
+  createMeshEditState,
   defaultTerrainBrush,
   mountEditor,
   observable,
@@ -99,12 +104,13 @@ import { NetPresence, type NetReplica } from "./net-presence.js";
 import { loadAssets } from "./asset-loader.js";
 import { saveAsset, clientLog } from "./dev-log.js";
 import { applyBodyState } from "./physics-sync.js";
-import { bakeBillboardTexture as bakeBillboardTextureImpl } from "./billboard-bake.js";
+import { bakeImpostorAtlas } from "./impostor-bake.js";
 import { renderThumbnails } from "./thumbnails.js";
 import { initProjectScripts } from "./project-scripts.js";
 import { installLiveSync } from "./live-sync.js";
 import { createPinStore } from "./pins.js";
 import { postContext, publishEngineSpec } from "./dev-bridge.js";
+import { openProfilerWindow } from "./profiler-window.js";
 
 CameraControls.install({ THREE });
 
@@ -114,6 +120,32 @@ async function main(): Promise<void> {
   const hud = document.getElementById("hud")!;
   const sceneLoadingEl = document.getElementById("scene-loading")!;
   const sceneLoadingTextEl = document.getElementById("scene-loading-text")!;
+
+  // Frame profiler: ALWAYS on, deliberately. Its per-scope cost is the same
+  // two performance.now() calls the hand-rolled EMA counters it replaced were
+  // already paying, and leaving it running means the profiler window opens
+  // with ~15 seconds of history ALREADY RECORDED. That is the difference
+  // between "reproduce the hitch again, now with the window open" and
+  // "the hitch just happened — open the window and look at it".
+  const profiler = new Profiler({ historyFrames: 900 });
+  profiler.enabled = true;
+
+  // Anything that blocks the main thread for >50ms, whatever it was — a GC
+  // pause, shader compilation, a promise continuation parsing a chunk, an
+  // extension. The profiler's own scopes only see inside the frame callback,
+  // so this is what puts a name and a duration on the "off-loop" gap they
+  // report but cannot explain. Not supported everywhere; failure is fine.
+  try {
+    new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        // startTime shares performance.now()'s origin, so the span lands on
+        // the timeline where the stall actually was, at its true width
+        profiler.recordSpan("long-task", entry.startTime, entry.duration, entry.name);
+      }
+    }).observe({ entryTypes: ["longtask"] });
+  } catch {
+    /* longtask unsupported (Safari/Firefox) — the gap number still stands */
+  }
 
   const registry = new ComponentRegistry();
   registerCoreComponents(registry);
@@ -133,6 +165,9 @@ async function main(): Promise<void> {
   // scene build AND both streamers, so every source registers into the same
   // system and gets updated from the same camera each frame
   const foliageLod = new FoliageLodSystem();
+  // cluster-DAG continuous LOD for `renderMode: "clustered"` hero meshes —
+  // re-selects each mesh's cut per frame; prunes meshes streamed out itself
+  const clusterLod = new ClusterLodSystem();
   // Forward-rendered point lights multiply fragment work. Share one
   // camera-relative budget across the main scene and both streamers.
   const lightBudget = new LightBudgetSystem(8);
@@ -148,7 +183,8 @@ async function main(): Promise<void> {
     resolveMaxAnisotropy: () => renderer.getMaxAnisotropy(),
     onInstancedBatch: (batch) => foliageLod.register(batch),
     onLight: (_entityId, light, importance) => lightBudget.register(light, importance),
-    bakeBillboardTexture: (object, aspect) => bakeBillboardTextureImpl(renderer, () => lastExpanded, object, aspect),
+    bakeImpostor: (object, bounds) => bakeImpostorAtlas(renderer, object, bounds),
+    onClusteredMesh: (_entityId, mesh) => clusterLod.register(mesh),
   }, {
     onLoaded: (doc, objects, simulated) => {
       for (const [id, object] of objects) built.objects.set(id, object);
@@ -176,6 +212,7 @@ async function main(): Promise<void> {
     onSimulationGained: (doc, objects) => scripts?.addEntities(doc, objects),
     onSimulationLost: (ids) => scripts?.removeEntities(ids),
   });
+  chunkManager.profiler = profiler; // chunk loads land as spans, see ChunkManager.profiler
   // additive scene modules: whole scene files placed as one-line `subscene`
   // entities, streamed by proximity (or resident with mode "always")
   const subsceneManager = new SubsceneManager(assets, registry, {
@@ -185,7 +222,8 @@ async function main(): Promise<void> {
     resolveMaxAnisotropy: () => renderer.getMaxAnisotropy(),
     onInstancedBatch: (batch) => foliageLod.register(batch),
     onLight: (_entityId, light, importance) => lightBudget.register(light, importance),
-    bakeBillboardTexture: (object, aspect) => bakeBillboardTextureImpl(renderer, () => lastExpanded, object, aspect),
+    bakeImpostor: (object, bounds) => bakeImpostorAtlas(renderer, object, bounds),
+    onClusteredMesh: (_entityId, mesh) => clusterLod.register(mesh),
   }, {
     onLoaded: (doc, objects) => {
       for (const [id, object] of objects) built.objects.set(id, object);
@@ -904,7 +942,8 @@ async function main(): Promise<void> {
       }),
     onGrass: (entityId, group, data) => grass.register(entityId, group, data),
     onInstancedBatch: (batch) => foliageLod.register(batch),
-    bakeBillboardTexture: (object, aspect) => bakeBillboardTextureImpl(renderer, () => lastExpanded, object, aspect),
+    bakeImpostor: (object, bounds) => bakeImpostorAtlas(renderer, object, bounds),
+    onClusteredMesh: (_entityId, mesh) => clusterLod.register(mesh),
     onModelLoaded: (entityId, root, clips) => {
       const entity = lastExpanded.entities[entityId];
       const animator = entity?.components["animator"] as AnimatorData | undefined;
@@ -1013,6 +1052,7 @@ async function main(): Promise<void> {
     }
     netPresence?.attach(built.scene); // remote-player avatars survive rebuilds
     viewport?.onSceneRebuilt();
+    meshEditTool?.onSceneRebuilt();
   }
 
   const renderer = new EngineRenderer(canvas);
@@ -1126,6 +1166,9 @@ async function main(): Promise<void> {
   const grayboxShape = observable<GrayboxShape>("box");
   const grayboxBevel = observable(0);
   const grayboxMaterial = observable(""); // "" = engine default; else a material GUID
+  const grayboxEditable = observable(true); // drawn shapes are editable poly meshes
+  // ProBuilder-style element editing (vertex/edge/face) of poly meshes
+  const meshEdit = createMeshEditState();
   const terrainActive = observable(false);
   const terrainBrush = observable<TerrainBrushSettings>({ ...defaultTerrainBrush });
   const pathActive = observable(false);
@@ -1161,6 +1204,7 @@ async function main(): Promise<void> {
     contextMenu,
     grayboxActive,
     pathActive,
+    meshEdit,
     hover,
     manipulating,
     assets,
@@ -1183,11 +1227,38 @@ async function main(): Promise<void> {
     shape: grayboxShape,
     bevel: grayboxBevel,
     material: grayboxMaterial,
+    editable: grayboxEditable,
     getScene: () => built.scene,
     onDraggingChanged: (dragging) => {
       gizmoDragging = dragging;
       controls.enabled = !dragging;
     },
+  });
+
+  const meshEditTool: MeshEditTool = new MeshEditTool({
+    canvas,
+    camera,
+    store,
+    selection,
+    multiSelection,
+    settings,
+    enabled: editorVisible,
+    gizmoMode,
+    state: meshEdit,
+    getScene: () => built.scene,
+    getObject: (id) => built.objects.get(id),
+    onDraggingChanged: (dragging) => {
+      gizmoDragging = dragging;
+      controls.enabled = !dragging;
+    },
+  });
+  // (rebuild() calls meshEditTool.onSceneRebuilt() once the scene exists)
+  // the draw tool and element editing are mutually exclusive modal tools
+  grayboxActive.subscribe(() => {
+    if (grayboxActive.get() && meshEdit.active.get()) meshEdit.active.set(false);
+  });
+  meshEdit.active.subscribe(() => {
+    if (meshEdit.active.get() && grayboxActive.get()) grayboxActive.set(false);
   });
 
   new PathTool({
@@ -1286,6 +1357,9 @@ async function main(): Promise<void> {
     grayboxShape,
     grayboxBevel,
     grayboxMaterial,
+    grayboxEditable,
+    meshEdit,
+    meshEditActions: meshEditTool,
     terrainActive,
     terrainBrush,
     pathActive,
@@ -1316,6 +1390,7 @@ async function main(): Promise<void> {
     onPinDelete: (id) => pinStore.remove(id),
     onFocusPoint: (point) => void controls.setTarget(point[0], point[1], point[2], true),
     saveAsset,
+    onProfiler: openProfiler,
     onFocusEntity: frameEntity,
     onUnpackModel: unpackModel,
     scenes: sceneList,
@@ -1607,6 +1682,23 @@ async function main(): Promise<void> {
     if (e.code === "KeyH" && editorVisible.get()) {
       settings.set({ ...settings.get(), showStats: !settings.get().showStats });
     }
+    // Shift+P: open the profiler window. Bare P belongs to the path tool
+    // (packages/editor/src/path-tool.ts), which ignores Shift for exactly
+    // this reason — the two must never both fire off one keystroke.
+    //
+    // Works IN PLAY MODE too, unlike the editor-only bindings above: a hitch
+    // you can only reproduce while actually flying is the case this exists
+    // for, and a trip back to the editor to look at it defeats the purpose.
+    // Safe there because P is not a movement key, so Shift+P stays
+    // unambiguous even with Shift held down as the fly-cam boost.
+    if (e.code === "KeyP" && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const target = e.target as HTMLElement | null;
+      const typing =
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target?.isContentEditable === true;
+      if (!typing) openProfiler();
+    }
   });
 
   // Unity gesture: double-click a prefab instance in the viewport opens its
@@ -1692,6 +1784,7 @@ async function main(): Promise<void> {
         experienceId: store.doc.name,
       }),
       registry: scriptRegistry,
+      profiler, // per-script-name scopes under "scripts" (see RuntimeOptions)
       input,
       viewForward,
       setAnimation: (entityId, clip, fade, opts) =>
@@ -1829,10 +1922,18 @@ async function main(): Promise<void> {
   store.subscribe((change) => {
     if (change.kind === "ops" && tryReconcile(change.result)) {
       reconcileCount++;
+      profiler.mark("scene.reconcile");
       return;
     }
     rebuildCount++;
+    // A full rebuild reconstructs every mesh and material in the scene and is
+    // by far the most expensive thing an editor action can trigger. Marked so
+    // that when the frame graph shows a 400ms cliff, the timeline underneath
+    // says whether an edit caused it — the difference between a real
+    // performance problem and the editor doing what it was told.
+    const endRebuild = profiler.span("scene.rebuild", `${Object.keys(store.doc.entities).length} entities`);
     rebuild();
+    endRebuild();
   });
   store.subscribe(() => {
     if (sim) startPlaySession(); // edits during play restart the session on the new doc
@@ -1954,7 +2055,7 @@ async function main(): Promise<void> {
     editingPrefab,
     editingChunk,
     assetSelection,
-    tools: { graybox: grayboxActive, terrain: terrainActive, path: pathActive },
+    tools: { graybox: grayboxActive, terrain: terrainActive, path: pathActive, meshEdit },
     pins: pinStore.pins,
     playMode,
     modelNodes,
@@ -1973,12 +2074,7 @@ async function main(): Promise<void> {
     getNetPresence: () => netPresence,
     getReconcileCount: () => reconcileCount,
     getRebuildCount: () => rebuildCount,
-    getPerf: () => ({
-      frame: { ...frameTimings },
-      drawCalls: renderer.renderer.info.render.drawCalls,
-      triangles: renderer.renderer.info.render.triangles,
-      foliageTiers: foliageLod.tierCounts(),
-    }),
+    getPerf: () => buildPerfReport(),
   };
   setInterval(() => postContext(devBridgeDeps), 1000);
   publishEngineSpec(devBridgeDeps);
@@ -2040,18 +2136,158 @@ async function main(): Promise<void> {
 
   let lastFrameMs = 0;
   /**
-   * Rolling (EMA) breakdown of where a frame's JS-side time actually goes —
-   * added because "triangles/draw calls dropped 21x but frame time didn't
-   * move" is unanswerable without this: those stats say nothing about
-   * physics, scripts, or chunk-streaming cost, which can dominate
-   * independently of anything the GPU submission stats capture. Smoothed
-   * (not last-frame-raw) so the HUD reads steadily instead of flickering.
+   * Cached profiler summary. summary() walks the whole ring (900 frames x
+   * every interned scope), which is cheap at 4Hz and wasteful at 60Hz — the
+   * HUD, the dev bridge, and the profiler window all read this one copy
+   * instead of each recomputing it on their own cadence.
    */
-  const frameTimings = { physics: 0, scripts: 0, chunks: 0, foliage: 0, render: 0, other: 0, total: 0 };
-  const TIMING_EMA_ALPHA = 0.15;
-  function recordTiming(key: keyof typeof frameTimings, ms: number): void {
-    frameTimings[key] += (ms - frameTimings[key]) * TIMING_EMA_ALPHA;
+  let perfCache: ReturnType<typeof profiler.summary> | null = null;
+  let perfCachedAt = 0;
+  function perfSummary(): ReturnType<typeof profiler.summary> {
+    const t = performance.now();
+    if (!perfCache || t - perfCachedAt > 250) {
+      perfCache = profiler.summary();
+      perfCachedAt = t;
+    }
+    return perfCache;
   }
+  /**
+   * Open the profiler in its own window (toolbar button, or P).
+   *
+   * GPU timestamps switch on with the window and off with it: they cost a
+   * query pair plus a buffer copy per pass every frame, which is a price
+   * worth paying while someone is looking and not otherwise.
+   */
+  function openProfiler(): void {
+    openProfilerWindow({
+      profiler,
+      setGpuTiming: (on) => renderer.setGpuTiming(on),
+      backend,
+      describeSession: () =>
+        `${store.doc.name} · ${playMode.get()}${chunkManager.stats.chunks > 0 ? ` · ${chunkManager.stats.chunks} chunks` : ""}`,
+      // The snapshot goes where an agent can read it: a FILE, in the repo,
+      // under .hitreg/profiles/. This is the loop the whole feature is for —
+      // hit a hitch, press one button, then say "read the latest profile
+      // snapshot" instead of describing a stutter in prose. The note is the
+      // most valuable field in it: "choppy flying low over the north shore"
+      // is the context that makes numbers a bug report.
+      sendToAgent: async (note) => {
+        const summary = profiler.summary();
+        const response = await fetch("/__hitreg/profile", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            scene: store.doc.name,
+            playMode: playMode.get(),
+            backend,
+            note,
+            capturedAt: new Date().toISOString(),
+            camera: camera.position.toArray().map((v) => Number(v.toFixed(1))),
+            // the verdict in plain English, so whoever opens the file first —
+            // person or model — reads the conclusion before the numbers
+            digest: digestProfile(summary),
+            report: buildPerfReport(),
+            full: summary,
+          }),
+        });
+        if (!response.ok) throw new Error(`snapshot failed (HTTP ${response.status})`);
+        const body = (await response.json()) as { ok?: boolean; file?: string; error?: string };
+        if (!body.ok || !body.file) throw new Error(body.error ?? "snapshot rejected");
+        return { file: body.file };
+      },
+    });
+  }
+
+  /**
+   * The profiler, condensed for `GET /__hitreg/context` — an agent debugging a
+   * hitch over curl gets the same numbers the popup window draws, without a
+   * screenshot. Trimmed to what is actionable: percentiles rather than means,
+   * the heaviest scopes by SELF time, the most recent spikes with whatever
+   * marker explains each one.
+   */
+  function buildPerfReport() {
+    const perf = perfSummary();
+    const r1 = (v: number) => Number(v.toFixed(2));
+    return {
+      fps: perf.fps,
+      windowSeconds: perf.windowSeconds,
+      /** Wall-clock frame arrival — what the player feels. */
+      frameMs: {
+        p50: r1(perf.intervalMs.p50),
+        p95: r1(perf.intervalMs.p95),
+        p99: r1(perf.intervalMs.p99),
+        max: r1(perf.intervalMs.max),
+      },
+      /** Split of that: JS in the loop, GPU, and time outside the loop entirely. */
+      jsMs: { avg: r1(perf.frameMs.avg), p95: r1(perf.frameMs.p95), max: r1(perf.frameMs.max) },
+      gpuMs: perf.gpuMs ? { avg: r1(perf.gpuMs.avg), max: r1(perf.gpuMs.max) } : null,
+      offLoopMs: { avg: r1(perf.gapMs.avg), p95: r1(perf.gapMs.p95), max: r1(perf.gapMs.max) },
+      jankPct: { over16: r1(perf.over16Pct), over33: r1(perf.over33Pct) },
+      hotScopes: [...perf.scopes]
+        .sort((a, b) => b.avgSelfMs - a.avgSelfMs)
+        .slice(0, 12)
+        .map((s) => ({
+          path: s.path,
+          selfMs: r1(s.avgSelfMs),
+          totalMs: r1(s.avgMs),
+          p95Ms: r1(s.p95Ms),
+          maxMs: r1(s.maxMs),
+          callsPerFrame: r1(s.callsPerFrame),
+        })),
+      counters: Object.fromEntries(
+        Object.entries(perf.counters).map(([k, v]) => [k, { last: r1(v.last), max: r1(v.max) }]),
+      ),
+      spikes: perf.spikes.slice(-8).map((s) => ({
+        frameMs: r1(Math.max(s.totalMs, s.intervalMs)),
+        jsMs: r1(s.totalMs),
+        offLoopMs: r1(s.gapMs),
+        worst: s.scopes.slice(0, 3).map((x) => `${x.path} ${x.selfMs.toFixed(1)}ms`),
+        markers: s.markers.map((m) => `${m.label}${m.ms > 0 ? ` ${m.ms.toFixed(0)}ms` : ""}${m.detail ? ` (${m.detail})` : ""}`),
+      })),
+      /** Long spans (loads, rebuilds) recently seen, newest last. */
+      recentEvents: perf.markers
+        .slice(-14)
+        .map((m) => `${m.label}${m.ms > 0 ? ` ${m.ms.toFixed(0)}ms` : ""}${m.detail ? ` (${m.detail})` : ""}`),
+      gpuTiming: renderer.gpuTimingActive,
+    };
+  }
+
+  /**
+   * Per-frame scalars the profiler graphs alongside the timings. Sampled after
+   * render() so the renderer's counters describe the frame just submitted.
+   *
+   * These are what turn a timing into a diagnosis: "render 9ms" says nothing
+   * on its own, but "render 9ms at 4,300 draw calls" and "render 9ms at 180
+   * draw calls" are different problems with different fixes (batching vs.
+   * fill rate / shader cost).
+   */
+  function sampleFrameCounters(): void {
+    if (!profiler.enabled) return;
+    const info = renderer.renderer.info;
+    profiler.setCounter("drawCalls", info.render.drawCalls);
+    profiler.setCounter("triangles", info.render.triangles);
+    profiler.setCounter("geometries", info.memory.geometries);
+    profiler.setCounter("textures", info.memory.textures);
+    // program count is not on the WebGPU Info type but is present at runtime;
+    // a climbing count during play means shaders are still compiling, which is
+    // the classic "first lap through a level stutters" cause
+    profiler.setCounter("programs", (info as { programs?: unknown[] }).programs?.length ?? 0);
+    const gpuMs = renderer.gpuFrameMs();
+    if (gpuMs !== null) profiler.setGpuMs(gpuMs);
+    const chunkStats = chunkManager.stats;
+    profiler.setCounter("chunks", chunkStats.chunks);
+    profiler.setCounter("chunkEntities", chunkStats.entities);
+    profiler.setCounter("loading", chunkStats.loading + subsceneManager.stats.loading + gltfLoadingCount());
+    const tiers = foliageLod.tierCounts();
+    profiler.setCounter("foliageNear", tiers.near);
+    profiler.setCounter("foliageMid", tiers.mid);
+    profiler.setCounter("foliageFar", tiers.far);
+    const clusterStats = clusterLod.stats();
+    profiler.setCounter("clusterMeshes", clusterStats.meshes);
+    profiler.setCounter("clusterTris", clusterStats.triangles);
+    profiler.setCounter("objects", built.objects.size);
+  }
+
   const followPos = new THREE.Vector3();
   // camera colliders are now distance-limited (see refreshCameraColliders) —
   // must stay synced with camera movement, not just scene/model-load events;
@@ -2129,9 +2365,15 @@ async function main(): Promise<void> {
   const loop = new FixedTimestepLoop({
     fixedUpdate: (dt) => {
       if (playMode.get() !== "playing" || !sim) return;
+      // "fixed" nests under the frame, and can run MORE THAN ONCE per frame
+      // (the loop substeps to catch up). callsPerFrame in the profiler table
+      // is how that shows: a fixed scope averaging 2.4 calls/frame means the
+      // sim is chasing a backlog, which is itself a finding.
+      profiler.begin("fixed");
       // host-authoritative remote players: fresh intentions drive proxy
       // bodies (clamped — peers send intent, never state), stale peers despawn
       if (netPresence) {
+        profiler.begin("net.inputs");
         const active = new Set<string>();
         for (const { peerId, v, jump, p } of netPresence.activeRemoteInputs()) {
           const id = netProxyId(peerId);
@@ -2152,10 +2394,17 @@ async function main(): Promise<void> {
         for (const id of [...netProxies]) {
           if (!active.has(id)) despawnNetProxy(id);
         }
+        profiler.end();
       }
       // sim/scripts mutate RUNTIME objects only — the document is authoring truth
-      const physicsStart = performance.now();
+      // solver and state-readback are split: the solver scales with body
+      // COUNT and contact complexity, the readback with how many of those
+      // bodies have render objects — they grow for different reasons and
+      // have different fixes, so one "physics" number can't be acted on
+      profiler.begin("physics.step");
       sim.step(dt);
+      profiler.end();
+      profiler.begin("physics.readback");
       for (const [id, state] of sim.states()) {
         const object = built.objects.get(id);
         if (!object) continue;
@@ -2172,13 +2421,17 @@ async function main(): Promise<void> {
           prevBodyPos.set(id, p.clone());
         }
       }
-      recordTiming("physics", performance.now() - physicsStart);
-      const scriptsStart = performance.now();
+      profiler.end();
+      // per-script-name scopes come from inside the runtime (see its
+      // `profiler` option) — this wrapper is what nests them under "scripts"
+      profiler.begin("scripts");
       scripts?.fixedUpdate(dt);
-      recordTiming("scripts", performance.now() - scriptsStart);
+      profiler.end();
+      profiler.end(); // fixed
     },
     update: (dt, alpha) => {
-      const otherStart = performance.now();
+      profiler.begin("update");
+      profiler.begin("interpolate");
       // draw dynamic bodies between their last two sim states
       if (playMode.get() === "playing" && sim) {
         for (const [id, curr] of currBodyPos) {
@@ -2190,6 +2443,8 @@ async function main(): Promise<void> {
           object.position.copy(object.parent.worldToLocal(lerpPos));
         }
       }
+      profiler.end(); // interpolate
+      profiler.begin("follow-cam");
       // follow cam: keep the orbit center on the target; the pointer-lock
       // mouse look (play) or drag-orbit (paused) supplies the rotation.
       // chase cam: rigid third-person — camera sits behind the target's own
@@ -2211,31 +2466,41 @@ async function main(): Promise<void> {
           }
         }
       }
-      if (playMode.get() === "playing") animations.update(dt);
-      let otherMs = performance.now() - otherStart;
+      profiler.end(); // follow-cam
+      if (playMode.get() === "playing") {
+        profiler.begin("animations");
+        animations.update(dt);
+        profiler.end();
+      }
       // chunk streaming follows the player in play mode, the fly-cam in edit
       {
-        const chunksStart = performance.now();
         const focusObj =
           playMode.get() !== "edit" && followTargetId ? built.objects.get(followTargetId) : null;
+        profiler.begin("chunks");
         if (focusObj) {
           const p = focusObj.getWorldPosition(followPos);
           chunkManager.update(p.x, p.z);
+          profiler.end();
+          profiler.begin("subscenes");
           subsceneManager.update(p.x, p.z);
         } else {
           chunkManager.update(camera.position.x, camera.position.z);
+          profiler.end();
+          profiler.begin("subscenes");
           subsceneManager.update(camera.position.x, camera.position.z);
         }
-        recordTiming("chunks", performance.now() - chunksStart);
+        profiler.end();
       }
       if (
         playMode.get() !== "edit" &&
         (!lastColliderRefreshPos || lastColliderRefreshPos.distanceToSquared(camera.position) > COLLIDER_REFRESH_DIST_SQ)
       ) {
         lastColliderRefreshPos = camera.position.clone();
+        profiler.begin("camera-colliders");
         refreshCameraColliders();
+        profiler.end();
       }
-      const camStart = performance.now();
+      profiler.begin("camera");
       updateFlyCam(dt);
       // while flying, the fly-cam owns the camera — camera-controls' update
       // would overwrite our position/rotation from its own internal state
@@ -2251,24 +2516,46 @@ async function main(): Promise<void> {
           renderCamera = built.activeCamera;
         }
       }
-      otherMs += performance.now() - camStart;
-      const foliageStart = performance.now();
+      profiler.end(); // camera
+      // each of these walks or rebuilds its own instanced/visibility set every
+      // frame, and any one of them can dominate alone — the old lumped
+      // "foliage" number could never say which
+      profiler.begin("particles");
       particles.update(dt, renderCamera); // billboards face the camera actually used
+      profiler.end();
+      profiler.begin("grass");
       grass.update(renderCamera, sampleTerrainHeight, sampleGrassyGround);
+      profiler.end();
+      profiler.begin("foliage-lod");
+      // the near→mid LOD switch is judged in screen pixels, so the system
+      // needs the projection actually in use — idempotent when unchanged
+      if ((renderCamera as THREE.PerspectiveCamera).isPerspectiveCamera) {
+        foliageLod.setProjection(
+          canvas.clientHeight || window.innerHeight,
+          (renderCamera as THREE.PerspectiveCamera).fov,
+        );
+      }
       foliageLod.update(renderCamera.getWorldPosition(foliageLodCameraPos));
+      clusterLod.update(renderCamera, canvas.clientHeight || window.innerHeight);
+      profiler.end();
+      profiler.begin("light-budget");
       lightBudget.update(built.scene, renderCamera);
-      recordTiming("foliage", performance.now() - foliageStart);
-      const netStart = performance.now();
+      profiler.end();
       // recenter the sky dome on whichever camera is actually rendering — a
       // fixed-radius BackSide sphere only reads as an infinite background
       // while the camera stays inside it (see scene-builder.ts's buildSkyDome)
       if (skyDomeMesh) skyDomeMesh.position.copy(renderCamera.getWorldPosition(foliageLodCameraPos));
+      profiler.begin("net");
       netPresence?.update(dt); // remote avatars lerp toward their snapshot targets
-      otherMs += performance.now() - netStart;
-      recordTiming("other", otherMs);
-      const renderStart = performance.now();
+      profiler.end();
+      profiler.end(); // update
+      // render sits OUTSIDE "update", at the top level: it is the one scope
+      // you compare directly against the GPU number, and burying it inside
+      // another subtotal makes that comparison harder to read
+      profiler.begin("render");
       renderer.render(built.scene, renderCamera);
-      recordTiming("render", performance.now() - renderStart);
+      profiler.end();
+      sampleFrameCounters();
       lastFrameMs = dt * 1000;
     },
   });
@@ -2292,6 +2579,15 @@ async function main(): Promise<void> {
     // submitted to the renderer this frame — draw calls / triangles do.
     const info = renderer.renderer.info;
     const tiers = foliageLod.tierCounts();
+    const perf = perfSummary();
+    // the heaviest leaves by SELF time — the code actually burning the frame,
+    // not the parent scopes that merely contain it
+    const top = [...perf.scopes]
+      .sort((a, b) => b.avgSelfMs - a.avgSelfMs)
+      .filter((s) => s.avgSelfMs >= 0.15)
+      .slice(0, 3)
+      .map((s) => `${s.name} ${s.avgSelfMs.toFixed(1)}`)
+      .join(" · ");
     // "is it stuck or just loading" was previously invisible — chunk/subscene
     // files streaming in and glTF models fetching/parsing (loadGltf) are the
     // three async load sources that can leave props/geometry silently absent
@@ -2322,19 +2618,28 @@ async function main(): Promise<void> {
       (tiers.near + tiers.mid + tiers.far > 0
         ? `foliage LOD: ${tiers.near} near · ${tiers.mid} mid · ${tiers.far} far\n`
         : "") +
+      ((s) =>
+        s.meshes > 0
+          ? `cluster LOD: ${s.meshes} meshes · ${s.clusters} clusters · ${s.triangles.toLocaleString()} tris · ${s.culled} culled\n`
+          : "")(clusterLod.stats()) +
       `draw calls: ${info.render.drawCalls}  ·  tris: ${info.render.triangles.toLocaleString()}\n` +
       `geometries: ${info.memory.geometries}  ·  textures: ${info.memory.textures}\n` +
-      `frame: ${lastFrameMs.toFixed(1)}ms  (JS total: ${frameTimings.total.toFixed(1)}ms)\n` +
-      `  phys ${frameTimings.physics.toFixed(1)} · scripts ${frameTimings.scripts.toFixed(1)} · ` +
-      `chunks ${frameTimings.chunks.toFixed(1)} · foliage ${frameTimings.foliage.toFixed(1)} · ` +
-      `render ${frameTimings.render.toFixed(1)} · other ${frameTimings.other.toFixed(1)}\n` +
-      `mode: ${mode}  ·  ${hint}`;
+      // p95, not the mean: the HUD's job is to make a hitch visible, and a
+      // mean is a machine for hiding one. The three worst scopes are named
+      // inline so the common case never needs the profiler window at all.
+      `fps ${perf.fps.toFixed(0)}  ·  frame p50 ${perf.intervalMs.p50.toFixed(1)} / ` +
+      `p95 ${perf.intervalMs.p95.toFixed(1)} / max ${perf.intervalMs.max.toFixed(1)}ms\n` +
+      `  js ${perf.frameMs.avg.toFixed(1)}  ·  ` +
+      (perf.gpuMs ? `gpu ${perf.gpuMs.avg.toFixed(1)}  ·  ` : "") +
+      `off-loop ${perf.gapMs.avg.toFixed(1)}  ·  janky ${perf.over33Pct.toFixed(0)}%\n` +
+      (top.length > 0 ? `  ${top}\n` : "") +
+      `mode: ${mode}  ·  ${hint}  ·  Shift+P profiler`;
   }, 500);
 
   function frame(t: number): void {
-    const start = performance.now();
+    profiler.beginFrame();
     loop.tick(t);
-    recordTiming("total", performance.now() - start);
+    profiler.endFrame();
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);

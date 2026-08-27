@@ -24,6 +24,8 @@ interface LoadedSubscene {
   sceneName: string;
   group: THREE.Object3D;
   expanded: SceneDoc;
+  /** Cached Object.keys(expanded.entities).length — see the stats getter. */
+  entityCount: number;
   objects: Map<string, THREE.Object3D>;
 }
 
@@ -65,8 +67,10 @@ export class SubsceneManager {
   ) {}
 
   get stats(): { loaded: number; entities: number; loading: number } {
+    // cached count, not Object.keys().length — polled every frame by the
+    // profiler's counter sampler; see ChunkManager.stats for the measurement
     let entities = 0;
-    for (const sub of this.loaded.values()) entities += Object.keys(sub.expanded.entities).length;
+    for (const sub of this.loaded.values()) entities += sub.entityCount;
     return { loaded: this.loaded.size, entities, loading: this.inFlight.size };
   }
 
@@ -177,6 +181,7 @@ export class SubsceneManager {
         sceneName: inst.data.scene,
         group,
         expanded,
+        entityCount: Object.keys(expanded.entities).length,
         objects: built.objects,
       };
       this.loaded.set(inst.id, sub);

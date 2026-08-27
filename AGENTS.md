@@ -32,6 +32,18 @@ Claude sessions get the same content via CLAUDE.md and `.claude/skills/`).
   `curl -s http://localhost:5173/__hitreg/spec`. This is ground truth for what
   you can build; the committed `spec.json` (repo root, `pnpm spec`) mirrors the
   engine surface for offline reading and drift-as-diff.
+- Performance reports ("it hitches", "it's choppy near X"): read a profiler
+  snapshot before theorizing. They are plain files in
+  `apps/playground/.hitreg/profiles/*.json` (newest last) — the human presses
+  **Shift+P** in the app, then **snapshot → AI**. Start with the snapshot's `note`
+  (what they were doing) and `digest` (the verdict in plain English), then
+  `report` for p50/p95/p99 wall-clock, the JS / GPU / off-loop split, the
+  hottest scopes by self time, and the worst frames kept whole with the spans
+  that overlapped them. `off-loop` — GC, shader compiles, async chunk parsing —
+  is where the time usually goes and is invisible to every other instrument.
+  Answer one by POSTing `{ file, resolved: true, reply }` to
+  `/__hitreg/profile`, exactly like a pin. Live equivalent: `context.perf`.
+  See `docs/performance-lessons.md`.
 - Client-side errors from the running app appear in the dev server's log.
 - Verify with `pnpm test` and `pnpm typecheck` before finishing.
 

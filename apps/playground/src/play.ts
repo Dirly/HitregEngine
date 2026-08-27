@@ -125,7 +125,7 @@ async function main(): Promise<void> {
     onParticles: (entityId, group, data) => particles.register(entityId, group, data, (id: string) => assets.getTexture(id)?.url),
     onLight: (_entityId, light, importance) => lightBudget.register(light, importance),
     onBillboard: (entityId, group, data) => billboards.register(entityId, group, data, { texture: (id: string) => assets.getTexture(id)?.url }),
-    bakeBillboardTexture: () => null,
+    bakeImpostor: () => null,
     onModelLoaded: (entityId, root, clips) => {
       const animator = expanded.entities[entityId]?.components["animator"];
       animations.register(entityId, root, clips, (animator as Parameters<AnimationSystem["register"]>[3]) ?? null);

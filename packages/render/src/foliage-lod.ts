@@ -1,4 +1,5 @@
 import * as THREE from "three/webgpu";
+import { writeImpostorSlot, type ImpostorInstanceData } from "./impostor.js";
 
 /**
  * One (assetId, node) group's near (real geometry, one mesh per submesh),
@@ -19,6 +20,18 @@ export interface InstancedPropBatch {
   positions: THREE.Vector3[];
   /** Each instance's real world matrix; reused for whichever tier is active. */
   matrices: THREE.Matrix4[];
+  /** Geometric deviation of the mid tier from the near tier, in model units
+   * (before each instance's own matrix; per-submesh scale already folded in).
+   * The system projects it to a screen-space error to pick the near→mid
+   * switch distance per batch — a rock whose decimated tier is within a
+   * centimetre of the real thing gives up full detail a few metres out; a
+   * sloppily-decimated canopy keeps its near tier for longer. Absent or 0 →
+   * the system's fixed `nearDistance` fallback. */
+  midError?: number;
+  /** Present when `far` is an octahedral impostor quad (impostor.ts): each
+   * logical instance's rotation/scale, which the system copies into the far
+   * geometry's instanced side-buffers whenever it (re)writes a far slot. */
+  impostor?: ImpostorInstanceData;
 }
 
 /** Instances re-evaluated per batch, per `update()` call — bounds the worst
@@ -31,6 +44,12 @@ const UNSET = 0;
 const NEAR = 1;
 const MID = 2;
 const FAR = 3;
+
+/** Floor on the error-driven near→mid distance: whatever the numbers say, a
+ * prop the camera is practically touching shows its real geometry. */
+const MIN_NEAR_DISTANCE = 5;
+const DEFAULT_VIEWPORT_HEIGHT = 1080;
+const DEFAULT_FOV_DEGREES = 50; // three's PerspectiveCamera default
 
 /**
  * Per-batch runtime state for the compacted-buffer scheme (see class doc).
@@ -46,6 +65,13 @@ interface BatchState {
   slotToIndex: [Int32Array, Int32Array, Int32Array];
   counts: [number, number, number];
   cursor: number;
+  /** Largest per-axis scale across this batch's instance matrices — what
+   * turns the batch's model-unit `midError` into a world-unit one. */
+  maxInstanceScale: number;
+  /** This batch's near→mid threshold (squared) and its hysteresis twin —
+   * per batch, because they derive from the batch's own mid-tier error. */
+  nearMidThresholdSq: number;
+  nearMidHystSq: number;
 }
 
 function tierMeshes(batch: InstancedPropBatch, tierNum: number): readonly THREE.InstancedMesh[] {
@@ -72,6 +98,7 @@ function removeFromTier(state: BatchState, batch: InstancedPropBatch, tierNum: n
       mesh.setMatrixAt(mySlot, matrix);
       mesh.instanceMatrix.needsUpdate = true;
     }
+    if (tierNum === FAR) writeImpostorSlot(batch.far, batch.impostor, mySlot, lastIndex);
   }
   state.counts[arrIdx] = lastSlot;
   for (const mesh of meshes) mesh.count = lastSlot;
@@ -91,6 +118,7 @@ function addToTier(state: BatchState, batch: InstancedPropBatch, tierNum: number
     mesh.count = slot + 1;
     mesh.instanceMatrix.needsUpdate = true;
   }
+  if (tierNum === FAR) writeImpostorSlot(batch.far, batch.impostor, slot, i);
 }
 
 /**
@@ -120,37 +148,97 @@ function addToTier(state: BatchState, batch: InstancedPropBatch, tierNum: number
  *    crossing a threshold all at once (e.g. flying straight at a dense stand
  *    of trees) spreads its matrix rewrites over several frames instead of
  *    stalling one of them.
+ *
+ * The near→mid threshold is per batch, driven by screen-space error: a batch
+ * that reports its mid tier's geometric deviation (`midError`, from the
+ * simplifier) switches where that deviation projects to `screenErrorPx`
+ * pixels — `px = error · H / (2 · d · tan(fov/2))`, solved for `d` — so
+ * smooth props drop to their cheaper tier close up and rough ones hold on,
+ * and a bigger viewport or narrower FOV pushes every threshold out on its
+ * own. Batches with no error data keep the fixed `nearDistance`. The mid→far
+ * threshold stays a plain distance: the far tier is a billboard/box, not a
+ * geometric approximation with a measurable error.
  */
 export class FoliageLodSystem {
   private readonly stateByBatch = new Map<InstancedPropBatch, BatchState>();
+  private viewportHeight = DEFAULT_VIEWPORT_HEIGHT;
+  private tanHalfFov = Math.tan((DEFAULT_FOV_DEGREES * Math.PI) / 360);
 
   constructor(
     /** far threshold: past this, everything collapses to the billboard/box proxy. */
     private lodDistance = 100,
     private hysteresis = 0.85,
-    /** near threshold: inside this, full-detail geometry; between this and
-     * `lodDistance`, the decimated mid tier (when a batch has one). */
+    /** near threshold for batches with no `midError`: inside this, full-detail
+     * geometry; between this and `lodDistance`, the decimated mid tier. */
     private nearDistance = 40,
+    /** how many pixels of geometric error the mid tier may show before the
+     * near tier takes over — the knob behind every error-driven threshold. */
+    private screenErrorPx = 2,
   ) {}
 
   setLodDistance(distance: number): void {
     this.lodDistance = distance;
+    this.refreshThresholds();
   }
 
   setNearDistance(distance: number): void {
     this.nearDistance = distance;
+    this.refreshThresholds();
+  }
+
+  setScreenError(pixels: number): void {
+    this.screenErrorPx = pixels;
+    this.refreshThresholds();
+  }
+
+  /** Viewport height (pixels) and vertical FOV (degrees) of the camera the
+   * LOD is judged against. Cheap and idempotent when nothing changed, so it's
+   * fine to call every frame right before `update()`. */
+  setProjection(viewportHeightPx: number, fovYDegrees: number): void {
+    const tanHalfFov = Math.tan((fovYDegrees * Math.PI) / 360);
+    if (viewportHeightPx === this.viewportHeight && Math.abs(tanHalfFov - this.tanHalfFov) < 1e-6) return;
+    this.viewportHeight = viewportHeightPx;
+    this.tanHalfFov = tanHalfFov;
+    this.refreshThresholds();
+  }
+
+  /** The distance at which `batch`'s mid tier becomes indistinguishable from
+   * its near tier under the current projection — see the class doc. */
+  nearThresholdFor(batch: InstancedPropBatch): number {
+    const state = this.stateByBatch.get(batch);
+    const error = batch.midError;
+    if (!state || error === undefined || !(error > 0)) return this.nearDistance;
+    const worldError = error * state.maxInstanceScale;
+    const distance = (worldError * this.viewportHeight) / (2 * this.tanHalfFov * this.screenErrorPx);
+    return Math.min(Math.max(distance, MIN_NEAR_DISTANCE), this.lodDistance);
+  }
+
+  private applyThreshold(batch: InstancedPropBatch, state: BatchState): void {
+    const distance = this.nearThresholdFor(batch);
+    state.nearMidThresholdSq = distance * distance;
+    state.nearMidHystSq = (distance * this.hysteresis) ** 2;
+  }
+
+  private refreshThresholds(): void {
+    for (const [batch, state] of this.stateByBatch) this.applyThreshold(batch, state);
   }
 
   register(batch: InstancedPropBatch): void {
     const n = batch.positions.length;
+    let maxInstanceScale = 0;
+    for (const matrix of batch.matrices) maxInstanceScale = Math.max(maxInstanceScale, matrix.getMaxScaleOnAxis());
     const state: BatchState = {
       tier: new Uint8Array(n),
       slot: new Int32Array(n),
       slotToIndex: [new Int32Array(n), new Int32Array(n), new Int32Array(n)],
       counts: [0, 0, 0],
       cursor: 0,
+      maxInstanceScale: maxInstanceScale > 0 ? maxInstanceScale : 1,
+      nearMidThresholdSq: 0,
+      nearMidHystSq: 0,
     };
     this.stateByBatch.set(batch, state);
+    this.applyThreshold(batch, state);
     // nothing is classified into any tier yet — every mesh starts at count 0
     // (not the constructor's default of "all N instances") so a freshly
     // registered batch costs nothing until update() actually places instances
@@ -178,12 +266,11 @@ export class FoliageLodSystem {
   update(cameraPosition: THREE.Vector3): void {
     const midFarThresholdSq = this.lodDistance * this.lodDistance;
     const midFarHystSq = (this.lodDistance * this.hysteresis) ** 2;
-    const nearMidThresholdSq = this.nearDistance * this.nearDistance;
-    const nearMidHystSq = (this.nearDistance * this.hysteresis) ** 2;
     for (const [batch, state] of this.stateByBatch) {
       const count = batch.positions.length;
       if (count === 0) continue;
       const hasMid = !!batch.mid && batch.mid.length > 0;
+      const { nearMidThresholdSq, nearMidHystSq } = state;
       const steps = Math.min(count, INSTANCES_PER_TICK);
       for (let step = 0; step < steps; step++) {
         const i = (state.cursor + step) % count;

@@ -82,9 +82,12 @@ The primary AI channel is **direct file editing** — no MCP required:
   (`manipulating` > `hover` > `selection` > `asset` > `none`); `focus.hover`
   carries the entity under the cursor *plus* the world point and surface
   normal, so "put a bench here" has a "here"; `focus.mode` says what the user
-  is doing (`edit`, `graybox`, `terrain-sculpt`, `editing-prefab:<id>`,
-  `playing`, …), which is often the difference between a sensible edit and a
-  destructive one. A stale `selection` with `strongest: "none"` means nobody
+  is doing (`edit`, `graybox`, `terrain-sculpt`, `mesh-edit:<vertex|edge|face>`,
+  `editing-prefab:<id>`, `playing`, …), which is often the difference between a
+  sensible edit and a destructive one. In `mesh-edit:*`, `focus.meshEdit`
+  lists the selected vertex/edge/face indices of the entity's editable
+  `poly` mesh — "bevel these edges" means those indices; edit with the
+  poly-mesh ops in `@hitreg/core` and write the mesh back in one op. A stale `selection` with `strongest: "none"` means nobody
   is pointing at anything — ask rather than assume.
   Context is keyed per browser tab: if more than one tab is connected to the
   dev server (e.g. an agent's own Playwright session alongside the user's), the
@@ -95,7 +98,9 @@ The primary AI channel is **direct file editing** — no MCP required:
 - **The agent inbox** (`curl -s "http://localhost:5173/__hitreg/agent-inbox?scene=<name>&wait=60"`)
   is how a human hands you work *right now*: they press **"send to AI"** on a
   note and it lands here, carrying the pinned entity's full component JSON so
-  you can act without a second fetch. `wait` long-polls — block on it and you
+  you can act without a second fetch. Profiler snapshots ride the same channel
+  (`profiles: [...]`, each with its file path, the human's note, and the
+  plain-English verdict) — same act, same wake-up. `wait` long-polls — block on it and you
   wake within a second of the click instead of polling. Answer by POSTing the
   scene's pins back with your `reply` and `resolved: true`; the reply shows
   up in the editor on the note itself.
@@ -109,6 +114,24 @@ The primary AI channel is **direct file editing** — no MCP required:
   `.hitreg/pins/` beside the scene, never inside it — a pin is a conversation
   *about* the level, so it must never ship in one. A note with no `sentAt` is
   a private draft, not a request: read it for context, don't act on it.
+- **Profiler snapshots** — `apps/playground/.hitreg/profiles/*.json`, newest
+  last. The human presses **Shift+P** in the app, then **snapshot → AI**, and one
+  lands here; "read the latest profile snapshot" means read that file. It's an
+  ordinary file in the repo, so this works with no dev server running.
+  Each holds `note` (what they were doing — **read it first**, it's the half
+  the numbers can't supply), `digest` (the verdict in plain English: fast
+  enough or not, and whether the time goes to JS, GPU, or **off-loop**),
+  `report` (p50/p95/**p99 wall-clock**, hottest scopes by *self* time with
+  scripts broken out per script name, counters, recent spikes with the spans
+  that overlapped them — `chunk.load`, `chunk.build`, `hlod.supercell`,
+  `scene.rebuild`, `long-task`), and `full` (the whole ring buffer).
+  **Read a snapshot before theorizing about any reported stutter** — it
+  usually names the cause outright, and `off-loop` time in particular (GC,
+  shader compiles, async chunk parsing) is invisible to every other
+  instrument here. Answer one by POSTing `{ file, resolved: true, reply }` to
+  `/__hitreg/profile`, exactly like a pin. Live equivalent without a
+  snapshot: `context.perf`, or `curl -s http://localhost:5173/__hitreg/profile`.
+  Background: `docs/performance-lessons.md`.
 - **Capability spec** (what you can build): `curl -s http://localhost:5173/__hitreg/spec`
   → `{ components, dataAssets, events, netState, scripts, ops, prefabs, endpoints }`,
   every field a JSON Schema generated from the live Zod definitions, so it can't

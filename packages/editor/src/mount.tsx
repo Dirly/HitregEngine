@@ -9,6 +9,8 @@ import type {
   EditorSettings,
   GizmoMode,
   GrayboxShape,
+  MeshEditActions,
+  MeshEditState,
   ModelBones,
   MultiSelection,
   Observable,
@@ -39,6 +41,12 @@ export interface MountOptions {
   grayboxBevel: Observable<number>;
   /** Material GUID stamped onto newly-drawn graybox shapes ("" = engine default). */
   grayboxMaterial: Observable<string>;
+  /** Drawn shapes commit as editable poly meshes (default on). */
+  grayboxEditable?: Observable<boolean>;
+  /** Mesh-edit (vertex/edge/face) mode state, shared with the viewport MeshEditTool. */
+  meshEdit?: MeshEditState;
+  /** The viewport MeshEditTool's action surface (element toolbar buttons call into it). */
+  meshEditActions?: MeshEditActions;
   terrainActive: Observable<boolean>;
   terrainBrush: Observable<TerrainBrushSettings>;
   pathActive: Observable<boolean>;
@@ -61,6 +69,8 @@ export interface MountOptions {
   onPinDelete?: (id: string) => void;
   onFocusPoint?: (point: [number, number, number]) => void;
   saveAsset?: (file: string, content: string) => void;
+  /** Open the host's frame profiler window (toolbar button; P does the same). */
+  onProfiler?: () => void;
   onFocusEntity?: (entityId: string) => void;
   onUnpackModel?: (entityId: string) => void;
   scenes?: Observable<string[]>;
@@ -102,6 +112,9 @@ export function mountEditor(options: MountOptions): { unmount(): void } {
       grayboxShape={options.grayboxShape}
       grayboxBevel={options.grayboxBevel}
       grayboxMaterial={options.grayboxMaterial}
+      grayboxEditable={options.grayboxEditable}
+      meshEdit={options.meshEdit}
+      meshEditActions={options.meshEditActions}
       terrainActive={options.terrainActive}
       terrainBrush={options.terrainBrush}
       pathActive={options.pathActive}
@@ -121,6 +134,7 @@ export function mountEditor(options: MountOptions): { unmount(): void } {
       onPinDelete={options.onPinDelete}
       onFocusPoint={options.onFocusPoint}
       saveAsset={options.saveAsset}
+      onProfiler={options.onProfiler}
       onFocusEntity={options.onFocusEntity}
       onUnpackModel={options.onUnpackModel}
       scenes={options.scenes}

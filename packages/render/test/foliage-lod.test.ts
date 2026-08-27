@@ -74,3 +74,85 @@ describe("FoliageLodSystem tier compaction", () => {
     expect(system.tierCounts()).toEqual({ near: 0, mid: 0, far: 0 });
   });
 });
+
+/** Same 3-instance layout (x = 0, 50, 100) WITH a mid tier, optionally
+ * reporting the mid tier's geometric error and a uniform instance scale. */
+function makeMidBatch(midError?: number, scale = 1): InstancedPropBatch {
+  const geometry = new THREE.BoxGeometry(1, 1, 1);
+  const material = new THREE.MeshBasicMaterial();
+  const count = 3;
+  const near = new THREE.InstancedMesh(geometry, material, count);
+  const mid = new THREE.InstancedMesh(geometry, material, count);
+  const far = new THREE.InstancedMesh(geometry, material, count);
+  const positions = [0, 50, 100].map((x) => new THREE.Vector3(x, 0, 0));
+  const matrices = positions.map((p) =>
+    new THREE.Matrix4().compose(p, new THREE.Quaternion(), new THREE.Vector3(scale, scale, scale)),
+  );
+  return { near: [near], mid: [mid], far, positions, matrices, ...(midError !== undefined ? { midError } : {}) };
+}
+
+describe("FoliageLodSystem error-driven near→mid threshold", () => {
+  const origin = new THREE.Vector3(0, 0, 0);
+
+  it("falls back to the fixed nearDistance for a batch that reports no mid-tier error", () => {
+    const system = new FoliageLodSystem(200, 0.85, 60);
+    const batch = makeMidBatch();
+    system.register(batch);
+    system.update(origin);
+    // 0 and 50 are inside 60 → near; 100 is between 60 and 200 → mid
+    expect(system.tierCounts()).toEqual({ near: 2, mid: 1, far: 0 });
+    expect(system.nearThresholdFor(batch)).toBe(60);
+  });
+
+  it("switches to the mid tier where its geometric error projects below the pixel budget", () => {
+    // viewport 1000 px, fov 90° (tan 45° = 1), 2 px budget ⇒ d = error·1000 / (2·1·2) = 250·error
+    const system = new FoliageLodSystem(200, 0.85, 60, 2);
+    system.setProjection(1000, 90);
+    const batch = makeMidBatch(0.3); // ⇒ 75 m: further out than the 60 m fallback
+    system.register(batch);
+    expect(system.nearThresholdFor(batch)).toBeCloseTo(75, 6);
+    system.update(origin);
+    expect(system.tierCounts()).toEqual({ near: 2, mid: 1, far: 0 });
+  });
+
+  it("re-derives every threshold when the projection changes", () => {
+    const system = new FoliageLodSystem(200, 0.85, 60, 2);
+    system.setProjection(1000, 90);
+    const batch = makeMidBatch(0.3); // 75 m
+    system.register(batch);
+    system.update(origin); // near: 0, 50; mid: 100
+
+    // half the viewport height ⇒ the same error is half as many pixels ⇒ 37.5 m
+    system.setProjection(500, 90);
+    expect(system.nearThresholdFor(batch)).toBeCloseTo(37.5, 6);
+    system.update(origin);
+    // instance at 50 was near; 50² > 37.5² so it drops to mid despite hysteresis
+    expect(system.tierCounts()).toEqual({ near: 1, mid: 2, far: 0 });
+  });
+
+  it("scales the error by the largest instance scale in the batch", () => {
+    const system = new FoliageLodSystem(200, 0.85, 60, 2);
+    system.setProjection(1000, 90);
+    const batch = makeMidBatch(0.15, 2); // 0.15 model units × scale 2 = 0.3 world ⇒ 75 m
+    system.register(batch);
+    expect(system.nearThresholdFor(batch)).toBeCloseTo(75, 6);
+  });
+
+  it("clamps: a mid tier too rough to ever be sub-pixel never displaces the near tier before lodDistance", () => {
+    const system = new FoliageLodSystem(200, 0.85, 60, 2);
+    system.setProjection(1000, 90);
+    const batch = makeMidBatch(10); // ⇒ 2500 m, clamped to lodDistance
+    system.register(batch);
+    expect(system.nearThresholdFor(batch)).toBe(200);
+    system.update(origin);
+    expect(system.tierCounts()).toEqual({ near: 3, mid: 0, far: 0 });
+  });
+
+  it("clamps: a near-perfect mid tier still yields the real geometry right at the camera", () => {
+    const system = new FoliageLodSystem(200, 0.85, 60, 2);
+    system.setProjection(1000, 90);
+    const batch = makeMidBatch(0.001); // ⇒ 0.25 m, floored
+    system.register(batch);
+    expect(system.nearThresholdFor(batch)).toBe(5);
+  });
+});

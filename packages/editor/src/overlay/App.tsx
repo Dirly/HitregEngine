@@ -14,6 +14,8 @@ import type {
   EditorSettings,
   GizmoMode,
   GrayboxShape,
+  MeshEditActions,
+  MeshEditState,
   MultiSelection,
   Observable,
   Pin,
@@ -25,6 +27,8 @@ import type {
 import type { PathCrossSection } from "../path-tool.js";
 import { activeButtonStyle, buttonStyle, clamp, dockStyle, Splitter, useObservable } from "./common.js";
 import { Toolbar } from "./toolbar.js";
+import { MeshEditPanel } from "./mesh-edit-panel.js";
+import { UvEditor } from "./uv-editor.js";
 import { HierarchyDock, type LoadedChunkCell } from "./hierarchy-dock.js";
 import { AssetsDock } from "./assets-dock.js";
 import { InspectorDock } from "./inspector-dock.js";
@@ -48,6 +52,12 @@ export interface AppProps {
   grayboxBevel: Observable<number>;
   /** Material GUID stamped onto newly-drawn graybox shapes ("" = engine default). */
   grayboxMaterial: Observable<string>;
+  /** Drawn shapes commit as editable poly meshes (default on). */
+  grayboxEditable?: Observable<boolean>;
+  /** Mesh-edit (vertex/edge/face) mode state, shared with the viewport MeshEditTool. */
+  meshEdit?: MeshEditState;
+  /** The viewport MeshEditTool's action surface (element toolbar buttons call into it). */
+  meshEditActions?: MeshEditActions;
   terrainActive: Observable<boolean>;
   terrainBrush: Observable<TerrainBrushSettings>;
   pathActive: Observable<boolean>;
@@ -75,6 +85,8 @@ export interface AppProps {
   onFocusEntity?: (entityId: string) => void;
   /** Detach a loaded model's named sub-objects into child entities. */
   onUnpackModel?: (entityId: string) => void;
+  /** Open the host's frame profiler window (toolbar button; P does the same). */
+  onProfiler?: () => void;
   /** Scene management (host-provided): available scene names + switching. */
   scenes?: Observable<string[]>;
   onSwitchScene?: (name: string) => void;
@@ -223,6 +235,8 @@ export function App(props: AppProps) {
             grayboxShape={props.grayboxShape}
             grayboxBevel={props.grayboxBevel}
             grayboxMaterial={props.grayboxMaterial}
+            grayboxEditable={props.grayboxEditable}
+            meshEdit={props.meshEdit}
             terrainActive={props.terrainActive}
             terrainBrush={props.terrainBrush}
             pathActive={props.pathActive}
@@ -233,6 +247,7 @@ export function App(props: AppProps) {
             onSwitchScene={props.onSwitchScene}
             onNewScene={props.onNewScene}
             onEnvironment={selectEnvironment}
+            onProfiler={props.onProfiler}
             editingPrefab={editingPrefab}
             editingChunk={editingChunk}
           />
@@ -272,6 +287,21 @@ export function App(props: AppProps) {
           )}
           {editingChunk && <ChunkEditBanner cell={editingChunk} onClose={props.onCloseChunkEdit} />}
           {props.pins && <PinBadge pins={props.pins} showResolved={showResolvedPins} onToggle={() => setShowResolvedPins((v) => !v)} />}
+          {props.meshEdit && (
+            <div style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "flex-start", justifyContent: "space-between", pointerEvents: "none" }}>
+              <MeshEditPanel
+                state={props.meshEdit}
+                actions={props.meshEditActions ?? null}
+                gizmoMode={props.gizmoMode}
+                assets={props.assets}
+                assetsVersion={props.assetsVersion}
+                store={props.store}
+                multiSelection={props.multiSelection}
+                onOpenUvEditor={() => props.meshEdit!.uvEditorOpen.set(!props.meshEdit!.uvEditorOpen.get())}
+              />
+              <UvEditor store={props.store} assets={props.assets} state={props.meshEdit} assetsVersion={props.assetsVersion} />
+            </div>
+          )}
         </div>
 
         <div style={{ ...dockStyle, gridColumn: 2, gridRow: 3 }}>
@@ -339,6 +369,7 @@ export function App(props: AppProps) {
             saveAsset={props.saveAsset}
             thumbnails={props.thumbnails}
             onEditPrefab={props.onEditPrefab}
+            meshEdit={props.meshEdit}
           />
         </div>
       </div>
@@ -377,6 +408,8 @@ export function App(props: AppProps) {
         selection={props.selection}
         multiSelection={props.multiSelection}
         contextMenu={props.contextMenu}
+        meshEdit={props.meshEdit}
+        meshEditActions={props.meshEditActions}
         onCreatePrefab={createPrefabFrom}
         onUnpackModel={props.onUnpackModel}
         onPinHere={props.onPinCreate}

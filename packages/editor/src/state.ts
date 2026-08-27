@@ -128,7 +128,131 @@ export interface Manipulation {
 export type Manipulating = Observable<Manipulation | null>;
 export const createManipulating = (): Manipulating => observable<Manipulation | null>(null);
 
-export type GrayboxShape = "box" | "cylinder" | "sphere" | "wedge" | "poly";
+/**
+ * Shapes the draw tool can lay down. The first five are the historic graybox
+ * primitives; the rest are ProBuilder-style parametric shapes. All of them
+ * commit as EDITABLE poly meshes (`mesh.source.kind: "poly"`) unless the
+ * "editable" toggle is off, in which case the first four fall back to the
+ * old sized primitives.
+ */
+export type GrayboxShape =
+  | "box"
+  | "cylinder"
+  | "sphere"
+  | "wedge"
+  | "poly"
+  | "plane"
+  | "cone"
+  | "stairs"
+  | "arch"
+  | "torus"
+  | "pipe"
+  | "door";
+
+export const GRAYBOX_SHAPES: GrayboxShape[] = [
+  "box",
+  "cylinder",
+  "sphere",
+  "wedge",
+  "poly",
+  "plane",
+  "cone",
+  "stairs",
+  "arch",
+  "torus",
+  "pipe",
+  "door",
+];
+
+/** Mesh-edit element mode (ProBuilder's object / vertex / edge / face toolbar). */
+export type ElementMode = "object" | "vertex" | "edge" | "face";
+
+/** Gizmo axes for element transforms: world axes, the entity's axes, or the selection's average normal. */
+export type HandleOrientation = "global" | "local" | "normal";
+
+/** Element-level selection inside the mesh being edited (indices into its PolyMesh). */
+export interface ElementSelectionState {
+  vertices: number[];
+  edges: Array<[number, number]>;
+  faces: number[];
+}
+
+export const emptyElementSelection = (): ElementSelectionState => ({ vertices: [], edges: [], faces: [] });
+
+/**
+ * Mesh-edit tool state, shared by the viewport tool, the element toolbar,
+ * the inspector, and the AI context bridge (which publishes the element
+ * selection so "bevel these edges" resolves to real indices).
+ */
+export interface MeshEditState {
+  /** Mesh-edit mode on (vertex/edge/face handles visible, element gizmo active). */
+  active: Observable<boolean>;
+  mode: Observable<ElementMode>;
+  orientation: Observable<HandleOrientation>;
+  /** Allow picking elements hidden behind the mesh (ProBuilder "select hidden"). */
+  selectHidden: Observable<boolean>;
+  selection: Observable<ElementSelectionState>;
+  /** Entity id whose mesh is being edited (null = none / the selected entity has no poly mesh). */
+  entityId: Observable<string | null>;
+  /** Default parameters for the parametric actions (extrude distance, bevel amount, ...). */
+  params: Observable<MeshEditParams>;
+  /** Live element counts of the edited mesh, for the panel readout. */
+  stats: Observable<{ vertices: number; edges: number; faces: number } | null>;
+  /** The UV editor window is open (edits the selected faces' UVs). */
+  uvEditorOpen: Observable<boolean>;
+  /** Tint every face by its smoothing group in the viewport (ProBuilder's smoothing preview). */
+  showSmoothing: Observable<boolean>;
+}
+
+export interface MeshEditParams {
+  extrudeDistance: number;
+  extrudeMethod: "vertex-normal" | "face-normal" | "individual";
+  insetAmount: number;
+  bevelAmount: number;
+  weldDistance: number;
+  loopPosition: number;
+  growAngle: number;
+  growLimitAngle: boolean;
+}
+
+export const defaultMeshEditParams: MeshEditParams = {
+  extrudeDistance: 0.5,
+  extrudeMethod: "vertex-normal",
+  insetAmount: 0.2,
+  bevelAmount: 0.1,
+  weldDistance: 0.01,
+  loopPosition: 0.5,
+  growAngle: 45,
+  growLimitAngle: false,
+};
+
+/** What the element toolbar can ask the viewport tool to do (implemented by MeshEditTool). */
+export interface MeshEditActions {
+  run(action: string, overrides?: Record<string, unknown>): void;
+  setMaterial(materialId: string): void;
+  /** Faces in face mode, per-corner vertex paint in vertex/edge mode. */
+  setColor(color: string | null): void;
+  setVertexPosition(vertex: number, position: [number, number, number]): void;
+  /** CSG between the active selection (A) and the other selected entity (B); A takes the result, B is removed. */
+  boolean(op: "union" | "subtract" | "intersect"): void;
+  /** Convert any entity's rendered geometry (glTF part, path, primitive, polygon) into an editable poly mesh. */
+  makeEditable(entityId: string): void;
+}
+
+export function createMeshEditState(): MeshEditState {
+  return {
+    active: observable(false),
+    mode: observable<ElementMode>("face"),
+    orientation: observable<HandleOrientation>("global"),
+    selectHidden: observable(false),
+    selection: observable<ElementSelectionState>(emptyElementSelection()),
+    entityId: observable<string | null>(null),
+    params: observable<MeshEditParams>({ ...defaultMeshEditParams }),
+    stats: observable<{ vertices: number; edges: number; faces: number } | null>(null),
+    uvEditorOpen: observable(false),
+    showSmoothing: observable(false),
+  };
+}
 
 export type TerrainBrushMode = "raise" | "lower" | "flatten" | "smooth";
 export interface TerrainBrushSettings { mode: TerrainBrushMode; radius: number; strength: number; }
@@ -142,13 +266,16 @@ export interface DockSizes {
   bottom: number;
 }
 
-export const defaultDockSizes: DockSizes = { top: 64, left: 300, right: 360, bottom: 240 };
+/** `top` is the single-row toolbar (6px pad + 24px controls + 6px pad + border); it has no splitter. */
+export const defaultDockSizes: DockSizes = { top: 38, left: 300, right: 360, bottom: 240 };
 
 export function createDockSizes(): Observable<DockSizes> {
   let initial = defaultDockSizes;
   try {
     const saved = localStorage.getItem("hitreg-editor-docks");
-    if (saved) initial = { ...defaultDockSizes, ...(JSON.parse(saved) as Partial<DockSizes>) };
+    // `top` is not user-resizable, so a persisted value is just a stale
+    // default from an older toolbar layout — always take the current one.
+    if (saved) initial = { ...defaultDockSizes, ...(JSON.parse(saved) as Partial<DockSizes>), top: defaultDockSizes.top };
   } catch {
     /* fresh defaults */
   }

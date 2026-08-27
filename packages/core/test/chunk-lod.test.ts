@@ -93,3 +93,53 @@ describe("chunk LOD rings", () => {
     expect(states.has("2_0")).toBe(false); // unloaded
   });
 });
+
+/**
+ * Ring thresholds are checked in descending-detail order, so a ring set to the
+ * SAME number as the ring above it can never be reached — the earlier branch
+ * always claims the distance first. That is not a theoretical hazard: it is
+ * how heli-island shipped (`fullRender: 2, hlod: 2`), and the effect is that
+ * the HLOD proxy tier silently does not exist. Every cell inside the radius
+ * stays full-detail, so the whole island sits in the scene graph at once and
+ * per-frame render CPU scales with total prop count instead of with distance.
+ *
+ * These tests exist so that collapse shows up as a red test rather than as a
+ * frame-time mystery months later.
+ */
+describe("ring thresholds that silently disable a tier", () => {
+  const reps = (rings: Partial<NonNullable<ChunkStreamerData["rings"]>>): Set<ChunkRep> => {
+    const config = streamer({ radius: 6, rings: { simulation: 1, fullRender: 2, hlod: 3, farTerrain: 4, ...rings } });
+    const out = new Set<ChunkRep>();
+    // sweep the focus cell outwards; `prev` stays empty so hysteresis never
+    // masks which tier a given distance resolves to on its own
+    for (let cx = 0; cx <= 6; cx++) {
+      const state = computeChunkStates({ x: 0, z: 0 }, config, empty);
+      const rep = state.get(chunkKey(cx, 0));
+      if (rep) out.add(rep);
+    }
+    return out;
+  };
+
+  it("reaches every tier when each ring is strictly larger than the one inside it", () => {
+    expect(reps({})).toEqual(new Set<ChunkRep>(["simulation", "fullRender", "hlod", "far"]));
+  });
+
+  it("never produces an hlod cell when hlod === fullRender (heli-island's bug)", () => {
+    const got = reps({ hlod: 2 });
+    expect(got.has("hlod")).toBe(false);
+    // and the cells that should have been cheap proxies are full-detail instead
+    expect(got.has("fullRender")).toBe(true);
+  });
+
+  it("never produces a fullRender cell when fullRender === simulation", () => {
+    expect(reps({ fullRender: 1 }).has("fullRender")).toBe(false);
+  });
+
+  it("resolveChunkRings clamps a smaller outer ring up, which also collapses the tier", () => {
+    // hlod < fullRender is clamped to fullRender — same unreachable outcome,
+    // so a config that merely looks wrong and one that looks fine both fail here
+    const rings = resolveChunkRings(streamer({ rings: { simulation: 1, fullRender: 3, hlod: 2, farTerrain: 4 } }));
+    expect(rings.hlod).toBe(3);
+    expect(reps({ fullRender: 3, hlod: 2 }).has("hlod")).toBe(false);
+  });
+});

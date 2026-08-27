@@ -1,4 +1,4 @@
-import { useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { SceneDoc, SceneStore, Op } from "@hitreg/core";
 import type { Observable } from "../state.js";
 
@@ -41,7 +41,9 @@ export const buttonStyle: React.CSSProperties = {
 export const activeButtonStyle: React.CSSProperties = {
   ...buttonStyle,
   background: "#1f3a5f",
-  borderColor: "#79c0ff",
+  // full shorthand (not borderColor) so toggling a button between the two
+  // styles never mixes shorthand + longhand on one element (React warns)
+  border: "1px solid #79c0ff",
   color: "#e6edf3",
 };
 
@@ -118,5 +120,99 @@ export function SearchInput(props: { value: string; onChange: (v: string) => voi
         width: 130,
       }}
     />
+  );
+}
+
+/** Keycap chip for shortcut hints inside tooltips. */
+export function Kbd(props: { children: React.ReactNode }) {
+  return (
+    <kbd
+      style={{
+        display: "inline-block",
+        padding: "0 5px",
+        minWidth: 16,
+        textAlign: "center",
+        lineHeight: "16px",
+        background: "#161b22",
+        border: "1px solid #30363d",
+        borderBottomWidth: 2,
+        borderRadius: 3,
+        color: "#e6edf3",
+        font: "10px ui-monospace, monospace",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {props.children}
+    </kbd>
+  );
+}
+
+/**
+ * Hover/focus tooltip. Rendered `position: fixed` from the trigger's rect so
+ * it escapes `overflow` clipping (the toolbar row scrolls horizontally).
+ * Replaces native `title` for controls that carry shortcuts — a keycap chip
+ * reads faster than "(Ctrl+Z)" buried in a sentence, and it appears on
+ * keyboard focus too, which native titles never do.
+ */
+export function Tooltip(props: { content: React.ReactNode; delay?: number; width?: number; children: React.ReactNode }) {
+  const anchor = useRef<HTMLSpanElement>(null);
+  const timer = useRef<number | null>(null);
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  const width = props.width ?? 320;
+
+  const clear = () => {
+    if (timer.current !== null) window.clearTimeout(timer.current);
+    timer.current = null;
+  };
+  const show = () => {
+    clear();
+    timer.current = window.setTimeout(() => {
+      const r = anchor.current?.getBoundingClientRect();
+      if (!r) return;
+      setPos({ left: Math.max(4, Math.min(r.left, window.innerWidth - width - 4)), top: r.bottom + 6 });
+    }, props.delay ?? 250);
+  };
+  const hide = () => {
+    clear();
+    setPos(null);
+  };
+  useEffect(() => clear, []);
+
+  return (
+    <span
+      ref={anchor}
+      style={{ display: "inline-flex", alignItems: "stretch" }}
+      onPointerEnter={show}
+      onPointerLeave={hide}
+      onPointerDown={hide}
+      onFocus={show}
+      onBlur={hide}
+    >
+      {props.children}
+      {pos && (
+        <span
+          role="tooltip"
+          style={{
+            position: "fixed",
+            left: pos.left,
+            top: pos.top,
+            zIndex: 1200,
+            maxWidth: width,
+            padding: "6px 8px",
+            background: "rgba(13, 17, 23, 0.97)",
+            border: "1px solid #30363d",
+            borderRadius: 4,
+            boxShadow: "0 4px 12px rgba(0,0,0,0.45)",
+            color: "#c9d1d9",
+            font: "11px ui-monospace, monospace",
+            lineHeight: "16px",
+            whiteSpace: "normal",
+            pointerEvents: "none",
+          }}
+        >
+          {props.content}
+        </span>
+      )}
+    </span>
   );
 }

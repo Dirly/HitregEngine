@@ -1,6 +1,7 @@
 export { mountEditor, type MountOptions } from "./mount.js";
 export { ViewportTools, type ViewportOptions } from "./viewport.js";
 export { GrayboxTool, type GrayboxToolOptions } from "./graybox-tool.js";
+export { MeshEditTool, type MeshEditToolOptions, type MeshAction } from "./mesh-edit-tool.js";
 export { TerrainTool, type TerrainToolOptions } from "./terrain-tool.js";
 export { PathTool, type PathToolOptions, type PathCrossSection } from "./path-tool.js";
 export {
@@ -15,6 +16,10 @@ export {
   createPins,
   createSelection,
   createMultiSelection,
+  createMeshEditState,
+  emptyElementSelection,
+  defaultMeshEditParams,
+  GRAYBOX_SHAPES,
   selectSingle,
   toggleSelection,
   rangeSelectTo,
@@ -34,6 +39,12 @@ export {
   type FocusHit,
   type GizmoMode,
   type GrayboxShape,
+  type ElementMode,
+  type ElementSelectionState,
+  type HandleOrientation,
+  type MeshEditState,
+  type MeshEditParams,
+  type MeshEditActions,
   type Hover,
   type Manipulating,
   type Manipulation,
@@ -56,3 +67,4 @@ export {
   toggleLockMany,
 } from "./selection-ops.js";
 export { screenToNdc, setRayFromScreen } from "./screen-ray.js";
+export { booleanMeshes, polyFromObject, geometryFromObject, type BooleanOp } from "./csg.js";
