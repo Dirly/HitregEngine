@@ -14,6 +14,8 @@ export type {
   PeerLeftMessage,
   RejectMessage,
   EventsMessage,
+  StateMessage,
+  ModuleMessage,
 } from "./protocol.js";
 export { FORMAT_JSON, encodeMessage, decodeMessage } from "./protocol.js";
 
@@ -55,5 +57,6 @@ export type {
   RoomEvents,
   RoomStateSync,
   CommandHandler,
+  ModuleHandler,
 } from "./room.js";
 export { RoomHost, RoomClient } from "./room.js";

@@ -3,8 +3,9 @@
  *
  * Trust boundary, enforced structurally: RoomHost has NO code path that
  * applies state received from a client. Clients send `hello`, `command`,
- * and `bye` — anything else is dropped with a one-time warning. Only the
- * host produces `welcome` and `snapshot` messages.
+ * `bye`, and `module` (an opaque request to a named module's handler) —
+ * anything else is dropped with a one-time warning. Only the host produces
+ * `welcome` and `snapshot` messages.
  */
 
 import type { Transport } from "./transport.js";
@@ -27,6 +28,8 @@ export interface RoomHostOptions {
 }
 
 export type CommandHandler = (peer: string, tick: number, input: unknown) => void;
+/** Host side: a joined peer's request to module `id`. */
+export type ModuleHandler = (peer: string, data: unknown) => void;
 
 interface HostPeer {
   name: string;
@@ -39,6 +42,7 @@ export class RoomHost {
   private readonly snapshotEvery: number;
   private readonly joined = new Map<string, HostPeer>();
   private readonly commandHandlers = new Set<CommandHandler>();
+  private readonly moduleHandlers = new Map<string, Set<ModuleHandler>>();
   private readonly warned = new Set<string>();
   private readonly unsubscribes: Array<() => void> = [];
   private fullSource: ((peerId?: string) => unknown) | null = null;
@@ -84,6 +88,37 @@ export class RoomHost {
   onCommand(cb: CommandHandler): () => void {
     this.commandHandlers.add(cb);
     return () => this.commandHandlers.delete(cb);
+  }
+
+  /**
+   * Subscribe to requests addressed to module `id` from JOINED peers (a
+   * module message before hello is dropped). Returns unsubscribe.
+   */
+  onModule(id: string, cb: ModuleHandler): () => void {
+    let set = this.moduleHandlers.get(id);
+    if (!set) {
+      set = new Set();
+      this.moduleHandlers.set(id, set);
+    }
+    set.add(cb);
+    return () => {
+      set.delete(cb);
+    };
+  }
+
+  /** Send module data to one joined peer, reliable-ordered. No-op otherwise. */
+  sendModule(peerId: string, id: string, data: unknown): void {
+    if (this.closed || !this.joined.has(peerId)) return;
+    this.transport.send(peerId, "reliable", encodeMessage({ t: "module", id, data }));
+  }
+
+  /** Send module data to every joined peer (optionally skipping one). */
+  broadcastModule(id: string, data: unknown, except?: string): void {
+    if (this.closed || this.joined.size === 0) return;
+    const packet = encodeMessage({ t: "module", id, data });
+    for (const peerId of this.joined.keys()) {
+      if (peerId !== except) this.transport.send(peerId, "reliable", packet);
+    }
   }
 
   /**
@@ -166,11 +201,21 @@ export class RoomHost {
       case "bye":
         this.removePeer(from);
         return;
+      case "module": {
+        if (!this.joined.has(from)) return; // module requests before hello are dropped
+        const handlers = this.moduleHandlers.get(msg.id);
+        if (!handlers) {
+          this.warnOnce(`RoomHost: no handler for module "${msg.id}" (from "${from}")`);
+          return;
+        }
+        for (const cb of [...handlers]) cb(from, msg.data);
+        return;
+      }
       default:
         // Host-only message types arriving FROM a client. There is no code
         // path that applies them — clients never dictate state.
         this.warnOnce(
-          `RoomHost: dropped "${msg.t}" from client "${from}" — clients may only send hello/command/bye`,
+          `RoomHost: dropped "${msg.t}" from client "${from}" — clients may only send hello/command/bye/module`,
         );
         return;
     }
@@ -268,6 +313,7 @@ export class RoomClient {
   private readonly eventsHandlers = new Set<(events: RoomEvents) => void>();
   private readonly stateHandlers = new Set<(sync: RoomStateSync) => void>();
   private readonly peersHandlers = new Set<(peers: RoomPeer[]) => void>();
+  private readonly moduleHandlers = new Map<string, Set<(data: unknown) => void>>();
   private readonly roster = new Map<string, string>(); // peerId -> name
   private readonly unsubscribes: Array<() => void> = [];
   private _state: RoomClientState = "connecting";
@@ -339,6 +385,25 @@ export class RoomClient {
     return () => this.peersHandlers.delete(cb);
   }
 
+  /** Subscribe to data the host sends to module `id`. Returns unsubscribe. */
+  onModule(id: string, cb: (data: unknown) => void): () => void {
+    let set = this.moduleHandlers.get(id);
+    if (!set) {
+      set = new Set();
+      this.moduleHandlers.set(id, set);
+    }
+    set.add(cb);
+    return () => {
+      set.delete(cb);
+    };
+  }
+
+  /** Send a request to the host's module `id`. No-op unless joined. */
+  sendModule(id: string, data: unknown): void {
+    if (this._state !== "joined") return;
+    this.send({ t: "module", id, data });
+  }
+
   leave(): void {
     if (this._state === "closed") return;
     this.send({ t: "bye" });
@@ -377,6 +442,13 @@ export class RoomClient {
         if (msg.full) sync.full = msg.full;
         if (msg.delta) sync.delta = msg.delta;
         for (const cb of [...this.stateHandlers]) cb(sync);
+        return;
+      }
+      case "module": {
+        if (this._state !== "joined") return;
+        const handlers = this.moduleHandlers.get(msg.id);
+        if (!handlers) return;
+        for (const cb of [...handlers]) cb(msg.data);
         return;
       }
       case "peerJoined":

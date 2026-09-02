@@ -32,7 +32,21 @@ export interface ByeMessage {
   t: "bye";
 }
 
-export type ClientMessage = HelloMessage | CommandMessage | ByeMessage;
+/**
+ * Module channel — an opaque envelope for pluggable features (chat, voice
+ * signaling, emotes, votes) that ride the room without extending the core
+ * protocol. Valid in BOTH directions: `id` names the module, `data` is the
+ * module's own wire format. Reliable-ordered. Modules keep the trust rule
+ * themselves: a host-side module handler treats client data as a REQUEST
+ * to validate, never as state to apply.
+ */
+export interface ModuleMessage {
+  t: "module";
+  id: string;
+  data: unknown;
+}
+
+export type ClientMessage = HelloMessage | CommandMessage | ByeMessage | ModuleMessage;
 
 // -- host → client -----------------------------------------------------------
 
@@ -98,7 +112,8 @@ export type HostMessage =
   | PeerLeftMessage
   | RejectMessage
   | EventsMessage
-  | StateMessage;
+  | StateMessage
+  | ModuleMessage;
 
 export type Message = ClientMessage | HostMessage;
 
@@ -139,6 +154,10 @@ export function decodeMessage(data: Uint8Array): Message | null {
         : null;
     case "bye":
       return { t: "bye" };
+    case "module":
+      return typeof msg.id === "string" && msg.id.length > 0
+        ? { t: "module", id: msg.id, data: msg.data }
+        : null;
     case "welcome":
       return typeof msg.peerId === "string" && typeof msg.tick === "number"
         ? { t: "welcome", peerId: msg.peerId, tick: msg.tick, full: msg.full }
