@@ -36,3 +36,13 @@ apps/playground/assets/audio/
 # README documenting the convention itself.
 apps/playground/projects/*
 !apps/playground/projects/README.md
+
+# generated tool output — every registered tool under tools/ writes its runs
+# into out/ or out-<variant>/. Regenerate by re-running the tool; the inputs
+# (tool.json, manifest.json, the entry modules) are what's tracked.
+tools/*/out/
+tools/*/out-*/
+
+# worldgen overview renders (`pnpm -F playground worldgen map`) — derived from
+# the recipe, multi-MB, and regenerated on demand.
+apps/playground/*-map.png
