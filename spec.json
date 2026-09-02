@@ -330,6 +330,14 @@
                   "description": "Multiply this model's base colour. A tool like Blockbench previews a model essentially UNLIT, so the same asset always arrives darker in a renderer that lights it for real — this is the grading knob for that gap. 1.5 is a noticeable lift. It brightens the lit and unlit sides alike, so it is not a fix for a dead shadow side; that wants image-based lighting.",
                   "type": "number",
                   "minimum": 0
+                },
+                "textureFilter": {
+                  "description": "Override the model's own texture sampling. 'nearest' keeps hard texel edges — the pixel-art / PSX look for a low-res character skin — where the linear filtering most exporters bake into the file smears it. Minification still mipmaps either way, so distant models stay stable. Applies to every map of every material in the model, and the loaded model is SHARED by every entity using it, so one entity's choice is the asset's choice.",
+                  "type": "string",
+                  "enum": [
+                    "linear",
+                    "nearest"
+                  ]
                 }
               },
               "required": [
@@ -1738,6 +1746,33 @@
               "type": "number",
               "minimum": 0,
               "maximum": 2
+            }
+          }
+        },
+        "pixelate": {
+          "description": "Render the frame at a low internal resolution and scale it up to the screen — the fake-PSX look. Not a shader pass: it changes the canvas backing size, so it costs nothing and speeds everything else up.",
+          "default": {},
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": false,
+              "type": "boolean"
+            },
+            "height": {
+              "default": 240,
+              "description": "Vertical resolution the whole frame is rendered at, in pixels; width follows the viewport's aspect. 240 is the PSX look (320x240 at 4:3), 270-360 reads as a softer modern take. Every pass, including bloom and AO, runs at this size, so it is also a large performance win.",
+              "type": "integer",
+              "minimum": 48,
+              "maximum": 1080
+            },
+            "filter": {
+              "default": "nearest",
+              "description": "How the small frame is scaled up to the screen. nearest keeps hard pixel edges (the retro look); linear blurs them into a soft low-res image.",
+              "type": "string",
+              "enum": [
+                "nearest",
+                "linear"
+              ]
             }
           }
         }

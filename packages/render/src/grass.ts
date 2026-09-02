@@ -103,6 +103,78 @@ const MAX_BLADES = 65000;
 const RECENTER_FRACTION = 0.6;
 
 /**
+ * Deadband on that grid, as a fraction of a cell PAST the boundary.
+ *
+ * Snapping alone has no memory, and a camera sitting on a boundary flips
+ * between two cells on the smallest wobble — which is exactly what a
+ * third-person camera does, because ORBITING moves the camera in a circle
+ * several metres wide around a player who is standing still. A CPU profile of
+ * the camera merely rotating in place, with no cell streaming at all, still
+ * put the world field's `fbm2` at 8.2% of main-thread self time: every
+ * boundary flip re-placed the whole field and re-evaluated the terrain noise
+ * under every tuft, for a view of the same ground from a slightly different
+ * angle.
+ *
+ * A Schmitt trigger fixes it: the camera has to cross the boundary and keep
+ * going by another 0.2 of a cell before the field follows, so a wobble that
+ * straddles the line settles on whichever side it reached first. The cost is
+ * that the patch centre can trail the camera by 0.7 rather than 0.5 of a cell
+ * on each axis; kept small deliberately, since the disc's far edge is what
+ * pays for it.
+ */
+const RECENTER_HYSTERESIS = 0.2;
+
+/**
+ * How much re-placement work one frame may do, in "sample units".
+ *
+ * A full re-place walks every grid cell of the disc and asks the host for the
+ * ground under each one. On a generated world that question is a procedural
+ * noise evaluation, not a lookup, and doing tens of thousands of them between
+ * two `requestAnimationFrame`s is where the profiled 80-130ms single-frame
+ * spikes came from. So a placement is built into a scratch buffer across as
+ * many frames as it needs and swapped in when it is COMPLETE — the field
+ * already on screen stays up meanwhile, which is why the seam never shows.
+ *
+ * The two costs are an order of magnitude apart, so they are charged
+ * separately: an uncached ground sample is ~2us, and merely visiting a cell
+ * that is already cached (hash, radius test, matrix compose) is ~10x cheaper.
+ * A budget of 1000 is therefore about 1000 cold samples OR 10000 warm cells
+ * per frame — roughly 2ms either way.
+ */
+const PLACEMENT_BUDGET = 1000;
+const MISS_COST = 1;
+const CELL_COST = 0.1;
+
+/**
+ * Cached ground samples, keyed by grid cell.
+ *
+ * `gx` and `gz` are both int32; this packs them into one float64 exactly
+ * (well inside 2^53 for any world smaller than ~2^20 cells across) so the
+ * cache can be a `Map` on a number rather than on a string built per query.
+ */
+function cellKey(gx: number, gz: number): number {
+  return gx * 4294967296 + (gz >>> 0);
+}
+
+/** In-flight placement: the disc being built, and where the walk got to. */
+interface PendingPlacement {
+  centerX: number;
+  centerZ: number;
+  gx0: number;
+  gx1: number;
+  gz0: number;
+  gz1: number;
+  gzMid: number;
+  rows: number;
+  /** outward row cursor, and the column cursor inside the row it names */
+  n: number;
+  gx: number;
+  gz: number;
+  rowActive: boolean;
+  visible: number;
+}
+
+/**
   * Deterministic [0, 1) from a GRID CELL, not from an instance index.
   *
   * That distinction is the whole fix for cover that swims: keyed by index, an
@@ -150,6 +222,36 @@ class GrassPatch {
   private mapTexture: THREE.Texture | null = null;
   private center = new THREE.Vector2(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
 
+  /**
+   * Ground heights already sampled, keyed by grid CELL (NaN = "no cover here").
+   *
+   * The placement grid is anchored to the world, so a re-placed disc asks
+   * about mostly the same points as the one before it — the overlap between
+   * two adjacent centres is the large majority of both. `sampleGrassy` is a
+   * pure function of (x, z) for a given world, so those repeats are free once
+   * answered, which is what turns a re-place from "re-evaluate the terrain
+   * noise field tens of thousands of times" into a buffer walk.
+   *
+   * Bounded, and dropped wholesale by `invalidateGround()` when the ground
+   * itself can have changed (a recipe live-edit, a world or scene swap) —
+   * a cache of terrain that no longer exists is worse than no cache.
+   */
+  private readonly samples = new Map<number, number>();
+  private readonly sampleLimit: number;
+  /** Placement being built across frames; see PLACEMENT_BUDGET. */
+  private pending: PendingPlacement | null = null;
+  /**
+   * Scratch the pending placement writes into, so the committed field on
+   * screen is never half-overwritten. Same size as the instance buffer it
+   * eventually replaces, allocated on the first placement.
+   */
+  private scratchMatrix: Float32Array | null = null;
+  private scratchRandom: Float32Array | null = null;
+  /** false until one placement has COMPLETED — the first one is not budgeted. */
+  private placed = false;
+  /** the ground moved under a field already on screen; re-place in place */
+  private stale = false;
+
   private readonly tmpMat = new THREE.Matrix4();
   private readonly tmpPos = new THREE.Vector3();
   private readonly tmpQuat = new THREE.Quaternion();
@@ -170,6 +272,10 @@ class GrassPatch {
       Math.max(1, Math.ceil(Math.PI * data.radius * data.radius * data.density * 1.15)),
     );
     this.spacing = 1 / Math.sqrt(Math.max(1e-4, data.density));
+    // ~2.5 discs' worth of cells: enough that the disc before last is still
+    // warm when the camera turns around, hard-capped so a huge dense layer
+    // cannot quietly grow a cache bigger than the mesh it feeds
+    this.sampleLimit = Math.min(120_000, Math.max(4096, Math.ceil(this.count * 2.5)));
     const textured = Boolean(data.texture);
 
     let geometry: THREE.BufferGeometry;
@@ -278,77 +384,197 @@ class GrassPatch {
     group.add(this.mesh);
   }
 
-  /** `sampleGrassy` returns null both for unloaded ground AND for ground that
-   * isn't the terrain's grassy band — either way, no blade there. */
-  private regenerate(sampleGrassy: FoliageSampler): void {
-    // A jittered grid ANCHORED TO THE WORLD, walked over the cells the patch
-    // currently covers. Every property of a tuft is a function of its cell, so
-    // recentering changes which tufts exist and never where the surviving ones
-    // are: the field stops swimming when you turn on the spot.
-    const spacing = this.spacing;
+  /**
+   * Start placing the disc centred on (centerX, centerZ). Nothing on screen
+   * changes until `stepPlacement` finishes the walk and commits.
+   */
+  private beginPlacement(centerX: number, centerZ: number): void {
     const radius = this.data.radius;
-    const radiusSq = radius * radius;
-    const gx0 = Math.floor((this.center.x - radius) / spacing);
-    const gx1 = Math.ceil((this.center.x + radius) / spacing);
-    const gz0 = Math.floor((this.center.y - radius) / spacing);
-    const gz1 = Math.ceil((this.center.y + radius) / spacing);
-    const random = this.instanceRandom.array as Float32Array;
-    let visible = 0;
-    // Rows walked OUTWARD from the centre, not top to bottom. The buffer can
-    // legitimately fill before the disc is covered (a dense layer clamped at
-    // MAX_BLADES), and filling it in raster order leaves the far half of the
-    // patch empty behind a straight edge across the middle of the view.
-    // Outward order puts any shortfall at the rim, where the distance fade is
-    // already dissolving it.
-    const gzMid = Math.round((gz0 + gz1) / 2);
-    const rows = gz1 - gz0 + 1;
-    for (let n = 0; n < rows && visible < this.count; n++) {
-      const gz = gzMid + (n % 2 === 0 ? n / 2 : -((n + 1) / 2));
-      if (gz < gz0 || gz > gz1) continue;
-      for (let gx = gx0; gx <= gx1 && visible < this.count; gx++) {
+    const spacing = this.spacing;
+    const gx0 = Math.floor((centerX - radius) / spacing);
+    const gx1 = Math.ceil((centerX + radius) / spacing);
+    const gz0 = Math.floor((centerZ - radius) / spacing);
+    const gz1 = Math.ceil((centerZ + radius) / spacing);
+    this.scratchMatrix ??= new Float32Array(this.count * 16);
+    this.scratchRandom ??= new Float32Array(this.count * 2);
+    this.pending = {
+      centerX,
+      centerZ,
+      gx0,
+      gx1,
+      gz0,
+      gz1,
+      // Rows walked OUTWARD from the centre, not top to bottom. The buffer can
+      // legitimately fill before the disc is covered (a dense layer clamped at
+      // MAX_BLADES), and filling it in raster order leaves the far half of the
+      // patch empty behind a straight edge across the middle of the view.
+      // Outward order puts any shortfall at the rim, where the distance fade
+      // is already dissolving it.
+      gzMid: Math.round((gz0 + gz1) / 2),
+      rows: gz1 - gz0 + 1,
+      n: 0,
+      gx: gx0,
+      gz: gz0,
+      rowActive: false,
+      visible: 0,
+    };
+  }
+
+  /**
+   * Walk up to `budget` sample-units of the pending placement, committing it
+   * if it finishes. Returns what it spent.
+   *
+   * A jittered grid ANCHORED TO THE WORLD, walked over the cells the disc
+   * covers. Every property of a tuft is a function of its cell, so recentering
+   * changes which tufts exist and never where the surviving ones are: the
+   * field stops swimming when you turn on the spot. `sampleGrassy` returns
+   * null both for unloaded ground AND for ground that isn't the terrain's
+   * grassy band — either way, no blade there.
+   */
+  private stepPlacement(sampleGrassy: FoliageSampler, budget: number): number {
+    const p = this.pending;
+    if (!p) return 0;
+    const spacing = this.spacing;
+    const radiusSq = this.data.radius * this.data.radius;
+    const matrices = this.scratchMatrix!;
+    const random = this.scratchRandom!;
+    let spent = 0;
+    while (p.n < p.rows && p.visible < this.count) {
+      if (!p.rowActive) {
+        const gz = p.gzMid + (p.n % 2 === 0 ? p.n / 2 : -((p.n + 1) / 2));
+        if (gz < p.gz0 || gz > p.gz1) {
+          p.n++;
+          continue;
+        }
+        p.gz = gz;
+        p.gx = p.gx0;
+        p.rowActive = true;
+      }
+      const gz = p.gz;
+      while (p.gx <= p.gx1 && p.visible < this.count) {
+        // checked BEFORE the cell is consumed, so the cursor always points at
+        // work not yet done and resuming next frame repeats nothing
+        if (spent >= budget) return spent;
+        const gx = p.gx++;
+        spent += CELL_COST;
         const worldX = (gx + hashCell(gx, gz, 1)) * spacing;
         const worldZ = (gz + hashCell(gx, gz, 2)) * spacing;
-        const dx = worldX - this.center.x;
-        const dz = worldZ - this.center.y;
+        const dx = worldX - p.centerX;
+        const dz = worldZ - p.centerZ;
         if (dx * dx + dz * dz > radiusSq) continue;
-        const ground = sampleGrassy(worldX, worldZ, this.data);
-        if (ground == null) continue;
+        const key = cellKey(gx, gz);
+        let ground = this.samples.get(key);
+        if (ground === undefined) {
+          spent += MISS_COST;
+          const sampled = sampleGrassy(worldX, worldZ, this.data);
+          ground = sampled == null ? NaN : sampled;
+          this.remember(key, ground);
+        }
+        if (Number.isNaN(ground)) continue;
         const scale = 0.7 + 0.6 * hashCell(gx, gz, 3);
         this.tmpPos.set(worldX, ground, worldZ);
         this.tmpQuat.setFromAxisAngle(this.Y_AXIS, hashCell(gx, gz, 4) * Math.PI * 2);
         this.tmpScale.set(scale, scale, scale);
         this.tmpMat.compose(this.tmpPos, this.tmpQuat, this.tmpScale);
-        random[visible * 2] = hashCell(gx, gz, 5);
-        random[visible * 2 + 1] = hashCell(gx, gz, 6);
-        this.mesh.setMatrixAt(visible++, this.tmpMat);
+        this.tmpMat.toArray(matrices, p.visible * 16);
+        random[p.visible * 2] = hashCell(gx, gz, 5);
+        random[p.visible * 2 + 1] = hashCell(gx, gz, 6);
+        p.visible++;
       }
+      p.rowActive = false;
+      p.n++;
     }
-    this.mesh.count = visible;
+    this.commit(p);
+    return spent;
+  }
+
+  /** Swap a finished placement onto the mesh — one memcpy, atomic to the eye. */
+  private commit(p: PendingPlacement): void {
+    (this.mesh.instanceMatrix.array as Float32Array).set(this.scratchMatrix!.subarray(0, p.visible * 16));
+    (this.instanceRandom.array as Float32Array).set(this.scratchRandom!.subarray(0, p.visible * 2));
+    this.mesh.count = p.visible;
     this.mesh.instanceMatrix.needsUpdate = true;
     this.instanceRandom.needsUpdate = true;
+    this.center.set(p.centerX, p.centerZ);
+    this.pending = null;
+    this.placed = true;
+    this.stale = false;
+  }
+
+  /** Remember one ground sample, evicting the oldest quarter when full. */
+  private remember(key: number, ground: number): void {
+    if (this.samples.size >= this.sampleLimit) {
+      // Map iterates in insertion order and the working set is the disc around
+      // the camera, so the oldest keys are the ground furthest behind it —
+      // close enough to LRU for a cache whose misses only cost a resample.
+      let drop = Math.max(1, this.sampleLimit >> 2);
+      for (const stale of this.samples.keys()) {
+        this.samples.delete(stale);
+        if (--drop <= 0) break;
+      }
+    }
+    this.samples.set(key, ground);
+  }
+
+  /**
+   * One axis of the recenter grid, with the deadband from RECENTER_HYSTERESIS.
+   *
+   * Crossing the boundary is not enough; the camera has to be past it by the
+   * margin before the centre jumps, and then it jumps straight to the
+   * camera's own cell rather than walking one cell per frame, so a teleport
+   * still lands in one step.
+   */
+  private recenterAxis(value: number, current: number, cell: number): number {
+    if (!Number.isFinite(current)) return Math.round(value / cell) * cell;
+    if (Math.abs(value - current) <= cell * (0.5 + RECENTER_HYSTERESIS)) return current;
+    return Math.round(value / cell) * cell;
+  }
+
+  /** Drop cached ground; the terrain under this field may have changed. */
+  invalidateGround(): void {
+    this.samples.clear();
+    // an in-flight placement is now half-sampled from the OLD terrain, and a
+    // field already on screen is entirely from it — both have to be redone
+    if (this.pending) this.beginPlacement(this.pending.centerX, this.pending.centerZ);
+    else if (this.placed) this.stale = true;
   }
 
   /** `sampleGround` = plain terrain height (any ground, for the camera
    * height-above-ground fade). `sampleGrassy` = terrain height gated to the
-   * grassy band only (for blade placement) — see regenerate(). */
-  update(camera: THREE.Camera, sampleGround: GroundSampler, sampleGrassy: FoliageSampler): void {
+   * grassy band only (for blade placement) — see stepPlacement(). */
+  update(
+    camera: THREE.Camera,
+    sampleGround: GroundSampler,
+    sampleGrassy: FoliageSampler,
+    budget = Number.POSITIVE_INFINITY,
+  ): number {
     this.group.updateWorldMatrix(true, false);
     this.mesh.matrix.copy(this.group.matrixWorld).invert();
 
     camera.getWorldPosition(this.tmpCamPos);
-    const cell = Math.max(1, this.data.radius * RECENTER_FRACTION);
-    const snappedX = Math.round(this.tmpCamPos.x / cell) * cell;
-    const snappedZ = Math.round(this.tmpCamPos.z / cell) * cell;
-    if (snappedX !== this.center.x || snappedZ !== this.center.y) {
-      this.center.set(snappedX, snappedZ);
-      this.regenerate(sampleGrassy);
+    // While a placement is in flight the centre is NOT reconsidered: letting a
+    // moving camera restart the walk every few frames is how an amortised
+    // build starves and the field stops following at all. Finish, commit,
+    // then re-decide — worst case the field is one build behind.
+    if (!this.pending) {
+      const cell = Math.max(1, this.data.radius * RECENTER_FRACTION);
+      const nextX = this.recenterAxis(this.tmpCamPos.x, this.center.x, cell);
+      const nextZ = this.recenterAxis(this.tmpCamPos.z, this.center.y, cell);
+      if (nextX !== this.center.x || nextZ !== this.center.y) this.beginPlacement(nextX, nextZ);
+      else if (this.stale) this.beginPlacement(this.center.x, this.center.y);
     }
+    let spent = 0;
+    // The FIRST placement runs to completion regardless of the budget: there
+    // is no field on screen to preserve, and an empty world for half a second
+    // is worse than one hitch during the load everything else is hitching in.
+    if (this.pending) spent = this.stepPlacement(sampleGrassy, this.placed ? budget : Infinity);
 
     const ground = sampleGround(this.tmpCamPos.x, this.tmpCamPos.z);
     const camHeight = ground == null ? this.data.heightFadeEnd : this.tmpCamPos.y - ground;
     const span = Math.max(0.001, this.data.heightFadeEnd - this.data.heightFadeStart);
     const t = Math.min(1, Math.max(0, (camHeight - this.data.heightFadeStart) / span));
     this.heightFadeUniform.value = 1 - t;
+    return spent;
   }
 
   /**
@@ -394,6 +620,10 @@ class GrassPatch {
     this.mesh.dispose();
     this.material.dispose();
     this.mapTexture?.dispose();
+    this.samples.clear();
+    this.pending = null;
+    this.scratchMatrix = null;
+    this.scratchRandom = null;
   }
 }
 
@@ -405,6 +635,11 @@ class GrassPatch {
  */
 export class GrassSystem {
   private readonly patches = new Map<string, GrassPatch>();
+  /** iteration order for update(), kept beside the map so the hot loop
+   * neither allocates nor re-derives it every frame */
+  private order: GrassPatch[] = [];
+  /** rotating start index, so one patch mid-placement cannot starve the rest */
+  private turn = 0;
 
   register(
     entityId: string,
@@ -414,20 +649,44 @@ export class GrassSystem {
   ): void {
     this.patches.get(entityId)?.dispose();
     this.patches.set(entityId, new GrassPatch(group, data, resolveTexture));
+    this.order = [...this.patches.values()];
   }
 
   update(camera: THREE.Camera, sampleGround: GroundSampler, sampleGrassy: FoliageSampler): void {
-    if (this.patches.size === 0) return;
-    for (const patch of this.patches.values()) patch.update(camera, sampleGround, sampleGrassy);
+    const patches = this.order;
+    if (patches.length === 0) return;
+    // ONE budget for the frame, shared: two layers re-placing at once must
+    // cost what one does, or a scene with a grass and a fern layer spikes
+    // exactly where a single layer was tuned not to
+    let left = PLACEMENT_BUDGET;
+    this.turn = (this.turn + 1) % patches.length;
+    for (let i = 0; i < patches.length; i++) {
+      const patch = patches[(this.turn + i) % patches.length]!;
+      left -= patch.update(camera, sampleGround, sampleGrassy, Math.max(0, left));
+    }
+  }
+
+  /**
+   * Drop every cached ground sample — the terrain itself has changed.
+   *
+   * The host owns this call because only the host knows what the samples
+   * meant: a world recipe live-edit, a heightmap asset edit, or a swap to a
+   * different world/scene all replace the ground under the same (x, z).
+   * Cheap and idempotent; the fields on screen re-place themselves.
+   */
+  invalidateGround(): void {
+    for (const patch of this.order) patch.invalidateGround();
   }
 
   unregister(entityId: string): void {
     this.patches.get(entityId)?.dispose();
     this.patches.delete(entityId);
+    this.order = [...this.patches.values()];
   }
 
   clear(): void {
     for (const patch of this.patches.values()) patch.dispose();
     this.patches.clear();
+    this.order = [];
   }
 }

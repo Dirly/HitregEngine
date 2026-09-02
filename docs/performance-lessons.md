@@ -159,7 +159,9 @@ considered and rejected on those numbers — the module-level
 
 ## TSL instancing mutates `positionLocal` in place — read `positionGeometry` for the raw local vertex
 
-Three's WebGPU node-material instancing pass does
+(`applyInstancedProps` in `instancing.ts` does the same, deliberately, so the
+rule below is unchanged for `InstancedProps` batches.) Three's WebGPU
+node-material instancing pass does
 `positionLocal.assign(instanceMatrix.mul(positionLocal))` as part of
 `setupPosition()`, *before* any custom `material.positionNode` runs. Any
 custom vertex node (wind sway, a "how far up this blade/card am I" bend
@@ -367,6 +369,68 @@ compiles what the camera can already see — exactly the pipelines that were
 about to be built anyway. Clearing `frustumCulled` on every mesh for the
 duration of the call is what makes it cover the whole level.
 
+## Shader builds are per InstancedMesh OBJECT, and `compileAsync` compiles for the wrong render context
+
+Resolved 2026-09-02, after a full day on the "it hitches when I turn" report
+below. Both halves were invisible to every instrument here until the render
+call was taken apart function by function (see `tools/perf-probe.mjs`):
+rotating in place with **nothing streaming** spent **2640 ms of a 3685 ms lap
+inside three's `Nodes.getForRender`** — shader CODE GENERATION on the main
+thread, ~60 ms per lit material — with GPU-side work (`createShaderModule`,
+`createRenderPipeline`, buffer uploads) under 1 ms per frame. The `writeBuffer`
+suspicion was wrong; the "programs" suspicion was right but for a reason nobody
+had named.
+
+**1. Three builds a separate shader for every `THREE.InstancedMesh`.**
+`RenderObject.getMaterialCacheKey()` appends `object.uuid` whenever
+`object.isInstancedMesh` (or `object.count > 1`), because the instance
+matrices reach the shader through nodes bound to that one object's buffers.
+So every InstancedMesh runs the node builder once on first draw, however many
+identical ones already compiled. A streamed world creates one per (cell, prop,
+submesh, LOD tier): 57 builds in one rotation over just 7 materials, and 3-8
+builds every time a cell is promoted from HLOD proxy to real content — which is
+exactly the stall that coincided with terrain "popping in". On top of that the
+uniform-buffer instancing path (any batch under 1024 instances) bakes the
+CAPACITY into the WGSL (`array<mat4x4<f32>, 764>`), so the compiled programs
+multiplied by capacity too: 102 vertex programs for 9 materials.
+
+Fix: `packages/render/src/instancing.ts`. Prop batches are `InstancedProps` —
+a plain `Mesh` over an `InstancedBufferGeometry` whose instance matrices are
+four interleaved `vec4` GEOMETRY attributes that the material reads with
+`attribute()` nodes (`applyInstancedProps`). Geometry attributes are resolved
+per render object at bind time, not at shader-build time, so the builder state
+is keyed by material + attribute layout and shared by every batch of the same
+prop: one shader per material per pass, ever. The object carries no `count`
+and no `isInstancedMesh` — either one puts the uuid back in the key. Result on
+the same rotation: **57 shader builds → 1, worst frame 235 ms → 71 ms**, node
+states at settle 135 → 49, programs 146 → 50.
+
+**2. A background `compileAsync` compiles for a RenderContext the scene never
+draws in.** Three keys each compiled state on its RenderContext, and
+`RenderContexts.get()` keys those by render-target attachment state + MRT node
++ **nesting depth**. The post chain draws the scene INSIDE its quad render —
+into the scene pass's MRT target, at depth 1 — while `compileAsync` resolves
+the canvas at depth 0. So `precompileGroup` compiled ~10 states per scene that
+were never used and the real ones still built on first draw: measured 57
+builds in a rotation with precompile "on", identical to "off". That is why
+the earlier attempts in this file read as "modest win, not worth it".
+
+Fix: `EngineRenderer.compileInSceneContext` borrows the scene pass's render
+target and MRT node and forces the depth for the synchronous prologue of
+`compileAsync` (the only part that resolves a context). Now a streamed group's
+shaders are generated with three's `buildAsync` yields and its pipelines with
+`createRenderPipelineAsync`, so neither the codegen nor the ~600 ms
+driver-side compile lands on a frame; the cell draws once ready. Result: cold
+rotation **worst frame 14 ms, zero builds on the frame**; a 30 s streaming
+flight: **0 frames over 50 ms** (before: 82 ms + a 623 ms off-loop gap per new
+material).
+
+Two invariants fall out of this, both in `instancing.ts`'s header comment:
+never give scene content a `THREE.InstancedMesh` (or a `count > 1`) unless
+you want one shader build per object, and never let a precompile target a
+different render target / MRT / nesting depth than the pass that will draw
+the objects — it will look like it works (states get created) and do nothing.
+
 ## Streaming while flying: bound the concurrency, and never re-bake a SHRINKING HLOD supercell
 
 Found 2026-09-01 on the first generated (marching-cubes) world, from a profile
@@ -409,6 +473,11 @@ Net on a scripted fly-through: **19 → 40 fps median, frame p95 36 ms → 14 ms
 peak draw calls 1278 → 153, in-flight loads 52 → 5.**
 
 ### What did NOT work: precompiling each chunk as it streams in
+
+> **Superseded 2026-09-02** — see "Shader builds are per InstancedMesh
+> OBJECT" above: the per-chunk precompile was compiling for a render context
+> the scene never drew in, and the per-chunk cost was one shader build per
+> InstancedMesh. Both fixed; the per-group precompile is now on.
 
 The residual cost is `render` self-time in bursts of 300–550 ms — first-sight
 pipeline compilation (see the section above), which streaming produces forever.
@@ -521,6 +590,10 @@ cannot arise.
 
 ### The one that could not move, and why it is worth knowing
 
+> **Moved 2026-09-02** without decoupling the collider — see "Shader builds
+> are per InstancedMesh OBJECT" above. The add-first ordering rule below still
+> holds; the precompile just had to run in the right render context.
+
 After all three, single `render/draw` calls of **760-1320ms** remained. That is
 WebGPU compiling a pipeline per new material/geometry pair on first DRAW,
 inside `render()`, on the frame that first shows a streamed cell.
@@ -546,3 +619,60 @@ hurt.
 wall-clock interval shows you the frames *after* each stall, all of which look
 innocent (`interval 1565ms | js-in-frame 19ms`). Sort by JS-in-frame instead
 and the culprit appears immediately. Several hours went into the wrong frames.
+
+## "It hitches when I turn": isolating rotation from streaming
+
+Reported 2026-09-02 as "rotating and moving the character is what causes it",
+after the streaming work above had already taken the demo from 16 to 42 fps.
+
+**Build the repro carefully, or you will measure the wrong thing.** In edit mode
+the streaming focus is the camera's orbit TARGET (see the comment at
+`chunkManager.update` in main.ts). A first attempt swept the target around a
+120-unit circle to "rotate", which dragged the focus across cell boundaries and
+re-streamed the world — both arms of the A/B came out at ~1.5 fps and neither
+finished loading. The honest test holds the TARGET fixed and orbits the EYE, and
+asserts the chunk count and `loading` are identical before and after:
+
+```
+pure rotation, 616 chunks resident, loading 0 throughout
+   fps 57 | p50 11.5 p95 16.4 p99 170.9 MAX 517.8 | over33% 3.2
+   worst frames: js 518 (draw 351.6), js 450 (draw 276.7)
+```
+
+Half-second frames from turning alone, with nothing loading. So this is a
+FIRST-DRAW cost, not a load cost, and no amount of moving generation off-thread
+touches it.
+
+### What is actually in those frames
+
+CDP profile of pure rotation:
+```
+11.1% 2106ms updateMatrixWorld
+ 8.2% 1560ms fbm2 @ noise.ts          <- field sampling, with nothing streaming
+ 7.5% 1416ms _projectObject           <- cull traversal, x6 passes
+ 5.0%  946ms writeBuffer              <- GPU buffer upload on first draw
+ 3.1%  581ms nearestOnPolyline @ field.ts
+ 2.6%  495ms build (node material)    <- pipeline compile
+```
+
+Two separate causes, and the split matters:
+
+1. **First-draw GPU work** — `writeBuffer` (uploading geometry the first time it
+   is drawn) plus pipeline `build`. `compileAsync` on a newly-streamed group
+   addresses only the second, which is why `EngineRenderer.precompileGroup`
+   measured a real but modest win and no more:
+   `fps 57 -> 69.6, p99 171 -> 156ms, worst 518 -> 469ms, over33% 3.2 -> 2.1`.
+2. **Field sampling from the grass system.** `sampleFoliageGround` calls
+   `field.slope`/`field.height`/`field.splatAt`, and `GrassSystem.update` runs
+   every frame against the camera, so an orbiting camera re-places cover and
+   re-evaluates the noise field on the main thread. It is cheap on average
+   (~0.3ms) and bursts to 80-130ms.
+
+### The ordering rule that keeps biting
+
+Precompiling a streamed group must happen AFTER `scene.add`, never before.
+Streamed terrain's collider is cooked from the built objects, so delaying the
+add delays the ground and the player falls through the world — hit twice by
+awaiting the compile first, and once more by trying to attach physics before the
+add (`sim.addEntities` needs those same objects). Add first, compile in the
+background, never await.

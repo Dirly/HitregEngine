@@ -69,6 +69,26 @@ interface LoadedSupercell {
   entityCount: number;
 }
 
+/**
+ * A cell whose source document has ARRIVED (worker round-trip done) but whose
+ * synchronous publish into the scene is still waiting for frame budget.
+ *
+ * Holding a document costs nothing but memory — no GPU resources exist yet, no
+ * group has been created, so dropping one is free and instant. That is what
+ * makes deferring this stage safe where deferring `scene.add` of an
+ * already-built cell would not be: see integrateCell.
+ */
+interface PendingCell {
+  key: string;
+  cx: number;
+  cz: number;
+  cell: ChunkDoc;
+  /** The streamer this was read for — a reconfigure invalidates it. */
+  streamer: ChunkStreamerData;
+  /** performance.now() at arrival, so the wait shows up in the build span. */
+  arrivedAt: number;
+}
+
 /** One merged bake inside a supercell — the unit that is added and dropped. */
 interface SupercellPart {
   group: THREE.Object3D;
@@ -112,11 +132,72 @@ type SupercellBakeMode = "replace" | "append";
 const MAX_CONCURRENT_SUPERCELL_BAKES = 2;
 
 /**
- * How many cells may load at once. See pumpCellQueue: a load is mostly
- * synchronous main-thread work, so concurrency buys nothing here and costs
- * frame evenness.
+ * How many cells may be AWAITING their source document at once.
+ *
+ * This used to be 3, justified on the grounds that "a load is mostly
+ * synchronous main-thread work, so concurrency buys nothing here". That
+ * reasoning is stale: cell generation moved to a Web Worker pool
+ * (ChunkProvider.get -> voxel-world.ts's pool, sized
+ * clamp(hardwareConcurrency - 2, 2, 6)), so a non-urgent cell now spends
+ * nearly all of its `chunk.load` span — measured up to 1.4s under load —
+ * simply waiting for a worker round-trip. Waiting costs the main thread
+ * nothing, so capping it at 3 left ~6 workers half idle and throttled
+ * streaming throughput at exactly the moment the player moves.
+ *
+ * The frame-evenness concern the old cap was really protecting is now handled
+ * where it belongs: by CELL_INTEGRATION_BUDGET_MS below, which bounds the
+ * SYNCHRONOUS part per frame regardless of how many results land at once.
+ *
+ * Matched to the worker count on purpose — more in flight than there are
+ * workers just lengthens each cell's queue wait without producing cells any
+ * faster. Recomputed lazily because this module is also imported by headless
+ * tooling and tests, where `navigator` may not exist.
  */
-const MAX_CONCURRENT_CELL_LOADS = 3;
+let maxCellLoadsInFlight = 0;
+function maxCellLoadsInFlightValue(): number {
+  if (maxCellLoadsInFlight === 0) {
+    const cores =
+      typeof navigator !== "undefined" && navigator.hardwareConcurrency
+        ? navigator.hardwareConcurrency
+        : 4;
+    maxCellLoadsInFlight = Math.max(2, Math.min(6, cores - 2));
+  }
+  return maxCellLoadsInFlight;
+}
+
+/**
+ * How much main-thread time one frame may spend publishing arrived cells into
+ * the scene (expandScene + buildScene + batchStaticMeshes + the add).
+ *
+ * A single cell's synchronous part measures ~6-18ms. With the in-flight cap
+ * raised to the worker count, several results routinely land in the same tick,
+ * and nothing used to stop all of them integrating back-to-back inside one
+ * frame — which is precisely the "standing still is fine, moving kills it"
+ * symptom. Draining against a budget spreads that burst over as many frames as
+ * it takes, so frame time stays flat no matter how deep the arrival queue is.
+ *
+ * At least one cell is always integrated per drain: a cell that costs more
+ * than the whole budget must still make progress, or a slow cell starves the
+ * queue forever. So this is a floor on throughput, not a hard ceiling on the
+ * frame — one over-budget cell can still overshoot, by design.
+ */
+export const CELL_INTEGRATION_BUDGET_MS = 2.5;
+
+/**
+ * How many arrived-but-not-yet-integrated cells may pile up before the
+ * streamer stops starting new loads.
+ *
+ * Backpressure, not a performance knob: if cells are arriving faster than the
+ * budget can publish them, generating still more of them buys nothing and just
+ * holds their documents in memory. It also keeps the nearest-first scan over
+ * the pending set trivially cheap.
+ */
+const MAX_PENDING_INTEGRATIONS = 16;
+
+/** Monotonic ms. Falls back to Date.now where `performance` is absent (tests). */
+function now(): number {
+  return typeof performance !== "undefined" ? performance.now() : Date.now();
+}
 
 /** simulation cells render full meshes AND run physics + scripts. */
 function isSimulated(rep: ChunkRep): boolean {
@@ -176,6 +257,13 @@ export interface ChunkLifecycle {
    */
   onReattached?: (doc: SceneDoc, objects: Map<string, THREE.Object3D>, simulated: boolean) => void;
   onUnloaded?: (ids: Iterable<string>) => void;
+  /**
+   * A group was just added to the scene: compile its shader pipelines now,
+   * in the BACKGROUND, so the first frame that happens to look at it does not
+   * compile them synchronously inside render(). Never awaited by the caller —
+   * see EngineRenderer.precompileGroup for why gating the add is not an option.
+   */
+  precompile?: (group: THREE.Object3D) => void;
   /** A `renderMode: "instanced"` batch's chunk unloaded — unregister it from
    * whatever FoliageLodSystem tracks it before its meshes get disposed. */
   onDisposeInstancedBatch?: (batch: InstancedPropBatch) => void;
@@ -211,7 +299,27 @@ export class ChunkManager {
   private loaded = new Map<string, LoadedChunk>();
   /** hlod/far ring cells, grouped and baked by supercell — see LoadedSupercell. */
   private loadedSupercells = new Map<string, LoadedSupercell>();
+  /** Cells awaiting their source document (worker/fetch) — the ASYNC cap. */
   private inFlight = new Set<string>();
+  /** Cells whose document arrived, awaiting frame budget — the SYNC cap. */
+  private pending = new Map<string, PendingCell>();
+  /**
+   * Baked supercells waiting to be shown, drained under the same frame budget
+   * as cells.
+   *
+   * Publishing a supercell is NOT free just because the meshing happened in a
+   * worker: it builds THREE geometry from the transferred buffers, parents it,
+   * refreshes the frozen subtree's matrices and — on a `replace` — disposes
+   * the stale parts, which for a 15-cell block is a lot of GPU objects at once.
+   * That ran in a promise continuation, i.e. BETWEEN frames, where no scope
+   * timer sees it: a profile with 20.5ms of JS and 13.7ms of GPU still showed
+   * 62ms/frame off-loop, with `hlod.supercell` spans of 428-520ms.
+   *
+   * Deferring these is safe in a way deferring a CELL is not: an HLOD proxy is
+   * far-field visuals only and carries no collider, so nothing can fall through
+   * a supercell that shows up two frames later.
+   */
+  private pendingSupercells: Array<() => void> = [];
   private inFlightSupercells = new Set<string>();
   /** Pending cell loads, newest-first; drained by pumpCellQueue. */
   private cellQueue: string[] = [];
@@ -277,7 +385,7 @@ export class ChunkManager {
       entities,
       simulated,
       proxied: proxiedCells,
-      loading: this.inFlight.size + this.inFlightSupercells.size,
+      loading: this.inFlight.size + this.pending.size + this.inFlightSupercells.size,
     };
   }
 
@@ -332,6 +440,8 @@ export class ChunkManager {
    * the world is stale at once, so there is nothing finer to invalidate.
    */
   reloadAll(): void {
+    this.pending.clear();
+    this.pendingSupercells.length = 0; // every arrived doc was generated from the stale recipe
     for (const [key, chunk] of [...this.loaded]) this.unload(key, chunk);
     for (const scKey of [...this.loadedSupercells.keys()]) this.unloadSupercell(scKey);
     this.lastFocus = null;
@@ -385,6 +495,9 @@ export class ChunkManager {
   suppressCell(cx: number, cz: number): void {
     const key = `${cx}_${cz}`;
     this.suppressed.add(key);
+    // drop it before it can publish; the drain skips suppressed keys anyway,
+    // but an inline (simulation) integration would already have gone through
+    this.pending.delete(key);
     const chunk = this.loaded.get(key);
     if (chunk) this.unload(key, chunk);
     // it may instead be baked into a proxy supercell — tear the whole thing down;
@@ -400,10 +513,20 @@ export class ChunkManager {
     this.lastFocus = null; // force a re-evaluation so it can reload if still in range
   }
 
-  /** Drive residency from the focus position. Cheap unless the focus changed cells. */
+  /**
+   * Drive residency from the focus position, and publish whatever cells have
+   * arrived since the last frame. Called EVERY frame by the app.
+   *
+   * The residency pass below is cheap unless the focus changed cells, but the
+   * integration drain runs unconditionally and before that early return — it
+   * is the only per-frame hook ChunkManager has, and cells finish generating
+   * on worker timing, not on cell crossings.
+   */
   update(fx: number, fz: number): void {
     const s = this.streamer;
     if (!s || !this.scene) return;
+    this.drainPendingSupercells();
+    this.drainPendingCells(fx, fz);
     const cx = Math.round(fx / s.cellSize);
     const cz = Math.round(fz / s.cellSize);
     if (this.lastFocus && this.lastFocus[0] === cx && this.lastFocus[1] === cz) return;
@@ -433,7 +556,9 @@ export class ChunkManager {
       if (!this.hasCell(key)) continue; // this world has no cell here
       const chunk = this.loaded.get(key);
       if (!chunk) {
-        if (!this.inFlight.has(key)) this.queueCell(key);
+        // `pending` counts as in-flight: its document is already here and is
+        // about to be published, so re-queueing would build the cell twice.
+        if (!this.inFlight.has(key) && !this.pending.has(key)) this.queueCell(key);
       } else if (chunk.simulated !== isSimulated(rep)) {
         // crossed the simulation/fullRender boundary: both tiers render the
         // SAME full-detail meshes (the only difference is physics+scripts),
@@ -504,8 +629,18 @@ export class ChunkManager {
     // Cells the near rings own THIS pass. `desired` above only tells us which
     // cells want proxying; it cannot distinguish "left the world" from "got
     // promoted", and only the second one double-draws.
+    //
+    // ACTUALLY loaded, not merely desired. `target` is what each cell WANTS to
+    // be; a promoted cell still has to clear the load queue, a worker
+    // round-trip (measured at over a second under load) and the frame budget
+    // before it exists. Dropping its proxy on intent alone left nothing drawn
+    // at that spot for the whole interval — a hole in the terrain with the
+    // ocean visible through it, exactly at the moment a cell "goes to higher
+    // resolution". Waiting for `loaded` costs a brief overlap where the coarse
+    // proxy and the fine cell both draw, which is far cheaper to look at than
+    // a hole, and it self-corrects on the next pass.
     const nearOwned = new Set<string>();
-    for (const [key, rep] of target) if (!isProxy(rep)) nearOwned.add(key);
+    for (const [key, rep] of target) if (!isProxy(rep) && this.loaded.has(key)) nearOwned.add(key);
     for (const [scKey, sc] of [...this.loadedSupercells]) {
       const members = desired.get(scKey);
       if (!members) {
@@ -576,6 +711,9 @@ export class ChunkManager {
     const coords = parseChunkCoords(file);
     if (!coords) return;
     const key = `${coords[0]}_${coords[1]}`;
+    // whatever is queued for this key was read before the edit — stale either
+    // way, and the branches below either re-read it or drop it entirely
+    this.pending.delete(key);
     if (content === null) {
       this.available.delete(key);
       const chunk = this.loaded.get(key);
@@ -643,32 +781,162 @@ export class ChunkManager {
     return parsed.data;
   }
 
-  /** simulation/fullRender only — hlod/far reps never reach here, see loadSupercell. */
+  /**
+   * ASYNC half of a cell load: get the source document and hand it to the
+   * integration queue. simulation/fullRender only — hlod/far reps never reach
+   * here, see loadSupercell.
+   *
+   * Nothing here touches the scene, so this is the stage the in-flight cap
+   * bounds and the stage that may run many-at-once: it is a worker round-trip
+   * (or a fetch) plus a `then`.
+   *
+   * SIMULATION cells skip the queue entirely and integrate inline. Their
+   * colliders are cooked from the built objects, so a simulation cell that
+   * waits for frame budget is ground the player can fall through — the same
+   * reason `readCell` passes them the provider's `urgent` flag. They are a
+   * handful of cells around the focus; the bulk of the streaming work is the
+   * render-only rings, which is where the budget actually applies.
+   */
   private async load(key: string, rep: ChunkRep, rawContent?: string): Promise<void> {
     const s = this.streamer;
     const coords = parseChunkKey(key);
     if (!s || !coords || !this.scene || !this.hasCell(key)) return;
     this.inFlight.add(key);
+    // Measures ACQUISITION only now (generate/fetch), not the publish — the
+    // synchronous half is `chunk.build`, in integrateCell, which reports the
+    // queue wait it incurred here.
     const endLoad = this.profiler?.span("chunk.load", `${key} (${rep})`);
+    let arrived: ChunkDoc | null = null;
     try {
-      const cell = await this.readCell(key, coords[0], coords[1], rawContent, isSimulated(rep));
-      if (!cell) return;
-      const { doc } = chunkToSceneDoc(s.source, coords[0], coords[1], s.cellSize, cell);
+      arrived = await this.readCell(key, coords[0], coords[1], rawContent, isSimulated(rep));
+    } catch (error) {
+      console.warn(`[chunks] failed to load cell ${key}:`, error);
+    } finally {
+      this.inFlight.delete(key);
+      endLoad?.();
+    }
+    if (!arrived) return;
+    // streamer may have been reconfigured while we fetched
+    if (this.streamer !== s || !this.scene) return;
+    const entry: PendingCell = {
+      key,
+      cx: coords[0],
+      cz: coords[1],
+      cell: arrived,
+      streamer: s,
+      arrivedAt: now(),
+    };
+    // A hot-swap (onFileChanged) is also inline: the point of a live edit is
+    // that it shows up now, and exactly one cell is involved.
+    if (isSimulated(rep) || rawContent !== undefined) {
+      this.integrateCell(entry, rep);
+      return;
+    }
+    this.pending.set(key, entry);
+  }
+
+  /**
+   * Publish arrived cells into the scene until the frame budget runs out,
+   * nearest-first. Called once per frame from `update`.
+   *
+   * Nearest-first mirrors `queueCell`'s policy one stage later: by the time a
+   * cell's document arrives the focus has usually moved, and the cell the
+   * player is about to see is not necessarily the one that finished first.
+   */
+  /**
+   * Show at most one baked supercell per frame.
+   *
+   * One is enough: a supercell covers a 4x4 block of cells, so even one per
+   * frame keeps the far ring well ahead of the player, and publishing several
+   * together is exactly the burst that was landing off-loop. Unlike cells this
+   * needs no distance ordering — the far ring has no gameplay urgency — and no
+   * inline bypass, because an HLOD proxy carries no collider.
+   */
+  private drainPendingSupercells(): void {
+    const publish = this.pendingSupercells.shift();
+    if (publish) publish();
+  }
+
+  private drainPendingCells(fx: number, fz: number): void {
+    if (this.pending.size === 0) return;
+    const s = this.streamer;
+    if (!s) return;
+    const started = now();
+    let integrated = 0;
+    while (this.pending.size > 0) {
+      // Always let the first cell through: one cell costing more than the
+      // whole budget must still make progress or the queue never drains.
+      if (integrated > 0 && now() - started >= CELL_INTEGRATION_BUDGET_MS) break;
+      let best: PendingCell | null = null;
+      let bestDist = Infinity;
+      for (const entry of this.pending.values()) {
+        // Drop, for free, anything that stopped being wanted while it waited —
+        // no group, no GPU resources, nothing to dispose.
+        if (
+          entry.streamer !== s ||
+          this.loaded.has(entry.key) ||
+          this.suppressed.has(entry.key) ||
+          !this.hasCell(entry.key)
+        ) {
+          this.pending.delete(entry.key);
+          continue;
+        }
+        const rep = this.desiredCells.get(entry.key);
+        if (!rep || isProxy(rep)) {
+          this.pending.delete(entry.key);
+          continue;
+        }
+        const dx = entry.cx * s.cellSize - fx;
+        const dz = entry.cz * s.cellSize - fz;
+        const dist = dx * dx + dz * dz;
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = entry;
+        }
+      }
+      if (!best) break;
+      this.pending.delete(best.key);
+      // `desiredCells` is the authority on what a cell should become by the
+      // time it publishes, exactly as in pumpCellQueue — re-read rather than
+      // trusting the rep it was requested with.
+      this.integrateCell(best, this.desiredCells.get(best.key) ?? "fullRender");
+      integrated += 1;
+    }
+    // integrating freed integration slots — the backpressure gate may have
+    // been holding queued loads back
+    if (this.cellQueue.length > 0) this.pumpCellQueue();
+  }
+
+  /**
+   * SYNCHRONOUS half of a cell load: doc -> scene. This is the part that drops
+   * a frame, and the part `CELL_INTEGRATION_BUDGET_MS` bounds.
+   *
+   * Once this runs it runs to completion. It must NOT be split further or made
+   * async: the add of an already-built group is what the ground under the
+   * player depends on (see the comment on `this.scene.add` below).
+   */
+  private integrateCell(entry: PendingCell, rep: ChunkRep): void {
+    const { key, cell } = entry;
+    const s = entry.streamer;
+    if (this.streamer !== s || !this.scene) return;
+    try {
+      const { doc } = chunkToSceneDoc(s.source, entry.cx, entry.cz, s.cellSize, cell);
       const issues = validateScene(doc, this.registry);
       if (issues.length > 0) {
         console.warn(`[chunks] cell ${key} has invalid components:`, issues);
         return;
       }
-      const expanded = expandScene(doc, this.assets, this.registry);
-      // streamer may have been reconfigured while we fetched
-      if (this.streamer !== s || !this.scene) return;
       // Everything from here down is SYNCHRONOUS main-thread work — prefab
       // expansion, geometry/material construction, collider creation. This
       // is the part that actually drops a frame, so it gets its own span
-      // separate from the fetch it followed.
+      // separate from the fetch it followed. `waited` is the time it spent in
+      // the integration queue: a large one means the budget is the
+      // bottleneck, not generation.
+      const waited = Math.round(now() - entry.arrivedAt);
+      const expanded = expandScene(doc, this.assets, this.registry);
       const endBuild = this.profiler?.span(
         "chunk.build",
-        `${key} · ${Object.keys(expanded.entities).length} entities`,
+        `${key} · ${Object.keys(expanded.entities).length} entities · waited ${waited}ms`,
       );
       const group = new THREE.Group();
       group.name = `chunk:${key}`;
@@ -688,15 +956,12 @@ export class ChunkManager {
       // splat weights) anyway.
       const batch = batchStaticMeshes(built.scene);
       const simulated = isSimulated(rep);
-      // A cell's shaders are compiled by the first frame that draws it, which
-      // measures as 760-1320ms inside a single `render/draw` while streaming.
-      // Precompiling before add() is the obvious fix and does NOT work here:
-      // the collider for streamed terrain is cooked from the BUILT objects, so
-      // it does not exist until this group is in the scene, and anything that
-      // delays add() delays the ground out from under the player. See
-      // docs/performance-lessons.md; the prerequisite is decoupling the
-      // collider from the scene graph.
+      // Add FIRST — the collider for streamed terrain is cooked from these
+      // built objects, so anything that delays this delays the ground under
+      // the player — then compile the shaders in the background, so the frame
+      // that first looks at this cell is not the frame that compiles it.
       this.scene.add(group);
+      this.lifecycle.precompile?.(group);
       // A render-only cell is, by definition, content nothing is allowed to
       // move: it carries no physics bodies and no scripts. Freezing its world
       // matrices takes the whole cell out of the renderer's per-frame matrix
@@ -717,10 +982,7 @@ export class ChunkManager {
       this.lifecycle.onLoaded?.(expanded, built.objects, simulated);
       endBuild?.();
     } catch (error) {
-      console.warn(`[chunks] failed to load cell ${key}:`, error);
-    } finally {
-      this.inFlight.delete(key);
-      endLoad?.();
+      console.warn(`[chunks] failed to integrate cell ${key}:`, error);
     }
   }
 
@@ -736,21 +998,34 @@ export class ChunkManager {
   }
 
   /**
-   * Start cell loads up to the concurrency cap.
+   * Start cell ACQUISITIONS up to the in-flight cap.
    *
-   * Loading a cell is mostly SYNCHRONOUS main-thread work — generating or
-   * parsing the document, expanding prefabs, building geometry and materials,
-   * merging the static batch. Running eighteen of those interleaved (which is
-   * what an unbounded fly-through produced) does not make any of them finish
-   * sooner; it just spreads one long stall across every frame in the burst.
-   * Bounding it keeps each load short and the frame rate even, at the cost of
-   * distant cells arriving a little later — which is the right trade, because
-   * the near ones are queued first.
+   * The old version of this comment argued that concurrency "buys nothing"
+   * because a load is mostly synchronous main-thread work. That was true when
+   * generation ran inline; it is not true now that `ChunkProvider.get` hands
+   * non-urgent cells to a worker pool. What runs concurrently here is waiting,
+   * and waiting is free — so this cap is sized to the worker count, and the
+   * synchronous half is bounded separately by the per-frame integration budget
+   * (see CELL_INTEGRATION_BUDGET_MS and drainPendingCells).
+   *
+   * The second gate is backpressure, not a stall: if arrived cells are already
+   * backed up waiting for frame budget, generating more of them only grows the
+   * backlog. drainPendingCells re-pumps as it clears them.
    */
   private pumpCellQueue(): void {
-    while (this.inFlight.size < MAX_CONCURRENT_CELL_LOADS && this.cellQueue.length > 0) {
+    while (
+      this.inFlight.size < maxCellLoadsInFlightValue() &&
+      this.pending.size < MAX_PENDING_INTEGRATIONS &&
+      this.cellQueue.length > 0
+    ) {
       const key = this.cellQueue.shift()!;
-      if (this.loaded.has(key) || this.inFlight.has(key) || this.suppressed.has(key)) continue;
+      if (
+        this.loaded.has(key) ||
+        this.inFlight.has(key) ||
+        this.pending.has(key) ||
+        this.suppressed.has(key)
+      )
+        continue;
       const rep = this.desiredCells.get(key);
       if (!rep || isProxy(rep)) continue; // left the ring, or belongs to a supercell now
       void this.load(key, rep).finally(() => this.pumpCellQueue());
@@ -869,6 +1144,32 @@ export class ChunkManager {
         cellKeys: new Set(cells.map((c) => `${c.cx}_${c.cz}`)),
         entityCount,
       };
+      // queue the publish; `update()` drains it under the frame budget
+      this.pendingSupercells.push(() => this.publishSupercell(scKey, part, mode, epoch));
+      return;
+    } catch (error) {
+      console.warn(`[chunks] failed to bake supercell ${scKey}:`, error);
+      return;
+    } finally {
+      this.inFlightSupercells.delete(scKey);
+      endLoad?.();
+    }
+  }
+
+  /** The synchronous half of a supercell bake. Runs under the frame budget. */
+  private publishSupercell(
+    scKey: string,
+    part: SupercellPart,
+    mode: SupercellBakeMode,
+    epoch: number,
+  ): void {
+    // the bake may have been superseded while this sat in the queue
+    if (!this.scene || this.supercellEpoch.get(scKey) !== epoch) {
+      this.disposeGroup(part.group);
+      return;
+    }
+    const entityCount = part.entityCount;
+    {
       const existing = this.loadedSupercells.get(scKey);
       if (existing && mode === "append") {
         existing.group.add(part.group);
@@ -895,6 +1196,7 @@ export class ChunkManager {
       group.name = `hlod-supercell:${scKey}`;
       group.add(part.group);
       this.scene.add(group);
+      this.lifecycle.precompile?.(group);
       // a far-field HLOD proxy is merged, baked geometry — it can never move
       freezeStaticSubtree(group);
       this.loadedSupercells.set(scKey, {
@@ -903,9 +1205,6 @@ export class ChunkManager {
         cellKeys: new Set(part.cellKeys),
         entityCount,
       });
-    } finally {
-      this.inFlightSupercells.delete(scKey);
-      endLoad?.();
     }
   }
 
@@ -968,10 +1267,10 @@ export class ChunkManager {
         // materials (bounded by unique material COUNT, not entity count),
         // which is a clear win over paying a fresh compile per chunk forever.
         if (!mesh.userData["sharedGeometry"]) mesh.geometry?.dispose();
-        // InstancedMesh (renderMode: "instanced" props) owns its own
-        // instance-matrix GPU buffer separately from `geometry` — without
-        // this it leaks one buffer per unload, worse the longer a session
-        // streams chunks in and out.
+        // A THREE.InstancedMesh owns its instance-matrix GPU buffer
+        // separately from `geometry` — without this it leaks one buffer per
+        // unload. (Prop batches are InstancedProps now, whose instance buffer
+        // lives IN the geometry and went with the dispose above.)
         if ((mesh as THREE.InstancedMesh).isInstancedMesh) (mesh as THREE.InstancedMesh).dispose();
         const batch = mesh.userData["foliageLodBatch"] as InstancedPropBatch | undefined;
         if (batch) this.lifecycle.onDisposeInstancedBatch?.(batch);
@@ -981,6 +1280,9 @@ export class ChunkManager {
 
   private unloadAll(): void {
     this.cellQueue.length = 0;
+    // arrived-but-unpublished docs own no GPU resources — dropping them is free
+    this.pending.clear();
+    this.pendingSupercells.length = 0;
     this.desiredCells.clear();
     this.supercellQueue.length = 0;
     this.desiredSupercells.clear();

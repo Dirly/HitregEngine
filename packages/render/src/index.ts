@@ -149,7 +149,7 @@ export {
   type SkyData,
   type SkyFogData,
 } from "./scene-lighting.js";
-export { currentMaterialEnvironment, setEnvironment } from "./material-maps.js";
+export { currentMaterialEnvironment, setEnvironment, applyModelTextureFilter, type TextureFilter } from "./material-maps.js";
 export { cachedSkyEnvironmentTexture, clearSkyEnvironmentCache } from "./environment.js";
 export {
   batchStaticMeshes,
@@ -161,6 +161,15 @@ export {
   type StaticBatchHandle,
   type StaticBatchStats,
 } from "./static-batch.js";
+export {
+  InstancedProps,
+  applyInstancedProps,
+  instanceMatrixNode,
+  instancedPositionLocal,
+  isInstancedProps,
+  isInstancedPropMaterial,
+  INSTANCE_MATRIX_ATTRIBUTES,
+} from "./instancing.js";
 export {
   freezeStaticSubtree,
   refreshStaticSubtree,

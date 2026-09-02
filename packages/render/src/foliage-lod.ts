@@ -1,5 +1,6 @@
 import * as THREE from "three/webgpu";
 import { writeImpostorSlot, type ImpostorInstanceData } from "./impostor.js";
+import type { InstancedProps } from "./instancing.js";
 
 /**
  * One (assetId, node) group's near (real geometry, one mesh per submesh),
@@ -10,12 +11,12 @@ import { writeImpostorSlot, type ImpostorInstanceData } from "./impostor.js";
  * index means the same placed prop everywhere.
  */
 export interface InstancedPropBatch {
-  near: THREE.InstancedMesh[];
+  near: InstancedProps[];
   /** Present only for models heavy enough that a decimated middle tier is
    * worth the one-time simplification cost (see scene-builder.ts). Props
    * without one just swap directly between near and far, as before. */
-  mid?: THREE.InstancedMesh[];
-  far: THREE.InstancedMesh;
+  mid?: InstancedProps[];
+  far: InstancedProps;
   /** World-space position per instance — what LOD distance is measured from. */
   positions: THREE.Vector3[];
   /** Each instance's real world matrix; reused for whichever tier is active. */
@@ -74,7 +75,7 @@ interface BatchState {
   nearMidHystSq: number;
 }
 
-function tierMeshes(batch: InstancedPropBatch, tierNum: number): readonly THREE.InstancedMesh[] {
+function tierMeshes(batch: InstancedPropBatch, tierNum: number): readonly InstancedProps[] {
   if (tierNum === NEAR) return batch.near;
   if (tierNum === MID) return batch.mid ?? [];
   return [batch.far];
@@ -101,7 +102,7 @@ function removeFromTier(state: BatchState, batch: InstancedPropBatch, tierNum: n
     if (tierNum === FAR) writeImpostorSlot(batch.far, batch.impostor, mySlot, lastIndex);
   }
   state.counts[arrIdx] = lastSlot;
-  for (const mesh of meshes) mesh.count = lastSlot;
+  for (const mesh of meshes) mesh.instanceCount = lastSlot;
 }
 
 /** Append logical instance `i` to `tierNum`'s compacted buffer. */
@@ -115,7 +116,7 @@ function addToTier(state: BatchState, batch: InstancedPropBatch, tierNum: number
   const meshes = tierMeshes(batch, tierNum);
   for (const mesh of meshes) {
     mesh.setMatrixAt(slot, matrix);
-    mesh.count = slot + 1;
+    mesh.instanceCount = slot + 1;
     mesh.instanceMatrix.needsUpdate = true;
   }
   if (tierNum === FAR) writeImpostorSlot(batch.far, batch.impostor, slot, i);
@@ -129,7 +130,7 @@ function addToTier(state: BatchState, batch: InstancedPropBatch, tierNum: number
  * distance to the camera: full-detail near, an optional decimated mid tier,
  * and a cheap billboard/box far tier.
  *
- * Each tier's `InstancedMesh.count` is kept equal to the number of instances
+ * Each tier's `InstancedProps.instanceCount` is kept equal to the number of instances
  * ACTUALLY in that tier, with active instances packed into buffer slots
  * [0, count) — NOT "all N instances always, with inactive ones zero-scaled".
  * Zero-scaling alone hides inactive instances visually but a GPU instanced
@@ -242,9 +243,9 @@ export class FoliageLodSystem {
     // nothing is classified into any tier yet — every mesh starts at count 0
     // (not the constructor's default of "all N instances") so a freshly
     // registered batch costs nothing until update() actually places instances
-    for (const mesh of batch.near) mesh.count = 0;
-    if (batch.mid) for (const mesh of batch.mid) mesh.count = 0;
-    batch.far.count = 0;
+    for (const mesh of batch.near) mesh.instanceCount = 0;
+    if (batch.mid) for (const mesh of batch.mid) mesh.instanceCount = 0;
+    batch.far.instanceCount = 0;
   }
 
   unregister(batch: InstancedPropBatch): void {

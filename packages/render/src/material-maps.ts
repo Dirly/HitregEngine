@@ -211,6 +211,58 @@ export function loadSharedTexture(
  * without an image decoder, and so no texture path can be added that skips
  * the colour-space assignment.
  */
+/** Every texture slot a loaded material can carry; the filter applies to all of them. */
+const MODEL_TEXTURE_SLOTS = [
+  "map",
+  "normalMap",
+  "roughnessMap",
+  "metalnessMap",
+  "emissiveMap",
+  "aoMap",
+  "alphaMap",
+  "bumpMap",
+  "specularMap",
+] as const;
+
+/**
+ * Re-filter every texture of a loaded model (`mesh.source.textureFilter`).
+ *
+ * A glTF carries its own sampler and the loader honours it, which for almost
+ * every exporter means LINEAR — so a 256px character skin meant to read as
+ * pixel art arrives smeared. This flips just the filters (colour space, wrap
+ * and anisotropy are the file's business), with the same nearest-magnify /
+ * mipmapped-minify split as {@link configureTexture} and for the same reason.
+ * Textures are shared across the model's materials and across every entity
+ * using the model, so each is touched once. Returns how many were changed.
+ */
+export function applyModelTextureFilter(root: THREE.Object3D, filter: TextureFilter): number {
+  const seen = new Set<string>();
+  let touched = 0;
+  root.traverse((node) => {
+    const mesh = node as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    for (const material of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
+      if (!material) continue;
+      const slots = material as unknown as Record<string, THREE.Texture | null | undefined>;
+      for (const slot of MODEL_TEXTURE_SLOTS) {
+        const texture = slots[slot];
+        if (!texture || !texture.isTexture || seen.has(texture.uuid)) continue;
+        seen.add(texture.uuid);
+        if (filter === "nearest") {
+          texture.magFilter = THREE.NearestFilter;
+          texture.minFilter = THREE.NearestMipmapLinearFilter;
+        } else {
+          texture.magFilter = THREE.LinearFilter;
+          texture.minFilter = THREE.LinearMipmapLinearFilter;
+        }
+        texture.needsUpdate = true;
+        touched += 1;
+      }
+    }
+  });
+  return touched;
+}
+
 export function configureTexture(
   texture: THREE.Texture,
   srgb: boolean,

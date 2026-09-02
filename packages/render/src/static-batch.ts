@@ -141,6 +141,7 @@ export function batchStaticMeshes(
     // a world-space merge would flatten away.
     if ((mesh as unknown as { isSkinnedMesh?: boolean }).isSkinnedMesh) return void skipped++;
     if ((mesh as unknown as { isInstancedMesh?: boolean }).isInstancedMesh) return void skipped++;
+    if ((mesh as unknown as { isInstancedProps?: boolean }).isInstancedProps) return void skipped++;
     if (!mesh.geometry?.getAttribute("position")) return void skipped++;
     // A geometry carrying attributes beyond position/normal/uv is carrying
     // them for a reason — voxel terrain's per-vertex splat weights and biome
@@ -295,6 +296,7 @@ export function mergeModelSubmeshes(root: THREE.Object3D): number {
     const mesh = node as THREE.Mesh;
     if (!mesh.isMesh) return;
     if ((mesh as unknown as { isInstancedMesh?: boolean }).isInstancedMesh) return;
+    if ((mesh as unknown as { isInstancedProps?: boolean }).isInstancedProps) return;
     if (Array.isArray(mesh.material)) return;
     if (!mesh.geometry?.getAttribute("position")) return;
     if (hasCustomAttributes(mesh.geometry)) return;

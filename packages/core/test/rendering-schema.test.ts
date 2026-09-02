@@ -104,6 +104,7 @@ describe("postfxSchema — post stack", () => {
       antialias: { mode: "fxaa" },
       motionBlur: { enabled: false, amount: 0.3, samples: 12 },
       sharpen: { enabled: false, amount: 0.4 },
+      pixelate: { enabled: false, height: 240, filter: "nearest" },
     });
   });
 

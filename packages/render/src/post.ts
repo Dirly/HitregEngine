@@ -109,6 +109,20 @@ export interface SharpenFx {
   amount: number;
 }
 
+export type PixelateFilter = "nearest" | "linear";
+
+/**
+ * Low internal resolution, scaled up to the screen — the fake-PSX look. Not a
+ * pass: the renderer shrinks its backing store (`EngineRenderer.setSize`) and
+ * the canvas upscales, with `image-rendering: pixelated` for hard pixels.
+ */
+export interface PixelateFx {
+  enabled: boolean;
+  /** Vertical resolution in pixels; width follows the viewport aspect. */
+  height: number;
+  filter: PixelateFilter;
+}
+
 /** The `postfx` component payload, as it arrives from a scene doc. */
 export interface PostFxData {
   bloom?: Partial<BloomFx>;
@@ -122,6 +136,7 @@ export interface PostFxData {
   antialias?: Partial<AntialiasFx>;
   motionBlur?: Partial<MotionBlurFx>;
   sharpen?: Partial<SharpenFx>;
+  pixelate?: Partial<PixelateFx>;
 }
 
 export interface ResolvedPostFx {
@@ -136,6 +151,7 @@ export interface ResolvedPostFx {
   antialias: AntialiasFx;
   motionBlur: MotionBlurFx;
   sharpen: SharpenFx;
+  pixelate: PixelateFx;
 }
 
 const TONEMAP_MODES: readonly TonemapMode[] = ["aces", "agx", "neutral", "reinhard", "linear"];
@@ -229,7 +245,27 @@ export function resolvePostFx(data: PostFxData | null | undefined): ResolvedPost
       enabled: bool(d.sharpen?.enabled, false),
       amount: num(d.sharpen?.amount, 0.4),
     },
+    pixelate: {
+      enabled: bool(d.pixelate?.enabled, false),
+      height: Math.round(num(d.pixelate?.height, 240)),
+      filter: d.pixelate?.filter === "linear" ? "linear" : "nearest",
+    },
   };
+}
+
+/**
+ * The pixel ratio the renderer should actually use for a viewport `cssHeight`
+ * CSS pixels tall when the host asked for `requested` (its DPR cap).
+ *
+ * Pixelate never UPSCALES the backing store past what the host asked for —
+ * a 240-line target on a 200px-tall viewport still renders at 200 lines —
+ * and it floors at a handful of lines so a degenerate viewport can't produce
+ * a zero-sized canvas.
+ */
+export function pixelateRatio(fx: ResolvedPostFx, cssHeight: number, requested: number): number {
+  if (!fx.pixelate.enabled || !(cssHeight > 0)) return requested;
+  const lines = Math.max(8, fx.pixelate.height);
+  return Math.min(requested, lines / cssHeight);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -760,6 +796,13 @@ export class PostChain {
   readonly signature: string;
   readonly outputNode: Tsl;
   readonly toneMapping: THREE.ToneMapping;
+  /**
+   * The pass that draws the scene. Exposed for `EngineRenderer.precompileGroup`:
+   * three keys every compiled shader on the render target + MRT it was built
+   * for, so a background compile that wants to be USED by this pass has to
+   * borrow its target and MRT node — see the renderer.
+   */
+  readonly scenePass: ReturnType<typeof pass>;
 
   private readonly disposables: Disposable[] = [];
 
@@ -802,6 +845,7 @@ export class PostChain {
     const has = (id: PostPassId) => this.plan.includes(id);
 
     const scenePass = pass(scene, camera);
+    this.scenePass = scenePass;
     this.disposables.push(scenePass as unknown as Disposable);
 
     // Selective bloom: split the scene pass into its normal lit "output" and

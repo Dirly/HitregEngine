@@ -111,6 +111,11 @@ export function voxelChunkProvider(
     assetExists: (id, kind) => (kind === "prefab" ? assets.getPrefab(id) : assets.getModel(id)) !== undefined,
   };
   reportMissingScatterAssets(world, options);
+  // A provider is rebuilt on every scene rebuild — every edit, every recipe
+  // change, every scene switch — so the previous pool's threads have to go
+  // with it. Without this each edit leaked a whole set of workers, which is
+  // exactly the live-editing loop this engine is built around.
+  activePool?.dispose();
   const pool = createVoxelWorkerPool(world, options);
   activePool = pool;
   return {
@@ -145,6 +150,8 @@ interface VoxelWorkerPool {
   supercell(
     buckets: Array<{ key: string; cells: Array<{ source: VoxelMeshSource; matrix: number[] }> }>,
   ): Promise<Array<{ key: string; mesh: VoxelMesh }>>;
+  /** Terminate the threads and fail anything still in flight. */
+  dispose(): void;
 }
 
 /**
@@ -256,6 +263,17 @@ function createVoxelWorkerPool(
     mesh: (source) => submit<VoxelMesh | null>((id) => ({ kind: "mesh", id, source })),
     supercell: (buckets) =>
       submit<Array<{ key: string; mesh: VoxelMesh }>>((id) => ({ kind: "supercell", id, buckets })),
+    dispose() {
+      for (const worker of workers) worker.terminate();
+      workers.length = 0;
+      // Anything still awaiting a terminated worker would hang forever, and a
+      // hung `readCell` holds a slot in the load queue for the rest of the
+      // session. Reject instead: ChunkManager already treats a failed cell as
+      // "load nothing" and warns.
+      const orphaned = [...pending.values()];
+      pending.clear();
+      for (const entry of orphaned) entry.reject(new Error("voxel worker pool disposed"));
+    },
   };
 }
 

@@ -207,6 +207,16 @@ export const meshSchema = z.object({
             "for that gap. 1.5 is a noticeable lift. It brightens the lit and unlit sides alike, so it is not a " +
             "fix for a dead shadow side; that wants image-based lighting.",
         ),
+      textureFilter: z
+        .enum(["linear", "nearest"])
+        .optional()
+        .describe(
+          "Override the model's own texture sampling. 'nearest' keeps hard texel edges — the pixel-art / PSX " +
+            "look for a low-res character skin — where the linear filtering most exporters bake into the file " +
+            "smears it. Minification still mipmaps either way, so distant models stay stable. Applies to every " +
+            "map of every material in the model, and the loaded model is SHARED by every entity using it, so " +
+            "one entity's choice is the asset's choice.",
+        ),
     }),
     z.object({
       /** Extruded 2D footprint (graybox poly-draw). Rises from the entity origin. */
@@ -1270,6 +1280,23 @@ export const postfxSchema = z.object({
       amount: z.number().min(0).max(2).default(0.4).describe("Contrast-adaptive sharpen strength. Its main use is buying back the texture detail FXAA/TAA softened."),
     })
     .prefault({}),
+  pixelate: z
+    .object({
+      enabled: z.boolean().default(false),
+      height: z
+        .number()
+        .int()
+        .min(48)
+        .max(1080)
+        .default(240)
+        .describe("Vertical resolution the whole frame is rendered at, in pixels; width follows the viewport's aspect. 240 is the PSX look (320x240 at 4:3), 270-360 reads as a softer modern take. Every pass, including bloom and AO, runs at this size, so it is also a large performance win."),
+      filter: z
+        .enum(["nearest", "linear"])
+        .default("nearest")
+        .describe("How the small frame is scaled up to the screen. nearest keeps hard pixel edges (the retro look); linear blurs them into a soft low-res image."),
+    })
+    .prefault({})
+    .describe("Render the frame at a low internal resolution and scale it up to the screen — the fake-PSX look. Not a shader pass: it changes the canvas backing size, so it costs nothing and speeds everything else up."),
 });
 
 /**

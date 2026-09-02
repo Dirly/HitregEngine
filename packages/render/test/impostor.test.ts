@@ -152,7 +152,7 @@ describe("per-batch data", () => {
 
   it("writeImpostorSlot copies one logical instance into one far-tier slot", () => {
     const bounds = new THREE.Box3(new THREE.Vector3(-1, 0, -1), new THREE.Vector3(1, 4, 1));
-    const far = new THREE.InstancedMesh(impostorGeometry(bounds, 3), new THREE.MeshBasicMaterial(), 3);
+    const far = { geometry: impostorGeometry(bounds, 3) };
     const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), 1.1);
     const m = new THREE.Matrix4().compose(new THREE.Vector3(), q, new THREE.Vector3(3, 3, 3));
     const data = impostorInstanceData([new THREE.Matrix4(), m, new THREE.Matrix4()]);

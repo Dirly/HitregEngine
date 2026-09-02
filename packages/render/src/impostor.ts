@@ -23,6 +23,7 @@ import {
   vec3,
   vec4,
 } from "three/tsl";
+import { instancedPositionLocal } from "./instancing.js";
 
 /**
  * Octahedral impostors for the instanced-prop far tier — the second piece of
@@ -234,7 +235,7 @@ export function impostorGeometry(bounds: THREE.Box3, count: number): THREE.Buffe
  * `slot` — called by the LOD system wherever it writes a far-tier matrix. A
  * batch without impostor data (primitive fallback proxy) is a no-op. */
 export function writeImpostorSlot(
-  far: THREE.InstancedMesh,
+  far: { geometry: THREE.BufferGeometry },
   data: ImpostorInstanceData | undefined,
   slot: number,
   i: number,
@@ -279,7 +280,10 @@ export function impostorMaterial(atlas: ImpostorAtlas, bounds: THREE.Box3): THRE
   const qxyzInv = qxyz.negate();
 
   // -- vertex: spread the four centre-anchored vertices into a quad facing the camera
-  const anchor = positionLocal; // already instanced: this instance's model centre, mesh-local space
+  // this instance's model centre, placed: the batch is an InstancedProps, whose
+  // instance transform lives in geometry attributes rather than in three's
+  // InstancedMesh path — see instancing.ts
+  const anchor = instancedPositionLocal();
   const cameraLocal = modelWorldMatrixInverse.mul(vec4(cameraPosition, 1)).xyz;
   const toCamera = normalize(sub(cameraLocal, anchor));
   // world-up reference for the quad's right vector, with the same pole

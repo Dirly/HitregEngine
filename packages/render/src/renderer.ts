@@ -2,6 +2,7 @@ import * as THREE from "three/webgpu";
 import {
   PostChain,
   needsPipeline,
+  pixelateRatio,
   nextPassToBlame,
   passPlan,
   pipelineSignature,
@@ -14,6 +15,38 @@ import {
 } from "./post.js";
 import { volumetricPlanKey, type VolumetricRequest } from "./atmosphere.js";
 import { sceneLighting, type SceneLighting } from "./scene-lighting.js";
+
+/**
+ * Three's `_callDepth` while the post chain's scene pass renders when
+ * `EngineRenderer.render()` is the outermost render: the quad render is depth
+ * 0 and the scene pass runs nested inside it. Part of the RenderContext key —
+ * see `compileInSceneContext`, which measures the real value each frame
+ * because a host that itself renders from inside a `render()` (the editor's
+ * docked viewport) pushes the whole chain one level deeper.
+ */
+const SCENE_PASS_CALL_DEPTH = 1;
+
+/**
+ * The slice of `WebGPURenderer`'s private surface `compileInSceneContext`
+ * leans on (three r185). Every member is feature-checked before use; if a
+ * future three renames one, the precompile silently degrades to plain
+ * `compileAsync` (correct, just compiling for a context nothing draws in —
+ * the probe in tools/perf-probe.mjs shows that as codegen during rotation).
+ */
+interface RenderObjectLike {
+  drawRange: unknown;
+  group: unknown;
+  dispose(): void;
+}
+interface RendererInternals {
+  _renderContexts?: { get: (rt: unknown, mrt: unknown, depth?: number) => unknown };
+  _createObjectPipeline?: (...args: unknown[]) => void;
+  _objects?: { get: (...args: unknown[]) => RenderObjectLike };
+  _nodes?: { getForRender: (renderObject: unknown) => unknown };
+  _pipelines?: { get: (renderObject: unknown) => { pipeline?: unknown } | undefined };
+  _currentRenderContext?: unknown;
+  backend?: { get: (object: unknown) => { error?: boolean } | undefined };
+}
 
 /**
  * The two halves of a render, so a profile can tell them apart.
@@ -79,6 +112,11 @@ export class EngineRenderer {
   private volumetric: VolumetricRequest | null = null;
   private volumetricKey = volumetricPlanKey(null);
 
+  /** What the host last asked for in setSize(); re-applied when pixelate changes. */
+  private viewport: { width: number; height: number; pixelRatio: number } | null = null;
+  /** The pixelate settings the canvas currently reflects (see applySize). */
+  private pixelateKey = "";
+
   private pipeline: THREE.RenderPipeline | null = null;
   private chain: PostChain | null = null;
   private pipelineScene: THREE.Scene | null = null;
@@ -115,10 +153,32 @@ export class EngineRenderer {
     return backend.isWebGPUBackend ? "webgpu" : "webgl";
   }
 
+  /**
+   * Size the drawing surface. `width`/`height` are CSS pixels; `pixelRatio` is
+   * the host's cap (usually min(devicePixelRatio, 1)). A `postfx.pixelate`
+   * setting lowers the ratio below that so the frame renders at a fixed line
+   * count and the canvas scales it up — see {@link pixelateRatio}.
+   */
   setSize(width: number, height: number, pixelRatio = 1): void {
-    this.renderer.setPixelRatio(pixelRatio);
+    this.viewport = { width, height, pixelRatio };
+    this.applySize();
+  }
+
+  private applySize(): void {
+    const viewport = this.viewport;
+    if (!viewport) return;
+    const { pixelate } = this.fx;
+    const ratio = pixelateRatio(this.fx, viewport.height, viewport.pixelRatio);
+    this.renderer.setPixelRatio(ratio);
     // updateStyle=false: the host app owns canvas CSS (docked editor layout)
-    this.renderer.setSize(width, height, false);
+    this.renderer.setSize(viewport.width, viewport.height, false);
+    // The upscale is the browser's, so its filter is a CSS property on the
+    // canvas — the one style the host does NOT own, because it is the look.
+    const canvas = this.renderer.domElement as HTMLCanvasElement | undefined;
+    if (canvas && canvas.style) {
+      canvas.style.imageRendering = pixelate.enabled && pixelate.filter === "nearest" ? "pixelated" : "";
+    }
+    this.pixelateKey = `${pixelate.enabled}:${pixelate.height}:${pixelate.filter}`;
   }
 
   /**
@@ -265,6 +325,10 @@ export class EngineRenderer {
 
   private applyPostFxState(): void {
     this.fx = resolvePostFx(this.postFxData);
+    // pixelate is not a pass — it is the backing-store size — so it is applied
+    // here and never enters the pipeline signature
+    const { pixelate } = this.fx;
+    if (this.viewport && `${pixelate.enabled}:${pixelate.height}:${pixelate.filter}` !== this.pixelateKey) this.applySize();
     // Tone mapping stays on the renderer as well as in the graph: it is what
     // the no-pipeline path uses, and `toneMappingExposure` is a renderer
     // reference that the graph's own tone-mapping node reads — which is why
@@ -288,42 +352,227 @@ export class EngineRenderer {
   }
 
   /**
-   * Build every render pipeline this scene will need, now, instead of paying
-   * for each one the first time its object happens to come on screen.
+   * Build every render pipeline a scene will need, now, instead of paying for
+   * each one the first time its object happens to come on screen.
    *
-   * WebGPU compiles a pipeline per material/geometry pair on first DRAW. In a
-   * level you fly around, that lands as a stall every time you pan somewhere
-   * new — the classic "it hitches whenever I turn" report, and it never settles
-   * because there is always another corner you have not looked at yet. Paying
-   * it once during load turns a permanent stutter into a slightly longer scene
-   * open.
+   * WebGPU compiles a pipeline per material/geometry pair on first DRAW, and
+   * three generates the shader (a node-builder run, ~60ms of main-thread JS
+   * for a lit, shadowed material) on the same frame. In a level you fly
+   * around that lands as a stall every time you turn somewhere new. Paying it
+   * at load turns a permanent stutter into a slightly longer scene open.
    *
-   * `compileAsync()` alone does NOT do this: it runs the normal
-   * `_projectObject` pass, which frustum-culls, so it only compiles what the
-   * camera can already see — precisely the pipelines that were about to be
-   * built anyway. Clearing `frustumCulled` for the duration is what makes it
-   * cover the whole level; the flags are restored afterwards, including if the
-   * compile throws.
-   *
-   * Awaiting is optional: the frame loop is free to run while this resolves,
-   * and the pipelines simply become ready as they land.
+   * Awaiting is optional: the frame loop is free to run while this resolves.
+   * See {@link precompileGroup} for the context rules this has to follow.
    */
   async precompile(scene: THREE.Scene, camera: THREE.Camera): Promise<void> {
+    await this.compileInSceneContext(scene, camera, scene);
+  }
+
+  /**
+   * Compile one newly-streamed SUBTREE's pipelines, in the background.
+   *
+   * `precompile` above solves this for a scene at load. Streamed content gets
+   * no such pass, so every chunk that arrives later would still compile its
+   * pipelines on first DRAW — "first draw" being whenever the player happens
+   * to TURN far enough to see it.
+   *
+   * NOT awaited by callers, deliberately. Gating a cell's `scene.add()` on
+   * its shaders was tried and reverted twice: streamed terrain's collider is
+   * cooked from the built objects, so delaying the add delays the ground and
+   * the player falls through the world. Adding first and compiling after
+   * costs nothing on the critical path — the group is already visible and
+   * collidable — and three's `compileAsync` builds the shader with yields
+   * between stages and creates the GPU pipeline with
+   * `createRenderPipelineAsync`, so neither the codegen nor the driver
+   * compile blocks a frame; the cell simply draws once its pipeline is ready.
+   *
+   * ## The context rule (why this was measured as useless once)
+   *
+   * Three keys every compiled shader on the RenderContext it was built for,
+   * and a RenderContext is keyed by render-target attachment state, MRT node
+   * and NESTING DEPTH. The post-processing chain draws the scene INSIDE its
+   * quad render — into the scene pass's MRT target, at depth 1 — while a bare
+   * `compileAsync` compiles for the canvas at depth 0. Those states never
+   * matched, so the first version of this compiled ~10 shaders per scene
+   * that were never used and the real ones still compiled on first draw
+   * (measured: 57 shader builds in one rotation with precompile "on").
+   * Borrowing the scene pass's target and MRT node fixes two of the three
+   * keys; the depth is forced through `_renderContexts.get` for the
+   * synchronous prologue of `compileAsync` (the only part that resolves a
+   * context). With no post chain the scene draws at depth 0 into the
+   * framebuffer target, which is exactly what `compileAsync` assumes, so
+   * nothing needs borrowing.
+   *
+   * Shadow-pass shaders are not covered (they build inside the light's
+   * shadow render); they are an order of magnitude cheaper.
+   */
+  async precompileGroup(
+    group: THREE.Object3D,
+    camera: THREE.Camera,
+    targetScene: THREE.Scene,
+  ): Promise<void> {
+    await this.compileInSceneContext(group, camera, targetScene);
+  }
+
+  /**
+   * How precompiles have run so far — for probes and bug reports. `borrowed`
+   * compiled in the scene pass's context, `plain` had no post chain to
+   * borrow from, `objects` is how many render objects were handed to the
+   * synchronous shader build, `fallbacks` how many of those threw.
+   */
+  readonly precompileStats = { borrowed: 0, plain: 0, objects: 0, fallbacks: 0, healed: 0 };
+  /** Measured in render(): the nesting depth the scene pass actually draws at. */
+  private scenePassCallDepth = SCENE_PASS_CALL_DEPTH;
+  /** False until the current post chain has drawn a frame (see below). */
+  private chainRendered = false;
+  /** Precompiles waiting for the chain's first frame. */
+  private renderWaiters: Array<() => void> = [];
+
+  private async compileInSceneContext(
+    root: THREE.Object3D,
+    camera: THREE.Camera,
+    targetScene: THREE.Scene,
+  ): Promise<void> {
+    const renderer = this.renderer;
+    const internals = renderer as unknown as RendererInternals;
+    const wantsChain = !this.postUnavailable && needsPipeline(this.plan);
+    // A load-time precompile usually runs before the first frame, i.e. before
+    // render() has built the post chain whose context we need to borrow.
+    // Build it here on the same terms render() would (it rebuilds again only
+    // if the render camera differs).
+    if (wantsChain && (!this.pipeline || !this.chain || this.pipelineScene !== targetScene)) {
+      try {
+        this.buildPipeline(targetScene, camera);
+      } catch {
+        // render() owns the failure path (it retires the pass and reports)
+      }
+    }
+    // The scene pass finishes configuring its render target (MSAA sample
+    // count, lazily added MRT textures) on its first frame, and that state is
+    // part of the RenderContext key. A whole-scene precompile at load runs
+    // before that frame, so it would compile for a context the pass never
+    // draws in — wait for the chain to render once. Streamed groups arrive
+    // long after and pass straight through.
+    if (wantsChain && this.chain && !this.chainRendered) {
+      await new Promise<void>((resolve) => this.renderWaiters.push(resolve));
+    }
+    // compileAsync runs the normal projection pass, which frustum-culls — and
+    // a just-streamed cell is usually off-screen, which is the entire case
+    // being solved here. Clear culling for the pass, restore it after.
     const restore: THREE.Object3D[] = [];
-    scene.traverse((object) => {
+    root.traverse((object) => {
       if (!(object as THREE.Mesh).isMesh) return;
       if (object.frustumCulled === false) return;
       object.frustumCulled = false;
       restore.push(object);
     });
+    const scenePass =
+      !this.postUnavailable && needsPipeline(this.plan) && this.chain && this.pipelineScene === targetScene
+        ? this.chain.scenePass
+        : null;
+    const contexts = internals._renderContexts;
+    const originalCreate = internals._createObjectPipeline;
+    /** Every render object the synchronous shader build touched — see the heal below. */
+    const handed: RenderObjectLike[] = [];
+    let undo: () => void = () => undefined;
+    if (
+      scenePass !== null &&
+      contexts !== undefined &&
+      typeof contexts.get === "function" &&
+      typeof originalCreate === "function" &&
+      internals._objects !== undefined &&
+      internals._nodes !== undefined
+    ) {
+      this.precompileStats.borrowed += 1;
+      const stats = this.precompileStats;
+      const previousTarget = renderer.getRenderTarget();
+      const previousMrt = renderer.getMRT();
+      const originalGet = contexts.get;
+      renderer.setRenderTarget(scenePass.renderTarget);
+      renderer.setMRT(scenePass.getMRT());
+      const depth = this.scenePassCallDepth;
+      contexts.get = function (rt: unknown, mrt: unknown) {
+        return originalGet.call(this, rt, mrt, depth);
+      };
+      // Shader CODE is generated by three from live renderer state — it reads
+      // getRenderTarget()/getMRT()/isOutputTarget while building — and
+      // compileAsync generates it in a later task, after the frame loop has
+      // put the canvas back. Built then, the fragment shader has one output
+      // where the scene pass's MRT target has several, and every pipeline
+      // fails with "Color target has no corresponding fragment stage output".
+      // So generate it HERE, inside the borrowed window, for each object the
+      // projection pass hands over; compileAsync's own pass then finds the
+      // state cached and only has the (async) GPU pipeline left to build. The
+      // synchronous cost is one build per genuinely new material variant —
+      // rare once batches share shaders (see instancing.ts).
+      internals._createObjectPipeline = function (this: RendererInternals, ...args) {
+        originalCreate.apply(this, args);
+        const [object, material, scene, camera, lightsNode, group, clippingContext, passId] = args;
+        try {
+          const renderObject = this._objects!.get(
+            object, material, scene, camera, lightsNode, this._currentRenderContext, clippingContext, passId,
+          );
+          renderObject.drawRange = (object as THREE.Mesh).geometry.drawRange;
+          renderObject.group = group;
+          this._nodes!.getForRender(renderObject);
+          handed.push(renderObject);
+          stats.objects += 1;
+        } catch (error) {
+          // compileAsync's own pass is the fallback; it just builds later
+          stats.fallbacks += 1;
+          if (stats.fallbacks === 1) console.warn("[render] precompile: synchronous shader build failed, deferring:", error);
+        }
+      };
+      undo = () => {
+        delete internals._createObjectPipeline;
+        contexts.get = originalGet;
+        renderer.setRenderTarget(previousTarget);
+        renderer.setMRT(previousMrt);
+      };
+    }
+    if (!scenePass) this.precompileStats.plain += 1;
+    let pending: Promise<void>;
     try {
-      await this.renderer.compileAsync(scene, camera);
+      // compileAsync resolves its RenderContext and projects the subtree
+      // synchronously, before its first await — the borrowed state only has
+      // to hold for that prologue, and must be undone before the frame loop
+      // renders again.
+      pending = renderer.compileAsync(root, camera, targetScene);
+    } finally {
+      undo();
+    }
+    try {
+      await pending;
     } catch (error) {
-      // A precompile is an optimisation, never a correctness requirement: a
-      // failure here must not stop the scene from being rendered normally.
+      // an optimisation, never a correctness requirement
       console.warn("[render] pipeline precompile failed:", error);
     } finally {
       for (const object of restore) object.frustumCulled = true;
+    }
+    // A pipeline that fails validation off-frame stays null in three's cache
+    // and the object is then never drawn in this context — a silent hole, not
+    // a warning. Materials that read the viewport (the water's depth-based
+    // foam, soft particles) can trip this because their bindings depend on a
+    // render being in progress. Drop those render objects entirely so the next
+    // real frame rebuilds them exactly as it would have without a precompile.
+    const pipelines = internals._pipelines;
+    const backend = internals.backend;
+    if (handed.length > 0 && pipelines && typeof pipelines.get === "function" && backend && typeof backend.get === "function") {
+      let healed = 0;
+      for (const renderObject of handed) {
+        const pipeline = pipelines.get(renderObject)?.pipeline;
+        if (!pipeline) continue;
+        if (backend.get(pipeline)?.error === true) {
+          renderObject.dispose();
+          healed += 1;
+        }
+      }
+      if (healed > 0) {
+        this.precompileStats.healed += healed;
+        // three has already logged one error per pipeline above this line;
+        // this is the "and nothing is broken" that those lines lack
+        console.info(`[render] precompile: ${healed} pipeline(s) failed validation off-frame and will build on first draw instead`);
+      }
     }
   }
 
@@ -374,9 +623,20 @@ export class EngineRenderer {
         }
         scopes?.begin("draw");
         try {
+          // The scene pass renders two levels below wherever we are now (the
+          // quad render, then the pass nested in it) — recorded for
+          // compileInSceneContext, which must key its compiles the same way.
+          const internals = this.renderer as unknown as { _callDepth?: number };
+          this.scenePassCallDepth = (internals._callDepth ?? -1) + 2;
           this.pipeline!.render();
         } finally {
           scopes?.end();
+        }
+        this.chainRendered = true;
+        if (this.renderWaiters.length > 0) {
+          const waiters = this.renderWaiters;
+          this.renderWaiters = [];
+          for (const resolve of waiters) resolve();
         }
         return;
       } catch (error) {
@@ -426,6 +686,7 @@ export class EngineRenderer {
     pipeline.outputNode = chain.outputNode;
     this.pipeline = pipeline;
     this.chain = chain;
+    this.chainRendered = false;
     this.plan = [...chain.plan];
     this.signature = chain.signature;
     this.lutState = { id: this.fx.grade.lut, ready: chain.plan.includes("lut") };

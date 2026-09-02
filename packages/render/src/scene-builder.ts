@@ -1,5 +1,6 @@
 import * as THREE from "three/webgpu";
 import { STATIC_BATCH_FLAG } from "./static-batch.js";
+import { InstancedProps, applyInstancedProps } from "./instancing.js";
 import { applyWorldUv } from "./primitive-uv.js";
 import {
   positionWorld,
@@ -41,7 +42,7 @@ import { applyFoliageNormals } from "./foliage-normals.js";
 import { applyModelBrightness } from "./model-brightness.js";
 import { applyFoliageWind, type FoliageWindOptions } from "./foliage-wind.js";
 import { applyFoliageFade } from "./foliage-fade.js";
-import { cloneMaterial } from "./node-material.js";
+import { asNodeMaterial, cloneMaterial } from "./node-material.js";
 import { clone as skeletonClone } from "three/addons/utils/SkeletonUtils.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import {
@@ -89,6 +90,8 @@ import {
   setMaterialSource,
   writeMaterialUniforms,
   type TextureResolver,
+  applyModelTextureFilter,
+  type TextureFilter,
 } from "./material-maps.js";
 
 // kits load once and instance many times
@@ -291,6 +294,7 @@ interface MeshData {
         foliageNormals?: number;
         foliageUp?: number;
         brightness?: number;
+        textureFilter?: TextureFilter;
         wind?: FoliageWindOptions;
         cameraFade?: boolean;
       }
@@ -1183,6 +1187,7 @@ interface PendingInstance {
   foliageNormals?: number;
   foliageUp?: number;
   brightness?: number;
+  textureFilter?: TextureFilter;
   wind?: FoliageWindOptions;
   cameraFade?: boolean;
   castShadow: boolean;
@@ -1251,8 +1256,11 @@ function buildPathScatter(
   if (placements.length === 0) return;
 
   const attach = (geometry: THREE.BufferGeometry) => {
-    const material = materialForId(data.material, options, materialCache);
-    const instanced = new THREE.InstancedMesh(geometry, material, placements.length);
+    // an instanced CLONE of the asset material: the instance transform is a
+    // vertex node on the material, and the shared asset material also draws
+    // plain meshes
+    const material = cachedInstancedMaterial(`pathScatter#${data.material}`, materialForId(data.material, options, materialCache));
+    const instanced = new InstancedProps(geometry, material, placements.length);
     instanced.castShadow = data.castShadow;
     instanced.receiveShadow = data.receiveShadow;
     instanced.userData["entityId"] = id;
@@ -1456,6 +1464,7 @@ function populateEntityGroup(
         foliageNormals: meshData.source.foliageNormals,
         foliageUp: meshData.source.foliageUp,
         brightness: meshData.source.brightness,
+        textureFilter: meshData.source.textureFilter,
         wind: meshData.source.wind,
         cameraFade: meshData.source.cameraFade,
         castShadow: meshData.castShadow,
@@ -1512,6 +1521,8 @@ function populateEntityGroup(
             if (foliage !== undefined) applyFoliageNormals(instance, { blend: foliage, up: foliageUp });
             const lift = meshData.source.kind === "asset" ? meshData.source.brightness : undefined;
             if (lift !== undefined) applyModelBrightness(instance, lift);
+            const textureFilter = meshData.source.kind === "asset" ? meshData.source.textureFilter : undefined;
+            if (textureFilter) applyModelTextureFilter(instance, textureFilter);
             const wind = meshData.source.kind === "asset" ? meshData.source.wind : undefined;
             if (wind) applyFoliageWind(instance, wind);
             if (meshData.source.kind === "asset" && meshData.source.cameraFade) applyFoliageFade(instance);
@@ -1749,6 +1760,8 @@ function flushInstancedPending(pending: Map<string, PendingInstance[]>, options:
         if (asked) applyFoliageNormals(gltf.scene, { blend: asked.foliageNormals, up: asked.foliageUp });
         const lift = entries.find((e) => e.brightness !== undefined)?.brightness;
         if (lift !== undefined) applyModelBrightness(gltf.scene, lift);
+        const textureFilter = entries.find((e) => e.textureFilter !== undefined)?.textureFilter;
+        if (textureFilter) applyModelTextureFilter(gltf.scene, textureFilter);
         // Wind and camera-fade both swap the material for a node material, so
         // they must land BEFORE instanceGltfInto clones and caches it — a
         // clone taken first would pin the plain material for the session.
@@ -1790,9 +1803,9 @@ const MID_TIER_KEEP_RATIO = 0.35;
 // (every cell independently loads its own glTF instances), so an
 // object-identity cache silently stops deduping the moment those calls don't
 // happen to observe the exact same geometry instance — and the cached
-// geometry is SHARED across every chunk's mid-tier InstancedMesh
-// (userData.sharedGeometry), so identity here is what keeps one GPU buffer
-// per unique submesh instead of one per cell.
+// geometry is SHARED across every chunk's mid-tier batch (each InstancedProps
+// wraps it without copying the arrays), so identity here is what keeps one
+// decimation per unique submesh instead of one per cell.
 interface MidTier {
   geometry: THREE.BufferGeometry;
   /** Geometric deviation from the near-tier geometry, in submesh-local units. */
@@ -1823,13 +1836,41 @@ const instancedMaterialCache = new Map<string, THREE.Material | THREE.Material[]
  * — a supercell's merged copy of a model and any nearby instanced copy of
  * the same model use the identical compiled material, never two pipelines
  * for what's visually one material. */
+/**
+ * Per-asset material clones for MERGED geometry (HLOD proxies): the same
+ * sharing rationale as {@link cachedInstancedMaterial}, minus the instance
+ * transform node — merged geometry carries no instance attributes, and a
+ * material that reads them draws every vertex at the origin. Keyed separately
+ * so an HLOD bake can strip wind from its clone without touching the batch's.
+ */
+const mergedMaterialCache = new Map<string, THREE.Material | THREE.Material[]>();
+export function cachedMergedMaterial(
+  cacheKey: string,
+  source: THREE.Material | THREE.Material[],
+): THREE.Material | THREE.Material[] {
+  const cached = mergedMaterialCache.get(cacheKey);
+  if (cached) return cached;
+  const cloned = Array.isArray(source) ? source.map(cloneMaterial) : cloneMaterial(source);
+  mergedMaterialCache.set(cacheKey, cloned);
+  return cloned;
+}
+
 export function cachedInstancedMaterial(
   cacheKey: string,
   source: THREE.Material | THREE.Material[],
 ): THREE.Material | THREE.Material[] {
   const cached = instancedMaterialCache.get(cacheKey);
   if (cached) return cached;
-  const cloned = Array.isArray(source) ? source.map(cloneMaterial) : cloneMaterial(source);
+  // Cloned so the instance transform node never lands on a material a plain
+  // mesh shares; converted to a NodeMaterial first because that node IS the
+  // instancing (see applyInstancedProps) — a non-node clone would draw every
+  // instance at the origin.
+  const instancedClone = (m: THREE.Material): THREE.Material => {
+    const clone = asNodeMaterial(cloneMaterial(m));
+    applyInstancedProps(clone);
+    return clone;
+  };
+  const cloned = Array.isArray(source) ? source.map(instancedClone) : instancedClone(source);
   instancedMaterialCache.set(cacheKey, cloned);
   return cloned;
 }
@@ -1944,6 +1985,23 @@ function materialLook(material: THREE.Material | THREE.Material[]): MaterialLook
  * BuildOptions); with a bake, the far tier is an octahedral impostor quad
  * (impostor.ts) and none of this runs.
  */
+/**
+ * Far-proxy materials, keyed by look: one per (shape, texture-or-color), shared
+ * by every batch that resolves to it. Built fresh per batch they would each be
+ * a distinct object with its own shader build (see instancing.ts).
+ */
+const farProxyMaterialCache = new Map<string, THREE.MeshLambertNodeMaterial>();
+function instancedFarProxyMaterial(isTall: boolean, look: MaterialLook): THREE.MeshLambertNodeMaterial {
+  const key = `${isTall ? "tall" : "flat"}#${look.map ? look.map.uuid : look.color.getHexString()}`;
+  let material = farProxyMaterialCache.get(key);
+  if (!material) {
+    material = buildFarProxyMaterial(isTall, look);
+    applyInstancedProps(material);
+    farProxyMaterialCache.set(key, material);
+  }
+  return material;
+}
+
 function buildFarProxyMaterial(isTall: boolean, look: MaterialLook): THREE.MeshLambertNodeMaterial {
   const base = look.map
     ? { colorNode: tslTexture(look.map, uv()) }
@@ -2054,11 +2112,11 @@ function instanceGltfInto(
   // (accumulated within a single buildScene/rebuildEntityVisuals call).
   const root = first.anchor;
 
-  const nearMeshes: THREE.InstancedMesh[] = [];
+  const nearMeshes: InstancedProps[] = [];
   for (let index = 0; index < submeshes.length; index++) {
     const sub = submeshes[index]!;
-    const instanced = new THREE.InstancedMesh(
-      sub.geometry.clone(),
+    const instanced = new InstancedProps(
+      sub.geometry,
       cachedInstancedMaterial(`${assetId}#${node ?? ""}#${index}`, sub.material),
       entries.length,
     );
@@ -2093,19 +2151,19 @@ function instanceGltfInto(
   // one submesh actually qualifies, so light props (rocks, mushrooms) keep
   // the exact 2-tier near/far behavior they had before.
   const midTiers = submeshes.map((sub, index) => buildMidTier(`${assetId}#${node ?? ""}#${index}`, sub.geometry));
-  const midMeshes: THREE.InstancedMesh[] | undefined = midTiers.some((t) => t !== null)
+  const midMeshes: InstancedProps[] | undefined = midTiers.some((t) => t !== null)
     ? submeshes.map((sub, index) => {
         // when a decimated geometry exists, it came from midTierGeometryCache
         // — shared across every chunk that ever builds this (assetId, node,
-        // submesh), so it must never be disposed by any ONE chunk's unload.
+        // submesh). InstancedProps wraps it in per-batch attribute objects over
+        // the same arrays, so a chunk unload disposes only its own buffers.
         const cachedTier = midTiers[index];
-        const geometry = cachedTier?.geometry ?? sub.geometry.clone();
-        const instanced = new THREE.InstancedMesh(
+        const geometry = cachedTier?.geometry ?? sub.geometry;
+        const instanced = new InstancedProps(
           geometry,
           cachedInstancedMaterial(`${assetId}#${node ?? ""}#${index}`, sub.material),
           entries.length,
         );
-        if (cachedTier) instanced.userData["sharedGeometry"] = true;
         // mid tier is already a distance-culled compromise — a decimated
         // shadow caster at this range reads as roughly the same dark blob a
         // real one would, for the cost of a whole extra shadow-pass draw per
@@ -2145,7 +2203,7 @@ function instanceGltfInto(
     atlas = options.bakeImpostor?.(source.clone(true), bounds) ?? null;
     impostorCache.set(impostorCacheKey, atlas);
   }
-  let far: THREE.InstancedMesh;
+  let far: InstancedProps;
   let impostor: ImpostorInstanceData | undefined;
   if (atlas) {
     let material = impostorMaterialCache.get(impostorCacheKey);
@@ -2153,7 +2211,7 @@ function instanceGltfInto(
       material = impostorMaterial(atlas, bounds);
       impostorMaterialCache.set(impostorCacheKey, material);
     }
-    far = new THREE.InstancedMesh(impostorGeometry(bounds, entries.length), material, entries.length);
+    far = new InstancedProps(impostorGeometry(bounds, entries.length), material, entries.length);
     impostor = impostorInstanceData(matrices);
   } else {
     const { geometry: farGeometry, isTall } = buildLodProxyGeometry(submeshes);
@@ -2163,11 +2221,7 @@ function instanceGltfInto(
     const dominantSubmesh = submeshes.reduce((a, b) =>
       b.geometry.attributes["position"]!.count > a.geometry.attributes["position"]!.count ? b : a,
     );
-    far = new THREE.InstancedMesh(
-      farGeometry,
-      buildFarProxyMaterial(isTall, materialLook(dominantSubmesh.material)),
-      entries.length,
-    );
+    far = new InstancedProps(farGeometry, instancedFarProxyMaterial(isTall, materialLook(dominantSubmesh.material)), entries.length);
   }
   far.castShadow = false; // a rough blob casting a shadow reads worse than no shadow
   far.receiveShadow = first.receiveShadow;

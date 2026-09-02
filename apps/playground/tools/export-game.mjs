@@ -15,7 +15,12 @@ if (!project || !entry) {
 
 const SRC = join("projects", project, "assets");
 if (!existsSync(SRC)) { console.error("no assets at " + SRC); process.exit(1); }
-const KINDS = ["scenes", "materials", "prefabs", "models", "textures", "audio", "terrain", "spritesheets"];
+// `worlds` carries the procedural-world RECIPES (assets/worlds/<id>.json). A
+// scene's `voxelWorld` component resolves its recipe BY ID at scene-resolve
+// time, so a bundle without them boots a scene whose terrain simply never
+// exists — sky, water and hand-placed props render over an empty world, with
+// only a console warning to say why.
+const KINDS = ["scenes", "materials", "prefabs", "models", "textures", "audio", "terrain", "spritesheets", "worlds"];
 
 function walk(dir, base = dir) {
   const out = [];

@@ -89,6 +89,10 @@ follows is the map and the judgment the schema can't encode.
 - **`sky` and `postfx` are one-per-scene** (first wins). Bloom (postfx) is what
   makes emissive materials actually glow; `material.shader: "unlit"` is
   flat/PS1-style and ignores lights.
+  `postfx.pixelate` (`{ enabled, height: 240, filter: "nearest" }`) renders the
+  whole frame at that many lines and lets the canvas scale it up — the
+  fake-PSX resolution look, and a large speed-up since every pass runs at
+  the small size. Pair it with `unlit` materials for the full effect.
 - **`subscene` is the AI-context unit:** a whole scene FILE placed at a
   transform (the Skyrim pattern) — "add a blacksmith to Riverwood" edits a
   300-line village file, not the world. A placed scene has its sky/postfx/nested

@@ -4,14 +4,12 @@ import type { SceneDoc, VoxelMeshSource } from "@hitreg/core";
 import { FOLIAGE_WIND } from "./foliage-wind.js";
 import {
   buildScene,
-  cachedInstancedMaterial,
   extractGltfSubmeshes,
   geometryFor,
   loadGltf,
   materialForId,
   polygonGeometry,
-  type BuildOptions,
-} from "./scene-builder.js";
+  type BuildOptions, cachedMergedMaterial } from "./scene-builder.js";
 import { voxelGeometry, voxelGeometryFromMesh } from "./voxel-geometry.js";
 
 /**
@@ -80,11 +78,6 @@ export interface HlodProxy {
 }
 
 /**
- * Normalize a geometry so a batch of them can merge: non-indexed, and carrying
- * exactly position/normal/uv (mergeGeometries rejects mismatched attribute sets,
- * e.g. the uv-less wedge next to a boxes' uvs).
- */
-/**
  * Strip vertex wind from a merged far proxy.
  *
  * The wind shader reads `positionGeometry` to work out how far up the plant a
@@ -127,40 +120,234 @@ function groupVoxelCells(
   return [...byKey].map(([key, list]) => ({ key, cells: list }));
 }
 
-function prepForMerge(geometry: THREE.BufferGeometry): THREE.BufferGeometry {
-  const g = geometry.index ? geometry.toNonIndexed() : geometry;
+/** The only attributes a merged PROP bucket carries (see `prepForMerge`). */
+const MERGE_ATTRIBUTES = ["position", "normal", "uv"] as const;
+
+type AnyAttribute = THREE.BufferAttribute | THREE.InterleavedBufferAttribute | THREE.GLBufferAttribute;
+
+/**
+ * A private copy of one attribute — de-interleaved if the source was
+ * interleaved (glTF accessors sharing a strided bufferView routinely are).
+ *
+ * `BufferAttribute.clone()` would do for the plain case, but
+ * `InterleavedBufferAttribute.clone()` de-interleaves through a plain JS array
+ * *and logs to the console every time*, which at a supercell's worth of props
+ * is its own measurable cost.
+ */
+function ownedAttribute(attr: AnyAttribute): THREE.BufferAttribute {
+  const interleaved = attr as THREE.InterleavedBufferAttribute;
+  const itemSize = attr.itemSize;
+  if (interleaved.isInterleavedBufferAttribute) {
+    const data = interleaved.data.array;
+    const stride = interleaved.data.stride;
+    // same typed-array class as the interleaved buffer, so a quantized /
+    // normalized attribute stays byte-for-byte what it was
+    const ctor = data.constructor as unknown as Float32ArrayConstructor;
+    const out = new ctor(interleaved.count * itemSize);
+    for (let i = 0, o = 0, base = interleaved.offset; i < interleaved.count; i++, base += stride) {
+      for (let c = 0; c < itemSize; c++) out[o++] = data[base + c]!;
+    }
+    return new THREE.BufferAttribute(out, itemSize, interleaved.normalized);
+  }
+  const plain = attr as THREE.BufferAttribute;
+  const copy = new THREE.BufferAttribute(plain.array.slice(), itemSize, plain.normalized);
+  copy.gpuType = plain.gpuType;
+  return copy;
+}
+
+/**
+ * Normalize a geometry so a batch of them can merge: carrying exactly
+ * position/normal/uv (mergeGeometries rejects mismatched attribute sets, e.g.
+ * the uv-less wedge next to a boxes' uvs), owned by us so the caller can bake
+ * the placement in with `applyMatrix4`, and with NO bounding volumes.
+ *
+ * Three things this deliberately does not do, each of which used to be most of
+ * the cost of a supercell bake (measured at ~11% of all main-thread time over
+ * a 30s flight, before this):
+ *
+ * 1. **It does not de-index.** `mergeGeometries` requires its inputs to be
+ *    *consistently* indexed or non-indexed — not necessarily non-indexed.
+ *    De-indexing an imported mesh multiplies its vertex count by 3-6x (indices
+ *    are 3 per triangle; a welded mesh has roughly half a vertex per triangle),
+ *    and every one of those vertices is then copied, matrix-transformed,
+ *    normal-transformed and merged. The bucket decides at merge time
+ *    (`mergeBucket`), so only a bucket that genuinely MIXES indexed and
+ *    non-indexed sources pays the flattening.
+ * 2. **It does not copy attributes it is about to throw away.** The old shape
+ *    was `prepForMerge(sub.geometry.clone())`: `clone()` duplicated every
+ *    attribute (tangent, uv2, color, joints/weights...), `toNonIndexed()`
+ *    expanded all of them again, and only then were they deleted. Now only
+ *    position/normal/uv are ever touched, and exactly once.
+ * 3. **It leaves `boundingBox`/`boundingSphere` null.** `applyMatrix4`
+ *    recomputes whichever volume is already set — and GLTFLoader sets BOTH on
+ *    every primitive it loads, so every prop walked its vertices twice more
+ *    for bounds that the merge throws away. The renderer computes the merged
+ *    result's bounds once, lazily, which is all anything actually reads.
+ *
+ * `shared` says the input came from the glTF cache and must not be mutated or
+ * disposed: other chunks and other instances of the same model hold the same
+ * object. Freshly built primitive/polygon geometry passes `false` and is
+ * adapted in place, so it costs no copy at all.
+ */
+function prepForMerge(geometry: THREE.BufferGeometry, shared: boolean): THREE.BufferGeometry {
+  // The one case that still has to de-index: a source with no normals. The old
+  // path computed them AFTER de-indexing, which yields flat, per-triangle
+  // normals — what glTF specifies for a primitive with no NORMAL. Computing
+  // them on the indexed geometry would smooth across shared vertices instead,
+  // a visible change, so this (rare) case keeps the old shape exactly.
+  const source = geometry.index && !geometry.getAttribute("normal") ? geometry.toNonIndexed() : geometry;
+  // `toNonIndexed` already handed back a fresh geometry; anything else is only
+  // ours to mutate when the caller said so.
+  const owned = source !== geometry || !shared;
+
+  const count = source.getAttribute("position").count;
+  let g: THREE.BufferGeometry;
+  if (owned) {
+    g = source;
+    for (const name of Object.keys(g.attributes)) {
+      if (!(MERGE_ATTRIBUTES as readonly string[]).includes(name)) g.deleteAttribute(name);
+    }
+  } else {
+    g = new THREE.BufferGeometry();
+    if (source.index) g.setIndex(ownedAttribute(source.index));
+    for (const name of MERGE_ATTRIBUTES) {
+      const attr = source.getAttribute(name);
+      if (attr) g.setAttribute(name, ownedAttribute(attr));
+    }
+  }
   if (!g.getAttribute("normal")) g.computeVertexNormals();
   if (!g.getAttribute("uv")) {
-    const count = g.getAttribute("position").count;
     g.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(count * 2), 2));
   }
-  for (const name of Object.keys(g.attributes)) {
-    if (name !== "position" && name !== "normal" && name !== "uv") g.deleteAttribute(name);
-  }
+  g.boundingBox = null;
+  g.boundingSphere = null;
   return g;
 }
 
 /**
- * How much coarser a voxel cell is meshed for its HLOD proxy. 2 quarters the
- * triangle count per cell while keeping the silhouette close enough that the
- * swap at the ring boundary does not read as a pop; 4 is cheaper still and
- * starts to visibly flatten ridgelines.
+ * Merge one bucket, keeping the index when every member has one.
+ *
+ * `mergeGeometries` handles indexed input, but through a path that pushes
+ * every merged index into a plain JS array and then re-scans and re-types it —
+ * new cost that would eat into what staying indexed just saved. `mergeIndexed`
+ * writes the typed arrays directly and hands back to `mergeGeometries` for
+ * anything it doesn't recognise, so the fallback is always the old behaviour.
  */
-const HLOD_VOXEL_COARSEN = 2;
+function mergeBucket(geoms: THREE.BufferGeometry[]): THREE.BufferGeometry | null {
+  if (geoms.length === 1) return geoms[0]!;
+  let indexed = 0;
+  for (const g of geoms) if (g.index) indexed += 1;
+  if (indexed === geoms.length) return mergeIndexed(geoms) ?? mergeGeometries(geoms, false);
+  if (indexed > 0) {
+    // A bucket that genuinely mixes — an indexed box primitive next to a
+    // non-indexed extrusion, same material. mergeGeometries needs one or the
+    // other, so flatten, exactly as this file used to do unconditionally.
+    return mergeGeometries(
+      geoms.map((g) => (g.index ? g.toNonIndexed() : g)),
+      false,
+    );
+  }
+  return mergeGeometries(geoms, false);
+}
+
+/**
+ * Concatenate a set of consistently-shaped INDEXED geometries into one.
+ *
+ * Returns null — caller falls back to `mergeGeometries` — for anything outside
+ * the shape this file produces: a missing index, a differing attribute set,
+ * interleaved or normalized or differently-typed attributes. Nothing here
+ * reads or writes a shared object; every buffer is freshly allocated.
+ */
+function mergeIndexed(geoms: THREE.BufferGeometry[]): THREE.BufferGeometry | null {
+  const first = geoms[0]!;
+  const names = Object.keys(first.attributes);
+  if (!names.includes("position")) return null;
+  let vertexCount = 0;
+  let indexCount = 0;
+  for (const g of geoms) {
+    if (!g.index) return null;
+    if (Object.keys(g.attributes).length !== names.length) return null;
+    const vertices = g.attributes["position"]?.count;
+    if (vertices === undefined) return null;
+    for (const name of names) {
+      // every attribute must span the same vertices, or the per-geometry
+      // offsets below would drift apart from the index remapping
+      if (g.attributes[name]?.count !== vertices) return null;
+      const attr = g.attributes[name] as THREE.BufferAttribute | undefined;
+      const ref = first.attributes[name] as THREE.BufferAttribute;
+      if (!attr || (attr as AnyAttribute as THREE.InterleavedBufferAttribute).isInterleavedBufferAttribute) return null;
+      if (attr.normalized || ref.normalized) return null;
+      if (attr.itemSize !== ref.itemSize) return null;
+      if (attr.array.constructor !== ref.array.constructor) return null;
+      if (attr.gpuType !== ref.gpuType) return null;
+    }
+    vertexCount += vertices;
+    indexCount += g.index.count;
+  }
+  const merged = new THREE.BufferGeometry();
+  for (const name of names) {
+    const ref = first.attributes[name] as THREE.BufferAttribute;
+    const ctor = ref.array.constructor as unknown as Float32ArrayConstructor;
+    const out = new ctor(vertexCount * ref.itemSize);
+    let offset = 0;
+    for (const g of geoms) {
+      const attr = g.attributes[name] as THREE.BufferAttribute;
+      out.set(attr.array as unknown as ArrayLike<number>, offset);
+      offset += attr.count * ref.itemSize;
+    }
+    const attribute = new THREE.BufferAttribute(out, ref.itemSize, false);
+    attribute.gpuType = ref.gpuType;
+    merged.setAttribute(name, attribute);
+  }
+  // 65536 distinct vertices is exactly what a Uint16 index can address
+  const index = vertexCount > 65536 ? new Uint32Array(indexCount) : new Uint16Array(indexCount);
+  let vertexOffset = 0;
+  let indexOffset = 0;
+  for (const g of geoms) {
+    const src = g.index!;
+    const array = src.array;
+    for (let i = 0; i < src.count; i++) index[indexOffset + i] = array[i]! + vertexOffset;
+    vertexOffset += g.attributes["position"]!.count;
+    indexOffset += src.count;
+  }
+  merged.setIndex(new THREE.BufferAttribute(index, 1));
+  return merged;
+}
+
+/**
+ * How much coarser a voxel cell is meshed for its HLOD proxy.
+ *
+ * 4 rather than 2: measured on the voxel demo it cut resident vertex memory
+ * from 291MB to 247MB. It barely moved draw CPU — frustum culling already
+ * discards most far-ring geometry before it is submitted, so raw triangle
+ * counts out there overstate what is actually drawn — but the memory is real
+ * and the detail is not visible: the far ring starts beyond the point where
+ * this scene's height fog is ~85% opaque. Push further only if ridgelines
+ * start to read as flat at the ring boundary.
+ */
+const HLOD_VOXEL_COARSEN = 4;
 
 /**
  * Merge-prep that KEEPS the terrain's splat weights and biome tint. Safe only
  * within an all-voxel bucket, where every geometry has the same attributes.
+ *
+ * The geometry is ours outright (`voxelGeometryFromMesh` just built it from
+ * this cell's mesh), so this adapts it in place — and, as of the same pass that
+ * stopped de-indexing props, it STAYS INDEXED. Voxel geometry is indexed by
+ * construction, so a whole bucket is consistently indexed and merges fine that
+ * way. On the preferred async-supercell path the bucket holds exactly one
+ * geometry and never merges at all, which made the old `toNonIndexed()` here
+ * pure waste: ~3x the vertices, in CPU time and in resident VRAM, on the
+ * single largest geometry in the scene.
  */
 function prepVoxelForMerge(geometry: THREE.BufferGeometry): THREE.BufferGeometry {
-  const g = geometry.index ? geometry.toNonIndexed() : geometry;
-  if (!g.getAttribute("uv")) {
+  if (!geometry.getAttribute("uv")) {
     // triplanar terrain never samples uv, but mergeGeometries requires every
     // input to declare the same set of attributes
-    const count = g.getAttribute("position").count;
-    g.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(count * 2), 2));
+    const count = geometry.getAttribute("position").count;
+    geometry.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(count * 2), 2));
   }
-  return g;
+  return geometry;
 }
 
 /**
@@ -262,10 +449,17 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
     for (const [, entity] of entities) {
       const placement = entityTransform(entity).clone();
       submeshes.forEach((sub, index) => {
-        const prepped = prepForMerge(sub.geometry.clone());
+        // `sub.geometry` belongs to the shared glTF cache — every other chunk
+        // and every un-merged instance of this model holds the same object, so
+        // prepForMerge copies rather than touches it (and copies ONCE, which
+        // the old `prepForMerge(sub.geometry.clone())` did not: clone()
+        // duplicated every attribute, then toNonIndexed() expanded them again).
+        const prepped = prepForMerge(sub.geometry, true);
         prepped.applyMatrix4(matrix.copy(placement).multiply(sub.localMatrix));
         const bucketKey = `gltf:${key}#${index}`;
-        const material = withoutFoliageWind(cachedInstancedMaterial(bucketKey, sub.material));
+        // merged geometry, so the MERGED cache: the instanced clones carry the
+        // InstancedProps transform node and expect instance attributes
+        const material = withoutFoliageWind(cachedMergedMaterial(bucketKey, sub.material));
         addToBucket(bucketKey, material, prepped);
       });
     }
@@ -314,8 +508,12 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
     for (const { key, mesh } of await offSupercell) {
       const geometry = voxelGeometryFromMesh(mesh);
       if (!geometry) continue;
-      // the merge already baked every cell's transform in, so this is only the
-      // uv-declaration prep that mergeGeometries used to need
+      // The merge already baked every cell's transform in, so this is only the
+      // uv-declaration prep that mergeGeometries used to need — no
+      // `applyMatrix4`, which means the exact bounds the mesher handed back
+      // survive onto the mesh. That saves the renderer a lazy
+      // `computeBoundingSphere()` over the biggest vertex buffer in the scene
+      // the first time the supercell is culled.
       voxelBuckets.set(key, [prepVoxelForMerge(geometry)]);
       mergedSources += 1;
     }
@@ -335,6 +533,13 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
       if (!geometry) continue;
       const cell = voxelCells[i]!;
       const prepped = prepVoxelForMerge(geometry);
+      // `applyMatrix4` recomputes whichever bounding volume is already set, and
+      // `geometryFrom` sets BOTH from the mesher's own min/max. Those are stale
+      // the moment the cell transform is baked in, and the merged result gets
+      // its own bounds from the renderer anyway — so drop them rather than pay
+      // two extra full walks of the cell's vertices for a value nobody reads.
+      prepped.boundingBox = null;
+      prepped.boundingSphere = null;
       prepped.applyMatrix4(entityTransform(cell.entity));
       const list = voxelBuckets.get(cell.key);
       if (list) list.push(prepped);
@@ -378,7 +583,9 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
       geometry = polygonGeometry(mesh.source);
     }
 
-    const prepped = prepForMerge(geometry);
+    // freshly built above and referenced by nothing else, so prepForMerge can
+    // adapt it in place instead of copying
+    const prepped = prepForMerge(geometry, false);
     prepped.applyMatrix4(entityTransform(entity));
 
     const key = mesh.material ?? "__default";
@@ -388,7 +595,7 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
 
   let mergedDrawCalls = 0;
   for (const [key, geoms] of voxelBuckets) {
-    const merged = geoms.length === 1 ? geoms[0]! : mergeGeometries(geoms, false);
+    const merged = mergeBucket(geoms);
     if (!merged) continue;
     const mesh = new THREE.Mesh(merged, materialForId(key === "__default" ? undefined : key, options, materialCache));
     // distant terrain neither casts nor receives: shadow cascades do not reach
@@ -400,8 +607,7 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
   }
 
   for (const bucket of buckets.values()) {
-    const merged =
-      bucket.geoms.length === 1 ? bucket.geoms[0]! : mergeGeometries(bucket.geoms, false);
+    const merged = mergeBucket(bucket.geoms);
     if (!merged) continue; // mismatched attributes despite prep — skip rather than crash
     const mesh = new THREE.Mesh(merged, bucket.material);
     // Same reasoning as the voxel buckets above, which this block used to

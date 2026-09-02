@@ -36,12 +36,31 @@ export async function loadAssets(
   await Promise.all(
     jsonKinds.map(async ({ kind, type, onlyJson }) => {
       const files = (index[kind] ?? []).filter((f) => !onlyJson || f.endsWith(".json"));
+      // One bad file must never take the scene with it. Before this guard a
+      // single data asset that failed its schema threw out of loadAssets,
+      // main.ts caught it as "fresh load failed" and seeded a BLANK starter
+      // scene in place of the one being edited — which reads as the whole
+      // world having vanished. Skip the file, say so, keep loading.
       const loaded = await Promise.all(
-        files.map(async (file) => ({ id: file.replace(/\.json$/, ""), data: await readJson(kind, file) })),
+        files.map(async (file) => {
+          const id = file.replace(/\.json$/, "");
+          try {
+            return { id, data: await readJson(kind, file) };
+          } catch (error) {
+            console.warn(`[assets] skipped ${kind}/${file}: unreadable JSON —`, error);
+            return null;
+          }
+        }),
       );
-      for (const { id, data } of loaded) {
-        if (type) assets.addDataAsset({ id, type, name: id, data });
-        else assets.addPrefab(id, data);
+      for (const entry of loaded) {
+        if (!entry) continue;
+        const { id, data } = entry;
+        try {
+          if (type) assets.addDataAsset({ id, type, name: id, data });
+          else assets.addPrefab(id, data);
+        } catch (error) {
+          console.warn(`[assets] skipped ${kind}/${id}: ${error instanceof Error ? error.message : String(error)}`);
+        }
       }
     }),
   );

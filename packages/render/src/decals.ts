@@ -142,6 +142,7 @@ function collectTargetMeshes(root: THREE.Object3D, worldBox: THREE.Box3, selfId:
     const mesh = node as THREE.Mesh;
     if (!mesh.isMesh || !mesh.visible) return;
     if ((mesh as unknown as THREE.InstancedMesh).isInstancedMesh) return;
+    if ((mesh as unknown as { isInstancedProps?: boolean }).isInstancedProps) return;
     if ((mesh as unknown as THREE.SkinnedMesh).isSkinnedMesh) return;
     if (mesh.userData["decal"] === true) return;
     if (mesh.userData["isColliderProxy"] === true || mesh.userData["skyDome"] === true) return;

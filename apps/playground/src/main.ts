@@ -64,6 +64,7 @@ import {
   reconcileScene,
   type AnimatorData,
   type BuildOptions,
+  type PostFxData,
   type BuiltScene,
   type StaticBatchHandle,
   type MaterialData,
@@ -222,6 +223,34 @@ async function main(): Promise<void> {
   // (below), not per-frame: loaded cells only change when the focus crosses
   // a cell boundary, so this stays a rare React update, not a 60/sec one.
   const loadedChunkCells = observable<Array<{ world: string; cx: number; cz: number; count: number }>>([]);
+  /**
+   * Publish the streamed-cell list to the editor at most this often.
+   *
+   * `loadedCells()` allocates one object per resident cell and the hierarchy
+   * renders one DOM row each — and this fired on EVERY load and EVERY unload.
+   * Standing still that is nothing; moving, it is hundreds of times a second
+   * against a list that reached 720 entries in a real session, so React
+   * reconciliation and the garbage it makes ran continuously BETWEEN frames.
+   * A profile of that session put 51ms/frame off-loop — more than the JS and
+   * GPU costs combined, and invisible to every scope timer, which is why it
+   * survived a day of optimising the render path.
+   *
+   * The list is a debugging aid: a quarter second of staleness is imperceptible
+   * and the cost difference is the frame rate.
+   */
+  const CHUNK_CELL_PUBLISH_MS = 250;
+  let chunkCellPublish: ReturnType<typeof setTimeout> | null = null;
+  const publishLoadedChunkCells = (): void => {
+    if (playMode.get() !== "edit") return; // nothing renders this while playing
+    if (chunkCellPublish !== null) return; // a trailing publish is already due
+    chunkCellPublish = setTimeout(() => {
+      chunkCellPublish = null;
+      // play mode does not use the hierarchy: publishing into it there is pure
+      // cost, so the list is refreshed once on the way back to edit instead
+      if (playMode.get() !== "edit") return;
+      loadedChunkCells.set(chunkManager.loadedCells());
+    }, CHUNK_CELL_PUBLISH_MS);
+  };
   // streamed chunk worlds: runtime-only content loaded by distance to the focus
   const chunkManager = new ChunkManager(assets, registry, {
     // HLOD supercells re-mesh each member cell on a coarser lattice; this
@@ -242,7 +271,7 @@ async function main(): Promise<void> {
       for (const [id, object] of objects) built.objects.set(id, object);
       // render-only LOD rings (fullRender/hlod/far) render but never simulate
       if (simulated) scripts?.addEntities(doc, objects);
-      loadedChunkCells.set(chunkManager.loadedCells());
+      publishLoadedChunkCells();
     },
     // re-parented into a freshly rebuilt scene, NOT a fresh load — every doc
     // edit triggers rebuild(), so this must stay cheap bookkeeping only (see
@@ -255,9 +284,18 @@ async function main(): Promise<void> {
     onUnloaded: (ids) => {
       for (const id of ids) built.objects.delete(id);
       scripts?.removeEntities(ids);
-      loadedChunkCells.set(chunkManager.loadedCells());
+      publishLoadedChunkCells();
     },
     onDisposeInstancedBatch: (batch) => foliageLod.unregister(batch),
+    // streamed cells compile their shaders in the background, so turning to
+    // face a cell that arrived earlier does not stall. Measured 2026-09-02 on
+    // the voxel demo (published build): with this on, a full rotation in
+    // place builds zero shaders on the frame and its worst frame is 14ms;
+    // with it off the first new material costs ~60ms of codegen plus a
+    // ~600ms driver-side pipeline compile. See EngineRenderer.precompileGroup
+    // for the render-context rule that made an earlier version of this
+    // useless, and docs/perf-investigation-2026-09-02.md for the numbers.
+    precompile: (group) => void renderer.precompileGroup(group, camera, built.scene),
     // simulation/fullRender retier in place (chunk-manager.ts's retier()) —
     // objects are already built and already in `built.objects`; only scripts
     // need to (de)register, same as onLoaded/onUnloaded's script half.
@@ -859,6 +897,17 @@ async function main(): Promise<void> {
    * infer it from an absence of chunk files.
    */
   let activeVoxelWorld: string | null = null;
+  /**
+   * The WorldField the ground-cover sampler last answered from.
+   *
+   * Cover caches the ground it has sampled (see GrassSystem), and a recipe
+   * live-edit builds a BRAND NEW field object under the same id — so the
+   * object's identity, checked once a frame, is the cheapest honest signal
+   * that every cached height is now about terrain that no longer exists.
+   * Belt and braces with the rebuild path above: this one holds even if a
+   * future caller re-registers a world without rebuilding the scene.
+   */
+  let foliageField: ReturnType<typeof getVoxelWorld> = null;
 
   /** World (x, z) -> ground height under whichever terrain tile covers that
    * point, or null if nothing is loaded there. */
@@ -1218,17 +1267,18 @@ async function main(): Promise<void> {
     // sky component sets its own background; this is only the no-sky fallback
     if (!built.scene.background) built.scene.background = new THREE.Color(0x0b0e14);
     // postfx component drives renderer post-processing (one per scene, first wins);
-    // live file edits land here via the same store.subscribe(rebuild) path as sky
-    type BloomData = { enabled: boolean; strength: number; radius: number; threshold: number };
-    let bloomOpts: BloomData | null = null;
+    // live file edits land here via the same store.subscribe(rebuild) path as sky.
+    // The WHOLE component goes over — bloom, grading, AO, pixelate, … — it is
+    // schema-validated upstream, so partial objects resolve to defaults.
+    let postFx: PostFxData | null = null;
     for (const entity of Object.values(expanded.entities)) {
-      const fx = entity.components["postfx"] as { bloom?: BloomData } | undefined;
+      const fx = entity.components["postfx"] as PostFxData | undefined;
       if (fx) {
-        bloomOpts = fx.bloom ?? null;
+        postFx = fx;
         break;
       }
     }
-    renderer.setBloom(bloomOpts?.enabled ? bloomOpts : null);
+    renderer.setPostFx(postFx);
     // chunkStreamer component opts the scene into streamed chunk content
     let streamer: ChunkStreamerData | null = null;
     for (const entity of Object.values(expanded.entities)) {
@@ -1255,7 +1305,13 @@ async function main(): Promise<void> {
     // subscene components: whole scene files composed additively at runtime
     const subscenes: SubsceneInstance[] = [];
     const worlds = worldTransforms(expanded);
+    // The heightmap tiles the foliage sampler reads are about to be rebuilt
+    // from the new doc, so anything cover cached about the ground is now
+    // about terrain that may no longer be there. Every asset live-edit lands
+    // here (assetsVersion -> rebuild), which is what makes a terrain edit
+    // move the grass on it instead of leaving it floating.
     terrainTiles = [];
+    grass.invalidateGround();
     for (const [id, entity] of Object.entries(expanded.entities)) {
       const sub = entity.components["subscene"] as SubsceneData | undefined;
       if (sub) subscenes.push({ id, world: worlds.get(id)!, data: sub });
@@ -2060,6 +2116,9 @@ async function main(): Promise<void> {
   // Backquote starts play from edit, pauses from play, and resumes from pause.
   playMode.subscribe(() => {
     editorVisible.set(playMode.get() !== "playing");
+    // the streamed-cell list is not published while playing (see
+    // publishLoadedChunkCells), so it is stale on the way back — refresh once
+    if (playMode.get() === "edit") publishLoadedChunkCells();
   });
 
   window.addEventListener("keydown", (e) => {
@@ -2801,6 +2860,11 @@ async function main(): Promise<void> {
             instancedCount += 1;
             instances += im.count;
           }
+          const props = o as { isInstancedProps?: boolean; instanceCount?: number };
+          if (props.isInstancedProps) {
+            instancedCount += 1;
+            instances += props.instanceCount ?? 0;
+          }
           for (const child of o.children) walk(child, depth + 1);
         };
         walk(built.scene, 0);
@@ -3145,6 +3209,13 @@ async function main(): Promise<void> {
       particles.update(dt, renderCamera); // billboards face the camera actually used
       profiler.end();
       profiler.begin("grass");
+      // one Map lookup: a recipe edit swaps the field object, which is the
+      // signal to drop cover's cached ground — see `foliageField`
+      const field = activeVoxelWorld ? getVoxelWorld(activeVoxelWorld) : null;
+      if (field !== foliageField) {
+        foliageField = field;
+        grass.invalidateGround();
+      }
       grass.update(renderCamera, sampleTerrainHeight, sampleFoliageGround);
       profiler.end();
       profiler.begin("foliage-lod");

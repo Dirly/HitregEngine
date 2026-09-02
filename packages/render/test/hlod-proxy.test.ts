@@ -68,9 +68,12 @@ describe("HLOD proxy merge", () => {
     expect(proxy.stats).toEqual({ mergedDrawCalls: 1, mergedSources: 2, deferred: 0 });
     const meshes = proxy.group.children.filter((c) => (c as THREE.Mesh).isMesh);
     expect(meshes.length).toBe(1);
-    // two non-indexed boxes = 36 + 36 vertices
+    // two boxes = 36 + 36 indices over 24 + 24 welded vertices. Asserting the
+    // INDEX count, not the vertex count: the merge deliberately keeps indexed
+    // geometry indexed now, and the de-indexed 72 this used to read was the
+    // 3x vertex expansion that was costing real time on every supercell bake.
     const merged = meshes[0] as THREE.Mesh;
-    expect(merged.geometry.getAttribute("position").count).toBe(72);
+    expect(merged.geometry.index!.count).toBe(72);
   });
 
   it("keeps distinct materials as separate draw calls", async () => {
@@ -109,8 +112,9 @@ describe("HLOD proxy merge", () => {
     expect(proxy.stats.mergedDrawCalls).toBe(1); // one submesh bucket, two placements
     expect(proxy.stats.mergedSources).toBe(2);
     const merged = proxy.group.children.find((c) => (c as THREE.Mesh).isMesh) as THREE.Mesh;
-    // two non-indexed boxes (the fake glTF's single box submesh) = 36 + 36 vertices
-    expect(merged.geometry.getAttribute("position").count).toBe(72);
+    // two boxes (the fake glTF's single box submesh) = 36 + 36 indices over
+    // 24 + 24 welded vertices — see the note on the merge test above.
+    expect(merged.geometry.index!.count).toBe(72);
   });
 
   it("merges primitives with and without uvs (wedge next to box) without crashing", async () => {
