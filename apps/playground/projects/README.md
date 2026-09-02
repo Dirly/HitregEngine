@@ -7,9 +7,16 @@ a game is orthogonal to the engine itself: keeping it in the engine repo
 would bloat AI context and risk a future agent mistaking its game-specific
 patterns (a job economy, a specific enemy-hit contract, whatever) for
 canonical engine usage. So `apps/playground/projects/` is gitignored
-wholesale (except this file) — every project here is local-only, meant to
-be saved/shared as its own separate git repo. This is where **everything**
-you build goes, demo scenes included.
+wholesale (except this file), and **every project is its own git repo** —
+`git init` inside the project folder, with its own history, remote and
+release cadence. This is where **everything** you build goes, demo scenes
+included.
+
+Because the engine repo already ignores `projects/*`, a project's nested
+`.git` is invisible to it: no submodule, no gitlink, no `git status` noise
+in either direction. Cloning a project into `projects/<name>/` of any engine
+working copy is the whole install step. Keep the project's branch on `main`
+to match the engine's.
 
 ## Layout
 
@@ -48,7 +55,13 @@ No custom hot-reload bridge was needed for this — putting scripts outside
 
 ```
 mkdir -p projects/my-game/assets/{scenes,materials,prefabs,chunks,terrain} projects/my-game/scripts
+cd projects/my-game && git init -b main
 ```
+
+Give it a `.gitignore` for the derived files — `node_modules/`, `dist/`,
+`.hitreg/` (pins and profiler snapshots are a conversation *about* the
+level, never part of one), and whatever your generators and worldgen map
+renders write.
 
 Author scenes/materials/prefabs under `assets/` (namespace subfolders keep
 ids collision-free the same way `heli-island/` does today), scripts under
