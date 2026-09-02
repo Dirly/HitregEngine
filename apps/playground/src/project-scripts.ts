@@ -22,6 +22,13 @@ import type { ScriptRegistry } from "@hitreg/scripting";
 type Deps = {
   registry: ScriptRegistry;
   events: EventRegistry;
+  /**
+   * The asset library a script's `static dataTypes` declarations are defined
+   * into, so a project can ship its own ScriptableObject type without editing
+   * the shared bootstrap — same self-registration as `static events`. Typed
+   * off the registry so this module doesn't have to name the sink interface.
+   */
+  assets?: Parameters<ScriptRegistry["reregister"]>[2];
   /** Called after a hot re-registration so main can restart a live play session. */
   onReload?: () => void;
 };
@@ -42,8 +49,10 @@ function registerAll(): void {
     if (!cls) continue;
     try {
       // reregister (not register) so a re-executed file overwrites its own
-      // prior class instead of throwing on the duplicate name.
-      deps.registry.reregister(cls, deps.events);
+      // prior class instead of throwing on the duplicate name. Data types come
+      // along for the ride and are idempotent by design — this line runs again
+      // on every script save, and defineDataType throws on a duplicate.
+      deps.registry.reregister(cls, deps.events, deps.assets);
     } catch (error) {
       console.warn(`[scripts] failed to register ${path}:`, error);
     }

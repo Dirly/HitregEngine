@@ -1,4 +1,5 @@
 import { type AssetLibrary } from "@hitreg/core";
+import { loadWorldRecipes } from "./voxel-world.js";
 
 /**
  * assets/ is the project content folder. In dev everything is fetched FRESH
@@ -44,6 +45,11 @@ export async function loadAssets(
       }
     }),
   );
+
+  // World recipes register into the voxel world registry rather than the asset
+  // library: render, physics and placement each resolve a generated cell by
+  // world id, the same way they resolve a glTF by asset id.
+  await loadWorldRecipes(index, readJson);
 
   for (const file of index["models"] ?? []) {
     if (!/\.(glb|gltf)$/.test(file)) continue;

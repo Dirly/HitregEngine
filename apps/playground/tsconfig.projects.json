@@ -1,0 +1,19 @@
+{
+  // Project game scripts (`projects/<name>/scripts/*.ts`) are pulled into the
+  // app at runtime by an `import.meta.glob` in src/project-scripts.ts, which
+  // tsc sees as returning `unknown`. The main tsconfig's `"include": ["src"]`
+  // therefore does NOT reach them, and `pnpm -F playground typecheck` was
+  // reporting a green that said nothing about any project's code — a silent
+  // hole that produced false confidence for a long time.
+  //
+  // This config exists purely to close that. It is invoked by
+  // tools/typecheck-projects.mjs, which skips cleanly when no project is
+  // present (projects/ is gitignored, so a fresh clone has none).
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["vite/client"],
+    "noEmit": true
+  },
+  "include": ["projects/*/scripts/**/*.ts"]
+}

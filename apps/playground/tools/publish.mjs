@@ -4,8 +4,12 @@
 // Drop the folder on ANY static host (Cloudflare R2, itch, Netlify, …).
 import { execSync } from "node:child_process";
 import { cpSync } from "node:fs";
-const project = process.argv[2] ?? "mall-heist";
-const entry = process.argv[3] ?? "mall.scene.json";
+const project = process.argv[2];
+const entry = process.argv[3];
+if (!project || !entry) {
+  console.error("usage: node tools/publish.mjs <project> <entryScene.scene.json>");
+  process.exit(1);
+}
 const out = `dist/${project}`;
 console.log("1/3 content + manifest…");
 execSync(`node tools/export-game.mjs ${project} ${entry} ${out}`, { stdio: "inherit" });

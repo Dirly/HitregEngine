@@ -23,6 +23,7 @@ import {
   SceneStore,
   validatePrefab,
   sampleHeightmap,
+  getVoxelWorld,
   worldTransforms,
   type ApplyResult,
   type TerrainHeightfield,
@@ -34,13 +35,18 @@ import {
   type SceneDoc,
   type SpritesheetDoc,
   type SubsceneData,
+  type ToolDefinition,
+  type ToolResult,
 } from "@hitreg/core";
 import {
   AnimationSystem,
   attachPhysicsDebug,
   attachSkeletonDebug,
   attachLightDebug,
+  detachPhysicsDebug,
+  detachLightDebug,
   BillboardSystem,
+  batchStaticMeshes,
   buildScene,
   collectBones,
   EngineRenderer,
@@ -48,15 +54,18 @@ import {
   ClusterLodSystem,
   gltfLoadingCount,
   GrassSystem,
+  type GrassData,
   LightBudgetSystem,
   makeMeshGeometryProvider,
   ParticleSystem,
   patchMaterial,
+  setFoliageFade,
   pathGeometry,
   reconcileScene,
   type AnimatorData,
   type BuildOptions,
   type BuiltScene,
+  type StaticBatchHandle,
   type MaterialData,
   type PathMeshSource,
 } from "@hitreg/render";
@@ -74,13 +83,15 @@ import {
   createContextMenu,
   createDockSizes,
   createEditingPrefab,
+  EDIT_RIG_PREFIX,
+  isEditRigId,
   createEditingChunk,
   createModelBones,
   createSelection,
   createMultiSelection,
   createHover,
   createManipulating,
-  defaultEditorSettings,
+  createEditorSettings,
   GrayboxTool,
   MeshEditTool,
   TerrainTool,
@@ -101,6 +112,17 @@ import { ChunkManager } from "./chunk-manager.js";
 import { SubsceneManager, type SubsceneInstance } from "./subscene-manager.js";
 import { BridgePlayerDataBackend } from "./player-data-bridge.js";
 import { NetPresence, type NetReplica } from "./net-presence.js";
+import {
+  clientLink,
+  createComms,
+  hostLink,
+  localLink,
+  netStateMembership,
+  registerCommsEvents,
+  registerCommsNetState,
+  type CommsLink,
+} from "@hitreg/comms";
+import { mountCommsUI } from "@hitreg/comms/ui";
 import { loadAssets } from "./asset-loader.js";
 import { saveAsset, clientLog } from "./dev-log.js";
 import { applyBodyState } from "./physics-sync.js";
@@ -108,8 +130,14 @@ import { bakeImpostorAtlas } from "./impostor-bake.js";
 import { renderThumbnails } from "./thumbnails.js";
 import { initProjectScripts } from "./project-scripts.js";
 import { installLiveSync } from "./live-sync.js";
+import {
+  resolveVoxelWorld,
+  voxelChunkProvider,
+  voxelMeshViaWorker,
+  voxelSupercellViaWorker,
+} from "./voxel-world.js";
 import { createPinStore } from "./pins.js";
-import { postContext, publishEngineSpec } from "./dev-bridge.js";
+import { installCameraBridge, postContext, publishEngineSpec } from "./dev-bridge.js";
 import { openProfilerWindow } from "./profiler-window.js";
 
 CameraControls.install({ THREE });
@@ -157,6 +185,7 @@ async function main(): Promise<void> {
   // `events` field when it loads, see the project-script loop below.
   const events = new EventRegistry();
   registerCoreEvents(events);
+  registerCommsEvents(events); // "chat.message" — local-only, what THIS tab was allowed to see
   const assets = new AssetLibrary();
   registerCoreAssetTypes(assets);
   // trimesh/convex colliders cook their geometry from the entity's GLB model
@@ -170,13 +199,36 @@ async function main(): Promise<void> {
   const clusterLod = new ClusterLodSystem();
   // Forward-rendered point lights multiply fragment work. Share one
   // camera-relative budget across the main scene and both streamers.
-  const lightBudget = new LightBudgetSystem(8);
+  // How many point lights may be lit at once, scene-wide. 8 was far too few
+  // once levels carried real practicals: a dungeon with 70-100 braziers lit
+  // only the nearest 8 of them, so every room you were not standing in was
+  // black, and no amount of raising individual intensities could fix it —
+  // the light simply was not being evaluated.
+  //
+  // Raising it used to be unaffordable because changing the active SET
+  // recompiled every lit material (see light-budget.ts). With the slot pool
+  // that cost is gone, and what remains is per-fragment math, measured here on
+  // a 5000-entity dungeon with 71 practicals (mean luma of a lit room / frame
+  // time):
+  //
+  //      8 -> 49.6 / 6.95ms    32 -> 82.8 / 6.99ms    48 -> 84.3 / 7.66ms
+  //     64 -> 84.3 / 16.85ms   96 -> 84.3 / 73.78ms
+  //
+  // Brightness saturates by 32 (past that the extra lights are too far away to
+  // contribute) while cost climbs steeply after 48. 32 buys 96% of the
+  // available light for 0.6% more frame time.
+  const lightBudget = new LightBudgetSystem(32);
   // "chunk sections" list for the hierarchy dock — updated on load/unload
   // (below), not per-frame: loaded cells only change when the focus crosses
   // a cell boundary, so this stays a rare React update, not a 60/sec one.
   const loadedChunkCells = observable<Array<{ world: string; cx: number; cz: number; count: number }>>([]);
   // streamed chunk worlds: runtime-only content loaded by distance to the focus
   const chunkManager = new ChunkManager(assets, registry, {
+    // HLOD supercells re-mesh each member cell on a coarser lattice; this
+    // sends that marching-cubes run to the voxel worker pool instead of the
+    // frame. Returns null with no pool, and the builder meshes inline.
+    voxelMeshAsync: (source) => voxelMeshViaWorker(source),
+    voxelSupercellAsync: (buckets) => voxelSupercellViaWorker(buckets),
     resolveModel: (assetId) => assets.getModel(assetId)?.url,
     resolveMaterial: (assetId) => assets.getDataAsset(assetId)?.data,
     resolveTexture: (assetId) => assets.getTexture(assetId)?.url,
@@ -306,6 +358,45 @@ async function main(): Promise<void> {
   // the working doc; autosave redirects to the prefab file, never a scene file
   const PREFAB_EDIT_SCENE = "__prefab-edit";
   const editingPrefab = createEditingPrefab();
+  /**
+   * Studio lighting for prefab isolation. A prefab is geometry and components
+   * — it carries no sky and, unless it IS a lamp, no lights. Opening one on
+   * its own therefore used to frame a black silhouette in a black void, which
+   * is the same as having no prefab editor at all.
+   *
+   * The rig is ordinary doc entities (so the normal sky/IBL/shadow pipeline
+   * lights it with no special-casing in the renderer) under reserved
+   * EDIT_RIG_PREFIX ids: docToPrefab strips them before anything is written,
+   * and the hierarchy hides them, so they can never leak into the asset. A
+   * prefab's own lights still add on top — you see it lit as it will look,
+   * plus enough fill to work.
+   */
+  const studioRigEntities = (): SceneDoc["entities"] => ({
+    [`${EDIT_RIG_PREFIX}sky`]: {
+      name: "Studio sky",
+      parent: null,
+      tags: [],
+      // drives background + image-based ambient; "light" is the IBL intensity
+      components: { sky: { top: "#6d7f9c", bottom: "#262b34", light: 1.1 } },
+    },
+    [`${EDIT_RIG_PREFIX}key`]: {
+      name: "Studio key",
+      parent: null,
+      tags: [],
+      components: {
+        // a directional light points down its OWN -Y (scene-builder parents the
+        // target at (0,-1,0)), so the 3/4 angle is a rotation, not a position
+        transform: { position: [0, 6, 0], rotation: [0.1754, 0, -0.2192, 0.9598] },
+        light: { kind: "directional", color: "#fff3e2", intensity: 3, castShadow: true },
+      },
+    },
+    [`${EDIT_RIG_PREFIX}fill`]: {
+      name: "Studio fill",
+      parent: null,
+      tags: [],
+      components: { light: { kind: "ambient", color: "#c7d6ea", intensity: 0.9 } },
+    },
+  });
   let prefabEditReturn: { scene: string } | null = null;
   let lastWrittenPrefab = "";
 
@@ -347,6 +438,13 @@ async function main(): Promise<void> {
       return null;
     }
     const entities = structuredClone(store.doc.entities);
+    // the editor's studio lighting is scaffolding, not content — drop it, and
+    // un-parent anything the user happened to nest under it so the reparenting
+    // pass below adopts it into the prefab instead of leaving a dangling ref
+    for (const id of Object.keys(entities)) if (isEditRigId(id)) delete entities[id];
+    for (const entity of Object.values(entities)) {
+      if (entity.parent !== null && !(entity.parent in entities)) entity.parent = null;
+    }
     for (const [id, entity] of Object.entries(entities)) {
       if (id !== original.root && entity.parent === null) entity.parent = original.root;
     }
@@ -435,7 +533,10 @@ async function main(): Promise<void> {
     store.replace({
       version: 1,
       name: PREFAB_EDIT_SCENE,
-      entities: structuredClone(prefab.entities),
+      // rig spread LAST so its ids can't collide with a prefab's, but the
+      // prefab's own entities come first in key order — sky is first-wins in
+      // scene-builder, so a prefab that carries its own sky keeps it
+      entities: { ...structuredClone(prefab.entities), ...studioRigEntities() },
     });
     // the untouched working doc round-trips to the stored definition — seed the
     // dedupe so entering the mode doesn't immediately rewrite the prefab file
@@ -705,6 +806,33 @@ async function main(): Promise<void> {
   // inside it — re-found after every rebuild() (a fresh scene graph each
   // time) and recentered on the camera every frame, below.
   let skyDomeMesh: THREE.Object3D | null = null;
+  /**
+   * Static draw-call batching. A modular scene issues one draw per piece — a
+   * 252-entity dungeon measured 908 draw calls for 109k triangles, i.e. ~120
+   * triangles per call, which is bind-bound rather than geometry-bound. Merging
+   * static meshes per material collapses that.
+   *
+   * Rebuilt (never incrementally patched) after every build and reconcile: the
+   * merge bakes world transforms into vertices, so an edited entity's batched
+   * copy is stale the instant it moves. Throwing the batch away and re-merging
+   * is both simpler and cheaper than trying to keep one in sync, and it means
+   * an entity being edited is always drawn from its own live mesh.
+   */
+  let staticBatch: StaticBatchHandle | null = null;
+  const rebuildStaticBatch = (): void => {
+    staticBatch?.dispose();
+    staticBatch = null;
+    if (!built) return;
+    staticBatch = batchStaticMeshes(built.scene);
+    // Build every pipeline the level needs now rather than on first sight of
+    // each object. WebGPU compiles per material/geometry pair on first DRAW, so
+    // without this the cost arrives as a stall each time the camera pans
+    // somewhere new — and it never settles, because there is always another
+    // corner nobody has looked at yet. Deliberately NOT awaited: the frame loop
+    // keeps running and pipelines become ready as they land. It follows the
+    // batch because merging changes which geometries exist.
+    void renderer.precompile(built.scene, camera);
+  };
   // cached terrain tiles for ground-height queries (grass placement, camera
   // height-above-ground fade) — rebuilt alongside `lastExpanded`, not on every
   // query, since it only covers the base scene doc's handful of heightmap
@@ -724,6 +852,14 @@ async function main(): Promise<void> {
     /** terrain-splat layers (if any) — see grassBlendWeight/sampleGrassyGround. */
     splatLayers: SplatLayerBand[] | null;
   }> = [];
+  /**
+   * The `voxelWorld` recipe id currently streaming, or null. Read by the
+   * ground probe below and reported on the context bridge, so an agent asking
+   * "what is this scene" is told the world is generated rather than having to
+   * infer it from an absence of chunk files.
+   */
+  let activeVoxelWorld: string | null = null;
+
   /** World (x, z) -> ground height under whichever terrain tile covers that
    * point, or null if nothing is loaded there. */
   function sampleTerrainHeight(x: number, z: number): number | null {
@@ -732,6 +868,13 @@ async function main(): Promise<void> {
       const lz = z - tile.z;
       if (Math.abs(lx) > tile.halfW || Math.abs(lz) > tile.halfD) continue;
       return tile.y + sampleHeightmap(tile.params, lx, lz);
+    }
+    // Generated worlds have no heightmap tiles at all — ask the field, which
+    // is the same function the mesh was polygonized from. This is what keeps
+    // grass, prop drops and the editor's ground snap working on voxel terrain.
+    if (activeVoxelWorld) {
+      const field = getVoxelWorld(activeVoxelWorld);
+      if (field) return field.surfaceCast(x, z) ?? field.height(x, z);
     }
     return null;
   }
@@ -760,10 +903,46 @@ async function main(): Promise<void> {
   // excludes ground that still reads visually as tan/sand or brown/moss, but
   // without shrinking to just the sliver right at the band's exact peak
   const GRASS_BLEND_THRESHOLD = 0.5;
-  /** Same as sampleTerrainHeight, but returns null unless the ground there is
-   * solidly the terrain's grassy splat color — so the grass field only grows
-   * where the terrain actually reads as green (not sand/rock/moss). */
-  function sampleGrassyGround(x: number, z: number): number | null {
+  /** Splat scratch for the voxel foliage gate — one buffer, not one per query. */
+  let foliageSplat = new Float32Array(0);
+  /**
+   * How far to sink a cover instance below the ground height at its centre.
+   *
+   * A billboard is a VERTICAL card standing on one sampled point, but it has
+   * width: on a gradient its downhill edge lifts off the terrain and the tuft
+   * appears to hover, which is the classic tell of scattered foliage. Sinking
+   * it by the drop across its own half-width — `halfWidth * tan(angle)` —
+   * buries the uphill edge instead, which nobody can see.
+   *
+   * The half-width uses the LARGEST scale `regenerate` jitters to (1.3), since
+   * the sampler is not told which instance is asking. Over-sinking a small
+   * tuft costs a centimetre of its base; under-sinking a large one floats it,
+   * and only one of those is visible.
+   *
+   * `steep` is sin(angle), so tan is sin/sqrt(1-sin^2) — clamped, because it
+   * runs away toward vertical and no cover grows there anyway.
+   */
+  function foliageSink(data: GrassData, steep: number): number {
+    const halfWidth = (data.bladeWidth / 2) * 1.3;
+    const tan = Math.min(2, steep / Math.sqrt(Math.max(1e-4, 1 - steep * steep)));
+    // plus a small constant bite so the base is always in the ground, not on it
+    return halfWidth * tan + data.bladeHeight * 0.04;
+  }
+  /**
+   * Where a ground-cover LAYER may grow, in world units, or null for "not
+   * here". One gate for both terrain kinds:
+   *
+   * - Heightmap tiles keep the original rule: the layer flagged `grassy` in
+   *   the terrain-splat material has to be the majority blended colour.
+   * - A generated voxel world is asked what the ground there actually IS —
+   *   the layer names surfaces (`grass`, `sand`, …) and their combined weight
+   *   has to reach `minSurface`.
+   *
+   * Gating on the SURFACE rather than on the biome is what makes cover agree
+   * with what you can see: a worn dirt patch inside a meadow grows no grass,
+   * because the ground there is not grass, and no rule had to say so.
+   */
+  function sampleFoliageGround(x: number, z: number, data: GrassData): number | null {
     for (const tile of terrainTiles) {
       const lx = x - tile.x;
       const lz = z - tile.z;
@@ -771,9 +950,31 @@ async function main(): Promise<void> {
       if (!tile.splatLayers) return null;
       const h = sampleHeightmap(tile.params, lx, lz);
       if (grassBlendWeight(tile.splatLayers, h) < GRASS_BLEND_THRESHOLD) return null;
-      return tile.y + h;
+      // same sink as the voxel branch, from a finite difference over the tile
+      const e = 0.5;
+      const dx = (sampleHeightmap(tile.params, lx + e, lz) - sampleHeightmap(tile.params, lx - e, lz)) / (2 * e);
+      const dz = (sampleHeightmap(tile.params, lx, lz + e) - sampleHeightmap(tile.params, lx, lz - e)) / (2 * e);
+      const g = Math.hypot(dx, dz);
+      return tile.y + h - foliageSink(data, g / Math.sqrt(1 + g * g));
     }
-    return null;
+    if (!activeVoxelWorld) return null;
+    const field = getVoxelWorld(activeVoxelWorld);
+    if (!field) return null;
+    const steep = field.slope(x, z);
+    if (steep > data.slopeMax) return null;
+    const ground = field.height(x, z) - foliageSink(data, steep);
+    if (ground <= field.recipe.seaLevel) return null; // nothing grows in the sea
+    if (data.surfaces.length === 0) return ground;
+    if (foliageSplat.length < field.surfaceCount) foliageSplat = new Float32Array(field.surfaceCount);
+    // the vertex path's own normal convention, so the gate sees exactly the
+    // weights the terrain shader is blending at that point
+    field.splatAt(x, ground, z, Math.sqrt(Math.max(0, 1 - steep * steep)), foliageSplat, 0);
+    let weight = 0;
+    for (const name of data.surfaces) {
+      const index = field.recipe.surfaces.findIndex((s) => s.name.toLowerCase() === name.toLowerCase());
+      if (index >= 0) weight += foliageSplat[index] ?? 0;
+    }
+    return weight >= data.minSurface ? ground : null;
   }
   // doc-change telemetry for the context bridge: in-place patches vs full rebuilds
   let reconcileCount = 0;
@@ -847,27 +1048,48 @@ async function main(): Promise<void> {
   /** entity id -> bone names of its loaded skinned model (inspector bone dropdowns). */
   const modelBones = createModelBones();
 
-  // debug viz is an EDIT-mode tool — the game view stays clean during play
+  // debug viz is an EDIT-mode tool — the game view stays clean during play.
+  // `showGizmos` is the master switch (V): off hides every overlay category
+  // at once, purely by visibility — nothing is detached or rebuilt, so
+  // flipping it back restores exactly the set that was on.
+  const gizmosOn = () => playMode.get() === "edit" && settings.get().showGizmos;
   function refreshPhysicsDebugVisibility(): void {
     if (!built) return;
-    const visible = playMode.get() === "edit" && settings.get().showPhysics;
+    const visible = gizmosOn() && settings.get().showPhysics;
     built.scene.traverse((node) => {
       if (node.userData["physicsDebug"]) node.visible = visible;
     });
   }
   function refreshSkeletonDebugVisibility(): void {
     if (!built) return;
-    const visible = playMode.get() === "edit" && settings.get().showSkeletons;
+    const visible = gizmosOn() && settings.get().showSkeletons;
     built.scene.traverse((node) => {
       if (node.userData["skeletonDebug"]) node.visible = visible;
     });
   }
   function refreshLightDebugVisibility(): void {
     if (!built) return;
-    const visible = playMode.get() === "edit" && settings.get().showLights;
+    const visible = gizmosOn() && settings.get().showLights;
     built.scene.traverse((node) => {
       if (node.userData["lightDebug"]) node.visible = visible;
     });
+  }
+  // Per-category toggles attach/detach their visuals in place on the live
+  // scene instead of forcing a full buildScene() teardown — a toggle the user
+  // hits to see past a wireframe must not cost a whole-scene rebuild. The
+  // invariant the reconcile path relies on (overlays are attached iff the
+  // category flag is on) is kept because off always detaches.
+  function syncPhysicsDebugAttachment(): void {
+    if (!built || !lastExpanded) return;
+    detachPhysicsDebug(built.scene);
+    if (settings.get().showPhysics) attachPhysicsDebug(lastExpanded, built.objects);
+    refreshPhysicsDebugVisibility();
+  }
+  function syncLightDebugAttachment(): void {
+    if (!built || !lastExpanded) return;
+    detachLightDebug(built.scene);
+    if (settings.get().showLights) attachLightDebug(lastExpanded, built.objects);
+    refreshLightDebugVisibility();
   }
   // camera collision: in play mode the follow camera dollies in instead of
   // clipping through static scenery (terrain, rocks, trees).
@@ -883,10 +1105,15 @@ async function main(): Promise<void> {
   // immediate neighbors) instead of the unbounded, unfiltered list.
   const COLLIDER_RADIUS_SQ = 200 * 200;
   function refreshCameraColliders(): void {
-    // A chase rig writes an exact camera pose every frame. camera-controls'
-    // four-ray dolly collision would brute-force nearby terrain triangles for
-    // a result that the next exact chase pose immediately overwrites.
-    if (!built || playMode.get() === "edit" || followRigMode === "chase") {
+    // Both play rigs now own their own collision, so camera-controls' built-in
+    // dolly-collision is left switched off for each:
+    //  - chase writes an exact camera pose every frame, so a brute-force
+    //    triangle result would be overwritten before it was ever seen;
+    //  - follow resolves against the physics colliders in
+    //    `updateFollowCamDistance`, which — unlike this mesh list — can see
+    //    streamed chunk terrain and props, and costs one broadphase sweep
+    //    instead of a full triangle raycast per mesh per frame.
+    if (!built || playMode.get() === "edit" || followRigMode !== null) {
       controls.colliderMeshes = [];
       return;
     }
@@ -940,7 +1167,8 @@ async function main(): Promise<void> {
           return doc?.type === "spritesheet" ? (doc.data as SpritesheetDoc) : undefined;
         },
       }),
-    onGrass: (entityId, group, data) => grass.register(entityId, group, data),
+    onGrass: (entityId, group, data) =>
+      grass.register(entityId, group, data, (assetId) => assets.getTexture(assetId)?.url),
     onInstancedBatch: (batch) => foliageLod.register(batch),
     bakeImpostor: (object, bounds) => bakeImpostorAtlas(renderer, object, bounds),
     onClusteredMesh: (_entityId, mesh) => clusterLod.register(mesh),
@@ -976,6 +1204,7 @@ async function main(): Promise<void> {
     billboards.clear();
     grass.clear();
     built = buildScene(lastExpanded, sceneBuildOptions);
+    rebuildStaticBatch();
     skyDomeMesh = null;
     built.scene.traverse((node) => {
       if (!skyDomeMesh && node.userData["skyDome"] === true) skyDomeMesh = node;
@@ -1014,6 +1243,14 @@ async function main(): Promise<void> {
     // streamed world should stay visible around it — keep the ORIGINAL
     // scene's streamer config alive instead of losing it with the doc swap.
     if (editingChunk.get() && chunkEditReturn) streamer = chunkEditReturn.streamer;
+    // A `voxelWorld` component streams a PROCEDURAL world: same streamer, same
+    // rings, same HLOD — the cells are generated from a recipe instead of read
+    // from files. It wins over `chunkStreamer` when a scene somehow has both,
+    // because a generated world has no chunk files for the file path to find.
+    const voxelWorld = resolveVoxelWorld(expanded);
+    chunkManager.setProvider(voxelWorld ? voxelChunkProvider(voxelWorld, assets) : null);
+    if (voxelWorld) streamer = voxelWorld.streamer;
+    activeVoxelWorld = voxelWorld?.data.world ?? null;
     void chunkManager.configure(streamer, built.scene);
     // subscene components: whole scene files composed additively at runtime
     const subscenes: SubsceneInstance[] = [];
@@ -1056,6 +1293,14 @@ async function main(): Promise<void> {
   }
 
   const renderer = new EngineRenderer(canvas);
+  // Let the renderer break its own scope down. `render` is almost always the
+  // biggest number in a profile and it is the one number that names nothing:
+  // the scene's per-frame lighting work, a postfx graph rebuild and the draw
+  // itself all land in it, and they have completely different fixes.
+  renderer.setScopeSink({
+    begin: (name) => profiler.begin(name),
+    end: () => profiler.end(),
+  });
   const [backend] = await Promise.all([renderer.init(), initPhysics()]);
 
   const camera = new THREE.PerspectiveCamera(
@@ -1065,6 +1310,8 @@ async function main(): Promise<void> {
     500,
   );
   const controls = new CameraControls(camera, canvas);
+  /** Scratch for the editor streaming focus (the orbit target) — see the frame loop. */
+  const editorFocus = new THREE.Vector3();
   controls.setLookAt(18, 12, 22, 0, 1, 0, false);
 
   // editor fly-cam: hold LEFT mouse + WASD (QE = down/up, Shift = boost);
@@ -1157,7 +1404,7 @@ async function main(): Promise<void> {
   // Authoring is the default state. The editor stays available whenever the
   // game is not actively running; play mode is the clean fullscreen view.
   const editorVisible = observable(true);
-  const settings = observable(defaultEditorSettings);
+  const settings = createEditorSettings(); // persisted: gizmos/grid/snap choices survive reloads
   const gizmoMode = observable<GizmoMode>("translate");
   const playMode = observable<PlayMode>("edit");
   const contextMenu = createContextMenu();
@@ -1179,15 +1426,83 @@ async function main(): Promise<void> {
   const thumbnails = observable<Record<string, string>>({});
   const dockSizes = createDockSizes();
   const assetsVersion = observable(0);
+  const editorTools = observable<ToolDefinition[]>([]);
+  void fetch("/__hitreg/tools")
+    .then(async (response) => {
+      if (!response.ok) throw new Error(await response.text());
+      return response.json() as Promise<{ tools: ToolDefinition[] }>;
+    })
+    .then(({ tools }) => editorTools.set(tools))
+    .catch((error) => console.warn("[tools] discovery failed:", error));
+
+  const runEditorTool = async (
+    id: string,
+    inputs: Record<string, unknown>,
+  ): Promise<ToolResult> => {
+    const response = await fetch(`/__hitreg/tools/${encodeURIComponent(id)}/run`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ inputs }),
+    });
+    const body = (await response.json()) as
+      | { ok: true; result: ToolResult }
+      | { ok: false; error: string };
+    if (!response.ok || !body.ok) {
+      throw new Error(body.ok ? `tool ${id} failed` : body.error);
+    }
+
+    for (const created of body.result.assets) {
+      if (created.kind === "texture") {
+        const url = `/__hitreg/asset-file?file=${encodeURIComponent(created.file)}&v=${Date.now()}`;
+        const existing = assets.getTexture(created.id);
+        if (existing) existing.url = url;
+        else assets.addTexture({ id: created.id, name: created.id.split("/").pop()!, url });
+      } else if (created.kind === "prefab") {
+        const prefabResponse = await fetch(
+          `/__hitreg/asset-file?file=${encodeURIComponent(created.file)}&v=${Date.now()}`,
+        );
+        if (!prefabResponse.ok) throw new Error(`could not load generated prefab ${created.id}`);
+        const prefab = await prefabResponse.json();
+        if (assets.getPrefab(created.id)) assets.updatePrefab(created.id, prefab);
+        else assets.addPrefab(created.id, prefab);
+      }
+    }
+    if (body.result.assets.length > 0) {
+      assetsVersion.set(assetsVersion.get() + 1);
+      const focusAsset = body.result.assets.find((asset) => asset.kind === "prefab") ??
+        body.result.assets.find((asset) => asset.kind === "texture");
+      if (focusAsset?.kind === "prefab" || focusAsset?.kind === "texture") {
+        selection.set(null);
+        assetSelection.set({ kind: focusAsset.kind, id: focusAsset.id });
+      }
+    }
+    return body.result;
+  };
   assetsVersion.subscribe(() => rebuild()); // material/prefab edits re-render the scene
-  // Scene-affecting debug overlays (physics/lights/skeleton wireframes) attach
-  // during a rebuild, so flipping them must rebuild. View-only flags — the
-  // stats HUD — must NOT: compare a signature of the rebuild-relevant fields so
-  // toggling stats doesn't tear down and rebuild the whole scene.
-  const rebuildKey = (s: ReturnType<typeof settings.get>) => JSON.stringify({ ...s, showStats: 0 });
+  // View-only flags must NOT rebuild the scene: the stats HUD, the gizmos
+  // master switch (pure visibility), and the physics/light overlays (attached
+  // and detached in place by the sync functions above). Compare a signature
+  // of the remaining rebuild-relevant fields so toggling any of those doesn't
+  // tear down and rebuild the whole scene.
+  const rebuildKey = (s: ReturnType<typeof settings.get>) =>
+    JSON.stringify({ ...s, showStats: 0, showGizmos: 0, showPhysics: 0, showLights: 0 });
   let lastRebuildKey = rebuildKey(settings.get());
+  let lastShowPhysics = settings.get().showPhysics;
+  let lastShowLights = settings.get().showLights;
   settings.subscribe(() => {
-    const key = rebuildKey(settings.get());
+    const s = settings.get();
+    if (s.showPhysics !== lastShowPhysics) {
+      lastShowPhysics = s.showPhysics;
+      syncPhysicsDebugAttachment();
+    }
+    if (s.showLights !== lastShowLights) {
+      lastShowLights = s.showLights;
+      syncLightDebugAttachment();
+    }
+    // gizmos master switch (and any other flag) — visibility pass is cheap
+    refreshPhysicsDebugVisibility();
+    refreshLightDebugVisibility();
+    const key = rebuildKey(s);
     if (key === lastRebuildKey) return;
     lastRebuildKey = key;
     rebuild();
@@ -1393,6 +1708,8 @@ async function main(): Promise<void> {
     onPinDelete: (id) => pinStore.remove(id),
     onFocusPoint: (point) => void controls.setTarget(point[0], point[1], point[2], true),
     saveAsset,
+    tools: editorTools,
+    runTool: runEditorTool,
     onProfiler: openProfiler,
     onFocusEntity: frameEntity,
     onUnpackModel: unpackModel,
@@ -1484,8 +1801,11 @@ async function main(): Promise<void> {
   const NET_NUDGE_DIST = 1.0; // prediction drift beyond this eases toward authority
   const NET_SNAP_DIST = 3.5; // …and beyond this teleports (velocity reset)
 
+  // the host-side comms link learns about joins/leaves from here (RoomHost has no roster hook)
+  let hostCommsLink: (CommsLink & { notifyRoster(): void }) | null = null;
   netPresence = new NetPresence({
     getSceneName: () => store.doc.name,
+    onRosterChanged: () => hostCommsLink?.notifyRoster(),
     getLocalPlayer: () => {
       if (playMode.get() !== "playing") return null;
       const playerId = localPlayerId();
@@ -1606,6 +1926,72 @@ async function main(): Promise<void> {
     onRoleChanged: (role) =>
       eventBus?.setNetRole(role === "host" ? "authority" : role === "peer" ? "peer" : "local"),
   });
+
+  // -- comms: text chat + VoIP (@hitreg/comms), riding the room's module channel --
+  // Membership (team/party) is plain netState so scripts assign it with the
+  // API they already have; chat routes on the host, voice gates on the sender
+  // (docs/comms.md). The link follows the session: host / peer / alone.
+  registerCommsNetState(netPresence.netState);
+  const commsSelf = netPresence.self();
+  const commsPos = new THREE.Vector3();
+  const commsFwd = new THREE.Vector3();
+  const commsUp = new THREE.Vector3();
+  const commsQuat = new THREE.Quaternion();
+  let commsListenerCamera: THREE.Camera = camera; // whichever camera rendered last frame
+  const comms = createComms({
+    link: localLink(commsSelf.peerId, commsSelf.name),
+    membership: netStateMembership(netPresence.netState),
+    positionOf: (peerId) => netPresence?.positionOf(peerId) ?? null,
+    listenerPose: () => {
+      if (playMode.get() !== "playing") return null;
+      const cam = commsListenerCamera;
+      cam.getWorldPosition(commsPos);
+      cam.getWorldDirection(commsFwd);
+      commsUp.set(0, 1, 0).applyQuaternion(cam.getWorldQuaternion(commsQuat));
+      return {
+        position: [commsPos.x, commsPos.y, commsPos.z],
+        forward: [commsFwd.x, commsFwd.y, commsFwd.z],
+        up: [commsUp.x, commsUp.y, commsUp.z],
+      };
+    },
+    // "/team red" from a player — dev/social default; a rules-driven game
+    // passes chat.allowSelfAssign:false and writes these keys from a script
+    assign: (peerId, kind, value) => {
+      const key = `comms.${kind}/${peerId}`;
+      if (value === null) {
+        netPresence!.netState.delete(key);
+        return true;
+      }
+      return netPresence!.netState.set(key, value);
+    },
+    emitEvent: (name, payload) => eventBus?.emit(name, payload),
+    chat: { proximityRadius: 25 },
+    voice: { proximityRadius: 25, fullVolumeRadius: 5, mode: "ptt" },
+  });
+  netPresence.onSession((session) => {
+    hostCommsLink = null;
+    if (!session) {
+      comms.setLink(localLink(commsSelf.peerId, commsSelf.name));
+    } else if (session.role === "host") {
+      hostCommsLink = hostLink(session.host, session.selfId, session.selfName);
+      comms.setLink(hostCommsLink);
+    } else {
+      // the host's display name isn't in the roster the client receives —
+      // mirror the dev naming scheme (guest-<id tail>) until identities are real
+      comms.setLink(
+        clientLink(
+          session.client,
+          session.hostId,
+          `guest-${session.hostId.slice(-4)}`,
+          session.selfId,
+          session.selfName,
+        ),
+      );
+    }
+  });
+  mountCommsUI({ chat: comms.chat, voice: comms.voice }); // bottom-left overlay; Enter opens
+  comms.voice.attachKeyboard(window); // V = say, B = team, N = party (push-to-talk)
+  comms.chat.system("Enter: chat · /g /t /p /s pick a channel · /team x · /party x · mic button for voice");
   // "unpack model parts": each named sub-object of a loaded kit becomes a child
   // entity referencing that node; the original keeps only the group transform
   function unpackModel(id: string): void {
@@ -1649,15 +2035,25 @@ async function main(): Promise<void> {
     }
   }
 
-  function frameEntity(id: string): void {
+  /**
+   * Frame an entity. Returns false when nothing is built for that id — the
+   * camera bridge (POST /__hitreg/camera {frame}) has to tell an agent
+   * "that entity isn't in the built scene" instead of silently not moving.
+   */
+  function frameEntity(id: string, transition = true): boolean {
     const object = built.objects.get(id);
-    if (!object) return;
-    void controls.fitToBox(new THREE.Box3().setFromObject(object), true, {
+    if (!object) return false;
+    void controls.fitToBox(new THREE.Box3().setFromObject(object), transition, {
       paddingLeft: 1,
       paddingRight: 1,
       paddingTop: 1,
       paddingBottom: 1,
     });
+    if (!transition) {
+      controls.update(0);
+      camera.updateMatrixWorld(true);
+    }
+    return true;
   }
 
   // Unity-style flow: edit/paused = editor visible; play = fullscreen game.
@@ -1667,7 +2063,15 @@ async function main(): Promise<void> {
   });
 
   window.addEventListener("keydown", (e) => {
-    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
+    // typing into a field (including pin-note textareas) must never trip a
+    // single-letter editor hotkey
+    if (
+      e.target instanceof HTMLInputElement ||
+      e.target instanceof HTMLSelectElement ||
+      e.target instanceof HTMLTextAreaElement ||
+      (e.target instanceof HTMLElement && e.target.isContentEditable)
+    )
+      return;
     if (e.code === "Backquote") {
       if (playMode.get() === "playing") {
         playMode.set("paused");
@@ -1684,6 +2088,12 @@ async function main(): Promise<void> {
     // H: toggle the perf/stats HUD (mirrors the toolbar "stats" checkbox)
     if (e.code === "KeyH" && editorVisible.get()) {
       settings.set({ ...settings.get(), showStats: !settings.get().showStats });
+    }
+    // V: gizmos master switch (mirrors the toolbar "gizmos" toggle) — hides
+    // every viewport overlay (collider/light/skeleton wireframes) at once so
+    // the scene can be seen clean. Bare key only: Ctrl+V is paste.
+    if (e.code === "KeyV" && !e.ctrlKey && !e.metaKey && !e.altKey && editorVisible.get()) {
+      settings.set({ ...settings.get(), showGizmos: !settings.get().showGizmos });
     }
     // Shift+P: open the profiler window. Bare P belongs to the path tool
     // (packages/editor/src/path-tool.ts), which ignores Shift for exactly
@@ -1719,9 +2129,10 @@ async function main(): Promise<void> {
 
   const scriptRegistry = new ScriptRegistry();
   registerBuiltinScripts(scriptRegistry);
-  // any default-exported Script class in src/scripts/ (engine-illustrative,
-  // committed) or projects/<game>/scripts/ (self-contained game builds,
-  // gitignored — see PROJECTS.md). Both are outside assets/, so Vite's normal
+  // any default-exported Script class in projects/<game>/scripts/ (self-
+  // contained game builds, gitignored — see projects/README.md) or the flat
+  // src/scripts/ (throwaway local experiments; the engine repo ships none).
+  // Both are outside assets/, so Vite's normal
   // watcher/HMR covers them like any other source file, no bridge needed.
   // project-scripts.js owns the glob AND is the HMR boundary for it: a script
   // edit re-registers in place (no full page reload). onReload restarts a live
@@ -1729,8 +2140,16 @@ async function main(): Promise<void> {
   initProjectScripts({
     registry: scriptRegistry,
     events,
+    // a project's own ScriptableObject types (`static dataTypes`) define
+    // themselves into the asset library here, the same way `static events`
+    // self-register — nothing project-specific has to be added to this file.
+    assets,
     onReload: () => {
       if (sim) startPlaySession();
+      // a hot-reloaded script may have declared a data type (or an event) that
+      // wasn't in the spec at boot; re-publish so /__hitreg/spec keeps matching
+      // what the app can actually validate, without a page reload.
+      publishEngineSpec(devBridgeDeps);
     },
   });
   const input = new InputService();
@@ -1754,6 +2173,21 @@ async function main(): Promise<void> {
   let followRigMode: "follow" | "chase" | null = null;
   let followRigDistance = 8;
   let followRigHeight = 1;
+  /**
+   * Third-person camera distance the PLAYER asked for with the wheel. Seeded
+   * from the active camera's `rig.distance` on entering play (which the follow
+   * rig otherwise ignored entirely) and only ever SHORTENED by collision —
+   * clearing an obstruction returns to exactly this, so the zoom level a
+   * player picks survives squeezing past a tree.
+   */
+  let playCamDistance = 8;
+  /** Never end up inside the character's own head. */
+  const PLAY_CAM_MIN = 1.6;
+  const PLAY_CAM_MAX = 14;
+  /** Probe sphere radius — the camera's near plane has width, a ray doesn't. */
+  const CAM_PROBE_RADIUS = 0.3;
+  /** Stop this far short of whatever the probe hit. */
+  const CAM_SKIN = 0.25;
   function startPlaySession(): void {
     sim?.free();
     scripts?.dispose();
@@ -1798,6 +2232,7 @@ async function main(): Promise<void> {
       setPathPoints,
       // replicated session state (ctx.netState) — facts every tab agrees on
       ...(netPresence ? { netState: netPresence.netState } : {}),
+      chat: comms.chat, // ctx.chat — announce / react to chat commands
       playSound: (entityId, soundId) => {
         const comp = lastExpanded.entities[entityId]?.components["audio"] as
           | AudioComponentData
@@ -1919,6 +2354,12 @@ async function main(): Promise<void> {
     if (!ok) return false;
     lastExpanded = expanded;
     refreshCameraColliders(); // static-tagged scenery may have moved or changed
+    // Re-merge: reconcile may have moved, retextured or replaced a mesh that is
+    // baked into a batch, and a batch bakes world transforms into its vertices.
+    // Skipping this would leave the edited piece drawn twice — once stale
+    // inside the merge, once live — which is a far more confusing bug than the
+    // merge being rebuilt slightly too often.
+    rebuildStaticBatch();
     return true;
   }
 
@@ -1987,12 +2428,37 @@ async function main(): Promise<void> {
       void canvas.requestPointerLock()?.catch(() => undefined);
     }
   });
+  // Wheel zoom in play. camera-controls' own wheel handling is parked while
+  // the pointer is locked (`controls.enabled = false` above), so the game rig
+  // needs its own — without this the third-person distance was fixed for the
+  // whole session. Collision can still pull the camera nearer than this; it
+  // is the distance the player WANTS, not the one it necessarily gets.
+  canvas.addEventListener(
+    "wheel",
+    (e) => {
+      if (playMode.get() === "edit" || followRigMode !== "follow") return;
+      e.preventDefault(); // the page must not scroll under a locked pointer
+      // normalize across deltaMode (pixel vs line) — a line-mode wheel reports
+      // ~3, a pixel-mode trackpad ~100, and raw deltas make one of them useless.
+      // Sized so a notch is a nudge (~0.7m) and crossing the whole band takes a
+      // deliberate scroll, not two clicks.
+      const step = e.deltaMode === 0 ? e.deltaY * 0.006 : e.deltaY * 0.25;
+      playCamDistance = Math.min(PLAY_CAM_MAX, Math.max(PLAY_CAM_MIN, playCamDistance + step));
+    },
+    { passive: false },
+  );
   const editorMinDistance = controls.minDistance;
+  const editorMaxDistance = controls.maxDistance;
   playMode.subscribe(() => {
     if (playMode.get() === "playing") {
       controls.maxPolarAngle = 1.45; // don't let the game camera dive underground
-      controls.minDistance = 2; // collision dolly-in stops at arm's length
-      void controls.dollyTo(8, true); // game framing: tighter than editor zoom
+      controls.minDistance = PLAY_CAM_MIN; // collision may squeeze in this far
+      controls.maxDistance = PLAY_CAM_MAX;
+      // the rig's authored `distance` is the game's framing; the wheel moves
+      // it from there. (Before this it was a hardcoded 8 and rig.distance was
+      // silently ignored for the follow rig.)
+      playCamDistance = Math.min(PLAY_CAM_MAX, Math.max(PLAY_CAM_MIN, followRigDistance));
+      void controls.dollyTo(playCamDistance, true);
       // the play-button click is our user gesture, but this fires from a
       // store subscription (async relative to that click), so the browser
       // can still see it as "document not focused" and reject — best-effort,
@@ -2001,6 +2467,7 @@ async function main(): Promise<void> {
     } else {
       controls.maxPolarAngle = editorMaxPolar;
       controls.minDistance = editorMinDistance;
+      controls.maxDistance = editorMaxDistance;
       if (document.pointerLockElement === canvas) document.exitPointerLock();
     }
     refreshCameraColliders();
@@ -2060,6 +2527,7 @@ async function main(): Promise<void> {
     assetSelection,
     tools: { graybox: grayboxActive, terrain: terrainActive, path: pathActive, meshEdit },
     pins: pinStore.pins,
+    frameEntity,
     playMode,
     modelNodes,
     modelBones,
@@ -2075,12 +2543,16 @@ async function main(): Promise<void> {
     getSim: () => sim,
     getEventBus: () => eventBus,
     getNetPresence: () => netPresence,
+    getComms: () => comms,
     getReconcileCount: () => reconcileCount,
     getRebuildCount: () => rebuildCount,
     getPerf: () => buildPerfReport(),
   };
   setInterval(() => postContext(devBridgeDeps), 1000);
   publishEngineSpec(devBridgeDeps);
+  // POST /__hitreg/camera aims this tab's editor camera — the only way an
+  // agent (or a screenshot harness) can point the view at anything.
+  installCameraBridge(devBridgeDeps);
 
   clientLog(`boot: ready (backend=${backend}, sceneSource=${seeded ? "code" : "file"})`);
 
@@ -2188,7 +2660,7 @@ async function main(): Promise<void> {
             camera: camera.position.toArray().map((v) => Number(v.toFixed(1))),
             // the verdict in plain English, so whoever opens the file first —
             // person or model — reads the conclusion before the numbers
-            digest: digestProfile(summary),
+            digest: digestProfile(summary, { backend }),
             report: buildPerfReport(),
             full: summary,
           }),
@@ -2291,7 +2763,129 @@ async function main(): Promise<void> {
     profiler.setCounter("objects", built.objects.size);
   }
 
+  /**
+   * Dev-only measurement handle for headless perf work.
+   *
+   * Everything that explains a slow frame here — how many Object3Ds the
+   * renderer actually walks, how they split between the main scene and the
+   * chunk/HLOD groups, which of them are instanced — is closure-scoped, so a
+   * profiling session driving this page from outside can read timings but
+   * never the cause. Stripped from production builds by the DEV guard.
+   */
+  if (import.meta.env.DEV) {
+    (window as unknown as { __hitreg?: unknown }).__hitreg = {
+      renderer,
+      chunkManager,
+      profiler,
+      // the editor orbit TARGET is the streaming focus in edit mode, so
+      // driving it along a path is a repeatable streaming benchmark
+      controls,
+      playMode,
+      scene: () => built.scene,
+      info: () => JSON.parse(JSON.stringify(renderer.renderer.info)),
+      graphStats: () => {
+        const byType = new Map<string, number>();
+        let total = 0;
+        let visible = 0;
+        let instancedCount = 0;
+        let instances = 0;
+        let maxDepth = 0;
+        const walk = (o: THREE.Object3D, depth: number): void => {
+          total += 1;
+          if (depth > maxDepth) maxDepth = depth;
+          const t = o.type;
+          byType.set(t, (byType.get(t) ?? 0) + 1);
+          if (o.visible) visible += 1;
+          const im = o as THREE.InstancedMesh;
+          if (im.isInstancedMesh) {
+            instancedCount += 1;
+            instances += im.count;
+          }
+          for (const child of o.children) walk(child, depth + 1);
+        };
+        walk(built.scene, 0);
+        // where the objects LIVE matters more than how many there are: the fix
+        // for 900 nodes under the hlod groups is not the fix for 900 under the
+        // scene doc's own entities
+        const roots: Array<Record<string, unknown>> = [];
+        for (const child of built.scene.children) {
+          let n = 0;
+          let autoUpdate = 0;
+          child.traverse((o) => {
+            n += 1;
+            if (o.matrixAutoUpdate) autoUpdate += 1;
+          });
+          roots.push({ name: child.name || "(unnamed)", type: child.type, n, autoUpdate });
+        }
+        roots.sort((a, b) => (b.n as number) - (a.n as number));
+        return {
+          total,
+          visible,
+          maxDepth,
+          instancedMeshes: instancedCount,
+          instances,
+          byType: Object.fromEntries([...byType].sort((a, b) => b[1] - a[1])),
+          topRoots: roots.slice(0, 14),
+          rootCount: roots.length,
+        };
+      },
+    };
+  }
+
   const followPos = new THREE.Vector3();
+  const camPivot = new THREE.Vector3();
+  const camDir = new THREE.Vector3();
+  /**
+   * Third-person camera collision, run against the PHYSICS colliders rather
+   * than camera-controls' own dolly-collision.
+   *
+   * Two reasons it has to be physics and not meshes. Correctness: the mesh
+   * path walks `lastExpanded` — the SCENE doc — so streamed chunk entities
+   * (all the voxel terrain, every scattered tree) were never in
+   * `colliderMeshes` at all, and the camera swung straight through hillsides
+   * and trunks. Cost: that path brute-force raycasts every triangle of every
+   * mesh in the list each frame with no acceleration structure, which
+   * profiling had already pinned as the dominant per-frame cost once terrain
+   * got large. One spherecast reuses Rapier's broadphase and sees exactly the
+   * geometry the player can actually collide with.
+   *
+   * A SPHERE, not a ray: the camera has a near plane with width, so a ray
+   * grazing a trunk still leaves the corner of the view inside it.
+   */
+  function updateFollowCamDistance(px: number, py: number, pz: number, dt: number): void {
+    camPivot.set(px, py, pz);
+    // pivot -> camera is wherever mouse-look has orbited to this frame
+    camDir.copy(camera.position).sub(camPivot);
+    if (camDir.lengthSq() < 1e-6) return;
+    camDir.normalize();
+
+    let allowed = playCamDistance;
+    if (sim && followTargetId) {
+      // exclude the target: the sweep starts inside its own capsule, and a
+      // shape stopped by itself reports distance 0 and jams the camera in the
+      // character's head every frame
+      const hit = sim.spherecast(
+        CAM_PROBE_RADIUS,
+        [px, py, pz],
+        [
+          px + camDir.x * playCamDistance,
+          py + camDir.y * playCamDistance,
+          pz + camDir.z * playCamDistance,
+        ],
+        { exclude: [followTargetId] },
+      );
+      if (hit) allowed = Math.max(PLAY_CAM_MIN, hit.distance - CAM_SKIN);
+    }
+
+    // Snap IN immediately, ease OUT. A single frame with the camera inside a
+    // wall shows the player through the world, so intrusion cannot be eased;
+    // but easing the recovery stops the camera flinging outward every time it
+    // clears a tree trunk.
+    const current = controls.distance;
+    const next =
+      allowed < current ? allowed : current + (allowed - current) * Math.min(1, dt * 6);
+    void controls.dollyTo(next, false);
+  }
   // camera colliders are now distance-limited (see refreshCameraColliders) —
   // must stay synced with camera movement, not just scene/model-load events;
   // throttled by distance (like chunkManager's cell-boundary check) since the
@@ -2466,8 +3060,20 @@ async function main(): Promise<void> {
             void controls.setLookAt(chaseEye.x, chaseEye.y, chaseEye.z, p.x, p.y + 1, p.z, false);
           } else {
             void controls.moveTo(p.x, p.y + 1, p.z, true);
+            updateFollowCamDistance(p.x, p.y + 1, p.z, dt);
           }
         }
+      }
+      // Foliage that blocks the shot dissolves (mesh source `cameraFade`).
+      // Hooked here because this is where "who the camera is following" is
+      // already resolved, and it is OFF in edit mode on purpose: dissolving
+      // whatever the camera is close to is exactly wrong when the camera is
+      // the tool for placing that thing.
+      {
+        const followed =
+          playMode.get() !== "edit" && followTargetId ? built.objects.get(followTargetId) : null;
+        if (followed) setFoliageFade({ enabled: true, player: followed.getWorldPosition(followPos) });
+        else setFoliageFade({ enabled: false });
       }
       profiler.end(); // follow-cam
       if (playMode.get() === "playing") {
@@ -2487,10 +3093,22 @@ async function main(): Promise<void> {
           profiler.begin("subscenes");
           subsceneManager.update(p.x, p.z);
         } else {
-          chunkManager.update(camera.position.x, camera.position.z);
+          // The editor camera ORBITS, so its position sweeps a circle around
+          // whatever it is looking at. Using that position as the streaming
+          // focus meant simply ROTATING the view dragged the focus across cell
+          // boundaries and re-streamed a world that had not changed: a profile
+          // of 25 seconds of pure rotation caught 134 HLOD supercell bakes
+          // totalling 24 seconds of work, plus 84 chunk loads.
+          //
+          // The orbit TARGET is the honest focus — it is what you are looking
+          // at, it does not move when you rotate or dolly, and it is already
+          // the centre of everything on screen. Panning and flying move it, and
+          // those are exactly the cases that SHOULD stream.
+          const focus = controls.getTarget(editorFocus);
+          chunkManager.update(focus.x, focus.z);
           profiler.end();
           profiler.begin("subscenes");
-          subsceneManager.update(camera.position.x, camera.position.z);
+          subsceneManager.update(focus.x, focus.z);
         }
         profiler.end();
       }
@@ -2527,7 +3145,7 @@ async function main(): Promise<void> {
       particles.update(dt, renderCamera); // billboards face the camera actually used
       profiler.end();
       profiler.begin("grass");
-      grass.update(renderCamera, sampleTerrainHeight, sampleGrassyGround);
+      grass.update(renderCamera, sampleTerrainHeight, sampleFoliageGround);
       profiler.end();
       profiler.begin("foliage-lod");
       // the near→mid LOD switch is judged in screen pixels, so the system
@@ -2550,13 +3168,15 @@ async function main(): Promise<void> {
       if (skyDomeMesh) skyDomeMesh.position.copy(renderCamera.getWorldPosition(foliageLodCameraPos));
       profiler.begin("net");
       netPresence?.update(dt); // remote avatars lerp toward their snapshot targets
+      commsListenerCamera = renderCamera;
+      comms.update(); // voice: gate outgoing tracks, VAD, spatial gains
       profiler.end();
       profiler.end(); // update
       // render sits OUTSIDE "update", at the top level: it is the one scope
       // you compare directly against the GPU number, and burying it inside
       // another subtotal makes that comparison harder to read
       profiler.begin("render");
-      renderer.render(built.scene, renderCamera);
+      renderer.render(built.scene, renderCamera); // sub-scopes itself, see setScopeSink
       profiler.end();
       sampleFrameCounters();
       lastFrameMs = dt * 1000;
@@ -2618,6 +3238,10 @@ async function main(): Promise<void> {
       (netStats && netStats.role !== "off"
         ? `net: ${netStats.role}${netStats.via ? ` (${netStats.via})` : ""} · ${netStats.players} players\n`
         : "") +
+      ((v) =>
+        v.enabled
+          ? `voice: ${v.transmitting ? "sending" : v.muted ? "muted" : "on"} [${v.speakChannel}] · ${v.peers.filter((p) => p.connected).length}/${v.peers.length} peers\n`
+          : "")(comms.voice.state()) +
       (tiers.near + tiers.mid + tiers.far > 0
         ? `foliage LOD: ${tiers.near} near · ${tiers.mid} mid · ${tiers.far} far\n`
         : "") +

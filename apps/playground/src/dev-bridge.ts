@@ -28,6 +28,32 @@ import type {
 import type { ChunkManager } from "./chunk-manager.js";
 import type { SubsceneManager } from "./subscene-manager.js";
 import type { NetPresence } from "./net-presence.js";
+import type { Comms } from "@hitreg/comms";
+
+/** Context-bridge view of player comms: recent chat lines + voice state. */
+function describeComms(comms: Comms | null): Record<string, unknown> | null {
+  if (!comms) return null;
+  const voice = comms.voice.state();
+  return {
+    chat: comms.chat
+      .history()
+      .slice(-10)
+      .map((m) => ({ channel: m.channel, name: m.name, text: m.text })),
+    voice: {
+      enabled: voice.enabled,
+      muted: voice.muted,
+      mode: voice.mode,
+      speakChannel: voice.speakChannel,
+      transmitting: voice.transmitting,
+      peers: voice.peers.map((p) => ({
+        name: p.name,
+        connected: p.connected,
+        speaking: p.speaking,
+        channel: p.channel,
+      })),
+    },
+  };
+}
 import type { BillboardSystem } from "@hitreg/render";
 
 export interface DevBridgeDeps {
@@ -55,6 +81,13 @@ export interface DevBridgeDeps {
   };
   /** World-anchored notes for the current scene. */
   pins: Pins;
+  /**
+   * Frame an entity the way the editor's own "focus selection" does; false
+   * when nothing is built for that id. Passed in rather than recomputed here
+   * so POST /__hitreg/camera {frame} and double-clicking the hierarchy land
+   * on exactly the same pose.
+   */
+  frameEntity: (id: string, transition?: boolean) => boolean;
   playMode: Observable<PlayMode>;
   modelNodes: Record<string, string[]>;
   modelBones: ModelBones;
@@ -70,6 +103,7 @@ export interface DevBridgeDeps {
   getSim: () => PhysicsSim | null;
   getEventBus: () => EventBus | null;
   getNetPresence: () => NetPresence | null;
+  getComms: () => Comms | null;
   getReconcileCount: () => number;
   getRebuildCount: () => number;
   /**
@@ -252,6 +286,7 @@ export function postContext(deps: DevBridgeDeps): void {
     getSim,
     getEventBus,
     getNetPresence,
+    getComms,
     getReconcileCount,
     getRebuildCount,
     getPerf,
@@ -308,6 +343,9 @@ export function postContext(deps: DevBridgeDeps): void {
       // last gameplay events delivered this play session ({ tick, name, payload })
       recentEvents: eventBus ? eventBus.trace().slice(-20) : null,
       net: netPresence?.debug() ?? null,
+      // player comms (@hitreg/comms): the last chat lines THIS tab was allowed
+      // to see, and voice state — "what are they saying" for an agent
+      comms: describeComms(getComms()),
       // replicated session state (first 60 keys) — what every tab agrees on
       netState: netPresence
         ? Object.fromEntries(Object.entries(netPresence.netState.snapshot()).slice(0, 60))
@@ -344,6 +382,132 @@ export function postContext(deps: DevBridgeDeps): void {
       updatedAt: performance.now(),
     }),
   }).catch(() => undefined);
+}
+
+/** A pose command from POST /__hitreg/camera, broadcast to every tab. */
+interface CameraCommand {
+  cmdId: string;
+  /** bridgeSessionId of the tab this is for — the ws send is a broadcast. */
+  to: string;
+  position?: [number, number, number];
+  target?: [number, number, number];
+  /** Entity id to frame, or the literal "selection". */
+  frame?: string;
+  transitionMs: number;
+}
+
+const camTarget = new THREE.Vector3();
+
+/**
+ * Aim the editor camera from outside the browser (POST /__hitreg/camera).
+ *
+ * This is the piece that lets an agent LOOK at its own work: nothing publishes
+ * the camera on `window`, and synthetic input can't fly it (the fly-cam needs
+ * real pointer capture), so before this the only way to pose the view for a
+ * screenshot was to rewrite the dev server's main.ts response and smuggle a
+ * handle out.
+ *
+ * Every reply is measured, never assumed — see the ack comment below.
+ */
+export function installCameraBridge(deps: DevBridgeDeps): void {
+  if (!import.meta.hot) return; // no dev server, no bridge
+  const { camera, controls, playMode, selection, frameEntity } = deps;
+
+  // camera-controls eases with a smooth-damp TIME CONSTANT, not a duration:
+  // a move is ~63% done after one `smoothTime` and only arrives around three
+  // of them (measured — a 600ms request set as smoothTime rested well past
+  // 1.1s and a third of the way short). So transitionMs, which callers read as
+  // "how long the move takes", maps to smoothTime/3. Captured once at install
+  // rather than at command time: two overlapping commands would otherwise save
+  // each other's modified value and leak it into the editor's permanent feel.
+  const baseSmoothTime = controls.smoothTime;
+  const SMOOTH_TIME_PER_MS = 1 / 3000;
+
+  const pose = (): { position: number[]; target: number[] } => ({
+    position: camera.position.toArray().map((v) => Number(v.toFixed(3))),
+    target: controls
+      .getTarget(camTarget)
+      .toArray()
+      .map((v) => Number(v.toFixed(3))),
+  });
+
+  import.meta.hot.on("hitreg:camera", (cmd: CameraCommand) => {
+    if (cmd.to !== bridgeSessionId) return; // broadcast — not addressed to this tab
+    const transition = cmd.transitionMs > 0;
+    let error: string | null = null;
+    try {
+      if (transition) controls.smoothTime = cmd.transitionMs * SMOOTH_TIME_PER_MS;
+      if (cmd.frame !== undefined) {
+        const id = cmd.frame === "selection" ? selection.get() : cmd.frame;
+        if (!id) error = 'frame:"selection" but nothing is selected';
+        else if (!frameEntity(id, transition)) error = `nothing is built for entity "${id}"`;
+      } else if (cmd.position) {
+        const t = cmd.target ?? controls.getTarget(camTarget).toArray();
+        // Deliberately NOT touching controls.enabled. It is false on purpose
+        // while the pointer is locked (main.ts's syncPointerLockState) so that
+        // orbit-drag doesn't double-apply the mouse look; `enabled` only gates
+        // DOM input, and setLookAt/update work with it off either way.
+        void controls.setLookAt(
+          cmd.position[0], cmd.position[1], cmd.position[2],
+          t[0]!, t[1]!, t[2]!,
+          transition,
+        );
+        if (!transition) {
+          // land it THIS frame: a screenshot tool posts a pose and shoots.
+          controls.update(0);
+          camera.updateMatrixWorld(true);
+        }
+      }
+    } catch (e) {
+      error = String(e);
+    }
+
+    /**
+     * Report what the camera DID, not what was asked for. The follow/chase rig
+     * and the fly-cam both run inside main's animation frame and can overrule
+     * this move entirely; camera-controls also clamps against minDistance and
+     * maxPolarAngle (both tightened in play mode). Acking from a rAF
+     * registered after theirs means we observe their result instead of racing
+     * it, so a caller that got overruled can see it in the response.
+     */
+    const ack = (): void => {
+      controls.smoothTime = baseSmoothTime;
+      requestAnimationFrame(() => {
+        void fetch("/__hitreg/camera", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            ack: cmd.cmdId,
+            bridgeSessionId,
+            ok: error === null,
+            camera: pose(),
+            playMode: playMode.get(),
+            ...(error ? { error } : {}),
+          }),
+        }).catch(() => undefined);
+      });
+    };
+
+    if (error !== null || !transition) {
+      ack();
+      return;
+    }
+    // eased move: answer when the controls actually come to rest — smooth-damp
+    // approaches asymptotically, so "transitionMs elapsed" is not the same as
+    // "arrived", and acking on a timer alone reports a pose still in flight.
+    // The cap is the fallback for a move that never rests (the user grabs the
+    // camera mid-flight); it stays inside the server's ack deadline.
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      controls.removeEventListener("rest", finish);
+      clearTimeout(cap);
+      ack();
+    };
+    const cap = setTimeout(finish, cmd.transitionMs + 1500);
+    controls.addEventListener("rest", finish);
+  });
 }
 
 /**

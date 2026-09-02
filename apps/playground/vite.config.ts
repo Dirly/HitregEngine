@@ -1,6 +1,16 @@
 import { defineConfig, type Plugin } from "vite";
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
+import type { IncomingMessage } from "node:http";
+// Vite config runs directly in Node rather than through the app's TS resolver;
+// use the source module so the config loader bundles this registry implementation.
+import {
+  ToolRegistry,
+  toolManifestSchema,
+  toolResultSchema,
+  type ToolManifest,
+} from "../../packages/core/src/tools.ts";
 
 /**
  * The dev server is the AI/file bridge:
@@ -13,6 +23,9 @@ import path from "node:path";
  * - GET/POST /__hitreg/context — the running app posts what the user sees
  *   (selection, camera, in-view entities, play mode); AI tools GET it to
  *   resolve "the thing I'm looking at" tasks.
+ * - GET/POST /__hitreg/camera — read or AIM the editor camera. The app has no
+ *   window handle on it and synthetic input can't fly it, so this is the only
+ *   way an agent can point the view at something (screenshots, "look at this").
  * - GET/POST /__hitreg/spec — the running app posts its capability spec
  *   (buildEngineSpec: every component/event/data-type/script + the ops
  *   protocol, generated from the live Zod schemas); AI tools GET it to learn
@@ -37,9 +50,13 @@ import path from "node:path";
 const BRIDGE_ENDPOINTS = [
   { method: "GET", path: "/__hitreg/spec", purpose: "This capability spec + endpoint list." },
   { method: "GET", path: "/__hitreg/context", purpose: "What the user currently sees: scene, selection, camera, in-view entities, play mode, diagnostics, plus `focus` — where their attention is, ranked (focus.strongest names which of manipulating/hover/selection/asset to resolve \"this\" against, and focus.mode says what they are doing: edit, graybox, terrain-sculpt, editing-prefab:<id>, playing, …). Keyed per browser tab (bridgeSessionId) — with exactly one tab connected this just returns its data; with more than one, returns { multipleClients: true, clients: [...] } instead of guessing, pass ?id=<id> from that list to pick one." },
+  { method: "GET", path: "/__hitreg/camera", purpose: "Where the editor camera is: { id, scene, playMode, mode, camera: { position:[x,y,z], target:[x,y,z] }, lastSeen } — the camera block of /__hitreg/context without the rest of the payload. Same per-tab keying as /__hitreg/context (?id=<id>; { multipleClients, clients } when several tabs are live)." },
+  { method: "POST", path: "/__hitreg/camera", purpose: "Aim the editor camera — this is how an agent looks at its own work (screenshots, \"show me what you mean\"). Body: { position:[x,y,z], target?:[x,y,z] } or { frame: \"<entityId>\" } (or frame:\"selection\"), plus transitionMs (default 0 = snap this frame, which is what a screenshot tool wants; >0 eases over roughly that long and holds the request open until the camera actually comes to rest). Returns the pose the camera ACTUALLY reached: { ok, id, cmdId, camera:{position,target}, playMode }. FOOTGUN: this drives the EDITOR camera. In play mode that camera is often not what is on screen — a follow/chase rig re-aims it every frame, and a scene camera or a script's active camera replaces it outright — so the move can be instantly overwritten or simply not rendered. Trust the returned `camera` over the one you asked for; if it snapped back, something else owns the view. Same per-tab keying as /__hitreg/context: pass ?id=<id>, and with several tabs live and no id this answers 409 { ok:false, multipleClients, clients } rather than aiming somebody else's window." },
   { method: "GET", path: "/__hitreg/assets-index", purpose: "Every asset file on disk, bucketed by kind (scenes, prefabs, materials, models, chunks, …)." },
   { method: "GET", path: "/__hitreg/asset-file?file=<rel>", purpose: "Read one asset file fresh from disk (bypasses Vite's cache)." },
   { method: "POST", path: "/__hitreg/write-asset", purpose: "Write an asset file ({file, content}); live-syncs into the running app." },
+  { method: "GET", path: "/__hitreg/tools", purpose: "List installed editor/asset tool manifests. The same definitions drive the editor UI and the tools block in this spec." },
+  { method: "POST", path: "/__hitreg/tools/:id/run", purpose: "Run a registered tool with { inputs }. Inputs are schema-validated; returns { assets, previews, warnings, report, log }." },
   { method: "GET", path: "/__hitreg/pins?scene=<name>", purpose: "World-anchored notes for a scene: [{ id, point:[x,y,z], entityId, text, author, createdAt, resolved }]. A pin is a human (or agent) comment left AT a place — read them to find what someone flagged and where. Stored beside the scene (.hitreg/pins/), never inside it." },
   { method: "POST", path: "/__hitreg/pins", purpose: "Replace a scene's notes ({scene, pins}) — post the full array. Agents may add pins to answer or to flag something for the human; set resolved:true rather than deleting, so the exchange stays readable." },
   { method: "GET", path: "/__hitreg/agent-inbox?scene=<name>&wait=<sec>", purpose: "Notes the human pressed \"send to AI\" on and that are not yet resolved — the requests actually addressed to you, each carrying the pinned entity's full component JSON so you can act without a second fetch. `wait` LONG-POLLS: the request is held open until a note arrives or the deadline passes (max 120s), so an idle agent wakes within ~0.5s of the click instead of polling on a timer. Answer by POSTing the scene's pins back with your `reply` and `resolved: true`. Also returns `profiles: [...]` — frame-profiler snapshots the human sent, each with its `.hitreg/profiles/` file path, their note, and the plain-English verdict; answer those via POST /__hitreg/profile." },
@@ -61,6 +78,61 @@ function hitregBridge(): Plugin {
   // and finding the offending POST body belonged to a different tab entirely.
   const contextByClient = new Map<string, { data: Record<string, unknown>; lastSeen: number }>();
   const CONTEXT_STALE_MS = 5000; // ~5 missed 1s posts = treat the tab as gone
+
+  /** Forget tabs that stopped posting — closed, navigated away, or crashed. */
+  const sweepStaleClients = (): void => {
+    const now = Date.now();
+    for (const [id, entry] of contextByClient) {
+      if (now - entry.lastSeen > CONTEXT_STALE_MS) contextByClient.delete(id);
+    }
+  };
+
+  /**
+   * The answer every tab-scoped endpoint gives when more than one tab is live
+   * and no `?id=` picks between them. Shared, not copied, so /__hitreg/camera
+   * tells the SAME multi-tab story as /__hitreg/context — a second convention
+   * would be a second thing for an agent to get wrong, and the bug this whole
+   * per-tab keying exists to prevent (see above) is precisely what happens
+   * when a tab-scoped endpoint guesses.
+   */
+  const clientListing = (): Record<string, unknown> => ({
+    multipleClients: true,
+    hint: "pass ?id=<id> to disambiguate",
+    clients: [...contextByClient.entries()].map(([id, entry]) => {
+      const data = entry.data as {
+        scene?: string;
+        playMode?: string;
+        focus?: { mode?: string; strongest?: string };
+      };
+      return {
+        id,
+        scene: data.scene,
+        playMode: data.playMode,
+        // enough of the focus block to tell the human's tab apart
+        // from an agent's own headless one without a second GET
+        mode: data.focus?.mode,
+        attending: data.focus?.strongest,
+        lastSeen: new Date(entry.lastSeen).toISOString(),
+      };
+    }),
+  });
+
+  /**
+   * Which tab a tab-scoped request is addressed to: an explicit `?id=`, else
+   * the only live tab. `ambiguous` means several tabs and no way to choose —
+   * the caller must answer with `clientListing()` rather than pick one.
+   */
+  const resolveClient = (url: URL): { id: string | null; ambiguous: boolean } => {
+    sweepStaleClients();
+    const requested = url.searchParams.get("id");
+    if (requested) {
+      return { id: contextByClient.has(requested) ? requested : null, ambiguous: false };
+    }
+    if (contextByClient.size === 1) {
+      return { id: contextByClient.keys().next().value ?? null, ambiguous: false };
+    }
+    return { id: null, ambiguous: contextByClient.size > 1 };
+  };
   let latestSpec: unknown = null;
   /** Most recent frame-profiler capture ("send to agent" in the profiler window). */
   let latestProfile: unknown = null;
@@ -70,6 +142,8 @@ function hitregBridge(): Plugin {
     configureServer(server) {
       const assetsRoot = path.resolve(server.config.root, "assets");
       const projectsRoot = path.resolve(server.config.root, "projects");
+      const engineRoot = path.resolve(server.config.root, "../..");
+      const toolsRoot = path.join(engineRoot, "tools");
       fs.mkdirSync(assetsRoot, { recursive: true });
 
       const ASSET_KINDS = [
@@ -82,6 +156,7 @@ function hitregBridge(): Plugin {
         "textures",
         "audio",
         "chunks",
+        "worlds",
       ] as const;
 
       // A virtual path like "materials/heli-island/beacon-glow.json" may live
@@ -102,6 +177,133 @@ function hitregBridge(): Plugin {
       };
       const withinKnownRoot = (target: string): boolean =>
         target.startsWith(assetsRoot + path.sep) || target.startsWith(projectsRoot + path.sep);
+
+      // Engine/plugin tools are folders with a validated tool.json manifest.
+      // Metadata is public and browser-safe; only the dev host imports entry.
+      const toolRegistry = new ToolRegistry();
+      const installedTools = new Map<string, { manifest: ToolManifest; entryPath: string }>();
+      if (fs.existsSync(toolsRoot)) {
+        for (const entry of fs.readdirSync(toolsRoot, { withFileTypes: true })) {
+          if (!entry.isDirectory()) continue;
+          const toolDir = path.join(toolsRoot, entry.name);
+          const manifestPath = path.join(toolDir, "tool.json");
+          if (!fs.existsSync(manifestPath)) continue;
+          const manifest = toolManifestSchema.parse(
+            JSON.parse(fs.readFileSync(manifestPath, "utf8")),
+          );
+          const entryPath = path.resolve(toolDir, manifest.entry);
+          if (!entryPath.startsWith(toolDir + path.sep)) {
+            throw new Error(`tool ${manifest.id}: entry escapes its tool folder`);
+          }
+          toolRegistry.register(manifest);
+          installedTools.set(manifest.id, { manifest, entryPath });
+        }
+      }
+
+      const readJsonBody = (
+        req: IncomingMessage,
+        maxBytes = 48 * 1024 * 1024,
+      ): Promise<unknown> =>
+        new Promise((resolve, reject) => {
+          let body = "";
+          let bytes = 0;
+          req.on("data", (chunk: Buffer) => {
+            bytes += chunk.length;
+            if (bytes > maxBytes) {
+              reject(new Error(`request exceeds ${maxBytes} bytes`));
+              req.destroy();
+              return;
+            }
+            body += chunk.toString("utf8");
+          });
+          req.on("end", () => {
+            try {
+              resolve(JSON.parse(body));
+            } catch (error) {
+              reject(error);
+            }
+          });
+          req.on("error", reject);
+        });
+
+      // One invocation surface for both editor UI and agents. Tool code gets a
+      // narrow asset writer that enforces the manifest's declared permissions
+      // and the same project sandbox as /__hitreg/write-asset.
+      server.middlewares.use("/__hitreg/tools", (req, res) => {
+        const url = new URL(req.url ?? "/", "http://x");
+        const runMatch = /^\/([^/]+)\/run$/.exec(url.pathname);
+        if (req.method === "GET" && (url.pathname === "/" || url.pathname === "")) {
+          res.setHeader("content-type", "application/json");
+          res.setHeader("cache-control", "no-store");
+          res.end(JSON.stringify({ tools: toolRegistry.list() }));
+          return;
+        }
+        if (req.method !== "POST" || !runMatch) {
+          res.statusCode = 404;
+          res.end(JSON.stringify({ ok: false, error: "unknown tool route" }));
+          return;
+        }
+
+        const id = decodeURIComponent(runMatch[1]!);
+        const installed = installedTools.get(id);
+        if (!installed) {
+          res.statusCode = 404;
+          res.end(JSON.stringify({ ok: false, error: `unknown tool "${id}"` }));
+          return;
+        }
+
+        void readJsonBody(req)
+          .then(async (body) => {
+            const rawInputs = (body as { inputs?: unknown })?.inputs;
+            const validated = toolRegistry.validate(id, rawInputs);
+            if (!validated.ok) throw new Error(validated.error);
+
+            const safeId = id.replace(/[^a-z0-9-]+/g, "-");
+            const runsRoot = path.join(server.config.root, ".hitreg", "tool-runs");
+            fs.mkdirSync(runsRoot, { recursive: true });
+            const runDir = fs.mkdtempSync(path.join(runsRoot, `${safeId}-`));
+            const permissions = new Set(installed.manifest.permissions);
+            const writeAsset = (file: string, data: Buffer): string => {
+              const normalized = file.replace(/\\/g, "/").replace(/^\/+/, "");
+              const kind = normalized.split("/", 1)[0] ?? "";
+              if (
+                !permissions.has("assets.write:*") &&
+                !permissions.has(`assets.write:${kind}`)
+              ) {
+                throw new Error(`tool ${id} has no permission to write ${kind} assets`);
+              }
+              const target = resolveAssetPath(normalized);
+              if (!withinKnownRoot(target)) throw new Error("tool output escapes project assets");
+              fs.mkdirSync(path.dirname(target), { recursive: true });
+              fs.writeFileSync(target, data);
+              return normalized;
+            };
+            const assetExists = (file: string): boolean => {
+              const normalized = file.replace(/\\/g, "/").replace(/^\/+/, "");
+              const target = resolveAssetPath(normalized);
+              if (!withinKnownRoot(target)) throw new Error("tool asset lookup escapes project assets");
+              return fs.existsSync(target);
+            };
+
+            const stamp = fs.statSync(installed.entryPath).mtimeMs;
+            const module = (await import(
+              `${pathToFileURL(installed.entryPath).href}?v=${stamp}`
+            )) as { run?: (context: unknown, inputs: Record<string, unknown>) => Promise<unknown> };
+            if (typeof module.run !== "function") {
+              throw new Error(`tool ${id} entry does not export run(context, inputs)`);
+            }
+            const result = toolResultSchema.parse(
+              await module.run({ runDir, writeAsset, assetExists }, validated.data),
+            );
+            res.setHeader("content-type", "application/json");
+            res.end(JSON.stringify({ ok: true, result }));
+          })
+          .catch((error) => {
+            res.statusCode = 400;
+            res.setHeader("content-type", "application/json");
+            res.end(JSON.stringify({ ok: false, error: String(error) }));
+          });
+      });
 
       server.middlewares.use("/__hitreg/write-asset", (req, res) => {
         if (req.method !== "POST") {
@@ -420,10 +622,7 @@ function hitregBridge(): Plugin {
 
       server.middlewares.use("/__hitreg/context", (req, res) => {
         if (req.method === "GET") {
-          const now = Date.now();
-          for (const [id, entry] of contextByClient) {
-            if (now - entry.lastSeen > CONTEXT_STALE_MS) contextByClient.delete(id);
-          }
+          sweepStaleClients();
           const url = new URL(req.url ?? "", "http://x");
           const requestedId = url.searchParams.get("id");
           res.setHeader("content-type", "application/json");
@@ -439,29 +638,7 @@ function hitregBridge(): Plugin {
           }
           // more than one live tab and no ?id= to disambiguate — say so
           // explicitly instead of silently returning whichever posted last
-          res.end(
-            JSON.stringify({
-              multipleClients: true,
-              hint: "pass ?id=<id> to disambiguate",
-              clients: [...contextByClient.entries()].map(([id, entry]) => {
-                const data = entry.data as {
-                  scene?: string;
-                  playMode?: string;
-                  focus?: { mode?: string; strongest?: string };
-                };
-                return {
-                  id,
-                  scene: data.scene,
-                  playMode: data.playMode,
-                  // enough of the focus block to tell the human's tab apart
-                  // from an agent's own headless one without a second GET
-                  mode: data.focus?.mode,
-                  attending: data.focus?.strongest,
-                  lastSeen: new Date(entry.lastSeen).toISOString(),
-                };
-              }),
-            }),
-          );
+          res.end(JSON.stringify(clientListing()));
           return;
         }
         if (req.method === "POST") {
@@ -482,6 +659,211 @@ function hitregBridge(): Plugin {
         }
         res.statusCode = 405;
         res.end();
+      });
+
+      // -- editor camera: aim it from outside the browser --------------------
+      //
+      // This is what lets an agent LOOK at its own work. The app publishes no
+      // handle on `window` (the camera and its CameraControls are locals
+      // inside main()'s boot IIFE) and synthetic input does not fly it — the
+      // fly-cam needs real pointer capture, which Playwright's synthetic
+      // events never produce. Without this endpoint a screenshot harness has
+      // to rewrite the dev server's /src/main.ts response to smuggle a handle
+      // out, which is exactly as fragile as it sounds (it breaks the day
+      // main.ts's anchor line moves).
+      //
+      // Delivery is the vite websocket, broadcast and filtered client-side by
+      // bridgeSessionId — the same shape as hitreg:net-signal. The browser
+      // then POSTs an ACK carrying the pose it ACTUALLY reached, measured
+      // after a rendered frame, and that ack is what this POST returns. The
+      // ack is the point, not ceremony: camera-controls clamps against
+      // minDistance/maxPolarAngle, a follow rig or script camera can own the
+      // view in play mode, and a live fly-cam drag overrules everything — a
+      // tool that assumed success would shoot from the wrong place and never
+      // know. When the returned `camera` is not what you asked for, believe
+      // the returned one.
+      let cameraSeq = 0;
+      /** cmdId -> the HTTP POST waiting for that command's ack. */
+      const pendingCamera = new Map<
+        string,
+        { settle: (payload: Record<string, unknown>) => void; timer: ReturnType<typeof setTimeout> }
+      >();
+      /** Ack grace on top of the requested transition (boot, GC, a slow frame). */
+      const CAMERA_ACK_SLACK_MS = 2500;
+      const MAX_TRANSITION_MS = 10_000;
+      const isVec3 = (v: unknown): v is [number, number, number] =>
+        Array.isArray(v) && v.length === 3 && v.every((n) => typeof n === "number" && Number.isFinite(n));
+
+      server.middlewares.use("/__hitreg/camera", (req, res) => {
+        const url = new URL(req.url ?? "", "http://x");
+        res.setHeader("content-type", "application/json");
+        res.setHeader("cache-control", "no-store");
+
+        if (req.method === "GET") {
+          const { id, ambiguous } = resolveClient(url);
+          if (ambiguous) {
+            res.end(JSON.stringify(clientListing()));
+            return;
+          }
+          const entry = id ? contextByClient.get(id) : undefined;
+          if (!entry || !id) {
+            res.end(JSON.stringify(null)); // no tab — same "nothing to report" as /context
+            return;
+          }
+          const data = entry.data as {
+            scene?: string;
+            playMode?: string;
+            camera?: unknown;
+            focus?: { mode?: string };
+          };
+          res.end(
+            JSON.stringify({
+              id,
+              scene: data.scene,
+              playMode: data.playMode,
+              mode: data.focus?.mode,
+              camera: data.camera ?? null,
+              lastSeen: new Date(entry.lastSeen).toISOString(),
+            }),
+          );
+          return;
+        }
+
+        if (req.method !== "POST") {
+          res.statusCode = 405;
+          res.end();
+          return;
+        }
+
+        let body = "";
+        req.on("data", (chunk: Buffer) => (body += chunk));
+        req.on("end", () => {
+          let msg: Record<string, unknown>;
+          try {
+            msg = JSON.parse(body || "{}") as Record<string, unknown>;
+          } catch (error) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ ok: false, error: String(error) }));
+            return;
+          }
+
+          // (a) the browser answering a command it just applied
+          if (typeof msg["ack"] === "string") {
+            const ackId = msg["ack"];
+            const clientId = typeof msg["bridgeSessionId"] === "string" ? msg["bridgeSessionId"] : "";
+            const entry = contextByClient.get(clientId);
+            // fold the fresh pose into that tab's stored context: GET
+            // /__hitreg/camera (and /context) would otherwise report the
+            // pre-move camera for up to a second, which reads as "the move
+            // silently failed" to anything that verifies immediately.
+            if (entry && msg["camera"]) {
+              entry.data["camera"] = msg["camera"];
+              entry.lastSeen = Date.now();
+            }
+            const pending = pendingCamera.get(ackId);
+            if (pending) {
+              clearTimeout(pending.timer);
+              pendingCamera.delete(ackId);
+              pending.settle({
+                ok: msg["ok"] !== false,
+                id: clientId,
+                cmdId: ackId,
+                camera: msg["camera"] ?? null,
+                playMode: msg["playMode"] ?? null,
+                ...(msg["error"] ? { error: msg["error"] } : {}),
+              });
+            }
+            res.end(JSON.stringify({ ok: true }));
+            return;
+          }
+
+          // (b) an agent asking for a move
+          const { id, ambiguous } = resolveClient(url);
+          if (ambiguous) {
+            // a command, unlike a read, must not be delivered to a guess
+            res.statusCode = 409;
+            res.end(JSON.stringify({ ok: false, ...clientListing() }));
+            return;
+          }
+          if (!id) {
+            res.statusCode = 503;
+            res.end(
+              JSON.stringify({
+                ok: false,
+                error:
+                  "no browser tab is posting context to this dev server — open the playground (or pass ?id= for a tab that is)",
+              }),
+            );
+            return;
+          }
+
+          const frame = msg["frame"];
+          const position = msg["position"];
+          const target = msg["target"];
+          if (frame !== undefined && typeof frame !== "string") {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ ok: false, error: "frame must be an entity id (or \"selection\")" }));
+            return;
+          }
+          if (frame === undefined && !isVec3(position)) {
+            res.statusCode = 400;
+            res.end(
+              JSON.stringify({
+                ok: false,
+                error:
+                  'give { position: [x,y,z], target?: [x,y,z], transitionMs? } or { frame: "<entityId>" }',
+              }),
+            );
+            return;
+          }
+          if (target !== undefined && !isVec3(target)) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ ok: false, error: "target must be [x,y,z]" }));
+            return;
+          }
+          const transitionMs = Math.min(
+            Math.max(Number(msg["transitionMs"] ?? 0) || 0, 0),
+            MAX_TRANSITION_MS,
+          );
+
+          const cmdId = `${Date.now().toString(36)}-${(cameraSeq++).toString(36)}`;
+          let done = false;
+          const settle = (payload: Record<string, unknown>): void => {
+            if (done) return;
+            done = true;
+            res.end(JSON.stringify(payload));
+          };
+          const timer = setTimeout(() => {
+            pendingCamera.delete(cmdId);
+            res.statusCode = 504;
+            settle({
+              ok: false,
+              id,
+              cmdId,
+              error:
+                "the tab never acknowledged the camera command (is it still loading, or is this an old build without the camera bridge?)",
+            });
+          }, transitionMs + CAMERA_ACK_SLACK_MS);
+          // the caller hung up before the ack. Watched on the RESPONSE, not the
+          // request: node fires the request's "close" as soon as its body has
+          // been read, which for a POST is immediately — hooking it there
+          // marked every command as abandoned and hung the endpoint forever.
+          res.on("close", () => {
+            if (res.writableEnded) return; // normal completion, not an abort
+            clearTimeout(timer);
+            pendingCamera.delete(cmdId);
+            done = true;
+          });
+          pendingCamera.set(cmdId, { settle, timer });
+          server.ws.send("hitreg:camera", {
+            cmdId,
+            to: id,
+            ...(typeof frame === "string" ? { frame } : {}),
+            ...(isVec3(position) ? { position } : {}),
+            ...(isVec3(target) ? { target } : {}),
+            transitionMs,
+          });
+        });
       });
 
       // Frame-profiler snapshots: .hitreg/profiles/<timestamp>-<scene>.json
@@ -671,7 +1053,13 @@ function hitregBridge(): Plugin {
           res.setHeader("cache-control", "no-store");
           const base =
             latestSpec ?? { note: "open the app once so it can post its spec" };
-          res.end(JSON.stringify({ ...(base as object), endpoints: BRIDGE_ENDPOINTS }));
+          res.end(
+            JSON.stringify({
+              ...(base as object),
+              tools: toolRegistry.describe(),
+              endpoints: BRIDGE_ENDPOINTS,
+            }),
+          );
           return;
         }
         if (req.method === "POST") {

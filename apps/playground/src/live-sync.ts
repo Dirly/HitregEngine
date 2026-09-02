@@ -9,6 +9,7 @@ import {
 import type { EditingPrefab, Observable, Selection } from "@hitreg/editor";
 import type { ChunkManager } from "./chunk-manager.js";
 import type { SubsceneManager } from "./subscene-manager.js";
+import { applyWorldRecipeEdit } from "./voxel-world.js";
 
 export interface LiveSyncDeps {
   assets: AssetLibrary;
@@ -130,6 +131,17 @@ export function installLiveSync(deps: LiveSyncDeps): void {
           if (assets.getPrefab(id)) assets.updatePrefab(id, doc);
           else assets.addPrefab(id, doc);
           assetsVersion.set(assetsVersion.get() + 1);
+        } else if (file.startsWith("worlds/")) {
+          // A world recipe governs EVERY generated cell at once, so there is
+          // nothing finer to invalidate: re-register it, drop the cached cell
+          // meshes, and re-stream whatever is resident. An invalid edit is
+          // rejected and the running world is left exactly as it was, the same
+          // rule every other asset watcher here follows.
+          const id = file.slice("worlds/".length).replace(/\.json$/, "");
+          if (applyWorldRecipeEdit(id, content)) {
+            chunkManager.reloadAll();
+            assetsVersion.set(assetsVersion.get() + 1);
+          }
         } else if (file.startsWith("chunks/")) {
           // hot-swap a loaded chunk in place (or pick up a brand-new cell)
           void chunkManager.onFileChanged(file.slice("chunks/".length), content);

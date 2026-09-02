@@ -45,6 +45,15 @@ async function snapshotObject(renderer: EngineRenderer, backend: Backend, object
   const target = new THREE.RenderTarget(THUMB, THUMB);
   renderer.renderer.setRenderTarget(target);
   renderer.renderer.render(scene, cam);
+  // Unbind BEFORE awaiting the readback, not after. The await yields to the
+  // event loop, and the app's own render loop keeps running — so while a bake
+  // was in flight, every main-loop frame rendered into this 96x96 thumbnail
+  // target instead of the canvas. The viewport visibly alternated between the
+  // scene and a stale frame for the whole bake pass, which reads as the
+  // renderer flickering rather than as anything to do with thumbnails.
+  // `readRenderTargetPixelsAsync` takes the target explicitly, so it does not
+  // need it to still be bound.
+  renderer.renderer.setRenderTarget(null);
   const pixels = (await renderer.renderer.readRenderTargetPixelsAsync(
     target,
     0,
@@ -52,7 +61,6 @@ async function snapshotObject(renderer: EngineRenderer, backend: Backend, object
     THUMB,
     THUMB,
   )) as Uint8Array;
-  renderer.renderer.setRenderTarget(null);
   target.dispose();
 
   const canvas2d = document.createElement("canvas");
@@ -198,7 +206,17 @@ async function renderThumbnailsOnce(deps: RenderThumbnailsDeps): Promise<void> {
       const contentKey = `${pid}:${json.length}`;
       await fill(pid, `__key_${pid}`, contentKey, `p:${pid}:${hash(json)}`, async () => {
         const expanded = expandScene(buildStreetDocEmpty(pid), assets, registry);
-        const thumb = buildScene(expanded, { resolveMaterial: (id) => assets.getDataAsset(id)?.data });
+        // resolveModel/resolveTexture are as necessary here as resolveMaterial:
+        // a prefab whose parts are glTF models (a rigged actor, a kitbashed
+        // prop) otherwise baked an EMPTY thumbnail and logged one
+        // "no URL for mesh asset" warning per model — which reads exactly like
+        // a broken asset in the scene, because the message doesn't say it came
+        // from the thumbnail pass.
+        const thumb = buildScene(expanded, {
+          resolveMaterial: (id) => assets.getDataAsset(id)?.data as MaterialData | undefined,
+          resolveModel: (assetId) => assets.getModel(assetId)?.url,
+          resolveTexture: (assetId) => assets.getTexture(assetId)?.url,
+        });
         return snapshotObject(renderer, backend, thumb.scene);
       });
     } catch (error) {
@@ -239,7 +257,9 @@ async function renderThumbnailsOnce(deps: RenderThumbnailsDeps): Promise<void> {
           material.map = texture;
           material.needsUpdate = true;
         }
-        const sphere = new THREE.Mesh(new THREE.SphereGeometry(1, 48, 32), material);
+        const geometry = new THREE.SphereGeometry(1, 48, 32);
+        addSplatPreviewWeights(geometry, data);
+        const sphere = new THREE.Mesh(geometry, material);
         return snapshotObject(renderer, backend, sphere);
       });
     } catch (error) {
@@ -248,6 +268,39 @@ async function renderThumbnailsOnce(deps: RenderThumbnailsDeps): Promise<void> {
   }
 
   if (changed) thumbnails.set(out);
+}
+
+/**
+ * Give a preview sphere the per-vertex splat weights a `source: "vertex"`
+ * terrain material expects.
+ *
+ * Two reasons. Without the attribute the shader warns on every compile and
+ * falls back to layer 0, so the swatch for a four-surface terrain material
+ * would be a flat patch of grass and tell you nothing. With it — banded by
+ * latitude, so the sphere reads bottom-to-top through the layers — the swatch
+ * shows all four surfaces the way the terrain will actually blend them.
+ */
+function addSplatPreviewWeights(geometry: THREE.BufferGeometry, data: MaterialData): void {
+  const splat = data.splat as { source?: string; layers?: unknown[] } | undefined;
+  if (splat?.source !== "vertex") return;
+  const layers = Math.min(4, Math.max(1, splat.layers?.length ?? 1));
+  const position = geometry.getAttribute("position");
+  const weights = new Float32Array(position.count * 4);
+  for (let i = 0; i < position.count; i++) {
+    // y in [-1, 1] -> a soft band per layer, so neighbours overlap and blend
+    const t = (position.getY(i) * 0.5 + 0.5) * (layers - 1);
+    for (let layer = 0; layer < layers; layer++) {
+      weights[i * 4 + layer] = Math.max(0, 1 - Math.abs(t - layer));
+    }
+    const sum = weights[i * 4]! + weights[i * 4 + 1]! + weights[i * 4 + 2]! + weights[i * 4 + 3]!;
+    if (sum > 0) for (let c = 0; c < 4; c++) weights[i * 4 + c] = weights[i * 4 + c]! / sum;
+    else weights[i * 4] = 1;
+  }
+  geometry.setAttribute("splatWeight", new THREE.BufferAttribute(weights, 4));
+  if (splat.source === "vertex" && !geometry.getAttribute("color")) {
+    const tint = new Float32Array(position.count * 3).fill(1);
+    geometry.setAttribute("color", new THREE.BufferAttribute(tint, 3));
+  }
 }
 
 /** Small stable string hash (FNV-1a) for namespacing persistent cache keys. */

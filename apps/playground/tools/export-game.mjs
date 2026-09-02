@@ -5,9 +5,13 @@
 import { readdirSync, statSync, mkdirSync, copyFileSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join, relative } from "node:path";
 
-const project = process.argv[2] ?? "mall-heist";
-const entry = process.argv[3] ?? "mall.scene.json";
+const project = process.argv[2];
+const entry = process.argv[3];
 const out = process.argv[4] ?? "public/game";
+if (!project || !entry) {
+  console.error("usage: node tools/export-game.mjs <project> <entryScene.scene.json> [outDir]");
+  process.exit(1);
+}
 
 const SRC = join("projects", project, "assets");
 if (!existsSync(SRC)) { console.error("no assets at " + SRC); process.exit(1); }

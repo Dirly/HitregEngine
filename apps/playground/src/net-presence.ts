@@ -106,6 +106,14 @@ export interface NetPresenceOptions {
   onRoleChanged?(role: "host" | "peer" | "off"): void;
 }
 
+/**
+ * The live session, for modules that ride the room's module channel
+ * (@hitreg/comms builds its CommsLink from this). Null = no session (alone).
+ */
+export type NetSession =
+  | { role: "host"; host: RoomHost; selfId: string; selfName: string }
+  | { role: "peer"; client: RoomClient; hostId: string; selfId: string; selfName: string };
+
 /** One replicated entity as the host's sim sees it, with its net policy. */
 export interface NetReplica {
   id: string;
@@ -237,6 +245,7 @@ export class NetPresence {
   private roomHost: RoomHost | null = null;
   private roomClient: RoomClient | null = null;
   private readonly sessionUnsubs: Array<() => void> = [];
+  private readonly sessionHandlers = new Set<(session: NetSession | null) => void>();
   private tickTimer: ReturnType<typeof setInterval> | undefined;
   private sendTimer: ReturnType<typeof setInterval> | undefined;
   private fallbackTimer: ReturnType<typeof setInterval> | undefined;
@@ -281,6 +290,69 @@ export class NetPresence {
   /** Re-call after every scene rebuild — re-parents the avatar group. */
   attach(scene: THREE.Scene): void {
     scene.add(this.group);
+  }
+
+  /** This tab's identity in the room (stable for the tab's lifetime). */
+  self(): { peerId: string; name: string } {
+    return { peerId: this.selfId, name: this.selfName };
+  }
+
+  /**
+   * Session lifecycle for room modules: fires with the live RoomHost /
+   * RoomClient when a session starts, null when it ends. Called immediately
+   * with the current state.
+   */
+  onSession(cb: (session: NetSession | null) => void): () => void {
+    this.sessionHandlers.add(cb);
+    cb(this.currentSession());
+    return () => {
+      this.sessionHandlers.delete(cb);
+    };
+  }
+
+  /**
+   * World position of any participant (self included) as this tab knows it:
+   * the host reads proxy bodies, peers read their interpolated avatars.
+   * Null = not in the world (not playing / unknown).
+   */
+  positionOf(peerId: string): [number, number, number] | null {
+    if (peerId === this.selfId) return this.opts.getLocalPlayer()?.position ?? null;
+    if (this.role === "host") {
+      const proxy = this.opts.getProxyState?.(peerId)?.p;
+      if (proxy) return proxy;
+      const input = this.remoteInputs.get(peerId);
+      if (input && performance.now() - input.at <= INPUT_STALE_MS) return input.p;
+      return null;
+    }
+    const target = this.targets.get(peerId);
+    return target ? [target.position.x, target.position.y, target.position.z] : null;
+  }
+
+  private currentSession(): NetSession | null {
+    if (this.role === "host" && this.roomHost) {
+      return { role: "host", host: this.roomHost, selfId: this.selfId, selfName: this.selfName };
+    }
+    if (this.role === "peer" && this.roomClient && this.sessionHost) {
+      return {
+        role: "peer",
+        client: this.roomClient,
+        hostId: this.sessionHost,
+        selfId: this.selfId,
+        selfName: this.selfName,
+      };
+    }
+    return null;
+  }
+
+  private notifySession(): void {
+    const session = this.currentSession();
+    for (const cb of [...this.sessionHandlers]) {
+      try {
+        cb(session);
+      } catch (error) {
+        console.warn("[net] session handler failed:", error);
+      }
+    }
   }
 
   stats(): { role: "host" | "peer" | "off"; players: number; via: string | null } {
@@ -554,6 +626,7 @@ export class NetPresence {
     this.transport = transport;
     this.roomHost = host;
     this.role = "host";
+    this.notifySession();
     this.sessionUnsubs.push(
       // commands carry movement INTENT — the host applies intentions, never state
       host.onCommand((peer, _tick, input) => this.recordInput(peer, input)),
@@ -681,6 +754,7 @@ export class NetPresence {
     this.transport = transport;
     this.roomClient = client;
     this.role = "peer";
+    this.notifySession();
     this.opts.onRoleChanged?.("peer");
     this.netState.setAuthority(false); // read-only replica while a host exists
     this.clock = new InterpolationClock({
@@ -748,7 +822,9 @@ export class NetPresence {
     this.lastReplicas = null;
     this.peerViews.clear();
     this.tick = 0;
+    const hadSession = this.role !== "off";
     this.role = "off";
+    if (hadSession) this.notifySession();
     this.opts.onRoleChanged?.("off");
     // no session = local authority; a former replica keeps its contents,
     // so a promotion right after this inherits the world's state

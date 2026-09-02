@@ -10,6 +10,9 @@ importers:
 
   apps/playground:
     dependencies:
+      '@hitreg/comms':
+        specifier: workspace:*
+        version: link:../../packages/comms
       '@hitreg/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -41,12 +44,37 @@ importers:
       '@types/three':
         specifier: ^0.185.1
         version: 0.185.1
+      tsx:
+        specifier: ^4.23.0
+        version: 4.23.0
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
       vite:
         specifier: ^8.1.4
         version: 8.1.4(@types/node@22.20.1)(esbuild@0.28.1)(tsx@4.23.0)
+
+  packages/comms:
+    dependencies:
+      '@hitreg/core':
+        specifier: workspace:*
+        version: link:../core
+      '@hitreg/net':
+        specifier: workspace:*
+        version: link:../net
+      zod:
+        specifier: ^4.0.0
+        version: 4.4.3
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^3.0.0
+        version: 3.2.7(@types/node@22.20.1)(lightningcss@1.32.0)(tsx@4.23.0)
 
   packages/core:
     dependencies:
@@ -72,6 +100,9 @@ importers:
       '@hitreg/core':
         specifier: workspace:*
         version: link:../core
+      '@hitreg/render':
+        specifier: workspace:*
+        version: link:../render
       react:
         specifier: ^19.2.7
         version: 19.2.7

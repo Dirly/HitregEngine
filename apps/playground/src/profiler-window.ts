@@ -202,7 +202,7 @@ function mount(win: Window, host: ProfilerWindowHost, gpuEnabled: boolean): void
     lastDraw = t;
     const summary = host.profiler.summary();
     drawHeader(stats, summary, host, gpuEnabled);
-    drawDigest($("digest"), summary);
+    drawDigest($("digest"), summary, host.backend);
     drawGraph(graph, host.profiler, laneColor);
     drawTimeline(timeline, host.profiler, summary);
     drawTable(table, summary, sortBy, showTree, laneColor);
@@ -285,8 +285,8 @@ function drawHeader(
  * want to be told whether it's fast enough and what is eating the time, and
  * making them derive that from percentiles is how a profiler ends up unused.
  */
-function drawDigest(el: HTMLElement, s: ProfileSummary): void {
-  const digest = digestProfile(s);
+function drawDigest(el: HTMLElement, s: ProfileSummary, backend: string): void {
+  const digest = digestProfile(s, { backend });
   const cls =
     digest.verdict === "smooth" ? "good" : digest.verdict === "misses-60" ? "warn" : "bad";
   const [headline, ...rest] = digest.lines;
