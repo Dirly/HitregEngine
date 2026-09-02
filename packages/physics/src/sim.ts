@@ -2,13 +2,29 @@ import RAPIER from "@dimforge/rapier3d-compat";
 import {
   heightmapMesh,
   polyMeshCollision,
+  voxelMesh,
   worldTransforms,
   type HeightmapParams,
   type PolyMeshSource,
   type Quat,
+  type VoxelMeshSource,
   type SceneDoc,
   type Vec3,
 } from "@hitreg/core";
+import { Layers, interactionGroups, queryGroups, type LayerMask } from "./layers.js";
+import {
+  DEFAULT_CHARACTER,
+  compareHits,
+  type CharacterMove,
+  type CharacterOptions,
+  type OverlapOptions,
+  type QueryShape,
+  type RayHit,
+  type RaycastAllOptions,
+  type RaycastOptions,
+  type ShapeHit,
+  type ShapecastOptions,
+} from "./queries.js";
 
 interface RigidbodyData {
   kind: "dynamic" | "kinematic" | "static";
@@ -28,11 +44,20 @@ interface ColliderData {
   restitution: number;
   density: number;
   isTrigger: boolean;
+  /**
+   * Optional authored collision layers. NOT in `colliderSchema` yet, so a
+   * validated doc never carries it today (zod strips unknown keys) — it is read
+   * here so that the day `packages/core` adds the field, authored layers work
+   * with no change in this package. Until then layers come from
+   * {@link defaultMembership} plus runtime {@link PhysicsSim.setLayers}.
+   */
+  layers?: { membership?: LayerMask; collidesWith?: LayerMask };
 }
 
 interface MeshComponentData {
   source:
     | ({ kind: "heightmap" } & Partial<HeightmapParams>)
+    | VoxelMeshSource
     | { kind: "asset"; assetId: string; node?: string }
     | { kind: "primitive"; shape: string; size?: Vec3 }
     | PolyMeshSource
@@ -104,6 +129,56 @@ export class PhysicsSim {
   private readonly options: PhysicsSimOptions;
   private disposed = false;
   private readonly warned = new Set<string>();
+
+  // ---- scene-query scratch -------------------------------------------------
+  // Every one of these exists so a query issued per entity per frame (a ground
+  // probe on 60 actors, an AI line-of-sight sweep, a camera boom) allocates
+  // NOTHING on the way in. Rapier's JS bindings copy these across the wasm
+  // boundary immediately, so mutating and reusing them is safe; the only rule
+  // is that a query may not be issued from inside another query's callback.
+  private readonly qRay = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 1 });
+  private readonly qPos = { x: 0, y: 0, z: 0 };
+  private readonly qVel = { x: 0, y: 0, z: 0 };
+  private readonly qRot = { x: 0, y: 0, z: 0, w: 1 };
+  private readonly qBall = new RAPIER.Ball(0.5);
+  private readonly qCapsule = new RAPIER.Capsule(0.5, 0.5);
+  private readonly qCuboid = new RAPIER.Cuboid(0.5, 0.5, 0.5);
+  /** Collider handles the in-flight query must ignore (multi-entity exclude). */
+  private readonly excluded = new Set<number>();
+  /** Single-body exclude fast path — Rapier drops it inside its own broad phase. */
+  private excludeBody: RAPIER.RigidBody | undefined;
+  // bound once: a fresh closure per query would defeat the point of the rest
+  private readonly excludeFilter = (c: RAPIER.Collider): boolean => !this.excluded.has(c.handle);
+  private readonly rayCollect = (hit: RAPIER.RayColliderIntersection): boolean => {
+    const id = this.colliderToEntity.get(hit.collider.handle);
+    if (id !== undefined) {
+      const t = hit.timeOfImpact;
+      const o = this.qRay.origin;
+      const d = this.qRay.dir;
+      // multi-hit results DO allocate one object per hit, deliberately: pooling
+      // them would hand the caller references this sim overwrites on its next
+      // query, and "the array I saved last frame silently changed" is a far
+      // worse bug than a short-lived object. The ARRAY is poolable (opts.out).
+      this.rayAccum.push({
+        entityId: id,
+        point: [o.x + d.x * t, o.y + d.y * t, o.z + d.z * t],
+        normal: [hit.normal.x, hit.normal.y, hit.normal.z],
+        distance: t,
+      });
+    }
+    return true; // keep going — raycastAll wants every hit, not the first
+  };
+  private readonly overlapCollect = (collider: RAPIER.Collider): boolean => {
+    const id = this.colliderToEntity.get(collider.handle);
+    if (id !== undefined) this.overlapAccum.push(id);
+    return true;
+  };
+  private rayAccum: RayHit[] = [];
+  private overlapAccum: string[] = [];
+  private readonly characters = new Map<string, CharacterEntry>();
+  private charCollision: RAPIER.CharacterCollision | null = null;
+  /** Colliders have changed since the last step — see {@link syncQueries}. */
+  private queriesDirty = true;
 
   constructor(doc: SceneDoc, gravity: Vec3 = [0, -9.81, 0], options: PhysicsSimOptions = {}) {
     if (!initialized) {
@@ -272,6 +347,10 @@ export class PhysicsSim {
       this.bodies.delete(id);
       this.moving.delete(id);
       this.sensors.delete(id);
+      this.queriesDirty = true;
+      // a controller outlives its body otherwise — chunk streaming unloads and
+      // reloads the same entity id, and a stale controller holds wasm memory
+      this.removeCharacter(id);
     }
   }
 
@@ -290,8 +369,19 @@ export class PhysicsSim {
       .setDensity(col.density ?? 1)
       .setSensor(col.isTrigger ?? false)
       .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS);
+    // Layers. The FILTER half defaults to ALL, which is why turning layers on
+    // changed no existing scene's behaviour: a collider that accepts every
+    // layer collides with exactly what it collided with before. Membership is
+    // what queries select on, so it is the half worth inferring well.
+    shape.setCollisionGroups(
+      interactionGroups(
+        col.layers?.membership ?? defaultMembership(body, col),
+        col.layers?.collidesWith ?? Layers.ALL,
+      ),
+    );
     const created = this.world.createCollider(shape, body);
     this.colliderToEntity.set(created.handle, id);
+    this.queriesDirty = true;
     if (col.isTrigger ?? false) this.sensors.add(id);
   }
 
@@ -318,6 +408,21 @@ export class PhysicsSim {
       const grid = heightmapMesh(source as unknown as HeightmapParams);
       return (
         this.cookShape(id, kind, scaleVertices(grid.positions, scale), grid.indices) ??
+        boxFallback()
+      );
+    }
+
+    if (source?.kind === "voxel") {
+      // the SAME cached cell the renderer drew (core/voxel/mesh.ts), so the
+      // collider IS the visible surface rather than an approximation of it —
+      // and because the cell is cached, cooking costs no extra meshing work.
+      // A cell with no surface (pure sky or solid interior) yields nothing to
+      // collide with, which is not a failure: falling back to a box here would
+      // drop an invisible cube in the middle of the world.
+      const mesh = voxelMesh(source as unknown as VoxelMeshSource);
+      if (mesh.triangleCount === 0) return null;
+      return (
+        this.cookShape(id, kind, scaleVertices(mesh.positions, scale), mesh.indices) ??
         boxFallback()
       );
     }
@@ -404,6 +509,11 @@ export class PhysicsSim {
   step(dt: number): void {
     this.world.timestep = dt;
     this.world.step(this.events);
+    this.drainEvents();
+    this.queriesDirty = false;
+  }
+
+  private drainEvents(): void {
     this.events.drainCollisionEvents((h1, h2, started) => {
       const a = this.colliderToEntity.get(h1);
       const b = this.colliderToEntity.get(h2);
@@ -411,6 +521,41 @@ export class PhysicsSim {
       if (started) this.pendingCollisions.push([a, b]);
       else this.pendingCollisionEnds.push([a, b]);
     });
+  }
+
+  /**
+   * Make colliders created since the last step visible to scene queries.
+   *
+   * Rapier 0.19 refreshes its query acceleration structure ONLY inside
+   * `step()`. A collider created after the last step is invisible to every
+   * ray, sweep and overlap — so a freshly streamed chunk is not there yet, and
+   * a query issued before the world's very first step finds an empty universe
+   * and cheerfully returns null. That failure is silent and reads exactly like
+   * "the raycast is broken", which is why this is handled here instead of
+   * documented as a caller's problem.
+   *
+   * The refresh is a zero-timestep step: verified to integrate nothing (no
+   * body moves, no velocity changes) while still rebuilding the broad phase.
+   * Collision events it produces are drained into the same pending lists a
+   * real step feeds, so a body spawned already inside a trigger still reports
+   * its `trigger.enter`.
+   *
+   * The one side effect a zero-dt step DOES have is consuming a kinematic
+   * body's pending `setNextKinematicTranslation` — it applies immediately and
+   * the body then reaches the real step with no motion left to describe, which
+   * is the jitter bug documented on {@link setKinematicTarget}. That is why
+   * `setKinematicTarget` and `moveCharacter` flush this first: after either of
+   * them the world is clean, so a later lazy sync can never fire while a
+   * kinematic target is outstanding.
+   */
+  private syncQueries(): void {
+    if (!this.queriesDirty) return;
+    this.queriesDirty = false;
+    const dt = this.world.timestep;
+    this.world.timestep = 0;
+    this.world.step(this.events);
+    this.world.timestep = dt;
+    this.drainEvents();
   }
 
   /** Collision-started pairs since the last call (entity ids, expanded scene). */
@@ -464,6 +609,9 @@ export class PhysicsSim {
    * dislocation, which reads as violent jitter on anything hanging off it.
    */
   setKinematicTarget(id: string, p: Vec3): void {
+    // flush any pending query refresh BEFORE arming the target: a lazy sync
+    // fired later would consume it (see syncQueries)
+    this.syncQueries();
     this.moving.get(id)?.setNextKinematicTranslation({ x: p[0], y: p[1], z: p[2] });
   }
 
@@ -474,6 +622,544 @@ export class PhysicsSim {
     body.setTranslation({ x: p[0], y: p[1], z: p[2] }, true);
     body.setLinvel({ x: 0, y: 0, z: 0 }, true);
     body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+  }
+
+  // =========================================================================
+  // Collision layers
+  // =========================================================================
+
+  /**
+   * Retag an entity's colliders at runtime.
+   *
+   * Needed because the scene document cannot express layers yet, and because
+   * the useful distinctions are runtime ones anyway: a body becomes an ACTOR
+   * when a character script attaches to it, a dropped weapon moves from ACTOR
+   * to PROP, a fired arrow leaves PROJECTILE the moment it sticks in a wall.
+   *
+   * Cost: O(colliders on the entity). Not a per-frame call — changing groups
+   * invalidates the pair cache for that collider in Rapier's broad phase.
+   */
+  setLayers(id: string, membership: LayerMask, collidesWith: LayerMask = Layers.ALL): void {
+    const body = this.bodies.get(id);
+    if (!body) return;
+    const groups = interactionGroups(membership, collidesWith);
+    for (let i = 0; i < body.numColliders(); i++) body.collider(i).setCollisionGroups(groups);
+  }
+
+  /** Current layers of an entity's first collider, or null if it has none. */
+  layersOf(id: string): { membership: LayerMask; collidesWith: LayerMask } | null {
+    const body = this.bodies.get(id);
+    if (!body || body.numColliders() === 0) return null;
+    const groups = body.collider(0).collisionGroups();
+    return { membership: (groups >>> 16) & 0xffff, collidesWith: groups & 0xffff };
+  }
+
+  // =========================================================================
+  // Scene queries
+  //
+  // All of these are IMMEDIATE-mode reads of the current world state. They are
+  // safe from `fixedUpdate` (that is the point — gameplay queries must run on
+  // the authority's fixed step or two peers disagree), and meaningless from a
+  // render-rate update, where they sample a world mid-interpolation.
+  // =========================================================================
+
+  /**
+   * Nearest hit along a ray, or null.
+   *
+   * Cost: one broad-phase traversal + a narrow-phase ray test per candidate.
+   * Cheap enough to run **per entity per frame** — a ground probe on every
+   * actor, an AI line-of-sight check per agent per AI tick — PROVIDED the
+   * `layers` mask is narrow. `docs/performance-lessons.md` records a profile
+   * where unfiltered camera-collision raycasts against full-resolution terrain
+   * were 70% of frame time; the mask is what keeps that from happening here.
+   * With `opts.out` supplied the call allocates nothing at all.
+   *
+   * `dir` need not be normalized; `maxDistance` and the returned `distance`
+   * are always metres regardless.
+   */
+  raycast(origin: Vec3, dir: Vec3, maxDistance: number, opts: RaycastOptions = {}): RayHit | null {
+    this.syncQueries();
+    const len = Math.hypot(dir[0], dir[1], dir[2]);
+    if (!(len > 0) || !(maxDistance > 0)) return null;
+    const ray = this.qRay;
+    ray.origin.x = origin[0];
+    ray.origin.y = origin[1];
+    ray.origin.z = origin[2];
+    ray.dir.x = dir[0] / len;
+    ray.dir.y = dir[1] / len;
+    ray.dir.z = dir[2] / len;
+    const predicate = this.beginFilter(opts.exclude);
+    const hit = this.world.castRayAndGetNormal(
+      ray,
+      maxDistance,
+      opts.solid ?? true,
+      sensorFlags(opts.includeSensors),
+      queryGroups(opts.layers ?? Layers.ALL),
+      undefined,
+      this.excludeBody,
+      predicate,
+    );
+    if (!hit) return null;
+    const id = this.colliderToEntity.get(hit.collider.handle);
+    if (id === undefined) return null; // collider not owned by an entity — ignore
+    const t = hit.timeOfImpact;
+    return writeHit(
+      opts.out,
+      id,
+      ray.origin.x + ray.dir.x * t,
+      ray.origin.y + ray.dir.y * t,
+      ray.origin.z + ray.dir.z * t,
+      hit.normal.x,
+      hit.normal.y,
+      hit.normal.z,
+      t,
+    );
+  }
+
+  /**
+   * Every hit along a ray, nearest first (see {@link compareHits} for why the
+   * sort is a multiplayer correctness fix and not cosmetics).
+   *
+   * An entity with several colliders can appear more than once — that is
+   * honest, not a bug: a pierce rule counting "bodies hit" should dedupe on
+   * `entityId` itself rather than have this call guess.
+   *
+   * Cost: strictly more than {@link raycast} — it cannot stop at the first hit,
+   * and it allocates one small object per hit. Fine for a piercing arrow;
+   * not something to run per entity per frame.
+   */
+  raycastAll(
+    origin: Vec3,
+    dir: Vec3,
+    maxDistance: number,
+    opts: RaycastAllOptions = {},
+  ): RayHit[] {
+    this.syncQueries();
+    const out = opts.out ?? [];
+    out.length = 0;
+    const len = Math.hypot(dir[0], dir[1], dir[2]);
+    if (!(len > 0) || !(maxDistance > 0)) return out;
+    const ray = this.qRay;
+    ray.origin.x = origin[0];
+    ray.origin.y = origin[1];
+    ray.origin.z = origin[2];
+    ray.dir.x = dir[0] / len;
+    ray.dir.y = dir[1] / len;
+    ray.dir.z = dir[2] / len;
+    const predicate = this.beginFilter(opts.exclude);
+    this.rayAccum = out;
+    this.world.intersectionsWithRay(
+      ray,
+      maxDistance,
+      opts.solid ?? true,
+      this.rayCollect,
+      sensorFlags(opts.includeSensors),
+      queryGroups(opts.layers ?? Layers.ALL),
+      undefined,
+      this.excludeBody,
+      predicate,
+    );
+    this.rayAccum = [];
+    out.sort(compareHits);
+    return out;
+  }
+
+  /**
+   * Sweep a convex shape from `from` to `to` and report the first thing it
+   * touches, or null.
+   *
+   * **This is the query a weapon arc actually needs.** A greatsword swing is a
+   * swept capsule, not a sphere at the hilt: testing a point or a ball at each
+   * fixed step leaves gaps a target can stand in (at 60 Hz a 0.12 s light
+   * attack gets ~7 steps to cover 120°, i.e. ~17° of unchecked arc per step),
+   * and it cannot tell you that the blade clipped a pillar on the way. Sweep
+   * the blade's capsule along the segment it covered SINCE THE LAST STEP and
+   * both problems go away.
+   *
+   * Cost: a swept-convex test is several times a raycast — call it once per
+   * swing step during an active attack window, not once per frame per entity.
+   * Sweeping against `Layers.WORLD` and against actors as two narrow queries is
+   * usually cheaper than one wide one, and lets a wall stop the swing.
+   */
+  shapecast(shape: QueryShape, from: Vec3, to: Vec3, opts: ShapecastOptions = {}): ShapeHit | null {
+    this.syncQueries();
+    const dx = to[0] - from[0];
+    const dy = to[1] - from[1];
+    const dz = to[2] - from[2];
+    const len = Math.hypot(dx, dy, dz);
+    // a zero-length sweep is an overlap test; say so rather than silently
+    // returning null and having the caller believe the blade missed
+    if (!(len > 0)) return null;
+    this.qPos.x = from[0];
+    this.qPos.y = from[1];
+    this.qPos.z = from[2];
+    this.qVel.x = dx / len;
+    this.qVel.y = dy / len;
+    this.qVel.z = dz / len;
+    this.setRotation(opts.rotation);
+    const predicate = this.beginFilter(opts.exclude);
+    const hit = this.world.castShape(
+      this.qPos,
+      this.qRot,
+      this.qVel,
+      this.resolveShape(shape),
+      0,
+      len,
+      opts.stopAtPenetration ?? true,
+      sensorFlags(opts.includeSensors),
+      queryGroups(opts.layers ?? Layers.ALL),
+      undefined,
+      this.excludeBody,
+      predicate,
+    );
+    if (!hit) return null;
+    const id = this.colliderToEntity.get(hit.collider.handle);
+    if (id === undefined) return null;
+    // Verified against Rapier 0.19 rather than assumed (packages/physics/test/
+    // queries.test.ts pins it): for a WORLD-space cast, `witness1` comes back
+    // as the world-space contact point and `normal1` as the world-space normal
+    // of the hit collider facing back down the sweep — i.e. the same convention
+    // castRayAndGetNormal uses, despite the "local-space" wording in the
+    // upstream typings. Reading witness2/normal2 instead gives shape-local
+    // values and a hit point that looks plausible but is metres wrong.
+    return writeHit(
+      opts.out,
+      id,
+      hit.witness1.x,
+      hit.witness1.y,
+      hit.witness1.z,
+      hit.normal1.x,
+      hit.normal1.y,
+      hit.normal1.z,
+      hit.time_of_impact,
+    );
+  }
+
+  /** Sphere sweep — {@link shapecast} with a ball. Same cost. */
+  spherecast(radius: number, from: Vec3, to: Vec3, opts: ShapecastOptions = {}): ShapeHit | null {
+    return this.shapecast({ kind: "ball", radius }, from, to, opts);
+  }
+
+  /**
+   * Capsule sweep — {@link shapecast} with a vertical capsule. `halfHeight` is
+   * the core half-length excluding the caps, so a 1.8 m character is
+   * `radius 0.35, halfHeight 0.55`.
+   */
+  capsulecast(
+    radius: number,
+    halfHeight: number,
+    from: Vec3,
+    to: Vec3,
+    opts: ShapecastOptions = {},
+  ): ShapeHit | null {
+    return this.shapecast({ kind: "capsule", halfHeight, radius }, from, to, opts);
+  }
+
+  /**
+   * Entity ids whose colliders intersect a shape placed at `position`, sorted
+   * and deduplicated.
+   *
+   * For AoE damage, "who is standing on the extraction lift", "what did the
+   * explosion reach". Sorted for the same determinism reason the ray results
+   * are — an AoE that damages in broad-phase order kills a different enemy
+   * first on each peer when the damage is enough to be lethal to some of them.
+   *
+   * Cost: proportional to how many colliders the shape's AABB overlaps, times
+   * a narrow-phase intersection test each. Keep the shape tight and the
+   * `layers` mask narrow; a 40 m sphere against `Layers.ALL` in a dense mine
+   * touches everything streamed in.
+   */
+  overlapShape(shape: QueryShape, position: Vec3, opts: OverlapOptions = {}): string[] {
+    this.syncQueries();
+    const out = opts.out ?? [];
+    out.length = 0;
+    this.qPos.x = position[0];
+    this.qPos.y = position[1];
+    this.qPos.z = position[2];
+    this.setRotation(opts.rotation);
+    const predicate = this.beginFilter(opts.exclude);
+    this.overlapAccum = out;
+    this.world.intersectionsWithShape(
+      this.qPos,
+      this.qRot,
+      this.resolveShape(shape),
+      this.overlapCollect,
+      sensorFlags(opts.includeSensors),
+      queryGroups(opts.layers ?? Layers.ALL),
+      undefined,
+      this.excludeBody,
+      predicate,
+    );
+    this.overlapAccum = [];
+    out.sort();
+    // one entity, several colliders → one answer. Unlike raycastAll (where a
+    // second hit on the same body is a distinct fact with its own distance),
+    // "is this entity inside the volume" has exactly one truthful answer.
+    let write = 0;
+    for (let read = 0; read < out.length; read++) {
+      if (read === 0 || out[read] !== out[read - 1]) out[write++] = out[read]!;
+    }
+    out.length = write;
+    return out;
+  }
+
+  /** Sphere overlap — {@link overlapShape} with a ball. Same cost. */
+  overlapSphere(center: Vec3, radius: number, opts: OverlapOptions = {}): string[] {
+    return this.overlapShape({ kind: "ball", radius }, center, opts);
+  }
+
+  // =========================================================================
+  // Kinematic character controller
+  // =========================================================================
+
+  /**
+   * Create or reconfigure this entity's character controller.
+   *
+   * A Souls-like does NOT want its player moved by the dynamics solver: a
+   * dynamic capsule bounces off stair nosings, accumulates momentum into
+   * corners, and is at the mercy of whatever restitution the level author left
+   * on a wall. A kinematic controller computes an exact slid/stepped/snapped
+   * translation instead, which is why every game with precise ground movement
+   * uses one. The body should be `rigidbody.kind: "kinematic"` with a capsule
+   * collider; other kinds work but get repositioned hard (see
+   * {@link moveCharacter}).
+   *
+   * Idempotent — calling it again on the same entity retunes the existing
+   * controller rather than leaking a second one.
+   */
+  configureCharacter(id: string, opts: CharacterOptions = {}): void {
+    const existing = this.characters.get(id);
+    const offset = opts.offset ?? DEFAULT_CHARACTER.offset;
+    // Rapier bakes the skin width in at construction, so a changed offset means
+    // a new controller; everything else is settable on the live one.
+    let ctrl = existing?.ctrl;
+    if (!ctrl || existing!.offset !== offset) {
+      existing?.ctrl.free();
+      ctrl = this.world.createCharacterController(offset);
+    }
+
+    const up = opts.up ?? [0, 1, 0];
+    const upLen = Math.hypot(up[0], up[1], up[2]) || 1;
+    const climb = opts.maxSlopeClimbAngle ?? DEFAULT_CHARACTER.maxSlopeClimbAngle;
+    ctrl.setUp({ x: up[0] / upLen, y: up[1] / upLen, z: up[2] / upLen });
+    ctrl.setSlideEnabled(opts.slide ?? DEFAULT_CHARACTER.slide);
+    ctrl.setMaxSlopeClimbAngle(climb);
+    ctrl.setMinSlopeSlideAngle(opts.minSlopeSlideAngle ?? DEFAULT_CHARACTER.minSlopeSlideAngle);
+
+    const autostep = opts.autostep === undefined ? DEFAULT_CHARACTER.autostep : opts.autostep;
+    if (autostep) {
+      ctrl.enableAutostep(
+        autostep.maxHeight,
+        autostep.minWidth,
+        autostep.includeDynamicBodies ?? false,
+      );
+    } else {
+      ctrl.disableAutostep();
+    }
+
+    const snap = opts.snapToGround === undefined ? DEFAULT_CHARACTER.snapToGround : opts.snapToGround;
+    if (snap !== null && snap > 0) ctrl.enableSnapToGround(snap);
+    else ctrl.disableSnapToGround();
+
+    ctrl.setApplyImpulsesToDynamicBodies(opts.pushDynamicBodies ?? DEFAULT_CHARACTER.pushDynamicBodies);
+    if (opts.mass !== undefined) ctrl.setCharacterMass(opts.mass);
+
+    // self is always in the exclude list: `computeColliderMovement` takes no
+    // exclude-collider argument (unlike the ray/shape queries), so the only way
+    // to keep the character's own capsule out of its obstacle set is the
+    // predicate — and a capsule stopped by itself never moves at all.
+    const exclude = [id, ...(opts.exclude ?? []).filter((e) => e !== id)];
+    this.characters.set(id, {
+      ctrl,
+      offset,
+      exclude,
+      layers: opts.layers ?? DEFAULT_CHARACTER.layers,
+      climbCos: Math.cos(climb),
+      up: [up[0] / upLen, up[1] / upLen, up[2] / upLen],
+    });
+  }
+
+  /** Whether this entity has a character controller attached. */
+  hasCharacter(id: string): boolean {
+    return this.characters.has(id);
+  }
+
+  /** Drop an entity's controller and free its wasm memory. */
+  removeCharacter(id: string): void {
+    const entry = this.characters.get(id);
+    if (!entry) return;
+    entry.ctrl.free();
+    this.characters.delete(id);
+  }
+
+  /**
+   * Move a character by `desired`, sliding along walls, stepping up stairs and
+   * snapping to ground, and report what actually happened.
+   *
+   * The returned `translation` is the APPLIED movement, which is almost never
+   * the desired one. Integrate velocity against the applied value: a character
+   * that keeps accumulating speed into a wall because it integrated the desired
+   * value shoots sideways the instant it clears the corner.
+   *
+   * Auto-configures with {@link DEFAULT_CHARACTER} on first use so a graybox
+   * actor moves sensibly without ceremony.
+   *
+   * Cost: internally a shape cast plus up to two more for autostep and
+   * snap-to-ground. This IS a per-entity-per-frame call — that is what it is
+   * for — but it is the most expensive one in this file, so it belongs on
+   * characters, not on every crate. Supply `out` to make it allocation-free.
+   */
+  moveCharacter(id: string, desired: Vec3, out?: CharacterMove): CharacterMove {
+    const result = out ?? {
+      translation: [0, 0, 0],
+      grounded: false,
+      hitWall: false,
+      hitCeiling: false,
+      collisions: [],
+    };
+    result.translation[0] = 0;
+    result.translation[1] = 0;
+    result.translation[2] = 0;
+    result.grounded = false;
+    result.hitWall = false;
+    result.hitCeiling = false;
+    result.collisions.length = 0;
+
+    // freshly streamed floor must exist before the character is asked to walk
+    // on it, and this also guarantees no lazy sync eats the target set below
+    this.syncQueries();
+    const body = this.bodies.get(id);
+    if (!body || body.numColliders() === 0) return result;
+    if (!this.characters.has(id)) this.configureCharacter(id);
+    const entry = this.characters.get(id)!;
+
+    this.qVel.x = desired[0];
+    this.qVel.y = desired[1];
+    this.qVel.z = desired[2];
+    entry.ctrl.computeColliderMovement(
+      body.collider(0),
+      this.qVel,
+      sensorFlags(false), // a trigger volume must never stop a character
+      queryGroups(entry.layers),
+      this.beginFilterAll(entry.exclude),
+    );
+
+    const mv = entry.ctrl.computedMovement();
+    result.translation[0] = mv.x;
+    result.translation[1] = mv.y;
+    result.translation[2] = mv.z;
+    result.grounded = entry.ctrl.computedGrounded();
+
+    const collisions = entry.ctrl.numComputedCollisions();
+    if (collisions > 0) {
+      const scratch = (this.charCollision ??= new RAPIER.CharacterCollision());
+      const [ux, uy, uz] = entry.up;
+      // "was I actually stopped?" — the horizontal distance asked for versus
+      // the horizontal distance achieved, measured in the plane perpendicular
+      // to `up`. This gate exists because Rapier reports a DEPENETRATION
+      // contact (toi 0) on any frame the capsule starts flush with or slightly
+      // inside a surface, and that contact's normal is a deepest-penetration
+      // artifact, not a surface: standing still on flat ground produces
+      // normals like (-0.62, 0.48, -0.62), which the slope test below reads as
+      // a wall. Classifying on the normal alone therefore reports "hitWall" on
+      // every frame a character settles onto the floor — a flag that is true
+      // when nothing is in the way is worse than no flag.
+      const dh = horizontalLength(desired[0], desired[1], desired[2], ux, uy, uz);
+      const ah = horizontalLength(mv.x, mv.y, mv.z, ux, uy, uz);
+      const blocked = dh > 1e-6 && ah < dh - 1e-4;
+      for (let i = 0; i < collisions; i++) {
+        const c = entry.ctrl.computedCollision(i, scratch);
+        if (!c) continue;
+        if (c.collider) {
+          const other = this.colliderToEntity.get(c.collider.handle);
+          if (other !== undefined && !result.collisions.includes(other)) {
+            result.collisions.push(other);
+          }
+        }
+        // normal1 is the obstacle's outward world normal. Pointing WITH up =
+        // floor; against it = ceiling; anything the controller refused to climb
+        // is a wall — reusing the real slope limit here rather than a magic
+        // 0.7 keeps "hitWall" and "would not climb it" the same statement.
+        const d = c.normal1.x * ux + c.normal1.y * uy + c.normal1.z * uz;
+        if (d <= -0.5) result.hitCeiling = true;
+        else if (blocked && d < entry.climbCos) result.hitWall = true;
+      }
+      result.collisions.sort(); // deterministic across peers — see compareHits
+    }
+
+    const t = body.translation();
+    const nx = t.x + mv.x;
+    const ny = t.y + mv.y;
+    const nz = t.z + mv.z;
+    if (body.bodyType() === RAPIER.RigidBodyType.KinematicPositionBased) {
+      // the jitter rule from setKinematicTarget applies here too: a kinematic
+      // character driven with setTranslation transmits no velocity estimate,
+      // so anything jointed to it (a carried artifact, a cloak) convulses
+      body.setNextKinematicTranslation({ x: nx, y: ny, z: nz });
+    } else {
+      body.setTranslation({ x: nx, y: ny, z: nz }, true);
+    }
+    return result;
+  }
+
+  // ---- query plumbing ------------------------------------------------------
+
+  /**
+   * Arm the exclusion filter for one query and return the predicate to pass to
+   * Rapier (or undefined when the fast path covers it). Must be called once per
+   * query, immediately before it.
+   */
+  private beginFilter(exclude?: readonly string[]): ((c: RAPIER.Collider) => boolean) | undefined {
+    this.excludeBody = undefined;
+    this.excluded.clear();
+    if (!exclude || exclude.length === 0) return undefined;
+    if (exclude.length === 1) {
+      // one entity — usually "ignore myself", by far the common case. Rapier
+      // drops a whole rigid body inside its broad phase, so this costs nothing
+      // per candidate, where the predicate below costs a JS call each.
+      this.excludeBody = this.bodies.get(exclude[0]!);
+      return undefined;
+    }
+    return this.beginFilterAll(exclude);
+  }
+
+  /** Exclusion via predicate only — for queries with no exclude-body argument. */
+  private beginFilterAll(
+    exclude: readonly string[],
+  ): ((c: RAPIER.Collider) => boolean) | undefined {
+    this.excludeBody = undefined;
+    this.excluded.clear();
+    for (const id of exclude) {
+      const body = this.bodies.get(id);
+      if (!body) continue;
+      for (let i = 0; i < body.numColliders(); i++) this.excluded.add(body.collider(i).handle);
+    }
+    return this.excluded.size > 0 ? this.excludeFilter : undefined;
+  }
+
+  /** Pooled Rapier shape for a query descriptor — one instance per shape kind. */
+  private resolveShape(shape: QueryShape): RAPIER.Shape {
+    switch (shape.kind) {
+      case "ball":
+        this.qBall.radius = shape.radius;
+        return this.qBall;
+      case "capsule":
+        this.qCapsule.radius = shape.radius;
+        this.qCapsule.halfHeight = shape.halfHeight;
+        return this.qCapsule;
+      case "cuboid":
+        this.qCuboid.halfExtents.x = shape.halfExtents[0];
+        this.qCuboid.halfExtents.y = shape.halfExtents[1];
+        this.qCuboid.halfExtents.z = shape.halfExtents[2];
+        return this.qCuboid;
+    }
+  }
+
+  private setRotation(q: Quat | undefined): void {
+    this.qRot.x = q ? q[0] : 0;
+    this.qRot.y = q ? q[1] : 0;
+    this.qRot.z = q ? q[2] : 0;
+    this.qRot.w = q ? q[3] : 1;
   }
 
   /** World-space states of every moving body, keyed by (expanded) entity id. */
@@ -492,8 +1178,85 @@ export class PhysicsSim {
 
   free(): void {
     this.disposed = true;
+    // controllers hold their own wasm allocation and are NOT owned by the
+    // world — dropping the world alone leaks one per character
+    for (const entry of this.characters.values()) entry.ctrl.free();
+    this.characters.clear();
     this.world.free();
   }
+}
+
+/** Per-entity character-controller state (see PhysicsSim.configureCharacter). */
+interface CharacterEntry {
+  ctrl: RAPIER.KinematicCharacterController;
+  /** Skin width the controller was CONSTRUCTED with — changing it rebuilds it. */
+  offset: number;
+  exclude: string[];
+  layers: LayerMask;
+  /** cos(maxSlopeClimbAngle), precomputed for the per-collision wall test. */
+  climbCos: number;
+  up: Vec3;
+}
+
+/**
+ * Sensors are excluded from queries unless asked for: a trigger volume is not
+ * geometry, and one that blocks a sword swing or an enemy's line of sight is
+ * always a bug. Rapier defaults the other way.
+ */
+function sensorFlags(includeSensors: boolean | undefined): RAPIER.QueryFilterFlags | undefined {
+  return includeSensors ? undefined : RAPIER.QueryFilterFlags.EXCLUDE_SENSORS;
+}
+
+/** Length of a vector's component perpendicular to `up` (a unit vector). */
+function horizontalLength(
+  x: number,
+  y: number,
+  z: number,
+  ux: number,
+  uy: number,
+  uz: number,
+): number {
+  const along = x * ux + y * uy + z * uz;
+  return Math.hypot(x - along * ux, y - along * uy, z - along * uz);
+}
+
+/** Fill a caller-supplied hit, or allocate one. Never allocates when `out` is given. */
+function writeHit(
+  out: RayHit | undefined,
+  entityId: string,
+  px: number,
+  py: number,
+  pz: number,
+  nx: number,
+  ny: number,
+  nz: number,
+  distance: number,
+): RayHit {
+  if (!out) {
+    return { entityId, point: [px, py, pz], normal: [nx, ny, nz], distance };
+  }
+  out.entityId = entityId;
+  out.point[0] = px;
+  out.point[1] = py;
+  out.point[2] = pz;
+  out.normal[0] = nx;
+  out.normal[1] = ny;
+  out.normal[2] = nz;
+  out.distance = distance;
+  return out;
+}
+
+/**
+ * Layer membership inferred from what the collider IS, since the scene document
+ * cannot say yet. Deliberately conservative: everything lands on a layer a
+ * query would actually ask for, and nothing is guessed as ACTOR (a body being
+ * dynamic says nothing about it being alive — that is a runtime fact, so a
+ * character script calls {@link PhysicsSim.setLayers} to claim it).
+ */
+function defaultMembership(body: RAPIER.RigidBody, col: ColliderData): LayerMask {
+  if (col.isTrigger ?? false) return Layers.TRIGGER;
+  if (col.shape === "heightmap") return Layers.TERRAIN;
+  return body.isFixed() ? Layers.WORLD : Layers.PROP;
 }
 
 /**
