@@ -1,6 +1,12 @@
 import type * as THREE from "three";
 import type { NetStateStore, PlayerDataService, ProfilerLike, SceneDoc } from "@hitreg/core";
-import type { InputLike, Script, ScriptContext, SimLike } from "./script.js";
+import type {
+  InputLike,
+  Script,
+  ScriptChatMessage,
+  ScriptContext,
+  SimLike,
+} from "./script.js";
 import type { ScriptRegistry } from "./registry.js";
 import type { EventBus } from "./events.js";
 
@@ -22,10 +28,17 @@ export interface RuntimeOptions {
     entityId: string,
     opts: { fill?: number; text?: string; visible?: boolean },
   ) => void;
-  /** Host particle hook: runtime-only emitter control. */
+  /** Host particle hook: runtime-only emitter control (including ramp retint). */
   setParticles?: (
     entityId: string,
-    opts: { emitting?: boolean; visible?: boolean; restart?: boolean; burst?: number },
+    opts: {
+      emitting?: boolean;
+      visible?: boolean;
+      restart?: boolean;
+      burst?: number;
+      colorStart?: string;
+      colorEnd?: string;
+    },
   ) => void;
   /** Host light hook: runtime-only enable/intensity/color control. */
   setLight?: (
@@ -49,6 +62,11 @@ export interface RuntimeOptions {
    */
   netState?: NetStateStore;
   /**
+   * Text chat host (an @hitreg/comms ChatService fits structurally), exposed
+   * to scripts as ctx.chat with auto-unsubscribing `on` handlers.
+   */
+  chat?: ScriptChatHost;
+  /**
    * Optional frame profiler. When enabled, each script's onFixedUpdate is
    * timed under its own scope name (`scripts/<script-name>`) rather than
    * lumped into one "scripts" number — with dozens of NPCs running the same
@@ -61,6 +79,15 @@ export interface RuntimeOptions {
 interface ScriptComponentData {
   name: string;
   params: Record<string, unknown>;
+}
+
+/** What the runtime needs from a chat implementation (see ScriptChat for the script-facing shape). */
+export interface ScriptChatHost {
+  send(channel: "proximity" | "global" | "team" | "party", text: string): { ok: boolean };
+  announce(text: string): void;
+  system(text: string): void;
+  onMessage(cb: (msg: ScriptChatMessage) => void): () => void;
+  history(): readonly ScriptChatMessage[];
 }
 
 /** A sim-stepped timer (ctx.after / ctx.every). Times are in accumulated ms. */
@@ -257,6 +284,8 @@ export class ScriptRuntime {
                 visible?: boolean;
                 restart?: boolean;
                 burst?: number;
+                colorStart?: string;
+                colorEnd?: string;
               }) => this.opts.setParticles!(entityId, opts),
             }
           : {}),
@@ -277,6 +306,7 @@ export class ScriptRuntime {
         ...(this.opts.playerData ? { playerData: this.opts.playerData } : {}),
         ...(this.opts.events ? { events: this.scopedEvents(id, this.opts.events) } : {}),
         ...(this.opts.netState ? { netState: this.scopedNetState(id, this.opts.netState) } : {}),
+        ...(this.opts.chat ? { chat: this.scopedChat(id, this.opts.chat) } : {}),
       };
       const script = new cls();
       script.ctx = context;
@@ -311,6 +341,30 @@ export class ScriptRuntime {
       emit: (name, payload) => bus.emit(name, payload),
       on: (name, cb) => track(bus.on(name, cb)),
       once: (name, cb) => track(bus.once(name, cb)),
+    };
+  }
+
+  /** ctx.chat for one script: `on` subscriptions auto-unsubscribe. */
+  private scopedChat(id: string, chat: ScriptChatHost): NonNullable<ScriptContext["chat"]> {
+    const track = (off: () => void): (() => void) => {
+      let subs = this.subscriptions.get(id);
+      if (!subs) {
+        subs = new Set();
+        this.subscriptions.set(id, subs);
+      }
+      const tracked = (): void => {
+        off();
+        this.subscriptions.get(id)?.delete(tracked);
+      };
+      subs.add(tracked);
+      return tracked;
+    };
+    return {
+      send: (channel, text) => chat.send(channel, text).ok,
+      announce: (text) => chat.announce(text),
+      system: (text) => chat.system(text),
+      on: (cb) => track(chat.onMessage(cb)),
+      history: () => chat.history(),
     };
   }
 

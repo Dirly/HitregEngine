@@ -1,3 +1,4 @@
+import type * as THREE from "three";
 import { Script } from "./script.js";
 import type { ScriptRegistry } from "./registry.js";
 import {
@@ -394,6 +395,204 @@ class Damageable extends Script {
   }
 }
 
+/**
+ * Third-person character movement: camera-relative WASD, Space to jump, and
+ * the model smoothly turns to face where it's running. Crossfades between
+ * idle and run clips off its own velocity, so it needs no game-specific
+ * wiring. Reads a few optional runtime channels other scripts may set on
+ * object.userData: speedMult (upgrades), frozen (menus pause movement),
+ * holdingWeapon (swaps to the *_Hold clips), actionClip/actionUntil (a
+ * one-shot clip that overrides locomotion until the given time).
+ */
+class ThirdPersonController extends Script {
+  static override scriptName = "third-person-controller";
+  static override params = {
+    speed: { default: 6.5, min: 0, max: 30 },
+    jump: { default: 8, min: 0, max: 30, description: "jump velocity" },
+    idleClip: { default: "Idle" },
+    runClip: { default: "Run" },
+    modelYaw: { default: 0, min: -3.1416, max: 3.1416, description: "extra yaw if the model faces backwards" },
+    turnSpeed: { default: 14, min: 1, max: 40, description: "how snappily the character turns" },
+    face: { default: "camera", description: "camera = always face the aim (strafe shooter); movement = face where you run" },
+  };
+
+  private yaw = 0;
+  private lastClip = "";
+
+  private play(clip: string, fade: number): void {
+    if (this.lastClip === clip) return;
+    this.lastClip = clip;
+    this.ctx.setAnimation?.(clip, fade);
+  }
+
+  override onStart(): void {
+    this.yaw = this.object.rotation.y;
+    this.play(this.param<string>("idleClip"), 0.2);
+  }
+
+  override onFixedUpdate(dt: number): void {
+    const sim = this.ctx.sim;
+    if (!sim) return;
+    const vel = sim.getLinvel(this.entityId);
+    if (!vel) return;
+
+    const ud = this.object.userData as {
+      speedMult?: number;
+      frozen?: boolean;
+      holdingWeapon?: boolean;
+      actionClip?: string;
+      actionUntil?: number;
+    };
+    if (ud.frozen) {
+      sim.setLinvel(this.entityId, [0, vel[1], 0]);
+      this.play(this.param<string>("idleClip"), 0.25);
+      return;
+    }
+
+    const input = this.ctx.input;
+    let forwardIn = 0;
+    let strafeIn = 0;
+    if (input.isDown("KeyW") || input.isDown("ArrowUp")) forwardIn += 1;
+    if (input.isDown("KeyS") || input.isDown("ArrowDown")) forwardIn -= 1;
+    if (input.isDown("KeyA") || input.isDown("ArrowLeft")) strafeIn -= 1;
+    if (input.isDown("KeyD") || input.isDown("ArrowRight")) strafeIn += 1;
+
+    // camera-relative when the host provides a view direction
+    const [fx, fz] = this.ctx.viewForward?.() ?? [0, -1];
+    const rx = -fz;
+    const rz = fx;
+    let x = fx * forwardIn + rx * strafeIn;
+    let z = fz * forwardIn + rz * strafeIn;
+    const len = Math.hypot(x, z);
+    const speed = this.param<number>("speed") * (ud.speedMult ?? 1);
+    if (len > 0) {
+      x = (x / len) * speed;
+      z = (z / len) * speed;
+    }
+
+    let vy = vel[1];
+    const grounded = Math.abs(vy) < 0.05;
+    if (input.isDown("Space") && grounded) vy = this.param<number>("jump");
+    sim.setLinvel(this.entityId, [x, vy, z]);
+
+    // steer the visual (body rotations are locked): shooter mode tracks the
+    // camera aim even while strafing; movement mode faces where you run
+    const faceCamera = this.param<string>("face") === "camera";
+    if (faceCamera || len > 0) {
+      const target = faceCamera
+        ? Math.atan2(fx, fz) + this.param<number>("modelYaw")
+        : Math.atan2(x, z) + this.param<number>("modelYaw");
+      let diff = target - this.yaw;
+      while (diff > Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      this.yaw += diff * Math.min(1, this.param<number>("turnSpeed") * dt);
+      this.object.rotation.set(0, this.yaw, 0);
+    }
+
+    const now = this.ctx.now() / 1000;
+    if (ud.actionClip && (ud.actionUntil ?? 0) > now) {
+      this.play(ud.actionClip, 0.05);
+      return;
+    }
+
+    const holding = ud.holdingWeapon === true;
+    const idleClip = holding ? "Idle_Hold" : this.param<string>("idleClip");
+    const runClip = holding ? "Run_Hold" : this.param<string>("runClip");
+    this.play(len > 0 ? runClip : idleClip, len > 0 ? 0.15 : 0.25);
+  }
+}
+
+/**
+ * Sockets this entity onto a named bone of its PARENT entity's skinned model
+ * (weapons in hands, hats on heads). Visual-only: copies the bone's world
+ * pose onto this entity every tick, with tunable offsets — adjust `offset` /
+ * `rotationDeg` live in the inspector until the prop sits right.
+ *
+ * Finding the right bone: toggle "bones" in the editor toolbar to draw the
+ * skeleton with joint name labels, and the inspector's `bone` field becomes
+ * a dropdown of the parent model's actual bone names once the model loads.
+ *
+ * This package only imports three's *types*, so the scratch math objects are
+ * cloned off the entity's own transform rather than constructed via
+ * `new THREE.*` — keeps @hitreg/scripting runtime-free of three.
+ */
+class BoneSocket extends Script {
+  static override scriptName = "bone-socket";
+  static override params = {
+    bone: {
+      default: "mixamorig:RightHand",
+      description: "bone name on the parent model's rig (see the 'bones' toolbar toggle)",
+    },
+    offset: { default: [0, 0, 0], description: "position offset, bone-oriented world units" },
+    rotationDeg: { default: [0, 90, 0], description: "rotation offset in degrees" },
+  };
+
+  /**
+   * Mirror of three's `PropertyBinding.sanitizeNodeName`, kept local because
+   * `@hitreg/scripting` deliberately imports three only as a TYPE (`import type
+   * * as THREE`) and must stay runtime-free of it.
+   */
+  static sanitizeBoneName(name: string): string {
+    return name.replace(/[\s.:[\]/]/g, "");
+  }
+
+  private bone: THREE.Object3D | null = null;
+  private offsetQuat!: THREE.Quaternion;
+  private bonePos!: THREE.Vector3;
+  private boneQuat!: THREE.Quaternion;
+  private parentQuat!: THREE.Quaternion;
+  private shift!: THREE.Vector3;
+
+  override onStart(): void {
+    const deg = this.param<[number, number, number]>("rotationDeg");
+    const euler = this.object.rotation
+      .clone()
+      .set((deg[0] * Math.PI) / 180, (deg[1] * Math.PI) / 180, (deg[2] * Math.PI) / 180);
+    this.offsetQuat = this.object.quaternion.clone().setFromEuler(euler);
+    this.bonePos = this.object.position.clone();
+    this.shift = this.object.position.clone();
+    this.boneQuat = this.object.quaternion.clone();
+    this.parentQuat = this.object.quaternion.clone();
+    this.bone = null;
+  }
+
+  override onFixedUpdate(): void {
+    const parent = this.object.parent;
+    if (!parent) return;
+    if (!this.bone) {
+      // the skinned model loads async — keep looking until it appears
+      const wanted = this.param<string>("bone");
+      this.bone =
+        parent.getObjectByName(wanted) ??
+        // glTF node names are SANITIZED on load: three's GLTFLoader strips
+        // `[ ] . : /` (PropertyBinding.sanitizeNodeName) because those are
+        // reserved in animation-track paths. So the conventional Mixamo bone
+        // "mixamorig:RightHand" — including this script's own default — exists
+        // at runtime as "mixamorigRightHand" and a literal lookup NEVER
+        // resolves. Falling back to the sanitized form means an author can
+        // paste the name straight off the rig, or off any Mixamo export, and
+        // have it work either way.
+        parent.getObjectByName(BoneSocket.sanitizeBoneName(wanted)) ??
+        null;
+      if (!this.bone) return;
+    }
+    this.bone.updateWorldMatrix(true, false);
+    this.bone.getWorldPosition(this.bonePos);
+    this.bone.getWorldQuaternion(this.boneQuat);
+
+    const off = this.param<[number, number, number]>("offset");
+    this.shift.set(off[0], off[1], off[2]).applyQuaternion(this.boneQuat);
+    this.bonePos.add(this.shift);
+
+    parent.updateWorldMatrix(true, false);
+    this.object.position.copy(parent.worldToLocal(this.bonePos));
+    parent.getWorldQuaternion(this.parentQuat).invert();
+    this.object.quaternion.copy(
+      this.parentQuat.multiply(this.boneQuat).multiply(this.offsetQuat),
+    );
+  }
+}
+
 export function registerBuiltinScripts(registry: ScriptRegistry): void {
   registry.register(Spinner);
   registry.register(Oscillator);
@@ -404,4 +603,6 @@ export function registerBuiltinScripts(registry: ScriptRegistry): void {
   registry.register(FaceTarget);
   registry.register(Tweener);
   registry.register(Damageable);
+  registry.register(ThirdPersonController);
+  registry.register(BoneSocket);
 }
