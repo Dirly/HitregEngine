@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "name": "Stone room kit",
+  "cellSize": [4, 3, 4],
+  "tiles": [
+    {
+      "id": "stone",
+      "prefabId": "dungeon/stone-cell",
+      "weight": 6,
+      "rotations": [0, 90, 180, 270],
+      "sockets": {
+        "px": "floor",
+        "nx": "floor",
+        "py": "stack",
+        "ny": "stack",
+        "pz": "floor",
+        "nz": "floor"
+      }
+    },
+    {
+      "id": "moss",
+      "prefabId": "dungeon/moss-cell",
+      "weight": 2,
+      "rotations": [0],
+      "sockets": {
+        "px": "floor",
+        "nx": "floor",
+        "py": "stack",
+        "ny": "stack",
+        "pz": "floor",
+        "nz": "floor"
+      }
+    },
+    {
+      "id": "void",
+      "weight": 1,
+      "rotations": [0],
+      "sockets": {
+        "px": "floor",
+        "nx": "floor",
+        "py": "stack",
+        "ny": "stack",
+        "pz": "floor",
+        "nz": "floor"
+      }
+    }
+  ],
+  "pins": [
+    { "at": [0, 0, 0], "tile": "moss", "rotation": 0 }
+  ]
+}

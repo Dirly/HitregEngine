@@ -1,0 +1,141 @@
+{
+  "size": 256,
+  "bleed": 8,
+  "keyColor": "#00ffff",
+  "groundFringe": 3,
+  "fitSearch": 1.6,
+  "slots": {
+    "#11008a": {
+      "name": "pants.back",
+      "transparency": false
+    },
+    "#1f00ff": {
+      "name": "pants.front",
+      "transparency": false
+    },
+    "#000000": {
+      "name": "hood",
+      "transparency": false
+    },
+    "#9da8ff": {
+      "name": "shoulders",
+      "transparency": false
+    },
+    "#420064": {
+      "name": "robe.back",
+      "transparency": true,
+      "fit": "contain",
+      "anchor": "top",
+      "fitPadding": 0
+    },
+    "#a900ff": {
+      "name": "robe.front",
+      "transparency": true,
+      "fit": "contain",
+      "anchor": "top",
+      "fitPadding": 0
+    },
+    "#ff0000": {
+      "name": "chest.front",
+      "transparency": false
+    },
+    "#a80000": {
+      "name": "chest.back",
+      "transparency": false
+    },
+    "#ffa800": {
+      "name": "tasset.front",
+      "transparency": true,
+      "fit": "contain",
+      "anchor": "top",
+      "fitPadding": 0
+    },
+    "#bf7e00": {
+      "name": "tasset.back",
+      "transparency": true,
+      "fit": "contain",
+      "anchor": "top",
+      "fitPadding": 0
+    },
+    "#ff8b8b": {
+      "name": "ornament",
+      "transparency": true,
+      "fit": "contain",
+      "anchor": "center"
+    },
+    "#f800ff": {
+      "name": "arms.front",
+      "transparency": false
+    },
+    "#760079": {
+      "name": "arms.back",
+      "transparency": false
+    },
+    "#3cff00": {
+      "name": "hand.front",
+      "transparency": false
+    },
+    "#0f3e00": {
+      "name": "hand.back",
+      "transparency": false
+    },
+    "#eca5ff": {
+      "name": "shoe",
+      "transparency": false
+    },
+    "#57100d": {
+      "name": "belt.buckle",
+      "transparency": false,
+      "fit": "contain",
+      "anchor": "center",
+      "fitPadding": 0
+    },
+    "#6b1511": {
+      "name": "belt",
+      "transparency": false,
+      "fit": "contain",
+      "anchor": "center"
+    },
+    "#e1c78b": {
+      "name": "face",
+      "transparency": false,
+      "fit": "contain",
+      "anchor": "center",
+      "fitPadding": 0
+    },
+    "#b5a070": {
+      "name": "head.side",
+      "transparency": false
+    }
+  },
+  "pairs": [
+    [
+      "pants.front",
+      "pants.back"
+    ],
+    [
+      "chest.front",
+      "chest.back"
+    ],
+    [
+      "arms.front",
+      "arms.back"
+    ],
+    [
+      "hand.front",
+      "hand.back"
+    ],
+    [
+      "robe.front",
+      "robe.back"
+    ],
+    [
+      "tasset.front",
+      "tasset.back"
+    ],
+    [
+      "face",
+      "head.side"
+    ]
+  ]
+}

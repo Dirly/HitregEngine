@@ -1,0 +1,91 @@
+{
+  "version": 1,
+  "id": "hitreg.texture-intake",
+  "name": "Texture Intake",
+  "description": "Turn hand-painted or image-generated art into a game-ready tileable texture family: offset-wrap seamless tiling, an optional luma-derived normal map (off by default — hand-painted art carries its own light), and an updated theme data asset slot.",
+  "category": "Assets/Generate",
+  "surfaces": ["tools", "assets"],
+  "permissions": ["assets.write:textures", "assets.write:themes"],
+  "entry": "./run.mjs",
+  "inputs": {
+    "image": {
+      "kind": "file",
+      "label": "Source image",
+      "description": "The generated texture art (PNG). Any 8-bit PNG works: RGB, RGBA, grayscale, or palette.",
+      "accept": ["image/png"],
+      "maxBytes": 16777216
+    },
+    "name": {
+      "kind": "string",
+      "label": "Output name",
+      "description": "Texture id below assets/textures; folders are allowed (theme folders like drowned-a/mossy-brick are the convention). The .png suffix is added automatically.",
+      "placeholder": "drowned-a/mossy-brick",
+      "pattern": "^[a-z0-9][a-z0-9/_-]*$",
+      "maxLength": 120
+    },
+    "slot": {
+      "kind": "select",
+      "label": "Theme slot",
+      "description": "Which theme role this texture fills. With a theme id set, the theme data asset's slot is created/updated; \"none\" skips theme wiring.",
+      "default": "none",
+      "options": [
+        { "value": "floor", "label": "floor" },
+        { "value": "wall", "label": "wall" },
+        { "value": "ceiling", "label": "ceiling" },
+        { "value": "trim", "label": "trim" },
+        { "value": "accent", "label": "accent" },
+        { "value": "rock", "label": "rock" },
+        { "value": "wood", "label": "wood" },
+        { "value": "metal", "label": "metal" },
+        { "value": "step", "label": "step" },
+        { "value": "water", "label": "water" },
+        { "value": "none", "label": "none" }
+      ]
+    },
+    "theme": {
+      "kind": "string",
+      "label": "Theme id",
+      "description": "Optional theme data-asset id. When set (and slot is not \"none\"), themes/<id>.json is created or updated in place: this slot gets { map, uvScale }, other slots are preserved.",
+      "required": false,
+      "placeholder": "drowned-a",
+      "pattern": "^[a-z0-9][a-z0-9_-]*$",
+      "maxLength": 64
+    },
+    "metresPerTile": {
+      "kind": "number",
+      "label": "Metres per tile",
+      "description": "World size one texture tile covers, recorded in the theme slot as uvScale [m, m] (metres per tile, NOT a repeat count).",
+      "default": 2,
+      "min": 0.25,
+      "max": 16,
+      "step": 0.25
+    },
+    "makeSeamless": {
+      "kind": "boolean",
+      "label": "Make seamless",
+      "description": "Make the texture tile seamlessly: offset-wrap by half the image size and cross-blend a feathered band (~12% of size) across the wrap seams. Image-gen output is never seamless — leave this on.",
+      "default": true
+    },
+    "normalFromLuma": {
+      "kind": "boolean",
+      "label": "Normal from luma",
+      "description": "Derive a tangent-space normal map (OpenGL +Y) from luminance via Sobel gradients and write <name>-normal.png alongside. OFF by default: this art direction is HAND-PAINTED, so the texture already carries its own light and form, and a luma-derived normal re-lights that painted detail a second time (painted shadows read as dents). Turn it on only for a surface whose relief is genuinely geometric rather than painted.",
+      "default": false
+    },
+    "normalStrength": {
+      "kind": "number",
+      "label": "Normal strength",
+      "description": "Normal map intensity. 1 is deliberately light — the stylized look wants suggestion, not geology.",
+      "default": 1,
+      "min": 0,
+      "max": 3,
+      "step": 0.1
+    },
+    "previewTiling": {
+      "kind": "boolean",
+      "label": "Preview tiling",
+      "description": "Return a 3x3 tiled preview (384px) so any remaining seams are instantly visible in the dialog.",
+      "default": true
+    }
+  }
+}

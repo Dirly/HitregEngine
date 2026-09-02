@@ -1,0 +1,84 @@
+{
+  "version": 1,
+  "id": "hitreg.armor-atlas",
+  "name": "Armor Atlas",
+  "description": "Register generated armor artwork against the character UV key, preserve cyan cutouts, and write a game-ready texture atlas.",
+  "category": "Assets/Generate",
+  "surfaces": ["assets", "tools"],
+  "permissions": ["assets.write:textures"],
+  "entry": "./run.mjs",
+  "inputs": {
+    "key": {
+      "kind": "file",
+      "label": "UV key",
+      "description": "The flat PNG color-key sheet supplied to the image generator.",
+      "accept": ["image/png"],
+      "maxBytes": 16777216
+    },
+    "art": {
+      "kind": "file",
+      "label": "Generated art",
+      "description": "The generated PNG painted over the key layout. It must have exactly the same dimensions as the UV key.",
+      "accept": ["image/png"],
+      "maxBytes": 16777216
+    },
+    "name": {
+      "kind": "string",
+      "label": "Output name",
+      "description": "Texture id below assets/textures; folders are allowed. The .png suffix is added automatically.",
+      "default": "atlas/armor-atlas",
+      "placeholder": "atlas/my-armor",
+      "pattern": "^[a-z0-9][a-z0-9/_-]*$",
+      "maxLength": 120
+    },
+    "size": {
+      "kind": "number",
+      "label": "Atlas size",
+      "description": "Square output size in pixels.",
+      "default": 256,
+      "integer": true,
+      "min": 64,
+      "max": 2048,
+      "step": 64
+    },
+    "bleed": {
+      "kind": "number",
+      "label": "Bleed",
+      "description": "Padding texels dilated around UV islands.",
+      "default": 8,
+      "integer": true,
+      "min": 0,
+      "max": 64,
+      "step": 1
+    },
+    "filter": {
+      "kind": "select",
+      "label": "Filter",
+      "description": "Box filtering is the normal downsampling path; nearest preserves hard source pixels.",
+      "default": "box",
+      "options": [
+        { "value": "box", "label": "box" },
+        { "value": "nearest", "label": "nearest" }
+      ]
+    },
+    "slices": {
+      "kind": "boolean",
+      "label": "Keep slices",
+      "description": "Write per-island diagnostic PNGs into the local tool-run record.",
+      "default": true
+    },
+    "artMargin": {
+      "kind": "boolean",
+      "label": "Artwork margin",
+      "description": "Include artwork outside the keyed islands when estimating registration.",
+      "default": false
+    },
+    "skip": {
+      "kind": "string",
+      "label": "Skip regions",
+      "description": "Optional comma-separated island names that are absent from this set, such as hood,ornament.",
+      "required": false,
+      "placeholder": "hood,ornament"
+    }
+  }
+}

@@ -1,0 +1,88 @@
+{
+  "version": 1,
+  "id": "hitreg.wfc-3d",
+  "name": "3D Prefab WFC",
+  "description": "Collapse a socket-authored 3D tile grid into a reusable composite prefab. Every occupied cell is a nested prefab instance; the tool never emits raw geometry.",
+  "category": "World/Generate",
+  "surfaces": ["tools", "assets"],
+  "permissions": ["assets.write:prefabs"],
+  "entry": "./run.mjs",
+  "inputs": {
+    "tileset": {
+      "kind": "file",
+      "label": "Prefab tileset",
+      "description": "JSON describing prefab tiles, their six face sockets, weights, allowed Y rotations, optional boundary sockets, and pinned cells. See tools/wfc-3d/README.md.",
+      "accept": ["application/json"],
+      "maxBytes": 1048576
+    },
+    "name": {
+      "kind": "string",
+      "label": "Output prefab",
+      "description": "Prefab id below assets/prefabs; folders are allowed. The .json suffix is added automatically.",
+      "default": "generated/wfc-layout",
+      "placeholder": "generated/island-01",
+      "pattern": "^[a-z0-9][a-z0-9/_-]*$",
+      "maxLength": 120
+    },
+    "width": {
+      "kind": "number",
+      "label": "Width (X)",
+      "description": "Grid cells along world X.",
+      "default": 8,
+      "integer": true,
+      "min": 1,
+      "max": 48,
+      "step": 1
+    },
+    "height": {
+      "kind": "number",
+      "label": "Height (Y)",
+      "description": "Grid cells along world Y. Use 1 for a single-layer layout.",
+      "default": 4,
+      "integer": true,
+      "min": 1,
+      "max": 48,
+      "step": 1
+    },
+    "depth": {
+      "kind": "number",
+      "label": "Depth (Z)",
+      "description": "Grid cells along world Z.",
+      "default": 8,
+      "integer": true,
+      "min": 1,
+      "max": 48,
+      "step": 1
+    },
+    "seed": {
+      "kind": "number",
+      "label": "Seed",
+      "description": "Deterministic unsigned 32-bit generation seed.",
+      "default": 1,
+      "integer": true,
+      "min": 0,
+      "max": 4294967295,
+      "step": 1
+    },
+    "attempts": {
+      "kind": "number",
+      "label": "Retry attempts",
+      "description": "Fresh deterministic collapses attempted after contradictions.",
+      "default": 20,
+      "integer": true,
+      "min": 1,
+      "max": 200,
+      "step": 1
+    },
+    "origin": {
+      "kind": "select",
+      "label": "Prefab origin",
+      "description": "Centered keeps the composite anchor at the bottom-center; minimum starts cell 0 at the anchor.",
+      "default": "center",
+      "options": [
+        { "value": "center", "label": "bottom center" },
+        { "value": "min", "label": "minimum corner" }
+      ]
+    }
+  }
+}
