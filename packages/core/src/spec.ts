@@ -4,6 +4,7 @@ import type { EventRegistry } from "./events.js";
 import type { NetStateStore } from "./net-state.js";
 import type { ToolDescription, ToolRegistry } from "./tools.js";
 import { propSpecSchema, type PrefabSpec } from "./prefab.js";
+import { projectManifestSchema } from "./project.js";
 import { OP_SPECS } from "./ops.js";
 import { z } from "zod";
 
@@ -69,6 +70,13 @@ export interface EngineSpec {
    * turned by a human afterward instead of being a black box.
    */
   prefabProp: unknown;
+  /**
+   * JSON Schema of a project's `project.json` — what a game declares about
+   * itself, including the registered tools it needs installed. A project is
+   * its own repo that the engine never tracks, so this is the contract that
+   * lets a host tell someone what they're missing before they hit it.
+   */
+  projectManifest: unknown;
 }
 
 /** Current spec shape version — bump on a breaking change to EngineSpec. */
@@ -87,5 +95,6 @@ export function buildEngineSpec(inputs: EngineSpecInputs): EngineSpec {
     tools: inputs.tools?.describe() ?? {},
     prefabs: inputs.assets?.prefabSpecs() ?? {},
     prefabProp: z.toJSONSchema(propSpecSchema, { io: "input" }),
+    projectManifest: z.toJSONSchema(projectManifestSchema, { io: "input" }),
   };
 }

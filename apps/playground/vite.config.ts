@@ -11,6 +11,12 @@ import {
   toolResultSchema,
   type ToolManifest,
 } from "../../packages/core/src/tools.ts";
+import {
+  describeMissingTools,
+  projectManifestSchema,
+  resolveProjectTools,
+  type ProjectToolReport,
+} from "../../packages/core/src/project.ts";
 
 /**
  * The dev server is the AI/file bridge:
@@ -57,6 +63,7 @@ const BRIDGE_ENDPOINTS = [
   { method: "POST", path: "/__hitreg/write-asset", purpose: "Write an asset file ({file, content}); live-syncs into the running app." },
   { method: "GET", path: "/__hitreg/tools", purpose: "List installed editor/asset tool manifests. The same definitions drive the editor UI and the tools block in this spec." },
   { method: "POST", path: "/__hitreg/tools/:id/run", purpose: "Run a registered tool with { inputs }. Inputs are schema-validated; returns { assets, previews, warnings, report, log }." },
+  { method: "GET", path: "/__hitreg/projects", purpose: "Installed projects and their declared tool dependencies: { installedTools, projects: [{ project, satisfied, installed, missing, missingOptional }] }. A project is its own git repo checked out into projects/<name>/, so it declares what it needs in project.json — read this before concluding a project's generator is broken, because \"the tool was never installed\" and \"the tool did nothing\" look identical from the outside." },
   { method: "GET", path: "/__hitreg/pins?scene=<name>", purpose: "World-anchored notes for a scene: [{ id, point:[x,y,z], entityId, text, author, createdAt, resolved }]. A pin is a human (or agent) comment left AT a place — read them to find what someone flagged and where. Stored beside the scene (.hitreg/pins/), never inside it." },
   { method: "POST", path: "/__hitreg/pins", purpose: "Replace a scene's notes ({scene, pins}) — post the full array. Agents may add pins to answer or to flag something for the human; set resolved:true rather than deleting, so the exchange stays readable." },
   { method: "GET", path: "/__hitreg/agent-inbox?scene=<name>&wait=<sec>", purpose: "Notes the human pressed \"send to AI\" on and that are not yet resolved — the requests actually addressed to you, each carrying the pinned entity's full component JSON so you can act without a second fetch. `wait` LONG-POLLS: the request is held open until a note arrives or the deadline passes (max 120s), so an idle agent wakes within ~0.5s of the click instead of polling on a timer. Answer by POSTing the scene's pins back with your `reply` and `resolved: true`. Also returns `profiles: [...]` — frame-profiler snapshots the human sent, each with its `.hitreg/profiles/` file path, their note, and the plain-English verdict; answer those via POST /__hitreg/profile." },
@@ -199,6 +206,64 @@ function hitregBridge(): Plugin {
           installedTools.set(manifest.id, { manifest, entryPath });
         }
       }
+
+      // Projects are separate git repos checked out into projects/<name>/, so
+      // the engine has no way to know what a given one needs — except by being
+      // told. project.json is that declaration. Resolve it against what is
+      // actually installed and say so ONCE at boot: a missing tool otherwise
+      // surfaces much later as a generator that mysteriously does nothing.
+      const projectReports = new Map<string, ProjectToolReport>();
+      const readProjectManifests = (): void => {
+        projectReports.clear();
+        if (!fs.existsSync(projectsRoot)) return;
+        for (const entry of fs.readdirSync(projectsRoot, { withFileTypes: true })) {
+          if (!entry.isDirectory()) continue;
+          const manifestPath = path.join(projectsRoot, entry.name, "project.json");
+          if (!fs.existsSync(manifestPath)) continue;
+          const parsed = projectManifestSchema.safeParse(
+            JSON.parse(fs.readFileSync(manifestPath, "utf8")),
+          );
+          if (!parsed.success) {
+            // Never fatal: a broken manifest in one project must not stop the
+            // dev server for every other one.
+            console.warn(`[hitreg] projects/${entry.name}/project.json is invalid:`);
+            console.warn(parsed.error.issues.map((i) => `  ${i.path.join(".")}: ${i.message}`).join("\n"));
+            continue;
+          }
+          if (parsed.data.name !== entry.name) {
+            console.warn(
+              `[hitreg] projects/${entry.name}/project.json declares name "${parsed.data.name}" — ` +
+                `asset ids namespace by FOLDER name, so these must match.`,
+            );
+          }
+          const report = resolveProjectTools(parsed.data, installedTools.keys());
+          projectReports.set(entry.name, report);
+          const message = describeMissingTools(report);
+          if (message) console.warn(`[hitreg] ${message}`);
+        }
+      };
+      readProjectManifests();
+
+      // Declared dependencies are part of the environment an agent is working
+      // in: "this generator does nothing" and "that tool was never installed"
+      // look identical from the outside otherwise.
+      server.middlewares.use("/__hitreg/projects", (req, res) => {
+        if (req.method !== "GET") {
+          res.statusCode = 405;
+          res.setHeader("content-type", "application/json");
+          res.end(JSON.stringify({ ok: false, error: "GET only" }));
+          return;
+        }
+        readProjectManifests();
+        res.setHeader("content-type", "application/json");
+        res.end(
+          JSON.stringify({
+            ok: true,
+            installedTools: [...installedTools.keys()],
+            projects: [...projectReports.values()],
+          }),
+        );
+      });
 
       const readJsonBody = (
         req: IncomingMessage,

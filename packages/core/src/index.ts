@@ -46,6 +46,7 @@ export {
 export {
   ToolRegistry,
   toolDefinitionSchema,
+  toolIdSchema,
   toolManifestSchema,
   toolInputSchema,
   toolFileValueSchema,
@@ -287,3 +288,13 @@ export {
   type VoxelWorldData,
 } from "./components/voxel.js";
 export * from "./voxel/index.js";
+export {
+  projectManifestSchema,
+  projectToolDependencySchema,
+  resolveProjectTools,
+  describeMissingTools,
+  type ProjectManifest,
+  type ProjectToolDependency,
+  type ProjectToolReport,
+  type ProjectToolStatus,
+} from "./project.js";

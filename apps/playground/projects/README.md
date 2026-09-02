@@ -63,6 +63,45 @@ Give it a `.gitignore` for the derived files — `node_modules/`, `dist/`,
 level, never part of one), and whatever your generators and worldgen map
 renders write.
 
+## Declaring what the project needs
+
+A project is cloned into someone else's engine working copy, which may not
+have the tools it was built with. `project.json` at the project root says so
+out loud:
+
+```json
+{
+  "version": 1,
+  "name": "my-game",
+  "description": "One line about the game.",
+  "engine": "^0.1",
+  "tools": [
+    {
+      "id": "hitreg.wfc-3d",
+      "repo": "https://github.com/…/wfc-3d",
+      "version": "^1.0",
+      "reason": "generates the vault layouts",
+      "optional": false
+    }
+  ]
+}
+```
+
+`name` must match the folder — asset ids namespace by folder name, so a
+mismatch silently breaks id resolution and the dev server warns about it.
+`tools` names registered tools (see `tools/README.md`); each is its own repo
+cloned into the engine's `tools/` folder. Mark a tool `optional` when the
+project still runs without it and it only regenerates content.
+
+The dev server validates every `project.json` at boot, resolves the tool list
+against what is actually installed, and warns — by id, with the repo to get
+it from — rather than letting a missing tool surface later as a generator
+that mysteriously does nothing. `GET /__hitreg/projects` returns the same
+resolution as data. The schema is `projectManifest` in `/__hitreg/spec`.
+
+Nothing is installed automatically: tool entry modules are trusted code that
+runs in the host, so fetching one stays a decision a person makes.
+
 Author scenes/materials/prefabs under `assets/` (namespace subfolders keep
 ids collision-free the same way `heli-island/` does today), scripts under
 `scripts/`. A script that needs its own gameplay events (a to-authority

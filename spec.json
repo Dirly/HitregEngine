@@ -6808,5 +6808,71 @@
     "required": [
       "default"
     ]
+  },
+  "projectManifest": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "version": {
+        "default": 1,
+        "type": "number",
+        "const": 1
+      },
+      "name": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9-]*$",
+        "description": "Project id. Must match the folder name under projects/, since asset ids namespace by it."
+      },
+      "description": {
+        "type": "string",
+        "minLength": 1
+      },
+      "engine": {
+        "description": "Engine version or range this project was built against. Advisory.",
+        "type": "string",
+        "minLength": 1
+      },
+      "tools": {
+        "default": [],
+        "description": "Registered tools this project needs installed under the engine's tools/ folder.",
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9.-]*$",
+              "description": "Registered tool id, e.g. hitreg.wfc-3d."
+            },
+            "repo": {
+              "description": "Where to get it — a git URL or other clone/install source. Shown when it is missing.",
+              "type": "string",
+              "minLength": 1
+            },
+            "version": {
+              "description": "Version or range the project was built against. Advisory: nothing enforces it yet.",
+              "type": "string",
+              "minLength": 1
+            },
+            "optional": {
+              "default": false,
+              "description": "True if the project still runs without it (the tool only regenerates content).",
+              "type": "boolean"
+            },
+            "reason": {
+              "description": "What this project uses it for. Worth writing: it is what tells a reader whether they need it.",
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "id"
+          ]
+        }
+      }
+    },
+    "required": [
+      "name"
+    ]
   }
 }

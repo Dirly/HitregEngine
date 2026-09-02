@@ -45,6 +45,35 @@ validated before they reach the editor or an agent. A custom UI may improve a
 complex workflow later, but it must call the same registered runner and return
 the same result contract.
 
+## Distribution: tools are plugins, `tools/` is an install directory
+
+A tool is its own git repo, and `tools/` is where you clone one. The engine
+repo tracks only the first-party set (`atlas/`, `wfc-3d/`, `texture-intake/`)
+and ignores everything else under `tools/`, so an installed third-party tool
+is invisible to it — no submodule, no gitlink, the same arrangement as
+`apps/playground/projects/`. Installing is `git clone <repo> tools/<folder>`;
+uninstalling is deleting the folder. Discovery is by folder scan at dev-server
+boot, so neither step touches engine code. See `tools/README.md`.
+
+A game declares the tools it needs in its own repo, in
+`projects/<name>/project.json`:
+
+```json
+{ "name": "my-game", "tools": [
+  { "id": "hitreg.wfc-3d", "repo": "https://github.com/…/wfc-3d",
+    "version": "^1.0", "reason": "generates the vault layouts" } ] }
+```
+
+The dev server resolves that against the registry at boot and warns about
+anything missing, naming the id and its repo; `GET /__hitreg/projects`
+returns the same resolution as data, and `projectManifest` in the spec is the
+schema. This exists because a missing tool is otherwise indistinguishable
+from a broken one: the generator simply does nothing.
+
+Resolution never installs anything. Entry modules are trusted host code (see
+above), so fetching one is a human decision, not a side effect of opening a
+project.
+
 ## Adding a tool
 
 Create a folder below `tools/` containing a complete `tool.json` and an ES

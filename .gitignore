@@ -37,9 +37,21 @@ apps/playground/assets/audio/
 apps/playground/projects/*
 !apps/playground/projects/README.md
 
+# tools/ is an INSTALL directory. A tool is a plugin: its own git repo, cloned
+# in here, picked because a project asked for it (projects/<name>/project.json
+# declares the dependency). So the default is "not ours" — only the first-party
+# tools that ship with the engine are tracked, and anything else you clone in
+# stays invisible to this repo the way projects/ does.
+tools/*
+!tools/README.md
+!tools/atlas/
+!tools/wfc-3d/
+!tools/texture-intake/
+
 # generated tool output — every registered tool under tools/ writes its runs
 # into out/ or out-<variant>/. Regenerate by re-running the tool; the inputs
-# (tool.json, manifest.json, the entry modules) are what's tracked.
+# (tool.json, manifest.json, the entry modules) are what's tracked. Listed
+# after the re-includes above so it still wins inside a first-party tool.
 tools/*/out/
 tools/*/out-*/
 

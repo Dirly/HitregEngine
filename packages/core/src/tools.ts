@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-const toolId = z
+export const toolIdSchema = z
   .string()
   .regex(/^[a-z][a-z0-9.-]*$/, "use lowercase dot-separated ids (for example hitreg.armor-atlas)");
 
@@ -61,7 +61,7 @@ export const toolInputSchema = z.discriminatedUnion("kind", [
 export const toolDefinitionSchema = z
   .object({
     version: z.literal(1).default(1),
-    id: toolId,
+    id: toolIdSchema,
     name: z.string().min(1),
     description: z.string().min(1),
     category: z.string().min(1),

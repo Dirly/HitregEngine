@@ -160,6 +160,18 @@ The primary AI channel is **direct file editing** — no MCP required:
   world points; exit 1 on findings. In the editor the same solve runs
   automatically on move/duplicate/drop (toolbar "placement assist" toggle).
   Judgment + conventions: docs/scene-authoring.md → "Placement".
+- **Tools are plugins, games are repos.** `tools/` is an install directory:
+  each tool is its own git repo cloned in, and only the first-party three
+  (`atlas/`, `wfc-3d/`, `texture-intake/`) are tracked by the engine. Each
+  project under `apps/playground/projects/<name>/` is its own git repo too,
+  and declares what it needs in `project.json` (`name` — must match the
+  folder — plus `engine` and a `tools` list of registered tool ids with
+  repo/version/reason). The dev server validates each manifest at boot and
+  warns about declared-but-missing tools; `curl -s
+  http://localhost:5173/__hitreg/projects` returns that resolution as data.
+  **Check it before concluding a project's generator is broken** — "the tool
+  was never installed" and "the tool did nothing" look identical otherwise.
+  Conventions: `tools/README.md`, `apps/playground/projects/README.md`.
 - **Capability spec** (what you can build): `curl -s http://localhost:5173/__hitreg/spec`
   → `{ components, dataAssets, events, netState, scripts, tools, ops, prefabs, endpoints }`,
   every field a JSON Schema generated from the live Zod definitions, so it can't
