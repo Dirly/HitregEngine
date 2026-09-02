@@ -1,24 +1,25 @@
 # Playground assets
 
-`scenes/`, `materials/`, `chunks/`, and `prefabs/` here are small,
-hand-authored JSON — they're tracked in git and double as living examples of
-the scene-authoring format (see `docs/scene-authoring.md`).
+This tree is **empty on purpose**. The engine repo ships no scene content —
+no example scenes, materials, prefabs, chunks, terrain, or art. Generic,
+reusable behaviors are builtin scripts in `@hitreg/scripting`; everything
+with a game or a demo behind it lives in a **project** under
+`../projects/<name>/{assets/,scripts/}` (gitignored, self-contained — see
+`../projects/README.md`).
 
-`models/`, `textures/`, and `audio/` are **not tracked** (see `.gitignore`).
-Those are third-party CC0 art packs and would otherwise bloat this repo with
-binary blobs. To get a working preview install with the demo scenes'
-actual art:
+`pnpm -F playground dev` still runs with nothing here: the app boots a
+code-built starter scene (ground + sun + ambient) and writes
+`scenes/<name>.scene.json` into this tree on first save.
+
+The dev server's asset bridge reads the same kind-folders from either
+location, so files dropped here resolve exactly like a project's:
 
 ```
-git clone https://github.com/Dirly/HitregDemoScene.git /tmp/hitreg-demo-assets
-cp -r /tmp/hitreg-demo-assets/assets/* apps/playground/assets/
+scenes/*.scene.json          materials/<ns>/*.json      prefabs/<ns>/*.json
+chunks/<world>/<cx>_<cz>.chunk.json    terrain/<ns>/*.json
+models/*.glb|gltf   textures/   audio/       (binary — always gitignored)
 ```
 
-Without that step, `pnpm -F playground dev` still runs — scenes referencing
-missing model/texture/audio ids just render without them (console warning,
-no crash).
-
-A **complete game** (its own scripts, economy, dozens of scenes/prefabs) is
-different from the small showcases above — it doesn't belong in this
-tracked tree at all. See `../projects/README.md` (`apps/playground/projects/`,
-gitignored) for that convention.
+Treat anything you put directly here as a throwaway local experiment; if it
+gets a name, move it into a project. Format reference:
+`docs/scene-authoring.md`.

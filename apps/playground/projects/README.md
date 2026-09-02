@@ -1,14 +1,15 @@
 # Playground projects
 
 A **project** is a complete, self-contained game built on this engine — its
-own scripts, scenes, prefabs, materials, chunks, terrain. Unlike the small
-demo scenes in `../assets/` (which double as scene-authoring showcases and
-stay committed), a full game is orthogonal to the engine itself: keeping it
-in the engine repo would bloat AI context and risk a future agent mistaking
-its game-specific patterns (a job economy, a specific enemy-hit contract,
-whatever) for canonical engine usage. So `apps/playground/projects/` is
-gitignored wholesale (except this file) — every project here is local-only,
-meant to be saved/shared as its own separate git repo.
+own scripts, scenes, prefabs, materials, chunks, terrain. The engine repo
+ships no scene content of its own (`../assets/` holds only a README), and
+a game is orthogonal to the engine itself: keeping it in the engine repo
+would bloat AI context and risk a future agent mistaking its game-specific
+patterns (a job economy, a specific enemy-hit contract, whatever) for
+canonical engine usage. So `apps/playground/projects/` is gitignored
+wholesale (except this file) — every project here is local-only, meant to
+be saved/shared as its own separate git repo. This is where **everything**
+you build goes, demo scenes included.
 
 ## Layout
 
