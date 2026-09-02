@@ -32,7 +32,7 @@ export class SceneStore {
 
   constructor(
     initial: SceneDoc,
-    private readonly registry: ComponentRegistry,
+    readonly registry: ComponentRegistry,
   ) {
     this.current = initial;
   }

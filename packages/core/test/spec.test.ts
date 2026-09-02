@@ -5,6 +5,7 @@ import {
   ComponentRegistry,
   EventRegistry,
   NetStateStore,
+  ToolRegistry,
   buildEngineSpec,
   registerChunkComponents,
   registerCoreAssetTypes,
@@ -69,6 +70,7 @@ describe("buildEngineSpec", () => {
     expect(bare.events).toEqual({});
     expect(bare.netState).toEqual({});
     expect(bare.scripts).toEqual({});
+    expect(bare.tools).toEqual({});
     expect(bare.prefabs).toEqual({});
 
     const netState = new NetStateStore();
@@ -95,5 +97,26 @@ describe("buildEngineSpec", () => {
     expect(spec.prefabs["lamp"]!.parts).toEqual([
       { id: "r", name: "Lamp", parent: null, depth: 0, tags: [], components: [] },
     ]);
+  });
+
+  it("includes registered editor tools and their invocation schemas", () => {
+    const { registry } = engineRegistries();
+    const tools = new ToolRegistry();
+    tools.register({
+      version: 1,
+      id: "hitreg.test-tool",
+      name: "Test tool",
+      description: "Exercises the generated tool surface.",
+      category: "Tests",
+      surfaces: ["tools"],
+      permissions: [],
+      inputs: {
+        count: { kind: "number", label: "Count", integer: true, min: 1, default: 2 },
+      },
+    });
+
+    const spec = buildEngineSpec({ registry, tools });
+    expect(spec.tools["hitreg.test-tool"]?.name).toBe("Test tool");
+    expect(spec.tools["hitreg.test-tool"]?.inputSchema).toMatchObject({ type: "object" });
   });
 });

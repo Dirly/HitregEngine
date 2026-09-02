@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { registerThemeAssetType } from "./theme.js";
 import {
   describePrefab,
   prefabDocSchema,
@@ -9,6 +10,7 @@ import {
 } from "./prefab.js";
 import { materialSchema } from "./components/core.js";
 import { spritesheetSchema } from "./spritesheet.js";
+import { worldRecipeSchema } from "./voxel/recipe.js";
 
 export const terrainHeightfieldSchema = z.object({
   version: z.literal(1).default(1),
@@ -29,6 +31,8 @@ export function registerCoreAssetTypes(assets: AssetLibrary): void {
   assets.defineDataType("material", materialSchema);
   assets.defineDataType("terrain-heightfield", terrainHeightfieldSchema);
   assets.defineDataType("spritesheet", spritesheetSchema);
+  assets.defineDataType("world-recipe", worldRecipeSchema);
+  registerThemeAssetType(assets);
 }
 
 /**

@@ -55,7 +55,9 @@ describe("ComponentRegistry", () => {
     const result = registry.validate("postfx", {});
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.data).toEqual({
+      // toMatchObject, not toEqual: the post stack grew siblings (tonemap, ao,
+      // grade, ...) and this test is about bloom's own defaults staying put.
+      expect(result.data).toMatchObject({
         bloom: { enabled: false, strength: 0.5, radius: 0.4, threshold: 0.85 },
       });
     }
@@ -146,6 +148,7 @@ describe("ComponentRegistry", () => {
       "billboard",
       "camera",
       "collider",
+      "decal",
       "grass",
       "joint",
       "light",
@@ -153,6 +156,7 @@ describe("ComponentRegistry", () => {
       "netObject",
       "particles",
       "pathScatter",
+      "placement",
       "postfx",
       "prefab",
       "rigidbody",
@@ -160,6 +164,7 @@ describe("ComponentRegistry", () => {
       "sky",
       "transform",
       "visibility",
+      "voxelWorld",
     ]);
     const transform = schemas["transform"] as { properties: Record<string, unknown> };
     expect(transform.properties).toHaveProperty("position");

@@ -43,6 +43,21 @@ export {
   type EngineSpec,
   type EngineSpecInputs,
 } from "./spec.js";
+export {
+  ToolRegistry,
+  toolDefinitionSchema,
+  toolManifestSchema,
+  toolInputSchema,
+  toolFileValueSchema,
+  toolResultSchema,
+  type ToolDefinition,
+  type ToolDescription,
+  type ToolManifest,
+  type ToolInput,
+  type ToolFileValue,
+  type ToolResult,
+  type ToolValidationResult,
+} from "./tools.js";
 export { FixedTimestepLoop, type LoopOptions } from "./loop.js";
 export {
   expandScene,
@@ -198,4 +213,77 @@ export {
   type ScopeStat,
   type SpikeFrame,
 } from "./profiler.js";
-export { digestProfile, type ProfileDigest, type PerfVerdict } from "./profile-digest.js";
+export {
+  digestProfile,
+  type ProfileDigest,
+  type PerfVerdict,
+  type DigestContext,
+} from "./profile-digest.js";
+export {
+  placementSchema,
+  registerPlacementComponent,
+  type PlacementData,
+} from "./components/placement.js";
+export {
+  collectSceneTriangles,
+  raycastTriangles,
+  snapPlacementOps,
+  lintPlacement,
+  type TriangleSoup,
+  type RayHit,
+  type SnapOptions,
+  type SnapResult,
+  type LintOptions,
+  type PlacementFinding,
+  type PlacementFindingKind,
+} from "./placement.js";
+export {
+  themeSchema,
+  themeSlotSchema,
+  themeLightSchema,
+  THEME_SLOTS,
+  REQUIRED_THEME_SLOTS,
+  DEFAULT_SLOT_UV_SCALE,
+  registerThemeAssetType,
+  materialsForTheme,
+  materialIdFor,
+  uvScaleFor,
+  themeFromTextureFolder,
+  type Theme,
+  type ThemeInput,
+  type ThemeSlot,
+  type ThemeSlotInput,
+  type ThemeSlotName,
+  type ThemeMaterialDoc,
+  type ThemeFolderReport,
+} from "./theme.js";
+export {
+  scatterOps,
+  polygonArea,
+  pointInPolygon,
+  polygonEdgeDistance,
+  type ScatterEntry,
+  type ScatterRegion,
+  type ScatterOptions,
+  type ScatterPlacement,
+  type ScatterDrop,
+  type ScatterReport,
+  type ScatterResult,
+} from "./scatter.js";
+export {
+  waterFillOps,
+  lintWater,
+  type WaterRegion,
+  type WaterFillOptions,
+  type WaterFillReport,
+  type WaterFillResult,
+  type WaterFinding,
+  type WaterLintOptions,
+} from "./water.js";
+export { decalSchema, registerDecalComponent, type DecalData } from "./components/decal.js";
+export {
+  voxelWorldSchema,
+  registerVoxelComponents,
+  type VoxelWorldData,
+} from "./components/voxel.js";
+export * from "./voxel/index.js";

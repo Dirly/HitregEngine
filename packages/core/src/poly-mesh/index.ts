@@ -156,3 +156,17 @@ export {
   hasValidFaces,
   type FromGeometryOptions,
 } from "./from-geometry.js";
+export {
+  weatherFaces,
+  weatheredBoxSource,
+  type WeatherOptions,
+  type WeatheredBoxOptions,
+  type BoxSide,
+} from "./weather.js";
+export {
+  paintGrime,
+  type GrimeRule,
+  type RadialGrimeRule,
+  type HeightBandGrimeRule,
+  type FacingGrimeRule,
+} from "./tint.js";

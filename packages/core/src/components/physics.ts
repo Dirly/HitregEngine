@@ -46,6 +46,15 @@ export const colliderSchema = z.object({
     .boolean()
     .default(false)
     .describe("Detect overlap without physical response — fires trigger.enter/exit events instead of colliding."),
+  layers: z
+    .object({
+      membership: z.number().int().min(0).max(0xffff).optional(),
+      collidesWith: z.number().int().min(0).max(0xffff).optional(),
+    })
+    .optional()
+    .describe(
+      "Collision layers as 16-bit masks. `membership` = what this collider IS (what a raycast/shapecast selects on with its `layers` option); `collidesWith` = what it is willing to interact with (defaults to ALL, so setting membership alone never changes existing collision behaviour — Rapier's test is symmetric). Bits, from @hitreg/physics `Layers`: WORLD 1, TERRAIN 2, ACTOR 4, PLAYER 8, PROP 16, TRIGGER 32, PROJECTILE 64, CAMERA_BLOCKER 128, DEBRIS 256, INTERACTABLE 512. OMIT IT and membership is inferred at collider creation: isTrigger -> TRIGGER, shape 'heightmap' -> TERRAIN, a fixed body -> WORLD, anything else -> PROP. Author it when a query has to tell a class of body apart from that default — a character body is PROP unless you say ACTOR|PLAYER, which is what makes it visible to an AI's vision query and invisible to a sword sweep's occlusion test.",
+    ),
 });
 
 export const jointSchema = z.object({

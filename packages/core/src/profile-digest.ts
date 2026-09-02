@@ -37,7 +37,13 @@ export interface ProfileDigest {
 
 const round = (v: number, digits = 1): string => v.toFixed(digits);
 
-export function digestProfile(summary: ProfileSummary): ProfileDigest {
+/** Ambient facts the summary can't carry but that change how to read it. */
+export interface DigestContext {
+  /** Renderer backend actually in use ("webgpu" | "webgl"). */
+  backend?: string;
+}
+
+export function digestProfile(summary: ProfileSummary, context: DigestContext = {}): ProfileDigest {
   if (!summary.enabled || summary.frames === 0) {
     const headline = "No frames recorded — the profiler was disabled or has just been cleared.";
     return { headline, verdict: "smooth", bottleneck: headline, lines: [headline], text: headline };
@@ -59,6 +65,24 @@ export function digestProfile(summary: ProfileSummary): ProfileDigest {
     `(${summary.frames} frames over ${summary.windowSeconds}s)`;
 
   const lines: string[] = [headline];
+
+  // Backend first, above every other finding, when it is the fallback.
+  //
+  // WebGPU is the engine's real target and WebGL is an automatic fallback, so
+  // a capture taken on WebGL is not measuring the engine — it is measuring the
+  // fallback path, and every number below it describes that instead. Measured
+  // on this project: the same scene and camera runs 64fps / 15ms on WebGPU and
+  // 20fps / 35ms on WebGL. Anyone reading a WebGL capture needs to know that
+  // before they start optimising something that is already fast.
+  if (context.backend === "webgl") {
+    lines.push(
+      `BACKEND IS THE WEBGL FALLBACK, not WebGPU. Every number here describes the ` +
+        `fallback path — the same scene can run several times faster on WebGPU, so ` +
+        `find out why the browser fell back before optimising anything below. ` +
+        `(GPU timestamp queries usually aren't available here either, which is why ` +
+        `the JS/GPU split may be missing.)`,
+    );
+  }
 
   // -- where the time goes ---------------------------------------------------
   // Compared as averages over the same window, so the three are commensurable.

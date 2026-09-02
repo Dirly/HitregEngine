@@ -151,3 +151,17 @@ describe("digestProfile", () => {
     expect(d.text).toContain("No frames recorded");
   });
 });
+
+describe("backend fallback warning", () => {
+  it("leads with the WebGL-fallback warning, above the bottleneck", () => {
+    const d = digestProfile(summary({ fps: 20 }), { backend: "webgl" });
+    expect(d.lines[1]).toContain("WEBGL FALLBACK");
+    expect(d.text).toContain("find out why the browser fell back");
+  });
+
+  it("stays quiet on WebGPU, and when the backend is unknown", () => {
+    for (const context of [{ backend: "webgpu" }, {}]) {
+      expect(digestProfile(summary(), context).text).not.toContain("WEBGL FALLBACK");
+    }
+  });
+});

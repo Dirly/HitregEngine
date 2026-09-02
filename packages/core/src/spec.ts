@@ -2,6 +2,7 @@ import type { ComponentRegistry } from "./components/registry.js";
 import type { AssetLibrary } from "./assets.js";
 import type { EventRegistry } from "./events.js";
 import type { NetStateStore } from "./net-state.js";
+import type { ToolDescription, ToolRegistry } from "./tools.js";
 import { propSpecSchema, type PrefabSpec } from "./prefab.js";
 import { OP_SPECS } from "./ops.js";
 import { z } from "zod";
@@ -33,6 +34,8 @@ export interface EngineSpecInputs {
    * rather than imported so core stays free of the scripting layer.
    */
   scripts?: Record<string, unknown>;
+  /** Editor/asset tools contributed by the engine and installed plugins. */
+  tools?: ToolRegistry;
   /** Spec-shape version, so a consumer can detect format changes. */
   version?: string;
 }
@@ -51,6 +54,8 @@ export interface EngineSpec {
   netState: Record<string, unknown>;
   /** behavior name -> its param specs (attachable via the `script` component). */
   scripts: Record<string, unknown>;
+  /** Tool id -> validated manifest and exact invocation JSON Schema. */
+  tools: Record<string, ToolDescription>;
   /**
    * prefab asset id -> its public surface: the entities it is made of and the
    * knobs it exposes (kind, range, unit, group). Reading this is how an agent
@@ -79,6 +84,7 @@ export function buildEngineSpec(inputs: EngineSpecInputs): EngineSpec {
     events: inputs.events?.jsonSchemas() ?? {},
     netState: inputs.netState?.jsonSchemas() ?? {},
     scripts: inputs.scripts ?? {},
+    tools: inputs.tools?.describe() ?? {},
     prefabs: inputs.assets?.prefabSpecs() ?? {},
     prefabProp: z.toJSONSchema(propSpecSchema, { io: "input" }),
   };

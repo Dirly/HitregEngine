@@ -358,16 +358,41 @@ function setPath(
   if (segments.length < 2 || !localId || !(localId in entities)) {
     throw new PrefabError(`${context}: path "${path}" must start with a local entity id`);
   }
+  // Arrays are traversable, not just objects. Without this a knob cannot bind
+  // to ONE component of a vector — a "height" prop wanting
+  // `mesh/source/size/1`, or a low-poly "facets" prop wanting
+  // `mesh/source/segments/0` — and the author's only options are to expose the
+  // whole tuple as a raw array control or to give up the knob. A numeric
+  // segment into an array is therefore valid; anything else into an array is
+  // still an error, so a typo names itself instead of silently writing a
+  // string key onto an array object.
   let target: Record<string, unknown> = entities[localId] as unknown as Record<string, unknown>;
   for (let s = 1; s < segments.length - 1; s++) {
     const key = segments[s]!;
     const next = target[key];
-    if (typeof next !== "object" || next === null || Array.isArray(next)) {
+    if (typeof next !== "object" || next === null) {
       throw new PrefabError(`${context}: path "${path}" has no object at "${key}"`);
+    }
+    if (Array.isArray(next)) {
+      const nextKey = segments[s + 1]!;
+      if (!/^\d+$/.test(nextKey)) {
+        throw new PrefabError(
+          `${context}: path "${path}" indexes array "${key}" with "${nextKey}" — array steps need a numeric index`,
+        );
+      }
     }
     target = next as Record<string, unknown>;
   }
-  target[segments[segments.length - 1]!] = structuredClone(value);
+  const leaf = segments[segments.length - 1]!;
+  if (Array.isArray(target)) {
+    const index = Number(leaf);
+    if (!/^\d+$/.test(leaf) || index >= (target as unknown[]).length) {
+      throw new PrefabError(
+        `${context}: path "${path}" writes "${leaf}" into an array of length ${(target as unknown[]).length}`,
+      );
+    }
+  }
+  target[leaf] = structuredClone(value);
 }
 
 /**

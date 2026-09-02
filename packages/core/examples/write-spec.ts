@@ -12,12 +12,13 @@
  * here by design — they belong to whatever app composes the engine, and the
  * live `/__hitreg/spec` endpoint serves that fuller, running-app surface.
  */
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
   AssetLibrary,
   ComponentRegistry,
   EventRegistry,
+  ToolRegistry,
   buildEngineSpec,
   registerChunkComponents,
   registerCoreAssetTypes,
@@ -35,12 +36,19 @@ registerCoreEvents(events);
 const assets = new AssetLibrary();
 registerCoreAssetTypes(assets);
 
-const spec = buildEngineSpec({ registry, events, assets });
+const tools = new ToolRegistry();
+const atlasManifest = fileURLToPath(new URL("../../../tools/atlas/tool.json", import.meta.url));
+tools.register(JSON.parse(readFileSync(atlasManifest, "utf8")));
+const wfcManifest = fileURLToPath(new URL("../../../tools/wfc-3d/tool.json", import.meta.url));
+tools.register(JSON.parse(readFileSync(wfcManifest, "utf8")));
+
+const spec = buildEngineSpec({ registry, events, assets, tools });
 const target = fileURLToPath(new URL("../../../spec.json", import.meta.url));
 writeFileSync(target, JSON.stringify(spec, null, 2) + "\n", "utf8");
 
 console.log(
   `wrote ${target}: ${Object.keys(spec.components).length} components, ` +
     `${Object.keys(spec.dataAssets).length} data types, ` +
-    `${Object.keys(spec.events).length} events, ${spec.ops.length} ops`,
+    `${Object.keys(spec.events).length} events, ${spec.ops.length} ops, ` +
+    `${Object.keys(spec.tools).length} tools`,
 );
