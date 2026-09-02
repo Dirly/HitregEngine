@@ -1,4 +1,11 @@
-import type { AssetLibrary, SceneStore } from "@hitreg/core";
+import { useRef, useState } from "react";
+import type {
+  AssetLibrary,
+  ComponentRegistry,
+  SceneStore,
+  ToolDefinition,
+  ToolResult,
+} from "@hitreg/core";
 import type {
   EditorSettings,
   ElementMode,
@@ -14,10 +21,16 @@ import type { PathCrossSection } from "../path-tool.js";
 import { NumberField } from "./fields.js";
 import { Kbd, Tooltip, buttonStyle, useObservable, useStoreDoc } from "./common.js";
 import { Icon, type IconName } from "./icons.js";
+import { ToolDialog } from "./tool-dialog.js";
 
 const EMPTY_SCENES: string[] = [];
 const emptyScenesObservable: Observable<string[]> = {
   get: () => EMPTY_SCENES,
+  set: () => undefined,
+  subscribe: () => () => undefined,
+};
+const emptyToolsObservable: Observable<ToolDefinition[]> = {
+  get: () => [],
   set: () => undefined,
   subscribe: () => () => undefined,
 };
@@ -198,6 +211,8 @@ const GLOBAL_SHORTCUTS: Array<{ keys: string[]; does: string }> = [
   { keys: ["~"], does: "play · pause (hides the editor while playing)" },
   { keys: ["LMB", "W A S D"], does: "hold to fly the camera · Q/E down/up · Shift boosts" },
   { keys: ["F"], does: "frame the selection" },
+  { keys: ["V"], does: "gizmos on/off (collider · light · skeleton overlays)" },
+  { keys: ["H"], does: "stats HUD on/off" },
   { keys: ["Del"], does: "delete selection" },
   { keys: ["Ctrl", "D"], does: "duplicate selection" },
   { keys: ["Ctrl"], does: "held while dragging: inverts snap" },
@@ -210,6 +225,8 @@ const GLOBAL_SHORTCUTS: Array<{ keys: string[]; does: string }> = [
 export function Toolbar(props: {
   store: SceneStore;
   assets: AssetLibrary;
+  registry: ComponentRegistry;
+  thumbnails: Observable<Record<string, string>>;
   assetsVersion: Observable<number>;
   playMode: Observable<PlayMode>;
   gizmoMode: Observable<GizmoMode>;
@@ -235,6 +252,8 @@ export function Toolbar(props: {
   onEnvironment?: () => void;
   /** Open the frame profiler window (host-provided; see profiler-window.ts). */
   onProfiler?: () => void;
+  tools?: Observable<ToolDefinition[]>;
+  runTool?: (id: string, inputs: Record<string, unknown>) => Promise<ToolResult>;
   /** While isolation-editing a prefab the scene switcher is hidden (switching mid-edit is incoherent). */
   editingPrefab?: string | null;
   /** While isolation-editing a chunk cell the scene switcher is hidden too. */
@@ -262,6 +281,13 @@ export function Toolbar(props: {
   const pathWidth = useObservable(props.pathWidth);
   const pathThickness = useObservable(props.pathThickness);
   const pathRadius = useObservable(props.pathRadius);
+  const registeredTools = useObservable(props.tools ?? emptyToolsObservable).filter((tool) =>
+    tool.surfaces.includes("tools"),
+  );
+  const [toolMenuOpen, setToolMenuOpen] = useState(false);
+  const [toolMenuPosition, setToolMenuPosition] = useState({ left: 0, top: 0 });
+  const toolMenuAnchor = useRef<HTMLSpanElement>(null);
+  const [activeTool, setActiveTool] = useState<ToolDefinition | null>(null);
   const set = (patch: Partial<EditorSettings>) => props.settings.set({ ...settings, ...patch });
 
   const gizmos: Array<{ key: GizmoMode; icon: IconName; tip: string; keys: string[]; shortcuts?: Array<{ keys: string[]; does: string }> }> = [
@@ -278,6 +304,7 @@ export function Toolbar(props: {
   ];
 
   return (
+    <>
     <div style={{ padding: "6px 10px", display: "flex", alignItems: "center", height: "100%", boxSizing: "border-box" }}>
       <div style={{ display: "flex", alignItems: "center", flexWrap: "nowrap", overflowX: "auto", flex: 1, minHeight: 26 }}>
         {/* ---- scene ---- */}
@@ -423,6 +450,72 @@ export function Toolbar(props: {
           />
         </Segment>
 
+        {registeredTools.length > 0 && props.runTool && (
+          <span ref={toolMenuAnchor} style={{ position: "relative", display: "inline-flex", marginLeft: 6 }}>
+            <Segment label="registered tools">
+              <ToolButton
+                icon="plus"
+                label="more"
+                tip="registered tools"
+                detail="Tools contributed by the engine and installed plugins."
+                onClick={() => {
+                  const next = !toolMenuOpen;
+                  if (next) {
+                    const rect = toolMenuAnchor.current?.getBoundingClientRect();
+                    if (rect) {
+                      setToolMenuPosition({
+                        left: Math.max(4, Math.min(rect.left, window.innerWidth - 244)),
+                        top: rect.bottom + 4,
+                      });
+                    }
+                  }
+                  setToolMenuOpen(next);
+                }}
+              />
+            </Segment>
+            {toolMenuOpen && (
+              <div
+                role="menu"
+                style={{
+                  position: "fixed",
+                  left: toolMenuPosition.left,
+                  top: toolMenuPosition.top,
+                  zIndex: 1200,
+                  minWidth: 240,
+                  padding: 4,
+                  background: "#161b22",
+                  border: "1px solid #30363d",
+                }}
+              >
+                {registeredTools.map((tool) => (
+                  <button
+                    key={tool.id}
+                    role="menuitem"
+                    title={tool.description}
+                    style={{
+                      width: "100%",
+                      padding: "5px 7px",
+                      background: "transparent",
+                      border: 0,
+                      color: "#c9d1d9",
+                      textAlign: "left",
+                      cursor: "pointer",
+                      font: "11px ui-monospace, monospace",
+                    }}
+                    onClick={() => {
+                      setActiveTool(tool);
+                      setToolMenuOpen(false);
+                    }}
+                  >
+                    <span style={{ display: "block", color: EMPHASIS }}>{tool.name}</span>
+                    <span style={{ display: "block", color: MUTED, fontSize: 10, marginTop: 2 }}>{tool.category}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </span>
+        )}
+
         {terrainOn && (
           <OptionsWell>
             <select
@@ -524,7 +617,7 @@ export function Toolbar(props: {
                 <span style={{ width: 42 }}>
                   <NumberField value={pathWidth} onCommit={(v) => v > 0 && props.pathWidth.set(v)} />
                 </span>
-                <span style={labelStyle} title="0 = flat sheet; >0 extrudes a slab down from the drawn curve">
+                <span style={labelStyle} title="0 = flat sheet; >0 raises a slab this thick on top of the drawn curve">
                   thick
                 </span>
                 <span style={{ width: 42 }}>
@@ -559,10 +652,26 @@ export function Toolbar(props: {
           />
           <ToolButton icon="grid" tip="ground grid" active={settings.grid} onClick={() => set({ grid: !settings.grid })} />
           <ToolButton
+            icon="settle"
+            tip="placement assist"
+            detail="Entities with a placement component settle onto the surface they declare (ground / ceiling / wall) after a move, duplicate, or drop — with their authored sink and jitter. Entities without the component never move on their own."
+            active={settings.placementAssist}
+            onClick={() => set({ placementAssist: !settings.placementAssist })}
+          />
+          <ToolButton
+            icon="gizmos"
+            tip="gizmos"
+            detail="Master switch for every viewport overlay (physics, skeleton, light gizmos). Off hides them all without losing which ones you had on."
+            keys={["V"]}
+            active={settings.showGizmos}
+            onClick={() => set({ showGizmos: !settings.showGizmos })}
+          />
+          <ToolButton
             icon="physics"
             tip="physics gizmos"
-            detail="Collider wireframes + joint anchors/axes."
+            detail="Collider wireframes + joint anchors/axes. Green = static, orange = dynamic, blue = kinematic, yellow = trigger."
             active={settings.showPhysics}
+            disabled={!settings.showGizmos}
             onClick={() => set({ showPhysics: !settings.showPhysics })}
           />
           <ToolButton
@@ -570,6 +679,7 @@ export function Toolbar(props: {
             tip="skeletons"
             detail="Bone lines + bone-name labels on skinned models."
             active={settings.showSkeletons}
+            disabled={!settings.showGizmos}
             onClick={() => set({ showSkeletons: !settings.showSkeletons })}
           />
           <ToolButton
@@ -577,6 +687,7 @@ export function Toolbar(props: {
             tip="light gizmos"
             detail="Direction arrows on directional/spot lights."
             active={settings.showLights}
+            disabled={!settings.showGizmos}
             onClick={() => set({ showLights: !settings.showLights })}
           />
           <ToolButton
@@ -637,5 +748,17 @@ export function Toolbar(props: {
         </Segment>
       </div>
     </div>
+    {activeTool && props.runTool && (
+      <ToolDialog
+        key={activeTool.id}
+        tool={activeTool}
+        assets={props.assets}
+        registry={props.registry}
+        thumbnails={props.thumbnails.get()}
+        onClose={() => setActiveTool(null)}
+        onRun={props.runTool}
+      />
+    )}
+    </>
   );
 }

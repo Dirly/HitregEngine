@@ -16,7 +16,7 @@ export interface PathToolOptions {
   active: Observable<boolean>;
   crossSection: Observable<PathCrossSection>;
   width: Observable<number>;
-  /** ribbon only: 0 = flat sheet, >0 = slab extruded down from the curve. */
+  /** ribbon only: 0 = flat sheet, >0 = slab raised this far above the drawn curve. */
   thickness: Observable<number>;
   radius: Observable<number>;
   getScene(): THREE.Scene;

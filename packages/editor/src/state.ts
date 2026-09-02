@@ -300,6 +300,13 @@ export interface EditorSettings {
   scaleSnap: number;
   grid: boolean;
   gridSize: number;
+  /**
+   * Master switch for every viewport overlay (physics/skeleton/light gizmos)
+   * — Unity's "Gizmos" button. Off hides them all at once without touching
+   * the per-category flags, so turning it back on restores the same set.
+   * V toggles it. Visibility-only: never triggers a scene rebuild.
+   */
+  showGizmos: boolean;
   /** X-ray collider wireframes + joint anchors/axes in the viewport. */
   showPhysics: boolean;
   /** Skeleton lines + bone-name labels on skinned models in the viewport. */
@@ -308,6 +315,13 @@ export interface EditorSettings {
   showLights: boolean;
   /** The perf/stats HUD in the viewport's top-right corner (H toggles it). */
   showStats: boolean;
+  /**
+   * Placement assist: after a translate/duplicate/drop, entities carrying a
+   * `placement` component settle onto the surface they declare (ground/
+   * ceiling/wall — see @hitreg/core placement). Only opted-in entities move;
+   * everything else stays exactly where the gizmo put it.
+   */
+  placementAssist: boolean;
 }
 
 /** Selected asset in the Assets panel (mutually exclusive with entity selection). */
@@ -325,6 +339,22 @@ export const createAssetSelection = (): AssetSelection =>
  */
 export type EditingPrefab = Observable<string | null>;
 export const createEditingPrefab = (): EditingPrefab => observable<string | null>(null);
+
+/**
+ * Id prefix for entities the EDITOR puts in the working doc that are not
+ * content — right now the studio lighting rig that prefab isolation needs to
+ * be lit at all. A prefab carries no sky and usually no lights, so opening
+ * one on its own used to show a black silhouette in a black void.
+ *
+ * They are real doc entities so the ordinary sky/light/IBL pipeline lights
+ * them for free, but they belong to the editing session, not to the asset:
+ * the host strips them before writing anything back, and the hierarchy hides
+ * them so nobody mistakes scaffolding for part of the prefab.
+ */
+export const EDIT_RIG_PREFIX = "__editrig:";
+
+/** Whether an entity id is the editor's own scaffolding (see EDIT_RIG_PREFIX). */
+export const isEditRigId = (id: string): boolean => id.startsWith(EDIT_RIG_PREFIX);
 
 /** One chunk-grid cell, identified by its streamed world + cell coordinates. */
 export interface EditingChunkCell {
@@ -399,11 +429,55 @@ export const defaultEditorSettings: EditorSettings = {
   scaleSnap: 0.1,
   grid: true,
   gridSize: 1,
-  showPhysics: true,
+  showGizmos: true,
+  // Debug overlays default OFF because they cost one draw call PER COLLIDER and
+  // PER LIGHT, and nothing about that scales. Measured on a 2000-entity dungeon
+  // (1767 colliders, 98 lights): the scene itself batches down to 39 draw calls
+  // and renders in 7ms, while the same scene with these two on submits 986 draw
+  // calls — over a thousand of them collider wireframes — for 21ms. The overlay
+  // was costing 3x the level it was drawn over. Both stay one click away in the
+  // toolbar; this only changes what a session starts with.
+  showPhysics: false,
   showSkeletons: false,
-  showLights: true,
+  showLights: false,
   showStats: true,
+  placementAssist: true,
 };
+
+const SETTINGS_KEY = "hitreg-editor-settings";
+
+/**
+ * Editor settings observable, persisted to localStorage so a view choice
+ * (gizmos off, grid off, snap step) survives a reload instead of snapping
+ * back to the defaults every session. Unknown/stale keys in the stored blob
+ * are dropped; missing ones take the current default.
+ */
+export function createEditorSettings(): Observable<EditorSettings> {
+  let initial = defaultEditorSettings;
+  try {
+    const saved = localStorage.getItem(SETTINGS_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved) as Record<string, unknown>;
+      const merged: Record<string, unknown> = { ...defaultEditorSettings };
+      for (const key of Object.keys(defaultEditorSettings) as Array<keyof EditorSettings>) {
+        const value = parsed[key];
+        if (typeof value === typeof defaultEditorSettings[key]) merged[key] = value;
+      }
+      initial = merged as unknown as EditorSettings;
+    }
+  } catch {
+    /* fresh defaults */
+  }
+  const settings = observable(initial);
+  settings.subscribe(() => {
+    try {
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings.get()));
+    } catch {
+      /* non-fatal */
+    }
+  });
+  return settings;
+}
 
 /**
  * Entity id -> ordered bone names of its loaded skinned model. Populated by

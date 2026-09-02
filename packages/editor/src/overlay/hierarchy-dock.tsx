@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { childrenOf, newId, type SceneDoc, type SceneStore } from "@hitreg/core";
 import {
+  isEditRigId,
   observable,
   rangeSelectTo,
   selectSingle,
@@ -14,10 +15,16 @@ import {
 import { applyMaterialToMany } from "../selection-ops.js";
 import { apply, buttonStyle, DockHeader, SearchInput, useObservable, useStoreDoc } from "./common.js";
 
-/** Flat, depth-first visible order (roots then children) — used for shift-range selection. */
+/**
+ * Flat, depth-first visible order (roots then children) — used for shift-range
+ * selection. The editor's own scaffolding (prefab-isolation studio lighting)
+ * is skipped: it lives in the working doc so the render pipeline lights it,
+ * but it is not part of what the user is editing.
+ */
 function flattenIds(doc: SceneDoc, parent: string | null = null): string[] {
   const out: string[] = [];
   for (const id of childrenOf(doc, parent)) {
+    if (isEditRigId(id)) continue;
     out.push(id, ...flattenIds(doc, id));
   }
   return out;
@@ -76,6 +83,7 @@ export function HierarchyDock(props: {
   const q = query.toLowerCase();
   const matches = query
     ? Object.entries(doc.entities)
+        .filter(([id]) => !isEditRigId(id))
         .filter(([, e]) =>
           q.startsWith("#")
             ? e.tags.some((t) => t.toLowerCase().includes(q.slice(1)))
@@ -212,7 +220,7 @@ interface TreeProps {
 }
 
 function Tree(props: TreeProps) {
-  const ids = childrenOf(props.doc, props.parent);
+  const ids = childrenOf(props.doc, props.parent).filter((id) => !isEditRigId(id));
   return (
     <>
       {ids.map((id) => (

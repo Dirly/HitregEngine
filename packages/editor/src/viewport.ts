@@ -1,6 +1,6 @@
 import * as THREE from "three/webgpu";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
-import { newId, type AssetLibrary, type Op, type SceneStore } from "@hitreg/core";
+import { newId, snapPlacementOps, type AssetLibrary, type Op, type SceneStore } from "@hitreg/core";
 import type {
   ContextMenu,
   EditorSettings,
@@ -343,6 +343,7 @@ export class ViewportTools {
     if (newRoots.length === 0) return;
     this.opts.selection.set(newRoots[newRoots.length - 1]!);
     this.opts.multiSelection?.set(newRoots);
+    this.assistSnap(newRoots);
   }
 
   private teardownGroupProxy(): void {
@@ -441,6 +442,7 @@ export class ViewportTools {
       });
     }
     if (ops.length > 0) this.opts.store.apply(ops);
+    if (this.controls.mode === "translate") this.assistSnap(this.groupIds);
     this.syncAttachment(); // rebuild the proxy fresh at the new pivot
   }
 
@@ -500,6 +502,18 @@ export class ViewportTools {
         }
       }
       if (overlay) continue; // mesh-edit handles are not scene geometry
+      // Static draw-call batching merges many static meshes into one, so a hit
+      // on a batch has no per-entity object to walk up from — without this the
+      // whole batched half of a scene would be unclickable. The merged mesh
+      // carries a face->entity table instead (see render/static-batch.ts,
+      // `BATCH_OWNERS`); read it through userData the same way this loop
+      // already reads `entityId`/`physicsDebug`, so the editor keeps no
+      // dependency on the render package.
+      const batched = this.ownerOfBatchedFace(hit);
+      if (batched) {
+        if (this.isLocked(batched)) continue;
+        return this.hitDetail(hit, batched);
+      }
       while (node) {
         const entityId = node.userData["entityId"] as string | undefined;
         if (entityId) {
@@ -512,6 +526,29 @@ export class ViewportTools {
       unowned ??= this.hitDetail(hit, null);
     }
     return unowned;
+  }
+
+  /**
+   * Entity that contributed the hit face of a merged static batch, or null when
+   * this is not a batch. `starts` holds each source's first triangle index in
+   * ascending order, so the owner is the last entry at or before `faceIndex`.
+   */
+  private ownerOfBatchedFace(hit: THREE.Intersection): string | null {
+    const owners = hit.object.userData["batchOwners"] as
+      | { starts: Uint32Array; ids: string[] }
+      | undefined;
+    const face = hit.faceIndex;
+    if (!owners || face === undefined || face === null) return null;
+    const { starts, ids } = owners;
+    let lo = 0;
+    let hi = starts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (starts[mid]! <= face) lo = mid;
+      else hi = mid - 1;
+    }
+    const id = ids[lo];
+    return id ? id.split(":")[0]! : null;
   }
 
   private hitDetail(hit: THREE.Intersection, id: string | null): FocusHit {
@@ -581,6 +618,7 @@ export class ViewportTools {
       { op: "add-entity", id, entity: { name, parent: null, tags: [], components } },
     ]);
     this.opts.selection.set(id);
+    this.assistSnap([id]);
   }
 
   private commitTransform(): void {
@@ -599,6 +637,29 @@ export class ViewportTools {
         },
       },
     ]);
+    if (this.controls.mode === "translate") this.assistSnap([id]);
+  }
+
+  /**
+   * Placement assist: after a translate commit / duplicate / asset drop,
+   * settle any moved entity that carries a `placement` component (directly or
+   * via its prefab root) onto the surface it declares — ground, ceiling, or
+   * wall, sunk and jittered per the component (see @hitreg/core placement).
+   * Entities without the component are never touched, so ordinary geometry
+   * moves exactly where the gizmo put it. Applied as its own ops batch: one
+   * Ctrl+Z undoes the settle, a second undoes the move.
+   */
+  private assistSnap(ids: string[]): void {
+    if (!this.opts.settings.get().placementAssist || ids.length === 0) return;
+    try {
+      const { ops } = snapPlacementOps(this.opts.store.doc, this.opts.store.registry, ids, {
+        assets: this.opts.assets,
+        requirePlacement: true,
+      });
+      if (ops.length > 0) this.opts.store.apply(ops);
+    } catch (error) {
+      console.warn("[editor] placement assist failed:", error);
+    }
   }
 
   dispose(): void {

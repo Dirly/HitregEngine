@@ -1,5 +1,11 @@
 import { createRoot } from "react-dom/client";
-import type { AssetLibrary, ComponentRegistry, SceneStore } from "@hitreg/core";
+import type {
+  AssetLibrary,
+  ComponentRegistry,
+  SceneStore,
+  ToolDefinition,
+  ToolResult,
+} from "@hitreg/core";
 import { App } from "./overlay/App.js";
 import type { LoadedChunkCell } from "./overlay/hierarchy-dock.js";
 import type {
@@ -70,6 +76,10 @@ export interface MountOptions {
   onPinDelete?: (id: string) => void;
   onFocusPoint?: (point: [number, number, number]) => void;
   saveAsset?: (file: string, content: string) => void;
+  /** Installed engine/plugin tools. */
+  tools?: Observable<ToolDefinition[]>;
+  /** Shared editor/agent tool invocation surface supplied by the host. */
+  runTool?: (id: string, inputs: Record<string, unknown>) => Promise<ToolResult>;
   /** Open the host's frame profiler window (toolbar button; P does the same). */
   onProfiler?: () => void;
   onFocusEntity?: (entityId: string) => void;
@@ -136,6 +146,8 @@ export function mountEditor(options: MountOptions): { unmount(): void } {
       onPinDelete={options.onPinDelete}
       onFocusPoint={options.onFocusPoint}
       saveAsset={options.saveAsset}
+      tools={options.tools}
+      runTool={options.runTool}
       onProfiler={options.onProfiler}
       onFocusEntity={options.onFocusEntity}
       onUnpackModel={options.onUnpackModel}

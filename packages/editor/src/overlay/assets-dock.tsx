@@ -1,11 +1,25 @@
 import { useState } from "react";
-import { newId, type AssetLibrary, type Op, type SceneStore } from "@hitreg/core";
+import {
+  newId,
+  type AssetLibrary,
+  type ComponentRegistry,
+  type Op,
+  type SceneStore,
+  type ToolDefinition,
+  type ToolResult,
+} from "@hitreg/core";
 import type { AssetSelection, MultiSelection, Observable, Selection } from "../state.js";
 import { applyMaterialToMany } from "../selection-ops.js";
 import { apply, buttonStyle, DockHeader, SearchInput, useObservable } from "./common.js";
+import { ToolDialog } from "./tool-dialog.js";
 
 const ASSET_FOLDERS_KEY = "hitreg-asset-folders";
 const ASSET_FOLDERS_OPEN_KEY = "hitreg-asset-folders-open";
+const EMPTY_TOOLS: Observable<ToolDefinition[]> = {
+  get: () => [],
+  set: () => undefined,
+  subscribe: () => () => undefined,
+};
 
 interface FolderNode {
   name: string;
@@ -103,6 +117,7 @@ function AssetSection(props: { label: string; children: React.ReactNode }) {
 
 export function AssetsDock(props: {
   assets: AssetLibrary;
+  registry: ComponentRegistry;
   store: SceneStore;
   selection: Selection;
   multiSelection: MultiSelection;
@@ -113,6 +128,10 @@ export function AssetsDock(props: {
   onCreateSpritesheet: (folder: string) => void;
   onCreatePrefab: (entityId: string, folder: string) => void;
   onSetSky: (textureId: string) => void;
+  /** Open a prefab definition in viewport isolation (double-click a prefab card). */
+  onEditPrefab?: (id: string) => void;
+  tools?: Observable<ToolDefinition[]>;
+  runTool?: (id: string, inputs: Record<string, unknown>) => Promise<ToolResult>;
 }) {
   useObservable(props.assetsVersion);
   const thumbnails = useObservable(props.thumbnails);
@@ -121,6 +140,10 @@ export function AssetsDock(props: {
   const selectedAsset = useObservable(props.assetSelection);
   const [query, setQuery] = useState("");
   const [folder, setFolder] = useState("");
+  const tools = useObservable(props.tools ?? EMPTY_TOOLS);
+  const assetTools = tools.filter((tool) => tool.surfaces.includes("assets"));
+  const [toolMenuOpen, setToolMenuOpen] = useState(false);
+  const [activeTool, setActiveTool] = useState<ToolDefinition | null>(null);
   const [userFolders, setUserFolders] = useState<string[]>(() => {
     try {
       return JSON.parse(localStorage.getItem(ASSET_FOLDERS_KEY) ?? "[]") as string[];
@@ -290,6 +313,59 @@ export function AssetsDock(props: {
         >
           + folder
         </button>
+        {assetTools.length > 0 && props.runTool && (
+          <span style={{ position: "relative" }}>
+            <button
+              style={buttonStyle}
+              aria-haspopup="menu"
+              aria-expanded={toolMenuOpen}
+              title="Run an installed asset tool"
+              onClick={() => setToolMenuOpen((open) => !open)}
+            >
+              tools â–¾
+            </button>
+            {toolMenuOpen && (
+              <div
+                role="menu"
+                style={{
+                  position: "absolute",
+                  right: 0,
+                  top: "calc(100% + 4px)",
+                  zIndex: 1100,
+                  minWidth: 220,
+                  padding: 4,
+                  background: "#161b22",
+                  border: "1px solid #30363d",
+                }}
+              >
+                {assetTools.map((tool) => (
+                  <button
+                    key={tool.id}
+                    role="menuitem"
+                    title={tool.description}
+                    style={{
+                      width: "100%",
+                      padding: "5px 7px",
+                      background: "transparent",
+                      border: 0,
+                      color: "#c9d1d9",
+                      textAlign: "left",
+                      cursor: "pointer",
+                      font: "11px ui-monospace, monospace",
+                    }}
+                    onClick={() => {
+                      setActiveTool(tool);
+                      setToolMenuOpen(false);
+                    }}
+                  >
+                    <span style={{ display: "block", color: "#e6edf3" }}>{tool.name}</span>
+                    <span style={{ display: "block", color: "#8b949e", fontSize: 10, marginTop: 2 }}>{tool.category}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </span>
+        )}
       </DockHeader>
       <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
         {/* folder tree — scrolls independently of the card grid */}
@@ -440,6 +516,8 @@ export function AssetsDock(props: {
                     dragPayload={{ kind: "prefab", id: pid }}
                     selected={selectedAsset?.kind === "prefab" && selectedAsset.id === pid}
                     onSelect={() => select("prefab", pid)}
+                    onOpen={props.onEditPrefab ? () => props.onEditPrefab!(pid) : undefined}
+                    openHint="Double-click to edit this prefab in the viewport"
                     actionLabel="+ add to scene"
                     onAction={() => {
                       const id = newId();
@@ -539,6 +617,17 @@ export function AssetsDock(props: {
           </div>
         </div>
       </div>
+      {activeTool && props.runTool && (
+        <ToolDialog
+          key={activeTool.id}
+          tool={activeTool}
+          assets={props.assets}
+          registry={props.registry}
+          thumbnails={thumbnails}
+          onClose={() => setActiveTool(null)}
+          onRun={props.runTool}
+        />
+      )}
     </>
   );
 }
@@ -552,6 +641,9 @@ function AssetCard(props: {
   kind: string;
   selected: boolean;
   onSelect: () => void;
+  /** Double-click action (prefabs: open the definition in isolation). */
+  onOpen?: () => void;
+  openHint?: string;
   actionLabel: string;
   actionDisabled?: boolean;
   onAction: () => void;
@@ -561,6 +653,7 @@ function AssetCard(props: {
   return (
     <div
       onClick={props.onSelect}
+      onDoubleClick={props.onOpen}
       draggable={!!props.dragPayload}
       onDragStart={(e) => {
         if (props.dragPayload) {
@@ -568,7 +661,13 @@ function AssetCard(props: {
           e.dataTransfer.effectAllowed = "copy";
         }
       }}
-      title={props.dragPayload ? "Drag into the viewport" : undefined}
+      title={
+        props.onOpen
+          ? props.openHint ?? "Double-click to open"
+          : props.dragPayload
+            ? "Drag into the viewport"
+            : undefined
+      }
       style={{
         display: "flex",
         flexDirection: "column",

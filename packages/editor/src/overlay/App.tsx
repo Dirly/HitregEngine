@@ -6,6 +6,8 @@ import {
   type AssetLibrary,
   type ComponentRegistry,
   type SceneStore,
+  type ToolDefinition,
+  type ToolResult,
 } from "@hitreg/core";
 import type {
   AssetSelection,
@@ -82,6 +84,10 @@ export interface AppProps {
   /** Entity id -> bone names of its loaded skinned model (host-populated). */
   modelBones?: Observable<Record<string, string[]>>;
   saveAsset?: (file: string, content: string) => void;
+  /** Installed engine/plugin tools; manifests drive their editor forms. */
+  tools?: Observable<ToolDefinition[]>;
+  /** Invoke the same registered tool path exposed to agents by the host. */
+  runTool?: (id: string, inputs: Record<string, unknown>) => Promise<ToolResult>;
   /** Fly the editor camera to frame an entity (double-click in hierarchy / F key). */
   onFocusEntity?: (entityId: string) => void;
   /** Detach a loaded model's named sub-objects into child entities. */
@@ -228,6 +234,8 @@ export function App(props: AppProps) {
           <Toolbar
             store={props.store}
             assets={props.assets}
+            registry={props.registry}
+            thumbnails={props.thumbnails}
             assetsVersion={props.assetsVersion}
             playMode={props.playMode}
             gizmoMode={props.gizmoMode}
@@ -250,6 +258,8 @@ export function App(props: AppProps) {
             onNewScene={props.onNewScene}
             onEnvironment={selectEnvironment}
             onProfiler={props.onProfiler}
+            tools={props.tools}
+            runTool={props.runTool}
             editingPrefab={editingPrefab}
             editingChunk={editingChunk}
           />
@@ -309,6 +319,7 @@ export function App(props: AppProps) {
         <div style={{ ...dockStyle, gridColumn: 2, gridRow: 3 }}>
           <AssetsDock
             assets={props.assets}
+            registry={props.registry}
             store={props.store}
             selection={props.selection}
             multiSelection={props.multiSelection}
@@ -318,6 +329,7 @@ export function App(props: AppProps) {
             onCreateMaterial={createMaterial}
             onCreateSpritesheet={createSpritesheet}
             onCreatePrefab={createPrefabFrom}
+            onEditPrefab={props.onEditPrefab}
             onSetSky={(textureId) => {
               // put the panorama on the scene's Environment (creating it if needed)
               const found = Object.entries(props.store.doc.entities).find(
@@ -352,6 +364,8 @@ export function App(props: AppProps) {
                 console.warn("[editor] set sky failed:", error);
               }
             }}
+            tools={props.tools}
+            runTool={props.runTool}
           />
         </div>
 
@@ -466,6 +480,12 @@ function PrefabEditBanner(props: {
         style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
       >
         Editing prefab <strong>{name}</strong> — saves apply to every instance
+      </span>
+      <span
+        style={{ color: "#9db8d6", whiteSpace: "nowrap" }}
+        title="Isolation adds a sky + key/fill light so the prefab is visible. They are not part of the prefab and are never saved into it."
+      >
+        studio lighting
       </span>
       <button
         style={activeButtonStyle}
