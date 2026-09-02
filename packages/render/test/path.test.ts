@@ -99,7 +99,7 @@ describe("pathGeometry", () => {
     for (let i = 0; i < normal.count; i++) expect(normal.getY(i)).toBeCloseTo(1, 5);
   });
 
-  it("thickness extrudes a closed slab: top at the curve, bottom `thickness` below, outward faces", () => {
+  it("thickness raises a closed slab: bottom on the curve, top `thickness` above, outward faces", () => {
     const geometry = ribbon({ thickness: 0.5 });
     const pos = geometry.getAttribute("position");
     let minY = Infinity;
@@ -108,12 +108,12 @@ describe("pathGeometry", () => {
       minY = Math.min(minY, pos.getY(i));
       maxY = Math.max(maxY, pos.getY(i));
     }
-    expect(maxY).toBeCloseTo(0, 5);
-    expect(minY).toBeCloseTo(-0.5, 5);
+    expect(minY).toBeCloseTo(0, 5);
+    expect(maxY).toBeCloseTo(0.5, 5);
 
     // every face normal must point away from the slab's centroid
     const index = geometry.getIndex()!;
-    const centroid = new THREE.Vector3(10, -0.25, 0);
+    const centroid = new THREE.Vector3(10, 0.25, 0);
     const normals = faceNormals(geometry);
     const tri = new THREE.Vector3();
     normals.forEach((n, f) => {

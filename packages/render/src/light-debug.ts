@@ -1,5 +1,6 @@
 import * as THREE from "three/webgpu";
 import type { SceneDoc } from "@hitreg/core";
+import { detachFlagged } from "./physics-debug.js";
 
 /**
  * Light direction visualization: an arrow for directional/spot lights (their
@@ -29,6 +30,11 @@ function xray<T extends THREE.Material>(material: T): T {
   material.transparent = true;
   material.opacity = 0.85;
   return material;
+}
+
+/** Remove + dispose every visual attachLightDebug added under `root` (in-place toggle off). */
+export function detachLightDebug(root: THREE.Object3D): void {
+  detachFlagged(root, "lightDebug");
 }
 
 /**

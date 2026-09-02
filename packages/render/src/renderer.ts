@@ -1,12 +1,34 @@
 import * as THREE from "three/webgpu";
-import { pass, min, mrt, output, emissive } from "three/tsl";
-import { bloom } from "three/addons/tsl/display/BloomNode.js";
+import {
+  PostChain,
+  needsPipeline,
+  nextPassToBlame,
+  passPlan,
+  pipelineSignature,
+  resolvePostFx,
+  toneMappingConstant,
+  type PostFxData,
+  type PostPassId,
+  type PostTextureResolver,
+  type ResolvedPostFx,
+} from "./post.js";
+import { volumetricPlanKey, type VolumetricRequest } from "./atmosphere.js";
+import { sceneLighting, type SceneLighting } from "./scene-lighting.js";
 
 /**
- * Belt-and-suspenders cap on top of the MRT split below — even the emissive
- * channel shouldn't be able to blow bloom out arbitrarily far past 1.0.
+ * The two halves of a render, so a profile can tell them apart.
+ *
+ * The engine's own profiler has twice now billed a whole class of bug to one
+ * opaque `render` scope — the light-budget shader-recompile trap (see
+ * light-budget.ts) and, before it, per-chunk pipeline rebuilds. "render is
+ * 22ms" is not a finding; "the scene's own per-frame lighting work is 0.2ms of
+ * it and the draw is the other 22" is. The renderer takes a sink rather than a
+ * Profiler so packages/render keeps no dependency on the app's profiler.
  */
-const BLOOM_INPUT_CEILING = 4;
+export interface RenderScopeSink {
+  begin(name: string): void;
+  end(): void;
+}
 
 export type Backend = "webgpu" | "webgl";
 
@@ -21,24 +43,60 @@ export interface BloomOptions {
  * WebGPURenderer wrapper. Three's WebGPURenderer falls back to WebGL2 on its
  * own when WebGPU is unavailable; init() reports which backend won.
  *
- * Post-processing: setBloom() drives a TSL RenderPipeline (scene pass + bloom,
- * works on both backends). The pipeline is built lazily on the next render()
- * and rebuilt whenever the scene or camera identity changes (the playground
- * swaps cameras between edit fly-cam and play rigs). Tone mapping stays on the
- * renderer — RenderPipeline defers it to its output transform, so it applies
- * exactly once with or without bloom.
+ * Post-processing: setPostFx() drives a TSL RenderPipeline assembled from the
+ * scene's `postfx` component (see post.ts for the pass order and why it is what
+ * it is). The pipeline is built lazily on the next render() and rebuilt
+ * whenever the scene or camera identity changes (the playground swaps cameras
+ * between edit fly-cam and play rigs) or whenever the *set* of enabled passes
+ * changes. A parameter tweak retunes uniforms in place — a rebuild recompiles
+ * shaders, and doing that per slider frame would blow the interactivity budget.
+ *
+ * A scene with no postfx (or postfx with nothing but tone mapping) builds no
+ * pipeline at all and renders through renderer.render() exactly as before.
  */
 export class EngineRenderer {
   readonly renderer: THREE.WebGPURenderer;
 
-  private bloomOptions: BloomOptions | null = null;
+  private postFxData: PostFxData | null = null;
+  private fx: ResolvedPostFx = resolvePostFx(null);
+  private plan: PostPassId[] = [];
+  private signature = "";
+  private resolveTexture: PostTextureResolver | null = null;
+  /**
+   * Whether the current `grade.lut` id actually decoded into a 3D texture. Only
+   * the chain can answer that, so it is learned from the last build and fed
+   * back into the signature — otherwise an unresolvable LUT id makes every
+   * setPostFx() call look like a structural change and rebuild forever.
+   */
+  private lutState: { id: string | undefined; ready: boolean } = { id: undefined, ready: false };
+
+  /**
+   * Shafts the scene wants this frame, read off the scene's SceneLighting in
+   * render(). It lives here rather than in `postFxData` because it is driven by
+   * the `sky` component, and because the *set* of shaft lights is discovered at
+   * runtime (a light has no shadow map until its first shadow render).
+   */
+  private volumetric: VolumetricRequest | null = null;
+  private volumetricKey = volumetricPlanKey(null);
+
   private pipeline: THREE.RenderPipeline | null = null;
-  private scenePass: ReturnType<typeof pass> | null = null;
-  private bloomNode: ReturnType<typeof bloom> | null = null;
+  private chain: PostChain | null = null;
   private pipelineScene: THREE.Scene | null = null;
   private pipelineCamera: THREE.Camera | null = null;
-  /** Set when the pipeline throws (e.g. backend limitation) — degrade to no bloom. */
-  private bloomUnavailable = false;
+
+  /**
+   * Passes retired because the graph threw on this backend. Per-pass rather
+   * than one global flag: an unsupported effect should cost you that effect,
+   * not the whole stack. Sticky for the renderer's lifetime — a pass that
+   * failed once will fail again, and retrying it every rebuild would turn a
+   * degraded frame into a stuttering one.
+   */
+  private readonly failedPasses = new Set<PostPassId>();
+  /** Set only when every optional pass has been retired and it still throws. */
+  private postUnavailable = false;
+
+  /** Render sub-scope reporting: off unless the app wires a profiler in. */
+  private scopes: RenderScopeSink | null = null;
   /** GPU timestamp queries: off unless the profiler asks for them (see setGpuTiming). */
   private gpuTiming = false;
   private gpuResolvePending = false;
@@ -48,6 +106,7 @@ export class EngineRenderer {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.applyPostFxState();
   }
 
   async init(): Promise<Backend> {
@@ -140,80 +199,245 @@ export class EngineRenderer {
     return typeof timestamp === "number" && timestamp > 0 ? timestamp : null;
   }
 
-  /** Enable/retune bloom (null disables). Live retunes update uniforms in place. */
+  /**
+   * The whole `postfx` component payload (null = none on this scene). Missing
+   * fields take their schema defaults, so `{}` means "ACES at exposure 1 and
+   * nothing else" — i.e. exactly what this renderer did before the stack
+   * existed.
+   *
+   * Structural changes (a pass enabled/disabled, a tone-mapping mode, a LUT)
+   * queue a rebuild on the next render; everything else is written straight
+   * into the live uniforms.
+   */
+  setPostFx(data: PostFxData | null): void {
+    this.postFxData = data;
+    this.applyPostFxState();
+  }
+
+  /**
+   * Resolve `postfx.grade.lut` texture ids. The renderer has no asset table of
+   * its own, so without this the numeric grade knobs still apply and the LUT is
+   * skipped with a warning.
+   */
+  setPostFxTextureResolver(resolve: PostTextureResolver | null): void {
+    this.resolveTexture = resolve;
+    // a resolver arriving late can turn an inert LUT into a real pass
+    this.applyPostFxState();
+  }
+
+  /** The passes actually in the graph right now, in execution order. */
+  postFxPlan(): readonly PostPassId[] {
+    return this.plan;
+  }
+
+  /** Passes retired by graceful degradation on this backend. */
+  postFxDegraded(): readonly PostPassId[] {
+    return [...this.failedPasses];
+  }
+
+  /**
+   * Enable/retune bloom (null disables). Retained shim over setPostFx() so
+   * existing callers keep working; it merges into whatever postfx is otherwise
+   * set rather than replacing it.
+   */
   setBloom(options: BloomOptions | null): void {
-    this.bloomOptions = options;
-    if (!options) {
+    const next: PostFxData = { ...(this.postFxData ?? {}) };
+    next.bloom = options ? { enabled: true, ...options } : { ...(next.bloom ?? {}), enabled: false };
+    this.setPostFx(next);
+  }
+
+  /**
+   * Fold in this frame's volumetric request. A changed shaft SET is structural
+   * (the node graph references specific lights) and rebuilds; a changed
+   * intensity/samples/decay/density is a uniform write. Splitting the two is
+   * what keeps a slider drag off the shader compiler.
+   */
+  private syncVolumetric(request: VolumetricRequest | null): void {
+    const key = volumetricPlanKey(request);
+    this.volumetric = request;
+    if (key !== this.volumetricKey) {
+      this.volumetricKey = key;
+      this.applyPostFxState();
+    } else if (request) {
+      this.chain?.retune(this.fx, request.settings);
+    }
+  }
+
+  private applyPostFxState(): void {
+    this.fx = resolvePostFx(this.postFxData);
+    // Tone mapping stays on the renderer as well as in the graph: it is what
+    // the no-pipeline path uses, and `toneMappingExposure` is a renderer
+    // reference that the graph's own tone-mapping node reads — which is why
+    // exposure is a live retune and not a rebuild.
+    this.renderer.toneMapping = toneMappingConstant(this.fx);
+    this.renderer.toneMappingExposure = this.fx.tonemap.exposure;
+
+    const lutReady =
+      this.fx.grade.lut === this.lutState.id ? this.lutState.ready : this.resolveTexture !== null;
+    const ctx = { disabled: this.failedPasses, lutReady, volumetric: this.volumetric };
+    this.plan = passPlan(this.fx, ctx);
+    const signature = pipelineSignature(this.fx, ctx);
+    if (signature !== this.signature) {
+      this.signature = signature;
+      // rebuilt lazily on the next render(), so a burst of edits in one frame
+      // costs one rebuild rather than one per edit
       this.disposePipeline();
-      return;
+    } else {
+      this.chain?.retune(this.fx, this.volumetric?.settings ?? null);
     }
-    if (this.bloomNode) {
-      this.bloomNode.strength.value = options.strength;
-      this.bloomNode.radius.value = options.radius;
-      this.bloomNode.threshold.value = options.threshold;
+  }
+
+  /**
+   * Build every render pipeline this scene will need, now, instead of paying
+   * for each one the first time its object happens to come on screen.
+   *
+   * WebGPU compiles a pipeline per material/geometry pair on first DRAW. In a
+   * level you fly around, that lands as a stall every time you pan somewhere
+   * new — the classic "it hitches whenever I turn" report, and it never settles
+   * because there is always another corner you have not looked at yet. Paying
+   * it once during load turns a permanent stutter into a slightly longer scene
+   * open.
+   *
+   * `compileAsync()` alone does NOT do this: it runs the normal
+   * `_projectObject` pass, which frustum-culls, so it only compiles what the
+   * camera can already see — precisely the pipelines that were about to be
+   * built anyway. Clearing `frustumCulled` for the duration is what makes it
+   * cover the whole level; the flags are restored afterwards, including if the
+   * compile throws.
+   *
+   * Awaiting is optional: the frame loop is free to run while this resolves,
+   * and the pipelines simply become ready as they land.
+   */
+  async precompile(scene: THREE.Scene, camera: THREE.Camera): Promise<void> {
+    const restore: THREE.Object3D[] = [];
+    scene.traverse((object) => {
+      if (!(object as THREE.Mesh).isMesh) return;
+      if (object.frustumCulled === false) return;
+      object.frustumCulled = false;
+      restore.push(object);
+    });
+    try {
+      await this.renderer.compileAsync(scene, camera);
+    } catch (error) {
+      // A precompile is an optimisation, never a correctness requirement: a
+      // failure here must not stop the scene from being rendered normally.
+      console.warn("[render] pipeline precompile failed:", error);
+    } finally {
+      for (const object of restore) object.frustumCulled = true;
     }
-    // no node yet: render() builds the pipeline lazily
+  }
+
+  /** Report render sub-scopes to a profiler. Pass null to stop reporting. */
+  setScopeSink(sink: RenderScopeSink | null): void {
+    this.scopes = sink;
   }
 
   render(scene: THREE.Scene, camera: THREE.Camera): void {
-    if (this.bloomOptions && !this.bloomUnavailable) {
+    const scopes = this.scopes;
+    scopes?.begin("lighting");
+    // Cascade refits, the shared IBL seam and the volumetric light query all
+    // key off the render camera and off WHICH scene is actually being drawn,
+    // neither of which the builder knows — so the state buildScene() attached
+    // to the scene is driven from this one call. A scene with no SceneLighting
+    // (a hand-made THREE.Scene) is unaffected and costs nothing.
+    const lighting: SceneLighting | null = sceneLighting(scene);
+    if (lighting) {
+      lighting.frame(camera);
+      this.syncVolumetric(lighting.volumetricRequest());
+    } else if (this.volumetric) {
+      this.syncVolumetric(null);
+    }
+    scopes?.end();
+
+    if (!this.postUnavailable && needsPipeline(this.plan)) {
       try {
-        if (!this.pipeline || scene !== this.pipelineScene || camera !== this.pipelineCamera) {
-          this.buildPipeline(scene, camera, this.bloomOptions);
+        if (
+          !this.pipeline ||
+          !this.chain ||
+          scene !== this.pipelineScene ||
+          camera !== this.pipelineCamera
+        ) {
+          // a rebuild recompiles every pass's shader: worth its own scope, or
+          // it reads as a mysterious once-per-camera-swap render spike
+          scopes?.begin("postfx-build");
+          try {
+            this.buildPipeline(scene, camera);
+          } finally {
+            scopes?.end();
+          }
         }
-        this.pipeline!.render();
+        scopes?.begin("postfx-update");
+        try {
+          this.chain!.update();
+        } finally {
+          scopes?.end();
+        }
+        scopes?.begin("draw");
+        try {
+          this.pipeline!.render();
+        } finally {
+          scopes?.end();
+        }
         return;
       } catch (error) {
-        this.bloomUnavailable = true;
-        this.disposePipeline();
-        console.warn("[render] bloom pipeline failed on this backend; rendering without it:", error);
+        this.degrade(error);
       }
     }
-    this.renderer.render(scene, camera);
+    scopes?.begin("draw");
+    try {
+      this.renderer.render(scene, camera);
+    } finally {
+      scopes?.end();
+    }
   }
 
-  private buildPipeline(scene: THREE.Scene, camera: THREE.Camera, options: BloomOptions): void {
+  /**
+   * A node graph only fails when it is compiled, deep inside render(), and the
+   * exception names no pass. So blame the most backend-sensitive pass still in
+   * the plan, retire it, and let the next frame rebuild without it — repeat
+   * until the graph builds or nothing optional is left.
+   */
+  private degrade(error: unknown): void {
+    const blamed = nextPassToBlame(this.plan, this.failedPasses);
     this.disposePipeline();
-    const scenePass = pass(scene, camera);
-    // selective bloom: split the scene pass into its normal lit "output" and
-    // the material's own "emissive" contribution (MRT — one pass, two
-    // targets). Bloom samples ONLY the emissive channel — a sunlit terrain
-    // slope or a grazing-angle water highlight can never feed it, no matter
-    // how bright, because ordinary PBR materials never write to `emissive`
-    // unless a material explicitly sets one. This is what fixed a repeatable
-    // freeze-and-flare at one hillside: threshold/ceiling tuning on the whole
-    // scene color couldn't win against a wide-enough bright area, because
-    // bloom's cost scales with area above threshold, not peak brightness —
-    // excluding lit surfaces from the bloom input entirely removes that
-    // failure mode structurally instead of just raising the bar.
-    scenePass.setMRT(mrt({ output, emissive }));
-    const scenePassColor = scenePass.getTextureNode("output");
-    const emissiveColor = scenePass.getTextureNode("emissive");
-    const bloomInput = min(emissiveColor, BLOOM_INPUT_CEILING);
-    const bloomPass = bloom(bloomInput, options.strength, options.radius, options.threshold);
-    // bloom's 5-level mip blur chain is a FIXED per-frame cost regardless of
-    // scene complexity — its default resolutionScale (0.5, i.e. half the
-    // render target) is the single biggest lever to cut that without
-    // changing the visible effect much; drop it further for headroom.
-    bloomPass.setResolutionScale(0.35);
+    if (blamed) {
+      this.failedPasses.add(blamed);
+      console.warn(`[render] postfx pass "${blamed}" failed on this backend; disabling it:`, error);
+      this.applyPostFxState();
+    } else {
+      this.postUnavailable = true;
+      console.warn("[render] post-processing failed on this backend; rendering without it:", error);
+    }
+  }
+
+  private buildPipeline(scene: THREE.Scene, camera: THREE.Camera): void {
+    this.disposePipeline();
+    const chain = new PostChain(this.renderer, this.fx, scene, camera, {
+      disabled: this.failedPasses,
+      resolveTexture: this.resolveTexture,
+      volumetric: this.volumetric,
+    });
     const pipeline = new THREE.RenderPipeline(this.renderer);
-    // additive bloom in working space; the pipeline's output transform then
-    // applies renderer.toneMapping + color space once
-    pipeline.outputNode = scenePassColor.add(bloomPass);
+    // The chain applies the tone curve and the working->output colour-space
+    // conversion itself (renderOutput), because grade/vignette/grain/AA have to
+    // run after it on display-referred values. Leaving RenderPipeline's own
+    // transform on would apply both twice.
+    pipeline.outputColorTransform = false;
+    pipeline.outputNode = chain.outputNode;
     this.pipeline = pipeline;
-    this.scenePass = scenePass;
-    this.bloomNode = bloomPass;
+    this.chain = chain;
+    this.plan = [...chain.plan];
+    this.signature = chain.signature;
+    this.lutState = { id: this.fx.grade.lut, ready: chain.plan.includes("lut") };
     this.pipelineScene = scene;
     this.pipelineCamera = camera;
   }
 
   private disposePipeline(): void {
-    this.bloomNode?.dispose();
-    this.scenePass?.dispose();
+    this.chain?.dispose();
     this.pipeline?.dispose();
     this.pipeline = null;
-    this.scenePass = null;
-    this.bloomNode = null;
+    this.chain = null;
     this.pipelineScene = null;
     this.pipelineCamera = null;
   }

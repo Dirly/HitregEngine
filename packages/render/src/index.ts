@@ -15,15 +15,49 @@ export {
 } from "./scene-builder.js";
 export { buildHlodProxy, type HlodProxy, type HlodProxyStats } from "./hlod-proxy.js";
 export { reconcileScene, type ReconcileHooks } from "./reconcile.js";
-export { attachPhysicsDebug } from "./physics-debug.js";
-export { attachLightDebug } from "./light-debug.js";
+export { attachPhysicsDebug, detachPhysicsDebug } from "./physics-debug.js";
+export { attachLightDebug, detachLightDebug } from "./light-debug.js";
 export { attachSkeletonDebug, collectBones } from "./skeleton-debug.js";
 export { extractCollisionGeometry, makeMeshGeometryProvider, type CollisionGeometry } from "./collision-geometry.js";
 export { AnimationSystem, type AnimatorData } from "./animation.js";
 export { ParticleSystem, type ParticlesData, type ParticleValue } from "./particles.js";
 export { BillboardSystem, type BillboardData, type BillboardValue, type BillboardResolvers } from "./billboards.js";
-export { GrassSystem, type GrassData, type GroundSampler } from "./grass.js";
-export { EngineRenderer, type Backend, type BloomOptions } from "./renderer.js";
+export { applyFoliageNormals, foliageNormals, type FoliageNormalOptions } from "./foliage-normals.js";
+export { applyModelBrightness } from "./model-brightness.js";
+export { applyFoliageWind, FOLIAGE_WIND, type FoliageWindMode, type FoliageWindOptions } from "./foliage-wind.js";
+export { applyFoliageFade, setFoliageFade, FOLIAGE_FADE, type FoliageFadeState } from "./foliage-fade.js";
+export { asNodeMaterial, cloneMaterial, editMeshMaterials } from "./node-material.js";
+export {
+  GrassSystem,
+  crossQuadGeometry,
+  type GrassData,
+  type GroundSampler,
+  type FoliageSampler,
+  type GrassTextureResolver,
+} from "./grass.js";
+export {
+  EngineRenderer,
+  type Backend,
+  type BloomOptions,
+  type RenderScopeSink,
+} from "./renderer.js";
+export {
+  POST_PASS_ORDER,
+  PostChain,
+  TAA_FALLBACK_REASON,
+  evaluateGrade,
+  needsPipeline,
+  passPlan,
+  pipelineSignature,
+  resolvePostFx,
+  toneMappingConstant,
+  type AntialiasMode,
+  type PostFxData,
+  type PostPassId,
+  type PostTextureResolver,
+  type ResolvedPostFx,
+  type TonemapMode,
+} from "./post.js";
 export { FoliageLodSystem, type InstancedPropBatch } from "./foliage-lod.js";
 export { simplifyGeometry, simplifierReady, type SimplifiedGeometry, type SimplifyOptions } from "./mesh-simplify.js";
 export {
@@ -55,3 +89,91 @@ export { LightBudgetSystem } from "./light-budget.js";
 export { pathGeometry, type PathMeshSource } from "./path-mesh.js";
 export { WaterSimulation } from "./water-sim.js";
 export { polyMeshGeometry, polyFaceForHit } from "./poly-mesh-geometry.js";
+export {
+  CASCADE_BIAS_SCALE_CAP,
+  CascadeShadowSystem,
+  DEFAULT_SHADOW_SETTINGS,
+  applyShadowSettings,
+  cascadeBiasScale,
+  cascadeDistances,
+  cascadeSplits,
+  frustumSliceCorners,
+  frustumSliceSphere,
+  quantizeExtent,
+  shadowEnabled,
+  shadowFarPlane,
+  shadowPassCost,
+  snapToTexelGrid,
+  type CascadeShadowStats,
+  type ShadowSettings,
+  type SliceSphere,
+} from "./csm.js";
+export {
+  DEFAULT_VOLUMETRIC_SETTINGS,
+  FogSystem,
+  VOLUMETRIC_RESOLUTION_SCALE,
+  VolumetricShafts,
+  decayToDistanceAttenuation,
+  densityToGodrayDensity,
+  fogFactor,
+  heightFogAttenuation,
+  volumetricLightCandidates,
+  volumetricPlanKey,
+  volumetricSampleCost,
+  volumetricSignature,
+  type FogSettings,
+  type VolumetricInputs,
+  type VolumetricRequest,
+  type VolumetricSettings,
+} from "./atmosphere.js";
+export {
+  EnvironmentSystem,
+  NO_ENVIRONMENT,
+  SKY_ENVIRONMENT_SIZE,
+  applyEnvironment,
+  averageLuminance,
+  environmentCacheKey,
+  loadEquirectTexture,
+  skyEnvironmentTexture,
+  skyEquirectData,
+  type EnvironmentOptions,
+  type EnvironmentResult,
+  type EnvironmentSettings,
+  type SkyEnvironmentSource,
+} from "./environment.js";
+export {
+  SceneLighting,
+  sceneLighting,
+  type SceneLightingOptions,
+  type SceneLightingStats,
+  type SkyData,
+  type SkyFogData,
+} from "./scene-lighting.js";
+export { currentMaterialEnvironment, setEnvironment } from "./material-maps.js";
+export { cachedSkyEnvironmentTexture, clearSkyEnvironmentCache } from "./environment.js";
+export {
+  batchStaticMeshes,
+  mergeModelSubmeshes,
+  ownerOfFace,
+  BATCH_OWNERS,
+  STATIC_BATCH_FLAG,
+  type BatchOwners,
+  type StaticBatchHandle,
+  type StaticBatchStats,
+} from "./static-batch.js";
+export {
+  freezeStaticSubtree,
+  refreshStaticSubtree,
+  thawStaticSubtree,
+} from "./static-transforms.js";
+export {
+  flushDecals,
+  reprojectDecalsAround,
+  syncEntityDecals,
+  type DecalBuildOptions,
+  type DecalData,
+  type DecalRequest,
+} from "./decals.js";
+
+export { voxelGeometry, voxelColliderProxyGeometry } from "./voxel-geometry.js";
+export { buildTerrainSplatMaterial, SPLAT_ATTRIBUTE, type SplatData } from "./terrain-splat.js";

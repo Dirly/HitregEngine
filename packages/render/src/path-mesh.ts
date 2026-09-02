@@ -8,7 +8,7 @@ export interface PathMeshSource {
   radius: number;
   radialSegments: number;
   segmentsPerSpan: number;
-  /** ribbon only: extrude downward into a slab this thick (0 = flat sheet). */
+  /** ribbon only: extrude UP off the curve into a slab this thick (0 = flat sheet). */
   thickness?: number;
   /** ribbon only, flat sheet: also emit the underside so it renders from below. */
   doubleSided?: boolean;
@@ -148,9 +148,11 @@ function ribbonGeometry(
 }
 
 /**
- * Ribbon extruded DOWN by `thickness` into a closed slab: the curve is the
- * top surface (the path tool samples it off terrain, so the road stays
- * where it was drawn) and the underside hangs below it. Top, bottom and the
+ * Ribbon extruded UP by `thickness` into a closed slab: the curve is the
+ * underside (the path tool samples it off terrain, so the slab sits ON the
+ * ground like a raised road or curb) and the drivable surface is `thickness`
+ * above it — extruding down instead would bury the whole slab in the terrain
+ * that the curve was traced over. Top, bottom and the
  * two side walls (plus end caps on an open path) each get their own
  * vertices so the crease between them shades hard instead of averaging
  * into a rounded-looking edge. Wall UVs keep v = arc length like the top so
@@ -192,10 +194,10 @@ function slabGeometry(
 
   for (let i = 0; i < sampleCount; i++) {
     const { point, side, arcLength } = frames[i]!;
-    const tl = point.clone().addScaledVector(side, -width / 2);
-    const tr = point.clone().addScaledVector(side, width / 2);
-    const bl = tl.clone().setY(tl.y - thickness);
-    const br = tr.clone().setY(tr.y - thickness);
+    const bl = point.clone().addScaledVector(side, -width / 2);
+    const br = point.clone().addScaledVector(side, width / 2);
+    const tl = bl.clone().setY(bl.y + thickness);
+    const tr = br.clone().setY(br.y + thickness);
     setVertex(TOP + i * 2, tl, 0, arcLength);
     setVertex(TOP + i * 2 + 1, tr, 1, arcLength);
     setVertex(BOTTOM + i * 2, bl, 0, arcLength);
@@ -242,12 +244,12 @@ function slabGeometry(
     // end caps: quad (tl, tr, br, bl) at the first and last sample
     const capQuad = (capIndex: number, frame: RibbonFrame, facingBackward: boolean): void => {
       const v = CAPS + capIndex * 4;
-      const tl = frame.point.clone().addScaledVector(frame.side, -width / 2);
-      const tr = frame.point.clone().addScaledVector(frame.side, width / 2);
-      setVertex(v + 0, tl, 0, 0);
-      setVertex(v + 1, tr, 1, 0);
-      setVertex(v + 2, tr.clone().setY(tr.y - thickness), 1, wallU);
-      setVertex(v + 3, tl.clone().setY(tl.y - thickness), 0, wallU);
+      const bl = frame.point.clone().addScaledVector(frame.side, -width / 2);
+      const br = frame.point.clone().addScaledVector(frame.side, width / 2);
+      setVertex(v + 0, bl.clone().setY(bl.y + thickness), 0, 0);
+      setVertex(v + 1, br.clone().setY(br.y + thickness), 1, 0);
+      setVertex(v + 2, br, 1, wallU);
+      setVertex(v + 3, bl, 0, wallU);
       const base = stripIndices * 4 + capIndex * 6;
       // (tr - tl) x (br - tl) = side x -Y = +tangent, so (0,1,2)(0,2,3)
       // faces along the curve — right for the END cap; the START cap faces

@@ -1,4 +1,6 @@
 import * as THREE from "three/webgpu";
+import { STATIC_BATCH_FLAG } from "./static-batch.js";
+import { applyWorldUv } from "./primitive-uv.js";
 import {
   positionWorld,
   positionLocal,
@@ -13,6 +15,7 @@ import {
   mix,
   smoothstep,
   saturate,
+  floor,
   clamp,
   add,
   sub,
@@ -34,9 +37,21 @@ import {
   perspectiveDepthToViewZ,
 } from "three/tsl";
 import { GLTFLoader, type GLTF } from "three/addons/loaders/GLTFLoader.js";
+import { applyFoliageNormals } from "./foliage-normals.js";
+import { applyModelBrightness } from "./model-brightness.js";
+import { applyFoliageWind, type FoliageWindOptions } from "./foliage-wind.js";
+import { applyFoliageFade } from "./foliage-fade.js";
+import { cloneMaterial } from "./node-material.js";
 import { clone as skeletonClone } from "three/addons/utils/SkeletonUtils.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
-import { heightmapMesh, type HeightmapParams, type PolyMeshSource, type SceneDoc } from "@hitreg/core";
+import {
+  heightmapMesh,
+  type HeightmapParams,
+  type PolyMeshSource,
+  type SceneDoc,
+  type VoxelMesh,
+  type VoxelMeshSource,
+} from "@hitreg/core";
 import { simplifierReady, simplifyGeometry } from "./mesh-simplify.js";
 import {
   impostorGeometry,
@@ -48,12 +63,33 @@ import {
 import { clusterDagReady, type ClusterDag } from "./cluster-dag.js";
 import { ClusteredMesh, clusterDagFromGeometry } from "./clustered-mesh.js";
 import { polyMeshGeometry } from "./poly-mesh-geometry.js";
+import { buildTerrainSplatMaterial, type MacroNoiseData } from "./terrain-splat.js";
+import { mergeModelSubmeshes } from "./static-batch.js";
+import { voxelGeometry, voxelColliderProxyGeometry } from "./voxel-geometry.js";
 import type { ParticlesData } from "./particles.js";
 import type { BillboardData } from "./billboards.js";
 import type { GrassData } from "./grass.js";
 import type { InstancedPropBatch } from "./foliage-lod.js";
 import { pathGeometry, type PathMeshSource } from "./path-mesh.js";
 import { pathScatterPlacements, type PathScatterData } from "./path-scatter.js";
+import { flushDecals, syncEntityDecals, type DecalData, type DecalRequest } from "./decals.js";
+import { DEFAULT_SHADOW_SETTINGS, applyShadowSettings, type ShadowSettings } from "./csm.js";
+import { DEFAULT_VOLUMETRIC_SETTINGS, type FogSettings, type VolumetricSettings } from "./atmosphere.js";
+import type { EnvironmentSettings } from "./environment.js";
+import { SceneLighting, type SkyData } from "./scene-lighting.js";
+import {
+  applyMaterialCommon,
+  applyMaterialMaps,
+  makeMaterialUniforms,
+  materialMapKey,
+  materialMapKeyOf,
+  materialSourceOf,
+  materialUniformsOf,
+  resolveTransparency,
+  setMaterialSource,
+  writeMaterialUniforms,
+  type TextureResolver,
+} from "./material-maps.js";
 
 // kits load once and instance many times
 const gltfCache = new Map<string, Promise<GLTF>>();
@@ -82,6 +118,28 @@ export function gltfLoadingCount(): number {
 export interface BuildOptions {
   /** Resolve a mesh asset id to a fetchable glTF/GLB URL (from the AssetLibrary). */
   resolveModel?(assetId: string): string | undefined;
+  /**
+   * Mesh a voxel cell off the main thread, for HLOD proxies.
+   *
+   * An HLOD supercell re-meshes each of its member cells on a coarser lattice
+   * — a separate marching-cubes run per cell, up to 16 of them in one bake —
+   * and that was the largest remaining main-thread stall while streaming.
+   * Return null (or leave the hook unset) and the builder meshes inline, which
+   * is what the headless tooling and the tests do.
+   */
+  voxelMeshAsync?(source: VoxelMeshSource): Promise<VoxelMesh | null> | null;
+  /**
+   * Mesh AND merge a supercell's terrain buckets off the main thread.
+   *
+   * Preferred over `voxelMeshAsync` for HLOD, because the merge itself — one
+   * matrix multiply per vertex plus the concatenation — outweighed the meshing
+   * once the meshing had moved, and doing both on the far side means one
+   * transfer per material rather than one per cell. Unset (or null) and the
+   * builder falls back to `voxelMeshAsync`, then to meshing inline.
+   */
+  voxelSupercellAsync?(
+    buckets: Array<{ key: string; cells: Array<{ source: VoxelMeshSource; matrix: number[] }> }>,
+  ): Promise<Array<{ key: string; mesh: VoxelMesh }>> | null;
   /** Resolve a material asset id to its (schema-validated) material data. */
   resolveMaterial?(assetId: string): unknown | undefined;
   /** Resolve a texture asset id to a fetchable image URL. */
@@ -148,8 +206,32 @@ export interface MaterialData {
   color: string;
   map?: string;
   repeat: [number, number];
+  /** Shared with every other map on this material — there is no per-map offset. */
+  uvOffset?: [number, number];
   roughness: number;
   metalness: number;
+  normalMap?: string;
+  normalScale?: number;
+  /** Multiplies the `roughness` scalar, never replaces it. */
+  roughnessMap?: string;
+  /** Multiplies the `metalness` scalar, never replaces it. */
+  metalnessMap?: string;
+  aoMap?: string;
+  aoIntensity?: number;
+  /** Packed Occlusion/Roughness/Metalness (R/G/B). Takes precedence over the three above. */
+  ormMap?: string;
+  detailNormalMap?: string;
+  detailRepeat?: [number, number];
+  detailStrength?: number;
+  /** Texture magnification: "nearest" for pixel art. See configureTexture. */
+  filter?: "linear" | "nearest";
+  triplanar?: boolean;
+  triplanarScale?: number;
+  alphaMap?: string;
+  alphaTest?: number;
+  envMapIntensity?: number;
+  side?: "front" | "back" | "double";
+  vertexColors?: boolean;
   emissive: string;
   emissiveIntensity: number;
   emissiveMap?: string;
@@ -158,6 +240,7 @@ export interface MaterialData {
   splat?: {
     layers: SplatLayerData[];
     slopeRock?: { color: string; roughness: number; start: number; end: number };
+    macroNoise?: MacroNoiseData;
   };
   water?: {
     shallowColor: string;
@@ -173,38 +256,14 @@ export interface MaterialData {
     foamWidth: number;
     edgeFadeStart: number;
     edgeFadeEnd: number;
+    /** Scrolling surface texture added over the procedural water. */
+    texture?: string;
+    textureScale?: number;
+    textureStrength?: number;
+    foamPixel?: number;
+    foamSteps?: number;
+    flow?: [number, number];
   };
-}
-
-/**
- * Load a texture into an arbitrary material slot (`map`, `emissiveMap`, ...)
- * once the image has actually loaded — the WebGPU backend crashes rendering
- * a texture whose image is still null.
- * `slot` defaults to color space SRGB, which is correct for both color and
- * emissive maps (both are authored as visible colors, not linear data like a
- * normal/roughness map would be).
- */
-function applyTextureWhenReady<K extends string>(
-  material: THREE.Material & Partial<Record<K, THREE.Texture | null>>,
-  slot: K,
-  url: string,
-  repeat: [number, number],
-  maxAnisotropy?: number,
-): void {
-  new THREE.TextureLoader().load(
-    url,
-    (texture) => {
-      texture.colorSpace = THREE.SRGBColorSpace;
-      texture.wrapS = THREE.RepeatWrapping;
-      texture.wrapT = THREE.RepeatWrapping;
-      texture.repeat.set(repeat[0], repeat[1]);
-      if (maxAnisotropy) texture.anisotropy = maxAnisotropy;
-      (material as Record<K, THREE.Texture | null>)[slot] = texture;
-      material.needsUpdate = true;
-    },
-    undefined,
-    (error) => console.warn(`[render] texture failed to load: ${url}`, error),
-  );
 }
 
 let gltfLoader: GLTFLoader | null = null;
@@ -217,8 +276,24 @@ interface TransformData {
 
 interface MeshData {
   source:
-    | { kind: "primitive"; shape: string; size: [number, number, number]; segments?: [number, number] }
-    | { kind: "asset"; assetId: string; node?: string }
+    | {
+        kind: "primitive";
+        shape: string;
+        size: [number, number, number];
+        segments?: [number, number];
+        shading?: "auto" | "flat" | "smooth";
+        uv?: { mode?: "stretch" | "world"; scale?: [number, number] };
+      }
+    | {
+        kind: "asset";
+        assetId: string;
+        node?: string;
+        foliageNormals?: number;
+        foliageUp?: number;
+        brightness?: number;
+        wind?: FoliageWindOptions;
+        cameraFade?: boolean;
+      }
     | {
         kind: "polygon";
         points: Array<[number, number]>;
@@ -226,6 +301,7 @@ interface MeshData {
         bevel?: { size: number; segments: number };
       }
     | ({ kind: "heightmap" } & HeightmapParams)
+    | VoxelMeshSource
     | ({ kind: "path" } & PathMeshSource)
     | PolyMeshSource;
   material?: string;
@@ -233,6 +309,9 @@ interface MeshData {
   receiveShadow: boolean;
   renderMode?: "auto" | "instanced" | "clustered";
   lod?: boolean;
+  /** Authoring hint that this mesh never moves — drives static draw-call
+   * batching (static-batch.ts). Read here only to tag the built mesh. */
+  static?: boolean;
 }
 
 export function polygonGeometry(source: {
@@ -265,6 +344,68 @@ interface LightData {
   importance?: number;
   /** directional + castShadow only — shadow camera ortho frustum half-width. */
   shadowSize?: number;
+  /** `light.shadow`; every field optional here because old docs predate it. */
+  shadow?: Partial<ShadowSettings>;
+}
+
+/**
+ * Fill `light.shadow` from a doc that may predate the block entirely. The
+ * defaults are the values that were hardcoded here before the schema existed,
+ * so a scene with no `shadow` block renders exactly as it did.
+ */
+function shadowSettingsOf(data: LightData): ShadowSettings {
+  const raw = data.shadow;
+  if (!raw) return DEFAULT_SHADOW_SETTINGS;
+  return {
+    enabled: raw.enabled ?? DEFAULT_SHADOW_SETTINGS.enabled,
+    mapSize: raw.mapSize ?? DEFAULT_SHADOW_SETTINGS.mapSize,
+    bias: raw.bias ?? DEFAULT_SHADOW_SETTINGS.bias,
+    normalBias: raw.normalBias ?? DEFAULT_SHADOW_SETTINGS.normalBias,
+    radius: raw.radius ?? DEFAULT_SHADOW_SETTINGS.radius,
+    cascades: raw.cascades ?? DEFAULT_SHADOW_SETTINGS.cascades,
+    cascadeSplit: raw.cascadeSplit ?? DEFAULT_SHADOW_SETTINGS.cascadeSplit,
+    far: raw.far ?? DEFAULT_SHADOW_SETTINGS.far,
+  };
+}
+
+/**
+ * Fill in the `sky` sub-blocks a doc may predate. This matters more than the
+ * usual defaulting: `FogSystem` branches on `fog.mode`, and a doc written
+ * before `mode` existed has none — without this it would fall through to the
+ * exponential/height node and a scene that had plain linear fog yesterday
+ * would not match today. The defaults here are the schema's own.
+ */
+function normalizeSky(sky: SkyData): SkyData {
+  const rawFog = sky.fog as Partial<FogSettings> | undefined;
+  const fog: FogSettings | undefined = rawFog
+    ? {
+        color: rawFog.color ?? "#101522",
+        mode: rawFog.mode ?? "linear",
+        near: rawFog.near ?? 40,
+        far: rawFog.far ?? 180,
+        density: rawFog.density ?? 0.015,
+        heightFalloff: rawFog.heightFalloff ?? 0.15,
+        baseHeight: rawFog.baseHeight ?? 0,
+      }
+    : undefined;
+  const rawVolumetric = sky.volumetric as Partial<VolumetricSettings> | undefined;
+  const volumetric: VolumetricSettings = {
+    enabled: rawVolumetric?.enabled ?? DEFAULT_VOLUMETRIC_SETTINGS.enabled,
+    intensity: rawVolumetric?.intensity ?? DEFAULT_VOLUMETRIC_SETTINGS.intensity,
+    samples: rawVolumetric?.samples ?? DEFAULT_VOLUMETRIC_SETTINGS.samples,
+    decay: rawVolumetric?.decay ?? DEFAULT_VOLUMETRIC_SETTINGS.decay,
+    density: rawVolumetric?.density ?? DEFAULT_VOLUMETRIC_SETTINGS.density,
+  };
+  const rawEnvironment = sky.environment as Partial<EnvironmentSettings> | undefined;
+  // "sky" and not "none" even when the block is absent: this is the schema
+  // default, and it is the whole fix for `metalness: 1` reading near-black.
+  const environment: EnvironmentSettings = {
+    mode: rawEnvironment?.mode ?? "sky",
+    hdri: rawEnvironment?.hdri,
+    intensity: rawEnvironment?.intensity ?? 1,
+    rotation: rawEnvironment?.rotation ?? 0,
+  };
+  return { ...sky, fog, volumetric, environment };
 }
 
 interface CameraData {
@@ -290,6 +431,12 @@ export interface BuiltScene {
    * scene rebuild. Excludes GLB-embedded materials and the shared default.
    */
   materials: Map<string, THREE.Material>;
+  /**
+   * Fog, IBL, cascades and volumetric intent for this scene. Also reachable
+   * from `sceneLighting(built.scene)` — which is how `EngineRenderer` finds it
+   * without the host having to pass it anywhere.
+   */
+  lighting: SceneLighting;
 }
 
 const defaultMaterial = new THREE.MeshStandardMaterial({
@@ -392,25 +539,140 @@ export function geometryFor(
   shape: string,
   size: [number, number, number],
   segments?: [number, number],
+  shading?: "auto" | "flat" | "smooth",
+  uv?: { mode?: "stretch" | "world"; scale?: [number, number] },
+): THREE.BufferGeometry {
+  const geometry = buildPrimitive(shape, size, segments);
+  // World UVs are generated before any flat-shading split: toNonIndexed copies
+  // the uv attribute along with the rest, and doing it here means the split
+  // (which triples the vertex count) happens once over already-correct data.
+  if (uv?.mode === "world") applyWorldUv(geometry, shape, size, uv.scale ?? [1, 1]);
+  if (shading !== "flat") return geometry;
+  // Three generates ANALYTIC normals around a ring, so an 8-sided cylinder
+  // renders as a faceted outline with a perfectly smooth gradient across it —
+  // the authored low-poly form still reads as a smooth cylinder. Un-indexing
+  // splits shared vertices so computeVertexNormals() gives each triangle its
+  // own face normal, which is what makes the flats catch different light
+  // values. Vertex count becomes 3x the triangle count, hence the schema's
+  // warning against using this on dense meshes.
+  const flat = geometry.toNonIndexed();
+  flat.computeVertexNormals();
+  geometry.dispose();
+  return flat;
+}
+
+/**
+ * Apply the size axes a round primitive's constructor cannot express.
+ *
+ * three's round generators take a RADIUS (plus a height), so they can only make
+ * shapes with a circular cross-section — the remaining `size` components have
+ * nowhere to go and used to be dropped on the floor. Scaling the finished
+ * geometry recovers them. `applyMatrix4` transforms normals through the normal
+ * matrix, so a squashed sphere still lights correctly rather than keeping the
+ * normals of the ball it was built as.
+ *
+ * `heightIsExact` marks the shapes whose constructor already consumed `y` as a
+ * real height (cylinder/cone/capsule): those only need their DEPTH corrected.
+ * A sphere consumed nothing but `x`, so it needs both.
+ */
+function ellipsoidal(
+  geometry: THREE.BufferGeometry,
+  x: number,
+  y: number,
+  z: number,
+  heightIsExact = false,
+): THREE.BufferGeometry {
+  if (!(x > 0)) return geometry;
+  const sy = heightIsExact ? 1 : y / x;
+  const sz = z / x;
+  // exact 1s are the overwhelmingly common case (a real sphere, a round
+  // column); skip the matrix entirely so nothing moves by a float epsilon
+  if (sy === 1 && sz === 1) return geometry;
+  geometry.scale(1, Number.isFinite(sy) && sy > 0 ? sy : 1, Number.isFinite(sz) && sz > 0 ? sz : 1);
+  return geometry;
+}
+
+function buildPrimitive(
+  shape: string,
+  size: [number, number, number],
+  segments?: [number, number],
 ): THREE.BufferGeometry {
   const [x, y, z] = size;
+  // `segments` used to be read by `plane` alone, which made every round
+  // primitive a fixed high-poly form: a 24-sided cylinder, a 32x16 sphere.
+  // That silently blocks a deliberately faceted low-poly art direction — there
+  // was no way to author an 8-sided column, and the tessellation is exactly
+  // the thing such a style needs to control. Each shape now reads the segment
+  // counts it actually has, DEFAULTING TO THE PREVIOUS LITERALS so existing
+  // content tessellates identically.
+  //
+  // The subtlety: `segments` is schema-DEFAULTED to [1, 1], so it is always
+  // present after validation and "absent" cannot be detected. For a flat plane
+  // or box [1, 1] is a legitimate value (one quad), but for a round shape a
+  // 1-segment ring is degenerate — so on those, anything below `min` means
+  // "not authored" and falls back to the historical literal. That keeps every
+  // existing document, which carries a literal [1, 1], tessellating exactly as
+  // it did before.
+  const seg = (i: 0 | 1, fallback: number, min = 1): number => {
+    const v = segments?.[i];
+    if (typeof v !== "number" || !Number.isFinite(v)) return fallback;
+    const n = Math.floor(v);
+    return n >= min ? n : fallback;
+  };
+  /** Radial rings need >= 3 to enclose anything. */
+  const RING = 3;
   switch (shape) {
     case "wedge":
       return wedgeGeometry(x, y, z);
     case "box":
-      return new THREE.BoxGeometry(x, y, z);
+      // Flat shape: [1, 1] is a legitimate authored value (one quad per face),
+      // so no RING floor. Depth follows width — the schema has two numbers.
+      return new THREE.BoxGeometry(x, y, z, seg(0, 1), seg(1, 1), seg(0, 1));
     case "sphere":
-      return new THREE.SphereGeometry(x / 2, 32, 16);
+      // A sphere used to take its radius from size[0] and SILENTLY DISCARD
+      // size[1] and size[2], so `[1.7, 0.55, 1.5]` — an author asking for a low
+      // dome — rendered as a 1.7m ball, three times too tall, with nothing
+      // logged. `size` is documented as [x, y, z] and now means it on every
+      // shape: the round axes are applied as a scale about the origin. Equal
+      // values reduce to exactly the old geometry, so existing content that
+      // authored a real sphere is untouched.
+      return ellipsoidal(
+        new THREE.SphereGeometry(x / 2, seg(0, 32, RING), seg(1, 16, 2)),
+        x,
+        y,
+        z,
+      );
     case "plane":
-      return new THREE.PlaneGeometry(x, z, segments?.[0] ?? 1, segments?.[1] ?? 1);
+      return new THREE.PlaneGeometry(x, z, seg(0, 1), seg(1, 1));
     case "cylinder":
-      return new THREE.CylinderGeometry(x / 2, x / 2, y, 24);
+      // [radial, height]. Radial is the style control: 6-12 gives visible
+      // flats, 24+ reads as smooth. z scales the cross-section's depth, so an
+      // oval pier is authorable; z === x is the circular case and unchanged.
+      return ellipsoidal(
+        new THREE.CylinderGeometry(x / 2, x / 2, y, seg(0, 24, RING), seg(1, 1)),
+        x,
+        y,
+        z,
+        true,
+      );
     case "capsule":
-      return new THREE.CapsuleGeometry(x / 2, Math.max(0, y - x), 8, 16);
+      return ellipsoidal(
+        new THREE.CapsuleGeometry(x / 2, Math.max(0, y - x), seg(1, 8, 2), seg(0, 16, RING)),
+        x,
+        y,
+        z,
+        true,
+      );
     case "cone":
-      return new THREE.ConeGeometry(x / 2, y, 24);
+      return ellipsoidal(
+        new THREE.ConeGeometry(x / 2, y, seg(0, 24, RING), seg(1, 1)),
+        x,
+        y,
+        z,
+        true,
+      );
     case "torus":
-      return new THREE.TorusGeometry(x / 2, y / 4, 16, 48);
+      return new THREE.TorusGeometry(x / 2, y / 4, seg(1, 16, RING), seg(0, 48, RING));
     default:
       return new THREE.BoxGeometry(x, y, z);
   }
@@ -421,60 +683,6 @@ export function geometryFor(
  * resolved via expandScene). Each entity becomes a Group; component visuals
  * hang off it, so transform updates touch only the group.
  */
-/**
- * Blends `splat.layers` by world-space height (each ascending layer overtakes
- * the previous through its own [heightStart, heightEnd] band via smoothstep,
- * exactly like terrain.ts's flatRadius falloff) plus an optional slope-driven
- * rock overlay for cliffs — so a heightmap terrain built from many tiles reads
- * as one continuous material with no per-tile hard edges, without needing any
- * authored texture or extra vertex data (purely a function of the existing
- * geometry's own position/normal).
- */
-function buildTerrainSplatMaterial(data: MaterialData): THREE.MeshStandardNodeMaterial {
-  const material = new THREE.MeshStandardNodeMaterial({
-    transparent: data.transparent || data.opacity < 1,
-    opacity: data.opacity,
-    metalness: 0,
-  });
-  const layers = data.splat?.layers ?? [];
-  if (layers.length === 0) {
-    material.colorNode = tslColor(data.color);
-    material.roughnessNode = float(data.roughness);
-    return material;
-  }
-  const height = positionWorld.y;
-  const layerColor = (layer: SplatLayerData): THREE.Node<"vec3"> | THREE.Node<"color"> => {
-    const base = tslColor(layer.color);
-    if (!layer.grassy) return base;
-    // cheap per-pixel mottling (two offset sine waves over world position) —
-    // no texture, no extra geometry — so a flat tint reads as a grass clump
-    // pattern instead of a solid color. Deliberately small-scale/subtle: this
-    // is meant to be visible up close and blend into an even tone at range.
-    const n1 = sin(add(mul(positionWorld.x, float(1.7)), mul(positionWorld.z, float(2.3))));
-    const n2 = sin(add(mul(positionWorld.x, float(-2.9)), mul(positionWorld.z, float(1.1))));
-    const tone = add(float(1), mul(add(n1, n2), float(0.06)));
-    return mul(base as unknown as THREE.Node<"vec3">, tone);
-  };
-  let colorNode: THREE.Node<"vec3"> | THREE.Node<"color"> = layerColor(layers[0]!);
-  let roughnessNode: THREE.Node<"float"> = float(layers[0]!.roughness);
-  for (let i = 1; i < layers.length; i++) {
-    const layer = layers[i]!;
-    const t = smoothstep(float(layer.heightStart), float(layer.heightEnd), height);
-    colorNode = mix(colorNode, layerColor(layer), t);
-    roughnessNode = mix(roughnessNode, float(layer.roughness), t);
-  }
-  const slope = data.splat?.slopeRock;
-  if (slope) {
-    // steepness: 0 = flat (normal straight up), 1 = vertical (normal sideways)
-    const steepness = clamp(sub(float(1), normalWorld.y), 0, 1);
-    const t = smoothstep(float(slope.start), float(slope.end), steepness);
-    colorNode = mix(colorNode, tslColor(slope.color), t);
-    roughnessNode = mix(roughnessNode, float(slope.roughness), t);
-  }
-  material.colorNode = colorNode;
-  material.roughnessNode = roughnessNode;
-  return material;
-}
 
 /**
  * Procedural water: real vertex-displaced waves (not just a color shimmer),
@@ -518,7 +726,7 @@ function buildTerrainSplatMaterial(data: MaterialData): THREE.MeshStandardNodeMa
  * own analytic partial derivative (closed-form, not numerically sampled) so
  * lighting responds to the bumps instead of the surface staying flat-shaded.
  */
-function buildWaterMaterial(data: MaterialData): THREE.MeshStandardNodeMaterial {
+function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THREE.MeshStandardNodeMaterial {
   const w = data.water ?? {
     shallowColor: "#3fa8c9",
     midColor: "#1f6f96",
@@ -533,6 +741,11 @@ function buildWaterMaterial(data: MaterialData): THREE.MeshStandardNodeMaterial 
     foamWidth: 0.5,
     edgeFadeStart: 400,
     edgeFadeEnd: 600,
+    textureScale: 24,
+    textureStrength: 0.9,
+    foamPixel: 0.7,
+    foamSteps: 3,
+    flow: [0.012, 0.008] as [number, number],
   };
   const material = new THREE.MeshStandardNodeMaterial({
     transparent: true,
@@ -575,21 +788,95 @@ function buildWaterMaterial(data: MaterialData): THREE.MeshStandardNodeMaterial 
   let base: THREE.Node<"vec3"> | THREE.Node<"color"> = mix(tslColor(w.shallowColor), tslColor(w.midColor), t1);
   base = mix(base as THREE.Node<"vec3">, tslColor(w.deepColor), t2);
 
-  // shoreline foam: a crisp band, not a long gradual fade — full foam close to
-  // shore, cutting off sharply (rather than linearly trailing off) at foamWidth
+  // set by the texture block below and read by the foam; null when this water
+  // has no surface texture, in which case the foam keeps its plain band
+  let foamBreakup: THREE.Node<"float"> | null = null;
+
+  // -- scrolling surface texture: the SURFACE, not a tint over it -----------
+  //
+  // Applied here, between the depth bands and the foam, so it becomes the
+  // water's actual colour while everything downstream — shoreline foam,
+  // shimmer, fresnel rim — still paints over it.
+  //
+  // Two samples, not one. A single scrolling tile reads as a photograph being
+  // dragged sideways, because the eye locks onto both the repeat and its
+  // direction. Sampling twice at different scales, drifting near-perpendicular
+  // at different rates, and averaging destroys both cues — the standard
+  // flow-map-free ocean trick.
+  //
+  // Coordinates are WORLD XZ, not UV: this surface is a 7 km plane whose UVs
+  // stretch one tile across the whole ocean, and world space also makes tiling
+  // independent of how the mesh happens to be unwrapped or scaled.
+  if (waterTextureId(data)) {
+    const map = new THREE.Texture();
+    map.wrapS = THREE.RepeatWrapping;
+    map.wrapT = THREE.RepeatWrapping;
+    const scale = float(1 / Math.max(0.01, w.textureScale ?? 24));
+    const flow = w.flow ?? [0.012, 0.008];
+    const world = vec2(positionWorld.x, positionWorld.z);
+    const uvA = add(mul(world, scale), vec2(mul(time, float(flow[0])), mul(time, float(flow[1]))));
+    const uvB = add(
+      mul(world, mul(scale, float(1.59))),
+      vec2(mul(time, float(-flow[1] * 1.4)), mul(time, float(flow[0] * 1.4))),
+    );
+    const detail = tslTexture(map, uvA).xyz.add(tslTexture(map, uvB).xyz).mul(float(0.5));
+    // Depth reads as a BRIGHTNESS ramp only — no hue shift.
+    //
+    // Two earlier attempts got this wrong in different ways. Multiplying the
+    // tile by the near-black `deepColor` crushed the surface to nothing past
+    // the shelf. Mixing toward a scaled-up `deepColor` instead kept it visible
+    // but pushed deep water blue against a teal tile, and a hue that disagrees
+    // with the texture reads as "off" even when the brightness is fine. So the
+    // texture's own colour is left alone and only its level moves: lifted in
+    // the shallows, very slightly down in deep water.
+    const litByDepth = mul(detail, mix(float(1.35), float(1.05), t2));
+    base = mix(base as THREE.Node<"vec3">, litByDepth, float(w.textureStrength ?? 0.35));
+    // A SNAPPED sample for the foam edge. Sampling the same continuous tile
+    // gives a smoothly wandering border — organic, but not pixelated. Snapping
+    // the lookup to a world grid makes the breakup constant across each cell,
+    // so the band steps in squares at the same scale as the terrain's texels.
+    const pixel = Math.max(0, w.foamPixel ?? 0.7);
+    const foamWorld = pixel > 0
+      ? mul(floor(div(world, float(pixel))), float(pixel))
+      : world;
+    const foamUv = add(mul(foamWorld, mul(scale, float(2.3))), vec2(mul(time, float(flow[0] * 0.6)), mul(time, float(flow[1] * 0.6))));
+    const foamSample = tslTexture(map, foamUv);
+    foamBreakup = foamSample.x.add(foamSample.y).add(foamSample.z).mul(float(1 / 3));
+    void loadWaterTexture(map, data, options);
+  }
+
+  // Shoreline foam. Two things stop it reading as a drawn contour line:
+  //
+  // 1. The band's distance is PERTURBED by the surface texture's own moving
+  //    luminance, so the edge wanders with the water instead of tracing a
+  //    clean offset of the shoreline.
+  // 2. The result is QUANTISED into a few steps. A smoothstep gives a soft
+  //    airbrushed gradient, which is exactly wrong next to nearest-filtered
+  //    pixel-art terrain; stepping it produces chunky bands that sit with the
+  //    rest of the world's resolution.
   const foamWidth = float(Math.max(w.foamWidth, 0.001));
-  const foamEdge = sub(float(1), smoothstep(mul(foamWidth, float(0.7)), foamWidth, waterDepth));
+  const foamJitter = foamBreakup
+    ? mul(sub(foamBreakup, float(0.42)), mul(foamWidth, float(2.6)))
+    : float(0);
+  const foamDepth = add(waterDepth, foamJitter);
+  const foamRaw = sub(float(1), smoothstep(mul(foamWidth, float(0.15)), foamWidth, foamDepth));
+  const foamSteps = float(Math.max(1, Math.round(w.foamSteps ?? 3)));
+  // top step deliberately short of 1: solid white froth reads as a painted
+  // ring, and the shore should still show water through the foam
+  // `foamSteps` levels, top step short of solid white so water still shows
+  // through the froth rather than a painted ring
+  const foamEdge = saturate(mul(floor(mul(foamRaw, foamSteps)), float(0.8).div(max(sub(foamSteps, float(1)), float(1)))));
   base = mix(base as THREE.Node<"vec3">, tslColor(w.foamColor), foamEdge);
 
   // gentle shimmer driven by the SAME wave phases, so the color motion reads
   // as coming from the same waves that are actually moving the geometry
   const ripple = mul(add(sin(phaseA), sin(phaseB)), float(0.5)); // [-1, 1]
   const shimmer = add(mul(ripple, float(0.05)), float(1)); // ~[0.95, 1.05], bounded
-  const shaded = mul(base as THREE.Node<"vec3">, shimmer);
+  const shaded: THREE.Node<"vec3"> = mul(base as THREE.Node<"vec3">, shimmer);
 
   const viewDir = normalize(sub(cameraPosition, positionWorld));
   const fresnel = pow(saturate(sub(float(1), saturate(dot(normalWorld, viewDir)))), float(w.fresnelPower));
-  material.colorNode = mix(shaded, tslColor(w.rimColor), fresnel);
+  material.colorNode = mix(shaded as THREE.Node<"vec3">, tslColor(w.rimColor), fresnel);
 
   // -- edge fade: opacity to 0 well before the mesh's own physical boundary --
   const camDist = length(sub(cameraPosition, positionWorld));
@@ -599,11 +886,67 @@ function buildWaterMaterial(data: MaterialData): THREE.MeshStandardNodeMaterial 
   return material;
 }
 
-export function makeMaterial(data: MaterialData): THREE.Material {
+
+/** The water surface texture's asset id, if this material asks for one. */
+function waterTextureId(data: MaterialData): string | undefined {
+  return data.water?.texture;
+}
+
+/**
+ * Fill the water's surface texture in place once it arrives.
+ *
+ * Built against an empty `THREE.Texture` and populated on load rather than
+ * rewiring `colorNode` afterwards: a node material recompiles its whole
+ * pipeline on any graph change, and the ocean is one of the largest meshes in
+ * the scene to recompile mid-frame.
+ */
+async function loadWaterTexture(
+  map: THREE.Texture,
+  data: MaterialData,
+  options: TextureResolver | undefined,
+): Promise<void> {
+  const assetId = waterTextureId(data);
+  if (!assetId) return;
+  const url = options?.resolveTexture?.(assetId);
+  if (!url) {
+    console.warn(`[render] no texture asset "${assetId}" for the water surface — it renders untextured`);
+    return;
+  }
+  try {
+    const loaded = await new THREE.TextureLoader().loadAsync(url);
+    map.image = loaded.image;
+    map.colorSpace = THREE.SRGBColorSpace;
+    map.wrapS = THREE.RepeatWrapping;
+    map.wrapT = THREE.RepeatWrapping;
+    // linear + mipmaps here, unlike the pixel-art terrain: this is a
+    // photographic tile scrolling continuously, and nearest would crawl
+    map.minFilter = THREE.LinearMipmapLinearFilter;
+    map.magFilter = THREE.LinearFilter;
+    map.generateMipmaps = true;
+    map.needsUpdate = true;
+    loaded.dispose();
+  } catch (error) {
+    console.warn(`[render] water texture failed to load: ${url}`, error);
+  }
+}
+
+/**
+ * Build the THREE material for a material asset. Textures are NOT attached
+ * here — `materialForId` drives `applyMaterialMaps` for that, because texture
+ * loading is async and needs the BuildOptions resolvers. Callers that build a
+ * material directly (the thumbnail previewer) get a correct untextured
+ * material and may attach their own maps.
+ *
+ * `standard`/`toon` are node materials rather than the classic classes so the
+ * map pipeline has somewhere to hang its node overrides — three converts the
+ * classic ones to node materials at draw time anyway, so this only removes a
+ * per-build conversion, it doesn't add a layer.
+ */
+export function makeMaterial(data: MaterialData, options?: TextureResolver): THREE.Material {
   const common = {
     color: new THREE.Color(data.color),
     opacity: data.opacity,
-    transparent: data.transparent || data.opacity < 1,
+    transparent: resolveTransparency(data).transparent,
   };
   switch (data.shader) {
     case "unlit": {
@@ -616,97 +959,137 @@ export function makeMaterial(data: MaterialData): THREE.Material {
       // drive bloom — e.g. a neon sign or energy shield that glows without
       // ever being lit.
       const material = new THREE.MeshBasicNodeMaterial(common);
+      const uniforms = makeMaterialUniforms(material, data);
       // @types/three only declares `emissiveNode` on MeshStandardNodeMaterialNodeProperties,
       // but NodeMaterial's own setupOutgoingLight() (materials/nodes/NodeMaterial.js) reads
       // `this.emissiveNode` generically off any subclass — a type-decl gap, not a runtime one.
-      (material as THREE.MeshBasicNodeMaterial & { emissiveNode: THREE.Node | null }).emissiveNode = tslColor(
-        data.emissive,
-      ).mul(float(data.emissiveIntensity));
+      // Driven from uniforms so a live emissive tweak stays a uniform write.
+      (material as THREE.MeshBasicNodeMaterial & { emissiveNode: THREE.Node | null }).emissiveNode = (
+        uniforms.emissive as unknown as THREE.Node<"color">
+      ).mul(uniforms.emissiveIntensity as unknown as THREE.Node<"float">) as unknown as THREE.Node;
+      applyMaterialCommon(material, data);
       return material;
     }
-    case "toon":
-      return new THREE.MeshToonMaterial({
+    case "toon": {
+      const material = new THREE.MeshToonNodeMaterial({
         ...common,
         emissive: new THREE.Color(data.emissive),
         emissiveIntensity: data.emissiveIntensity,
       });
+      applyMaterialCommon(material, data);
+      return material;
+    }
     case "wireframe":
       return new THREE.MeshBasicMaterial({ ...common, wireframe: true });
     case "terrain-splat":
-      return buildTerrainSplatMaterial(data);
+      // the only shader that resolves its OWN textures (one triplanar set per
+      // splat layer), so it needs the resolver the generic map pass gets
+      return buildTerrainSplatMaterial(data, options);
     case "water":
-      return buildWaterMaterial(data);
+      return buildWaterMaterial(data, options);
     case "standard":
-    default:
-      return new THREE.MeshStandardMaterial({
+    default: {
+      const material = new THREE.MeshStandardNodeMaterial({
         ...common,
         roughness: data.roughness,
         metalness: data.metalness,
         emissive: new THREE.Color(data.emissive),
         emissiveIntensity: data.emissiveIntensity,
       });
+      applyMaterialCommon(material, data);
+      return material;
+    }
   }
 }
 
 /**
- * Update an existing material instance to match new material data, in place —
- * for a live material-file edit that shouldn't tear down the whole scene.
- * Returns false (patch declined; the caller should fall back to a rebuild) when
- * the change can't be expressed as a plain property tweak: a different shader
- * (a different material class), or anything involving a texture map — attaching
- * or detaching a `map`/`emissiveMap` is left to the rebuild path, which owns
- * async texture loading and repeat wiring. Only color/opacity/PBR scalars on
- * standard/unlit/toon/wireframe are patched; terrain-splat and water are
- * procedural and always decline.
+ * Update an existing material instance in place to match new material data —
+ * the cheap tier for a live material-file edit that shouldn't tear down the
+ * whole scene. Returns false to decline, meaning the caller should take the
+ * full rebuild.
+ *
+ * The decision boundary, and why it sits where it does:
+ *
+ * | change                                                    | result |
+ * |-----------------------------------------------------------|--------|
+ * | scalars — color/opacity/emissive/roughness/metalness,      | PATCH  |
+ * | normalScale/detailStrength/aoIntensity/envMapIntensity,     |        |
+ * | repeat/uvOffset/detailRepeat/triplanarScale                 |        |
+ * | `side`                                                      | PATCH  |
+ * | any map asset id added, removed or changed                  | rebuild|
+ * | `triplanar` toggled                                         | rebuild|
+ * | `vertexColors` / `alphaTest` crossing zero                  | rebuild|
+ * | shader changed (different material class)                   | rebuild|
+ * | terrain-splat / water (procedural, colours baked as consts) | rebuild|
+ *
+ * The important line is the FIRST row: it patches even on a material that
+ * already has maps. The old rule ("anything involving a texture map declines")
+ * was affordable when a material had at most `map` + `emissiveMap`; with the
+ * full PBR set nearly every real material carries maps, so that rule would
+ * have sent essentially every material tweak through a whole-scene rebuild
+ * and blown the <1s hot-reload budget. It works because every scalar in the
+ * node graph is a uniform (see MaterialUniforms) — patching them recompiles
+ * nothing at all, which is a tier cheaper than the old classic-material patch
+ * that set `needsUpdate` on every edit.
+ *
+ * Anything in the rebuild rows genuinely changes the shape of the compiled
+ * graph (or needs an async texture load), which `materialMapKey` captures in
+ * one comparable string.
  */
 export function patchMaterial(existing: THREE.Material, data: MaterialData): boolean {
   const shader = data.shader ?? "standard";
-  const hasMap = (m: THREE.Material) => {
-    const mm = m as { map?: unknown; emissiveMap?: unknown };
-    return !!mm.map || !!mm.emissiveMap;
-  };
-  if (data.map || data.emissiveMap || hasMap(existing)) return false;
+  // procedural shaders bake their colours/bands into the node graph as
+  // constants — there are no uniforms to write, so they always decline
+  if (shader === "terrain-splat" || shader === "water") return false;
 
-  const setCommon = (m: THREE.Material & { color?: THREE.Color }) => {
-    m.color?.set(data.color);
-    m.opacity = data.opacity;
-    m.transparent = data.transparent || data.opacity < 1;
-    m.needsUpdate = true;
-  };
-
-  switch (shader) {
-    case "standard": {
-      if (!(existing instanceof THREE.MeshStandardMaterial)) return false;
-      setCommon(existing);
-      existing.roughness = data.roughness;
-      existing.metalness = data.metalness;
-      existing.emissive.set(data.emissive);
-      existing.emissiveIntensity = data.emissiveIntensity;
-      return true;
-    }
-    case "toon": {
-      if (!(existing instanceof THREE.MeshToonMaterial)) return false;
-      setCommon(existing);
-      existing.emissive.set(data.emissive);
-      existing.emissiveIntensity = data.emissiveIntensity;
-      return true;
-    }
-    case "unlit": {
-      if (!(existing instanceof THREE.MeshBasicNodeMaterial)) return false;
-      setCommon(existing);
-      // mirror makeMaterial: unlit drives bloom through an explicit emissiveNode
-      (existing as THREE.MeshBasicNodeMaterial & { emissiveNode: THREE.Node | null }).emissiveNode =
-        tslColor(data.emissive).mul(float(data.emissiveIntensity));
-      return true;
-    }
-    case "wireframe": {
-      if (!(existing instanceof THREE.MeshBasicMaterial)) return false;
-      setCommon(existing);
-      return true;
-    }
-    default:
-      return false;
+  const uniforms = materialUniformsOf(existing);
+  const builtKey = materialMapKeyOf(existing);
+  // A material this module didn't build (or built before a structural change)
+  // has nothing to patch through; wireframe has no uniforms by design.
+  if (shader !== "wireframe") {
+    if (!uniforms || builtKey === undefined) return false;
+    if (builtKey !== materialMapKey(data)) return false;
   }
+
+  const classOk =
+    shader === "standard"
+      ? (existing as { isMeshStandardNodeMaterial?: boolean }).isMeshStandardNodeMaterial === true
+      : shader === "toon"
+        ? (existing as { isMeshToonNodeMaterial?: boolean }).isMeshToonNodeMaterial === true
+        : shader === "unlit"
+          ? existing instanceof THREE.MeshBasicNodeMaterial
+          : existing instanceof THREE.MeshBasicMaterial;
+  if (!classOk) return false;
+
+  const { transparent } = resolveTransparency(data);
+  const target = existing as THREE.Material & {
+    color?: THREE.Color;
+    emissive?: THREE.Color;
+    emissiveIntensity?: number;
+    roughness?: number;
+    metalness?: number;
+    envMapIntensity?: number;
+  };
+  target.color?.set(data.color);
+  target.opacity = data.opacity;
+  target.side = data.side === "double" ? THREE.DoubleSide : data.side === "back" ? THREE.BackSide : THREE.FrontSide;
+  if (target.emissive) target.emissive.set(data.emissive);
+  if ("emissiveIntensity" in target) target.emissiveIntensity = data.emissiveIntensity;
+  if (shader === "standard") {
+    target.roughness = data.roughness;
+    target.metalness = data.metalness;
+    target.envMapIntensity = data.envMapIntensity ?? 1;
+  }
+  if (uniforms) writeMaterialUniforms(uniforms, data);
+
+  // `transparent` moves the mesh between the opaque and transparent render
+  // queues, which three only re-evaluates on a material version bump — the one
+  // property here that still costs a recompile, and only when it actually flips
+  if (existing.transparent !== transparent) {
+    existing.transparent = transparent;
+    existing.needsUpdate = true;
+  }
+  return true;
 }
 
 /**
@@ -721,34 +1104,46 @@ export function materialForId(
   cache: Map<string, THREE.Material>,
 ): THREE.Material {
   if (!id) return defaultMaterial;
-  const cached = cache.get(id);
-  if (cached) return cached;
   const data = options.resolveMaterial?.(id) as MaterialData | undefined;
+  const cached = cache.get(id);
+  // The build cache is module-level and outlives a rebuild (it's what stops
+  // every newly-streamed chunk recompiling pipelines other chunks already
+  // compiled — see sharedAssetMaterialCache). That means a rebuild triggered
+  // by a material EDIT would otherwise hand back the pre-edit material and the
+  // edit would silently never appear. So the cache entry is keyed on the
+  // resolved asset data as well: identity first (the AssetLibrary hands out
+  // the same object until the asset is replaced, so this is the O(1) common
+  // case), falling back to a structural compare for hosts that rebuild the
+  // object each call.
+  if (cached && data && materialsMatch(materialSourceOf(cached), data)) return cached;
+  if (cached && !data) return cached;
   if (!data) {
     console.warn(`[render] no material asset "${id}" — using default`);
     return defaultMaterial;
   }
-  const material = makeMaterial(data);
-  const maxAnisotropy = options.resolveMaxAnisotropy?.();
-  const mapUrl = data.map ? options.resolveTexture?.(data.map) : undefined;
-  if (mapUrl && data.shader !== "wireframe") {
-    applyTextureWhenReady(material, "map", mapUrl, data.repeat ?? [1, 1], maxAnisotropy);
-  }
-  // emissiveMap only means anything on shaders with a lighting model to mask
-  // against — standard/toon. unlit already renders its whole surface as if
-  // emissive; terrain-splat/water/wireframe drive color procedurally.
-  const emissiveMapUrl = data.emissiveMap ? options.resolveTexture?.(data.emissiveMap) : undefined;
-  if (emissiveMapUrl && (data.shader === "standard" || data.shader === "toon")) {
-    applyTextureWhenReady(
-      material as THREE.Material & { emissiveMap?: THREE.Texture | null },
-      "emissiveMap",
-      emissiveMapUrl,
-      data.repeat ?? [1, 1],
-      maxAnisotropy,
-    );
-  }
+  const material = makeMaterial(data, options);
+  setMaterialSource(material, data);
+  // Every map (color, emissive, normal, roughness/metalness/AO or packed ORM,
+  // detail normal, alpha) resolves and attaches here, in one pass — see
+  // material-maps.ts for the colour-space, sharing and UV-transform rules.
+  applyMaterialMaps(material, data, options);
   cache.set(id, material);
   return material;
+}
+
+/**
+ * Cheap equality for a resolved material asset: reference identity, then a
+ * structural compare. Only reached on a cache hit, so the slow branch runs at
+ * most once per material per rebuild.
+ */
+function materialsMatch(previous: unknown, next: unknown): boolean {
+  if (previous === next) return true;
+  if (previous === undefined) return false;
+  try {
+    return JSON.stringify(previous) === JSON.stringify(next);
+  } catch {
+    return false;
+  }
 }
 
 function resolveMaterialFor(
@@ -784,6 +1179,12 @@ interface PendingInstance {
   id: string;
   group: THREE.Object3D;
   node?: string;
+  /** Leaf-card normal reshaping for this model; see foliage-normals.ts. */
+  foliageNormals?: number;
+  foliageUp?: number;
+  brightness?: number;
+  wind?: FoliageWindOptions;
+  cameraFade?: boolean;
   castShadow: boolean;
   receiveShadow: boolean;
   lod: boolean;
@@ -815,6 +1216,20 @@ interface PopulateContext {
    * submesh (see `flushInstancedPending`), rather than one full mesh each.
    */
   instancedPending: Map<string, PendingInstance[]>;
+  /**
+   * `decal` entities queue here instead of projecting on the spot: fitted
+   * decal geometry reads OTHER entities' world matrices, which only exist
+   * once the whole build's parenting pass has run (see flushDecals).
+   */
+  decalPending: DecalRequest[];
+  /** null on a single-entity reconcile of a scene built before this existed. */
+  lighting: SceneLighting | null;
+  /**
+   * The winning `sky` payload, stashed rather than applied on the spot: IBL has
+   * to reach materials that later entities in the same build create, so the
+   * environment is pushed once, after the whole build.
+   */
+  sky?: SkyData | null;
 }
 
 /**
@@ -903,13 +1318,20 @@ function populateEntityGroup(
     const meshData = entity.components["mesh"] as MeshData | undefined;
     if (meshData && meshData.source.kind === "primitive") {
       const mesh = new THREE.Mesh(
-        geometryFor(meshData.source.shape, meshData.source.size, meshData.source.segments),
+        geometryFor(
+          meshData.source.shape,
+          meshData.source.size,
+          meshData.source.segments,
+          meshData.source.shading,
+          meshData.source.uv,
+        ),
         resolveMaterialFor(meshData, options, materialCache),
       );
       if (meshData.source.shape === "plane") mesh.rotation.x = -Math.PI / 2;
       mesh.castShadow = meshData.castShadow;
       mesh.receiveShadow = meshData.receiveShadow;
       mesh.userData["entityId"] = id;
+      mesh.userData[STATIC_BATCH_FLAG] = meshData.static === true;
       group.add(mesh);
     }
     if (meshData && meshData.source.kind === "polygon") {
@@ -920,6 +1342,7 @@ function populateEntityGroup(
       mesh.castShadow = meshData.castShadow;
       mesh.receiveShadow = meshData.receiveShadow;
       mesh.userData["entityId"] = id;
+      mesh.userData[STATIC_BATCH_FLAG] = meshData.static === true;
       group.add(mesh);
     }
 
@@ -943,6 +1366,7 @@ function populateEntityGroup(
       mesh.castShadow = meshData.castShadow;
       mesh.receiveShadow = meshData.receiveShadow;
       mesh.userData["entityId"] = id;
+      mesh.userData[STATIC_BATCH_FLAG] = meshData.static === true;
       mesh.userData["polyMesh"] = true;
       group.add(mesh);
     }
@@ -955,6 +1379,7 @@ function populateEntityGroup(
       mesh.castShadow = meshData.castShadow;
       mesh.receiveShadow = meshData.receiveShadow;
       mesh.userData["entityId"] = id;
+      mesh.userData[STATIC_BATCH_FLAG] = meshData.static === true;
       // marks this mesh for ctx.setPathPoints (main.ts) — a live-simulated
       // rope/chain rebuilds its geometry every tick from new control points,
       // reusing every OTHER field (crossSection/width/radius/...) from the
@@ -962,6 +1387,29 @@ function populateEntityGroup(
       mesh.userData["pathMesh"] = true;
       mesh.userData["pathSource"] = meshData.source;
       group.add(mesh);
+    }
+
+    if (meshData && meshData.source.kind === "voxel") {
+      // the SAME mesh physics cooks and placement snaps against (core/voxel) —
+      // one cached cell, three consumers, so they cannot drift
+      const geometry = voxelGeometry(meshData.source);
+      if (geometry) {
+        const mesh = new THREE.Mesh(geometry, resolveMaterialFor(meshData, options, materialCache));
+        mesh.castShadow = meshData.castShadow;
+        mesh.receiveShadow = meshData.receiveShadow;
+        mesh.userData["entityId"] = id;
+        mesh.userData[STATIC_BATCH_FLAG] = meshData.static === true;
+        mesh.userData["voxelSource"] = meshData.source;
+        // No camera-collision proxy here, unlike the heightmap branch below.
+        // `refreshCameraColliders` only walks the BASE scene document's static
+        // entities, and streamed chunk content is never in that document — so
+        // a proxy built here would be meshed, uploaded and kept for a consumer
+        // that cannot see it. It cost a second marching-cubes pass and a second
+        // geometry for every cell in the world, which is also what was
+        // thrashing the cell cache. If chunk terrain is ever wired into camera
+        // collision, build the proxy there, on demand, for the few cells in range.
+        group.add(mesh);
+      }
     }
 
     if (meshData && meshData.source.kind === "heightmap") {
@@ -975,6 +1423,7 @@ function populateEntityGroup(
       mesh.castShadow = meshData.castShadow;
       mesh.receiveShadow = meshData.receiveShadow;
       mesh.userData["entityId"] = id;
+      mesh.userData[STATIC_BATCH_FLAG] = meshData.static === true;
       // main.ts's refreshCameraColliders() raycasts static geometry every
       // frame for camera dolly-collision (no acceleration structure) — doing
       // that against full render resolution (up to 256x256) is expensive even
@@ -1004,6 +1453,11 @@ function populateEntityGroup(
         id,
         group,
         node: meshData.source.node,
+        foliageNormals: meshData.source.foliageNormals,
+        foliageUp: meshData.source.foliageUp,
+        brightness: meshData.source.brightness,
+        wind: meshData.source.wind,
+        cameraFade: meshData.source.cameraFade,
         castShadow: meshData.castShadow,
         receiveShadow: meshData.receiveShadow,
         lod: meshData.lod ?? true,
@@ -1051,7 +1505,25 @@ function populateEntityGroup(
               }
               node.userData["entityId"] = id;
             });
+            // leaf cards before anything downstream sees the geometry: the
+            // LOD/impostor bakes read normals, so this has to land first
+            const foliage = meshData.source.kind === "asset" ? meshData.source.foliageNormals : undefined;
+            const foliageUp = meshData.source.kind === "asset" ? meshData.source.foliageUp : undefined;
+            if (foliage !== undefined) applyFoliageNormals(instance, { blend: foliage, up: foliageUp });
+            const lift = meshData.source.kind === "asset" ? meshData.source.brightness : undefined;
+            if (lift !== undefined) applyModelBrightness(instance, lift);
+            const wind = meshData.source.kind === "asset" ? meshData.source.wind : undefined;
+            if (wind) applyFoliageWind(instance, wind);
+            if (meshData.source.kind === "asset" && meshData.source.cameraFade) applyFoliageFade(instance);
             if (clustered) clusterizeModel(instance, assetId, nodeName, id, options);
+            // A kit-exported prop arrives as dozens of tiny same-material
+            // submeshes, and each one costs a draw call in the main pass and in
+            // every shadow cascade. Only safe when nothing addresses the nodes
+            // by name afterwards: an animation clip does, and the cluster path
+            // has already built its own representation from them.
+            if (!clustered && (gltf.animations?.length ?? 0) === 0) {
+              mergeModelSubmeshes(instance);
+            }
             group.add(instance);
             options.onModelLoaded?.(id, instance, gltf.animations ?? []);
           },
@@ -1082,25 +1554,12 @@ function populateEntityGroup(
           const dir = new THREE.DirectionalLight(color, lightData.intensity);
           dir.target.position.set(0, -1, 0);
           group.add(dir.target);
-          if (lightData.castShadow) {
-            // default frustum is ~10 units — useless for a real scene.
-            // 1024 (not 2048): confirmed fill-rate/fragment-bound via real
-            // frame-timing data, and a large shadowSize already spreads 2048²
-            // thin (e.g. shadowSize 300 -> ~3.4 texels/world-unit, already
-            // soft) — halving resolution cuts shadow-pass fragment cost 4x
-            // for a quality loss that's marginal next to that existing blur.
-            dir.shadow.mapSize.set(1024, 1024);
-            const cam = dir.shadow.camera;
-            const size = lightData.shadowSize ?? 40;
-            cam.left = -size;
-            cam.right = size;
-            cam.top = size;
-            cam.bottom = -size;
-            cam.near = 0.5;
-            cam.far = Math.max(120, size * 3);
-            dir.shadow.bias = -0.0004;
-            dir.shadow.normalBias = 0.02;
-          }
+          // The single-map defaults (1024², ±shadowSize ortho, near 0.5,
+          // far max(120, size*3), bias -0.0004, normalBias 0.02) now live in
+          // DEFAULT_SHADOW_SETTINGS + shadowFarPlane, and `cascades: 1` takes
+          // exactly that path — so a scene with no `shadow` block is unchanged.
+          // 1024 (not 2048) is still deliberate: confirmed fill-rate-bound via
+          // real frame timing, and cost scales with the SQUARE of it.
           light = dir;
           break;
         }
@@ -1118,7 +1577,13 @@ function populateEntityGroup(
         }
       }
       if (light) {
-        light.castShadow = lightData.castShadow;
+        // Cascades are directional-only; SceneLighting owns that branch. The
+        // single-map defaults reproduce what was hardcoded here before the
+        // `light.shadow` schema existed, so an unchanged scene is unchanged.
+        const shadow = shadowSettingsOf(lightData);
+        const shadowSize = lightData.shadowSize ?? 40;
+        if (ctx.lighting) ctx.lighting.registerLight(light, lightData.castShadow, shadow, shadowSize);
+        else applyShadowSettings(light, lightData.castShadow, shadow, shadowSize);
         light.userData["runtimeEnabled"] = true;
         light.userData["lightImportance"] = lightData.importance ?? 1;
         group.add(light);
@@ -1126,17 +1591,7 @@ function populateEntityGroup(
       }
     }
 
-    const skyData = entity.components["sky"] as
-      | {
-          top: string;
-          bottom: string;
-          texture?: string;
-          cubemap?: { px: string; nx: string; py: string; ny: string; pz: string; nz: string };
-          light: number;
-          fog?: { color: string; near: number; far: number };
-          sun?: { direction: [number, number, number]; color: string; size: number; intensity: number };
-        }
-      | undefined;
+    const skyData = entity.components["sky"] as SkyData | undefined;
     if (skyData && scene && !scene.background) {
       const cubemapUrls = skyData.cubemap
         ? (["px", "nx", "py", "ny", "pz", "nz"] as const).map((face) =>
@@ -1171,9 +1626,10 @@ function populateEntityGroup(
         group.add(buildSkyDome(skyData.top, skyData.bottom, skyData.sun));
         scene.background = new THREE.Color(skyData.bottom);
       }
-      if (skyData.fog) {
-        scene.fog = new THREE.Fog(new THREE.Color(skyData.fog.color), skyData.fog.near, skyData.fog.far);
-      }
+      // Fog, IBL and volumetric intent are all deferred to SceneLighting, which
+      // buildScene applies once the whole scene exists — IBL has to reach
+      // materials built by entities that come after this one.
+      ctx.sky = normalizeSky(skyData);
       if (skyData.light > 0) {
         group.add(new THREE.HemisphereLight(new THREE.Color(skyData.top), new THREE.Color(skyData.bottom), skyData.light));
       }
@@ -1187,6 +1643,9 @@ function populateEntityGroup(
 
     const grassData = entity.components["grass"] as GrassData | undefined;
     if (grassData) options.onGrass?.(id, group, grassData);
+
+    const decalData = entity.components["decal"] as DecalData | undefined;
+    if (decalData) ctx.decalPending.push({ id, group, data: decalData });
 
     const cameraData = entity.components["camera"] as CameraData | undefined;
     if (cameraData) {
@@ -1280,6 +1739,22 @@ function flushInstancedPending(pending: Map<string, PendingInstance[]>, options:
     // registered without its mid tier and then patched later
     Promise.all([loadGltf(url), simplifierReady()]).then(
       ([gltf]) => {
+        // Leaf normals FIRST, on the shared cached scene, before anything
+        // clones or derives from it — the mid-tier decimation and the impostor
+        // bake both read normals, and both are cached by (assetId, node), so a
+        // batch built from the authored normals would pin the bad ones for the
+        // whole session. Foliage normals are a property of the MODEL, so any
+        // entry that asks for them settles it for the asset.
+        const asked = entries.find((e) => e.foliageNormals !== undefined);
+        if (asked) applyFoliageNormals(gltf.scene, { blend: asked.foliageNormals, up: asked.foliageUp });
+        const lift = entries.find((e) => e.brightness !== undefined)?.brightness;
+        if (lift !== undefined) applyModelBrightness(gltf.scene, lift);
+        // Wind and camera-fade both swap the material for a node material, so
+        // they must land BEFORE instanceGltfInto clones and caches it — a
+        // clone taken first would pin the plain material for the session.
+        const wind = entries.find((e) => e.wind !== undefined)?.wind;
+        if (wind) applyFoliageWind(gltf.scene, wind);
+        if (entries.some((e) => e.cameraFade)) applyFoliageFade(gltf.scene);
         const byNode = new Map<string | undefined, PendingInstance[]>();
         for (const entry of entries) {
           const bucket = byNode.get(entry.node);
@@ -1354,7 +1829,7 @@ export function cachedInstancedMaterial(
 ): THREE.Material | THREE.Material[] {
   const cached = instancedMaterialCache.get(cacheKey);
   if (cached) return cached;
-  const cloned = Array.isArray(source) ? source.map((m) => m.clone()) : source.clone();
+  const cloned = Array.isArray(source) ? source.map(cloneMaterial) : cloneMaterial(source);
   instancedMaterialCache.set(cacheKey, cloned);
   return cloned;
 }
@@ -1739,6 +2214,17 @@ export function buildScene(doc: SceneDoc, options: BuildOptions = {}): BuiltScen
   const cameras = new Map<string, THREE.PerspectiveCamera>();
   const materialCache = sharedAssetMaterialCache;
   const instancedPending = new Map<string, PendingInstance[]>();
+  const decalPending: DecalRequest[] = [];
+  const lighting = new SceneLighting(scene, { resolveTexture: options.resolveTexture });
+  const populateCtx: PopulateContext = {
+    options,
+    materialCache,
+    scene,
+    instancedPending,
+    decalPending,
+    lighting,
+    sky: null,
+  };
   let activeCamera: THREE.PerspectiveCamera | null = null;
 
   for (const [id, entity] of Object.entries(doc.entities)) {
@@ -1747,7 +2233,7 @@ export function buildScene(doc: SceneDoc, options: BuildOptions = {}): BuiltScen
     group.userData["entityId"] = id;
     applyEntityTransform(group, entity);
 
-    const camera = populateEntityGroup(group, id, entity, { options, materialCache, scene, instancedPending });
+    const camera = populateEntityGroup(group, id, entity, populateCtx);
     if (camera) {
       cameras.set(id, camera);
       const cameraData = entity.components["camera"] as CameraData | undefined;
@@ -1767,7 +2253,15 @@ export function buildScene(doc: SceneDoc, options: BuildOptions = {}): BuiltScen
   // every entity is placed now, so instanced batches can read stable matrixWorlds
   flushInstancedPending(instancedPending, options);
 
-  return { scene, objects, activeCamera, cameras, materials: materialCache };
+  // decals likewise need every receiver's real world matrix before projecting
+  flushDecals(scene, decalPending, options);
+
+  // Applied last, and applied even when there is NO sky: the material-side IBL
+  // seam is module-global (materials are shared across builds), so a scene
+  // without a sky has to actively clear it or it inherits the previous scene's.
+  lighting.applySky(populateCtx.sky ?? null);
+
+  return { scene, objects, activeCamera, cameras, materials: materialCache, lighting };
 }
 
 /**
@@ -1790,11 +2284,25 @@ export function rebuildEntityVisuals(
     // a child whose entityId maps back to itself IS an entity group — keep it;
     // everything else (meshes, lights + targets, model roots, debug viz) goes
     if (typeof childEntity === "string" && built.objects.get(childEntity) === child) continue;
+    // A light dropped without releasing leaves its CSMShadowNode (and its
+    // shadow-pass cost) in the system, refitting a light no longer in scene.
+    if ((child as THREE.Light).isLight === true) built.lighting.releaseLight(child as THREE.Light);
     group.remove(child);
   }
   applyEntityTransform(group, entity);
   const instancedPending = new Map<string, PendingInstance[]>();
-  populateEntityGroup(group, id, entity, { options, materialCache, scene: null, instancedPending });
+  const decalPending: DecalRequest[] = [];
+  populateEntityGroup(group, id, entity, {
+    options,
+    materialCache,
+    scene: null,
+    instancedPending,
+    decalPending,
+    lighting: built.lighting,
+  });
   // a single entity's own group is already fully placed — flush immediately
   flushInstancedPending(instancedPending, options);
+  // rebuild this entity's own decal, and re-fit neighbouring decals over its
+  // changed geometry (see decals.ts for the re-projection contract)
+  syncEntityDecals(built.scene, id, group, decalPending, options);
 }

@@ -6,6 +6,7 @@ import {
   type BuildOptions,
   type BuiltScene,
 } from "./scene-builder.js";
+import { reprojectDecalsAround } from "./decals.js";
 
 /**
  * Incremental scene reconciliation: fold a batch's changed entities into an
@@ -64,6 +65,11 @@ function componentAction(
       return "visuals";
     }
   }
+  // A decal's fitted geometry is projected against world space, so a pure
+  // move must re-project — only the visuals path does that.
+  if (action === "transform" && ("decal" in after.components || "decal" in before.components)) {
+    return "visuals";
+  }
   return action;
 }
 
@@ -110,6 +116,9 @@ export function reconcileScene(
     group.name = after.name;
     if (action === "transform") {
       applyEntityTransform(group, after);
+      // geometry moved under any nearby projected decals — re-fit them
+      // (no-op when the scene has no decals)
+      reprojectDecalsAround(built.scene, id, group, options);
     } else if (action === "visuals") {
       hooks.onEntityReset?.(id);
       rebuildEntityVisuals(built, id, after, options, materialCache);

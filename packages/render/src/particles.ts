@@ -9,6 +9,10 @@ export interface ParticlesData {
   shape: "point" | "sphere" | "box" | "cone";
   shapeSize: [number, number, number];
   coneAngle: number;
+  spread: number;
+  turbulence: number;
+  turbulenceSpeed: number;
+  fadeIn: number;
   direction: [number, number, number];
   speed: [number, number];
   gravity: number;
@@ -32,6 +36,15 @@ export interface ParticleValue {
   restart?: boolean;
   /** Spawn this many particles immediately, bounded by the emitter pool. */
   burst?: number;
+  /**
+   * Retint the ramp at runtime without touching the document — one emitter
+   * that takes the colour of what it is describing (dust the colour of the
+   * ground under a runner, sparks the colour of the metal being cut) instead
+   * of one authored emitter per case. Applies to every particle, live ones
+   * included, since the ramp is evaluated per frame from age.
+   */
+  colorStart?: string;
+  colorEnd?: string;
 }
 
 /** Renderer-side safety net on top of the schema's own cap. */
@@ -106,6 +119,11 @@ class Emitter {
   private readonly age: Float32Array;
   private readonly life: Float32Array;
   private readonly rot: Float32Array;
+  /** Per-particle turbulence phase, so motes wander independently rather than
+   * swaying in lockstep. */
+  private readonly phase: Float32Array;
+  /** Emitter-local clock driving the turbulence field. */
+  private elapsed = 0;
   private readonly colorStart = new THREE.Color();
   private readonly colorEnd = new THREE.Color();
   private readonly color = new THREE.Color();
@@ -122,6 +140,7 @@ class Emitter {
     this.age = new Float32Array(this.capacity);
     this.life = new Float32Array(this.capacity);
     this.rot = new Float32Array(this.capacity);
+    this.phase = new Float32Array(this.capacity);
     this.colorStart.set(data.colorStart);
     this.colorEnd.set(data.colorEnd);
 
@@ -172,6 +191,8 @@ class Emitter {
       this.mesh.count = 0;
     }
     if (value.emitting !== undefined) this.emitting = value.emitting;
+    if (value.colorStart !== undefined) this.colorStart.set(value.colorStart);
+    if (value.colorEnd !== undefined) this.colorEnd.set(value.colorEnd);
     if (value.visible !== undefined) {
       this.runtimeVisible = value.visible;
       this.mesh.visible = value.visible;
@@ -197,16 +218,21 @@ class Emitter {
     tmpDir.set(dx, dy, dz);
     if (tmpDir.lengthSq() < 1e-8) tmpDir.set(0, 1, 0);
     tmpDir.normalize();
-    if (this.data.shape === "cone") {
-      const cosA = Math.cos((this.data.coneAngle * Math.PI) / 180);
-      const z = 1 - Math.random() * (1 - cosA);
-      const r = Math.sqrt(Math.max(0, 1 - z * z));
-      const phi = Math.random() * Math.PI * 2;
-      tmpAxis.set(r * Math.cos(phi), r * Math.sin(phi), z);
-      tmpQuat.setFromUnitVectors(Z_AXIS, tmpDir);
-      tmpAxis.applyQuaternion(tmpQuat);
-      tmpDir.copy(tmpAxis);
-    }
+    // A cone's own half-angle, and `spread` on top of ANY shape. The second is
+    // what a hanging volume of motes needs: without it a box emitter hands
+    // every particle the identical velocity vector, and a thousand specks all
+    // travelling in exact parallel read as falling snow rather than as dust.
+    const angle = Math.max(this.data.shape === "cone" ? this.data.coneAngle : 0, this.data.spread);
+    if (angle <= 0) return;
+    // uniform direction within `angle` of tmpDir (angle 180 = the full sphere)
+    const cosA = Math.cos((angle * Math.PI) / 180);
+    const z = 1 - Math.random() * (1 - cosA);
+    const r = Math.sqrt(Math.max(0, 1 - z * z));
+    const phi = Math.random() * Math.PI * 2;
+    tmpAxis.set(r * Math.cos(phi), r * Math.sin(phi), z);
+    tmpQuat.setFromUnitVectors(Z_AXIS, tmpDir);
+    tmpAxis.applyQuaternion(tmpQuat);
+    tmpDir.copy(tmpAxis);
   }
 
   /** Spawn offset within the emitter shape, in emitter-local space → tmpPos. */
@@ -261,6 +287,7 @@ class Emitter {
       this.age[i] = 0;
       this.life[i] = Math.max(MIN_LIFE, randRange(this.data.lifetime[0], this.data.lifetime[1]));
       this.rot[i] = this.data.spin === 0 ? 0 : Math.random() * Math.PI * 2;
+      this.phase[i] = Math.random() * Math.PI * 2;
     }
   }
 
@@ -277,8 +304,11 @@ class Emitter {
     this.group.updateWorldMatrix(true, false);
 
     // integrate + retire (swap-remove keeps [0, alive) dense — no compaction)
-    const { pos, vel, age, life, rot } = this;
+    const { pos, vel, age, life, rot, phase } = this;
     const damp = d.drag > 0 ? Math.max(0, 1 - d.drag * dt) : 1;
+    this.elapsed += dt;
+    const swirl = d.turbulence > 0 ? d.turbulence * dt : 0;
+    const clock = this.elapsed * d.turbulenceSpeed;
     for (let i = 0; i < this.alive; i++) {
       age[i] = age[i]! + dt;
       if (age[i]! >= life[i]!) {
@@ -293,12 +323,23 @@ class Emitter {
           age[i] = age[last]!;
           life[i] = life[last]!;
           rot[i] = rot[last]!;
+          phase[i] = phase[last]!;
         }
         i--;
         continue;
       }
       // gravity pulls along world -Y (in local space: emitter-local -Y)
       vel[i * 3 + 1] = vel[i * 3 + 1]! - d.gravity * dt;
+      // Turbulence: a smooth, cheap wander field. Three decorrelated sine
+      // rates per particle, offset by its own phase, so specks drift and
+      // curl past each other instead of marching. This — not the spawn
+      // velocity — is what separates airborne dust from falling snow.
+      if (swirl !== 0) {
+        const p = phase[i]!;
+        vel[i * 3] = vel[i * 3]! + Math.sin(clock + p) * swirl;
+        vel[i * 3 + 1] = vel[i * 3 + 1]! + Math.sin(clock * 0.73 + p * 2.1) * swirl;
+        vel[i * 3 + 2] = vel[i * 3 + 2]! + Math.sin(clock * 1.31 + p * 3.7) * swirl;
+      }
       if (damp !== 1) {
         vel[i * 3] = vel[i * 3]! * damp;
         vel[i * 3 + 1] = vel[i * 3 + 1]! * damp;
@@ -328,7 +369,15 @@ class Emitter {
     const colorArray = colors.array as Float32Array;
     for (let i = 0; i < this.alive; i++) {
       const t = age[i]! / life[i]!;
-      const opacity = d.opacityStart + (d.opacityEnd - d.opacityStart) * t;
+      // `fadeIn` ramps up from nothing over the first slice of life, so a
+      // particle arrives instead of appearing. Without it every birth is a
+      // pop — the giveaway that a "hanging" effect is actually being spawned.
+      const opacity =
+        d.fadeIn > 0 && t < d.fadeIn
+          ? d.opacityStart * (t / d.fadeIn)
+          : d.opacityStart +
+            (d.opacityEnd - d.opacityStart) *
+              (d.fadeIn > 0 ? (t - d.fadeIn) / (1 - d.fadeIn) : t);
       let size = d.sizeStart + (d.sizeEnd - d.sizeStart) * t;
       // Per-instance opacity with node materials is awkward, so it is encoded
       // instead (documented trade-off): additive → fade the instance color

@@ -172,3 +172,30 @@ export function attachPhysicsDebug(
     }
   }
 }
+
+/**
+ * Remove every visual attachPhysicsDebug added under `root`, disposing their
+ * GPU resources. Lets the host flip the overlay off (and back on via a fresh
+ * attach) in place, without tearing down and rebuilding the whole scene.
+ */
+export function detachPhysicsDebug(root: THREE.Object3D): void {
+  detachFlagged(root, "physicsDebug");
+}
+
+/** Shared by the debug overlays: remove + dispose every subtree flagged in userData. */
+export function detachFlagged(root: THREE.Object3D, flag: string): void {
+  const doomed: THREE.Object3D[] = [];
+  root.traverse((node) => {
+    if (node.userData[flag]) doomed.push(node);
+  });
+  for (const node of doomed) {
+    node.removeFromParent();
+    node.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      mesh.geometry?.dispose?.();
+      const material = mesh.material as THREE.Material | THREE.Material[] | undefined;
+      if (Array.isArray(material)) material.forEach((m) => m.dispose());
+      else material?.dispose?.();
+    });
+  }
+}
