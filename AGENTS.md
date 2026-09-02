@@ -12,11 +12,18 @@ Claude sessions get the same content via CLAUDE.md and `.claude/skills/`).
    reference with pitfalls. This replaces the Claude-only scene-authoring
    skill for non-Claude agents.
 3. `ARCHITECTURE.md` — binding technical decisions. `VISION.md` — the thesis.
+4. `docs/tools.md` — registered editor/asset tools, plugin manifests,
+   permissions, discovery, and the shared human/AI invocation path.
+5. `docs/voxel-worlds.md` — procedural marching-cubes worlds: the world
+   recipe, biome rules, streaming, the `worldgen` pipeline, and the
+   invariants (one mesh for render/physics/placement, welded seams, closed
+   volumes) that break silently if you change the wrong thing.
 
 **The short version of how to work here:**
 
-- Scenes/prefabs/materials are JSON under `apps/playground/assets/`; edit the
-  files directly — while `pnpm dev` runs, saves live-sync into the user's
+- Scenes/prefabs/materials are JSON under a project's
+  `apps/playground/projects/<name>/assets/` (or the flat
+  `apps/playground/assets/` for throwaway experiments); edit the files directly — while `pnpm dev` runs, saves live-sync into the user's
   browser (schema-validated; invalid edits are rejected with a console warning).
 - Always write complete, valid JSON files; never leave a file mid-edit.
 - Runtime context (what the user sees, selection, camera, kit model contents):
@@ -27,7 +34,7 @@ Claude sessions get the same content via CLAUDE.md and `.claude/skills/`).
   `focus.pins` lists notes a human anchored to a world point — standing
   requests that need nobody at the keyboard. Read them before asking what to
   do; answer via `/__hitreg/pins` (set `resolved: true`, don't delete).
-- Capability spec (every component/data-type/event/script + the ops protocol,
+- Capability spec (every component/data-type/event/script/tool + the ops protocol,
   as JSON Schema generated from the live schemas — plus the full endpoint list):
   `curl -s http://localhost:5173/__hitreg/spec`. This is ground truth for what
   you can build; the committed `spec.json` (repo root, `pnpm spec`) mirrors the
@@ -49,12 +56,14 @@ Claude sessions get the same content via CLAUDE.md and `.claude/skills/`).
 
 **Building a game vs. extending the engine — keep the two apart:**
 
-- A small illustrative scene (a few entities, one scripting pattern) can live
-  in the tracked `apps/playground/assets/` / `src/scripts/` trees. A
-  *complete game* (its own economy, many scenes, a dedicated script suite)
-  goes entirely under `apps/playground/projects/<name>/{assets/,scripts/}`
-  instead — gitignored, self-contained, see `apps/playground/projects/README.md`.
-  Don't ask whether to commit a full game there; it isn't meant to be.
+- The engine repo ships no scene content. Anything you build — a demo scene,
+  a showcase, a *complete game* — goes under
+  `apps/playground/projects/<name>/{assets/,scripts/}`: gitignored,
+  self-contained, see `apps/playground/projects/README.md`. The flat
+  `apps/playground/assets/` / `src/scripts/` trees are for throwaway local
+  experiments only; nothing scene-specific gets committed there. Generic,
+  reusable behaviors belong in `@hitreg/scripting`'s builtins instead.
+  Don't ask whether to commit a game; it isn't meant to be.
 - A project's own gameplay events are declared on the owning script itself
   (`static events`, see `ScriptEventDecl` in `@hitreg/scripting`), not added
   to the shared `apps/playground/src/main.ts` bootstrap.

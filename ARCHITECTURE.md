@@ -164,6 +164,21 @@ longer re-trigger every GLB load in the scene. The context bridge reports
 
 ## 2b. Creator tooling (JSON-driven, browser-based, AI-drivable)
 
+**Registered tools are plugin contributions (added 2026-08-31, per Derek).**
+An editor or asset tool is declared by a validated manifest: identity,
+category, surfaces, permissions, and schema-described inputs. The engine's
+`ToolRegistry` publishes those declarations into the capability spec; the
+editor generates its default form from the same declaration; and humans and
+agents invoke one host-owned runner path. A plugin is the installable container
+and tools are one contribution type. Tool implementations may use Node, WASM,
+or browser code behind the host boundary. Installed host entries are trusted;
+their ordinary outputs use declared permissions checked by sandboxed asset
+writers. Loading untrusted third-party code requires a future isolated runner —
+the permission manifest alone is not a security sandbox.
+Specialized UI is an optional view over the same invocation contract, never a
+second implementation. Long-running import/bake tools are async and return
+standard assets, previews, warnings, and reports so latency is visible.
+
 Beyond the core editor panels, the roadmap includes — each as a document type
 in the same schema/ops system, each with a visual editor view:
 
@@ -445,7 +460,8 @@ packages/
   core/      ECS, scene document, ops protocol, schemas, fixed-timestep loop, math
   render/    Three.js WebGPU adapter: mesh/light/camera/particle systems
   physics/   Rapier integration (shared by client + headless server)
-  net/       transport, snapshots, prediction, lag compensation
+  net/       transport, snapshots, prediction, lag compensation, module channel
+  comms/     text chat + VoIP (proximity/global/team/party) as a room module
   scripting/ ScriptComponent runtime, @param decorator, script registry
   editor/    React overlay (dev-only)
   mcp/       MCP server exposing the running engine to AI

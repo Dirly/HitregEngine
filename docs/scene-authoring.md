@@ -54,6 +54,38 @@ follows is the map and the judgment the schema can't encode.
 - **`collider` without `rigidbody` = static scenery.** `trimesh`/`convex`/
   `heightmap` colliders cook exact collision from the entity's own mesh (GLB
   models included) and ignore `size`.
+- **An instance's `transform` REPLACES the prefab root's — so author the root as
+  an empty anchor at the foot.** Expansion applies instance-declared components
+  over the root's *per component*, so any offset authored on the root entity is
+  discarded the moment the prefab is placed. A prefab whose root carries a mesh
+  sitting at, say, y = 0.25 therefore renders 0.25 m lower than it looks in
+  isolation, and a root mesh can never have its foot at its own origin anyway (a
+  box's origin is its centre). The failure is invisible while you author the
+  prefab and systematic once it ships: one mis-authored root becomes every
+  instance of that prop sunk into the floor by the same amount. In one dungeon
+  set this was **617 placement errors across three levels — half to two-thirds
+  of all props buried** — from about fifteen prefabs.
+  The rule that avoids it: **the root is an empty anchor with no mesh and no
+  collider, positioned at the piece's contact point (its foot), and all geometry
+  hangs off it as children with explicit local offsets.** Then placing the
+  instance at a floor height is correct by construction. For a wall-mounted or
+  hanging piece the anchor is its mount point instead; say which in the prefab's
+  docs, because a placer cannot tell from the JSON.
+- **Resized primitives squash their texture — unless you ask for world UVs.** A
+  primitive maps one texture tile across each face whatever that face measures,
+  so a 2 m wall box and a 40 m wall box of the same material do not match, and
+  level geometry built by resizing boxes reads as smeared.
+  `mesh.source.uv = { mode: "world", scale: [2, 2] }` generates the UVs in
+  METRES instead (there, one tile every 2 m), so the texture holds its real size
+  as the box is resized and neighbouring pieces line up. It is baked into the
+  mesh's own UVs, so it costs nothing per fragment, and it is OBJECT-space, so
+  it survives instancing and moving the entity. The material's `repeat` still
+  multiplies on top — set that to `[1, 1]` on materials meant for world-UV
+  meshes. Prefer it to `material.triplanar` for flat, axis-aligned, resized
+  geometry (walls, floors, slabs); triplanar remains the right tool for
+  sculpted rock with no sane unwrap, and being world-SPACE its texture swims if
+  the mesh moves. `wedge` ships no UVs at all in the default `stretch` mode, so
+  world mode is currently the only way to texture one.
 - **`sky` and `postfx` are one-per-scene** (first wins). Bloom (postfx) is what
   makes emissive materials actually glow; `material.shader: "unlit"` is
   flat/PS1-style and ignores lights.
@@ -62,7 +94,7 @@ follows is the map and the judgment the schema can't encode.
   300-line village file, not the world. A placed scene has its sky/postfx/nested
   subscenes stripped; it stays a normal scene you can open in the picker and
   play standalone. The same scene places many times (ids namespaced per
-  placement). Demo: `demo-chunks` places `village-a` twice.
+  placement).
 - **Chunks** stream runtime-only content around the player (play) or camera
   (edit): they render + collide, hot-swap on file change, and NEVER enter the
   scene doc (so autosave/undo/diff stay clean). Files:
@@ -138,8 +170,11 @@ sleeping and one-shot effects; `ctx.setLight(entityId, { enabled?, intensity?,
 color? })` for runtime flashes/toggles; and `ctx.playerData` —
 experience-scoped persistence (`get/set/increment/transaction/keys(namespace,
 …)`, async, quota+rate-limited, atomic; survives sessions, e.g.
-`ctx.playerData?.increment("stats", "sessions")`). Minimal example:
-`session-counter`.
+`ctx.playerData?.increment("stats", "sessions")`); and `ctx.chat` (when the
+app mounts `@hitreg/comms`) — `send(channel, text)`, `announce(text)` (authority
+→ everyone), `system(text)` (local), `on(cb)` / `history()` over exactly the
+lines this tab was allowed to see; team/party membership is plain netState
+(`comms.team/<peerId>`, `comms.party/<peerId>`) — see `docs/comms.md`.
 
 ## Prefabs (React-style)
 
@@ -212,6 +247,17 @@ Reference by GUID from components/scripts. `updateDataAsset` = every referent
 sees new values. Schemas for AI: the `dataAssets` block of GET /__hitreg/spec
 (or `assets.dataTypeJsonSchemas()` in code).
 
+**On disk, a data-asset FILE is the bare `data` payload — not the wrapper.**
+The call above is the *code* API; the loader (`apps/playground/src/
+asset-loader.ts`) reads `materials/<id>.json` and registers the file's entire
+contents as `data`, taking `id` from the **file path**. So a material file's
+top level is `{ "shader": "standard", "map": "…", … }`. Writing the code shape
+into the file instead — `{ version, id, type, name, data: {…} }` — does **not**
+fail loudly: the component schemas are non-strict, so Zod strips every unknown
+key and the asset resolves to ALL DEFAULTS. A fully-authored PBR material then
+renders as untextured grey with `roughness` 0.85, with no error anywhere. If a
+material looks flat and untextured but nothing warns, check this first.
+
 ## Events (typed, deterministic)
 
 Scripts talk through `ctx.events` — `emit(name, payload)`, `on(name, cb)` (returns
@@ -252,7 +298,58 @@ via to-authority events and the authority writes the result — shared pickups +
 migration-proof combat in ~30 lines.
 The `events` block of GET /__hitreg/spec is the AI-facing payload spec; the
 context bridge posts `recentEvents` (last delivered `{ tick, name, payload }`)
-while playing. Minimal example: `apps/playground/src/scripts/event-demo.ts`.
+while playing.
+
+## Placement (settle props, don't eyeball them)
+
+Authoring-time solvers, not runtime scripts: a solve bakes its result into the
+ordinary `transform` component, so the JSON stays the truth and nothing runs
+per frame. Field reference: the `placement` component schema in the spec —
+this section is only the judgment around it.
+
+- Give a prop a `placement` component and a solve settles it onto the surface
+  it declares (ground / ceiling / wall), embedded `sink` metres so uneven
+  floors leave no hairline float, with seeded rotation/scale jitter so a
+  scattered batch doesn't read as copy-paste. Same doc + ids + seed always
+  reproduces the same result.
+- Three ways to run a solve:
+  - **Editor placement assist** (toolbar toggle, on by default): moving,
+    duplicating, or dropping an opted-in entity settles it automatically.
+    Entities without the component never move on their own.
+  - **CLI, headless**: `pnpm -F playground place snap <scene.json>` settles
+    every opted-in entity and writes the file (live-syncs into a running
+    dev session like any other scene edit). `--ids a,b` snaps exactly those
+    entities whether or not they opted in; `--seed n` varies the jitter;
+    `--dry-run` reports without writing.
+  - **API**: `snapPlacementOps` / `lintPlacement` from `@hitreg/core` for
+    tools and generators.
+- `pnpm -F playground place lint <scene.json>` reports floating (detached) props
+  and z-fight risks (same-facing coincident
+  coplanar faces — the flicker), each with the world point to look at; pass
+  `--overlap <tol>` to also report interpenetrating statics (opt-in, because
+  graybox construction interpenetrates on purpose). Exit
+  code 1 when findings exist, so generators can gate on it: place, lint,
+  fix, re-run to clean.
+- `embed: [min, max]` buries a seeded random fraction of the entity’s own
+  height past the surface — scatter rocks read as half-sunk in the ground
+  instead of perched on it (pair with `rotJitter: "full"`). Additive with
+  `sink`; ground/ceiling only.
+- Author wall props with their back at local **-Z**; wall snap replaces the
+  rotation (local +Z faces into the room) and keeps the authored height.
+- Support geometry headless is primitives, poly meshes, extruded polygons,
+  and heightmap terrain. `asset` (GLB) and `path` meshes contribute none —
+  snapping onto a model needs the running app or a primitive proxy.
+
+## Lighting interiors that read
+
+The most common authoring failure in enclosed spaces is lighting that looks
+sensible in the JSON and renders nearly black. The numbers that actually
+work are in the `light` schema's field docs (spec: components.light) — the
+short version: interior ambient 1.2–1.8, point lights 6–15 with range sized
+to the room, and the sun contributes nothing under a ceiling. Calibrate to
+the screen, not to taste: an interior shot of a lit room should average
+mean luma 70–100 out of 255. When a whole scene trends dark, raise
+`postfx.tonemap.exposure` once instead of touching every light.
 
 ## Pitfalls
 
@@ -262,3 +359,6 @@ while playing. Minimal example: `apps/playground/src/scripts/event-demo.ts`.
   confidently, but validate prop names against the prefab's declared props.
 - Runnable pipeline demo (ops → prefabs → undo): `pnpm -F @hitreg/core demo`
   (`packages/core/examples/build-a-street.ts`).
+- Grime tints (`paintGrime`) are per-corner colors and cannot survive any op
+  that changes a face's corner count (subdivide, weather, bevel, …). Order of
+  passes is therefore fixed: shape → weather → paint. Grime is a final pass.

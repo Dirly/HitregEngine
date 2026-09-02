@@ -297,3 +297,252 @@ Three mechanisms, each with a headless test suite under `packages/render/test`:
 Deliberately not built (WebGPU has no 64-bit atomics, and it would kill the
 WebGL fallback): GPU-driven cluster selection, a software rasteriser, a
 visibility buffer. Revisit if those platform gaps close.
+
+## The editor's own debug overlays outweighed the level they were drawn over
+
+`showPhysics` and `showLights` used to default to **on**, and each draws one
+object per collider and per light — no batching, no culling budget, no
+scaling story. On a 2000-entity dungeon (1767 colliders, 98 point lights) the
+scene itself batches down to **39 draw calls and ~7 ms/frame**, while the same
+scene with the overlays on submits **986 draw calls for ~21 ms** — more than a
+thousand of them collider wireframes. The overlay cost 3x the level.
+
+Two things make this hard to spot:
+
+1. `renderer.info.render.drawCalls` counts *every* renderable in every pass,
+   including `Line`/`Sprite` objects. A draw-call number that will not
+   reconcile with the mesh count is usually an overlay, not geometry — count
+   renderables **by type** before concluding batching is broken.
+2. Static batching genuinely works (2200 source meshes → 15 merged draws, one
+   per material bucket), so the scene JSON and the batch stats both look
+   healthy while the frame is dominated by something that is not in either.
+
+Defaults are now off (`packages/editor/src/state.ts`), both still one toolbar
+click away. **Flipping the default does not help an existing session** — the
+settings are persisted in `localStorage`, so anyone who has already opened the
+editor keeps their stored `true` and has to toggle it by hand.
+
+The deeper fix, if these ever need to be on for a large scene, is to merge all
+static collider wireframes into a single `LineSegments` buffer (the same trick
+`static-batch.ts` uses for meshes) rather than one object each.
+
+## A changing light SET recompiles every lit material (WebGPU)
+
+`LightsNode.customCacheKey()` hashes `light.id` per light, so the renderer's
+material cache key changes whenever the set of visible lights changes — even
+if the COUNT is identical. A camera-relative light budget that culls by
+toggling `light.visible` therefore recompiles every lit material, inside
+`renderer.render()`, on nearly every frame of camera movement.
+
+Measured on the dungeon above (98 point lights, budget 8): rotating the camera
+in place ran at **18 ms/frame**, while MOVING it — same scene, same frustum
+churn, only the position differing — collapsed to **2296 ms/frame**. Forcing
+the budget to 0 (a set that cannot change) restored 28 ms.
+
+The fix in `light-budget.ts`: never toggle authored lights. Hide them once and
+treat them as data, then keep a fixed pool of slot lights — created once,
+always visible, stable identity — and re-aim the pool at whichever lights
+currently win. The light set the renderer sees is then constant forever and the
+per-frame update writes uniforms only. Shadow casters are excluded (a shadow
+map belongs to its light) and left permanently visible.
+
+Diagnosis note: the engine profiler bills this to `render` with a large pile of
+**off-loop** time, which is what shader compilation looks like from outside the
+JS timeline. The `update/light-budget` scope itself reads as ~0.3 ms — the
+system is cheap, its *side effect* is not, and the scope timing actively points
+away from the culprit. The A/B that isolates it is rotate-in-place vs
+move-through: both churn the frustum identically, only one moves the camera.
+
+## Pipelines compile on first DRAW, so panning somewhere new stalls
+
+WebGPU builds a render pipeline the first time a material/geometry pair is
+actually drawn. In a level you fly around, that arrives as a hitch every time
+the camera reaches somewhere it has not been, and it never settles because
+there is always another corner. `EngineRenderer.precompile()` pays it once
+after each scene build (worst frame 560 ms → ~150 ms on the dungeon above).
+
+The catch: `renderer.compileAsync(scene, camera)` alone does **not** do this.
+It runs the normal `_projectObject` pass, which frustum-culls, so it only
+compiles what the camera can already see — exactly the pipelines that were
+about to be built anyway. Clearing `frustumCulled` on every mesh for the
+duration of the call is what makes it cover the whole level.
+
+## Streaming while flying: bound the concurrency, and never re-bake a SHRINKING HLOD supercell
+
+Found 2026-09-01 on the first generated (marching-cubes) world, from a profile
+snapshot: 28 fps, worst frame 2596 ms, `peak 53 concurrent loads`, and one
+frame carrying **35 in-flight `hlod.supercell` bakes** of up to 2.5 s each.
+The four causes, all separate, in the order they mattered:
+
+**1. A supercell was re-baked whenever its membership changed at all.** Merged
+geometry can't be patched, so any change meant a full rebuild. Flying forward
+changes the membership of nearly every supercell in the ring on every cell
+crossing — trailing ones shrink, leading ones grow — so the whole far ring
+re-baked continuously, and each rebuild superseded bakes that had not finished.
+The fix is to make the rule *asymmetric*: rebuild when a desired cell is
+**missing** from the bake (else you get a visible hole), and **keep** a bake
+that merely covers cells you no longer want (they are distant scenery, they
+draw in the same merged call, and removing them buys nothing you can see).
+
+**2. Nothing bounded concurrency.** Both cell loads and supercell bakes are
+mostly *synchronous* main-thread work spread across promise continuations.
+Running 53 of them interleaved does not make any finish sooner — it smears one
+long stall across every frame in the burst. Small caps (3 cell loads, 2
+supercell bakes) plus a newest-first queue, with stale entries dropped at pump
+time, made each unit finish promptly. Newest-first matters: the queue is a list
+of things you are flying *toward*.
+
+**3. Streamed chunks were never static-batched.** `rebuildStaticBatch` only
+ever ran over the base scene document, and in a generated world essentially all
+content is streamed — so a cell of 200 scattered props issued 200+ draw calls.
+Batching per cell at load time (not globally) keeps it incremental and keeps
+per-cell frustum culling. Peak draw calls 1278 → 153.
+
+**4. An entry-counted mesh cache was thrashing.** A full voxel cell is ~110 KB
+and a coarsened one ~25 KB, so a fixed entry count budgets wildly different
+amounts of memory depending on the mix. With ~650 cells resident the cap sat
+just under what the world needed and evicted cells that were about to be asked
+for again, so every supercell re-bake re-meshed from scratch. Budget by
+**bytes**.
+
+Net on a scripted fly-through: **19 → 40 fps median, frame p95 36 ms → 14 ms,
+peak draw calls 1278 → 153, in-flight loads 52 → 5.**
+
+### What did NOT work: precompiling each chunk as it streams in
+
+The residual cost is `render` self-time in bursts of 300–550 ms — first-sight
+pipeline compilation (see the section above), which streaming produces forever.
+The obvious fix, calling `EngineRenderer.precompile()` on each chunk group
+before showing it, made things **worse**: frame p95 went 14 ms → 180 ms while
+only halving the worst frame. `compileAsync` carries a large per-call cost, so
+paying it once per chunk is worse than paying it lazily once per unique
+pipeline amortised across many chunks. Reverted.
+
+Two things to know if you try again. Compiling against a bare staging
+`THREE.Scene` is doubly wrong — with no lights in it you compile the *no-lights*
+shader variant, and the real one still stalls on first draw; `compileAsync`
+takes a third `targetScene` argument for exactly this. And measure p95, not
+just the worst frame: this change improved the worst frame and still made the
+experience worse.
+
+### Measure it with a scripted fly-through, not by flying manually
+
+`POST /__hitreg/camera` + `GET /__hitreg/context` is enough to sweep the camera
+across the world at a fixed rate and sample `perf` at each hop — repeatable,
+comparable before and after, and it surfaces `counters` (draw calls, in-flight
+loads, chunks) that a screenshot cannot. Flying the same route a *second* time
+is the cheap way to separate first-sight cost from recurring cost: here the
+return pass ran 30% faster, which is what identified the residual as pipeline
+compilation rather than per-chunk work.
+
+## A single glTF prop can be half your draw calls (kit exports and shadow cascades)
+
+Found 2026-09-02 profiling the voxel demo, which was submitting 776 draw calls
+a frame. One prop — a kit-built house — accounted for **356 of them**, for 726
+triangles of geometry.
+
+The mechanism is multiplicative and easy to miss. A DCC/kit export arrives as
+however many submeshes the exporter felt like emitting; this one was **89
+separate meshes averaging eight triangles each**, all sharing one material. How
+a model splits into submeshes is an artifact of the export, not an authoring
+decision — but the renderer pays a draw call per submesh in the main pass AND
+in every shadow cascade. With three cascades that is `89 x 4 = 356`.
+
+Measured, by toggling that one entity:
+
+```
+control                 draw 8.62ms  calls 732
+house: no shadow        draw 7.66ms  calls 465   (-267 = 89 x 3 cascades)
+house hidden entirely   draw 7.24ms  calls 376   (-356 = 49% of ALL calls)
+```
+
+**The fix** is `mergeModelSubmeshes` in `packages/render/src/static-batch.ts`,
+called from the model load path: merge a loaded model's same-material submeshes
+into one mesh each, in the model root's local space. It took the demo from 776
+to 294 draw calls. It is deliberately not `batchStaticMeshes` — that merges
+across ENTITIES and only for ones flagged static, keyed by entity so the editor
+can still pick one out of a batch; this merges WITHIN one model instance, where
+every submesh already belongs to the same entity.
+
+What it must refuse, because each would be a bug rather than a saving:
+skinned meshes (their vertices are driven by a skeleton, and baking them into
+the parent's space freezes them at the bind pose); anything under a model with
+animation clips (a clip addresses nodes by name, and a merged mesh no longer
+has that node); geometry carrying attributes beyond position/normal/uv, for the
+same reason `hasCustomAttributes` exists; and multi-material meshes, which
+would need draw groups and so save nothing.
+
+**Do not dispose the originals' geometry.** `skeletonClone` shares buffers with
+the cached glTF scene, so disposing here corrupts every other instance of the
+same model — the same trap as the shared-material caching above. Detach only.
+
+Two corollaries worth internalising:
+
+- **Shadow cascades multiply every per-object cost by `1 + cascades`.** Before
+  optimising anything per-object, check what the cascade count is: at
+  `cascades: 3` the demo spent 60% of its draw CPU and 68% of its draw calls in
+  shadow passes. `renderer.info.render.frameCalls` tells you how many passes
+  you are actually paying for (it read 6: three cascades, the main pass, and
+  two post passes).
+- **Count casters before theorising.** A quick traverse counting
+  `mesh.castShadow` by subtree root answered in one run what two rounds of
+  guessing had not: 89 of the scene's 194 casters were one prop. The same
+  traverse showed far-ring HLOD proxy *props* were set to cast while the
+  proxy *terrain* in that identical ring was not — a self-contradiction inside
+  one function that cost 26% of all triangles submitted per frame.
+
+## Streaming stalls: what moved off the main thread, and the one that could not
+
+Found 2026-09-02 on the voxel demo. A 1200-unit flight produced 800-1000ms
+`long-task` stalls and a 2003ms worst frame. Three separate costs turned out to
+be hiding behind the same symptom, and only a profile taken DURING the flight
+(not at rest) separated them.
+
+**1. Cell generation.** `fbm2` alone was 14.5% of all main-thread self time.
+Moved to a worker pool; `ChunkProvider.get` had always allowed a Promise
+return. Result: long tasks 833/1026ms -> 72/102ms, off-loop average 11-28ms ->
+5-9ms.
+
+**2. HLOD coarse meshing.** A supercell re-meshes each member cell on a coarser
+lattice — a SEPARATE marching-cubes run from the cell's own generation, up to
+16 of them in one bake. This is why moving generation shrank the hitch without
+removing it. Moved to the same worker (`buildVoxelMesh` bypasses core's mesh
+cache, which is what makes the result safe to *transfer*).
+
+**3. The supercell merge.** Transforming every cell's vertices into supercell
+space and concatenating them measured ~3.9s across a 30s flight — larger than
+the meshing it followed. `mergeVoxelMeshes` (`packages/core/src/voxel/merge.ts`)
+does it as pure typed-array arithmetic so the worker can, returning one merged
+geometry per material: one transfer per material rather than one per cell.
+Merging *voxel* cells specifically is what keeps it simple — every cell of a
+world declares identical attributes, because the palette is a property of the
+world, so the mismatched-attribute case that makes general merging expensive
+cannot arise.
+
+### The one that could not move, and why it is worth knowing
+
+After all three, single `render/draw` calls of **760-1320ms** remained. That is
+WebGPU compiling a pipeline per new material/geometry pair on first DRAW,
+inside `render()`, on the frame that first shows a streamed cell.
+
+`compileAsync` before adding the group to the scene is the textbook fix. It was
+implemented and reverted **twice**, because both times the player fell through
+the world. The reason is structural: **the collider for streamed terrain is
+cooked from the BUILT objects, so it does not exist until the group is in the
+scene.** Anything that delays `add()` delays the ground. Attaching physics
+first does not help either — `sim.addEntities` needs those same built objects.
+
+So the prerequisite for fixing this is decoupling the collider from the scene
+graph (cook it from the `ChunkDoc` / the voxel field directly, which the worker
+already has). Until then, precompiling only the far HLOD supercells was
+measured and **reverted as not worth it**: it took `programs` from 263 to 1006
+— compiling off-screen content that may never be drawn — and made `gapMax`
+worse (415ms -> 609ms), without touching the near-cell stalls that actually
+hurt.
+
+### Reading the profiler when you chase this
+
+`gapMs = interval - the PREVIOUS frame's JS`, so sorting spike frames by
+wall-clock interval shows you the frames *after* each stall, all of which look
+innocent (`interval 1565ms | js-in-frame 19ms`). Sort by JS-in-frame instead
+and the culprit appears immediately. Several hours went into the wrong frames.

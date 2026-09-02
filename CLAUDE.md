@@ -46,8 +46,14 @@ pnpm typecheck                   # all packages
   fixed-timestep loop. Zero deps beyond Zod; runs headless.
 - `packages/render` — Three.js WebGPU adapter (`buildScene`, `EngineRenderer`).
   WebGL fallback is automatic; `init()` reports the backend.
-- `apps/playground` — dev sandbox; the committed example scenes (e.g. `sumo`)
-  double as living examples of scene authoring.
+- `packages/comms` — drop-in text chat + VoIP on proximity/global/team/party
+  channels, riding the room protocol's `module` message; membership is
+  netState (`comms.team/*`, `comms.party/*`). **docs/comms.md** before touching
+  chat/voice routing — one rule (`recipientsFor`) governs both media.
+- `apps/playground` — dev sandbox (editor + runtime host). Ships with **no
+  scene content**: it boots a code-built starter scene and writes the first
+  scene file on save. Games and demos live in gitignored
+  `apps/playground/projects/<name>/`.
 
 Scene/prefab format reference: **docs/scene-authoring.md** (tool-neutral; the
 `scene-authoring` skill wraps it for Claude sessions — non-Claude agents read
@@ -66,7 +72,11 @@ The primary AI channel is **direct file editing** — no MCP required:
   resolve; animation clips drive the `animator` component; blending via
   scripts' ctx.setAnimation). Chunks: `assets/chunks/<world>/<cx>_<cz>.chunk.json`
   streamed by a scene's `chunkStreamer` component (runtime-only, never in the
-  scene doc).
+  scene doc). Procedural worlds: `assets/worlds/<id>.json` — one small recipe
+  document (noise bands, biome rules, rivers/towns/roads) that a scene streams
+  via a `voxelWorld` component; the marching-cubes terrain, colliders and trees
+  are all derived from it and never written to disk. **docs/voxel-worlds.md**
+  before touching terrain generation.
 - While `pnpm dev` runs, any edit to those files **applies to the running
   browser scene in place** (dev-server watcher → websocket), no reload. Invalid
   edits are rejected with a console warning and change nothing — schemas guard
@@ -132,8 +142,26 @@ The primary AI channel is **direct file editing** — no MCP required:
   `/__hitreg/profile`, exactly like a pin. Live equivalent without a
   snapshot: `context.perf`, or `curl -s http://localhost:5173/__hitreg/profile`.
   Background: `docs/performance-lessons.md`.
+- **World generation** (procedural open worlds): `pnpm -F playground worldgen`
+  — `init` writes a complete recipe + terrain material + scene, then `rivers`,
+  `towns`, `roads`, `pois` each compute from the CURRENT terrain and write a
+  few lines back into the recipe's `features`, so every stage stays readable
+  and hand-editable. `map` renders a PNG overview of the whole world (this is
+  how you — or an agent — check the result without opening the browser);
+  `stats` reports tris and ms per cell against the frame budget. Judgment +
+  the invariants that will break silently: docs/voxel-worlds.md.
+- **Placement toolbox** (settle props instead of eyeballing coordinates): give
+  props a `placement` component (spec has the fields) and run
+  `pnpm -F playground place snap <scene.json>` — every opted-in entity settles
+  onto the ground/ceiling/wall it declares, sunk + seeded-jittered, written
+  back to the file (live-syncs if dev is running). `place lint <scene.json>`
+  reports floating props and z-fight risks (`--overlap <tol>` adds
+  interpenetration, opt-in) with
+  world points; exit 1 on findings. In the editor the same solve runs
+  automatically on move/duplicate/drop (toolbar "placement assist" toggle).
+  Judgment + conventions: docs/scene-authoring.md → "Placement".
 - **Capability spec** (what you can build): `curl -s http://localhost:5173/__hitreg/spec`
-  → `{ components, dataAssets, events, netState, scripts, ops, prefabs, endpoints }`,
+  → `{ components, dataAssets, events, netState, scripts, tools, ops, prefabs, endpoints }`,
   every field a JSON Schema generated from the live Zod definitions, so it can't
   drift from what validates. Prefer it over prose when you need exact fields for
   a component/script/event. Committed snapshot of the engine surface: `spec.json`
@@ -142,16 +170,18 @@ The primary AI channel is **direct file editing** — no MCP required:
 
 ## Building a full game vs. extending the engine
 
-Small illustrative scenes (`sumo`, `village-a`, etc.) live under
-`apps/playground/assets/` + `apps/playground/src/scripts/` and stay
-committed — they double as scene-authoring/scripting examples. A **complete
-game** (its own economy/job loop, many scenes, a dedicated script suite) is
-different: it does not belong in the engine repo at all, committed or not —
-see `apps/playground/projects/README.md`. It lives entirely under
+The engine repo ships **no scene content** — no example scenes, materials,
+prefabs, chunks, or gameplay scripts. Generic, reusable behaviors are
+builtin scripts in `@hitreg/scripting` (`builtin.ts`); everything with a
+game or a demo behind it — a showcase scene, a **complete game** (its own
+economy/job loop, many scenes, a dedicated script suite) — does not belong in
+the engine repo at all, committed or not — see
+`apps/playground/projects/README.md`. It lives entirely under
 `apps/playground/projects/<name>/{assets/,scripts/}`, gitignored wholesale
-(except that README). Default to building there, not under the flat
-`assets/`/`src/scripts/` trees, whenever the ask is "build me a game," not
-"add an example." A script needing its own gameplay events declares them on
+(except that README). Always build there. The flat
+`apps/playground/assets/` / `src/scripts/` trees still work (same asset
+bridge, same script glob) but are for throwaway local experiments only —
+nothing scene-specific gets committed to them. A script needing its own gameplay events declares them on
 itself (`static events` — see `ScriptEventDecl` in `@hitreg/scripting`)
 instead of editing the shared `apps/playground/src/main.ts` bootstrap; that
 file should stay generic across every scene/project it serves.
