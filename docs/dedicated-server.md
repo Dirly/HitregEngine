@@ -188,6 +188,12 @@ clients can show "away"; the playground ignores it for now.
 - The server has no GLB loader: asset-mesh (trimesh/convex) colliders fall
   back to boxes. Voxel terrain + scatter primitives are exact.
 - Admin HTTP has no auth — bind to localhost or front it.
+- Voxel terrain colliders land on the WORLD layer, not TERRAIN (physics
+  `defaultMembership` only tags heightmaps) — on the server AND in the
+  browser. Combat's "TERRAIN first, WORLD fallback" ground probe therefore
+  always falls back, which is why a tree trunk can anchor a telegraph. The
+  fix is one line in `packages/physics/src/sim.ts` where a voxel source is
+  cooked; left alone because it changes both sides at once.
 - One scene per process; Cloudflare Durable Objects (the hosting Derek
   mentioned) would wrap `GameServer` per zone — `serve()` is the shape.
 - The P2P dev path is untouched and still the default without `?server=`.
