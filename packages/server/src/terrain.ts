@@ -23,19 +23,24 @@ import {
   expandScene,
   getVoxelWorld,
   parseChunkKey,
+  primeVoxelMesh,
   registerVoxelWorld,
   voxelChunkDoc,
   voxelChunkOptionsFrom,
+  type ChunkDoc,
   type ChunkRep,
   type RecipeEdit,
   type RecipeEditResult,
   type ChunkStreamerData,
   type SceneDoc,
   type VoxelChunkOptions,
+  type VoxelMesh,
+  type VoxelMeshSource,
   type VoxelWorldData,
   type WorldField,
 } from "@hitreg/core";
 import type { HeadlessWorld } from "./world.js";
+import { VoxelPool, type VoxelPoolOptions } from "./voxel-pool.js";
 
 export interface TerrainStreamerOptions {
   /** Cells around each focus to keep simulated (default: the component's `rings.simulation`, min 1). */
@@ -51,6 +56,14 @@ export interface TerrainStreamerOptions {
   loadBudgetMs?: number;
   /** Cells unloaded per step at most (default 4). */
   unloadsPerStep?: number;
+  /**
+   * Generate cells on worker threads (default on: min(4, cpus-1) threads;
+   * `{ workers: 0 }` keeps everything inline). Off-thread, a cell costs the
+   * tick ~4 ms (expand + attach) instead of ~40; the budget above still
+   * bounds how many land per update. Spawn-time `ensure*` loads stay inline
+   * — ground has to exist before the body does.
+   */
+  pool?: VoxelPoolOptions & { workers?: number } | false;
 }
 
 export interface ResolvedServerWorld {
@@ -95,6 +108,11 @@ export class TerrainStreamer {
   private readonly loadBudgetMs: number;
   /** Cost of the last cell load, for diagnostics. */
   lastLoadMs = 0;
+  private pool: VoxelPool | null = null;
+  /** Cells requested from the pool and not yet landed. */
+  private readonly inflight = new Set<string>();
+  /** Results that arrived between updates, integrated on the next one (bounded by the budget). */
+  private readonly arrived: Array<{ key: string; cell: ChunkDoc; source: VoxelMeshSource | null; mesh: VoxelMesh | null }> = [];
   /** Resident cells: key -> entity ids the cell added. */
   private readonly loaded = new Map<string, string[]>();
   /** Per-cell representation from the last residency pass (hysteresis input). */
@@ -118,6 +136,39 @@ export class TerrainStreamer {
       limit === Infinity
         ? Infinity
         : (limit + (resolved.field.recipe.bounds?.limitFalloff ?? 600)) / resolved.field.recipe.cellSize + 2;
+    const poolOpts = opts.pool === false ? null : (opts.pool ?? {});
+    if (poolOpts && (poolOpts.workers ?? 1) > 0) {
+      try {
+        this.pool = new VoxelPool(poolOpts);
+        this.initPool();
+      } catch (error) {
+        console.warn("[server:terrain] no generation workers, generating inline:", error);
+        this.pool = null;
+      }
+    }
+  }
+
+  /** Threads generating cells (0 = inline). */
+  get workers(): number {
+    return this.pool?.size ?? 0;
+  }
+
+  private initPool(): void {
+    if (!this.pool) return;
+    const present: string[] = [];
+    for (const rule of this.resolved.field.recipe.scatter) {
+      const id = rule.prefab ?? rule.model;
+      if (id && this.options.assetExists?.(id, rule.prefab ? "prefab" : "model")) present.push(id);
+    }
+    for (const poi of this.resolved.field.recipe.features.pois) {
+      if (poi.prefab && this.options.assetExists?.(poi.prefab, "prefab")) present.push(poi.prefab);
+    }
+    this.pool.init(this.resolved.field.recipe, this.resolved.data.world, this.options, present);
+  }
+
+  dispose(): void {
+    this.pool?.dispose();
+    this.pool = null;
   }
 
   /** Resident cell keys. */
@@ -162,9 +213,21 @@ export class TerrainStreamer {
     }
     wanted.sort((a, b) => a.d - b.d);
     const started = performance.now();
-    for (const { key } of wanted.slice(0, this.loadsPerStep)) {
-      this.load(key);
+    // cells that came back from the workers land first — they are the cheap ones
+    while (this.arrived.length > 0 && performance.now() - started <= this.loadBudgetMs) {
+      const { key, cell, source, mesh } = this.arrived.shift()!;
+      if (this.loaded.has(key) || !next.has(key)) continue; // unloaded (or ensured inline) while in flight
+      if (source && mesh) primeVoxelMesh(source, mesh);
+      this.integrate(key, cell);
+    }
+    for (const { key } of wanted) {
+      if (this.pool && !this.pool.broken) {
+        if (this.inflight.size >= this.loadsPerStep * 2) break;
+        this.request(key);
+        continue;
+      }
       if (performance.now() - started > this.loadBudgetMs) break; // the rest next update
+      this.load(key);
     }
     // unloads
     let unloaded = 0;
@@ -191,22 +254,59 @@ export class TerrainStreamer {
     }
   }
 
+  /** Ask a worker for the cell; the result lands on a later update. */
+  private request(key: string): void {
+    if (this.inflight.has(key) || this.loaded.has(key) || !this.pool) return;
+    const coords = parseChunkKey(key);
+    if (!coords) return;
+    this.inflight.add(key);
+    const generation = this.pool.currentGeneration;
+    this.pool
+      .cell(coords[0], coords[1])
+      .then((cell) => {
+        this.inflight.delete(key);
+        if (cell.generation !== generation || cell.generation !== this.pool?.currentGeneration) return; // recipe changed under it
+        this.arrived.push({ key, cell: cell.doc, source: cell.source, mesh: cell.mesh });
+      })
+      .catch((error: unknown) => {
+        this.inflight.delete(key);
+        // a dead pool falls back to inline generation on the next update
+        if (!(error instanceof Error && /disposed/.test(error.message))) {
+          console.warn(`[server:terrain] worker could not generate ${key}:`, error);
+        }
+      });
+  }
+
+  /** Inline generation — spawn-time ensures and the no-worker fallback. */
   private load(key: string): void {
     const coords = parseChunkKey(key);
     if (!coords) return;
     const [cx, cz] = coords;
-    const { field, data, streamer } = this.resolved;
+    const { field, data } = this.resolved;
     const started = performance.now();
     try {
       const cell = voxelChunkDoc(field, data.world, cx, cz, this.options);
-      const { doc } = chunkToSceneDoc(streamer.source, cx, cz, streamer.cellSize, cell);
-      const expanded = expandScene(doc, this.world.assets, this.world.registry);
-      this.world.addEntities(expanded, { silent: true });
-      this.loaded.set(key, Object.keys(expanded.entities));
+      this.integrate(key, cell);
       this.lastLoadMs = performance.now() - started;
     } catch (error) {
       console.warn(`[server:terrain] cell ${key} failed to load:`, error);
       this.loaded.set(key, []); // don't retry every step
+    }
+  }
+
+  /** doc → scene → sim: the part that has to happen on this thread. */
+  private integrate(key: string, cell: ChunkDoc): void {
+    const coords = parseChunkKey(key);
+    if (!coords) return;
+    const { streamer } = this.resolved;
+    try {
+      const { doc } = chunkToSceneDoc(streamer.source, coords[0], coords[1], streamer.cellSize, cell);
+      const expanded = expandScene(doc, this.world.assets, this.world.registry);
+      this.world.addEntities(expanded, { silent: true });
+      this.loaded.set(key, Object.keys(expanded.entities));
+    } catch (error) {
+      console.warn(`[server:terrain] cell ${key} failed to integrate:`, error);
+      this.loaded.set(key, []);
     }
   }
 
@@ -241,6 +341,10 @@ export class TerrainStreamer {
     const result = applyRecipeEdits(before, edits);
     const field = registerVoxelWorld(this.resolved.data.world, result.recipe);
     this.resolved = { ...this.resolved, field };
+    // workers hold their own field: re-ship the recipe, and anything they
+    // were generating against the old one is dropped by generation
+    this.initPool();
+    this.arrived.length = 0;
     const limit = field.worldLimit;
     this.limitCells =
       limit === Infinity ? Infinity : (limit + (field.recipe.bounds?.limitFalloff ?? 600)) / field.recipe.cellSize + 2;

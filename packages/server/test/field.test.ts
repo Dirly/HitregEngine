@@ -83,6 +83,7 @@ describe.skipIf(!field)("combat-demo field, headless", () => {
 
   afterAll(() => {
     server?.close();
+    server?.terrain?.dispose();
     world?.dispose();
   });
 

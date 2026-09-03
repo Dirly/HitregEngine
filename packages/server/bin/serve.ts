@@ -17,6 +17,7 @@
  *   --terrain-radius <n>  simulated cells around each player (default: the scene's rings.simulation)
  *   --max-players <n>
  *   --no-persist          do not write terraformed recipes back to their file
+ *   --workers <n>         cell-generation worker threads (default min(4, cpus-1); 0 = inline)
  *
  * Clients: open the playground with `?server=ws://<host>:<port>` and press play.
  * Admin:   curl -s http://<host>:<port>/admin/status
@@ -57,6 +58,7 @@ async function main(): Promise<void> {
     terrainRadius: num("terrain-radius"),
     maxPlayers: num("max-players"),
     persistRecipe: !process.argv.includes("--no-persist"),
+    workers: num("workers"),
   });
   const tickLog = setInterval(() => {
     const s = handle.server.stats() as { players: unknown[]; terrainCells: number; tick: number };

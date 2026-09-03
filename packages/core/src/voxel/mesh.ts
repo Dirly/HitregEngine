@@ -205,6 +205,26 @@ export function voxelMesh(source: VoxelMeshSource): VoxelMesh {
   return mesh;
 }
 
+/**
+ * Hand the cache a mesh built ELSEWHERE — a worker thread that ran
+ * `buildVoxelMesh` against its own copy of the field. The next `voxelMesh`
+ * for the same source is then a hit, so render, physics and placement keep
+ * sharing one geometry while the marching happened off the calling thread.
+ * A mesh for an unregistered world is ignored (it would never be asked for).
+ */
+export function primeVoxelMesh(source: VoxelMeshSource, mesh: VoxelMesh): void {
+  if (!worlds.has(source.world)) return;
+  const key = cacheKey(source);
+  dropCached(key);
+  meshCache.set(key, mesh);
+  meshCacheBytes += meshBytes(mesh);
+  while (meshCacheBytes > MESH_CACHE_BYTES && meshCache.size > 1) {
+    const oldest = meshCache.keys().next().value;
+    if (oldest === undefined) break;
+    dropCached(oldest);
+  }
+}
+
 /** Mesh a cell against an explicit field, bypassing the registry and the cache. */
 export function buildVoxelMesh(field: WorldField, source: VoxelMeshSource): VoxelMesh {
   const recipe = field.recipe;
@@ -261,7 +281,10 @@ export function buildVoxelMesh(field: WorldField, source: VoxelMeshSource): Voxe
   }
 
   // world -> cell-local: the chunk root already sits at [cx*cellSize, 0, cz*cellSize]
-  const positions = result.positions;
+  // Skirts hang from every boundary edge, so a neighbour meshed at a
+  // different lattice step (the HLOD ring) cannot open a crack at the join.
+  const skirted = addSkirts(result, splat, tint, surfaceCount, x0, z0, recipe.cellSize, step * SKIRT_STEPS);
+  const positions = skirted.positions;
   let minX = Infinity;
   let minY2 = Infinity;
   let minZ = Infinity;
@@ -284,15 +307,145 @@ export function buildVoxelMesh(field: WorldField, source: VoxelMeshSource): Voxe
 
   return {
     positions,
-    normals: result.normals,
-    indices: result.indices,
-    splat,
+    normals: skirted.normals,
+    indices: skirted.indices,
+    splat: skirted.splat,
     surfaceCount,
-    tint,
+    tint: skirted.tint,
     min: [minX, minY2, minZ],
     max: [maxX, maxY2, maxZ],
-    vertexCount: result.vertexCount,
-    triangleCount: result.triangleCount,
+    vertexCount: skirted.vertexCount,
+    triangleCount: skirted.triangleCount,
+  };
+}
+
+/** Skirt depth in lattice steps: a full-detail cell drops 6 m, an HLOD cell (4x lattice) 24 m. */
+const SKIRT_STEPS = 3;
+
+interface SkirtInput {
+  positions: Float32Array;
+  normals: Float32Array;
+  indices: Uint32Array;
+  vertexCount: number;
+  triangleCount: number;
+}
+
+/**
+ * Skirts: a vertical strip hung from every mesh edge that lies on one of the
+ * cell's four side planes.
+ *
+ * Two cells meshed at the SAME step weld exactly (§4), but the HLOD ring is
+ * meshed at a coarser lattice, and a coarse surface crosses the shared plane
+ * at different heights than the fine one — a crack you can see the sky
+ * through wherever the coarse side is lower. A strip hanging `depth` down
+ * from each cell's own boundary edge covers the gap from whichever side is
+ * higher; the other cell's strip is buried in rock. Both sides emit them
+ * unconditionally because a cell does not know its neighbour's step.
+ *
+ * Marching cubes puts every vertex on a lattice edge, so a triangle crossing
+ * a boundary cube face has exactly one edge in the plane: the boundary edges
+ * are found by looking for triangle edges whose endpoints both sit on a
+ * plane, no adjacency structure needed. Skirt vertices copy the edge vertex's
+ * normal, splat and tint, so the strip shades as a continuation of the
+ * surface rather than as a wall.
+ *
+ * The skirt is part of the one shared mesh (render, physics, placement): in
+ * the simulation ring every neighbour is full detail, so there it is entirely
+ * inside rock and nothing can touch it.
+ */
+function addSkirts(
+  mesh: SkirtInput,
+  splat: Float32Array,
+  tint: Float32Array,
+  surfaceCount: number,
+  x0: number,
+  z0: number,
+  cellSize: number,
+  depth: number,
+): SkirtInput & { splat: Float32Array; tint: Float32Array } {
+  const { positions, normals, indices, vertexCount, triangleCount } = mesh;
+  const eps = 1e-4;
+  const planes: { axis: 0 | 2; at: number; outward: number }[] = [
+    { axis: 0, at: x0, outward: -1 },
+    { axis: 0, at: x0 + cellSize, outward: 1 },
+    { axis: 2, at: z0, outward: -1 },
+    { axis: 2, at: z0 + cellSize, outward: 1 },
+  ];
+  const on = (v: number, plane: (typeof planes)[number]): boolean => Math.abs(positions[v * 3 + plane.axis]! - plane.at) < eps;
+  /** [a, b, planeIndex] per boundary edge. */
+  const edges: number[] = [];
+  for (let t = 0; t < triangleCount; t++) {
+    const i0 = indices[t * 3]!;
+    const i1 = indices[t * 3 + 1]!;
+    const i2 = indices[t * 3 + 2]!;
+    for (let p = 0; p < planes.length; p++) {
+      const plane = planes[p]!;
+      const a = on(i0, plane);
+      const b = on(i1, plane);
+      const c = on(i2, plane);
+      if (a && b && !c) edges.push(i0, i1, p);
+      else if (b && c && !a) edges.push(i1, i2, p);
+      else if (c && a && !b) edges.push(i2, i0, p);
+    }
+  }
+  const count = edges.length / 3;
+  if (count === 0) return { ...mesh, splat, tint };
+
+  const outPositions = new Float32Array((vertexCount + count * 2) * 3);
+  const outNormals = new Float32Array((vertexCount + count * 2) * 3);
+  const outSplat = new Float32Array((vertexCount + count * 2) * surfaceCount);
+  const outTint = new Float32Array((vertexCount + count * 2) * 3);
+  const outIndices = new Uint32Array((triangleCount + count * 2) * 3);
+  outPositions.set(positions);
+  outNormals.set(normals);
+  outSplat.set(splat);
+  outTint.set(tint);
+  outIndices.set(indices);
+
+  let v = vertexCount;
+  let tri = triangleCount;
+  const copyVertex = (from: number, to: number, drop: number): void => {
+    outPositions[to * 3] = positions[from * 3]!;
+    outPositions[to * 3 + 1] = positions[from * 3 + 1]! - drop;
+    outPositions[to * 3 + 2] = positions[from * 3 + 2]!;
+    outNormals[to * 3] = normals[from * 3]!;
+    outNormals[to * 3 + 1] = normals[from * 3 + 1]!;
+    outNormals[to * 3 + 2] = normals[from * 3 + 2]!;
+    for (let k = 0; k < surfaceCount; k++) outSplat[to * surfaceCount + k] = splat[from * surfaceCount + k]!;
+    outTint[to * 3] = tint[from * 3]!;
+    outTint[to * 3 + 1] = tint[from * 3 + 1]!;
+    outTint[to * 3 + 2] = tint[from * 3 + 2]!;
+  };
+  for (let e = 0; e < count; e++) {
+    const a = edges[e * 3]!;
+    const b = edges[e * 3 + 1]!;
+    const plane = planes[edges[e * 3 + 2]!]!;
+    const a2 = v++;
+    const b2 = v++;
+    copyVertex(a, a2, depth);
+    copyVertex(b, b2, depth);
+    // wind so the strip faces OUT of the cell: (b - a) x (b2 - a) along the plane normal
+    const abx = positions[b * 3]! - positions[a * 3]!;
+    const abz = positions[b * 3 + 2]! - positions[a * 3 + 2]!;
+    // (ab) x (0, -depth, 0): x = abz * depth ... only the plane-axis component matters
+    const nx = -abz * -depth; // (ab_y * c_z - ab_z * c_y) with c = (0,-depth,0): -ab_z * -depth
+    const nz = abx * -depth; // (ab_x * c_y - ab_y * c_x)
+    const facing = plane.axis === 0 ? nx * plane.outward : nz * plane.outward;
+    if (facing >= 0) {
+      outIndices.set([a, b, b2, a, b2, a2], tri * 3);
+    } else {
+      outIndices.set([a, b2, b, a, a2, b2], tri * 3);
+    }
+    tri += 2;
+  }
+  return {
+    positions: outPositions,
+    normals: outNormals,
+    indices: outIndices,
+    splat: outSplat,
+    tint: outTint,
+    vertexCount: v,
+    triangleCount: tri,
   };
 }
 

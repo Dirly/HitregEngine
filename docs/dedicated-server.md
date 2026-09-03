@@ -159,10 +159,12 @@ wandering at run speed, casting every ~3 s, against the `mmo` scene):**
 | 50 | 4.8 ms | 11.6 ms | ~70 ms | 45 → 75 |
 
 Budget is 16.7 ms at 60 Hz, so ~50 players per process is the comfortable
-ceiling today. The spikes are synchronous voxel cell generation + trimesh
-cooking on the tick (`TerrainStreamer.load`); moving that to a worker
-thread is the first perf lever, a 30 Hz sim tick the second, binary
-snapshots the third. `GET /admin/status` reports `tickMs` live.
+ceiling today. The spikes WERE synchronous voxel cell generation + trimesh
+cooking on the tick; iteration 4 moved generation to worker threads
+(`VoxelPool`, default min(4, cpus-1), `--workers 0` for inline): a cell
+now costs the tick ~4 ms (expand + attach against a pre-marched mesh) and
+the same 50-bot run peaks at 15-22 ms instead of ~70. Next levers: a 30 Hz
+sim tick, then binary snapshots. `GET /admin/status` reports `tickMs` live.
 Run it: `pnpm -F @hitreg/server exec tsx bin/bots.ts --url ws://127.0.0.1:8787 --count 20 --seconds 60`.
 
 **Reconnect grace (iteration 2):** a dropped socket (or a `bye`) holds the
@@ -179,8 +181,10 @@ clients can show "away"; the playground ignores it for now.
 - The playground connects on PLAY and says bye on stop (`wantsSession` in
   NetPresence), so an editor tab holds nothing on the server; the body then
   lives out the grace window. Verified in-browser (iteration 2).
-- Cell loads are budgeted (`loadBudgetMs`, default 6 ms per update) so a
-  sprint into fresh terrain costs several ticks, not one long one.
+- Cell loads are budgeted (`loadBudgetMs`, default 6 ms per update) and
+  generated on worker threads; spawn-time `ensureAround` loads stay inline
+  so ground exists before a body does. `primeVoxelMesh` (new in core) is
+  how a worker's marched mesh reaches the cache the physics cook reads.
 - The server has no GLB loader: asset-mesh (trimesh/convex) colliders fall
   back to boxes. Voxel terrain + scatter primitives are exact.
 - Admin HTTP has no auth — bind to localhost or front it.

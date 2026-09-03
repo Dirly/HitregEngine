@@ -52,6 +52,7 @@ export {
 export {
   worldRecipeSchema,
   defaultWorldRecipe,
+  continentalWorldRecipe,
   MAX_SURFACES,
   riverSchema,
   canyonSchema,
@@ -73,12 +74,17 @@ export {
   type BlobDoc,
   type TunnelDoc,
   type PoiDoc,
+  type LakeDoc,
+  type ZoneAnchorDoc,
+  type ZonesDoc,
+  lakeSchema,
 } from "./recipe.js";
 
 export {
   createWorldField,
   type WorldField,
   type BiomeSample,
+  type ZoneSample,
   type SampleBlockRequest,
   type PolylineHit,
 } from "./field.js";
@@ -86,6 +92,7 @@ export {
 export {
   voxelMesh,
   buildVoxelMesh,
+  primeVoxelMesh,
   registerVoxelWorld,
   registerVoxelField,
   getVoxelWorld,

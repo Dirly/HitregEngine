@@ -33,3 +33,4 @@ export { GameServer, WORLD_MODULE, type GameServerOptions, type WorldModuleMessa
 export { NpcManager, type NpcManagerOptions, type NpcRecord, type NpcTemplate } from "./npcs.js";
 export { handleAdmin, type AdminDeps } from "./admin.js";
 export { serve, type ServeOptions, type ServeHandle } from "./serve.js";
+export { VoxelPool, defaultWorkerCount, type VoxelPoolOptions, type GeneratedCell } from "./voxel-pool.js";

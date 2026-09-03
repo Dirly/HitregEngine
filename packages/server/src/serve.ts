@@ -32,6 +32,8 @@ export interface ServeOptions {
   reconnectGraceSeconds?: number;
   /** Write terraformed recipes back to their file (default true — the recipe is the save). */
   persistRecipe?: boolean;
+  /** Cell-generation worker threads (default min(4, cpus-1); 0 = inline). */
+  workers?: number;
   log?: (line: string) => void;
 }
 
@@ -74,10 +76,12 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
     exclude: (_id, e) => e.tags.includes("player"),
   });
   const voxel = resolveServerVoxelWorld(world.base, opts.terrainRadius);
-  const terrain = voxel ? new TerrainStreamer(world, voxel) : null;
+  const terrain = voxel
+    ? new TerrainStreamer(world, voxel, opts.workers === undefined ? {} : { pool: opts.workers > 0 ? { workers: opts.workers } : false })
+    : null;
   log(
     `[serve] scene "${opts.scene}": ${world.entities.size} entities` +
-      (voxel ? `, voxel world "${voxel.data.world}" (cell ${voxel.streamer.cellSize}m, ring ${voxel.streamer.rings!.simulation})` : ", no voxel world"),
+      (voxel ? `, voxel world "${voxel.data.world}" (cell ${voxel.streamer.cellSize}m, ring ${voxel.streamer.rings!.simulation}, ${terrain!.workers} generation worker(s))` : ", no voxel world"),
   );
 
   const httpServer = http.createServer();
@@ -168,6 +172,7 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
       new Promise<void>((resolve) => {
         server.close();
         transport.close();
+        terrain?.dispose();
         world.dispose();
         httpServer.close(() => resolve());
       }),
