@@ -118,6 +118,32 @@ export class GameServer {
     );
     // a `hello` is the join signal: RoomHost has no roster hook, so the
     // roster is diffed each tick (same as net-presence.ts)
+
+    // Ground under every simulated body BEFORE the first step. Terrain
+    // streams around foci, and the authored NPCs exist from tick 0 — without
+    // this they fall through a world that has not loaded yet, and every
+    // ground probe they make afterwards reads the fallback.
+    if (this.terrain) {
+      for (const p of this.terrainFoci()) this.terrain.ensureAround(p[0], p[2], 1);
+    }
+  }
+
+  /**
+   * Where terrain must exist: every root entity with a DYNAMIC rigidbody —
+   * players and NPCs alike. A body with nothing under it falls forever, so
+   * "near a player" is not enough; the world has to be solid wherever the
+   * simulation puts weight on it.
+   */
+  private terrainFoci(): Array<[number, number, number]> {
+    const foci: Array<[number, number, number]> = [];
+    for (const [id, e] of this.world.entities) {
+      if (e.parent !== null) continue;
+      const rb = e.components["rigidbody"] as { kind?: string } | undefined;
+      if (rb?.kind !== "dynamic") continue;
+      const p = this.world.positionOf(id);
+      if (p) foci.push(p);
+    }
+    return foci;
   }
 
   /** Where the template says a player stands (also the `spawnPoint` default). */
@@ -158,14 +184,7 @@ export class GameServer {
     if (this.closed) return;
     this.syncRoster();
     const tick = this.world.tick;
-    if (this.terrain && tick % this.terrainEvery === 0) {
-      const foci: Array<[number, number, number]> = [];
-      for (const player of this.players.values()) {
-        const p = this.world.positionOf(player.bodyId);
-        if (p) foci.push(p);
-      }
-      this.terrain.update(foci);
-    }
+    if (this.terrain && tick % this.terrainEvery === 0) this.terrain.update(this.terrainFoci());
     this.world.step();
     this.collectReplicas();
     if (this.world.tick % this.snapshotEvery === 0) this.host.tick(this.world.tick);

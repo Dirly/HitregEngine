@@ -165,11 +165,24 @@ export class NpcManager {
     }
   }
 
-  /** Watches for deaths and respawns. */
+  /** Watches for deaths (respawn) and for bodies that left the world (teleport home). */
   private afterStep = (): void => {
-    if (this.respawnTicks === 0) return;
     const world = this.server.world;
     const tick = world.tick;
+    // Insurance against the one failure that is silent: a body with no
+    // ground under it (a cell that failed to load, a bad spawn point) falls
+    // forever and its scripts keep running, probing air. Put it back.
+    if (tick % 30 === 0) {
+      for (const record of this.npcs.values()) {
+        const p = world.positionOf(record.id);
+        if (p && p[1] < record.spawnAt[1] - 60) {
+          console.warn(`[server:npcs] ${record.id} fell out of the world (y=${p[1].toFixed(0)}) — returned to spawn`);
+          this.server.terrain?.ensureAround(record.spawnAt[0], record.spawnAt[2], 1);
+          world.sim.setPosition(record.id, record.spawnAt);
+        }
+      }
+    }
+    if (this.respawnTicks === 0) return;
     for (const record of this.npcs.values()) {
       const dead = world.netState.get(`combat/${record.id}.dead`) === true;
       if (!dead) {

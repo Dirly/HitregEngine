@@ -11,6 +11,7 @@
  *   GET  /admin/npcs            every managed NPC with position / hp / dead
  *   GET  /admin/templates       spawnable template names
  *   GET  /admin/netstate        the whole replicated session state
+ *   GET  /admin/events          the event bus trace ring (last 64 delivered events)
  *   POST /admin/spawn           { template, at: [x,y,z], yaw?, id?, params? }
  *   POST /admin/despawn         { id }
  */
@@ -87,6 +88,10 @@ export async function handleAdmin(deps: AdminDeps, req: IncomingMessage, res: Se
     }
     if (req.method === "GET" && p === "/admin/netstate") {
       send(res, 200, server.world.netState.snapshot());
+      return true;
+    }
+    if (req.method === "GET" && p === "/admin/events") {
+      send(res, 200, { tick: server.world.tick, events: server.world.eventBus.trace() });
       return true;
     }
     if (req.method === "POST" && p === "/admin/spawn") {
