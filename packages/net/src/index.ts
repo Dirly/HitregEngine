@@ -60,3 +60,19 @@ export type {
   ModuleHandler,
 } from "./room.js";
 export { RoomHost, RoomClient } from "./room.js";
+
+export type {
+  WebSocketClientTransportOptions,
+  WebSocketLike,
+  WsHandshake,
+} from "./websocket-client.js";
+export {
+  WS_HOST_ID,
+  WS_CHANNEL_RELIABLE,
+  WS_CHANNEL_UNRELIABLE,
+  parseWsHandshake,
+  frameData,
+  unframeData,
+  randomPeerId,
+  WebSocketClientTransport,
+} from "./websocket-client.js";
