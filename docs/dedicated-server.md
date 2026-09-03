@@ -154,8 +154,11 @@ clients can show "away"; the playground ignores it for now.
 1. Client-side prediction feel over real latency (only 0 ms tested).
 
 **Known gaps / decisions for Derek:**
-- A tab in EDIT mode still holds an idle body on the server (it connects
-  on load, not on play). Cheap to change either way.
+- The playground connects on PLAY and says bye on stop (`wantsSession` in
+  NetPresence), so an editor tab holds nothing on the server; the body then
+  lives out the grace window. Verified in-browser (iteration 2).
+- Cell loads are budgeted (`loadBudgetMs`, default 6 ms per update) so a
+  sprint into fresh terrain costs several ticks, not one long one.
 - The server has no GLB loader: asset-mesh (trimesh/convex) colliders fall
   back to boxes. Voxel terrain + scatter primitives are exact.
 - Admin HTTP has no auth — bind to localhost or front it.

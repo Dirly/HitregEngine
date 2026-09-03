@@ -55,6 +55,13 @@ export interface NetPresenceOptions {
   /** Dedicated-server url (`ws://…`). Null = P2P dev rooms via the vite relay. */
   serverUrl?: string | null;
   /**
+   * Dedicated server only: should this tab be connected right now? Default
+   * always. The playground answers "while playing", so an editor tab does not
+   * hold an idle body on the server; stopping play says bye (the server keeps
+   * the body for its reconnect grace, then despawns it).
+   */
+  wantsSession?(): boolean;
+  /**
    * Peer: does a replicated ENTITY already stand in for this peer's player?
    * (A dedicated server spawns every player as an entity doc; the capsule
    * avatar is then redundant and is not drawn.)
@@ -419,8 +426,13 @@ export class NetPresence {
   update(dt: number): void {
     if (!this.enabled) return;
     if (this.serverUrl !== null) {
-      // dedicated server: keep a client session up; re-dial after a drop
-      if (this.role === "off" && performance.now() >= this.nextDialAt) this.dialServer();
+      // dedicated server: keep a client session up while wanted; re-dial after a drop
+      const wanted = this.opts.wantsSession?.() ?? true;
+      if (wanted && this.role === "off" && performance.now() >= this.nextDialAt) this.dialServer();
+      if (!wanted && this.role !== "off") {
+        this.teardownSession(); // sends bye; the server's grace window takes it from here
+        this.sessionHost = null;
+      }
     } else {
       const room = `scene:${this.opts.getSceneName()}`;
       if (room !== this.room) this.joinRoom(room);

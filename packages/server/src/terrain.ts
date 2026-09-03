@@ -37,6 +37,13 @@ export interface TerrainStreamerOptions {
   radiusCells?: number;
   /** Cells loaded per step at most (default 2). */
   loadsPerStep?: number;
+  /**
+   * Milliseconds of cell generation allowed per update (default 6). A cell is
+   * cooked synchronously — sampling the field, marching it, building the
+   * trimesh — and the second cell in a step only starts if the first left
+   * room in the budget. Keeps a sprint into fresh terrain from stalling a tick.
+   */
+  loadBudgetMs?: number;
   /** Cells unloaded per step at most (default 4). */
   unloadsPerStep?: number;
 }
@@ -79,6 +86,9 @@ export class TerrainStreamer {
   private readonly options: VoxelChunkOptions;
   private readonly loadsPerStep: number;
   private readonly unloadsPerStep: number;
+  private readonly loadBudgetMs: number;
+  /** Cost of the last cell load, for diagnostics. */
+  lastLoadMs = 0;
   /** Resident cells: key -> entity ids the cell added. */
   private readonly loaded = new Map<string, string[]>();
   /** Per-cell representation from the last residency pass (hysteresis input). */
@@ -90,6 +100,7 @@ export class TerrainStreamer {
     this.resolved = resolved;
     this.loadsPerStep = opts.loadsPerStep ?? 2;
     this.unloadsPerStep = opts.unloadsPerStep ?? 4;
+    this.loadBudgetMs = opts.loadBudgetMs ?? 6;
     this.options = {
       ...voxelChunkOptionsFrom(resolved.data),
       collision: true,
@@ -144,7 +155,11 @@ export class TerrainStreamer {
       wanted.push({ key, d });
     }
     wanted.sort((a, b) => a.d - b.d);
-    for (const { key } of wanted.slice(0, this.loadsPerStep)) this.load(key);
+    const started = performance.now();
+    for (const { key } of wanted.slice(0, this.loadsPerStep)) {
+      this.load(key);
+      if (performance.now() - started > this.loadBudgetMs) break; // the rest next update
+    }
     // unloads
     let unloaded = 0;
     for (const key of [...this.loaded.keys()]) {
@@ -175,12 +190,14 @@ export class TerrainStreamer {
     if (!coords) return;
     const [cx, cz] = coords;
     const { field, data, streamer } = this.resolved;
+    const started = performance.now();
     try {
       const cell = voxelChunkDoc(field, data.world, cx, cz, this.options);
       const { doc } = chunkToSceneDoc(streamer.source, cx, cz, streamer.cellSize, cell);
       const expanded = expandScene(doc, this.world.assets, this.world.registry);
       this.world.addEntities(expanded, { silent: true });
       this.loaded.set(key, Object.keys(expanded.entities));
+      this.lastLoadMs = performance.now() - started;
     } catch (error) {
       console.warn(`[server:terrain] cell ${key} failed to load:`, error);
       this.loaded.set(key, []); // don't retry every step

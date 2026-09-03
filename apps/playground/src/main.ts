@@ -2046,6 +2046,8 @@ async function main(): Promise<void> {
   netPresence = new NetPresence({
     getSceneName: () => store.doc.name,
     serverUrl: netServerUrl,
+    // connect while playing: an editor tab has no business holding a body
+    wantsSession: () => playMode.get() === "playing",
     // a server-spawned body replaces the capsule avatar for that peer
     hasEntityForPeer: (peerId) => {
       const id = netPresence?.netState.get(`player/${peerId}`);
