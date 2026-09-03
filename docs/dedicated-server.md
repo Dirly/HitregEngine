@@ -121,10 +121,23 @@ The setting also persists per browser: `localStorage.setItem("hitreg:server",
 
 ## RESUME
 
+**Morning checklist (2026-09-03).** Five overnight iterations, 12 commits on
+`feat/ai-native-tweakability`, every package's tests and typecheck green.
+
+1. `pnpm -F @hitreg/server serve --scene mmo` in one terminal, `pnpm -F playground dev`
+   in another, open `http://localhost:5173/?server=ws://127.0.0.1:8787` in two
+   browsers (or one browser + a second machine on the LAN with `--host 0.0.0.0`),
+   press ` in both. You should see each other's characters run, cast, and be
+   fought by the heroes. `curl -s localhost:8787/admin/status` while you play.
+2. Then read **Design decisions** above and say which to keep.
+3. Then the **Known gaps** below — each is a one-line decision.
+
 **Where things stand.** Movement and combat work online against a dedicated
 Node server, with the server owning every player body, every NPC, every
-cast and the terrain colliders. Nothing persists yet; nothing is
-authenticated; one scene per process.
+cast and the terrain colliders; the world can be edited live from the admin
+API (terraform), and the edit is the save. Nothing else persists yet
+(player state dies with the body); nothing is authenticated; one scene per
+process; ~50 players per process at 60 Hz with headroom.
 
 **Uncommitted content changes** (project folders are gitignored; combat-demo
 is not a git repo yet, voxel-demo untouched, `mmo` got its own repo):
