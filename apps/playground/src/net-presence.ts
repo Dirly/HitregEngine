@@ -12,6 +12,8 @@ import {
   TransformInterpolator,
   WebRtcClientTransport,
   WebRtcHostTransport,
+  WebSocketClientTransport,
+  WS_HOST_ID,
   type SignalingChannel,
   type Transport,
   type TransformSnap,
@@ -40,11 +42,24 @@ import {
  * host change is handled crudely — tear down and re-dial the new host. The
  * 20 Hz setInterval host tick still stands in for the real fixed-tick sim.
  *
- * No-ops entirely without import.meta.hot (prod builds have no signaling).
+ * No-ops entirely without import.meta.hot (prod builds have no signaling) —
+ * unless a DEDICATED SERVER url is given (`?server=ws://host:port`, see
+ * @hitreg/server): then there is no room, no election and no signaling; this
+ * tab is always a RoomClient of that server over a WebSocket, re-dialing with
+ * a short backoff whenever the link drops. Everything peer-side (prediction,
+ * reconciliation, ghosts, replicated events, netState) is the same code.
  */
 
 export interface NetPresenceOptions {
   getSceneName(): string;
+  /** Dedicated-server url (`ws://…`). Null = P2P dev rooms via the vite relay. */
+  serverUrl?: string | null;
+  /**
+   * Peer: does a replicated ENTITY already stand in for this peer's player?
+   * (A dedicated server spawns every player as an entity doc; the capsule
+   * avatar is then redundant and is not drawn.)
+   */
+  hasEntityForPeer?(peerId: string): boolean;
   /** The local play-mode player, or null when not playing. */
   getLocalPlayer(): { position: [number, number, number]; yaw: number } | null;
   onRosterChanged?: () => void;
@@ -217,6 +232,9 @@ function makeLabel(name: string): { sprite: THREE.Sprite; texture: THREE.CanvasT
 export class NetPresence {
   private readonly opts: NetPresenceOptions;
   private readonly enabled: boolean;
+  /** Dedicated-server mode: the url to dial, else null. */
+  private readonly serverUrl: string | null;
+  private nextDialAt = 0;
   private readonly selfId = `p-${Math.random().toString(36).slice(2, 10)}`;
   private readonly selfName = `guest-${this.selfId.slice(-4)}`;
 
@@ -238,7 +256,7 @@ export class NetPresence {
   private sessionHost: string | null = null;
   private transport: Transport | null = null;
   /** How this tab is (or will be) linked: host listens on both at once. */
-  private via: "rtc" | "relay" | "rtc+relay" | null = null;
+  private via: "rtc" | "relay" | "rtc+relay" | "ws" | null = null;
   /** RTC diagnostics survive the merge wrapper (context bridge / HUD). */
   private rtcDiag: (() => Record<string, Record<string, string>>) | null = null;
   private relayTransport: Transport | null = null;
@@ -275,7 +293,10 @@ export class NetPresence {
     this.opts = opts;
     this.group.name = "netPresence";
     this.group.userData["netPresence"] = true;
-    this.enabled = typeof import.meta.hot !== "undefined" && import.meta.hot != null;
+    this.serverUrl = opts.serverUrl ?? null;
+    const hot = typeof import.meta.hot !== "undefined" && import.meta.hot != null;
+    this.enabled = hot || this.serverUrl !== null;
+    if (this.serverUrl !== null) return; // dedicated server: no signaling room
     if (!this.enabled) return; // prod build: no signaling channel, presence is off
     import.meta.hot!.on("hitreg:net-signal", (payload: NetSignalDown) => {
       // relay callbacks must never throw back into vite's ws client
@@ -355,6 +376,11 @@ export class NetPresence {
     }
   }
 
+  /** The dedicated server this tab talks to, or null in P2P dev rooms. */
+  server(): string | null {
+    return this.serverUrl;
+  }
+
   stats(): { role: "host" | "peer" | "off"; players: number; via: string | null } {
     if (this.role === "off") return { role: "off", players: 0, via: null };
     const self = this.opts.getLocalPlayer() ? 1 : 0;
@@ -367,6 +393,7 @@ export class NetPresence {
       selfId: this.selfId,
       role: this.role,
       via: this.via,
+      server: this.serverUrl,
       room: this.room,
       members: this.members.length,
       sessionHost: this.sessionHost,
@@ -391,13 +418,18 @@ export class NetPresence {
 
   update(dt: number): void {
     if (!this.enabled) return;
-    const room = `scene:${this.opts.getSceneName()}`;
-    if (room !== this.room) this.joinRoom(room);
+    if (this.serverUrl !== null) {
+      // dedicated server: keep a client session up; re-dial after a drop
+      if (this.role === "off" && performance.now() >= this.nextDialAt) this.dialServer();
+    } else {
+      const room = `scene:${this.opts.getSceneName()}`;
+      if (room !== this.room) this.joinRoom(room);
+    }
 
     // report play-state flips — the relay elects the first PLAYING member
     // as host (the authority must be a tab that actually simulates)
     const playing = this.opts.getLocalPlayer() !== null;
-    if (playing !== this.reportedPlaying && this.room) {
+    if (this.serverUrl === null && playing !== this.reportedPlaying && this.room) {
       this.reportedPlaying = playing;
       import.meta.hot?.send("hitreg:net-signal", {
         kind: "state",
@@ -424,6 +456,14 @@ export class NetPresence {
     const k = 1 - Math.exp(-12 * dt);
     for (const [peerId, target] of this.targets) {
       let avatar = this.remotes.get(peerId);
+      if (this.opts.hasEntityForPeer?.(peerId)) {
+        // a replicated body stands in for this player — no capsule
+        if (avatar) {
+          this.disposeAvatar(avatar);
+          this.remotes.delete(peerId);
+        }
+        continue;
+      }
       if (!avatar) {
         avatar = this.createAvatar(peerId, target);
         this.remotes.set(peerId, avatar);
@@ -516,6 +556,7 @@ export class NetPresence {
    * wipe it.
    */
   resetSessionStateIfSolo(): void {
+    if (this.serverUrl !== null) return; // the server owns the state; we hold a replica
     if (this.members.length <= 1) this.netState.clear();
   }
 
@@ -738,6 +779,25 @@ export class NetPresence {
     }, 700);
   }
 
+  /** Dedicated server: dial it over a WebSocket and run the ordinary client path. */
+  private dialServer(): void {
+    if (this.serverUrl === null) return;
+    this.nextDialAt = performance.now() + 2000; // backoff if this attempt dies
+    let transport: WebSocketClientTransport;
+    try {
+      transport = new WebSocketClientTransport(this.serverUrl, {
+        peerId: this.selfId,
+        name: this.selfName,
+      });
+    } catch (error) {
+      console.warn("[net] cannot dial the server:", error);
+      return;
+    }
+    this.sessionHost = WS_HOST_ID;
+    this.via = "ws";
+    this.wireClient(transport, WS_HOST_ID);
+  }
+
   /** Dev fallback path: same room protocol, transport is the signaling relay. */
   private startClientRelay(hostId: string): void {
     if (!this.signaling) return;
@@ -766,6 +826,13 @@ export class NetPresence {
         if (peer !== hostId) return;
         if (state === "connected") client.join(this.selfName);
         if (state === "disconnected") {
+          if (this.serverUrl !== null) {
+            console.warn("[net] lost the server — re-dialing shortly");
+            this.teardownSession();
+            this.sessionHost = null;
+            this.nextDialAt = performance.now() + 2000;
+            return;
+          }
           console.warn("[net] lost the host — waiting for a members update");
           this.targets = new Map();
           this.opts.onRosterChanged?.();

@@ -19,8 +19,14 @@ export interface RuntimeOptions {
   input: InputLike;
   /** Horizontal camera forward [x, z] — enables camera-relative controls. */
   viewForward?: () => [number, number];
+  /** This tab's own player entity id (see ScriptContext.localPlayer). */
+  localPlayer?: () => string | null;
   /** Host animation hook: crossfade an entity's animator to a clip (loop:false = one-shot). */
   setAnimation?: (entityId: string, clip: string, fadeSeconds?: number, opts?: { loop?: boolean }) => void;
+  /** Host animation hook: which clips this entity's model loaded with. */
+  animationClips?: (entityId: string) => string[];
+  /** Host animation hook: scale playback rate (1 = authored). */
+  setAnimationSpeed?: (entityId: string, multiplier: number) => void;
   /** Host audio hook: play an entity's audio component or a sound asset id. */
   playSound?: (entityId: string, soundId?: string) => void;
   /** Host billboard hook: mutate an entity's billboard (fill/text/visible). */
@@ -259,6 +265,7 @@ export class ScriptRuntime {
         after: (seconds, cb) => this.scheduleTimer(id, seconds, cb, false),
         every: (seconds, cb) => this.scheduleTimer(id, seconds, cb, true),
         ...(this.opts.viewForward ? { viewForward: this.opts.viewForward } : {}),
+        ...(this.opts.localPlayer ? { localPlayer: this.opts.localPlayer } : {}),
         setActiveCamera: (cameraId) => {
           this.activeCameraId = cameraId;
         },
@@ -268,12 +275,16 @@ export class ScriptRuntime {
                 this.opts.setAnimation!(id, clip, fade, opts),
             }
           : {}),
+        ...(this.opts.animationClips ? { animationClips: () => this.opts.animationClips!(id) } : {}),
+        ...(this.opts.setAnimationSpeed
+          ? { setAnimationSpeed: (multiplier: number) => this.opts.setAnimationSpeed!(id, multiplier) }
+          : {}),
         ...(this.opts.playSound
           ? { playSound: (soundId?: string) => this.opts.playSound!(id, soundId) }
           : {}),
         ...(this.opts.setBillboard
           ? {
-              setBillboard: (opts: { fill?: number; text?: string; visible?: boolean }) =>
+              setBillboard: (opts: { fill?: number; text?: string; visible?: boolean; play?: boolean; row?: number; tint?: string }) =>
                 this.opts.setBillboard!(id, opts),
             }
           : {}),

@@ -1,3 +1,4 @@
+import { createWorldMapOverlay } from "./world-map.js";
 import CameraControls from "camera-controls";
 import * as THREE from "three/webgpu";
 import {
@@ -40,6 +41,10 @@ import {
 } from "@hitreg/core";
 import {
   AnimationSystem,
+  ClothSwaySystem,
+  DEFAULT_CLOTH_SWAY,
+  type ClothSwayOptions,
+  type IslandReport,
   attachPhysicsDebug,
   attachSkeletonDebug,
   attachLightDebug,
@@ -1029,7 +1034,28 @@ async function main(): Promise<void> {
   let reconcileCount = 0;
   let rebuildCount = 0;
   let netPresence: NetPresence | null = null; // constructed after the editor mounts
+  /**
+   * Dedicated-server mode (`?server=ws://host:port`, or localStorage
+   * "hitreg:server"): this tab is a pure client of a @hitreg/server process.
+   * The scene doc's own player entity is NOT built — the server spawns a body
+   * per joiner and sends its docs over the `world` module; those live in
+   * netRuntimeDocs and are built/attached like streamed chunk content.
+   */
+  const netServerUrl: string | null = (() => {
+    const fromQuery = new URLSearchParams(location.search).get("server");
+    if (fromQuery) return fromQuery;
+    try {
+      return localStorage.getItem("hitreg:server");
+    } catch {
+      return null;
+    }
+  })();
+  /** Entity docs the server spawned at runtime (players, NPCs), by id. */
+  const netRuntimeDocs = new Map<string, SceneDoc["entities"][string]>();
+  /** Our own body's id on the server, once the `world` module told us. */
+  let netSelfId: string | null = null;
   const animations = new AnimationSystem();
+  const cloth = new ClothSwaySystem();
   const particles = new ParticleSystem();
   const billboards = new BillboardSystem();
   const grass = new GrassSystem();
@@ -1195,6 +1221,24 @@ async function main(): Promise<void> {
       const terrain = terrainId ? assets.getDataAsset(terrainId)?.data as { size: [number, number]; resolution: number; heights: number[] } | undefined : undefined;
       if (terrain) mesh.source = { ...mesh.source, size: terrain.size, resolution: terrain.resolution, heights: terrain.heights };
     }
+    if (netServerUrl) {
+      // the server owns players: its per-joiner body replaces the authored one
+      const drop = new Set<string>();
+      for (const [id, e] of Object.entries(expanded.entities)) {
+        if (e.parent === null && e.tags.includes("player")) drop.add(id);
+      }
+      let grew = true;
+      while (grew) {
+        grew = false;
+        for (const [id, e] of Object.entries(expanded.entities)) {
+          if (!drop.has(id) && e.parent !== null && drop.has(e.parent)) {
+            drop.add(id);
+            grew = true;
+          }
+        }
+      }
+      for (const id of drop) delete expanded.entities[id];
+    }
     return expanded;
   }
 
@@ -1222,9 +1266,40 @@ async function main(): Promise<void> {
     bakeImpostor: (object, bounds) => bakeImpostorAtlas(renderer, object, bounds),
     onClusteredMesh: (_entityId, mesh) => clusterLod.register(mesh),
     onModelLoaded: (entityId, root, clips) => {
-      const entity = lastExpanded.entities[entityId];
+      const entity = lastExpanded.entities[entityId] ?? netRuntimeDocs.get(entityId);
       const animator = entity?.components["animator"] as AnimatorData | undefined;
-      animations.register(entityId, root, clips, animator ?? null);
+      animations.register(entityId, root, clips, animator ?? null, entity?.parent ?? null);
+      const clothData = entity?.components["clothSway"] as Partial<ClothSwayOptions> | undefined;
+      if (clothData) {
+        try {
+        const islands: IslandReport[] = [];
+        const wired = cloth.register(
+          entityId,
+          root,
+          { ...DEFAULT_CLOTH_SWAY, ...clothData },
+          islands,
+        );
+        if (wired === 0) {
+          // Say WHY, with the numbers: these are tuning thresholds, and a
+          // bare "found nothing" leaves no way to tell a model with no cloth
+          // from bounds that are one hundredth too tight.
+          console.warn(
+            `[cloth] ${entityId}: no hanging panel found. Islands (hang/thickness/attach vs ` +
+              `${DEFAULT_CLOTH_SWAY.panelMinLength}+/${DEFAULT_CLOTH_SWAY.panelMaxThickness}-/` +
+              `${DEFAULT_CLOTH_SWAY.panelAttachMin}..${DEFAULT_CLOTH_SWAY.panelAttachMax}):`,
+            islands
+              .sort((a, b) => b.verts - a.verts)
+              .slice(0, 8)
+              .map((i) => `${i.verts}v ${i.hang}/${i.thickness}/${i.attach}`)
+              .join("  "),
+          );
+        }
+        } catch (error) {
+          // never let a cosmetic effect cost the caller their scene
+          console.warn(`[cloth] ${entityId}: disabled after an error`, error);
+          cloth.unregister(entityId);
+        }
+      }
       // report kit contents so AI (and unpack) can see what's inside a model
       const source = (
         entity?.components["mesh"] as { source?: { assetId?: string; node?: string } } | undefined
@@ -1344,6 +1419,7 @@ async function main(): Promise<void> {
       sceneCam.updateProjectionMatrix();
     }
     netPresence?.attach(built.scene); // remote-player avatars survive rebuilds
+    rebuildNetRuntimeObjects(); // server-spawned bodies survive rebuilds too
     viewport?.onSceneRebuilt();
     meshEditTool?.onSceneRebuilt();
   }
@@ -1807,8 +1883,14 @@ async function main(): Promise<void> {
       return; // (session start re-derives from netPresence.replicatedIds())
     }
     const target = new Set(ids);
+    // Another player's server-spawned subtree stays suspended whatever the
+    // managed set says: the server only lists the BODY (it is the thing with a
+    // transform to replicate), but its child scripts — a caster reading the
+    // keyboard, an actor — belong to that player's tab, never to this one.
+    const ownSubtree = new Set(netSelfId ? netRuntimeSubtree(netSelfId) : []);
+    const foreign = (id: string): boolean => netRuntimeDocs.has(id) && !ownSubtree.has(id);
     const toSuspend = [...target].filter((id) => !netSuspended.has(id));
-    const toResume = [...netSuspended].filter((id) => !target.has(id));
+    const toResume = [...netSuspended].filter((id) => !target.has(id) && !foreign(id));
     if (toSuspend.length > 0 || toResume.length > 0) {
       console.log(`[net] host-simulated entities: +${toSuspend.length} -${toResume.length}`);
     }
@@ -1840,14 +1922,116 @@ async function main(): Promise<void> {
         if (object) sim.setPosition(id, [object.position.x, object.position.y, object.position.z]);
       }
     }
+    const keep = [...netSuspended].filter(foreign);
     netSuspended.clear();
     for (const id of target) netSuspended.add(id);
+    for (const id of keep) netSuspended.add(id);
   }
 
   function localPlayerId(): string | null {
+    if (netSelfId && built.objects.has(netSelfId)) return netSelfId;
     return (
       Object.entries(lastExpanded.entities).find(([, e]) => e.tags.includes("player"))?.[0] ?? null
     );
+  }
+
+  // -- dedicated-server runtime entities ---------------------------------------
+  // Docs the server spawned (every player's body, NPCs added at runtime) are
+  // built into the live scene exactly like a streamed cell: buildScene on a
+  // partial doc, objects registered, and — while playing — attached to the
+  // session. OUR body gets physics + scripts (that is the prediction loop);
+  // everyone else's gets scripts registered-but-suspended so the host-driven
+  // ghost path (suspendForHost) owns it from the first frame.
+  function netRuntimeSubtree(rootId: string): string[] {
+    const out = [rootId];
+    for (let i = 0; i < out.length; i++) {
+      for (const [id, e] of netRuntimeDocs) {
+        if (e.parent === out[i] && !out.includes(id)) out.push(id);
+      }
+    }
+    return out;
+  }
+  function buildNetRuntimeObjects(docs: SceneDoc["entities"]): Map<string, THREE.Object3D> {
+    const partial: SceneDoc = { ...lastExpanded, entities: docs };
+    const result = buildScene(partial, sceneBuildOptions);
+    built.scene.add(result.scene);
+    for (const [id, object] of result.objects) built.objects.set(id, object);
+    return result.objects;
+  }
+  function rebuildNetRuntimeObjects(): void {
+    if (netRuntimeDocs.size === 0) return;
+    buildNetRuntimeObjects(Object.fromEntries(netRuntimeDocs));
+  }
+  /** Attach runtime docs to the live play session (all of them by default). */
+  function attachNetRuntimeToSession(ids?: string[]): void {
+    if (!sim || !scripts) return;
+    const list = ids ?? [...netRuntimeDocs.keys()];
+    const own = new Set(netSelfId ? netRuntimeSubtree(netSelfId) : []);
+    const ownDocs: SceneDoc["entities"] = {};
+    const otherDocs: SceneDoc["entities"] = {};
+    const objects = new Map<string, THREE.Object3D>();
+    for (const id of list) {
+      const doc = netRuntimeDocs.get(id);
+      const object = built.objects.get(id);
+      if (!doc || !object) continue;
+      objects.set(id, object);
+      if (own.has(id)) ownDocs[id] = doc;
+      else otherDocs[id] = doc;
+    }
+    if (Object.keys(ownDocs).length > 0) {
+      sim.addEntities({ ...lastExpanded, entities: ownDocs });
+      scripts.addEntities({ ...lastExpanded, entities: ownDocs }, objects, { silent: true });
+    }
+    const otherIds = Object.keys(otherDocs);
+    if (otherIds.length > 0) {
+      scripts.addEntities({ ...lastExpanded, entities: otherDocs }, objects, { silent: true });
+      scripts.suspendEntities(otherIds);
+      for (const id of otherIds) netSuspended.add(id);
+    }
+  }
+  function despawnNetRuntime(ids: string[]): void {
+    const present = ids.filter((id) => netRuntimeDocs.has(id));
+    if (present.length === 0) return;
+    sim?.removeEntities(present);
+    scripts?.removeEntities(present, { silent: true });
+    for (const id of present) {
+      const object = built.objects.get(id);
+      object?.parent?.remove(object);
+      built.objects.delete(id);
+      netRuntimeDocs.delete(id);
+      netSuspended.delete(id);
+      prevBodyPos.delete(id);
+      currBodyPos.delete(id);
+      if (id === netSelfId) netSelfId = null;
+    }
+  }
+  /** The server's `world` module: entity docs to build, ids to drop. */
+  function onWorldModule(data: unknown): void {
+    const msg = data as
+      | { t?: string; entities?: SceneDoc["entities"]; ids?: unknown; self?: unknown }
+      | null;
+    if (!msg || typeof msg !== "object") return;
+    if (msg.t === "spawn" && msg.entities && typeof msg.entities === "object") {
+      const fresh: SceneDoc["entities"] = {};
+      for (const [id, doc] of Object.entries(msg.entities)) {
+        if (netRuntimeDocs.has(id)) continue;
+        netRuntimeDocs.set(id, doc);
+        fresh[id] = doc;
+      }
+      if (typeof msg.self === "string") netSelfId = msg.self;
+      const ids = Object.keys(fresh);
+      if (ids.length > 0) {
+        buildNetRuntimeObjects(fresh);
+        attachNetRuntimeToSession(ids);
+      }
+      if (typeof msg.self === "string") {
+        resolveFollowTarget();
+        if (playMode.get() !== "edit") refreshCameraColliders();
+      }
+      console.log(`[net] server spawned ${ids.length} entities${typeof msg.self === "string" ? ` (you are ${msg.self})` : ""}`);
+    } else if (msg.t === "despawn" && Array.isArray(msg.ids)) {
+      despawnNetRuntime(msg.ids.filter((id): id is string => typeof id === "string"));
+    }
   }
   /** Host-side physics proxies for remote players (entity ids in the sim). */
   const netProxies = new Set<string>();
@@ -1861,6 +2045,12 @@ async function main(): Promise<void> {
   let hostCommsLink: (CommsLink & { notifyRoster(): void }) | null = null;
   netPresence = new NetPresence({
     getSceneName: () => store.doc.name,
+    serverUrl: netServerUrl,
+    // a server-spawned body replaces the capsule avatar for that peer
+    hasEntityForPeer: (peerId) => {
+      const id = netPresence?.netState.get(`player/${peerId}`);
+      return typeof id === "string" && built.objects.has(id);
+    },
     onRosterChanged: () => hostCommsLink?.notifyRoster(),
     getLocalPlayer: () => {
       if (playMode.get() !== "playing") return null;
@@ -1894,7 +2084,7 @@ async function main(): Promise<void> {
       let x = fx * forward + -fz * strafe;
       let z = fz * forward + fx * strafe;
       const len = Math.hypot(x, z);
-      const script = lastExpanded.entities[playerId]?.components["script"] as
+      const script = (lastExpanded.entities[playerId] ?? netRuntimeDocs.get(playerId))?.components["script"] as
         | { params?: { speed?: number } }
         | undefined;
       const speed = (script?.params?.speed ?? 6.5) * (ud.speedMult ?? 1);
@@ -1979,8 +2169,16 @@ async function main(): Promise<void> {
     // peer→authority requests (to-authority events): out on peers, in on host
     collectPeerEvents: () => eventBus?.takeCommandOutbox() ?? [],
     onPeerEvent: (from, events) => eventBus?.injectFromPeer(from, events),
-    onRoleChanged: (role) =>
-      eventBus?.setNetRole(role === "host" ? "authority" : role === "peer" ? "peer" : "local"),
+    onRoleChanged: (role) => {
+      eventBus?.setNetRole(role === "host" ? "authority" : role === "peer" ? "peer" : "local");
+      // the server session ended: its entities go with it (they come back
+      // with the next welcome), so nothing of the server's runs unowned here
+      if (role === "off" && netServerUrl) despawnNetRuntime([...netRuntimeDocs.keys()]);
+    },
+  });
+  // the server's `world` module (entity docs for players + runtime NPCs)
+  netPresence.onSession((session) => {
+    if (session?.role === "peer" && netServerUrl) session.client.onModule("world", onWorldModule);
   });
 
   // -- comms: text chat + VoIP (@hitreg/comms), riding the room's module channel --
@@ -2121,6 +2319,23 @@ async function main(): Promise<void> {
     if (playMode.get() === "edit") publishLoadedChunkCells();
   });
 
+  // M: the world map — the same overview PNG the worldgen CLI renders, with
+  // towns, peaks, waterfalls and the player's position on it. Works in play
+  // mode too (M is not a movement key); it is how a person and an agent end
+  // up pointing at the same place on the same map.
+  const worldMapDir = new THREE.Vector3();
+  const worldMapPos = new THREE.Vector3();
+  const worldMap = createWorldMapOverlay({
+    world: () => resolveVoxelWorld(lastExpanded)?.data.world ?? null,
+    position: () => {
+      const target = playMode.get() !== "edit" && followTargetId ? built.objects.get(followTargetId) : null;
+      if (target) target.getWorldPosition(worldMapPos);
+      else controls.getTarget(worldMapPos);
+      camera.getWorldDirection(worldMapDir);
+      return { x: worldMapPos.x, z: worldMapPos.z, yaw: Math.atan2(-worldMapDir.x, -worldMapDir.z) };
+    },
+  });
+
   window.addEventListener("keydown", (e) => {
     // typing into a field (including pin-note textareas) must never trip a
     // single-letter editor hotkey
@@ -2131,6 +2346,10 @@ async function main(): Promise<void> {
       (e.target instanceof HTMLElement && e.target.isContentEditable)
     )
       return;
+    if (e.code === "KeyM" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+      worldMap.toggle();
+      return;
+    }
     if (e.code === "Backquote") {
       if (playMode.get() === "playing") {
         playMode.set("paused");
@@ -2283,8 +2502,11 @@ async function main(): Promise<void> {
       profiler, // per-script-name scopes under "scripts" (see RuntimeOptions)
       input,
       viewForward,
+      localPlayer: () => localPlayerId(),
       setAnimation: (entityId, clip, fade, opts) =>
         animations.play(entityId, clip, fade ?? 0.3, opts?.loop ?? true),
+      animationClips: (entityId) => animations.clipNames(entityId),
+      setAnimationSpeed: (entityId, multiplier) => animations.setSpeed(entityId, multiplier),
       setBillboard: (entityId, opts) => billboards.setValue(entityId, opts),
       setParticles: (entityId, opts) => particles.setValue(entityId, opts),
       setLight: setRuntimeLight,
@@ -2316,9 +2538,18 @@ async function main(): Promise<void> {
     // re-suspend them in the fresh session (the id set didn't change, so
     // onWorldEntities won't re-fire on its own)
     netSuspended.clear();
+    attachNetRuntimeToSession(); // server-spawned bodies: ours simulated, others suspended
     if (netPresence) suspendForHost(netPresence.replicatedIds());
 
-    // data-driven follow cam: an active camera with a follow/chase rig tracks its target tag
+    resolveFollowTarget();
+  }
+  /**
+   * Data-driven follow cam: an active camera with a follow/chase rig tracks
+   * its target tag. Our own server-spawned body wins when it carries the tag
+   * (every player's body does, so "first with the tag" would follow a
+   * stranger).
+   */
+  function resolveFollowTarget(): void {
     followTargetId = null;
     followRigMode = null;
     for (const entity of Object.values(lastExpanded.entities)) {
@@ -2330,8 +2561,12 @@ async function main(): Promise<void> {
         | undefined;
       if (cam?.active && (cam.rig?.mode === "follow" || cam.rig?.mode === "chase")) {
         const tag = cam.rig.targetTag;
+        const self = netSelfId ? netRuntimeDocs.get(netSelfId) : undefined;
         followTargetId =
-          Object.entries(lastExpanded.entities).find(([, e]) => e.tags.includes(tag))?.[0] ?? null;
+          (self && self.tags.includes(tag) ? netSelfId : null) ??
+          Object.entries(lastExpanded.entities).find(([, e]) => e.tags.includes(tag))?.[0] ??
+          [...netRuntimeDocs].find(([, e]) => e.tags.includes(tag))?.[0] ??
+          null;
         followRigMode = cam.rig.mode as "follow" | "chase";
         followRigDistance = cam.rig.distance ?? 8;
         followRigHeight = cam.rig.height ?? 1;
@@ -2398,6 +2633,7 @@ async function main(): Promise<void> {
       {
         onEntityReset: (id) => {
           animations.unregister(id);
+          cloth.unregister(id);
           particles.unregister(id);
           billboards.unregister(id);
           if (id in modelBones.get()) {
@@ -2841,6 +3077,14 @@ async function main(): Promise<void> {
       controls,
       playMode,
       scene: () => built.scene,
+      // animation + cloth state: which clip an entity is actually playing and at
+      // what rate. Without this a headless session can see a character slide
+      // but never tell a wrong clip from a wrong playback speed.
+      anim: (id: string) => ({
+        clip: animations.currentClip(id),
+        clips: animations.clipNames(id),
+      }),
+      cloth: (id: string) => cloth.swayOf(id)?.toArray() ?? null,
       info: () => JSON.parse(JSON.stringify(renderer.renderer.info)),
       graphStats: () => {
         const byType = new Map<string, number>();
@@ -3143,6 +3387,12 @@ async function main(): Promise<void> {
       if (playMode.get() === "playing") {
         profiler.begin("animations");
         animations.update(dt);
+        try {
+          cloth.update(dt);
+        } catch (error) {
+          console.warn("[cloth] update failed; cloth disabled for this session", error);
+          cloth.clear();
+        }
         profiler.end();
       }
       // chunk streaming follows the player in play mode, the fly-cam in edit
@@ -3207,6 +3457,7 @@ async function main(): Promise<void> {
       // "foliage" number could never say which
       profiler.begin("particles");
       particles.update(dt, renderCamera); // billboards face the camera actually used
+      billboards.update(dt); // flipbook VFX frames
       profiler.end();
       profiler.begin("grass");
       // one Map lookup: a recipe edit swaps the field object, which is the

@@ -24,6 +24,13 @@ export interface ScriptContext {
   getObject(id: string): THREE.Object3D | undefined;
   /** Entity ids carrying a tag (expanded scene). */
   findByTag(tag: string): string[];
+  /**
+   * The entity id of THIS tab's own player, or null when there is none (a
+   * headless server, a tab that has not joined). On a dedicated server every
+   * joined player is a `player`-tagged body, so `findByTag("player")[0]` is
+   * "somebody", not "me" — a HUD or a relevance filter asks this instead.
+   */
+  localPlayer?(): string | null;
   /** Milliseconds of simulated time (fixed-step accumulated, replay-safe). */
   now(): number;
   /**
@@ -51,10 +58,22 @@ export interface ScriptContext {
    * (for one-shots like attack/emote); the default loops.
    */
   setAnimation?(clip: string, fadeSeconds?: number, opts?: { loop?: boolean }): void;
+  /**
+   * Clip names this entity's model actually shipped with. Lets a behavior
+   * degrade instead of stalling: a locomotion script can fall back from a
+   * missing "Walk" to "Run" rather than asking the animator for a clip that
+   * isn't there and leaving the character frozen mid-stride.
+   */
+  animationClips?(): string[];
+  /**
+   * Scale this entity's animation playback (1 = the authored rate). The cure
+   * for foot-skate on in-place locomotion clips — see AnimationSystem.setSpeed.
+   */
+  setAnimationSpeed?(multiplier: number): void;
   /** Play this entity's audio component, or any sound asset id, at this entity. */
   playSound?(soundId?: string): void;
   /** Mutate this entity's billboard at runtime (HP bar fill, label text) — never the document. */
-  setBillboard?(opts: { fill?: number; text?: string; visible?: boolean }): void;
+  setBillboard?(opts: { fill?: number; text?: string; visible?: boolean; play?: boolean; row?: number; tint?: string }): void;
   /**
    * Start/stop, reveal, restart, burst or retint an entity's particle emitter
    * at runtime. `colorStart`/`colorEnd` move the whole ramp — that is how one
