@@ -137,6 +137,7 @@ import { renderThumbnails } from "./thumbnails.js";
 import { initProjectScripts } from "./project-scripts.js";
 import { installLiveSync } from "./live-sync.js";
 import {
+  applyWorldRecipeEdit,
   resolveVoxelWorld,
   voxelChunkProvider,
   voxelMeshViaWorker,
@@ -2031,6 +2032,15 @@ async function main(): Promise<void> {
       console.log(`[net] server spawned ${ids.length} entities${typeof msg.self === "string" ? ` (you are ${msg.self})` : ""}`);
     } else if (msg.t === "despawn" && Array.isArray(msg.ids)) {
       despawnNetRuntime(msg.ids.filter((id): id is string => typeof id === "string"));
+    } else if (msg.t === "recipe") {
+      // the server terraformed the world: same path a recipe file edit takes
+      const m = msg as unknown as { id?: unknown; recipe?: unknown };
+      if (typeof m.id === "string" && m.recipe && typeof m.recipe === "object") {
+        if (applyWorldRecipeEdit(m.id, JSON.stringify(m.recipe))) {
+          chunkManager.reloadAll();
+          console.log(`[net] world recipe "${m.id}" updated by the server — re-streaming`);
+        }
+      }
     }
   }
   /** Host-side physics proxies for remote players (entity ids in the sim). */

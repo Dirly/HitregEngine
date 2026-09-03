@@ -21,7 +21,7 @@ Nothing in the room protocol changes. What the server adds on top:
 | simulation | `HeadlessWorld` — registries, expanded scene, headless `Object3D` map, `PhysicsSim`, `EventBus`, `NetStateStore`, `ScriptRuntime`, voxel collider streamer, fixed loop | `@hitreg/server` |
 | session | `GameServer` — `RoomHost` + per-peer player entities + server-side movement driver + snapshots/events/state fan-out + the `world` spawn module | `@hitreg/server` |
 | population | `NpcManager` — spawn/despawn/respawn at runtime; the hook the AI dungeon master drives | `@hitreg/server` |
-| ops | HTTP admin (`/admin/*`) — list players/NPCs, spawn, despawn, netState dump | `@hitreg/server` |
+| ops | HTTP admin (`/admin/*`) — list players/NPCs, spawn, despawn, netState dump, events trace, **terraform** | `@hitreg/server` |
 | client | `?server=ws://…` mode in the playground: pure client, no election, spawns replicated entity docs the server sends | `apps/playground` |
 
 ## Milestones (checked = verified headless)
@@ -33,6 +33,7 @@ Nothing in the room protocol changes. What the server adds on top:
 - [x] M5 NPC manager + admin endpoints + respawn
 - [x] M6 `mmo` project: voxel-demo world + combat roster, one scene the server hosts
 - [x] M7 two-client headless verification (Playwright, real WebGPU Chrome), RESUME written
+- [x] M8 terraform: `POST /admin/terraform` applies recipe edits on the server (touched cells re-cook), clients re-stream, the recipe file is saved; the inverse batch undoes
 
 ## Design decisions (made overnight — Derek to ratify)
 
@@ -59,6 +60,27 @@ Nothing in the room protocol changes. What the server adds on top:
 5. **NPC spawn/despawn replicates as entity docs** on the `world` module
    (reliable). This is the missing "runtime spawn replication" item from the
    multiplayer roadmap, done for the server case first.
+
+## Editing the world from outside (the DM hook)
+
+```
+curl -s -X POST http://127.0.0.1:8787/admin/terraform -H 'content-type: application/json' -d '{
+  "edits": [
+    { "edit": "add-feature", "kind": "blobs",
+      "feature": { "id": "crater", "center": [1663, 47, -6252], "radius": 5, "op": "remove", "falloff": 2.5 } }
+  ]}'
+# → { ok, inverse: [...], added: ["crater"], touchedCells: [[34,-131]], reloaded: ["34_-131"] }
+```
+
+The batch is the same `RecipeEdit` vocabulary the worldgen CLI and editor
+use (`RECIPE_EDIT_SPECS` in @hitreg/core, in `spec.json`), validated and
+atomic. The server re-cooks only the resident cells the footprint touched,
+every client gets the new recipe over the `world` module and re-streams,
+and the recipe file is written back (atomic rename) because the recipe IS
+the world save — restart the server and the crater is still there. POST the
+returned `inverse` to undo. `--no-persist` for experiments. Verified live:
+a crater and a pillar appeared in a connected client within a few seconds;
+the undo removed them (iteration 3).
 
 ## How to run it
 

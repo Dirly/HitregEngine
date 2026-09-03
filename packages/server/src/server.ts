@@ -22,7 +22,7 @@ import {
   type Transport,
   type ReplicaEntry,
 } from "@hitreg/net";
-import type { EntityDoc, NetObjectData } from "@hitreg/core";
+import type { EntityDoc, NetObjectData, RecipeEdit, WorldRecipe } from "@hitreg/core";
 import type { HeadlessWorld } from "./world.js";
 import type { TerrainStreamer } from "./terrain.js";
 import {
@@ -40,7 +40,9 @@ export type WorldModuleMessage =
   | { t: "spawn"; entities: Record<string, EntityDoc>; self?: string }
   | { t: "despawn"; ids: string[] }
   /** A player's link dropped (body held for the grace window) or came back. */
-  | { t: "presence"; peerId: string; linked: boolean };
+  | { t: "presence"; peerId: string; linked: boolean }
+  /** The world recipe changed (terraform): re-register it and re-stream. */
+  | { t: "recipe"; id: string; recipe: WorldRecipe };
 
 export interface GameServerOptions {
   world: HeadlessWorld;
@@ -61,6 +63,8 @@ export interface GameServerOptions {
    * window gets its body back where it stood — a dropped link is not a death.
    */
   reconnectGraceSeconds?: number;
+  /** Called with the new recipe after every successful terraform (persist it — the recipe is the save). */
+  onRecipeChanged?: (id: string, recipe: WorldRecipe) => void;
 }
 
 interface RemoteInputCommand {
@@ -92,6 +96,7 @@ export class GameServer {
   private readonly snapshotEvery: number;
   private readonly terrainEvery: number;
   private readonly graceTicks: number;
+  private readonly onRecipeChanged: ((id: string, recipe: WorldRecipe) => void) | undefined;
   /** Wall-clock cost of the last 300 ticks (ms), for /admin/status. */
   private readonly tickCost: number[] = [];
   private readonly unsubs: Array<() => void> = [];
@@ -108,6 +113,7 @@ export class GameServer {
     this.snapshotEvery = opts.snapshotEvery ?? 3;
     this.terrainEvery = opts.terrainEvery ?? 10;
     this.graceTicks = Math.round((opts.reconnectGraceSeconds ?? 30) / this.world.fixedDt);
+    this.onRecipeChanged = opts.onRecipeChanged;
     this.template = opts.playerTemplate === undefined ? extractPlayerTemplate(this.world.expanded) : opts.playerTemplate;
     const authored = (this.template?.entities[this.template.rootId]?.components["transform"] as { position?: number[] } | undefined)?.position;
     const fallback: [number, number, number] = isFiniteVec(authored, 3)
@@ -350,6 +356,25 @@ export class GameServer {
     this.world.removeEntities(present);
     for (const id of present) this.runtimeDocs.delete(id);
     this.host.broadcastModule(WORLD_MODULE, { t: "despawn", ids: present } satisfies WorldModuleMessage);
+  }
+
+  // -- terraform ------------------------------------------------------------------------
+
+  /**
+   * Edit the world. The batch is validated and applied atomically to the
+   * recipe (`applyRecipeEdits`), touched resident cells re-cook, every
+   * client receives the new recipe over the `world` module and re-streams,
+   * and the recipe is handed to `onRecipeChanged` to persist. Returns the
+   * inverse batch — POST it back to undo. Throws with no change on an
+   * invalid edit or when the scene has no voxel world.
+   */
+  terraform(edits: readonly RecipeEdit[]): { inverse: RecipeEdit[]; added: string[]; touchedCells: [number, number][]; reloaded: string[] } {
+    if (!this.terrain) throw new Error("this scene has no voxel world to terraform");
+    const { result, reloaded, touchedCells } = this.terrain.applyEdits(edits);
+    const id = this.terrain.resolved.data.world;
+    this.host.broadcastModule(WORLD_MODULE, { t: "recipe", id, recipe: result.recipe } satisfies WorldModuleMessage);
+    this.onRecipeChanged?.(id, result.recipe);
+    return { inverse: result.inverse, added: result.added, touchedCells, reloaded };
   }
 
   // -- replication --------------------------------------------------------------------

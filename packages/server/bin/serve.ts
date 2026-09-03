@@ -16,6 +16,7 @@
  *   --grace <seconds>     keep a dropped player's body this long for a reconnect (default 30)
  *   --terrain-radius <n>  simulated cells around each player (default: the scene's rings.simulation)
  *   --max-players <n>
+ *   --no-persist          do not write terraformed recipes back to their file
  *
  * Clients: open the playground with `?server=ws://<host>:<port>` and press play.
  * Admin:   curl -s http://<host>:<port>/admin/status
@@ -55,6 +56,7 @@ async function main(): Promise<void> {
     reconnectGraceSeconds: num("grace"),
     terrainRadius: num("terrain-radius"),
     maxPlayers: num("max-players"),
+    persistRecipe: !process.argv.includes("--no-persist"),
   });
   const tickLog = setInterval(() => {
     const s = handle.server.stats() as { players: unknown[]; terrainCells: number; tick: number };

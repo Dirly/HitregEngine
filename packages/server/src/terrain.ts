@@ -15,15 +15,20 @@
  */
 
 import {
+  applyRecipeEdits,
+  cellsForEdits,
   chunkKey,
   chunkToSceneDoc,
   computeChunkStates,
   expandScene,
   getVoxelWorld,
   parseChunkKey,
+  registerVoxelWorld,
   voxelChunkDoc,
   voxelChunkOptionsFrom,
   type ChunkRep,
+  type RecipeEdit,
+  type RecipeEditResult,
   type ChunkStreamerData,
   type SceneDoc,
   type VoxelChunkOptions,
@@ -82,7 +87,8 @@ export function resolveServerVoxelWorld(doc: SceneDoc, radiusCells?: number): Re
 
 export class TerrainStreamer {
   readonly world: HeadlessWorld;
-  readonly resolved: ResolvedServerWorld;
+  /** Replaced wholesale by {@link applyEdits} — the field is a pure function of the recipe. */
+  resolved: ResolvedServerWorld;
   private readonly options: VoxelChunkOptions;
   private readonly loadsPerStep: number;
   private readonly unloadsPerStep: number;
@@ -93,7 +99,7 @@ export class TerrainStreamer {
   private readonly loaded = new Map<string, string[]>();
   /** Per-cell representation from the last residency pass (hysteresis input). */
   private prev = new Map<string, ChunkRep>();
-  private readonly limitCells: number;
+  private limitCells: number;
 
   constructor(world: HeadlessWorld, resolved: ResolvedServerWorld, opts: TerrainStreamerOptions = {}) {
     this.world = world;
@@ -211,8 +217,42 @@ export class TerrainStreamer {
     this.world.removeEntities(ids, { silent: true });
   }
 
-  /** Ground height at (x, z) from the recipe field (not the collider) — for spawn placement. */
+  /**
+   * Ground height at (x, z) from the recipe field (not the collider) — for
+   * spawn placement. `surfaceCast` marches the real density (blobs, tunnels,
+   * caves included); `height` is the 2D landform and is the fallback where
+   * the cast finds no surface.
+   */
   groundHeight(x: number, z: number): number {
-    return this.resolved.field.height(x, z);
+    const field = this.resolved.field;
+    return field.surfaceCast(x, z) ?? field.height(x, z);
+  }
+
+  /**
+   * TERRAFORM: apply a validated, invertible edit batch to the recipe, swap
+   * the field, and re-cook only the resident cells the batch touched. The
+   * recipe IS the world save, so the returned recipe is what to persist and
+   * what to hand clients; `result.inverse` is the undo.
+   *
+   * Atomic: an invalid edit throws before anything changes.
+   */
+  applyEdits(edits: readonly RecipeEdit[]): { result: RecipeEditResult; reloaded: string[]; touchedCells: [number, number][] } {
+    const before = this.resolved.field.recipe;
+    const result = applyRecipeEdits(before, edits);
+    const field = registerVoxelWorld(this.resolved.data.world, result.recipe);
+    this.resolved = { ...this.resolved, field };
+    const limit = field.worldLimit;
+    this.limitCells =
+      limit === Infinity ? Infinity : (limit + (field.recipe.bounds?.limitFalloff ?? 600)) / field.recipe.cellSize + 2;
+    const touchedCells = cellsForEdits(result.recipe, result);
+    const reloaded: string[] = [];
+    for (const [cx, cz] of touchedCells) {
+      const key = chunkKey(cx, cz);
+      if (!this.loaded.has(key)) continue;
+      this.unload(key);
+      this.load(key);
+      reloaded.push(key);
+    }
+    return { result, reloaded, touchedCells };
   }
 }

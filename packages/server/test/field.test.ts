@@ -180,10 +180,38 @@ describe.skipIf(!field)("combat-demo field, headless", () => {
       payload: { casterId: "hero0", abilityId: "strike", aim: [1, 0] },
     });
     await flush(hub, 1);
-    const staminaBefore = world.netState.get("combat/hero0.stamina") as number;
     for (let i = 0; i < 30; i++) server.tick();
     expect(world.netState.get("combat/dummy1.hp")).toBe(hpBefore);
-    expect(world.netState.get("combat/hero0.stamina") as number).toBeGreaterThanOrEqual(staminaBefore - 0.01);
+    // hero0's brain casts cleave/frostNova on its own; a STRIKE by hero0 could only have come from the forged request
+    const forged = world.eventBus.trace().filter((e) => e.name === "combat.cast.accepted" && (e.payload as { casterId: string; abilityId: string }).casterId === "hero0" && (e.payload as { abilityId: string }).abilityId === "strike");
+    expect(forged).toEqual([]);
+  });
+
+  it("terraforms: a crater under the player re-cooks its cell, tells the client, and is invertible", async () => {
+    const bodyId = "player:p-alice";
+    const p = world.positionOf(bodyId)!;
+    const terrain = server.terrain!;
+    const before = terrain.groundHeight(p[0], p[2]);
+    const cellsBefore = terrain.cells().length;
+    const msgsBefore = worldMsgs.length;
+    const { inverse, touchedCells, reloaded } = server.terraform([
+      { edit: "add-feature", kind: "blobs", feature: { id: "crater", center: [p[0], before, p[2]], radius: 6, op: "remove", falloff: 3 } },
+    ]);
+    const after = terrain.groundHeight(p[0], p[2]);
+    expect(after).toBeLessThan(before - 2); // the ground really dropped
+    expect(touchedCells.length).toBeGreaterThan(0);
+    expect(reloaded.length).toBeGreaterThan(0); // the resident cell under the player re-cooked
+    expect(terrain.cells().length).toBe(cellsBefore); // and nothing else changed residency
+    await flush(hub);
+    const recipeMsg = worldMsgs.slice(msgsBefore).find((m) => m.t === "recipe") as { id: string; recipe: { features: { blobs: Array<{ id: string }> } } } | undefined;
+    expect(recipeMsg?.id).toBe("combat-field");
+    expect(recipeMsg?.recipe.features.blobs.some((b) => b.id === "crater")).toBe(true);
+    // the body falls into it over the next ticks (the collider under it changed)
+    for (let i = 0; i < 60; i++) server.tick();
+    expect(world.positionOf(bodyId)![1]).toBeLessThan(p[1] - 1);
+    // undo restores the ground exactly
+    server.terraform(inverse);
+    expect(terrain.groundHeight(p[0], p[2])).toBeCloseTo(before, 3);
   });
 
   it("tears the body down when the peer leaves", async () => {

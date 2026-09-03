@@ -14,9 +14,12 @@
  *   GET  /admin/events          the event bus trace ring (last 64 delivered events)
  *   POST /admin/spawn           { template, at: [x,y,z], yaw?, id?, params? }
  *   POST /admin/despawn         { id }
+ *   POST /admin/terraform       { edits: RecipeEdit[] } → { inverse, added, touchedCells, reloaded }
+ *                               (see RECIPE_EDIT_SPECS in @hitreg/core; POST the inverse back to undo)
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { recipeEditSchema, type RecipeEdit } from "@hitreg/core";
 import type { GameServer } from "./server.js";
 import type { NpcManager } from "./npcs.js";
 
@@ -127,6 +130,28 @@ export async function handleAdmin(deps: AdminDeps, req: IncomingMessage, res: Se
         return true;
       }
       send(res, 200, { ok: npcs.despawn(body.id), id: body.id });
+      return true;
+    }
+    if (req.method === "POST" && p === "/admin/terraform") {
+      const body = (await readJson(req)) as { edits?: unknown } | null;
+      if (!body || !Array.isArray(body.edits) || body.edits.length === 0) {
+        send(res, 400, { ok: false, error: "expected { edits: RecipeEdit[] }" });
+        return true;
+      }
+      const edits: RecipeEdit[] = [];
+      for (const raw of body.edits) {
+        const parsed = recipeEditSchema.safeParse(raw);
+        if (!parsed.success) {
+          send(res, 400, { ok: false, error: `bad edit: ${parsed.error.issues[0]?.message ?? "schema error"}` });
+          return true;
+        }
+        edits.push(parsed.data);
+      }
+      try {
+        send(res, 200, { ok: true, ...server.terraform(edits) });
+      } catch (error) {
+        send(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
+      }
       return true;
     }
     send(res, 404, { ok: false, error: `no such admin route: ${req.method} ${p}` });

@@ -5,6 +5,7 @@
  * directly on port 0.
  */
 
+import fs from "node:fs";
 import http from "node:http";
 import { WebSocketHostTransport } from "@hitreg/net/server";
 import { loadContent, playgroundRoots } from "./assets.js";
@@ -29,6 +30,8 @@ export interface ServeOptions {
   terrainRadius?: number;
   maxPlayers?: number;
   reconnectGraceSeconds?: number;
+  /** Write terraformed recipes back to their file (default true — the recipe is the save). */
+  persistRecipe?: boolean;
   log?: (line: string) => void;
 }
 
@@ -106,6 +109,20 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
     ...(opts.snapshotEvery ? { snapshotEvery: opts.snapshotEvery } : {}),
     ...(opts.maxPlayers !== undefined ? { maxPlayers: opts.maxPlayers } : {}),
     ...(opts.reconnectGraceSeconds !== undefined ? { reconnectGraceSeconds: opts.reconnectGraceSeconds } : {}),
+    onRecipeChanged: (id, recipe) => {
+      if (opts.persistRecipe === false) return;
+      const file = content.worldFiles.get(id);
+      if (!file) return;
+      // atomic: a crash mid-write must not leave a half recipe as the save
+      const tmp = `${file}.tmp`;
+      try {
+        fs.writeFileSync(tmp, JSON.stringify(recipe, null, 2) + "\n");
+        fs.renameSync(tmp, file);
+        log(`[serve] recipe "${id}" saved (${file})`);
+      } catch (error) {
+        log(`[serve] could not save recipe "${id}": ${error instanceof Error ? error.message : String(error)}`);
+      }
+    },
   });
   const npcs = new NpcManager(server, { respawnSeconds: opts.respawnSeconds ?? 20 });
   log(`[serve] npcs: ${npcs.npcs.size} authored, templates: ${[...npcs.templates.keys()].join(", ") || "(none)"}`);

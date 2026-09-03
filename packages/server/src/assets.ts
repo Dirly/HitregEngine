@@ -42,6 +42,8 @@ export interface LoadedContent {
   sceneFiles: Map<string, string>;
   /** World recipe ids that registered. */
   worlds: string[];
+  /** World recipe id -> the file it was read from (terraform writes back here). */
+  worldFiles: Map<string, string>;
   /** Every `<root>/scripts/` folder found, in root order. */
   scriptDirs: string[];
   warnings: string[];
@@ -70,6 +72,7 @@ export function loadContent(roots: string[], assets = new AssetLibrary()): Loade
   const scenes = new Map<string, SceneDoc>();
   const sceneFiles = new Map<string, string>();
   const worlds: string[] = [];
+  const worldFiles = new Map<string, string>();
   const scriptDirs: string[] = [];
   // data types must exist before data assets validate against them
   try {
@@ -123,6 +126,7 @@ export function loadContent(roots: string[], assets = new AssetLibrary()): Loade
       addOrWarn(`worlds/${file}`, () => {
         registerVoxelWorld(id, readJson(fileOf("worlds", file)));
         worlds.push(id);
+        worldFiles.set(id, fileOf("worlds", file));
       });
     }
     // binary assets register by id only — the server never loads their bytes
@@ -158,7 +162,7 @@ export function loadContent(roots: string[], assets = new AssetLibrary()): Loade
       }
     }
   }
-  return { assets, scenes, sceneFiles, worlds, scriptDirs, warnings };
+  return { assets, scenes, sceneFiles, worlds, worldFiles, scriptDirs, warnings };
 }
 
 /**
