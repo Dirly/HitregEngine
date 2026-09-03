@@ -115,16 +115,22 @@ is not a git repo yet, voxel-demo untouched, `mmo` got its own repo):
   `dummy-brain.ts`: fights the NEAREST living player, not the first tagged.
 - `projects/mmo/` (new, committed in its own repo).
 
-**Not verified yet, in order of value:**
-1. Remote-player ANIMATION on peers: the server publishes a gait clip per
-   body (`PlayerDriver.gaitClip`) and the client feeds it to `setEntityAnim`
-   — the screenshots were taken while the other player stood still. Check
-   with a moving player in view.
-2. Telegraphs/FX of ANOTHER player's cast on a peer (accepted events do
-   replicate; the pool draws by casterId — should work, not seen).
-3. Client-side prediction feel over real latency (only 0 ms tested).
-4. NPC heroes attacking a player (brains target players; the field roster
-   starts out of aggro range of the spawn).
+**Also verified (later the same night):** a peer sees the other player's
+body RUNNING (server-published gait clip → client animator); another
+player's cleave telegraph and meteor impact draw on the peer; hero NPCs
+engage a joined player (frostNova/cleave requests in `/admin/events`); NPCs
+stand on streamed ground from tick 0 (`/admin/npcs` heights ≈ terrain).
+Found and fixed by the trace: NPCs used to fall through a world that only
+streamed around players — terrain foci are now every dynamic body.
+
+**Headless-testing trap:** two tabs in ONE headless Chrome context — the
+background tab gets discarded/reloaded under GPU pressure and its keys go
+nowhere; it looks exactly like "casts don't reach the server". One browser
+per player (see the scratch scripts' `remote-visuals-2.mjs` pattern).
+
+**Not verified yet:**
+1. Client-side prediction feel over real latency (only 0 ms tested).
+2. Server cost per tick with many players (a bot-client stress run).
 
 **Known gaps / decisions for Derek:**
 - A tab in EDIT mode still holds an idle body on the server (it connects
