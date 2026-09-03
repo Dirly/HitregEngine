@@ -214,6 +214,43 @@ importers:
         specifier: ^4.0.0
         version: 4.4.3
 
+  packages/server:
+    dependencies:
+      '@hitreg/core':
+        specifier: workspace:*
+        version: link:../core
+      '@hitreg/net':
+        specifier: workspace:*
+        version: link:../net
+      '@hitreg/physics':
+        specifier: workspace:*
+        version: link:../physics
+      '@hitreg/scripting':
+        specifier: workspace:*
+        version: link:../scripting
+      three:
+        specifier: ^0.185.1
+        version: 0.185.1
+      zod:
+        specifier: ^4.0.0
+        version: 4.4.3
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.1
+      '@types/three':
+        specifier: ^0.185.1
+        version: 0.185.1
+      tsx:
+        specifier: ^4.23.0
+        version: 4.23.0
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^3.0.0
+        version: 3.2.7(@types/node@22.20.1)(lightningcss@1.32.0)(tsx@4.23.0)
+
 packages:
 
   '@dimforge/rapier3d-compat@0.12.0':

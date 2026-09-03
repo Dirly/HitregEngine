@@ -1,0 +1,31 @@
+{
+  "name": "@hitreg/server",
+  "version": "0.0.1",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "bin": {
+    "hitreg-serve": "./bin/serve.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "serve": "tsx bin/serve.ts"
+  },
+  "dependencies": {
+    "@hitreg/core": "workspace:*",
+    "@hitreg/net": "workspace:*",
+    "@hitreg/physics": "workspace:*",
+    "@hitreg/scripting": "workspace:*",
+    "three": "^0.185.1",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/three": "^0.185.1",
+    "tsx": "^4.23.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
