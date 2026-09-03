@@ -69,7 +69,8 @@ pnpm -F playground dev                                 # the usual playground
 http://localhost:5173/?server=ws://127.0.0.1:8787      # press ` to play
 curl -s http://127.0.0.1:8787/admin/status             # who is on, where
 curl -s http://127.0.0.1:8787/admin/npcs
-curl -s -X POST http://127.0.0.1:8787/admin/spawn -H 'content-type: application/json'   -d '{"template":"hero0","at":[1670,50,-6250],"id":"boss"}'
+curl -s -X POST http://127.0.0.1:8787/admin/spawn -H 'content-type: application/json' \
+  -d '{"template":"hero0","at":[1670,50,-6250],"id":"boss"}'
 ```
 
 `--host 0.0.0.0` serves the LAN. `--scene field` hosts combat-demo's terrain
