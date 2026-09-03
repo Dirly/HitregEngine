@@ -38,7 +38,9 @@ export const WORLD_MODULE = "world";
 /** `world` module messages, host → client. */
 export type WorldModuleMessage =
   | { t: "spawn"; entities: Record<string, EntityDoc>; self?: string }
-  | { t: "despawn"; ids: string[] };
+  | { t: "despawn"; ids: string[] }
+  /** A player's link dropped (body held for the grace window) or came back. */
+  | { t: "presence"; peerId: string; linked: boolean };
 
 export interface GameServerOptions {
   world: HeadlessWorld;
@@ -53,6 +55,12 @@ export interface GameServerOptions {
   maxPlayers?: number;
   /** Ticks between terrain residency passes (default 10). */
   terrainEvery?: number;
+  /**
+   * Seconds a disconnected player's body stays in the world before it is torn
+   * down (default 30). A tab that re-dials with the same peer id inside the
+   * window gets its body back where it stood — a dropped link is not a death.
+   */
+  reconnectGraceSeconds?: number;
 }
 
 interface RemoteInputCommand {
@@ -83,6 +91,9 @@ export class GameServer {
   private readonly peerViews = new Map<string, Set<string>>();
   private readonly snapshotEvery: number;
   private readonly terrainEvery: number;
+  private readonly graceTicks: number;
+  /** Wall-clock cost of the last 300 ticks (ms), for /admin/status. */
+  private readonly tickCost: number[] = [];
   private readonly unsubs: Array<() => void> = [];
   private replicas: ReplicaEntry[] = [];
   private replicaState = new Map<string, { p: [number, number, number]; q: [number, number, number, number]; anim?: string; syncTransform: boolean }>();
@@ -96,6 +107,7 @@ export class GameServer {
     this.terrain = opts.terrain ?? null;
     this.snapshotEvery = opts.snapshotEvery ?? 3;
     this.terrainEvery = opts.terrainEvery ?? 10;
+    this.graceTicks = Math.round((opts.reconnectGraceSeconds ?? 30) / this.world.fixedDt);
     this.template = opts.playerTemplate === undefined ? extractPlayerTemplate(this.world.expanded) : opts.playerTemplate;
     const authored = (this.template?.entities[this.template.rootId]?.components["transform"] as { position?: number[] } | undefined)?.position;
     const fallback: [number, number, number] = isFiniteVec(authored, 3)
@@ -110,12 +122,10 @@ export class GameServer {
       ...(opts.maxPlayers !== undefined ? { maxPeers: opts.maxPlayers } : {}),
     });
     this.host.setStateSource((peerId) => this.buildStateFor(peerId));
-    this.unsubs.push(
-      this.host.onCommand((peer, _tick, input) => this.onCommand(peer, input)),
-      opts.transport.onPeer((peer, state) => {
-        if (state === "disconnected") this.leave(peer);
-      }),
-    );
+    // no transport-level disconnect hook on purpose: the roster diff in
+    // syncRoster is the ONE place a player leaves, and it applies the
+    // reconnect grace — a socket drop and a `bye` take the same path
+    this.unsubs.push(this.host.onCommand((peer, _tick, input) => this.onCommand(peer, input)));
     // a `hello` is the join signal: RoomHost has no roster hook, so the
     // roster is diffed each tick (same as net-presence.ts)
 
@@ -182,6 +192,7 @@ export class GameServer {
   /** One authoritative tick: roster → terrain → sim + scripts → replication. */
   tick(): void {
     if (this.closed) return;
+    const started = performance.now();
     this.syncRoster();
     const tick = this.world.tick;
     if (this.terrain && tick % this.terrainEvery === 0) this.terrain.update(this.terrainFoci());
@@ -192,6 +203,8 @@ export class GameServer {
     if (outbox.length > 0) this.host.broadcastEvents(outbox);
     const delta = this.world.netState.takeDelta();
     if (delta) this.host.broadcastState(delta);
+    this.tickCost.push(performance.now() - started);
+    if (this.tickCost.length > 300) this.tickCost.shift();
   }
 
   close(): void {
@@ -210,11 +223,40 @@ export class GameServer {
   private syncRoster(): void {
     const roster = new Map(this.host.peers().map((p) => [p.peerId, p.name]));
     for (const [peerId, name] of roster) {
-      if (!this.players.has(peerId)) this.join(peerId, name);
+      const existing = this.players.get(peerId);
+      if (!existing) this.join(peerId, name);
+      else if (existing.disconnectedAt !== null) this.rejoin(existing, name);
     }
-    for (const peerId of [...this.players.keys()]) {
-      if (!roster.has(peerId)) this.leave(peerId);
+    const tick = this.world.tick;
+    for (const player of [...this.players.values()]) {
+      if (roster.has(player.peerId)) continue;
+      // link gone: hold the body for the grace window, then tear down
+      if (this.graceTicks <= 0) {
+        this.leave(player.peerId);
+      } else if (player.disconnectedAt === null) {
+        player.disconnectedAt = tick;
+        player.input = null; // stands still; nobody is steering it
+        this.host.broadcastModule(WORLD_MODULE, { t: "presence", peerId: player.peerId, linked: false } satisfies WorldModuleMessage);
+      } else if (tick - player.disconnectedAt >= this.graceTicks) {
+        this.leave(player.peerId);
+      }
     }
+  }
+
+  /** Same peer id back inside the grace window: hand the body back, resend the world. */
+  private rejoin(player: PlayerRecord, name: string): void {
+    player.disconnectedAt = null;
+    player.name = name;
+    this.peerViews.delete(player.peerId);
+    this.host.sendStateTo(player.peerId, this.world.netState.snapshot());
+    const entities: Record<string, EntityDoc> = {};
+    for (const [id, doc] of this.runtimeDocs) entities[id] = doc;
+    this.host.sendModule(player.peerId, WORLD_MODULE, {
+      t: "spawn",
+      entities,
+      ...(player.bodyId ? { self: player.bodyId } : {}),
+    } satisfies WorldModuleMessage);
+    this.host.broadcastModule(WORLD_MODULE, { t: "presence", peerId: player.peerId, linked: true } satisfies WorldModuleMessage, player.peerId);
   }
 
   private join(peerId: string, name: string): void {
@@ -234,7 +276,7 @@ export class GameServer {
       // everyone else learns the newcomer's body; the newcomer gets the whole runtime set below
       this.host.broadcastModule(WORLD_MODULE, { t: "spawn", entities: spawned.client } satisfies WorldModuleMessage, peerId);
     }
-    this.players.set(peerId, { peerId, name, bodyId, ids, input: null, appliedSeq: 0 });
+    this.players.set(peerId, { peerId, name, bodyId, ids, input: null, appliedSeq: 0, disconnectedAt: null });
     this.world.eventBus.emit("player.joined", { peerId, name });
     // joiner sync, in this order on the reliable channel: state, then docs
     this.host.sendStateTo(peerId, this.world.netState.snapshot());
@@ -268,7 +310,7 @@ export class GameServer {
 
   private onCommand(peer: string, input: unknown): void {
     const player = this.players.get(peer);
-    if (!player) return;
+    if (!player || player.disconnectedAt !== null) return;
     const cmd = input as { t?: unknown } | null;
     if (cmd?.t === "event") {
       const e = cmd as { name?: unknown; payload?: unknown };
@@ -349,6 +391,8 @@ export class GameServer {
       const p = this.world.positionOf(player.bodyId);
       if (!p) continue;
       const object = this.world.objects.get(player.bodyId);
+      // players are keyed by peer id for reconciliation; a body in grace has no
+      // peer to reconcile, but its ENTITY still replicates like any other
       out[player.peerId] = {
         position: [r3(p[0]), r3(p[1]), r3(p[2])],
         yaw: object ? object.rotation.y : 0,
@@ -386,14 +430,19 @@ export class GameServer {
 
   /** Diagnostics for an admin endpoint. */
   stats(): Record<string, unknown> {
+    const sorted = [...this.tickCost].sort((a, b) => a - b);
+    const q = (f: number): number => (sorted.length ? Math.round(sorted[Math.min(sorted.length - 1, Math.floor(f * sorted.length))]! * 100) / 100 : 0);
     return {
       tick: this.world.tick,
+      /** ms per tick over the last 300 ticks; the budget is 1000/hz (16.7 at 60 Hz). */
+      tickMs: { p50: q(0.5), p95: q(0.95), max: sorted.length ? Math.round(sorted[sorted.length - 1]! * 100) / 100 : 0, budget: Math.round(this.world.fixedDt * 1000 * 100) / 100 },
       players: [...this.players.values()].map((p) => ({
         peerId: p.peerId,
         name: p.name,
         bodyId: p.bodyId,
         position: this.world.positionOf(p.bodyId),
         inputAge: p.input ? Date.now() - p.input.at : null,
+        linked: p.disconnectedAt === null,
       })),
       entities: this.world.entities.size,
       replicas: this.replicas.length,

@@ -13,6 +13,7 @@
  *   --hz <n>              sim rate (default 60)
  *   --snapshot-every <n>  ticks per snapshot (default 3)
  *   --respawn <seconds>   NPC respawn delay, 0 disables (default 20)
+ *   --grace <seconds>     keep a dropped player's body this long for a reconnect (default 30)
  *   --terrain-radius <n>  simulated cells around each player (default: the scene's rings.simulation)
  *   --max-players <n>
  *
@@ -51,6 +52,7 @@ async function main(): Promise<void> {
     fixedHz: num("hz"),
     snapshotEvery: num("snapshot-every"),
     respawnSeconds: num("respawn"),
+    reconnectGraceSeconds: num("grace"),
     terrainRadius: num("terrain-radius"),
     maxPlayers: num("max-players"),
   });

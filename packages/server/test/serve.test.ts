@@ -24,7 +24,7 @@ async function until(cond: () => boolean, timeoutMs = 5000): Promise<void> {
 
 let handle: ServeHandle | null = null;
 try {
-  handle = await serve({ playground, scene: "field", port: 0, respawnSeconds: 1, log: () => undefined });
+  handle = await serve({ playground, scene: "field", port: 0, respawnSeconds: 1, reconnectGraceSeconds: 1.5, log: () => undefined });
 } catch (error) {
   console.warn("serve test skipped:", error instanceof Error ? error.message : error);
 }
@@ -116,6 +116,26 @@ describe.skipIf(!handle)("serve(): sockets + admin", () => {
     await until(() => !handle!.world.entities.has("boss"));
     expect(handle!.world.netState.get("combat/boss.hp")).toBeUndefined();
   });
+
+  it("holds a dropped player's body for the grace window and hands it back on re-dial", async () => {
+    const world = handle!.world;
+    const c = dial("p-cat", "Cat");
+    await until(() => c.world.some((m) => m.t === "spawn" && m.self === "player:p-cat"));
+    // move it somewhere, then drop the link WITHOUT a bye (a crash, not a leave)
+    world.sim.setPosition("player:p-cat", [1390, 20, 12]);
+    c.transport.close();
+    await until(() => (handle!.server.stats() as { players: Array<{ peerId: string; linked: boolean }> }).players.find((p) => p.peerId === "p-cat")?.linked === false);
+    expect(world.entities.has("player:p-cat")).toBe(true);
+    // back inside the window with the same id: same body, where it stood
+    const again = dial("p-cat", "Cat");
+    await until(() => again.world.some((m) => m.t === "spawn" && m.self === "player:p-cat"));
+    const p = world.positionOf("player:p-cat")!;
+    expect(Math.hypot(p[0] - 1390, p[2] - 12)).toBeLessThan(1);
+    expect(world.netState.get("owner/player:p-cat")).toBe("p-cat");
+    // and a real leave that outlives the window tears it down
+    again.client.leave();
+    await until(() => !world.entities.has("player:p-cat"), 6000);
+  }, 20_000);
 
   it("respawns a killed NPC after the delay with fresh pools", async () => {
     const world = handle!.world;

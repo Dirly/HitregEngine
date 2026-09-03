@@ -28,6 +28,7 @@ export interface ServeOptions {
   respawnSeconds?: number;
   terrainRadius?: number;
   maxPlayers?: number;
+  reconnectGraceSeconds?: number;
   log?: (line: string) => void;
 }
 
@@ -104,6 +105,7 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
     spawnPoint,
     ...(opts.snapshotEvery ? { snapshotEvery: opts.snapshotEvery } : {}),
     ...(opts.maxPlayers !== undefined ? { maxPlayers: opts.maxPlayers } : {}),
+    ...(opts.reconnectGraceSeconds !== undefined ? { reconnectGraceSeconds: opts.reconnectGraceSeconds } : {}),
   });
   const npcs = new NpcManager(server, { respawnSeconds: opts.respawnSeconds ?? 20 });
   log(`[serve] npcs: ${npcs.npcs.size} authored, templates: ${[...npcs.templates.keys()].join(", ") || "(none)"}`);

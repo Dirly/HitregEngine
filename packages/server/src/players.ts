@@ -140,6 +140,8 @@ export interface PlayerRecord {
   input: MovementIntent | null;
   /** Last input seq the driver applied (echoed in snapshots for reconciliation). */
   appliedSeq: number;
+  /** Server tick the player's link dropped, or null while connected (reconnect grace). */
+  disconnectedAt: number | null;
 }
 
 export interface PlayerDriverOptions {
