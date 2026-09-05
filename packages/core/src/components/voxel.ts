@@ -23,7 +23,15 @@ export const voxelWorldSchema = z.object({
       simulation: z.number().min(0).default(2).describe("Cells within this radius render AND collide + run scripts."),
       fullRender: z.number().min(0).default(3).describe("Out to here: full meshes, no physics/scripts."),
       hlod: z.number().min(0).default(7).describe("Out to here: merged low-detail proxy."),
-      farTerrain: z.number().min(0).default(14).describe("Out to here: coarse far proxy. Beyond: unloaded."),
+      farTerrain: z
+        .number()
+        .min(0)
+        .default(24)
+        .describe(
+          "Out to here: coarse far proxy (twice as coarse as hlod, so it costs about the same per supercell). " +
+            "Beyond: unloaded. Match the scene's height fog to it — the ring should end where the fog is ~85% " +
+            "opaque, or ridgelines cut off in clear air.",
+        ),
     })
     .prefault({})
     .describe("Residency rings in CELLS from the focus, exactly as chunkStreamer.rings. Generated cells are cheap to drop and expensive to build, so keep `simulation` tight and let `hlod` carry the distance."),

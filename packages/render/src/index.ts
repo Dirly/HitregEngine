@@ -20,11 +20,28 @@ export { attachLightDebug, detachLightDebug } from "./light-debug.js";
 export { attachSkeletonDebug, collectBones } from "./skeleton-debug.js";
 export { extractCollisionGeometry, makeMeshGeometryProvider, type CollisionGeometry } from "./collision-geometry.js";
 export { AnimationSystem, type AnimatorData } from "./animation.js";
+export { ClothSwaySystem, DEFAULT_CLOTH_SWAY, markClothVertices, type ClothSwayOptions, type IslandReport } from "./cloth-sway.js";
 export { ParticleSystem, type ParticlesData, type ParticleValue } from "./particles.js";
-export { BillboardSystem, type BillboardData, type BillboardValue, type BillboardResolvers } from "./billboards.js";
+export {
+  VfxSystem,
+  resolveAnchor,
+  type SpellHandle,
+  type SpellPlayOptions,
+  type VfxFrame,
+  type VfxHandle,
+  type VfxResolvers,
+  type VfxStats,
+} from "./vfx/index.js";
+export {
+  BillboardSystem,
+  type BillboardData,
+  type BillboardValue,
+  type BillboardResolvers,
+  type FlipbookData,
+} from "./billboards.js";
 export { applyFoliageNormals, foliageNormals, type FoliageNormalOptions } from "./foliage-normals.js";
 export { applyModelBrightness } from "./model-brightness.js";
-export { applyFoliageWind, FOLIAGE_WIND, type FoliageWindMode, type FoliageWindOptions } from "./foliage-wind.js";
+export { applyFoliageWind, setFoliageWindScale, windMaterialMatches, FOLIAGE_WIND, type FoliageWindMode, type FoliageWindOptions } from "./foliage-wind.js";
 export { applyFoliageFade, setFoliageFade, FOLIAGE_FADE, type FoliageFadeState } from "./foliage-fade.js";
 export { asNodeMaterial, cloneMaterial, editMeshMaterials } from "./node-material.js";
 export {
@@ -57,6 +74,9 @@ export {
   type PostTextureResolver,
   type ResolvedPostFx,
   type TonemapMode,
+  pixelateRatio,
+  type PixelateFx,
+  type PixelateFilter,
 } from "./post.js";
 export { FoliageLodSystem, type InstancedPropBatch } from "./foliage-lod.js";
 export { simplifyGeometry, simplifierReady, type SimplifiedGeometry, type SimplifyOptions } from "./mesh-simplify.js";
@@ -144,6 +164,8 @@ export {
 export {
   SceneLighting,
   sceneLighting,
+  type LiveSkyOptions,
+  type LiveSkyBase,
   type SceneLightingOptions,
   type SceneLightingStats,
   type SkyData,
@@ -174,7 +196,10 @@ export {
   freezeStaticSubtree,
   refreshStaticSubtree,
   thawStaticSubtree,
+  isFrozenStaticSubtree,
 } from "./static-transforms.js";
+export { bumpShadowPassMaterials } from "./shadow-pass-material.js";
+export { InstancedPropPool, type PoolEntry, type PoolStats } from "./prop-pool.js";
 export {
   flushDecals,
   reprojectDecalsAround,

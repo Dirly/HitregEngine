@@ -24,6 +24,7 @@ export {
   materialSchema,
   scriptSchema,
   animatorSchema,
+  clothSwaySchema,
   audioSchema,
   skySchema,
   postfxSchema,
@@ -288,6 +289,7 @@ export {
   type VoxelWorldData,
 } from "./components/voxel.js";
 export * from "./voxel/index.js";
+export * from "./vfx/index.js";
 export {
   projectManifestSchema,
   projectToolDependencySchema,

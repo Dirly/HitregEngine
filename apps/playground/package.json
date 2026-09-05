@@ -11,7 +11,9 @@
     "build:game": "node tools/publish.mjs",
     "typecheck:projects": "node tools/typecheck-projects.mjs",
     "place": "tsx tools/place.mts",
-    "worldgen": "tsx tools/worldgen.mts"
+    "worldgen": "tsx tools/worldgen.mts",
+    "retarget": "node tools/retarget.mjs",
+    "wfc": "node ../../tools/wfc-3d/kit.mjs"
   },
   "dependencies": {
     "@hitreg/comms": "workspace:*",

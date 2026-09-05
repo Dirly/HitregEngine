@@ -206,6 +206,24 @@ export function cachedSkyEnvironmentTexture(key: string, sky: SkyEnvironmentSour
   return texture;
 }
 
+/**
+ * Rewrite a generated sky texture's pixels from a new gradient WITHOUT
+ * replacing the object. Three keys its PMREM prefilter by texture identity
+ * and re-runs it when `needsUpdate` bumps `pmremVersion`, and
+ * `material-maps.setEnvironment` only recompiles when the OBJECT changes —
+ * so this costs one CPU fill and one prefilter and nothing else. What a
+ * day/night cycle uses to step the IBL a few times a day; the cached entry
+ * keeps its original key, so a rebuild from the authored sky returns this
+ * (now re-tinted) texture until the script refreshes it again.
+ */
+export function refillSkyEnvironmentTexture(texture: THREE.DataTexture, sky: SkyEnvironmentSource): void {
+  const { width, height } = SKY_ENVIRONMENT_SIZE;
+  const image = texture.image as { data: Float32Array; width: number; height: number };
+  if (!image?.data || image.width !== width || image.height !== height) return;
+  image.data.set(skyEquirectData(sky, width, height));
+  texture.needsUpdate = true;
+}
+
 /** Test seam: drop every cached sky texture. */
 export function clearSkyEnvironmentCache(): void {
   for (const texture of skyTextureCache.values()) texture.dispose();

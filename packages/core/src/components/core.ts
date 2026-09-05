@@ -3,6 +3,9 @@ import type { ComponentRegistry } from "./registry.js";
 import { prefabInstanceSchema } from "../prefab.js";
 import { registerPhysicsComponents } from "./physics.js";
 import { registerPathComponents } from "./path.js";
+
+/** Most splat layers a terrain material may carry — four vec4 weight attributes. Mirrored by the recipe palette cap. */
+export const MAX_SPLAT_LAYERS = 16;
 import { registerVoxelComponents } from "./voxel.js";
 import { registerPlacementComponent } from "./placement.js";
 import { registerDecalComponent } from "./decal.js";
@@ -68,6 +71,16 @@ export const meshWindSchema = z.object({
         "'is this the leaf material' test on purpose: Blockbench exports every material as alphaMode " +
         "MASK, so a cutout test catches the trunk too (the same trap `foliageNormals` documents), " +
         "while height does not care where the trunk sits horizontally.",
+    ),
+  materials: z
+    .string()
+    .optional()
+    .describe(
+      "Only move materials whose NAME, or whose colour texture's name, contains this (case-insensitive) — " +
+        "`leaves` for a model whose leaf texture is called Leaves. The rest of the model stands still and the " +
+        "`canopy` height test is skipped, so the trunk stays put by NAME rather than by height. Name the texture " +
+        "or material in the DCC tool before export: Blockbench exports a pasted texture as literally 'pasted', " +
+        "which matches nothing, and an unmatched model gets no wind at all.",
     ),
 });
 
@@ -207,6 +220,22 @@ export const meshSchema = z.object({
             "for that gap. 1.5 is a noticeable lift. It brightens the lit and unlit sides alike, so it is not a " +
             "fix for a dead shadow side; that wants image-based lighting.",
         ),
+      uvRotation: z
+        .number()
+        .optional()
+        .describe(
+          "Rotate every texture map of this model, in DEGREES, counter-clockwise in UV space (u right, v up — " +
+            "three's `rotateUV` convention), about the per-vertex pivot in the model's SECOND UV set (glTF " +
+            "TEXCOORD_1, written by the kit import as the UV of the part's local origin so an atlased island turns " +
+            "about itself, not the page centre), or about (0.5, 0.5) when the model has none. Exists for WFC kit floors: a " +
+            "floor-with-wall module the solver placed rotated 90° would turn its planks with it, so the WFC tool " +
+            "writes the counter-rotation here and every floor in a generated building runs its planks along the " +
+            "building's own axis. The value derives from the module's grid variant, never from world orientation, " +
+            "so rotating the whole building rotates every floor with it. Costs nothing: in `renderMode: " +
+            "\"instanced\"` batches the angle is a per-instance attribute on a shader shared by every instance of " +
+            "the model. Only honoured for `renderMode: \"instanced\"` asset meshes — other render modes ignore it " +
+            "with one console warning per asset.",
+        ),
       textureFilter: z
         .enum(["linear", "nearest"])
         .optional()
@@ -303,6 +332,13 @@ export const meshSchema = z.object({
         .default("ribbon")
         .describe("ribbon = flat strip (roads, rivers, fences); tube = round (vines, cables, rope)."),
       width: z.number().positive().default(2).describe("ribbon only: total width across the curve."),
+      widths: z
+        .array(z.number().positive())
+        .optional()
+        .describe(
+          "ribbon (flat sheet) only: per-control-point width, same length as `points`, interpolated along the curve. " +
+            "Overrides `width` — a river that broadens downstream, a path that pinches through a gap.",
+        ),
       thickness: z
         .number()
         .min(0)
@@ -323,6 +359,41 @@ export const meshSchema = z.object({
         .max(32)
         .default(8)
         .describe("Curve smoothness between each pair of control points."),
+      trim: z
+        .tuple([z.number().int().min(0), z.number().int().min(0)])
+        .default([0, 0])
+        .describe(
+          "ribbon (flat sheet), open curve only: spans to leave UNDRAWN at the start and end. The trimmed " +
+            "control points still shape the curve — they are phantom neighbours — so a long curve cut into " +
+            "pieces (a river streamed cell by cell) can give each piece the point beyond its border and the " +
+            "pieces meet with the same tangent, the same width and the same vertices: a welded seam instead " +
+            "of a gap. [1, 1] with one extra point at each end is the streaming case.",
+        ),
+      flowSpeed: z
+        .number()
+        .min(0)
+        .default(0)
+        .describe(
+          "ribbon (flat sheet) only: emit a per-vertex `flow` attribute = the curve's tangent times this speed " +
+            "(m/s). A water material with `flowMode: \"channel\"` reads it to run its waves and texture along " +
+            "the curve — a river that visibly flows downstream and over its falls. 0 emits nothing.",
+        ),
+      uvMetres: z
+        .boolean()
+        .default(false)
+        .describe(
+          "ribbon (flat sheet) only: uv in METRES instead of (0..1 across, arc length along): x is the signed " +
+            "distance from the centreline, y the distance along the curve. A surface texture then keeps one " +
+            "scale across a channel that changes width.",
+        ),
+      uvAlong: z
+        .array(z.number())
+        .optional()
+        .describe(
+          "ribbon (flat sheet) only, with uvMetres: the y texture coordinate at each control point (same length " +
+            "as `points`), interpolated between them — the distance along the WHOLE river for a piece of one, so " +
+            "the texture is continuous from piece to piece. Omit to start at 0.",
+        ),
     }),
   ]),
   material: z
@@ -747,7 +818,12 @@ export const materialSchema = z.object({
       layers: z
         .array(splatLayerSchema)
         .min(2)
-        .max(8)
+        // the same cap as the recipe palette (MAX_SURFACES): the shader blends up
+        // to four vec4 weight attributes. This was 8 while the palette allowed 16,
+        // and a ten-surface world silently rendered WHITE — the material failed
+        // validation, the terrain fell back to the default, and nothing said so
+        // louder than one console warning.
+        .max(MAX_SPLAT_LAYERS)
         .describe(
           "Up to four surfaces. With source 'height' they are ascending bands; with source 'vertex' the array " +
             "ORDER is the weight vector's channel order and must match the world recipe's `surfaces`.",
@@ -916,6 +992,25 @@ export const materialSchema = z.object({
           "Texture drift in tiles per second [x, z]. The second sample layer moves at a different scale and " +
             "roughly perpendicular, which is what stops the eye locking onto a single repeating direction.",
         ),
+      flowMode: z
+        .enum(["drift", "channel"])
+        .default("drift")
+        .describe(
+          "drift: standing water — waves and texture are laid out in WORLD space (so sheets streamed cell by " +
+            "cell agree along their shared edges) and drift by `flow`. channel: moving water — the geometry " +
+            "carries a per-vertex `flow` vector and metre uvs (a `path` ribbon with `flowSpeed` and " +
+            "`uvMetres`), and waves, texture and foam all travel along it at that speed: a river runs " +
+            "downstream and over its falls. Only use channel on geometry that has the attribute.",
+        ),
+      displace: z
+        .boolean()
+        .default(true)
+        .describe(
+          "Move the vertices with the waves. Right for a finely subdivided plane (the ocean); WRONG for a lake " +
+            "sheet (one polygon fan) or a river ribbon (two vertices across), where lifting the few vertices " +
+            "tilts whole triangles into faceted streaks. false keeps the wave NORMALS (lighting still moves) " +
+            "and leaves the geometry flat. `worldgen rivers` writes the lake and river materials with false.",
+        ),
     })
     .optional()
     .describe(
@@ -944,6 +1039,40 @@ export const animatorSchema = z.object({
   play: z.string().optional(),
   fade: z.number().min(0).default(0.3),
   speed: z.number().default(1),
+});
+
+/**
+ * Free-hanging cloth — a tabard, tassets, a cloak — given secondary motion in
+ * the vertex shader instead of by simulated bones.
+ *
+ * Put this on the entity carrying the MODEL. It costs one spring per character
+ * rather than one per bone, so a crowd costs what one character costs; the
+ * trade is that cloth flows rather than drapes, and never collides with the
+ * legs.
+ *
+ * Which geometry moves is worked out from SHAPE, not from names, materials or
+ * skin weights — a hanging panel is a connected island that is thin, hangs a
+ * long way, and attaches near the waist. That matters because an auto-rigger
+ * usually binds a skirt to the THIGH bones, which makes skin weights useless
+ * for telling a tabard from a trouser leg. The four `panel*` fields are that
+ * test, as fractions of the character's height; widen them if a panel is
+ * missed, tighten them if a limb starts flapping.
+ */
+export const clothSwaySchema = z.object({
+  strength: z.number().min(0).default(0.22).describe("Peak lag at the hem, in metres."),
+  stiffness: z.number().positive().default(9).describe("How fast the cloth catches up. Higher is stiffer."),
+  damping: z
+    .number()
+    .min(0)
+    .max(2)
+    .default(0.55)
+    .describe("Fraction of critical damping. Under 1 overshoots and settles — that overshoot IS the swing."),
+  flutter: z.number().min(0).default(0.012).describe("Idle shimmer in metres, so cloth is never dead while standing."),
+  flutterSpeed: z.number().positive().default(1.6),
+  panelMinLength: z.number().min(0).max(1).default(0.15).describe("A panel must hang at least this fraction of body height."),
+  panelMaxThickness: z.number().min(0).max(1).default(0.08).describe("...and be thinner than this. This is what separates a panel from a limb."),
+  panelAttachMin: z.number().min(0).max(1).default(0.3).describe("...and hang from between these two heights, which is where a belt is."),
+  panelAttachMax: z.number().min(0).max(1).default(0.72),
 });
 
 /** Sound emitter. `src` is an audio asset id (assets/audio/). */
@@ -1071,6 +1200,40 @@ export const skySchema = z.object({
       color: hexColor.default("#fff6df"),
       size: z.number().min(0.9).max(0.9999).default(0.997).describe("Closer to 1 = a smaller, sharper glow."),
       intensity: z.number().min(0).default(1.5),
+    })
+    .optional(),
+  /** Gradient-dome only: a moon disc on the sky — a picture, not a light.
+   * The `day-night` builtin script aims and fades it (and drives the sun
+   * disc, the directional light and the fog); author it here for a fixed moon. */
+  moon: z
+    .object({
+      direction: vec3.default([-0.4, 0.55, -0.3]).describe("Toward the moon on the sky sphere."),
+      color: hexColor.default("#c9d6f2"),
+      size: z.number().min(0.9).max(0.9999).default(0.9994).describe("Closer to 1 = a smaller, sharper disc."),
+      intensity: z.number().min(0).default(0).describe("0 hides it; ~1 is a full moon."),
+    })
+    .optional(),
+  /** Gradient-dome only: a procedural star field, faded at the horizon.
+   * The `day-night` script raises it at night and wheels it with the sun;
+   * author it here for a fixed night sky. */
+  stars: z
+    .object({
+      intensity: z.number().min(0).default(0).describe("0 hides the stars; ~1 is a clear night."),
+      density: z.number().min(0).max(1).default(0.35).describe("Fraction of the sky lattice that carries a star."),
+      size: z.number().min(0.1).max(4).default(1).describe("Dot size multiplier."),
+    })
+    .optional(),
+  /** Gradient-dome only: a drifting procedural cloud layer, composited over the
+   * sun, moon and stars. Coverage 0 = clear sky. The `day-night` script lights
+   * it (white by day, warm at dawn, dark at night); coverage stays authored. */
+  clouds: z
+    .object({
+      coverage: z.number().min(0).max(1).default(0).describe("0 = no clouds, 0.4 = scattered, 0.8 = overcast."),
+      scale: z.number().min(0.05).max(10).default(1).describe("Cloud size; larger = fewer, bigger clouds."),
+      speed: z.tuple([z.number(), z.number()]).default([0.6, 0.2]).describe("Wind: drift direction and rate across the sky."),
+      softness: z.number().min(0.01).max(1).default(0.35).describe("Edge softness; low = crisp cumulus edges, high = haze."),
+      color: hexColor.default("#ffffff").describe("Lit colour."),
+      shadow: hexColor.default("#8a94a8").describe("Colour of the thick, shadowed parts."),
     })
     .optional(),
 });
@@ -1311,7 +1474,7 @@ export const particlesSchema = z.object({
   /** Particles spawned per second. */
   rate: z.number().min(0).default(20),
   /** Live-particle cap — pool size, hard-capped for the latency budget. */
-  max: z.number().int().min(1).max(2000).default(200),
+  max: z.number().int().min(1).max(8000).default(200),
   /** Per-particle lifespan, random in [min, max] seconds. */
   lifetime: z.tuple([z.number().min(0), z.number().min(0)]).default([0.8, 1.6]),
   /** Emitter volume; cone spreads velocity by coneAngle around direction. */
@@ -1357,6 +1520,15 @@ export const particlesSchema = z.object({
     ),
   /** Initial velocity direction (emitter-local; normalized at runtime). */
   direction: vec3.default([0, 1, 0]),
+  radial: z
+    .enum(["none", "out", "in"])
+    .default("none")
+    .describe(
+      "Aim each particle along the line from the emitter's centre to its own spawn point instead of along " +
+        "`direction`: out = an explosion (needs a sphere/box shape so there IS an offset); in = energy " +
+        "CONVERGING on the centre — the charge-up look, particles born on the shell and flying inward. " +
+        "`spread` still scatters around that line.",
+    ),
   /** Initial speed, random in [min, max] units/sec. */
   speed: z.tuple([z.number(), z.number()]).default([1, 2]),
   /** Positive pulls particles down (world -Y), units/sec^2. */
@@ -1375,10 +1547,93 @@ export const particlesSchema = z.object({
   blending: z.enum(["normal", "additive"]).default("additive"),
   /** Texture asset id; omitted = procedural soft round sprite. */
   texture: z.string().optional(),
+  sprite: z
+    .enum(["soft", "square", "pixel"])
+    .default("soft")
+    .describe(
+      "The procedural sprite used when no `texture` is given: soft = a radial falloff (smoke, glow); square = a " +
+        "hard-edged square with a one-texel fade (PSX sparks and rain); pixel = a chunky 6x6 blob with stepped " +
+        "alpha (retro embers, motes).",
+    ),
+  subUV: z
+    .object({
+      cols: z.number().int().min(1).default(1),
+      rows: z.number().int().min(1).default(1),
+      mode: z
+        .enum(["life", "loop", "random"])
+        .default("life")
+        .describe(
+          "life = play the sheet once across the particle's lifetime (smoke that " +
+            "billows and dissipates); loop = play it repeatedly at `fps`; random = " +
+            "hold one frame chosen per particle, which is the cheap way to make a " +
+            "hundred identical quads stop looking identical.",
+        ),
+      fps: z.number().positive().default(24),
+    })
+    .optional()
+    .describe(
+      "Play the texture as a SPRITE SHEET, per particle. A still sprite drifting is " +
+        "the clearest tell that an effect is dated — every modern smoke, fire or " +
+        "impact particle animates on its own clock.",
+    ),
+  softFade: z
+    .number()
+    .min(0)
+    .default(0)
+    .describe(
+      "Metres over which a particle fades as it approaches solid geometry. 0 = off. " +
+        "A quad slicing visibly into the ground is THE thing that reads as cheap, and " +
+        "nothing else fixes it. Costs a scene-depth read, so leave it off for effects " +
+        "that never touch a surface (sparks in mid-air).",
+    ),
+  stretch: z
+    .number()
+    .min(0)
+    .default(0)
+    .describe(
+      "Stretch each particle along its own velocity, in seconds of travel. 0 = round. " +
+        "Sparks and debris read as DOTS without this — the streak is the motion.",
+    ),
+  sizeCurve: z
+    .array(z.tuple([z.number().min(0).max(1), z.number().min(0)]))
+    .optional()
+    .describe(
+      "[[t, size], …] over normalized life, overriding sizeStart/sizeEnd. A two-point " +
+        "lerp cannot describe a flash — spike, fast falloff, long dim tail — which is " +
+        "most of what separates an impact from a fading blob.",
+    ),
+  opacityCurve: z
+    .array(z.tuple([z.number().min(0).max(1), z.number().min(0).max(1)]))
+    .optional()
+    .describe("[[t, opacity], …] over normalized life, overriding opacityStart/End and fadeIn."),
+  colorGradient: z
+    .array(z.tuple([z.number().min(0).max(1), hexColor]))
+    .optional()
+    .describe("[[t, \"#rrggbb\"], …] over normalized life, overriding colorStart/colorEnd."),
   space: z
     .enum(["local", "world"])
     .default("world")
     .describe("world = particles trail behind a moving emitter; local = they ride it."),
+  ground: z
+    .object({
+      mode: z
+        .enum(["kill", "settle"])
+        .default("kill")
+        .describe("kill = the particle ends on contact (a raindrop); settle = it stops where it landed, holds, then fades (snow)."),
+      hold: z.number().min(0).default(6).describe("settle only: seconds a landed particle rests before fading."),
+      fade: z.number().min(0).default(2).describe("settle only: seconds the fade-out takes."),
+      offset: z.number().default(0.03).describe("Height above the ground a landed particle rests at."),
+      splash: z
+        .string()
+        .optional()
+        .describe("Entity id (or tag) of another emitter to burst ONE particle from at the contact point — a raindrop's splash. That emitter usually has rate 0."),
+    })
+    .optional()
+    .describe(
+      "Terrain contact. The host answers 'how high is the ground here' from the streamed terrain, sampled once per " +
+        "particle at birth; a particle that falls to it dies or settles. Terrain only — props, roofs and water are not " +
+        "tested. Needs space: world. Settled particles count toward `max`, so a settling snowfall wants a large one.",
+    ),
 });
 
 /**
@@ -1486,6 +1741,44 @@ export const billboardSchema = z.object({
   /** Sprite kind only: spritesheet data-asset id + frame name (wins over texture). */
   sheet: z.string().optional(),
   frame: z.string().optional(),
+  flipbook: z
+    .object({
+      row: z
+        .number()
+        .int()
+        .min(0)
+        .default(0)
+        .describe(
+          "Which grid ROW to play. VFX sheets are commonly one effect per sheet with a row per colour " +
+            "variant, so this is the colour picker — the same explosion in orange, cyan or violet without " +
+            "a second texture.",
+        ),
+      fps: z.number().positive().default(30),
+      loop: z.boolean().default(false),
+      playing: z.boolean().default(true),
+      blending: z
+        .enum(["normal", "additive"])
+        .default("additive")
+        .describe("additive = glowing magic/fire/impacts; normal = smoke, debris, decals."),
+      hideOnEnd: z
+        .boolean()
+        .default(true)
+        .describe("Non-looping only: hide the sprite when the last frame finishes, so pooled one-shot effects self-clear."),
+      tint: hexColor
+        .default("#ffffff")
+        .describe(
+          "Multiplied over the frame. Effect libraries usually ship a WHITE/greyscale variant " +
+            "alongside their coloured ones — point `row` at that one and this becomes a free hue " +
+            "control, so an effect can take ANY colour instead of only the handful the sheet was " +
+            "authored with. That is what makes a generated ability able to pick its own element.",
+        ),
+    })
+    .optional()
+    .describe(
+      "Sprite kind only: play the sheet's grid as an ANIMATION instead of showing one static `frame`. " +
+        "The chosen `row` is the timeline (its columns are the frames), which is the layout VFX flipbook " +
+        "sheets ship in. Set this and `frame` is ignored.",
+    ),
   visible: z.boolean().default(true),
 });
 
@@ -1545,6 +1838,7 @@ export function registerCoreComponents(registry: ComponentRegistry): void {
   registry.register("prefab", prefabInstanceSchema);
   registry.register("script", scriptSchema);
   registry.register("animator", animatorSchema);
+  registry.register("clothSway", clothSwaySchema);
   registry.register("audio", audioSchema);
   registry.register("sky", skySchema);
   registry.register("postfx", postfxSchema);

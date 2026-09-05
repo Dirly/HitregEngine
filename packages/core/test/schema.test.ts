@@ -34,6 +34,22 @@ describe("ComponentRegistry", () => {
     }
   });
 
+  it("accepts uvRotation (degrees) on a model mesh source and only there", () => {
+    const registry = setup();
+    const model = registry.validate("mesh", {
+      source: { kind: "asset", assetId: "wfc/kit/floor.gltf", uvRotation: -90 },
+      renderMode: "instanced",
+    });
+    expect(model.ok).toBe(true);
+    if (model.ok) {
+      expect((model.data as { source: { uvRotation?: number } }).source.uvRotation).toBe(-90);
+    }
+    const bad = registry.validate("mesh", {
+      source: { kind: "asset", assetId: "wfc/kit/floor.gltf", uvRotation: "90" },
+    });
+    expect(bad.ok).toBe(false);
+  });
+
   it("defaults serialized entity visibility to visible", () => {
     const registry = setup();
     const result = registry.validate("visibility", {});
@@ -100,9 +116,9 @@ describe("ComponentRegistry", () => {
     }
   });
 
-  it("hard-caps particles max at 2000 and rejects bad shapes", () => {
+  it("hard-caps particles max at 8000 and rejects bad shapes", () => {
     const registry = setup();
-    const capped = registry.validate("particles", { max: 5000 });
+    const capped = registry.validate("particles", { max: 9000 });
     expect(capped.ok).toBe(false);
     if (!capped.ok) expect(capped.error).toMatch(/max/);
     const badShape = registry.validate("particles", { shape: "torus" });
@@ -147,6 +163,7 @@ describe("ComponentRegistry", () => {
       "audio",
       "billboard",
       "camera",
+      "clothSway",
       "collider",
       "decal",
       "grass",

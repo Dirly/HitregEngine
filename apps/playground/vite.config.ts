@@ -159,6 +159,8 @@ function hitregBridge(): Plugin {
         "materials",
         "terrain",
         "spritesheets",
+        "vfx",
+        "spells",
         "models",
         "textures",
         "audio",
@@ -174,10 +176,27 @@ function hitregBridge(): Plugin {
         const flat = path.resolve(assetsRoot, file);
         if (fs.existsSync(flat)) return flat;
         if (fs.existsSync(projectsRoot)) {
-          for (const entry of fs.readdirSync(projectsRoot, { withFileTypes: true })) {
-            if (!entry.isDirectory()) continue;
+          const projects = fs
+            .readdirSync(projectsRoot, { withFileTypes: true })
+            .filter((entry) => entry.isDirectory());
+          // An existing file wins outright.
+          for (const entry of projects) {
             const candidate = path.resolve(projectsRoot, entry.name, "assets", file);
             if (fs.existsSync(candidate)) return candidate;
+          }
+          // A NEW file belongs beside its siblings: if exactly one project
+          // already owns that folder, write there. Without this, creating an
+          // asset from the editor drops it in the flat tree — which is for
+          // throwaway experiments, so a project's first new scene or material
+          // silently landed outside the project and outside its git repo.
+          const dir = path.dirname(file);
+          if (dir && dir !== "." && dir !== path.sep) {
+            const owners = projects.filter((entry) =>
+              fs.existsSync(path.resolve(projectsRoot, entry.name, "assets", dir)),
+            );
+            if (owners.length === 1) {
+              return path.resolve(projectsRoot, owners[0]!.name, "assets", file);
+            }
           }
         }
         return flat;

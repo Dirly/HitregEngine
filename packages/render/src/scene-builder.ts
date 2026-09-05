@@ -1,6 +1,6 @@
 import * as THREE from "three/webgpu";
 import { STATIC_BATCH_FLAG } from "./static-batch.js";
-import { InstancedProps, applyInstancedProps } from "./instancing.js";
+import { InstancedProps, applyInstanceUvRotation, applyInstancedProps } from "./instancing.js";
 import { applyWorldUv } from "./primitive-uv.js";
 import {
   positionWorld,
@@ -32,8 +32,19 @@ import {
   uv,
   vec2,
   vec3,
+  vec4,
   length,
+  attribute,
+  normalLocal,
+  modelWorldMatrix,
+  cameraViewMatrix,
+  hash,
+  fract,
+  step,
+  cross,
+  mx_fractal_noise_float,
   texture as tslTexture,
+  uniform,
   viewportDepthTexture,
   perspectiveDepthToViewZ,
 } from "three/tsl";
@@ -58,12 +69,16 @@ import {
   impostorGeometry,
   impostorInstanceData,
   impostorMaterial,
+  impostorPageGeometry,
+  impostorPageMaterial,
+  writeImpostorSlot,
   type ImpostorAtlas,
   type ImpostorInstanceData,
 } from "./impostor.js";
 import { clusterDagReady, type ClusterDag } from "./cluster-dag.js";
 import { ClusteredMesh, clusterDagFromGeometry } from "./clustered-mesh.js";
 import { polyMeshGeometry } from "./poly-mesh-geometry.js";
+import { horizonTint } from "./atmosphere.js";
 import { buildTerrainSplatMaterial, type MacroNoiseData } from "./terrain-splat.js";
 import { mergeModelSubmeshes } from "./static-batch.js";
 import { voxelGeometry, voxelColliderProxyGeometry } from "./voxel-geometry.js";
@@ -71,13 +86,14 @@ import type { ParticlesData } from "./particles.js";
 import type { BillboardData } from "./billboards.js";
 import type { GrassData } from "./grass.js";
 import type { InstancedPropBatch } from "./foliage-lod.js";
+import type { InstancedPropPool } from "./prop-pool.js";
 import { pathGeometry, type PathMeshSource } from "./path-mesh.js";
 import { pathScatterPlacements, type PathScatterData } from "./path-scatter.js";
 import { flushDecals, syncEntityDecals, type DecalData, type DecalRequest } from "./decals.js";
 import { DEFAULT_SHADOW_SETTINGS, applyShadowSettings, type ShadowSettings } from "./csm.js";
 import { DEFAULT_VOLUMETRIC_SETTINGS, type FogSettings, type VolumetricSettings } from "./atmosphere.js";
 import type { EnvironmentSettings } from "./environment.js";
-import { SceneLighting, type SkyData } from "./scene-lighting.js";
+import { SceneLighting, SKY_DOME_UNIFORMS, type SkyData, type SkyDomeUniforms } from "./scene-lighting.js";
 import {
   applyMaterialCommon,
   applyMaterialMaps,
@@ -107,10 +123,69 @@ export function loadGltf(url: string): Promise<GLTF> {
     gltfPending.add(url);
     pending = (gltfLoader ??= new GLTFLoader())
       .loadAsync(url)
+      .then((gltf) => {
+        shareNamedTextures(gltf.scene);
+        return gltf;
+      })
       .finally(() => gltfPending.delete(url));
     gltfCache.set(url, pending);
   }
   return pending;
+}
+
+/** Prefix the kit-import tools give a glTF texture whose bytes are shared by many files. */
+export const SHARED_TEXTURE_PREFIX = "hitreg-shared:";
+
+// name -> the first texture loaded under it; every later model swaps its own
+// copy for this one
+const sharedTextures = new Map<string, THREE.Texture>();
+
+/** Once-per-asset warning for uvRotation on a render mode that ignores it. */
+const uvRotationWarned = new Set<string>();
+
+/**
+ * Share textures across separately loaded models by name.
+ *
+ * A WFC kit is N self-contained module files (the asset bridge resolves no
+ * sidecars) that all embed the SAME atlas, and GLTFLoader decodes and
+ * uploads each file's copy on its own — N modules × one 2048² atlas would
+ * be N GPU textures of identical bytes. The kit tools name that image
+ * `hitreg-shared:<content-hash>` (GLTFLoader carries the glTF texture name,
+ * else the image name, onto `texture.name`), so the first copy seen under a
+ * name wins, later copies are replaced on their materials and disposed.
+ * Only the texture object is swapped — the tools guarantee identical
+ * sampler/colour-space settings for identical bytes. Returns how many
+ * material slots were re-pointed.
+ */
+export function shareNamedTextures(root: THREE.Object3D): number {
+  let swapped = 0;
+  const disposed = new Set<THREE.Texture>();
+  root.traverse((object) => {
+    const mesh = object as THREE.Mesh;
+    if (!mesh.isMesh || !mesh.material) return;
+    for (const material of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
+      const slots = material as unknown as Record<string, unknown>;
+      for (const slot of Object.keys(slots)) {
+        const texture = slots[slot] as THREE.Texture | null | undefined;
+        if (!texture || texture.isTexture !== true) continue;
+        if (!texture.name.startsWith(SHARED_TEXTURE_PREFIX)) continue;
+        const shared = sharedTextures.get(texture.name);
+        if (!shared) {
+          sharedTextures.set(texture.name, texture);
+          continue;
+        }
+        if (shared === texture) continue;
+        slots[slot] = shared;
+        swapped += 1;
+        if (!disposed.has(texture)) {
+          disposed.add(texture);
+          texture.dispose();
+        }
+        material.needsUpdate = true;
+      }
+    }
+  });
+  return swapped;
 }
 
 /** Number of glTF models currently being fetched/parsed, for a loading indicator. */
@@ -143,6 +218,13 @@ export interface BuildOptions {
   voxelSupercellAsync?(
     buckets: Array<{ key: string; cells: Array<{ source: VoxelMeshSource; matrix: number[] }> }>,
   ): Promise<Array<{ key: string; mesh: VoxelMesh }>> | null;
+  /**
+   * How much coarser voxel cells are meshed in an HLOD proxy build (lattice
+   * step multiplier). Unset: the builder's default (4). The chunk manager
+   * passes a larger value for supercells that lie entirely in the FAR ring,
+   * which is what lets that ring reach twice as far for the same cost.
+   */
+  hlodVoxelCoarsen?: number;
   /** Resolve a material asset id to its (schema-validated) material data. */
   resolveMaterial?(assetId: string): unknown | undefined;
   /** Resolve a texture asset id to a fetchable image URL. */
@@ -186,6 +268,15 @@ export interface BuildOptions {
    * model's own material/color.
    */
   bakeImpostor?(object: THREE.Object3D, bounds: THREE.Box3): ImpostorAtlas | null;
+  /**
+   * World-level instanced batches shared across builds (see prop-pool.ts).
+   * With both this and `instancePoolOwner` set, `renderMode: "instanced"`
+   * entities without a `uvRotation` join the pool on behalf of the owner
+   * instead of getting per-build batches; the host releases the owner when
+   * the build (a streamed cell) unloads.
+   */
+  instancePool?: InstancedPropPool;
+  instancePoolOwner?: object;
   /**
    * Fired for every mesh a `renderMode: "clustered"` asset entity turned
    * into a `ClusteredMesh` (cluster-DAG continuous LOD, clustered-mesh.ts).
@@ -266,6 +357,10 @@ export interface MaterialData {
     foamPixel?: number;
     foamSteps?: number;
     flow?: [number, number];
+    /** drift = standing water laid out in world space; channel = the geometry's `flow` attribute + metre uvs carry the current. */
+    flowMode?: "drift" | "channel";
+    /** false: wave normals only, no vertex motion (lake sheets, ribbons). */
+    displace?: boolean;
   };
 }
 
@@ -297,6 +392,7 @@ interface MeshData {
         textureFilter?: TextureFilter;
         wind?: FoliageWindOptions;
         cameraFade?: boolean;
+        uvRotation?: number;
       }
     | {
         kind: "polygon";
@@ -462,6 +558,9 @@ function buildSkyDome(
   top: string,
   bottom: string,
   sun?: { direction: [number, number, number]; color: string; size: number; intensity: number },
+  moon?: { direction: [number, number, number]; color: string; size: number; intensity: number },
+  stars?: { intensity: number; density: number; size: number },
+  clouds?: { coverage: number; scale: number; speed: [number, number]; softness: number; color: string; shadow: string },
 ): THREE.Mesh {
   // defensive: production sky data is always zod-validated (top/bottom always
   // real hex strings) before it reaches here, but TSL's color() warns loudly
@@ -469,7 +568,6 @@ function buildSkyDome(
   // fallback — stay equally tolerant of incomplete/malformed input.
   const topColor = top || "#5fa9ff";
   const bottomColor = bottom || "#101522";
-
   const radius = 450;
   const geometry = new THREE.SphereGeometry(radius, 32, 20);
   // depthWrite:false alone only means the dome never BLOCKS what's drawn
@@ -485,22 +583,101 @@ function buildSkyDome(
     depthWrite: false,
     depthTest: false,
   });
-
-  const dir = normalize(positionLocal);
-  const t = pow(clamp(mul(add(dir.y, float(0.35)), float(1 / 1.35)), 0, 1), float(0.9));
-  let colorNode: THREE.Node<"vec3"> | THREE.Node<"color"> = mix(tslColor(bottomColor), tslColor(topColor), t);
+  // Every knob is a uniform, so a day/night script can drive the sky every
+  // frame without a rebuild (SceneLighting.setSkyLive). The sun and moon
+  // discs are always in the shader; an intensity of 0 is how one is absent.
+  const uniforms: SkyDomeUniforms = {
+    top: uniform(new THREE.Color(topColor)),
+    bottom: uniform(new THREE.Color(bottomColor)),
+    sunDirection: uniform(new THREE.Vector3(...(sun?.direction ?? [0.4, 0.55, 0.3])).normalize()),
+    sunColor: uniform(new THREE.Color(sun?.color ?? "#fff6df")),
+    sunSize: uniform(sun?.size ?? 0.997),
+    sunIntensity: uniform(sun?.intensity ?? 0),
+    moonDirection: uniform(new THREE.Vector3(...(moon?.direction ?? [-0.4, 0.55, -0.3])).normalize()),
+    moonColor: uniform(new THREE.Color(moon?.color ?? "#c9d6f2")),
+    moonSize: uniform(moon?.size ?? 0.9994),
+    moonIntensity: uniform(moon?.intensity ?? 0),
+    starsIntensity: uniform(stars?.intensity ?? 0),
+    starsDensity: uniform(stars?.density ?? 0.35),
+    starsSize: uniform(stars?.size ?? 1),
+    starsRotation: uniform(new THREE.Vector4(0, 0, 0, 1)),
+    cloudCoverage: uniform(clouds?.coverage ?? 0),
+    cloudScale: uniform(clouds?.scale ?? 1),
+    cloudSpeed: uniform(new THREE.Vector2(...(clouds?.speed ?? [0.6, 0.2]))),
+    cloudSoftness: uniform(clouds?.softness ?? 0.35),
+    cloudColor: uniform(new THREE.Color(clouds?.color ?? "#ffffff")),
+    cloudShadow: uniform(new THREE.Color(clouds?.shadow ?? "#8a94a8")),
+    cloudLight: uniform(1),
+  };
+  // TSL's generics cannot follow uniform-typed colours through mix/pow/add;
+  // the graph is the same one the constant version built, just with uniforms
+  // in the leaves.
+  /* eslint-disable @typescript-eslint/no-explicit-any */
+  const u = uniforms as unknown as Record<keyof SkyDomeUniforms, any>;
+  const dir: any = normalize(positionLocal);
+  const t: any = pow(clamp(mul(add(dir.y, float(0.35)), float(1 / 1.35)), 0, 1), float(0.9));
+  let colorNode: any = mix(u.bottom, u.top, t);
   // horizon haze: lighten toward the bottom color near dir.y == 0
-  const hazeAmount = sub(float(1), smoothstep(float(0), float(0.22), abs(dir.y)));
-  colorNode = mix(colorNode, tslColor(bottomColor), mul(hazeAmount, float(0.6)));
-  if (sun) {
-    const sunDir = normalize(vec3(sun.direction[0], sun.direction[1], sun.direction[2]));
-    const facing = clamp(dot(dir, sunDir), 0, 1);
-    const glow = mul(pow(facing, float(1 / (1 - sun.size))), float(sun.intensity));
-    const sunColorVec3 = tslColor(sun.color) as unknown as THREE.Node<"vec3">;
-    colorNode = add(colorNode as THREE.Node<"vec3">, mul(sunColorVec3, glow));
-  }
+  const hazeAmount: any = sub(float(1), smoothstep(float(0), float(0.22), abs(dir.y)));
+  colorNode = mix(colorNode, u.bottom, mul(hazeAmount, float(0.6)));
+  // soft sun glow: a wide falloff shaped by `size` (closer to 1 = tighter)
+  const sunFacing: any = clamp(dot(dir, normalize(u.sunDirection)), 0, 1);
+  const sunGlow: any = mul(pow(sunFacing, float(1).div(float(1).sub(u.sunSize))), u.sunIntensity);
+  colorNode = add(colorNode, mul(u.sunColor, sunGlow));
+  // moon: a tight disc plus a faint halo (a quarter of the disc's brightness,
+  // a much wider falloff), so it reads as a body with a glow rather than a dot
+  const moonFacing: any = clamp(dot(dir, normalize(u.moonDirection)), 0, 1);
+  const moonDisc: any = pow(moonFacing, float(1).div(float(1).sub(u.moonSize)));
+  const moonHalo: any = mul(pow(moonFacing, float(220)), float(0.18));
+  const moonGlow: any = mul(add(moonDisc, moonHalo), u.moonIntensity);
+  colorNode = add(colorNode, mul(u.moonColor, moonGlow));
+  // stars: a hashed lattice on the (rotated) view direction — one candidate
+  // point per cell, lit when its hash clears the density threshold, drawn as
+  // a soft dot with a slow twinkle. Faded out at the horizon and under the
+  // haze band, and scaled by `starsIntensity`, which a day/night script
+  // raises as the sun sets. A few ALU ops per sky pixel; no texture.
+  const rq: any = u.starsRotation;
+  const rt: any = cross(rq.xyz, dir).mul(2);
+  const dirStars: any = dir.add(rt.mul(rq.w)).add(cross(rq.xyz, rt));
+  const lattice: any = dirStars.mul(float(110));
+  const cell: any = floor(lattice);
+  const inCell: any = sub(sub(lattice, cell), float(0.5));
+  const h0: any = hash(dot(cell, vec3(1, 57, 113)));
+  const h1: any = hash(h0.mul(91.3));
+  const h2: any = hash(h0.mul(7.7));
+  const h3: any = hash(h0.mul(3.1));
+  const lit: any = step(sub(float(1), mul(u.starsDensity, float(0.25))), h0);
+  const offset: any = sub(vec3(h1, h2, h3), float(0.5)).mul(0.6);
+  const dist: any = length(sub(inCell, offset));
+  const dot_: any = smoothstep(mul(float(0.17), u.starsSize), float(0), dist);
+  const twinkle: any = add(float(0.7), mul(sin(add(mul(time, float(2)), mul(h1, float(40)))), float(0.3)));
+  const starFade: any = mul(smoothstep(float(0.02), float(0.2), dir.y), sub(float(1), hazeAmount));
+  const starLight: any = mul(mul(mul(mul(lit, dot_), twinkle), add(float(0.6), mul(h2, float(0.9)))), mul(u.starsIntensity, starFade));
+  colorNode = add(colorNode, mul(vec3(0.85, 0.9, 1.0), starLight));
+  // clouds: the view direction projected onto a plane above the camera,
+  // fractal noise drifting with the wind, thresholded by coverage. Composited
+  // LAST so a cloud hides the sun, the moon and the stars behind it. Thicker
+  // cloud falls toward the shadow colour; `cloudLight` is what a day/night
+  // script dims at night and warms at dawn. Faded out toward the horizon,
+  // where the projection stretches to infinity.
+  // a softened projection: a true plane stretches to infinity at the horizon,
+  // which turned every cloud into a streak; blending the divisor toward a
+  // constant keeps distant clouds compact
+  const planeY: any = add(mul(max(dir.y, float(0)), float(0.7)), float(0.3));
+  const plane: any = vec2(dir.x, dir.z).div(planeY).mul(mul(float(0.35), u.cloudScale));
+  const drift: any = plane.add(mul(u.cloudSpeed, mul(time, float(0.02))));
+  const noise: any = mx_fractal_noise_float(vec3(drift.x, drift.y, mul(time, float(0.01))), 4, 2.2, 0.5, 1);
+  const density: any = add(mul(noise, float(0.5)), float(0.5));
+  const threshold: any = sub(float(1), u.cloudCoverage);
+  const cloudAlpha: any = mul(
+    smoothstep(threshold, add(threshold, u.cloudSoftness), density),
+    smoothstep(float(0.0), float(0.14), dir.y),
+  );
+  const thickness: any = smoothstep(threshold, float(1), density);
+  const cloudColor: any = mul(mix(u.cloudColor, u.cloudShadow, mul(thickness, float(0.75))), u.cloudLight);
+  colorNode = mix(colorNode, cloudColor, mul(cloudAlpha, float(0.96)));
+  /* eslint-enable @typescript-eslint/no-explicit-any */
   material.colorNode = colorNode;
-
   const mesh = new THREE.Mesh(geometry, material);
   mesh.frustumCulled = false;
   mesh.renderOrder = -1000;
@@ -510,6 +687,7 @@ function buildSkyDome(
   // infinite-skybox trick); tag it so the host can find it after a rebuild
   // recreates the whole scene graph (main.ts: userData["skyDome"] === true).
   mesh.userData["skyDome"] = true;
+  mesh.userData[SKY_DOME_UNIFORMS] = uniforms;
   return mesh;
 }
 
@@ -720,15 +898,16 @@ function buildPrimitive(
  * mesh's actual bounds — so the edge itself is never in view from any
  * direction the camera can approach it from.
  *
- * Wave displacement operates in the water mesh's own LOCAL space (before its
- * -90°-X "lie the plane flat" rotation — see the `shape === "plane"` case
- * below), where the flat plane spans local X/Y and its normal is local +Z;
- * `positionLocal.x`/`.y` are the wave phase basis, and height is added along
- * local Z (which becomes world Y once the mesh's own rotation is applied).
- * Two summed waves at different frequencies/directions/speeds read as far
- * less mechanical than one; the surface normal is perturbed by each wave's
- * own analytic partial derivative (closed-form, not numerically sampled) so
- * lighting responds to the bumps instead of the surface staying flat-shaded.
+ * Wave displacement is phased in WORLD space and applied along the surface's
+ * own normal, so one material serves the ocean plane (rotated flat), the
+ * per-cell lake sheets and the river ribbons alike, and sheets streamed in
+ * separate cells agree exactly along a shared edge (see the waves block for
+ * the gap this replaced). Two summed waves at different frequencies/
+ * directions/speeds read as far less mechanical than one; the surface normal
+ * is perturbed by each wave's own analytic partial derivative (closed-form,
+ * not numerically sampled) so lighting responds to the bumps instead of the
+ * surface staying flat-shaded. `flowMode: "channel"` swaps the world axes
+ * for the ribbon's metre uv and its `flow` attribute: moving water.
  */
 function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THREE.MeshStandardNodeMaterial {
   const w = data.water ?? {
@@ -758,28 +937,62 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
     roughness: 0.35,
   });
 
-  // -- waves: vertex displacement + analytic normal, in the plane's own local space --
+  // -- waves: vertex displacement + analytic normal -------------------------
+  //
+  // Measured in WORLD space and displaced along the surface's OWN normal.
+  // The first version phased the waves by the mesh's local x/y and lifted
+  // vertices along local z, which is right for one big plane lying flat
+  // (local z is world up) and wrong for everything else: a lake sheet or a
+  // river ribbon is authored flat in local XZ, so its "local y" is constant
+  // and its "local z" is HORIZONTAL — every sheet slid sideways by its own
+  // phase, and where two streamed cells met, the two sheets slid by
+  // different amounts and tore open a gap along the seam. World-space
+  // phase makes neighbouring sheets agree to the millimetre along a shared
+  // edge; the normal makes the lift vertical for a flat sheet and
+  // perpendicular for a falling one.
+  //
+  // `channel` water (river ribbons) measures "along" on the ribbon's metre
+  // uv instead of world x, so the waves travel down the channel, around
+  // its bends and over its falls, and never break at a cell seam because
+  // the uv is continuous across pieces (`uvAlong`).
+  const channel = w.flowMode === "channel";
+  const worldXZ = vec2(positionWorld.x, positionWorld.z);
+  const flowAttribute = attribute("flow", "vec3") as unknown as THREE.Node<"vec3">;
+  const flowWorld = channel ? modelWorldMatrix.mul(vec4(flowAttribute, float(0))).xyz : null;
+  const flowSpeed = flowWorld ? length(flowWorld) : null;
+  // a still vertex (speed 0) must not divide by zero: nudge before normalising
+  const flowDir = flowWorld ? normalize(add(vec2(flowWorld.x, flowWorld.z), vec2(float(1e-4), float(0)))) : null;
+  const along = channel ? uv().y : positionWorld.x;
+  const across = channel ? uv().x : positionWorld.z;
+
   const kA = float(w.waveFrequency);
   const ampA = float(w.waveAmplitude);
-  const phaseA = add(mul(positionLocal.x, kA), mul(time, float(w.waveSpeed)));
+  const phaseA = sub(mul(along, kA), mul(time, float(w.waveSpeed)));
   const heightA = mul(sin(phaseA), ampA);
 
   const kB = float(w.waveFrequency * 1.7);
   const ampB = float(w.waveAmplitude * 0.5);
-  const dirBx = float(0.7071);
-  const dirBy = float(0.7071);
-  const phaseB = add(
-    mul(add(mul(positionLocal.x, dirBx), mul(positionLocal.y, dirBy)), kB),
-    mul(time, float(w.waveSpeed * 1.3)),
-  );
+  const dirB = float(0.7071);
+  const phaseB = sub(mul(add(mul(along, dirB), mul(across, dirB)), kB), mul(time, float(w.waveSpeed * 1.3)));
   const heightB = mul(sin(phaseB), ampB);
 
   const waveHeight = add(heightA, heightB);
-  material.positionNode = add(positionLocal, vec3(float(0), float(0), waveHeight));
+  // a coarse sheet (a lake's polygon fan, a two-wide ribbon) keeps its
+  // vertices still: lifting them tilts whole triangles into faceted streaks
+  material.positionNode = w.displace === false ? positionLocal : add(positionLocal, mul(normalLocal, waveHeight));
 
-  const dhdx = add(mul(mul(ampA, kA), cos(phaseA)), mul(mul(mul(ampB, kB), dirBx), cos(phaseB)));
-  const dhdy = mul(mul(mul(ampB, kB), dirBy), cos(phaseB));
-  material.normalNode = normalize(vec3(mul(dhdx, float(-1)), mul(dhdy, float(-1)), float(1)));
+  // slope of the wave surface in the (along, across) frame, then rotated into
+  // world XZ: the frame is the flow direction for a channel, world axes otherwise
+  const dhAlong = add(mul(mul(ampA, kA), cos(phaseA)), mul(mul(mul(ampB, kB), dirB), cos(phaseB)));
+  const dhAcross = mul(mul(mul(ampB, kB), dirB), cos(phaseB));
+  const alongDir = flowDir ?? vec2(float(1), float(0));
+  const acrossDir = flowDir ? vec2(mul(flowDir.y, float(-1)), flowDir.x) : vec2(float(0), float(1));
+  const slopeX = add(mul(dhAlong, alongDir.x), mul(dhAcross, acrossDir.x));
+  const slopeZ = add(mul(dhAlong, alongDir.y), mul(dhAcross, acrossDir.y));
+  // bend the geometry's own world normal (up for a sheet, sideways for a
+  // fall) by the slope, then into view space, which is what normalNode is
+  const bumpedWorld = normalize(add(normalWorld, vec3(mul(slopeX, float(-1)), float(0), mul(slopeZ, float(-1)))));
+  material.normalNode = normalize(cameraViewMatrix.mul(vec4(bumpedWorld, float(0))).xyz);
 
   // -- toon-banded depth color: hard-ish steps, not a smooth gradient --
   const sceneViewZ = perspectiveDepthToViewZ(viewportDepthTexture(), cameraNear, cameraFar);
@@ -817,12 +1030,30 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
     map.wrapT = THREE.RepeatWrapping;
     const scale = float(1 / Math.max(0.01, w.textureScale ?? 24));
     const flow = w.flow ?? [0.012, 0.008];
-    const world = vec2(positionWorld.x, positionWorld.z);
-    const uvA = add(mul(world, scale), vec2(mul(time, float(flow[0])), mul(time, float(flow[1]))));
-    const uvB = add(
-      mul(world, mul(scale, float(1.59))),
-      vec2(mul(time, float(-flow[1] * 1.4)), mul(time, float(flow[0] * 1.4))),
-    );
+    const world = worldXZ;
+    let uvA: THREE.Node<"vec2">;
+    let uvB: THREE.Node<"vec2">;
+    if (channel && flowSpeed) {
+      // A channel samples on the ribbon's METRE uv — x across the centreline,
+      // y along the river — so the tile follows the bends and runs down a
+      // fall instead of being smeared onto a vertical face by a world-XZ
+      // projection, and it scrolls along y at the vertex's own speed. The
+      // second layer runs slower and wanders a little across, which keeps
+      // the two from reading as one sliding photograph.
+      const ribbon = uv();
+      const travelled = mul(time, flowSpeed);
+      uvA = mul(vec2(ribbon.x, sub(ribbon.y, travelled)), scale);
+      uvB = mul(
+        vec2(add(ribbon.x, mul(sin(mul(time, float(0.37))), float(0.6))), sub(ribbon.y, mul(travelled, float(0.72)))),
+        mul(scale, float(1.59)),
+      );
+    } else {
+      uvA = add(mul(world, scale), vec2(mul(time, float(flow[0])), mul(time, float(flow[1]))));
+      uvB = add(
+        mul(world, mul(scale, float(1.59))),
+        vec2(mul(time, float(-flow[1] * 1.4)), mul(time, float(flow[0] * 1.4))),
+      );
+    }
     const detail = tslTexture(map, uvA).xyz.add(tslTexture(map, uvB).xyz).mul(float(0.5));
     // Depth reads as a BRIGHTNESS ramp only — no hue shift.
     //
@@ -840,10 +1071,16 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
     // the lookup to a world grid makes the breakup constant across each cell,
     // so the band steps in squares at the same scale as the terrain's texels.
     const pixel = Math.max(0, w.foamPixel ?? 0.7);
+    // a channel's foam rides its own metre uv too, so it moves with the water
+    const foamBasis = channel ? uv() : world;
     const foamWorld = pixel > 0
-      ? mul(floor(div(world, float(pixel))), float(pixel))
-      : world;
-    const foamUv = add(mul(foamWorld, mul(scale, float(2.3))), vec2(mul(time, float(flow[0] * 0.6)), mul(time, float(flow[1] * 0.6))));
+      ? mul(floor(div(foamBasis, float(pixel))), float(pixel))
+      : foamBasis;
+    const foamScroll =
+      channel && flowSpeed
+        ? vec2(float(0), mul(mul(time, flowSpeed), float(-0.6)))
+        : vec2(mul(time, float(flow[0] * 0.6)), mul(time, float(flow[1] * 0.6)));
+    const foamUv = add(mul(foamWorld, mul(scale, float(2.3))), foamScroll);
     const foamSample = tslTexture(map, foamUv);
     foamBreakup = foamSample.x.add(foamSample.y).add(foamSample.z).mul(float(1 / 3));
     void loadWaterTexture(map, data, options);
@@ -880,7 +1117,11 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
 
   const viewDir = normalize(sub(cameraPosition, positionWorld));
   const fresnel = pow(saturate(sub(float(1), saturate(dot(normalWorld, viewDir)))), float(w.fresnelPower));
-  material.colorNode = mix(shaded as THREE.Node<"vec3">, tslColor(w.rimColor), fresnel);
+  // the rim is the sky reflected at a grazing angle, so it takes the sky's
+  // colour at the horizon: bright by day, dark at dusk like the land around
+  // it, instead of a constant near-white that floated over a fogged-out hill
+  const rim = (tslColor(w.rimColor) as unknown as THREE.Node<"vec3">).mul(horizonTint as unknown as THREE.Node<"vec3">);
+  material.colorNode = mix(shaded as THREE.Node<"vec3">, rim, fresnel);
 
   // -- edge fade: opacity to 0 well before the mesh's own physical boundary --
   const camDist = length(sub(cameraPosition, positionWorld));
@@ -1190,6 +1431,8 @@ interface PendingInstance {
   textureFilter?: TextureFilter;
   wind?: FoliageWindOptions;
   cameraFade?: boolean;
+  /** `mesh.source.uvRotation`, degrees — see INSTANCE_UV_ROTATION_ATTRIBUTE. */
+  uvRotation?: number;
   castShadow: boolean;
   receiveShadow: boolean;
   lod: boolean;
@@ -1467,6 +1710,7 @@ function populateEntityGroup(
         textureFilter: meshData.source.textureFilter,
         wind: meshData.source.wind,
         cameraFade: meshData.source.cameraFade,
+        uvRotation: meshData.source.uvRotation,
         castShadow: meshData.castShadow,
         receiveShadow: meshData.receiveShadow,
         lod: meshData.lod ?? true,
@@ -1479,6 +1723,12 @@ function populateEntityGroup(
       const url = options.resolveModel?.(assetId);
       const nodeName = meshData.source.node;
       const clustered = meshData.renderMode === "clustered";
+      if (meshData.source.uvRotation !== undefined && !uvRotationWarned.has(assetId)) {
+        uvRotationWarned.add(assetId);
+        console.warn(
+          `[render] mesh.source.uvRotation on "${assetId}" is only honoured with renderMode "instanced"; ignored`,
+        );
+      }
       if (url) {
         // async: the model pops in when loaded; group placement is already correct
         // (a clustered mesh also waits for the clusterizer's WASM, once per session)
@@ -1634,15 +1884,20 @@ function populateEntityGroup(
           (error) => console.warn(`[render] sky texture failed: ${panoramaUrl}`, error),
         );
       } else {
-        group.add(buildSkyDome(skyData.top, skyData.bottom, skyData.sun));
+        const dome = buildSkyDome(skyData.top, skyData.bottom, skyData.sun, skyData.moon, skyData.stars, skyData.clouds);
+        group.add(dome);
         scene.background = new THREE.Color(skyData.bottom);
+        ctx.lighting?.attachSkyDome(dome);
       }
       // Fog, IBL and volumetric intent are all deferred to SceneLighting, which
       // buildScene applies once the whole scene exists — IBL has to reach
       // materials built by entities that come after this one.
       ctx.sky = normalizeSky(skyData);
       if (skyData.light > 0) {
-        group.add(new THREE.HemisphereLight(new THREE.Color(skyData.top), new THREE.Color(skyData.bottom), skyData.light));
+        const hemisphere = new THREE.HemisphereLight(new THREE.Color(skyData.top), new THREE.Color(skyData.bottom), skyData.light);
+        hemisphere.userData["skyHemisphere"] = true;
+        group.add(hemisphere);
+        ctx.lighting?.attachSkyHemisphere(hemisphere);
       }
     }
 
@@ -1782,6 +2037,7 @@ function flushInstancedPending(pending: Map<string, PendingInstance[]>, options:
 }
 
 const instanceMatrixScratch = new THREE.Matrix4();
+const identityScratch = new THREE.Matrix4();
 const sourceInverseScratch = new THREE.Matrix4();
 
 // Below this vertex count, a submesh's own vertex-shader cost is already
@@ -1806,7 +2062,7 @@ const MID_TIER_KEEP_RATIO = 0.35;
 // geometry is SHARED across every chunk's mid-tier batch (each InstancedProps
 // wraps it without copying the arrays), so identity here is what keeps one
 // decimation per unique submesh instead of one per cell.
-interface MidTier {
+export interface MidTier {
   geometry: THREE.BufferGeometry;
   /** Geometric deviation from the near-tier geometry, in submesh-local units. */
   error: number;
@@ -1819,6 +2075,172 @@ const midTierGeometryCache = new Map<string, MidTier | null>();
 // compiled pipeline per unique model, never one per chunk.
 const impostorCache = new Map<string, ImpostorAtlas | null>();
 const impostorMaterialCache = new Map<string, THREE.Material>();
+
+/**
+ * The impostor atlas + material for one (asset, node), baked on first use and
+ * cached forever after (see the caches above for why). Null when the host has
+ * no baker (headless) or the bake failed, in which case callers fall back to
+ * whatever cheaper proxy they have.
+ */
+export function cachedImpostor(
+  assetId: string,
+  node: string | undefined,
+  source: THREE.Object3D,
+  bounds: THREE.Box3,
+  options: BuildOptions,
+): { atlas: ImpostorAtlas; material: THREE.Material } | null {
+  const key = `${assetId}#${node ?? ""}`;
+  let atlas: ImpostorAtlas | null;
+  if (impostorCache.has(key)) {
+    atlas = impostorCache.get(key)!;
+  } else {
+    // a throwaway clone, never the shared cached `source` itself
+    atlas = options.bakeImpostor?.(source.clone(true), bounds) ?? null;
+    impostorCache.set(key, atlas);
+  }
+  if (!atlas) return null;
+  let material = impostorMaterialCache.get(key);
+  if (!material) {
+    material = impostorMaterial(atlas, bounds);
+    impostorMaterialCache.set(key, material);
+  }
+  return { atlas, material };
+}
+
+/**
+ * One draw call of impostor quads for `matrices.length` placements of a
+ * model — every instance active, no LOD tracking. This is what the HLOD
+ * supercells use for their trees: a merged full-geometry tree in the far
+ * ring was 1,400 vertices per instance that read as a few pixels, and every
+ * species' every submesh was its own merged bucket. As quads it is four
+ * vertices per tree, one draw per species per supercell, and the same atlas
+ * the near ring's far tier already baked. Null without a baker.
+ */
+/** One model's placements, for `impostorPageBatchFor`. */
+export interface ImpostorPageItem {
+  assetId: string;
+  node: string | undefined;
+  gltf: GLTF;
+  submeshes: GltfSubmesh[];
+  matrices: readonly THREE.Matrix4[];
+}
+
+const impostorPageMaterialCache = new Map<string, THREE.Material>();
+
+/**
+ * Impostor quads for MANY models in as few draws as the atlases allow: every
+ * model whose atlas lives on the same shared page (see the app's baker) goes
+ * into one `InstancedProps` over that page's material, carrying its region,
+ * radius and centre per instance. A supercell of five tree species is then
+ * one draw instead of five. Models with no atlas, or with a page of their
+ * own, come back in `unpaged` for the caller to batch per model.
+ */
+export function impostorPageBatchFor(
+  items: readonly ImpostorPageItem[],
+  options: BuildOptions,
+): { batches: InstancedProps[]; unpaged: ImpostorPageItem[] } {
+  const byPage = new Map<string, { page: ImpostorAtlas; entries: Array<{ item: ImpostorPageItem; atlas: ImpostorAtlas; bounds: THREE.Box3 }> }>();
+  const unpaged: ImpostorPageItem[] = [];
+  for (const item of items) {
+    if (item.matrices.length === 0) continue;
+    const source: THREE.Object3D = item.node ? (item.gltf.scene.getObjectByName(item.node) ?? item.gltf.scene) : item.gltf.scene;
+    const bounds = submeshBounds(item.submeshes);
+    const baked = cachedImpostor(item.assetId, item.node, source, bounds, options);
+    if (!baked || !baked.atlas.region) {
+      unpaged.push(item);
+      continue;
+    }
+    const key = baked.atlas.albedo.uuid;
+    let group = byPage.get(key);
+    if (!group) {
+      group = { page: baked.atlas, entries: [] };
+      byPage.set(key, group);
+    }
+    group.entries.push({ item, atlas: baked.atlas, bounds });
+  }
+  const batches: InstancedProps[] = [];
+  for (const [key, group] of byPage) {
+    let material = impostorPageMaterialCache.get(key);
+    if (!material) {
+      material = impostorPageMaterial(group.page);
+      impostorPageMaterialCache.set(key, material);
+    }
+    const total = group.entries.reduce((n, e) => n + e.item.matrices.length, 0);
+    const batch = new InstancedProps(impostorPageGeometry(total), material, total);
+    const regions = new Float32Array(total * 3);
+    const radii = new Float32Array(total);
+    const centers = new Float32Array(total * 3);
+    const matrices: THREE.Matrix4[] = [];
+    const center = new THREE.Vector3();
+    let i = 0;
+    for (const { item, atlas, bounds } of group.entries) {
+      const region = atlas.region!;
+      const radius = bounds.getSize(center).length() / 2;
+      bounds.getCenter(center);
+      for (const matrix of item.matrices) {
+        matrices.push(matrix);
+        regions[i * 3] = region.u;
+        regions[i * 3 + 1] = region.v;
+        regions[i * 3 + 2] = region.scale;
+        radii[i] = radius;
+        centers[i * 3] = center.x;
+        centers[i * 3 + 1] = center.y;
+        centers[i * 3 + 2] = center.z;
+        i++;
+      }
+    }
+    const data: ImpostorInstanceData = { ...impostorInstanceData(matrices), regions, radii, centers };
+    // the anchor is the centre ATTRIBUTE, so the geometry's own bounds are a
+    // point at the origin — give the batch a sphere over its placements
+    const sphere = new THREE.Sphere();
+    const point = new THREE.Vector3();
+    let maxRadius = 0;
+    for (let k = 0; k < total; k++) {
+      batch.setMatrixAt(k, matrices[k]!);
+      writeImpostorSlot(batch, data, k, k);
+      point.set(centers[k * 3]!, centers[k * 3 + 1]!, centers[k * 3 + 2]!).applyMatrix4(matrices[k]!);
+      if (k === 0) sphere.center.copy(point);
+      else sphere.expandByPoint(point);
+      maxRadius = Math.max(maxRadius, radii[k]! * data.scales[k]!);
+    }
+    sphere.radius += maxRadius;
+    batch.geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1);
+    batch.boundingSphere = sphere;
+    batch.instanceCount = total;
+    batch.instanceMatrix.needsUpdate = true;
+    batch.castShadow = false;
+    batch.receiveShadow = false;
+    batches.push(batch);
+  }
+  return { batches, unpaged };
+}
+
+export function impostorBatchFor(
+  assetId: string,
+  node: string | undefined,
+  gltf: GLTF,
+  submeshes: GltfSubmesh[],
+  matrices: readonly THREE.Matrix4[],
+  options: BuildOptions,
+): InstancedProps | null {
+  if (matrices.length === 0) return null;
+  const source: THREE.Object3D = node ? (gltf.scene.getObjectByName(node) ?? gltf.scene) : gltf.scene;
+  const bounds = submeshBounds(submeshes);
+  const impostor = cachedImpostor(assetId, node, source, bounds, options);
+  if (!impostor) return null;
+  const far = new InstancedProps(impostorGeometry(bounds, matrices.length), impostor.material, matrices.length);
+  const data = impostorInstanceData(matrices);
+  for (let i = 0; i < matrices.length; i++) {
+    far.setMatrixAt(i, matrices[i]!);
+    writeImpostorSlot(far, data, i, i);
+  }
+  far.instanceCount = matrices.length;
+  far.instanceMatrix.needsUpdate = true;
+  far.computeBoundingSphere();
+  far.castShadow = false;
+  far.receiveShadow = false;
+  return far;
+}
 // near/mid-tier instanced materials, keyed like midTierGeometryCache — CPU
 // profiling (a real ~40-53% of frame-time spikes during sustained flight)
 // found instanceGltfInto's per-submesh `sub.material.clone()` was creating a
@@ -1858,6 +2280,7 @@ export function cachedMergedMaterial(
 export function cachedInstancedMaterial(
   cacheKey: string,
   source: THREE.Material | THREE.Material[],
+  options: { uvRotation?: boolean } = {},
 ): THREE.Material | THREE.Material[] {
   const cached = instancedMaterialCache.get(cacheKey);
   if (cached) return cached;
@@ -1868,6 +2291,9 @@ export function cachedInstancedMaterial(
   const instancedClone = (m: THREE.Material): THREE.Material => {
     const clone = asNodeMaterial(cloneMaterial(m));
     applyInstancedProps(clone);
+    // a material that binds the uv-rotation attribute is only ever handed to
+    // batches that allocate it, hence its own cache key (see instanceGltfInto)
+    if (options.uvRotation) applyInstanceUvRotation(clone);
     return clone;
   };
   const cloned = Array.isArray(source) ? source.map(instancedClone) : instancedClone(source);
@@ -1886,7 +2312,7 @@ export function cachedInstancedMaterial(
  * simplifyGeometry). Requires `simplifierReady()` to have resolved, which
  * flushInstancedPending awaits alongside the glTF load.
  */
-function buildMidTier(cacheKey: string, geometry: THREE.BufferGeometry): MidTier | null {
+export function buildMidTier(cacheKey: string, geometry: THREE.BufferGeometry): MidTier | null {
   const cached = midTierGeometryCache.get(cacheKey);
   if (cached !== undefined) return cached;
   const vertexCount = geometry.attributes["position"]?.count ?? 0;
@@ -1916,7 +2342,7 @@ function buildMidTier(cacheKey: string, geometry: THREE.BufferGeometry): MidTier
  */
 /** Model-space bounds of a whole model: every submesh's box through its own
  * local transform. */
-function submeshBounds(submeshes: Array<{ geometry: THREE.BufferGeometry; localMatrix: THREE.Matrix4 }>): THREE.Box3 {
+export function submeshBounds(submeshes: Array<{ geometry: THREE.BufferGeometry; localMatrix: THREE.Matrix4 }>): THREE.Box3 {
   const bbox = new THREE.Box3();
   const scratchBox = new THREE.Box3();
   for (const sub of submeshes) {
@@ -1927,7 +2353,7 @@ function submeshBounds(submeshes: Array<{ geometry: THREE.BufferGeometry; localM
   return bbox;
 }
 
-function buildLodProxyGeometry(
+export function buildLodProxyGeometry(
   submeshes: Array<{ geometry: THREE.BufferGeometry; localMatrix: THREE.Matrix4 }>,
 ): { geometry: THREE.BufferGeometry; isTall: boolean; width?: number; height?: number } {
   const bbox = submeshBounds(submeshes);
@@ -1955,7 +2381,7 @@ function buildLodProxyGeometry(
   return { geometry, isTall: true, width, height };
 }
 
-interface MaterialLook {
+export interface MaterialLook {
   color: THREE.Color;
   /** The model's ACTUAL color/detail texture, when it has one — most nature
    * assets get their real look from this, not a flat `.color` tint (which
@@ -1964,7 +2390,7 @@ interface MaterialLook {
   map: THREE.Texture | null;
 }
 
-function materialLook(material: THREE.Material | THREE.Material[]): MaterialLook {
+export function materialLook(material: THREE.Material | THREE.Material[]): MaterialLook {
   const m = (Array.isArray(material) ? material[0] : material) as
     | (THREE.Material & { color?: THREE.Color; map?: THREE.Texture | null })
     | undefined;
@@ -1991,7 +2417,7 @@ function materialLook(material: THREE.Material | THREE.Material[]): MaterialLook
  * a distinct object with its own shader build (see instancing.ts).
  */
 const farProxyMaterialCache = new Map<string, THREE.MeshLambertNodeMaterial>();
-function instancedFarProxyMaterial(isTall: boolean, look: MaterialLook): THREE.MeshLambertNodeMaterial {
+export function instancedFarProxyMaterial(isTall: boolean, look: MaterialLook): THREE.MeshLambertNodeMaterial {
   const key = `${isTall ? "tall" : "flat"}#${look.map ? look.map.uuid : look.color.getHexString()}`;
   let material = farProxyMaterialCache.get(key);
   if (!material) {
@@ -2092,6 +2518,31 @@ function instanceGltfInto(
   // a function shared with hlod-proxy.ts (which never needs it).
   const source: THREE.Object3D = node ? gltf.scene.getObjectByName(node)! : gltf.scene;
 
+  // Streamed cells pool their props world-wide (prop-pool.ts) — one set of
+  // tiers per model however many cells are resident — unless an entry needs
+  // the per-instance uv-rotation attribute, which the pool does not carry.
+  const pool = options.instancePool;
+  const owner = options.instancePoolOwner;
+  if (pool && owner && !entries.some((entry) => entry.uvRotation !== undefined)) {
+    if (!pool.isLive(owner)) return; // the cell unloaded while its model was loading
+    const first = entries[0]!;
+    const placed = entries.map((entry) => {
+      entry.group.updateWorldMatrix(true, false);
+      return { id: entry.id, matrix: entry.group.matrixWorld.clone() };
+    });
+    pool.add(
+      assetId,
+      node,
+      gltf,
+      submeshes,
+      { castShadow: first.castShadow, receiveShadow: first.receiveShadow, lod: first.lod },
+      placed,
+      owner,
+      options,
+    );
+    return;
+  }
+
   // per-instance world matrix/position, computed ONCE and shared by every
   // tier (near submeshes AND the far proxy all place identically)
   const matrices: THREE.Matrix4[] = [];
@@ -2112,12 +2563,27 @@ function instanceGltfInto(
   // (accumulated within a single buildScene/rebuildEntityVisuals call).
   const root = first.anchor;
 
+  // Per-instance texture rotation (WFC kit floors). A batch where ANY entry
+  // sets it draws with a material variant that binds the attribute, keyed
+  // apart from the plain clone so batches of the same asset without it keep
+  // their plain shader and never bind an attribute they did not allocate.
+  const rotated = entries.some((entry) => entry.uvRotation !== undefined);
+  const materialKeySuffix = rotated ? "#uvrot" : "";
+  const uvRotations = rotated
+    ? Float32Array.from(entries, (entry) => THREE.MathUtils.degToRad(entry.uvRotation ?? 0))
+    : undefined;
+  const applyUvRotations = (instanced: InstancedProps): void => {
+    if (!uvRotations) return;
+    instanced.enableUvRotation();
+    for (let i = 0; i < uvRotations.length; i++) instanced.setUvRotationAt(i, uvRotations[i]!);
+  };
+
   const nearMeshes: InstancedProps[] = [];
   for (let index = 0; index < submeshes.length; index++) {
     const sub = submeshes[index]!;
     const instanced = new InstancedProps(
       sub.geometry,
-      cachedInstancedMaterial(`${assetId}#${node ?? ""}#${index}`, sub.material),
+      cachedInstancedMaterial(`${assetId}#${node ?? ""}#${index}${materialKeySuffix}`, sub.material, { uvRotation: rotated }),
       entries.length,
     );
     instanced.castShadow = first.castShadow;
@@ -2127,6 +2593,7 @@ function instanceGltfInto(
       instanceMatrixScratch.copy(matrices[i]!).multiply(sub.localMatrix);
       instanced.setMatrixAt(i, instanceMatrixScratch);
     }
+    applyUvRotations(instanced);
     instanced.instanceMatrix.needsUpdate = true;
     // InstancedMesh's bounding sphere defaults to null (unlike a plain Mesh's
     // geometry bounds) — frustum culling silently does nothing without this,
@@ -2161,7 +2628,7 @@ function instanceGltfInto(
         const geometry = cachedTier?.geometry ?? sub.geometry;
         const instanced = new InstancedProps(
           geometry,
-          cachedInstancedMaterial(`${assetId}#${node ?? ""}#${index}`, sub.material),
+          cachedInstancedMaterial(`${assetId}#${node ?? ""}#${index}${materialKeySuffix}`, sub.material, { uvRotation: rotated }),
           entries.length,
         );
         // mid tier is already a distance-culled compromise — a decimated
@@ -2175,6 +2642,7 @@ function instanceGltfInto(
           instanceMatrixScratch.copy(matrices[i]!).multiply(sub.localMatrix);
           instanced.setMatrixAt(i, instanceMatrixScratch);
         }
+        applyUvRotations(instanced);
         instanced.instanceMatrix.needsUpdate = true;
         instanced.computeBoundingSphere();
         root.add(instanced);
@@ -2194,25 +2662,12 @@ function instanceGltfInto(
   // Without a baker (headless build, or the app opted out) the primitive
   // proxies stand in: a cross-billboard for tall props, a box for squat ones.
   const bounds = submeshBounds(submeshes);
-  const impostorCacheKey = `${assetId}#${node ?? ""}`;
-  let atlas: ImpostorAtlas | null;
-  if (impostorCache.has(impostorCacheKey)) {
-    atlas = impostorCache.get(impostorCacheKey)!;
-  } else {
-    // a throwaway clone, never the shared cached `source` itself
-    atlas = options.bakeImpostor?.(source.clone(true), bounds) ?? null;
-    impostorCache.set(impostorCacheKey, atlas);
-  }
+  const impostor = cachedImpostor(assetId, node, source, bounds, options);
   let far: InstancedProps;
-  let impostor: ImpostorInstanceData | undefined;
-  if (atlas) {
-    let material = impostorMaterialCache.get(impostorCacheKey);
-    if (!material) {
-      material = impostorMaterial(atlas, bounds);
-      impostorMaterialCache.set(impostorCacheKey, material);
-    }
-    far = new InstancedProps(impostorGeometry(bounds, entries.length), material, entries.length);
-    impostor = impostorInstanceData(matrices);
+  let impostorData: ImpostorInstanceData | undefined;
+  if (impostor) {
+    far = new InstancedProps(impostorGeometry(bounds, entries.length), impostor.material, entries.length);
+    impostorData = impostorInstanceData(matrices);
   } else {
     const { geometry: farGeometry, isTall } = buildLodProxyGeometry(submeshes);
     // the fallback's look comes from the LARGEST submesh by vertex count, not
@@ -2239,14 +2694,17 @@ function instanceGltfInto(
         return tier ? Math.max(worst, tier.error * sub.localMatrix.getMaxScaleOnAxis()) : worst;
       }, 0)
     : undefined;
+  const localMatrices = submeshes.map((sub) => sub.localMatrix);
   const batch: InstancedPropBatch = {
     near: nearMeshes,
     mid: midMeshes,
     far,
     positions,
     matrices,
+    ...(localMatrices.some((m) => !m.equals(identityScratch)) ? { localMatrices } : {}),
     ...(midError !== undefined ? { midError } : {}),
-    ...(impostor ? { impostor } : {}),
+    ...(impostorData ? { impostor: impostorData } : {}),
+    ...(uvRotations ? { uvRotations } : {}),
   };
   for (const mesh of nearMeshes) mesh.userData["foliageLodBatch"] = batch;
   if (midMeshes) for (const mesh of midMeshes) mesh.userData["foliageLodBatch"] = batch;

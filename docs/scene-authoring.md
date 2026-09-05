@@ -171,7 +171,14 @@ NOT setTimeout; return a cancel fn, auto-cancelled on dispose/suspend);
 `ctx.setBillboard({ fill?, text?, visible? })`;
 `ctx.setParticles(entityId, { emitting?, visible?, restart?, burst? })` for
 sleeping and one-shot effects; `ctx.setLight(entityId, { enabled?, intensity?,
-color? })` for runtime flashes/toggles; and `ctx.playerData` —
+color? })` for runtime flashes/toggles; `ctx.vfx?.playSpell(spellOrId, { origin,
+casterId?, targetId?, direction?, target? }, { manual? })` /
+`ctx.vfx?.play(effectOrId, frame)` — composed effects and whole timed spells
+(`spell` / `vfx` data assets or inline documents; entity ids and bone sockets
+resolved for you, ground probed from physics; `manual` phases you fire with
+`handle.trigger(phase, at?)`, projectiles driven with `handle.setPath`; absent
+on a dedicated server — see `docs/vfx-architecture.md`); `ctx.getDataAsset(id)`
+to read any data asset; and `ctx.playerData` —
 experience-scoped persistence (`get/set/increment/transaction/keys(namespace,
 …)`, async, quota+rate-limited, atomic; survives sessions, e.g.
 `ctx.playerData?.increment("stats", "sessions")`); and `ctx.chat` (when the
@@ -366,3 +373,62 @@ mean luma 70–100 out of 255. When a whole scene trends dark, raise
 - Grime tints (`paintGrime`) are per-corner colors and cannot survive any op
   that changes a face's corner count (subdivide, weather, bevel, …). Order of
   passes is therefore fixed: shape → weather → paint. Grime is a final pass.
+
+## Day/night cycle
+
+Attach the `day-night` builtin script to any entity (the sky is the natural
+home) and the scene's existing sky, sun and ambient become the DAY look; the
+script derives dawn, dusk and night from its params and drives everything
+through `ctx.setSky` — uniforms and light properties only, never a rebuild.
+One directional light plays both bodies: it dims to zero at sunset, swings
+under the horizon and comes back cool and faint as the moon, so shadows
+switch owner for free. The moon itself is a disc on the gradient dome
+(`sky.moon`, aimed by the script, or authored for a fixed moon). Two rules the
+script obeys and any custom one must too: never toggle a light or add a
+second directional light (the light SET must stay constant, or every lit
+material recompiles), and never hand the sky a new environment texture per
+frame — `refreshEnvironment` re-prefilters the generated IBL in place, a few
+times a game day (`envRefreshHours`). Multiplayer: the authority owns the
+clock and publishes it to netState (`world.hour`) every `syncSeconds`;
+peers ease toward it.
+
+Stars are part of the same dome (`sky.stars`: intensity, density, size) — a
+hashed lattice on the view direction, no texture — faded at the horizon and
+under the haze band; the `day-night` script raises them after sunset
+(`stars`, `starDensity` params) and wheels them about the arc's axis.
+
+Clouds (`sky.clouds`: coverage, scale, speed, softness, color, shadow) are a
+drifting fractal-noise layer on the dome, composited over the sun, moon and
+stars so they occlude them. Coverage stays authored; the `day-night` script
+only lights them — white by day, warmed by `dawnColor` at the horizon, dark
+against the stars at night. Two or three octaves of noise per sky pixel.
+
+## Weather
+
+The `weather` builtin script (attach it to any entity; the demo uses the
+world) rolls a biome-agnostic state — how much precipitation, how stormy —
+on the authority (dedicated server or P2P host), publishes it to netState
+(`world.weather`), and lets every client decide what that looks like where
+its player stands: `ctx.biomeAt` returns the recipe's biome blend under a
+point, and the script weights three looks by it — rain in the `rainBiomes`,
+blowing sand in the `sandBiomes`, snow in the `snowBiomes` or above
+`snowAbove`. Zone edges fade because the biome weights already do. It drives
+three player-parented emitters tagged `weather-rain`, `weather-sand`,
+`weather-snow` (their RATE, via `ctx.setParticles`) and the sky hook's
+weather layer (`gloom`, `tint`, `wind`, cloud coverage, fog density), which
+sits on top of whatever `day-night` wrote, so the two scripts are independent.
+`force: clear | light | storm` pins the weather for authoring. It adds no
+lights and never replaces the environment texture; a full storm costs about
+1.5 ms of GPU fill for the drops.
+
+Particles can now meet the terrain: `particles.ground` samples the streamed
+ground height once per particle at birth (voxel and heightmap worlds), and a
+particle that falls to it either dies (`mode: kill`) — optionally bursting
+one particle from another emitter named in `splash` at the exact contact
+point, which is how raindrops splash on slopes — or settles (`mode: settle`):
+stops where it landed, keeps its look for `hold` seconds, then fades over
+`fade`. Settled particles count toward `max`, so a settling snowfall wants a
+few thousand. In a play session the host answers from the PHYSICS world (a
+downward ray from the birth point), so roofs, walls and the player count too
+— a tree's trunk collider lands snow in its canopy; outside play, the
+terrain height alone. Water is not tested.

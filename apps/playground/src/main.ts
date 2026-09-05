@@ -56,6 +56,10 @@ import {
   collectBones,
   EngineRenderer,
   FoliageLodSystem,
+  InstancedPropPool,
+  sceneLighting,
+  type LiveSkyBase,
+  type LiveSkyOptions,
   ClusterLodSystem,
   gltfLoadingCount,
   GrassSystem,
@@ -76,6 +80,7 @@ import {
   type PathMeshSource,
 } from "@hitreg/render";
 import { AudioSystem, type AudioComponentData } from "./audio-system.js";
+import { createVfx, makeVfxHost, warmVfx } from "./vfx-host.js";
 import { initPhysics, PhysicsSim } from "@hitreg/physics";
 import {
   EventBus,
@@ -83,6 +88,7 @@ import {
   registerBuiltinScripts,
   ScriptRegistry,
   ScriptRuntime,
+  type BiomeAt,
 } from "@hitreg/scripting";
 import {
   createAssetSelection,
@@ -201,6 +207,9 @@ async function main(): Promise<void> {
   // scene build AND both streamers, so every source registers into the same
   // system and gets updated from the same camera each frame
   const foliageLod = new FoliageLodSystem();
+  // streamed cells share one set of instanced batches per model (prop-pool.ts)
+  // instead of one per cell — the cell count stops multiplying the draw count
+  const propPool = new InstancedPropPool(foliageLod);
   // cluster-DAG continuous LOD for `renderMode: "clustered"` hero meshes —
   // re-selects each mesh's cut per frame; prunes meshes streamed out itself
   const clusterLod = new ClusterLodSystem();
@@ -269,6 +278,7 @@ async function main(): Promise<void> {
     resolveTexture: (assetId) => assets.getTexture(assetId)?.url,
     resolveMaxAnisotropy: () => renderer.getMaxAnisotropy(),
     onInstancedBatch: (batch) => foliageLod.register(batch),
+    instancePool: propPool,
     onLight: (_entityId, light, importance) => lightBudget.register(light, importance),
     bakeImpostor: (object, bounds) => bakeImpostorAtlas(renderer, object, bounds),
     onClusteredMesh: (_entityId, mesh) => clusterLod.register(mesh),
@@ -1057,8 +1067,25 @@ async function main(): Promise<void> {
   let netSelfId: string | null = null;
   const animations = new AnimationSystem();
   const cloth = new ClothSwaySystem();
-  const particles = new ParticleSystem();
+  const particles = new ParticleSystem({
+    // `particles.ground`: rain dies and splashes where it meets the streamed
+    // terrain, snow settles on it — one height sample per particle at birth
+    // In a play session the physics world answers, so drops die on roofs, walls
+    // and the player as well as the ground (a scattered tree's trunk collider
+    // counts too, which lands snow in its canopy). Outside play, the terrain.
+    groundAt: (x, y, z) => {
+      const hit = sim?.raycast([x, y + 0.05, z], [0, -1, 0], 400);
+      return hit ? hit.point[1] : sampleTerrainHeight(x, z);
+    },
+    entityByTag: (tag) => Object.entries(lastExpanded.entities).find(([, e]) => e.tags.includes(tag))?.[0],
+  });
   const billboards = new BillboardSystem();
+  // composed effects + spells (ctx.vfx). Re-attached to whatever `built.scene`
+  // is each frame, so a scene rebuild keeps it; its slot lights are fixed so
+  // the light set never changes mid-session (see VfxSystem).
+  const vfx = createVfx(assets);
+  const vfxHost = makeVfxHost(vfx);
+  let vfxWarmed = false;
   const grass = new GrassSystem();
   const pathPointsInverse = new THREE.Matrix4();
   const pathPointScratch = new THREE.Vector3();
@@ -1088,6 +1115,39 @@ async function main(): Promise<void> {
       if (opts.intensity !== undefined) light.intensity = Math.max(0, opts.intensity);
       if (opts.color !== undefined) light.color.set(opts.color);
     });
+  }
+
+  // ctx.setSky / ctx.getSky — the day/night channel: uniforms and light
+  // properties on the live scene, never a rebuild (see SceneLighting.setSkyLive)
+  function setRuntimeSky(opts: LiveSkyOptions): void {
+    sceneLighting(built.scene)?.setSkyLive(opts);
+  }
+  function getRuntimeSky(): LiveSkyBase | null {
+    return sceneLighting(built.scene)?.liveSkyBase() ?? null;
+  }
+  // ctx.biomeAt — the weather script's "what is the ground here" question,
+  // answered from the recipe's own biome rules (the same blend the terrain
+  // texture and the grass use), so zone edges fade exactly where the ground does
+  function runtimeBiomeAt(x: number, z: number): BiomeAt | null {
+    if (!activeVoxelWorld) return null;
+    const field = getVoxelWorld(activeVoxelWorld);
+    if (!field) return null;
+    if (field.worldLimit !== Infinity && Math.hypot(x, z) > field.worldLimit) return null;
+    const sample = field.biome(x, z);
+    const weights: Record<string, number> = {};
+    field.recipe.biomes.forEach((rule, i) => {
+      const w = sample.weights[i] ?? 0;
+      if (w > 1e-4) weights[rule.id] = w;
+    });
+    return {
+      id: sample.id,
+      zone: sample.zone,
+      weights,
+      ground: field.height(x, z),
+      temperature: sample.temperature,
+      moisture: sample.moisture,
+      slope: sample.slope,
+    };
   }
 
   function setPathPoints(entityId: string, points: Array<[number, number, number]>): void {
@@ -1436,11 +1496,15 @@ async function main(): Promise<void> {
   });
   const [backend] = await Promise.all([renderer.init(), initPhysics()]);
 
+  // Far plane 4000, the same as a scene camera's default: the editor camera is
+  // what a person flying the world in edit mode sees through, and at 500 the
+  // far terrain ring (over a kilometre out) was clipped to fog whatever the
+  // streamer had loaded. The play camera already runs 0.1..4000 on this renderer.
   const camera = new THREE.PerspectiveCamera(
     60,
     window.innerWidth / window.innerHeight,
     0.1,
-    500,
+    4000,
   );
   const controls = new CameraControls(camera, canvas);
   /** Scratch for the editor streaming focus (the orbit target) — see the frame loop. */
@@ -2337,6 +2401,14 @@ async function main(): Promise<void> {
   // up pointing at the same place on the same map.
   const worldMapDir = new THREE.Vector3();
   const worldMapPos = new THREE.Vector3();
+  /**
+   * A fast-travel in progress: the player body is pinned at `pos` every frame
+   * until the ground under it has a collider (the destination cell is
+   * streamed on demand, and a dynamic body dropped into a cell with no
+   * collider yet falls straight through the world — the same trap as a
+   * buried spawn, see docs/voxel-worlds.md), or until `until` passes.
+   */
+  let travelHold: { id: string; pos: [number, number, number]; until: number } | null = null;
   const worldMap = createWorldMapOverlay({
     world: () => resolveVoxelWorld(lastExpanded)?.data.world ?? null,
     position: () => {
@@ -2345,6 +2417,33 @@ async function main(): Promise<void> {
       else controls.getTarget(worldMapPos);
       camera.getWorldDirection(worldMapDir);
       return { x: worldMapPos.x, z: worldMapPos.z, yaw: Math.atan2(-worldMapDir.x, -worldMapDir.z) };
+    },
+    // Click on the map = go there. Dev-mode fast travel: the player body in
+    // play mode, the editor camera otherwise. The ground height comes from
+    // the recipe field, which is exact for a heightfield point and only
+    // approximate under an overhang — the hold below settles the rest.
+    travel: (x, z) => {
+      const world = resolveVoxelWorld(lastExpanded);
+      if (!world) return "this scene has no voxelWorld";
+      if (world.field.worldLimit !== Infinity && Math.hypot(x, z) > world.field.worldLimit) return "outside the world limit";
+      const groundY = world.field.height(x, z);
+      const y = Math.max(groundY, world.field.recipe.seaLevel);
+      if (playMode.get() === "playing") {
+        if (netServerUrl) return "a dedicated server owns your position — travel is host-side only";
+        const playerId = localPlayerId();
+        if (!sim || !playerId) return "no local player to move";
+        // a metre and a half of air: the capsule is centred on the entity, and
+        // landing from a short drop beats spawning intersected with the ground
+        const pos: [number, number, number] = [x, y + 2.5, z];
+        sim.setPosition(playerId, pos);
+        travelHold = { id: playerId, pos, until: performance.now() + 8000 };
+        clientLog(`travel: ${playerId} -> ${x.toFixed(0)}, ${y.toFixed(0)}, ${z.toFixed(0)}`);
+        return;
+      }
+      // editor / paused: look at the spot from a little above and to one side;
+      // streaming follows the orbit target, so the world fills in around it
+      void controls.setLookAt(x + 40, y + 35, z + 40, x, y + 1, z, false);
+      clientLog(`travel: camera -> ${x.toFixed(0)}, ${y.toFixed(0)}, ${z.toFixed(0)}`);
     },
   });
 
@@ -2521,7 +2620,12 @@ async function main(): Promise<void> {
       setAnimationSpeed: (entityId, multiplier) => animations.setSpeed(entityId, multiplier),
       setBillboard: (entityId, opts) => billboards.setValue(entityId, opts),
       setParticles: (entityId, opts) => particles.setValue(entityId, opts),
+      vfx: vfxHost,
+      assets,
       setLight: setRuntimeLight,
+      setSky: setRuntimeSky,
+      getSky: getRuntimeSky,
+      biomeAt: runtimeBiomeAt,
       setPathPoints,
       // replicated session state (ctx.netState) — facts every tab agrees on
       ...(netPresence ? { netState: netPresence.netState } : {}),
@@ -2592,6 +2696,7 @@ async function main(): Promise<void> {
     scripts?.dispose();
     scripts = null;
     eventBus = null;
+    vfx.stopAll(0); // nothing outlives the session it was cast in
     chunkManager.setSim(null);
     subsceneManager.setSim(null);
     sim?.free();
@@ -2758,7 +2863,13 @@ async function main(): Promise<void> {
   const editorMaxDistance = controls.maxDistance;
   playMode.subscribe(() => {
     if (playMode.get() === "playing") {
-      controls.maxPolarAngle = 1.45; // don't let the game camera dive underground
+      // How far the camera may swing BELOW the pivot, i.e. how far up the
+      // player can look. 1.45 rad (7° above level) made the sky unreachable;
+      // the ground is no reason to cap it, because the follow rig resolves the
+      // camera against the physics colliders every frame
+      // (updateFollowCamDistance) and simply pulls in when terrain is in the
+      // way. 2.4 rad lets the player look ~45° up.
+      controls.maxPolarAngle = 2.4;
       controls.minDistance = PLAY_CAM_MIN; // collision may squeeze in this far
       controls.maxDistance = PLAY_CAM_MAX;
       // the rig's authored `distance` is the game's framing; the wheel moves
@@ -3083,10 +3194,21 @@ async function main(): Promise<void> {
     (window as unknown as { __hitreg?: unknown }).__hitreg = {
       renderer,
       chunkManager,
+      propPool,
       profiler,
+      // the VFX system, and the validating host over it: a headless probe can
+      // play a raw effect/spell document (`vfxHost.play(doc, {origin,
+      // direction})`) and screenshot one module kind in isolation
+      vfx,
+      vfxHost,
       // the editor orbit TARGET is the streaming focus in edit mode, so
       // driving it along a path is a repeatable streaming benchmark
       controls,
+      camera,
+      // live, not captured: the sim is created on play and replaced on scene load
+      get sim() {
+        return sim;
+      },
       playMode,
       scene: () => built.scene,
       // animation + cloth state: which clip an entity is actually playing and at
@@ -3407,6 +3529,20 @@ async function main(): Promise<void> {
         }
         profiler.end();
       }
+      // a fast-travel in flight: pin the body until the ground has arrived
+      if (travelHold) {
+        const hold = travelHold;
+        if (!sim || playMode.get() !== "playing" || performance.now() > hold.until) {
+          travelHold = null;
+        } else {
+          // cast beside the body, not through it, so its own capsule cannot
+          // answer for the ground; a hit anywhere below means the cell's
+          // collider is in and the body may fall the last metre on its own
+          const ground = sim.raycast([hold.pos[0] + 1.5, hold.pos[1] + 20, hold.pos[2]], [0, -1, 0], 60, { exclude: [hold.id] });
+          if (ground) travelHold = null;
+          else sim.setPosition(hold.id, hold.pos);
+        }
+      }
       // chunk streaming follows the player in play mode, the fly-cam in edit
       {
         const focusObj =
@@ -3470,6 +3606,13 @@ async function main(): Promise<void> {
       profiler.begin("particles");
       particles.update(dt, renderCamera); // billboards face the camera actually used
       billboards.update(dt); // flipbook VFX frames
+      if (!vfxWarmed) {
+        // once, on the first frame: compile every effect pipeline now, not on
+        // the first cast (VfxSystem.warmup measured that stall at 265–739 ms)
+        vfxWarmed = true;
+        void warmVfx(vfx, assets, (group) => renderer.precompileGroup(group, renderCamera, built.scene), renderCamera);
+      }
+      vfx.update(dt, renderCamera, built.scene);
       profiler.end();
       profiler.begin("grass");
       // one Map lookup: a recipe edit swaps the field object, which is the
@@ -3510,7 +3653,9 @@ async function main(): Promise<void> {
       // you compare directly against the GPU number, and burying it inside
       // another subtotal makes that comparison harder to read
       profiler.begin("render");
+      vfx.applyShake(renderCamera); // camera shake lives only inside the draw
       renderer.render(built.scene, renderCamera); // sub-scopes itself, see setScopeSink
+      vfx.restoreShake(renderCamera);
       profiler.end();
       sampleFrameCounters();
       lastFrameMs = dt * 1000;

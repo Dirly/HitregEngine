@@ -31,6 +31,16 @@ export interface FogSettings {
 }
 
 /**
+ * The colour of the sky at the horizon, as a shader uniform any material can
+ * read — the fog colour whenever the scene has fog, white otherwise. Water
+ * reads it: its fresnel rim is a reflection of the sky, and a fixed
+ * near-white rim glowed at dusk while the hills around a distant lake had
+ * gone dark into the fog, which is what left bright sheets of water hanging
+ * in a night sky with no land under them.
+ */
+export const horizonTint = uniform(new THREE.Color(1, 1, 1));
+
+/**
  * Clamp on the "camera is below the fog base" term. Physically the density
  * keeps growing without limit as you descend below `baseHeight`; numerically
  * that is an `exp()` that reaches infinity and paints the screen flat. e^4 is
@@ -119,6 +129,7 @@ export class FogSystem {
   private linear: THREE.Fog | null = null;
 
   apply(scene: THREE.Scene, settings: FogSettings | null): void {
+    horizonTint.value.set(settings ? settings.color : "#ffffff");
     if (!settings) {
       scene.fog = null;
       scene.fogNode = null;
@@ -151,6 +162,31 @@ export class FogSystem {
     // `fogNode` is ever cleared.
     scene.fog = new THREE.FogExp2(new THREE.Color(settings.color), settings.density);
     scene.fogNode = state.node;
+  }
+
+  /**
+   * Change what the CURRENT fog looks like without re-deciding what kind it
+   * is: colour and density/near/far land on the live uniforms and fog object.
+   * The per-frame half of `apply` for a day/night script.
+   */
+  retune(scene: THREE.Scene, live: { color?: string; density?: number; near?: number; far?: number }): void {
+    if (live.color !== undefined) horizonTint.value.set(live.color);
+    const fog = scene.fog;
+    if (this.linear && fog === this.linear) {
+      if (live.color !== undefined) this.linear.color.set(live.color);
+      if (live.near !== undefined) this.linear.near = live.near;
+      if (live.far !== undefined) this.linear.far = live.far;
+      return;
+    }
+    if (this.state) {
+      if (live.color !== undefined) this.state.color.value.set(live.color);
+      if (live.density !== undefined) this.state.density.value = Math.max(0, live.density);
+    }
+    const exp2 = fog as THREE.FogExp2 | null;
+    if (exp2 && (exp2 as THREE.FogExp2).isFogExp2) {
+      if (live.color !== undefined) exp2.color.set(live.color);
+      if (live.density !== undefined) exp2.density = Math.max(0, live.density);
+    }
   }
 
   dispose(scene?: THREE.Scene): void {

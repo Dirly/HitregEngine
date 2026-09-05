@@ -143,13 +143,41 @@ The primary AI channel is **direct file editing** — no MCP required:
   snapshot: `context.perf`, or `curl -s http://localhost:5173/__hitreg/profile`.
   Background: `docs/performance-lessons.md`.
 - **World generation** (procedural open worlds): `pnpm -F playground worldgen`
-  — `init` writes a complete recipe + terrain material + scene, then `rivers`,
-  `towns`, `roads`, `pois` each compute from the CURRENT terrain and write a
-  few lines back into the recipe's `features`, so every stage stays readable
-  and hand-editable. `map` renders a PNG overview of the whole world (this is
-  how you — or an agent — check the result without opening the browser);
-  `stats` reports tris and ms per cell against the frame budget. Judgment +
-  the invariants that will break silently: docs/voxel-worlds.md.
+  — `init` writes a complete recipe (continents in a bounded sea, cut into
+  large single-purpose ZONES with their own landforms) + terrain and water
+  materials + scene, then `canyons`, `rivers` (real hydrology — depression
+  fill, flow accumulation, a channel tree — used to pick the LAKES: a lake
+  exists only where the tree runs through a depression, the other hollows
+  are FILLED to valley floors; it writes NO rivers unless `--trace`),
+  `towns`, `paths` (2.4 m footpaths between the towns, routed on the
+  dense route with a hard grade cap so they follow the ground; SPLIT at any
+  river ≥ 6 m wide with a `bridge` feature + placeholder deck between the
+  pieces, fords over brooks; dirt, gravel across snow biomes — there are no
+  wide roads any more, `roads` is an alias), `trails` (footpaths from that
+  network up the peaks, a capped scramble for the last leg, stopping below
+  a summit no scramble reaches), `pois` each compute from the CURRENT terrain and
+  write a few lines back into the recipe's `features`, so every stage stays
+  readable and hand-editable. **Rivers are AUTHORED — by you or an agent —
+  not generated**: write `{ id, points, width, widths?, depth, bank, water:
+  true, surface }` into `features.rivers` with NO `bedY` and the field
+  solves a descending bed through the points (flush with the lakes it
+  leaves and enters, flush with the river it joins, a gorge through any
+  drop steeper than `maxGrade`), carving, banking and watering it live in
+  the running scene — no regeneration. Route one with `descend --from-lake
+  <id>` (the valley floor as `--points`) and `profile --points "x,z;…"`
+  (ground, grade, bank heights; `--river <id>` reads the solved bed).
+  **After changing rivers, re-run towns → paths → pois → trails** (a path a
+  river now crosses is a wall across it until `paths` writes the bridge).
+  `map` renders a PNG overview (`--plain` for water only, at real river
+  widths — this is how you or an agent check the result without opening the
+  browser); `stats` reports tris and ms per cell against the frame budget;
+  `river-path` records a path-tool entity or typed points as
+  `features.riverPaths` for the stage to solve (the older route); `audit`
+  checks every river ends somewhere, beds descend, nothing is under water,
+  every bridge has its paths (exit 1 on findings — run it before believing
+  a screenshot). **Procedure for altering a live world by hand — rivers
+  first, ~4 per world, more feature kinds to come: docs/world-editing/.**
+  Judgment + the invariants that will break silently: docs/voxel-worlds.md.
 - **Placement toolbox** (settle props instead of eyeballing coordinates): give
   props a `placement` component (spec has the fields) and run
   `pnpm -F playground place snap <scene.json>` — every opted-in entity settles
@@ -160,6 +188,67 @@ The primary AI channel is **direct file editing** — no MCP required:
   world points; exit 1 on findings. In the editor the same solve runs
   automatically on move/duplicate/drop (toolbar "placement assist" toggle).
   Judgment + conventions: docs/scene-authoring.md → "Placement".
+- **WFC building kits** (modelled parts → generated structures): a kit is a
+  folder of one-part-per-file GLBs (`floor*`, `wall*`, `door*`, `stair*`…,
+  origin at the cell's bottom centre, a wall on one edge with its thickness
+  inside the cell) plus `examples/*.glb` built FROM those parts on the cell
+  grid, rotated about Y only. `pnpm -F playground wfc import <kitDir>
+  --project <name> --cell 4,3,4 [--atlas town]` pulls every embedded texture
+  into one PROJECT atlas page (content-deduped, islands never move, every
+  module on the page is re-emitted when it changes; `wfc pack <propsDir>
+  --atlas town --out models/props` puts plain props on the same page so a
+  whole town is one texture), rewrites the parts onto it, composes a prefab per distinct cell (floor + walls on which edges,
+  up to rotation — nobody models corners) and LEARNS the allowed face pairs
+  from what touched what in the examples; `wfc solve --kit <id> --name
+  generated/house-01 --size 6,1,6` writes an enclosed layout prefab, and
+  `wfc inspect <file>` prints what the importer sees. Two invariants: an
+  example only teaches pairings it contains (a missing one is a contradiction,
+  not an error), and floor textures stay straight across rotated cells via a
+  per-instance UV counter-rotation (`mesh.source.uvRotation`, written by the
+  solver from the grid variant, honoured on instanced meshes, rotation
+  centre from the part's second UV set) — so floor islands must be square and
+  no face may rely on UV wrap. **tools/wfc-3d/README.md** before touching it;
+  the modeller-facing rules are **docs/wfc-kit-authoring.md**.
+- **Animated characters** (an FBX animation library onto a differently-rigged
+  character): `pnpm -F playground retarget --mesh Char.fbx --anim Lib.fbx --out
+  <name>.glb` bakes one self-contained GLB — skeleton maps are data in
+  `tools/rig-map.mjs`, never a change to the retarget math. Two traps make the
+  difference between working and subtly broken: the two rigs' REST poses
+  usually differ (T-pose library, A-pose auto-rigged character — copying
+  rotations, three's `SkeletonUtils.retarget` included, welds the arms to the
+  sides), and a library shipping both in-place and `_RM` variants wants the
+  **in-place** one, because the controller drives movement by physics velocity.
+  A character is always TWO entities — body with the script, model on a child
+  with `mesh` + `animator` — because the sim owns a rigidbody's rotation.
+  Locomotion clips carry an authored ground speed (a walk cycle is often ~1 m/s
+  while a run is ~6) — tell the controller via `clipSpeeds` or the feet skate by
+  the ratio; `retarget` measures and prints them. Free-hanging cloth is the
+  `clothSway` component: a vertex-shader lag whose panels are found by SHAPE,
+  because auto-riggers bind skirts to the thigh bones and skin weights cannot
+  tell a tabard from a trouser leg.
+  **docs/character-animation.md** before touching character rigs, gaits or cloth.
+- **Spells and VFX** (generated, not authored): a `spell` data asset
+  (`assets/spells/<id>.json`) is an element + an archetype (kind / shape /
+  radius / range / windup / duration…) + timed phases (telegraph, charge,
+  cast, travel, impact, tick, linger, end), each a list of schema-registered
+  VFX modules (sprite, particles, ring, shell, column, beam, bolt, light, mesh,
+  trail, telegraph, shake, sound). `generateSpell({ seed, element, archetype,
+  catalog })` in `@hitreg/core` composes one from a hand-authored preset
+  library sized off the archetype's radius; `auditSpell` enforces budget /
+  readability / lifetime; scripts play them with `ctx.vfx.playSpell(id, frame)`.
+  Iterate in combat-demo's `fx-lab` scene (Randomize, schema-driven knobs,
+  Save). Sprites are picked by ROLE from a project catalog, never by name —
+  the engine ships no sheets. **docs/vfx-architecture.md** before touching any
+  of it; two traps: sizes are multiples of the archetype radius (a preset that
+  hard-codes metres is a bug), and lights are a fixed slot pool (toggling
+  lights recompiles every lit shader).
+- **Dedicated server** (`@hitreg/server`): `pnpm -F @hitreg/server serve --scene <name>`
+  hosts any project scene headless — same sim, no renderer — and every tab
+  opened with `?server=ws://host:port` becomes its client (no P2P election).
+  Players are server-spawned entity docs, casts are validated against
+  netState ownership, NPCs respawn, and `curl -s http://127.0.0.1:8787/admin/status`
+  (`/admin/npcs`, `/admin/spawn`, `/admin/netstate`) is how an agent reads and
+  edits the live population. **docs/dedicated-server.md** before touching it.
 - **Tools are plugins, games are repos.** `tools/` is an install directory:
   each tool is its own git repo cloned in, and only the first-party three
   (`atlas/`, `wfc-3d/`, `texture-intake/`) are tracked by the engine. Each
