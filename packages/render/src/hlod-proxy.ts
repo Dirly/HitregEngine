@@ -1,6 +1,7 @@
 import * as THREE from "three/webgpu";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
-import type { SceneDoc, VoxelMeshSource } from "@hitreg/core";
+import type { PolyMeshSource, SceneDoc, VoxelMeshSource } from "@hitreg/core";
+import { polyMeshGeometry } from "./poly-mesh-geometry.js";
 import { FOLIAGE_WIND } from "./foliage-wind.js";
 import {
   buildScene,
@@ -9,7 +10,7 @@ import {
   loadGltf,
   materialForId,
   polygonGeometry,
-  type BuildOptions, cachedMergedMaterial } from "./scene-builder.js";
+  type BuildOptions, type ImpostorPageItem, cachedImpostor, cachedMergedMaterial, impostorBatchFor, impostorPageBatchFor, submeshBounds } from "./scene-builder.js";
 import { voxelGeometry, voxelGeometryFromMesh } from "./voxel-geometry.js";
 
 /**
@@ -122,6 +123,71 @@ function groupVoxelCells(
 
 /** The only attributes a merged PROP bucket carries (see `prepForMerge`). */
 const MERGE_ATTRIBUTES = ["position", "normal", "uv"] as const;
+
+/**
+ * A scattered prop too small to read from the far ring — anything under four
+ * metres tall (its collider height, which the scatter rule scales with the
+ * instance). Trees pass; mushrooms, roots, stumps, shrubs and small rocks do
+ * not. Applies to `scatter`-tagged entities only: a placed building has no
+ * collider budget to judge it by and always merges.
+ */
+function isFarRingClutter(entity: SceneDoc["entities"][string]): boolean {
+  if (!(entity.tags ?? []).includes("scatter")) return false;
+  const collider = entity.components["collider"] as { size?: [number, number, number] } | undefined;
+  return (collider?.size?.[1] ?? 0) < 4;
+}
+
+/**
+ * Which merged bucket a glTF submesh joins — by what its material DRAWS
+ * with, not by which file it came from.
+ *
+ * Two submeshes whose materials sample the same texture object with the same
+ * cutout/side/blend settings produce identical pixels from one shader, so
+ * they can share a draw call. The kit and prop tools name a texture shared by
+ * many files `hitreg-shared:<hash>` and `shareNamedTextures` swaps every
+ * model's copy for one object — which is what makes the uuid below agree
+ * across models. A project whose props are packed onto one atlas therefore
+ * merges a whole supercell's props into ONE draw, instead of one per (model,
+ * submesh): on the voxel demo the far ring alone was 90–100 prop draws a frame
+ * with every species in its own bucket. Models that still embed their own
+ * texture keep their own bucket, exactly as before.
+ *
+ * `color`, roughness and metalness are folded in as coarse classes rather
+ * than exact values so a 0.9 and a 0.95 roughness — indistinguishable at
+ * proxy range — do not split a bucket; the first material seen for a key is
+ * the one the bucket draws with (`cachedMergedMaterial`).
+ */
+function mergedBucketKey(material: THREE.Material, fallback: string): string {
+  const m = material as THREE.Material & {
+    map?: THREE.Texture | null;
+    color?: THREE.Color;
+    roughness?: number;
+    metalness?: number;
+    emissive?: THREE.Color;
+    emissiveMap?: THREE.Texture | null;
+    normalMap?: THREE.Texture | null;
+    vertexColors?: boolean;
+  };
+  const map = m.map;
+  if (!map || map.isTexture !== true) return fallback;
+  const bucketOf = (v: number | undefined): number => Math.round((v ?? 0) * 4);
+  const tint = m.color ? m.color.getHexString() : "-";
+  const emissive = m.emissive && m.emissive.getHex() !== 0 ? m.emissive.getHexString() : "-";
+  return [
+    "tex",
+    map.uuid,
+    m.normalMap?.uuid ?? "-",
+    m.emissiveMap?.uuid ?? "-",
+    emissive,
+    tint,
+    m.alphaTest > 0 ? "cut" : "-",
+    m.transparent ? "blend" : "-",
+    m.side,
+    m.vertexColors ? "vc" : "-",
+    bucketOf(m.roughness),
+    bucketOf(m.metalness),
+  ].join("|");
+}
 
 type AnyAttribute = THREE.BufferAttribute | THREE.InterleavedBufferAttribute | THREE.GLBufferAttribute;
 
@@ -321,9 +387,11 @@ function mergeIndexed(geoms: THREE.BufferGeometry[]): THREE.BufferGeometry | nul
  * from 291MB to 247MB. It barely moved draw CPU — frustum culling already
  * discards most far-ring geometry before it is submitted, so raw triangle
  * counts out there overstate what is actually drawn — but the memory is real
- * and the detail is not visible: the far ring starts beyond the point where
- * this scene's height fog is ~85% opaque. Push further only if ridgelines
- * start to read as flat at the ring boundary.
+ * and the detail is not visible. The far ring goes coarser still: the chunk
+ * manager passes `hlodVoxelCoarsen` (8 for supercells wholly in the far
+ * ring), which is what lets that ring reach a kilometre and more for the
+ * same triangle and bake budget. Push either further only if ridgelines
+ * start to read as flat at a ring boundary.
  */
 const HLOD_VOXEL_COARSEN = 4;
 
@@ -387,6 +455,7 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
   const q = new THREE.Quaternion();
   const s = new THREE.Vector3();
   let mergedSources = 0;
+  let impostorDrawCalls = 0;
 
   const entityTransform = (entity: SceneDoc["entities"][string]): THREE.Matrix4 => {
     const t = entity.components["transform"] as ProxyTransform | undefined;
@@ -414,10 +483,18 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
   // glTF (asset) entities: group by (assetId, node) so each unique model is
   // only loaded once per supercell bake, regardless of how many entities
   // place it (loadGltf itself also caches by URL across bakes).
+  const farRing = (options.hlodVoxelCoarsen ?? HLOD_VOXEL_COARSEN) > HLOD_VOXEL_COARSEN;
   const assetEntities = new Map<string, Array<[string, SceneDoc["entities"][string]]>>();
   for (const [id, entity] of Object.entries(doc.entities)) {
     const mesh = entity.components["mesh"] as ProxyMesh | undefined;
     if (!mesh || mesh.source.kind !== "asset") continue;
+    // The far ring keeps only what reads at a kilometre: trees. Clutter —
+    // mushrooms, roots, stumps, shrubs, small rocks — is invisible out there
+    // but was still a merged bucket (one draw call per species per supercell
+    // part, ~90 of the frame's draws on the voxel demo) and a merge of every
+    // instance's geometry on bake. Same rule the primitive path below already
+    // applied; glTF props had skipped it.
+    if (farRing && isFarRingClutter(entity)) continue;
     const key = `${mesh.source.assetId}#${mesh.source.node ?? ""}`;
     let list = assetEntities.get(key);
     if (!list) {
@@ -426,6 +503,7 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
     }
     list.push([id, entity]);
   }
+  const impostorItems: ImpostorPageItem[] = [];
   for (const [key, entities] of assetEntities) {
     const first = entities[0]![1].components["mesh"] as ProxyMesh & { source: { kind: "asset" } };
     const { assetId, node } = first.source;
@@ -435,18 +513,38 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
       continue;
     }
     let submeshes: ReturnType<typeof extractGltfSubmeshes>;
+    let gltf: Awaited<ReturnType<typeof loadGltf>> | null = null;
     try {
-      const gltf = await loadGltf(url);
+      gltf = await loadGltf(url);
       submeshes = extractGltfSubmeshes(gltf, node);
     } catch (error) {
       console.warn(`[render] hlod merge: failed to load "${assetId}":`, error);
       submeshes = null;
     }
-    if (submeshes === null || submeshes.length === 0) {
+    if (gltf === null || submeshes === null || submeshes.length === 0) {
       for (const [id, entity] of entities) deferred[id] = entity;
       continue;
     }
-    for (const [, entity] of entities) {
+    // Props that LOD (trees — anything whose scatter rule did not opt out with
+    // `lod: false`) become one batch of impostor quads per species: the same
+    // octahedral atlas the near ring swaps to past its far threshold, so a
+    // tree looks the same crossing the ring boundary, and four vertices per
+    // instance instead of its whole geometry merged into the proxy. Props
+    // that opted out are cheap by declaration (rocks, stumps, mushrooms) and
+    // keep merging as real geometry — a rock has no atlas and needs none.
+    let toMerge = entities;
+    if (options.bakeImpostor) {
+      const lodded = entities.filter(([, entity]) => (entity.components["mesh"] as { lod?: boolean }).lod !== false);
+      const source: THREE.Object3D = node ? (gltf.scene.getObjectByName(node) ?? gltf.scene) : gltf.scene;
+      // bake (cached) up front so a model with no atlas keeps merging as geometry
+      if (lodded.length > 0 && cachedImpostor(assetId, node, source, submeshBounds(submeshes), options)) {
+        // collected across every species and batched once below — all the
+        // species whose atlases share a page draw as one
+        impostorItems.push({ assetId, node, gltf, submeshes, matrices: lodded.map(([, entity]) => entityTransform(entity).clone()) });
+        toMerge = entities.filter(([, entity]) => (entity.components["mesh"] as { lod?: boolean }).lod === false);
+      }
+    }
+    for (const [, entity] of toMerge) {
       const placement = entityTransform(entity).clone();
       submeshes.forEach((sub, index) => {
         // `sub.geometry` belongs to the shared glTF cache — every other chunk
@@ -456,7 +554,9 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
         // duplicated every attribute, then toNonIndexed() expanded them again).
         const prepped = prepForMerge(sub.geometry, true);
         prepped.applyMatrix4(matrix.copy(placement).multiply(sub.localMatrix));
-        const bucketKey = `gltf:${key}#${index}`;
+        const bucketKey = Array.isArray(sub.material)
+          ? `gltf:${key}#${index}`
+          : mergedBucketKey(sub.material, `gltf:${key}#${index}`);
         // merged geometry, so the MERGED cache: the instanced clones carry the
         // InstancedProps transform node and expect instance attributes
         const material = withoutFoliageWind(cachedMergedMaterial(bucketKey, sub.material));
@@ -479,6 +579,22 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
   // are all consistent and the attributes can be kept — without them the
   // distant terrain would render as a single flat layer and the LOD swap would
   // be a visible colour pop.
+  if (impostorItems.length > 0) {
+    const { batches, unpaged } = impostorPageBatchFor(impostorItems, options);
+    for (const batch of batches) {
+      group.add(batch);
+      impostorDrawCalls += 1;
+    }
+    for (const item of unpaged) {
+      const batch = impostorBatchFor(item.assetId, item.node, item.gltf, item.submeshes, item.matrices, options);
+      if (batch) {
+        group.add(batch);
+        impostorDrawCalls += 1;
+      }
+    }
+    for (const item of impostorItems) mergedSources += item.matrices.length;
+  }
+
   const voxelBuckets = new Map<string, THREE.BufferGeometry[]>();
   // Gather first, mesh second. A supercell holds up to 16 member cells and
   // each needs its own marching-cubes run at the coarse lattice; meshing them
@@ -493,7 +609,7 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
       entity,
       source: {
         ...mesh.source,
-        lodStep: Math.max(mesh.source.lodStep ?? 1, 1) * HLOD_VOXEL_COARSEN,
+        lodStep: Math.max(mesh.source.lodStep ?? 1, 1) * Math.max(1, Math.round(options.hlodVoxelCoarsen ?? HLOD_VOXEL_COARSEN)),
       },
       key: mesh.material ?? "__default",
     });
@@ -548,18 +664,52 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
     }
   }
 
+  // The far ring (a coarser bake than the hlod default) is a silhouette a
+  // kilometre away: a brook's ribbon is narrower than its voxels, a bridge
+  // deck is a line. Neither is worth a draw call out there; wide rivers and
+  // lakes still are.
   for (const [id, entity] of Object.entries(doc.entities)) {
     const mesh = entity.components["mesh"] as ProxyMesh | undefined;
     if (!mesh || mesh.source.kind === "asset") continue; // handled above
     if (mesh.source.kind === "voxel") continue; // handled just above
+    if (farRing) {
+      const tags = entity.tags ?? [];
+      if (tags.includes("bridge")) continue;
+      if (tags.includes("river") && ((mesh.source as { width?: number }).width ?? 0) < 12) continue;
+      // scatter props that are prefabs of primitives cannot instance, so
+      // every rock merged into the far proxies as static geometry (about
+      // 3.6 M resident triangles for a 28-cell ring, most of it rocks).
+      if (isFarRingClutter(entity)) continue;
+    }
     if (mesh.source.kind === "heightmap" || mesh.source.kind === "path") {
       deferred[id] = entity;
       continue;
     }
-    // Anything else with no merge path here — editable poly meshes, and any
-    // future source kind — is DEFERRED, not guessed at. Falling through to
-    // polygonGeometry() with a source that has no `points` threw, and a throw
-    // in here loses the whole supercell, terrain included.
+    // A poly mesh with ONE material and no face tints merges like a polygon.
+    // The case that matters is a lake: its sheet is emitted per streamed cell
+    // (chunk.ts), so a big lake in the far ring was a hundred transparent
+    // draw calls for one flat surface — and the water shader is laid out in
+    // world space, so merged sheets shade exactly as the separate ones did.
+    // A poly with material slots or per-face colour keeps the deferred path:
+    // its groups do not survive a bucket merge.
+    if ((mesh.source as { kind: string }).kind === "poly") {
+      const { geometry, compiled } = polyMeshGeometry(mesh.source as unknown as PolyMeshSource);
+      const single = !compiled.colors && compiled.groups.every((g) => g.materialIndex === 0);
+      if (!single) {
+        geometry.dispose();
+        deferred[id] = entity;
+        continue;
+      }
+      const prepped = prepForMerge(geometry, false);
+      prepped.applyMatrix4(entityTransform(entity));
+      const key = mesh.material ?? "__default";
+      addToBucket(key, materialForId(mesh.material, options, materialCache), prepped);
+      continue;
+    }
+    // Anything else with no merge path here — any future source kind — is
+    // DEFERRED, not guessed at. Falling through to polygonGeometry() with a
+    // source that has no `points` threw, and a throw in here loses the whole
+    // supercell, terrain included.
     if (mesh.source.kind !== "primitive" && mesh.source.kind !== "polygon") {
       deferred[id] = entity;
       continue;
@@ -593,7 +743,7 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
     addToBucket(key, material, prepped);
   }
 
-  let mergedDrawCalls = 0;
+  let mergedDrawCalls = impostorDrawCalls;
   for (const [key, geoms] of voxelBuckets) {
     const merged = mergeBucket(geoms);
     if (!merged) continue;

@@ -23,7 +23,7 @@ import {
   vec3,
   vec4,
 } from "three/tsl";
-import { instancedPositionLocal } from "./instancing.js";
+import { instanceMatrixNode, instancedPositionLocal } from "./instancing.js";
 
 /**
  * Octahedral impostors for the instanced-prop far tier — the second piece of
@@ -78,6 +78,19 @@ export interface ImpostorAtlas {
    * WebGPU render targets, false for WebGL ones) — the baker knows which
    * backend drew it; the sampler flips accordingly. */
   flipFrames: boolean;
+  /**
+   * Where this model's `grid × grid` frames sit when `albedo`/`normal` are a
+   * PAGE shared by many models (see the baker's shared page): uv offset and
+   * the fraction of the page one model's block spans. Absent = the textures
+   * are this model's alone.
+   */
+  region?: ImpostorRegion;
+}
+
+export interface ImpostorRegion {
+  u: number;
+  v: number;
+  scale: number;
 }
 
 /** Per-logical-instance rotation (unit quaternion, xyzw) and uniform scale,
@@ -85,6 +98,11 @@ export interface ImpostorAtlas {
 export interface ImpostorInstanceData {
   rotations: Float32Array;
   scales: Float32Array;
+  /** Page batches only (`impostorPageGeometry`): per instance, the model's
+   * atlas region (u, v, scale), its bounds radius, and its bounds centre. */
+  regions?: Float32Array;
+  radii?: Float32Array;
+  centers?: Float32Array;
 }
 
 // ---- direction ⇄ atlas mapping (JS half; the shader transcribes it) -------
@@ -248,6 +266,43 @@ export function writeImpostorSlot(
   (scale.array as Float32Array)[slot] = data.scales[i]!;
   rotation.needsUpdate = true;
   scale.needsUpdate = true;
+  const region = far.geometry.getAttribute("impostorRegion") as THREE.InstancedBufferAttribute | undefined;
+  if (region && data.regions && data.radii && data.centers) {
+    const radius = far.geometry.getAttribute("impostorRadius") as THREE.InstancedBufferAttribute;
+    const center = far.geometry.getAttribute("impostorCenter") as THREE.InstancedBufferAttribute;
+    (region.array as Float32Array).set(data.regions.subarray(i * 3, i * 3 + 3), slot * 3);
+    (radius.array as Float32Array)[slot] = data.radii[i]!;
+    (center.array as Float32Array).set(data.centers.subarray(i * 3, i * 3 + 3), slot * 3);
+    region.needsUpdate = true;
+    radius.needsUpdate = true;
+    center.needsUpdate = true;
+  }
+}
+
+/**
+ * The quad geometry for a PAGE batch: many models' impostors in one draw,
+ * each instance carrying its own atlas region, bounds radius and bounds
+ * centre as attributes (`impostorPageMaterial` reads them). Vertex positions
+ * are the origin — the centre attribute is the anchor. Bounds are left to
+ * the caller (a page batch spans whatever it holds).
+ */
+export function impostorPageGeometry(count: number): THREE.BufferGeometry {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(12), 3));
+  geometry.setAttribute("uv", new THREE.BufferAttribute(new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]), 2));
+  geometry.setIndex([0, 1, 2, 0, 2, 3]);
+  const n = Math.max(count, 1);
+  const add = (name: string, size: number): void => {
+    const attr = new THREE.InstancedBufferAttribute(new Float32Array(n * size), size);
+    attr.setUsage(THREE.DynamicDrawUsage);
+    geometry.setAttribute(name, attr);
+  };
+  add("impostorRotation", 4);
+  add("impostorScale", 1);
+  add("impostorRegion", 3);
+  add("impostorRadius", 1);
+  add("impostorCenter", 3);
+  return geometry;
 }
 
 // ---- material ---------------------------------------------------------------
@@ -269,34 +324,57 @@ function rotateByQuat(v: any, qxyz: any, qw: any): any {
  */
 export function impostorMaterial(atlas: ImpostorAtlas, bounds: THREE.Box3): THREE.MeshLambertNodeMaterial {
   const radius = bounds.getSize(new THREE.Vector3()).length() / 2;
-  const grid = atlas.grid;
-
-  // (wrapped in conversion nodes: @types/three's `attribute()` return type
-  // has no swizzles, and the node itself is the same either way)
-  const rotation = vec4(attribute<"vec4">("impostorRotation", "vec4"));
   const instanceScale = float(attribute<"float">("impostorScale", "float"));
+  const region = atlas.region ? vec3(atlas.region.u, atlas.region.v, atlas.region.scale) : null;
+  return buildImpostorMaterial(atlas, region, float(radius).mul(instanceScale), instancedPositionLocal());
+}
+
+/**
+ * One material for a whole shared PAGE: every instance names its own region,
+ * radius and anchor through the attributes `impostorPageGeometry` allocates,
+ * so a supercell's every species draws as one batch. Cached by the caller
+ * per page (the page's textures are what the shader binds).
+ */
+export function impostorPageMaterial(page: ImpostorAtlas): THREE.MeshLambertNodeMaterial {
+  const instanceScale = float(attribute<"float">("impostorScale", "float"));
+  const region = vec3(attribute<"vec3">("impostorRegion", "vec3"));
+  const radius = float(attribute<"float">("impostorRadius", "float"));
+  const center = vec3(attribute<"vec3">("impostorCenter", "vec3"));
+  const anchor = instanceMatrixNode().mul(vec4(center, 1)).xyz;
+  return buildImpostorMaterial(page, region, radius.mul(instanceScale), anchor);
+}
+
+/**
+ * The impostor shader: a camera-facing quad in the vertex stage, hemi-
+ * octahedral 3-frame blend in the fragment stage, Lambert-lit through the
+ * baked normal. Alpha-tested and depth-writing (not blended): a far forest
+ * is hundreds of overlapping quads in one instanced draw with no per-instance
+ * sort, and cut-outs compose correctly where blending would show the draw
+ * order. `region` (u, v, scale — a node or null for "the whole texture"),
+ * `half` (the quad's half-extent, already scaled per instance) and `anchor`
+ * (the instance's placed bounds centre) are what the two entry points vary.
+ */
+function buildImpostorMaterial(
+  atlas: Pick<ImpostorAtlas, "albedo" | "normal" | "grid" | "flipFrames">,
+  region: any,
+  half: any,
+  anchor: any,
+): THREE.MeshLambertNodeMaterial {
+  const grid = atlas.grid;
+  const rotation = vec4(attribute<"vec4">("impostorRotation", "vec4"));
   const qxyz = rotation.xyz;
   const qw = rotation.w;
   const qxyzInv = qxyz.negate();
-
-  // -- vertex: spread the four centre-anchored vertices into a quad facing the camera
-  // this instance's model centre, placed: the batch is an InstancedProps, whose
-  // instance transform lives in geometry attributes rather than in three's
-  // InstancedMesh path — see instancing.ts
-  const anchor = instancedPositionLocal();
   const cameraLocal = modelWorldMatrixInverse.mul(vec4(cameraPosition, 1)).xyz;
   const toCamera = normalize(sub(cameraLocal, anchor));
-  // world-up reference for the quad's right vector, with the same pole
-  // substitute the baker used (see impostorFrameUp) so frames aren't mirrored
+  // world-up reference for the quad's right vector, swapped near the pole
   const upRef = select(abs(toCamera.y).greaterThan(POLE_COS), vec3(0, 0, -1), vec3(0, 1, 0));
   const right = normalize(cross(upRef, toCamera));
   const up = cross(toCamera, right);
   const corner = sub(uv(), vec2(0.5, 0.5)).mul(2); // [-1, 1]²
-  const half = float(radius).mul(instanceScale);
   const quadPosition = anchor.add(right.mul(corner.x.mul(half))).add(up.mul(corner.y.mul(half)));
 
-  // -- fragment: which frames, how much of each
-  // direction to the camera in MODEL space: undo the instance rotation
+  // view direction in MODEL space (undo the instance rotation) → atlas cell
   const dirModel = rotateByQuat(toCamera, qxyzInv, qw);
   const dirHemi = vec3(dirModel.x, max(dirModel.y, 0), dirModel.z); // clamp below-horizon views to the horizon
   const l1 = add(add(abs(dirHemi.x), dirHemi.y), abs(dirHemi.z));
@@ -313,27 +391,23 @@ export function impostorMaterial(atlas: ImpostorAtlas, bounds: THREE.Box3): THRE
   const w0 = mix(f.x.add(f.y).sub(1), float(1).sub(f.x).sub(f.y), lower);
   const w1 = mix(float(1).sub(f.y), f.x, lower);
   const w2 = mix(float(1).sub(f.x), f.y, lower);
-
-  // in-frame uv: the quad's own uv, V flipped when the atlas was drawn top-down
   const inner = atlas.flipFrames ? vec2(uv().x, sub(float(1), uv().y)) : uv();
   const invGrid = float(1 / grid);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const frameUv = (frame: any) => frame.add(inner).mul(invGrid);
+  const frameUv = (frame: any) => {
+    const local = frame.add(inner).mul(invGrid);
+    return region ? local.mul(region.z).add(region.xy) : local;
+  };
   const uv0 = frameUv(frame0);
   const uv1 = frameUv(frame1);
   const uv2 = frameUv(frame2);
-
   const a0 = tslTexture(atlas.albedo, uv0);
   const a1 = tslTexture(atlas.albedo, uv1);
   const a2 = tslTexture(atlas.albedo, uv2);
   const albedo = a0.mul(w0).add(a1.mul(w1)).add(a2.mul(w2));
-
   const n0 = tslTexture(atlas.normal, uv0).xyz;
   const n1 = tslTexture(atlas.normal, uv1).xyz;
   const n2 = tslTexture(atlas.normal, uv2).xyz;
   const normalModel = n0.mul(w0).add(n1.mul(w1)).add(n2.mul(w2)).mul(2).sub(1);
-  // baked normals are model-space: re-apply the instance rotation, then let
-  // three take the mesh-local result into view space like any other normal
   const normalLocal = normalize(rotateByQuat(normalModel, qxyz, qw));
 
   const material = new THREE.MeshLambertNodeMaterial({

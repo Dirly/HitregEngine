@@ -431,6 +431,33 @@ you want one shader build per object, and never let a precompile target a
 different render target / MRT / nesting depth than the pass that will draw
 the objects — it will look like it works (states get created) and do nothing.
 
+## The first cast of every spell stalled: per-emitter shaders and cold VFX pipelines
+
+Found 2026-09-03 chasing "the two saved spells chug" in the spell lab, with a
+headless probe that wrapped `GPUDevice.createRenderPipeline` and counted per
+play. The steady state was innocent (p95 8 ms with both pulses running); the
+FIRST play of any spell created 10–12 pipelines on the main thread — a
+265–739 ms hitch — and the same spell played again created none. Two causes:
+
+- **Every particle emitter compiled its own shader**, even two with
+  identical settings. Diffing the WGSL of two identical emitters showed only
+  the instance buffer's name differed (`NodeBuffer_<node id>`): three's
+  `InstancedMesh` path bakes that name and the capacity into the code, so
+  program caching by code text can never hit. Same disease the foliage had
+  (§ above); same cure — the emitter is now an `InstancedProps` with the
+  matrices and per-particle colour as instanced geometry attributes, and all
+  emitters of a look share one program. A new emitter now costs 0 compiles;
+  a new *variant* (blend mode, soft fade, sub-UV) still costs one, once.
+- **Everything else compiled on first draw**, which for a spell is the first
+  cast. `VfxSystem.warmup()` plays an invisible sampler of every module kind
+  and variant far below the world and hands the VFX root to
+  `EngineRenderer.precompileGroup` (the context-borrowing one), on the app's
+  first frame. First-cast stalls went from 265–739 ms to 28–132 ms; what is
+  left is per-variant particle pipelines and first-use texture uploads.
+
+Cheap guard for next time: play the effect twice and compare pipeline
+counts — if the second play is zero, it was compile, not the effect.
+
 ## Streaming while flying: bound the concurrency, and never re-bake a SHRINKING HLOD supercell
 
 Found 2026-09-01 on the first generated (marching-cubes) world, from a profile
@@ -676,3 +703,157 @@ add delays the ground and the player falls through the world — hit twice by
 awaiting the compile first, and once more by trying to attach physics before the
 add (`sim.addEntities` needs those same objects). Add first, compile in the
 background, never await.
+
+## A capped bake queue needs a refill, or a wide far ring never finishes
+
+Found 2026-09-04 while pushing `rings.farTerrain` from 14 to 28 cells. The
+HLOD supercell queue is capped at 64 entries (a long flight enqueues the
+whole far ring, and the tail is stale by the time it runs — that cap is
+right). But the only thing that refilled it was the residency pass, and the
+residency pass runs only when the focus crosses a cell. Stand still on a
+peak with 175 supercells in the ring: 64 bake, the queue drains, and the
+other 109 stay "desired" forever — the far ring is simply absent, and no
+warning says so (`__hitreg.chunkManager`: desired 175, loaded 66, queue 0,
+in flight 0). With a 14-cell ring the whole disc was under the cap and the
+bug never showed.
+
+`pumpSupercellQueue` now forces the next `update()` to re-run residency
+when the queue and the in-flight set are both empty and desired supercells
+remain unbaked — guarded by "only while each refill made progress", so a
+supercell whose cells all fail cannot re-queue every frame. The general
+lesson: any bounded work queue fed by an event (a cell crossing) needs a
+second feeder for the case where the event stops but the work does not.
+
+## Draw-count pass on the voxel demo (2026-09-04): two three.js traps and the far ring
+
+Reported as "443 draw calls with nothing but terrain in the scene, ~45 fps".
+Measured headless (1280×720, WebGPU) at the spawn, looking south, with the
+in-session A/B probe (toggle a category of renderables, read the profiler):
+
+```
+                                   draws   JS ms   GPU ms   fps
+start                               455    27.3     7.5     35
++ shadow-material fix               455    20.0     4.4     48
++ frozen-subtree fix + impostors    430    16.7     5.9     58
++ far-ring supercell grid           354    14.6     4.9     66
+```
+
+The frame was CPU-bound throughout — GPU never above 8 ms — and the CPU
+profile said where: 14% `updateMatrixWorld`, 11% `getMaterialCacheKey` +
+`customProgramCacheKey`, 8% `_projectObject`, then per-draw submission. Four
+separate causes, in the order they mattered:
+
+**1. Three's shared shadow-pass material invalidated every caster every
+frame** (`packages/render/src/shadow-pass-material.ts`). The A/B that found it
+made no sense on its own: hiding the ONE skinned player mesh saved 6 ms. The
+mechanism: in a shadow pass the renderer draws every caster with one override
+material per light and copies each caster's `alphaTest` onto it first, so leaf
+cards cut holes in their shadows. `Material`'s `alphaTest` setter bumps
+`version` whenever the value crosses zero, and the render-object cache
+compares each shadow render object's version against THAT material's. A
+caster list mixing alpha-tested foliage with opaque rocks, trunks and one
+character flips the version several times per pass, and every shadow render
+object that sees a new version recomputes its whole cache key (a walk over
+every material property plus `customProgramCacheKey`) to conclude nothing
+changed. The fix is a targeted patch of the `alphaTest` setter that skips the
+bump on `isShadowPassMaterial` materials only — each shadow render object's
+key already encodes its own caster's cutout class, so nothing can change
+underneath it. A live material edit that crosses zero calls
+`bumpShadowPassMaterials()` to re-key on demand. Diagnosis tip: a
+shadow-pass `NodeMaterial` whose `version` climbs by 2 every few frames.
+
+**2. Frozen subtrees were not pruned — and could not be by honouring
+`force`** (`packages/render/src/static-transforms.ts`). Three r185's
+`updateMatrixWorld` recurses into every child whatever
+`matrixWorldAutoUpdate` says (the r15x child test is gone), so
+`freezeStaticSubtree` was clearing a flag that pruned nothing: 2,352 calls a
+frame over 2,345 objects. The first fix — an own `updateMatrixWorld` on the
+frozen root that returns unless `force` — ALSO pruned nothing, because every
+`matrixAutoUpdate` object (the Scene included) calls `updateMatrix()` on the
+way down, which sets its own `matrixWorldNeedsUpdate`, which turns `force`
+on for all its children: the walk reaches every frozen root forced, every
+frame. What actually matters is whether the parent moved, and that is
+answerable directly — keep the parent's world matrix as of the last layout
+and compare 16 floats. Calls per frame 2,352 → 1,069, none under a frozen
+root. A unit test pins all four behaviours (pruned, ancestor moved, refresh,
+thaw). Verify a change like this with the call count, not the profile: the
+first version looked plausible in code and did nothing.
+
+**3. Supercell props were merged full geometry** — in the hlod ring AND the
+far ring, out to 1.3 km. A 354-triangle tree merged 1,416 vertices per
+instance into a proxy that reads as a few pixels, every (species, submesh)
+was its own bucket, and glTF props skipped the "under 4 m tall is invisible
+out there" filter the primitive path already had (mushrooms were baked into
+the far ring). Now: LOD-able props (`mesh.lod !== false`) become one
+`InstancedProps` batch of impostor quads per species per supercell, from the
+same octahedral atlas the near ring already bakes (`impostorBatchFor` in
+scene-builder.ts, shared cache), so a tree looks the same across the ring
+boundary; `lod: false` props keep merging (a rock has no atlas and needs
+none); the far ring drops clutter for glTF too; and merged buckets key by
+what the material DRAWS with (texture object + cutout/side/blend classes),
+so props packed onto one project atlas (`wfc pack --atlas`) collapse into one
+bucket per supercell.
+
+**4. One supercell grid served both rings.** The far ring was 164 supercells
+of ~2.5 meshes — every one walked per pass, frustum-tested, and a draw when in
+view. The far ring now groups on a grid `FAR_SUPERCELL_MULTIPLIER` (2×) wider
+than the hlod ring's, in its own key space (`f<scx>_<scz>`): 164 → 54 far
+supercells. The boundary rule that keeps it honest: a far block never bakes a
+cell an hlod block currently holds (so moving away never double-draws), and
+once an hlod block takes one of a far block's cells the far block is re-baked
+WITHOUT it as a replace — never a drop, which would open a hole on the
+horizon for the length of a bake. An hlod publish that overlaps a far block
+nudges residency (`lastFocus = null`), since residency otherwise runs only on
+a cell crossing.
+
+Not done, in order of what is left (354 draws at rest, ~55 µs of CPU each):
+near-ring instanced batches are per CELL, so 29 near chunks × species × tiers
+is ~90 draws (72 of them shadow cascades) that a world-level pool per asset
+would make ~25; `cascades: 3` triples every near caster; clutter
+(`castShadow: true` on mushrooms, roots, shrubs) is a draw per cascade for
+something no shadow shows. And pixelate at 480 lines (the "nearest neighbour"
+look) is purely a GPU saving — with the frame CPU-bound it changes nothing
+either way, so it is not a suspect.
+
+### Same day, second pass: pool the near ring, page the impostors
+
+```
+                                   draws   JS ms   fps
+after the far-ring grid (above)     354    14.6     66
++ world prop pool                   166    10.2     93
++ shared impostor page              155    10.0     95
+```
+
+**5. Near-ring batches were per CELL** (`packages/render/src/prop-pool.ts`).
+`buildScene` runs once per streamed cell, so every cell had its own near/mid/
+far `InstancedProps` per species: 29 resident cells × 8 species × tiers, each
+near tier drawn again in three shadow cascades — ~90 draws for a few thousand
+triangles. The pool keeps one PAGE of tiers per (model, node, shadow/LOD
+flags) that every cell adds its instances to and releases on unload; the page
+is an ordinary batch to `FoliageLodSystem`, just a `dynamic` one (logical
+slots come and go, `addInstance`/`removeInstance`, a live mask the round-robin
+skips). Three things that had to be right: ownership is a TOKEN per load, not
+the cell key, because a cell's batch lands in a glTF promise continuation
+that can resolve after the cell unloaded; an added instance is classified
+against the last camera immediately, or a freshly streamed cell's trees wait
+up to ten frames for the round-robin; and the LOD system now applies each
+submesh's own `localMatrix` when it writes near/mid slots — it never had,
+which was a latent misplacement for any model whose meshes carry a node
+transform (the demo's do not, so it never showed). Entries with a
+`uvRotation` and builds without an owner (the base scene) keep per-build
+batches.
+
+**6. Every species had its own impostor atlas, so every species was its own
+draw** in every supercell. The baker (`apps/playground/src/impostor-bake.ts`)
+now renders each model's 576² block into a shared 4096² PAGE — same two
+render targets, 49 models per page — and reports the block as
+`ImpostorAtlas.region`. `impostorPageMaterial` reads region, radius and
+bounds-centre per instance, so a supercell's every species is one
+`InstancedProps` (`impostorPageBatchFor`); per-species materials keep working
+on a page-backed atlas by folding the region in as constants. The near ring's
+far tiers stay per species: the LOD compaction owns one far mesh per batch.
+
+Left after this pass (155 draws at the spawn, JS 10 ms headless): the near
+ring's 7 species × (near submeshes × 4 passes + far) ≈ 60 draws is now the
+largest bucket, and only `cascades: 2` or fewer species would shrink it;
+far/hlod terrain proxies ≈ 40; base scene ≈ 30.

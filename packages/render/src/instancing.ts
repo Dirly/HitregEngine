@@ -1,5 +1,24 @@
 import * as THREE from "three/webgpu";
-import { Fn, attribute, mat4, normalLocal, positionLocal, transformNormal, vec4 } from "three/tsl";
+import {
+  Fn,
+  attribute,
+  context,
+  mat4,
+  materialAO,
+  materialColor,
+  materialEmissive,
+  materialMetalness,
+  materialNormal,
+  materialOpacity,
+  materialRoughness,
+  normalLocal,
+  positionLocal,
+  rotateUV,
+  transformNormal,
+  uv,
+  vec2,
+  vec4,
+} from "three/tsl";
 
 /**
  * Instanced prop batches whose SHADER does not depend on the batch.
@@ -124,6 +143,87 @@ export function isInstancedPropMaterial(material: THREE.Material): boolean {
 }
 
 /**
+ * Per-instance texture rotation, in RADIANS, as an optional instanced float
+ * attribute (see {@link InstancedProps.enableUvRotation}).
+ *
+ * Why it exists: a WFC kit floor module placed at a 90° grid variant would
+ * turn its planks with it. The tool writes the counter-rotation on the
+ * entity (`mesh.source.uvRotation`, degrees) and it lands here, so every
+ * floor of a generated building runs along the building's own axis while
+ * every floor of every building still shares ONE material and ONE shader.
+ */
+export const INSTANCE_UV_ROTATION_ATTRIBUTE = "instanceUvRotation";
+
+const UV_ROTATION_FLAG = "isInstanceUvRotationMaterial";
+
+/**
+ * Make an {@link applyInstancedProps} material read
+ * {@link INSTANCE_UV_ROTATION_ATTRIBUTE} and rotate every texture map's UVs
+ * by it, counter-clockwise (u right, v up — exactly three's `rotateUV`).
+ * Idempotent.
+ *
+ * The rotation CENTRE is the geometry's `uv1` attribute (glTF TEXCOORD_1)
+ * when it has one, else (0.5, 0.5). Kit modules are atlased, so a floor's
+ * UVs occupy a sub-rectangle of a 2048 page and turning them about the page
+ * centre would swing them into other islands; the kit import therefore
+ * writes, into every vertex's uv1, the UV of the part's own local origin
+ * (constant per part), and the rotation pivots there. Decided at shader
+ * build time per attribute layout, so one material serves both kinds of
+ * geometry.
+ *
+ * Nothing about the material's own shading is rebuilt: each map slot keeps
+ * its stock `material*` node (colour × map with the map's alpha for
+ * alphaTest cutouts, emissive × emissiveMap, ...) wrapped in a node
+ * `context` whose `getUV` hook `TextureNode.setup` consults for any texture
+ * node that has no explicit UV. A slot the material already customised is
+ * wrapped as-is rather than replaced. The attribute is read in the fragment
+ * stage, which TSL auto-varies from the vertex attribute.
+ *
+ * Every batch drawn with this material MUST have enabled the attribute (a
+ * missing vertex attribute is a pipeline error, not a fallback) — which is
+ * why scene-builder keys such materials separately from plain instanced
+ * clones of the same asset.
+ */
+export function applyInstanceUvRotation(material: THREE.Material): void {
+  const node = material as THREE.NodeMaterial & Record<string, unknown>;
+  if (node.isNodeMaterial !== true) {
+    console.warn(`[render] applyInstanceUvRotation: ${material.type} is not a NodeMaterial; texture rotation ignored`);
+    return;
+  }
+  if (node.userData[UV_ROTATION_FLAG] === true) return;
+  const angle = attribute(INSTANCE_UV_ROTATION_ATTRIBUTE, "float");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const rotated = (Fn as any)((_: unknown, builder: { hasGeometryAttribute(name: string): boolean }) => {
+    const center = builder.hasGeometryAttribute("uv1") ? uv(1) : vec2(0.5, 0.5);
+    return rotateUV(uv(), angle, center);
+  })();
+  const hook = { getUV: () => rotated };
+  const slots: Array<[map: string, slot: string, stock: unknown]> = [
+    ["map", "colorNode", materialColor],
+    ["emissiveMap", "emissiveNode", materialEmissive],
+    ["normalMap", "normalNode", materialNormal],
+    ["roughnessMap", "roughnessNode", materialRoughness],
+    ["metalnessMap", "metalnessNode", materialMetalness],
+    ["alphaMap", "opacityNode", materialOpacity],
+    ["aoMap", "aoNode", materialAO],
+  ];
+  for (const [map, slot, stock] of slots) {
+    const texture = node[map] as THREE.Texture | null | undefined;
+    if (!texture || texture.isTexture !== true) continue;
+    const existing = node[slot] as THREE.Node | null | undefined;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    node[slot] = (context as any)(existing ?? stock, hook);
+  }
+  node.userData[UV_ROTATION_FLAG] = true;
+  node.needsUpdate = true;
+}
+
+/** True when {@link applyInstanceUvRotation} has been applied to the material. */
+export function isInstanceUvRotationMaterial(material: THREE.Material): boolean {
+  return material.userData[UV_ROTATION_FLAG] === true;
+}
+
+/**
  * A per-batch `InstancedBufferGeometry` over a shared base geometry.
  *
  * Attribute OBJECTS are new (so disposing this batch frees only its own GPU
@@ -176,6 +276,8 @@ export class InstancedProps extends THREE.Mesh {
   readonly capacity: number;
   /** Culling volume over the placed instances; null until computed. */
   boundingSphere: THREE.Sphere | null = null;
+  /** Per-instance UV rotation (radians); null until {@link enableUvRotation}. */
+  private uvRotation: THREE.InstancedBufferAttribute | null = null;
 
   constructor(base: THREE.BufferGeometry, material: THREE.Material | THREE.Material[], count: number) {
     const capacity = Math.max(count, 1);
@@ -211,6 +313,37 @@ export class InstancedProps extends THREE.Mesh {
 
   getMatrixAt(index: number, matrix: THREE.Matrix4): THREE.Matrix4 {
     return matrix.fromArray(this.instanceMatrix.array as Float32Array, index * FLOATS_PER_INSTANCE);
+  }
+
+  /**
+   * Allocate the {@link INSTANCE_UV_ROTATION_ATTRIBUTE} side buffer (one
+   * float per slot, radians, zero-filled). Only batches drawn with an
+   * {@link applyInstanceUvRotation} material need it, and every such batch
+   * must call this — the shader binds the attribute unconditionally.
+   */
+  enableUvRotation(): void {
+    if (this.uvRotation) return;
+    this.uvRotation = new THREE.InstancedBufferAttribute(new Float32Array(this.capacity), 1);
+    this.geometry.setAttribute(INSTANCE_UV_ROTATION_ATTRIBUTE, this.uvRotation);
+  }
+
+  /** True once {@link enableUvRotation} has run. */
+  get hasUvRotation(): boolean {
+    return this.uvRotation !== null;
+  }
+
+  /** Per-slot texture rotation in radians; marks the attribute for upload. */
+  setUvRotationAt(index: number, radians: number): void {
+    if (!this.uvRotation) {
+      console.warn("[render] InstancedProps.setUvRotationAt before enableUvRotation(); ignored");
+      return;
+    }
+    (this.uvRotation.array as Float32Array)[index] = radians;
+    this.uvRotation.needsUpdate = true;
+  }
+
+  getUvRotationAt(index: number): number {
+    return this.uvRotation ? (this.uvRotation.array as Float32Array)[index]! : 0;
   }
 
   /**

@@ -33,6 +33,31 @@ export interface InstancedPropBatch {
    * logical instance's rotation/scale, which the system copies into the far
    * geometry's instanced side-buffers whenever it (re)writes a far slot. */
   impostor?: ImpostorInstanceData;
+  /**
+   * Per NEAR/MID mesh (index-aligned with `near`, and `mid` when present):
+   * that submesh's own transform inside the model, applied after the
+   * instance matrix when a slot is written. Absent = identity for every
+   * submesh (a model whose meshes sit at its root).
+   */
+  localMatrices?: THREE.Matrix4[];
+  /**
+   * Membership changes at runtime (an InstancedPropPool page): every logical
+   * index starts DEAD and only `addInstance`/`removeInstance` make it live.
+   * `positions`/`matrices` are then pre-sized to the page's capacity and
+   * hold whatever the pool last wrote there.
+   */
+  dynamic?: boolean;
+  /**
+   * Never leave the near tier — for props whose rule opted out of LOD
+   * (`mesh.lod: false`) but still live in a pool for the draw-call merge.
+   * Such a batch has no mid tier and its `far` is never drawn.
+   */
+  alwaysNear?: boolean;
+  /** Per logical instance, radians: the `mesh.source.uvRotation` counter-rotation
+   * the WFC tool writes on kit floors. Present only when some instance set
+   * it; near/mid tiers then carry it as an instanced attribute the shared
+   * material reads, and compaction moves it with the instance. */
+  uvRotations?: Float32Array;
 }
 
 /** Instances re-evaluated per batch, per `update()` call — bounds the worst
@@ -73,6 +98,17 @@ interface BatchState {
    * per batch, because they derive from the batch's own mid-tier error. */
   nearMidThresholdSq: number;
   nearMidHystSq: number;
+  /** Dynamic batches only: 1 = a placed instance, 0 = an empty logical slot. */
+  live: Uint8Array | null;
+}
+
+const slotMatrixScratch = new THREE.Matrix4();
+
+/** The matrix written for logical instance `i` into tier mesh `k`. */
+function slotMatrix(batch: InstancedPropBatch, tierNum: number, k: number, i: number): THREE.Matrix4 {
+  const world = batch.matrices[i]!;
+  const local = tierNum === FAR ? undefined : batch.localMatrices?.[k];
+  return local ? slotMatrixScratch.multiplyMatrices(world, local) : world;
 }
 
 function tierMeshes(batch: InstancedPropBatch, tierNum: number): readonly InstancedProps[] {
@@ -94,10 +130,11 @@ function removeFromTier(state: BatchState, batch: InstancedPropBatch, tierNum: n
     // [0, count) fully packed with no gaps
     slotToIndex[mySlot] = lastIndex;
     state.slot[lastIndex] = mySlot;
-    const matrix = batch.matrices[lastIndex]!;
-    for (const mesh of meshes) {
-      mesh.setMatrixAt(mySlot, matrix);
+    for (let k = 0; k < meshes.length; k++) {
+      const mesh = meshes[k]!;
+      mesh.setMatrixAt(mySlot, slotMatrix(batch, tierNum, k, lastIndex));
       mesh.instanceMatrix.needsUpdate = true;
+      if (batch.uvRotations && tierNum !== FAR) mesh.setUvRotationAt(mySlot, batch.uvRotations[lastIndex]!);
     }
     if (tierNum === FAR) writeImpostorSlot(batch.far, batch.impostor, mySlot, lastIndex);
   }
@@ -112,12 +149,13 @@ function addToTier(state: BatchState, batch: InstancedPropBatch, tierNum: number
   state.slotToIndex[arrIdx][slot] = i;
   state.slot[i] = slot;
   state.counts[arrIdx] = slot + 1;
-  const matrix = batch.matrices[i]!;
   const meshes = tierMeshes(batch, tierNum);
-  for (const mesh of meshes) {
-    mesh.setMatrixAt(slot, matrix);
+  for (let k = 0; k < meshes.length; k++) {
+    const mesh = meshes[k]!;
+    mesh.setMatrixAt(slot, slotMatrix(batch, tierNum, k, i));
     mesh.instanceCount = slot + 1;
     mesh.instanceMatrix.needsUpdate = true;
+    if (batch.uvRotations && tierNum !== FAR) mesh.setUvRotationAt(slot, batch.uvRotations[i]!);
   }
   if (tierNum === FAR) writeImpostorSlot(batch.far, batch.impostor, slot, i);
 }
@@ -163,6 +201,10 @@ function addToTier(state: BatchState, batch: InstancedPropBatch, tierNum: number
 export class FoliageLodSystem {
   private readonly stateByBatch = new Map<InstancedPropBatch, BatchState>();
   private viewportHeight = DEFAULT_VIEWPORT_HEIGHT;
+  /** Where the camera was at the last `update()` — what a freshly added
+   * instance is classified against, so it draws on its first frame instead
+   * of waiting for the round-robin to reach it. */
+  private lastCamera: THREE.Vector3 | null = null;
   private tanHalfFov = Math.tan((DEFAULT_FOV_DEGREES * Math.PI) / 360);
 
   constructor(
@@ -237,6 +279,7 @@ export class FoliageLodSystem {
       maxInstanceScale: maxInstanceScale > 0 ? maxInstanceScale : 1,
       nearMidThresholdSq: 0,
       nearMidHystSq: 0,
+      live: batch.dynamic ? new Uint8Array(n) : null,
     };
     this.stateByBatch.set(batch, state);
     this.applyThreshold(batch, state);
@@ -264,36 +307,80 @@ export class FoliageLodSystem {
     return counts;
   }
 
-  update(cameraPosition: THREE.Vector3): void {
+  /** The tier logical instance `i` wants from `cameraPosition`, with hysteresis against its current tier. */
+  private decide(batch: InstancedPropBatch, state: BatchState, i: number, cameraPosition: THREE.Vector3): number {
+    if (batch.alwaysNear) return NEAR;
     const midFarThresholdSq = this.lodDistance * this.lodDistance;
     const midFarHystSq = (this.lodDistance * this.hysteresis) ** 2;
+    const hasMid = !!batch.mid && batch.mid.length > 0;
+    const distSq = batch.positions[i]!.distanceToSquared(cameraPosition);
+    const prevTier = state.tier[i]!;
+    if (!hasMid) {
+      // original 2-tier behavior: 1 = near, 3 = far (2 is simply unused)
+      const wasNear = prevTier === NEAR;
+      const isNear = wasNear ? distSq < midFarThresholdSq : distSq < midFarHystSq;
+      return isNear ? NEAR : FAR;
+    }
+    const wasNear = prevTier === NEAR;
+    const wasMidOrNear = prevTier === NEAR || prevTier === MID;
+    const isNearSide = wasNear ? distSq < state.nearMidThresholdSq : distSq < state.nearMidHystSq;
+    const isMidOrCloser = wasMidOrNear ? distSq < midFarThresholdSq : distSq < midFarHystSq;
+    return !isMidOrCloser ? FAR : isNearSide ? NEAR : MID;
+  }
+
+  private place(batch: InstancedPropBatch, state: BatchState, i: number, wantTier: number): void {
+    const prevTier = state.tier[i]!;
+    if (prevTier === wantTier) return;
+    if (prevTier !== UNSET) removeFromTier(state, batch, prevTier, i);
+    addToTier(state, batch, wantTier, i);
+    state.tier[i] = wantTier;
+  }
+
+  /**
+   * A dynamic batch placed logical instance `i` (its `matrices[i]` and
+   * `positions[i]` are written): make it live and, when a camera has been
+   * seen, put it straight into the right tier.
+   */
+  addInstance(batch: InstancedPropBatch, i: number): void {
+    const state = this.stateByBatch.get(batch);
+    if (!state?.live) return;
+    state.live[i] = 1;
+    state.tier[i] = UNSET;
+    if (this.lastCamera) this.place(batch, state, i, this.decide(batch, state, i, this.lastCamera));
+  }
+
+  /** Which logical instance currently occupies compacted slot `slot` of tier mesh `mesh` (a raycast's `instanceId`). */
+  logicalIndexAt(batch: InstancedPropBatch, mesh: InstancedProps, slot: number): number | undefined {
+    const state = this.stateByBatch.get(batch);
+    if (!state) return undefined;
+    const tierNum = batch.near.includes(mesh) ? NEAR : batch.mid?.includes(mesh) ? MID : batch.far === mesh ? FAR : 0;
+    if (tierNum === 0) return undefined;
+    const arrIdx = (tierNum - 1) as 0 | 1 | 2;
+    if (slot < 0 || slot >= state.counts[arrIdx]) return undefined;
+    return state.slotToIndex[arrIdx][slot];
+  }
+
+  /** A dynamic batch freed logical instance `i`: take it out of whichever tier draws it. */
+  removeInstance(batch: InstancedPropBatch, i: number): void {
+    const state = this.stateByBatch.get(batch);
+    if (!state?.live || !state.live[i]) return;
+    const tier = state.tier[i]!;
+    if (tier !== UNSET) removeFromTier(state, batch, tier, i);
+    state.tier[i] = UNSET;
+    state.live[i] = 0;
+  }
+
+  update(cameraPosition: THREE.Vector3): void {
+    (this.lastCamera ??= new THREE.Vector3()).copy(cameraPosition);
     for (const [batch, state] of this.stateByBatch) {
       const count = batch.positions.length;
       if (count === 0) continue;
-      const hasMid = !!batch.mid && batch.mid.length > 0;
-      const { nearMidThresholdSq, nearMidHystSq } = state;
+      const live = state.live;
       const steps = Math.min(count, INSTANCES_PER_TICK);
       for (let step = 0; step < steps; step++) {
         const i = (state.cursor + step) % count;
-        const distSq = batch.positions[i]!.distanceToSquared(cameraPosition);
-        const prevTier = state.tier[i]!;
-        let wantTier: number;
-        if (!hasMid) {
-          // original 2-tier behavior: 1 = near, 3 = far (2 is simply unused)
-          const wasNear = prevTier === NEAR;
-          const isNear = wasNear ? distSq < midFarThresholdSq : distSq < midFarHystSq;
-          wantTier = isNear ? NEAR : FAR;
-        } else {
-          const wasNear = prevTier === NEAR;
-          const wasMidOrNear = prevTier === NEAR || prevTier === MID;
-          const isNearSide = wasNear ? distSq < nearMidThresholdSq : distSq < nearMidHystSq;
-          const isMidOrCloser = wasMidOrNear ? distSq < midFarThresholdSq : distSq < midFarHystSq;
-          wantTier = !isMidOrCloser ? FAR : isNearSide ? NEAR : MID;
-        }
-        if (prevTier === wantTier) continue;
-        if (prevTier !== UNSET) removeFromTier(state, batch, prevTier, i);
-        addToTier(state, batch, wantTier, i);
-        state.tier[i] = wantTier;
+        if (live && live[i] === 0) continue;
+        this.place(batch, state, i, this.decide(batch, state, i, cameraPosition));
       }
       state.cursor = (state.cursor + steps) % count;
     }

@@ -1,4 +1,5 @@
 import * as THREE from "three/webgpu";
+import { patchShadowPassAlphaTest } from "./shadow-pass-material.js";
 import {
   PostChain,
   needsPipeline,
@@ -140,6 +141,7 @@ export class EngineRenderer {
   private gpuResolvePending = false;
 
   constructor(canvas: HTMLCanvasElement) {
+    patchShadowPassAlphaTest();
     this.renderer = new THREE.WebGPURenderer({ canvas, antialias: true });
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.shadowMap.enabled = true;
@@ -460,8 +462,23 @@ export class EngineRenderer {
     // a just-streamed cell is usually off-screen, which is the entire case
     // being solved here. Clear culling for the pass, restore it after.
     const restore: THREE.Object3D[] = [];
+    // Transparent meshes sit this out. The water shader reads the viewport
+    // depth, and a pipeline for it built off-frame binds a placeholder depth
+    // texture whose sample count never matches the multisampled scene pass —
+    // every later frame then fails validation and the water is never drawn.
+    // Measured on streamed river/lake sheets: 6,400 GPUValidationErrors per
+    // probe with them precompiled, none without. They compile on first draw,
+    // exactly as the scene-level ocean plane always has.
+    const hidden: THREE.Object3D[] = [];
     root.traverse((object) => {
       if (!(object as THREE.Mesh).isMesh) return;
+      const material = (object as THREE.Mesh).material;
+      const transparent = Array.isArray(material) ? material.some((m) => m.transparent) : material?.transparent;
+      if (transparent && object.visible) {
+        object.visible = false;
+        hidden.push(object);
+        return;
+      }
       if (object.frustumCulled === false) return;
       object.frustumCulled = false;
       restore.push(object);
@@ -548,6 +565,7 @@ export class EngineRenderer {
       console.warn("[render] pipeline precompile failed:", error);
     } finally {
       for (const object of restore) object.frustumCulled = true;
+      for (const object of hidden) object.visible = true;
     }
     // A pipeline that fails validation off-frame stays null in three's cache
     // and the object is then never drawn in this context — a silent hole, not

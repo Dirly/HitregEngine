@@ -45,6 +45,8 @@ interface LoadedChunk {
   simulated: boolean;
   /** Static draw-call merge for this cell’s props; disposed with the cell. */
   batch: StaticBatchHandle | null;
+  /** This cell's instances in the world prop pool (BuildOptions.instancePool), released with the cell. */
+  poolOwner: object;
 }
 
 /**
@@ -67,6 +69,8 @@ interface LoadedSupercell {
   cellKeys: Set<string>;
   /** Approximate, for the diagnostics HUD only (no per-entity objects exist). */
   entityCount: number;
+  /** Baked at the far ring's coarseness (FAR_VOXEL_COARSEN); a rebuild after an edit keeps it. */
+  far: boolean;
 }
 
 /**
@@ -91,6 +95,8 @@ interface PendingCell {
 
 /** One merged bake inside a supercell — the unit that is added and dropped. */
 interface SupercellPart {
+  /** Baked at the far ring's coarseness. */
+  far: boolean;
   group: THREE.Object3D;
   cellKeys: Set<string>;
   entityCount: number;
@@ -117,6 +123,49 @@ const MAX_SUPERCELL_PARTS = 4;
  * already exists.
  */
 type SupercellBakeMode = "replace" | "append";
+
+/**
+ * Lattice coarsening for supercells that lie wholly in the far ring (the
+ * hlod ring keeps the builder's 4): 12 m voxels on a 48 m cell, a silhouette
+ * and a splat and nothing else, which is all a kilometre away needs.
+ */
+const FAR_VOXEL_COARSEN = 6;
+
+/**
+ * Far-ring supercells are this many times wider than hlod-ring ones, per
+ * axis — 8x8 cells for the default factor of 4. The far ring is where the
+ * OBJECT count lives: with one grid for both rings a 28-cell far ring was 164
+ * supercells of ~2.5 meshes each, and every one of them is visited by the
+ * renderer's per-pass walk, frustum-tested and (when in view) a draw call. At
+ * this coarseness a block's content is a handful of impostor batches over a
+ * 6x-coarsened terrain mesh, so a 4x bigger block is not a 4x bigger bake.
+ *
+ * The two rings therefore keep separate key spaces (`f<scx>_<scz>` for far),
+ * and a cell moving between them moves between blocks: a far block never
+ * bakes a cell an hlod block currently holds, and re-bakes (replace, not
+ * drop — no hole at 300 m) once an hlod block has taken one of its cells.
+ */
+const FAR_SUPERCELL_MULTIPLIER = 2;
+const FAR_KEY_PREFIX = "f";
+
+function supercellKeyFor(scx: number, scz: number, far: boolean): string {
+  return far ? `${FAR_KEY_PREFIX}${scx}_${scz}` : `${scx}_${scz}`;
+}
+
+function isFarSupercellKey(key: string): boolean {
+  return key.startsWith(FAR_KEY_PREFIX);
+}
+
+function parseSupercellKey(key: string): { scx: number; scz: number; far: boolean } | null {
+  const far = isFarSupercellKey(key);
+  const coords = parseChunkKey(far ? key.slice(FAR_KEY_PREFIX.length) : key);
+  return coords ? { scx: coords[0], scz: coords[1], far } : null;
+}
+
+/** Cells per supercell axis for one ring's key space. */
+function supercellFactor(base: number, far: boolean): number {
+  return far ? base * FAR_SUPERCELL_MULTIPLIER : base;
+}
 
 /**
  * How many HLOD supercells may bake at once.
@@ -326,7 +375,7 @@ export class ChunkManager {
   /** The residency the CURRENT focus wants, keyed by cell — the queue reads it at pump time. */
   private desiredCells = new Map<string, ChunkRep>();
   /** Pending supercell bakes, newest-first; drained by pumpSupercellQueue. */
-  private supercellQueue: Array<{ key: string; members: Set<string>; mode: SupercellBakeMode }> = [];
+  private supercellQueue: Array<{ key: string; members: Set<string>; mode: SupercellBakeMode; far: boolean }> = [];
   /** Supercell keys the CURRENT focus wants — used to drop stale queue entries. */
   private desiredSupercells = new Set<string>();
   /** Bumped on every unload/reload of a given supercell key so an in-flight
@@ -336,6 +385,12 @@ export class ChunkManager {
   private scene: THREE.Scene | null = null;
   private sim: PhysicsSim | null = null;
   private lastFocus: [number, number] | null = null;
+  /**
+   * Desired-but-unbaked supercells at the last queue refill, so a refill only
+   * happens while it is making progress (a supercell whose cells all fail
+   * would otherwise re-queue forever).
+   */
+  private lastRefillMissing = Infinity;
   /** "cx_cz" cells force-unloaded regardless of proximity — currently open for
    * isolation editing (main.ts's editChunkCell), which renders its own
    * editable copy in place of the normal streamed one. */
@@ -409,6 +464,8 @@ export class ChunkManager {
       this.lifecycle.onReattached?.(chunk.expanded, chunk.objects, chunk.simulated);
     }
     for (const sc of this.loadedSupercells.values()) scene.add(sc.group);
+    // the world prop pool's pages live outside any cell's group
+    if (this.buildOptions.instancePool) scene.add(this.buildOptions.instancePool.group);
     await this.refreshIndex();
     this.lastFocus = null; // force a re-evaluation on the next update
   }
@@ -530,6 +587,7 @@ export class ChunkManager {
     const cx = Math.round(fx / s.cellSize);
     const cz = Math.round(fz / s.cellSize);
     if (this.lastFocus && this.lastFocus[0] === cx && this.lastFocus[1] === cz) return;
+    if (!this.lastFocus || this.lastFocus[0] !== cx || this.lastFocus[1] !== cz) this.lastRefillMissing = Infinity;
     this.lastFocus = [cx, cz];
 
     // feed current reps back in so the ring hysteresis holds cells on a boundary.
@@ -589,21 +647,41 @@ export class ChunkManager {
 
     // -- hlod/far cells: group into supercells, one merged proxy per group --
     const factor = Math.max(1, Math.floor(s.hlodSupercellFactor));
-    const desired = new Map<string, Set<string>>(); // "scx_scz" -> member "cx_cz" keys
+    // Two key spaces: hlod-ring cells group on the base grid, far-ring cells
+    // on a FAR_SUPERCELL_MULTIPLIER-wider one (and are meshed coarser still,
+    // FAR_VOXEL_COARSEN, which is what lets the ring reach a kilometre for the
+    // same bake and triangle budget).
+    const desired = new Map<string, Set<string>>(); // supercell key -> member "cx_cz" keys
     for (const [key, rep] of target) {
       if (!isProxy(rep)) continue;
       if (this.suppressed.has(key)) continue;
       if (!this.hasCell(key)) continue;
       const coords = parseChunkKey(key);
       if (!coords) continue;
-      const [scx, scz] = supercellForCell(coords[0], coords[1], factor);
-      const scKey = `${scx}_${scz}`;
+      const far = rep === "far";
+      const [scx, scz] = supercellForCell(coords[0], coords[1], supercellFactor(factor, far));
+      const scKey = supercellKeyFor(scx, scz, far);
       let members = desired.get(scKey);
       if (!members) {
         members = new Set();
         desired.set(scKey, members);
       }
       members.add(key);
+    }
+    // A cell an hlod block currently holds is never wanted by a far block:
+    // the hlod block keeps drawing it (finer, and kept on purpose — see
+    // SHRANK below) until it unloads, at which point the far block finds the
+    // cell missing and appends it. Without this, moving away double-drew
+    // every cell along the hlod/far boundary.
+    const hlodHeld = new Set<string>();
+    for (const [scKey, sc] of this.loadedSupercells) {
+      if (isFarSupercellKey(scKey)) continue;
+      for (const key of sc.cellKeys) hlodHeld.add(key);
+    }
+    for (const [scKey, members] of desired) {
+      if (!isFarSupercellKey(scKey)) continue;
+      for (const key of hlodHeld) members.delete(key);
+      if (members.size === 0) desired.delete(scKey);
     }
     // Merged geometry cannot be edited in place, so every membership change
     // is a bake of SOMETHING. Which something is the whole cost, and the three
@@ -654,6 +732,23 @@ export class ChunkManager {
       if (promoted.length > 0) this.dropSupercellParts(scKey, sc, promoted);
       if (!this.loadedSupercells.has(scKey)) continue; // dropped its last part
       if (this.inFlightSupercells.has(scKey)) continue; // a bake is already catching up
+      // the far/hlod boundary moved through this far block: an hlod block now
+      // holds some of its cells, so it draws them twice (coarser, underneath).
+      // Re-bake it without them. A replace, not a drop: the old parts stay
+      // until the new bake lands, so the horizon never opens a hole.
+      if (sc.far) {
+        let overlapped = false;
+        for (const key of sc.cellKeys) {
+          if (hlodHeld.has(key)) {
+            overlapped = true;
+            break;
+          }
+        }
+        if (overlapped) {
+          this.queueSupercell(scKey, members, "replace", true);
+          continue;
+        }
+      }
       const missing = new Set([...members].filter((key) => !sc.cellKeys.has(key)));
       if (missing.size === 0) continue;
       if (sc.parts.length >= MAX_SUPERCELL_PARTS) {
@@ -661,14 +756,14 @@ export class ChunkManager {
         // Queued, NOT unloaded first — loadSupercell swaps the merged block in
         // before freeing the parts it replaces, so the far ring never shows a
         // hole for the ~200ms the bake takes.
-        this.queueSupercell(scKey, members, "replace");
+        this.queueSupercell(scKey, members, "replace", isFarSupercellKey(scKey));
       } else {
-        this.queueSupercell(scKey, missing, "append");
+        this.queueSupercell(scKey, missing, "append", isFarSupercellKey(scKey));
       }
     }
     for (const [scKey, members] of desired) {
       if (this.loadedSupercells.has(scKey) || this.inFlightSupercells.has(scKey)) continue;
-      this.queueSupercell(scKey, members, "replace");
+      this.queueSupercell(scKey, members, "replace", isFarSupercellKey(scKey));
     }
     this.pumpSupercellQueue();
     this.profiler?.end();
@@ -737,7 +832,7 @@ export class ChunkManager {
       if (sc.cellKeys.has(key)) {
         const members = new Set(sc.cellKeys);
         this.unloadSupercell(scKey);
-        this.queueSupercell(scKey, members, "replace");
+        this.queueSupercell(scKey, members, "replace", sc.far);
         this.pumpSupercellQueue();
         return;
       }
@@ -940,7 +1035,15 @@ export class ChunkManager {
       );
       const group = new THREE.Group();
       group.name = `chunk:${key}`;
-      const built = buildScene(expanded, this.buildOptions);
+      // a fresh token per load: the cell's instanced props land in the world
+      // pool under it (possibly after this cell has already unloaded — the
+      // model load is async — which is why the pool wants a token and not
+      // the cell key)
+      const poolOwner = {};
+      const built = buildScene(
+        expanded,
+        this.buildOptions.instancePool ? { ...this.buildOptions, instancePoolOwner: poolOwner } : this.buildOptions,
+      );
       group.add(built.scene);
       // Merge this cell's static props into one draw call per material.
       //
@@ -976,6 +1079,7 @@ export class ChunkManager {
         rep,
         simulated,
         batch,
+        poolOwner,
       };
       this.loaded.set(key, chunk);
       if (simulated) this.sim?.addEntities(expanded); // render-only rings never collide
@@ -1044,6 +1148,7 @@ export class ChunkManager {
     scKey: string,
     members: ReadonlySet<string>,
     mode: SupercellBakeMode,
+    far: boolean,
   ): void {
     const existing = this.supercellQueue.findIndex((item) => item.key === scKey);
     // A queued append is a delta against a proxy that may since have been
@@ -1051,7 +1156,7 @@ export class ChunkManager {
     // and merging two appends would lose one of their cell sets. Re-deriving
     // the delta on the next residency pass is both cheaper and always right.
     if (existing >= 0) this.supercellQueue.splice(existing, 1);
-    this.supercellQueue.unshift({ key: scKey, members: new Set(members), mode });
+    this.supercellQueue.unshift({ key: scKey, members: new Set(members), mode, far });
     // bound the backlog: a long flight can enqueue the whole far ring, and
     // anything that far down the list is guaranteed stale by the time it runs
     if (this.supercellQueue.length > 64) this.supercellQueue.length = 64;
@@ -1071,9 +1176,24 @@ export class ChunkManager {
       // is self-sufficient either way, a first build or a consolidation.
       if (next.mode === "append" && !this.loadedSupercells.has(next.key)) continue;
       if (!this.desiredSupercells.has(next.key)) continue; // moved on since it was queued
-      void this.loadSupercell(next.key, next.members, next.mode).finally(() =>
+      void this.loadSupercell(next.key, next.members, next.mode, next.far).finally(() =>
         this.pumpSupercellQueue(),
       );
+    }
+    // The queue is capped (see queueSupercell) and only a residency pass
+    // refills it — and that pass runs only when the focus crosses a cell. A
+    // far ring wider than the cap left the rest of it desired but never baked
+    // while the camera stood still: from a peak, 109 of 175 supercells
+    // simply missing. When the queue drains with desired supercells still
+    // unbaked, force the next update() to re-run residency, as long as each
+    // refill made progress.
+    if (this.supercellQueue.length === 0 && this.inFlightSupercells.size === 0) {
+      let missing = 0;
+      for (const key of this.desiredSupercells) if (!this.loadedSupercells.has(key)) missing++;
+      if (missing > 0 && missing < this.lastRefillMissing) {
+        this.lastRefillMissing = missing;
+        this.lastFocus = null;
+      }
     }
   }
 
@@ -1087,12 +1207,13 @@ export class ChunkManager {
     scKey: string,
     memberKeys: ReadonlySet<string>,
     mode: SupercellBakeMode,
+    far = false,
   ): Promise<void> {
     const s = this.streamer;
     if (!s || !this.scene) return;
-    const coords = parseChunkKey(scKey);
-    if (!coords) return;
-    const [scx, scz] = coords;
+    const parsed = parseSupercellKey(scKey);
+    if (!parsed) return;
+    const { scx, scz } = parsed;
     this.inFlightSupercells.add(scKey);
     const endLoad = this.profiler?.span(
       "hlod.supercell",
@@ -1115,7 +1236,7 @@ export class ChunkManager {
       // streamer may have been reconfigured while we fetched, or this
       // supercell's desired membership may have already moved on
       if (this.streamer !== s || !this.scene || cells.length === 0) return;
-      const factor = Math.max(1, Math.floor(s.hlodSupercellFactor));
+      const factor = supercellFactor(Math.max(1, Math.floor(s.hlodSupercellFactor)), parsed.far);
       const build = assembleHlodBuildDoc(scx, scz, cells, {
         cellSize: s.cellSize,
         factor,
@@ -1123,7 +1244,10 @@ export class ChunkManager {
         assets: this.assets,
         registry: this.registry,
       });
-      const built = await buildHlodProxy(build.doc, this.buildOptions);
+      const built = await buildHlodProxy(
+        build.doc,
+        far ? { ...this.buildOptions, hlodVoxelCoarsen: FAR_VOXEL_COARSEN } : this.buildOptions,
+      );
       // buildHlodProxy now loads/merges glTFs (slower than the plain-JSON
       // fetches above), widening the window for this supercell to have been
       // unloaded or reloaded (onFileChanged's unload+reload, or a membership
@@ -1143,6 +1267,7 @@ export class ChunkManager {
         group: built.group,
         cellKeys: new Set(cells.map((c) => `${c.cx}_${c.cz}`)),
         entityCount,
+        far,
       };
       // queue the publish; `update()` drains it under the frame budget
       this.pendingSupercells.push(() => this.publishSupercell(scKey, part, mode, epoch));
@@ -1167,6 +1292,25 @@ export class ChunkManager {
     if (!this.scene || this.supercellEpoch.get(scKey) !== epoch) {
       this.disposeGroup(part.group);
       return;
+    }
+    // an hlod block landing on cells a far block still draws: residency runs
+    // only on a cell crossing, so ask for one — it re-bakes that far block
+    // without the overlap (see the far/hlod boundary note in refresh)
+    if (!part.far) {
+      for (const [otherKey, other] of this.loadedSupercells) {
+        if (!isFarSupercellKey(otherKey)) continue;
+        let overlap = false;
+        for (const key of part.cellKeys) {
+          if (other.cellKeys.has(key)) {
+            overlap = true;
+            break;
+          }
+        }
+        if (overlap) {
+          this.lastFocus = null;
+          break;
+        }
+      }
     }
     const entityCount = part.entityCount;
     {
@@ -1204,6 +1348,7 @@ export class ChunkManager {
         parts: [part],
         cellKeys: new Set(part.cellKeys),
         entityCount,
+        far: part.far,
       });
     }
   }
@@ -1244,6 +1389,7 @@ export class ChunkManager {
     // restore the source meshes first: dispose() puts them back so disposeGroup
     // frees the real geometries rather than only the merged copies
     chunk.batch?.dispose();
+    this.buildOptions.instancePool?.release(chunk.poolOwner);
     this.disposeGroup(chunk.group);
     if (chunk.simulated) this.sim?.removeEntities(Object.keys(chunk.expanded.entities));
     this.lifecycle.onUnloaded?.(Object.keys(chunk.expanded.entities));

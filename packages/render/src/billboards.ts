@@ -1,6 +1,7 @@
 import * as THREE from "three/webgpu";
 import {
   frameToUv,
+  gridFrameRect,
   nearestFrameName,
   resolveSpriteFrame,
   type SpritesheetDoc,
@@ -20,7 +21,21 @@ export interface BillboardData {
   /** Spritesheet data-asset id + frame name (wins over texture). */
   sheet?: string;
   frame?: string;
+  /** Play the sheet grid's `row` as an animation instead of one static frame. */
+  flipbook?: FlipbookData;
   visible: boolean;
+}
+
+/** Validated `billboard.flipbook` block (schema lives in @hitreg/core). */
+export interface FlipbookData {
+  row: number;
+  fps: number;
+  loop: boolean;
+  playing: boolean;
+  blending: "normal" | "additive";
+  hideOnEnd: boolean;
+  /** Multiplied over the frame — a hue control over a white source row. */
+  tint: string;
 }
 
 /** Resolvers a host injects; sheet lookups come from the AssetLibrary. */
@@ -34,6 +49,13 @@ export interface BillboardValue {
   fill?: number;
   text?: string;
   visible?: boolean;
+  /** Flipbook only: restart from frame 0 (and unhide). This is how a pooled
+   * one-shot effect is re-fired without rebuilding anything. */
+  play?: boolean;
+  /** Flipbook only: switch colour-variant row. */
+  row?: number;
+  /** Flipbook only: multiply colour. With a white source row this is free hue. */
+  tint?: string;
 }
 
 // World-space UI is part of the scene, so geometry in front of it occludes it
@@ -89,6 +111,17 @@ class Billboard {
   // last drawn state — the canvas repaints ONLY when fill/text change
   private drawnFill: number | null = null;
   private drawnText: string | null = null;
+  /** Flipbook playback: null until a sheet with a grid resolves. */
+  private flip: {
+    grid: { cols: number; rows: number };
+    sheet: SpritesheetDoc;
+    imageW: number;
+    imageH: number;
+    row: number;
+    frame: number;
+    time: number;
+    playing: boolean;
+  } | null = null;
 
   constructor(
     group: THREE.Object3D,
@@ -130,6 +163,10 @@ class Billboard {
    */
   private initSprite(resolvers: BillboardResolvers): void {
     const { data } = this;
+    if (data.flipbook) {
+      this.initFlipbook(resolvers);
+      return;
+    }
     if (data.sheet !== undefined || data.frame !== undefined) {
       if (!data.sheet || !data.frame) {
         this.diagnose(`billboard: sheet/frame must both be set (sheet="${data.sheet ?? ""}", frame="${data.frame ?? ""}")`);
@@ -192,6 +229,109 @@ class Billboard {
       this.diagnose(`billboard: sprite kind with no resolvable texture "${data.texture ?? ""}"`);
       this.placeholder(data.texture ?? "?");
     }
+  }
+
+  /**
+   * Flipbook: the sheet's grid IS the timeline — one row of cells played left
+   * to right. Only the texture offset moves per frame, so an effect costs one
+   * sprite and one texture no matter how many frames it has.
+   */
+  private initFlipbook(resolvers: BillboardResolvers): void {
+    const { data } = this;
+    const book = data.flipbook!;
+    if (!data.sheet) {
+      this.diagnose("billboard: flipbook needs a `sheet`");
+      this.placeholder("no sheet");
+      return;
+    }
+    const sheet = resolvers.sheet?.(data.sheet);
+    if (!sheet) {
+      this.diagnose(`billboard: spritesheet "${data.sheet}" not found`);
+      this.placeholder(data.sheet);
+      return;
+    }
+    if (!sheet.grid) {
+      this.diagnose(`billboard: flipbook needs sheet "${data.sheet}" to declare a grid`);
+      this.placeholder(data.sheet);
+      return;
+    }
+    if (book.row >= sheet.grid.rows) {
+      this.diagnose(
+        `billboard: flipbook row ${book.row} out of range for sheet "${data.sheet}" (${sheet.grid.rows} rows)`,
+      );
+      this.placeholder(`row ${book.row}`);
+      return;
+    }
+    const url = resolvers.texture?.(sheet.texture);
+    if (!url) {
+      this.diagnose(`billboard: sheet "${data.sheet}" texture "${sheet.texture}" not found`);
+      this.placeholder(sheet.texture);
+      return;
+    }
+    if (book.blending === "additive") {
+      this.material.blending = THREE.AdditiveBlending;
+      this.material.depthWrite = false;
+    }
+    if (book.tint) this.material.color.set(book.tint);
+    new THREE.TextureLoader().load(
+      url,
+      (texture) => {
+        texture.colorSpace = THREE.SRGBColorSpace;
+        texture.magFilter = THREE.LinearFilter;
+        const image = texture.image as { width: number; height: number };
+        this.material.map = texture;
+        this.material.needsUpdate = true;
+        this.flip = {
+          grid: { cols: sheet.grid!.cols, rows: sheet.grid!.rows },
+          sheet,
+          imageW: image.width,
+          imageH: image.height,
+          row: book.row,
+          frame: 0,
+          time: 0,
+          playing: book.playing,
+        };
+        this.applyFlipFrame();
+      },
+      undefined,
+      (error) => console.warn(`[billboard] flipbook texture failed to load: ${url}`, error),
+    );
+  }
+
+  /** Point the material's UV window at the current (row, frame) cell. */
+  private applyFlipFrame(): void {
+    const flip = this.flip;
+    const map = this.material.map;
+    if (!flip || !map || !flip.sheet.grid) return;
+    const rect = gridFrameRect(flip.sheet.grid, flip.row * flip.grid.cols + flip.frame);
+    if (!rect) return;
+    const uv = frameToUv(rect, flip.imageW, flip.imageH);
+    map.offset.set(uv.offsetX, uv.offsetY);
+    map.repeat.set(uv.repeatX, uv.repeatY);
+  }
+
+  /** Advance a playing flipbook. No-op for bar/text/static sprites. */
+  update(dt: number): void {
+    const flip = this.flip;
+    const book = this.data.flipbook;
+    if (!flip || !book || !flip.playing) return;
+    flip.time += dt;
+    const next = Math.floor(flip.time * book.fps);
+    if (next === flip.frame) return;
+    if (next >= flip.grid.cols) {
+      if (book.loop) {
+        flip.frame = next % flip.grid.cols;
+        flip.time %= flip.grid.cols / book.fps;
+      } else {
+        flip.frame = flip.grid.cols - 1;
+        flip.playing = false;
+        if (book.hideOnEnd) this.sprite.visible = false;
+        return;
+      }
+    } else {
+      flip.frame = next;
+    }
+    this.applyFlipFrame();
   }
 
   /** Unmissable magenta stand-in for unresolvable sprite content. */
@@ -261,6 +401,17 @@ class Billboard {
     if (opts.fill !== undefined) this.fill = clamp01(opts.fill);
     if (opts.text !== undefined) this.text = opts.text;
     if (opts.visible !== undefined) this.sprite.visible = opts.visible;
+    if (this.flip) {
+      if (opts.row !== undefined && opts.row < this.flip.grid.rows) this.flip.row = opts.row;
+      if (opts.tint) this.material.color.set(opts.tint);
+      if (opts.play) {
+        this.flip.frame = 0;
+        this.flip.time = 0;
+        this.flip.playing = true;
+        this.sprite.visible = opts.visible ?? true;
+      }
+      if (opts.row !== undefined || opts.play) this.applyFlipFrame();
+    }
     this.redraw(); // no-op when nothing drawn changed
   }
 
@@ -277,7 +428,8 @@ class Billboard {
  * Data-driven world-space billboard host (HP bars, name labels, icon sprites),
  * shaped like ParticleSystem: entities register during buildScene (via
  * BuildOptions.onBillboard); scripts mutate at runtime through setValue.
- * Sprites face the camera by construction, so there is no per-frame update.
+ * Sprites face the camera by construction; the only per-frame work is
+ * advancing flipbook effects, so `update` is free when none are registered.
  */
 export class BillboardSystem {
   private readonly billboards = new Map<string, Billboard>();
@@ -305,6 +457,11 @@ export class BillboardSystem {
   /** Runtime-only mutation for scripts: fill clamped to 0..1; redraws only on change. */
   setValue(entityId: string, opts: BillboardValue): void {
     this.billboards.get(entityId)?.setValue(opts);
+  }
+
+  /** Advance flipbook playback. Call once per rendered frame. */
+  update(dt: number): void {
+    for (const billboard of this.billboards.values()) billboard.update(dt);
   }
 
   diagnostics(): readonly string[] {

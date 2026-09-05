@@ -34,6 +34,47 @@ import {
 export interface ImpostorBakeOptions {
   grid?: number;
   frameSize?: number;
+  /** Bake into the shared page (default) or into textures of this model's own. */
+  shared?: boolean;
+}
+
+/**
+ * One PAGE of many models' atlases — the same two render targets, each model
+ * in its own block — so every impostor in the world samples one texture pair
+ * and a supercell's species can share a draw (`impostorPageMaterial`). A
+ * 4096² page holds 49 default-sized (576²) blocks; a second page opens when
+ * the first is full. Pages are never freed: they are bounded by unique
+ * models, not by what is loaded.
+ */
+const PAGE_SIZE = 4096;
+
+interface ImpostorPage {
+  albedo: THREE.RenderTarget;
+  normal: THREE.RenderTarget;
+  /** Next free block, in blocks. */
+  cursor: number;
+  perRow: number;
+  blockSize: number;
+  cleared: boolean;
+}
+
+const pages: ImpostorPage[] = [];
+
+function pageWithRoom(blockSize: number): ImpostorPage {
+  const perRow = Math.floor(PAGE_SIZE / blockSize);
+  for (const page of pages) {
+    if (page.blockSize === blockSize && page.cursor < perRow * perRow) return page;
+  }
+  const page: ImpostorPage = {
+    albedo: new THREE.RenderTarget(PAGE_SIZE, PAGE_SIZE),
+    normal: new THREE.RenderTarget(PAGE_SIZE, PAGE_SIZE),
+    cursor: 0,
+    perRow,
+    blockSize,
+    cleared: false,
+  };
+  pages.push(page);
+  return page;
 }
 
 function normalMaterialFor(source: THREE.Material): THREE.MeshBasicNodeMaterial {
@@ -55,11 +96,14 @@ function renderFrames(
   radius: number,
   grid: number,
   frameSize: number,
+  originX = 0,
+  originY = 0,
+  clear = true,
 ): void {
   const camera = new THREE.OrthographicCamera(-radius, radius, radius, -radius, 0.01, radius * 4);
   const dir = new THREE.Vector3();
   renderer.setRenderTarget(target);
-  renderer.clear();
+  if (clear) renderer.clear();
   const prevAutoClear = renderer.autoClear;
   renderer.autoClear = false;
   try {
@@ -70,7 +114,7 @@ function renderFrames(
         camera.position.copy(center).addScaledVector(dir, radius * 2);
         camera.lookAt(center);
         camera.updateMatrixWorld();
-        target.viewport.set(i * frameSize, j * frameSize, frameSize, frameSize);
+        target.viewport.set(originX + i * frameSize, originY + j * frameSize, frameSize, frameSize);
         renderer.render(scene, camera);
       }
     }
@@ -108,8 +152,15 @@ export function bakeImpostorAtlas(
     // pass 1: albedo under a flat white ambient (see header)
     const ambient = new THREE.AmbientLight(0xffffff, Math.PI);
     scene.add(ambient);
-    const albedo = new THREE.RenderTarget(size, size);
-    renderFrames(gl, scene, albedo, center, radius, grid, frameSize);
+    const shared = options.shared !== false;
+    const page = shared ? pageWithRoom(size) : null;
+    const block = page ? page.cursor++ : 0;
+    const originX = page ? (block % page.perRow) * size : 0;
+    const originY = page ? Math.floor(block / page.perRow) * size : 0;
+    const albedo = page ? page.albedo : new THREE.RenderTarget(size, size);
+    // a page is cleared once, on its first block; every later block draws
+    // into its own rectangle of the same target
+    renderFrames(gl, scene, albedo, center, radius, grid, frameSize, originX, originY, !page || !page.cleared);
     scene.remove(ambient);
 
     // pass 2: model-space normals, same frames
@@ -121,11 +172,17 @@ export function bakeImpostorAtlas(
         ? mesh.material.map((m) => normalMaterialFor(m))
         : normalMaterialFor(mesh.material);
     });
-    const normal = new THREE.RenderTarget(size, size);
-    renderFrames(gl, scene, normal, center, radius, grid, frameSize);
-
+    const normal = page ? page.normal : new THREE.RenderTarget(size, size);
+    renderFrames(gl, scene, normal, center, radius, grid, frameSize, originX, originY, !page || !page.cleared);
+    if (page) page.cleared = true;
     const backend = gl.backend as { isWebGPUBackend?: boolean };
-    return { albedo: albedo.texture, normal: normal.texture, grid, flipFrames: backend.isWebGPUBackend === true };
+    return {
+      albedo: albedo.texture,
+      normal: normal.texture,
+      grid,
+      flipFrames: backend.isWebGPUBackend === true,
+      ...(page ? { region: { u: originX / PAGE_SIZE, v: originY / PAGE_SIZE, scale: size / PAGE_SIZE } } : {}),
+    };
   } catch (error) {
     console.warn("[impostor] bake failed, falling back to primitive far proxies:", error);
     return null;
