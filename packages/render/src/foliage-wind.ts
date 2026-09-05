@@ -10,6 +10,7 @@ import {
   smoothstep,
   time,
   vec3,
+  uniform,
 } from "three/tsl";
 import { editMeshMaterials } from "./node-material.js";
 
@@ -54,6 +55,22 @@ export interface FoliageWindOptions {
    * is not.
    */
   canopy?: number;
+  /**
+   * Only move materials whose name, or whose colour map's name, contains
+   * this (case-insensitive). The rest of the model stands still and the
+   * canopy height test is skipped: the leaves are picked by NAME. Blockbench
+   * exports an unnamed pasted texture as literally "pasted", so a model
+   * whose textures were never named matches nothing and gets no wind.
+   */
+  materials?: string;
+}
+
+/** Does this material answer to the `materials` filter — by its own name, or its colour map's? */
+export function windMaterialMatches(material: THREE.Material, filter: string): boolean {
+  const needle = filter.toLowerCase();
+  if (material.name && material.name.toLowerCase().includes(needle)) return true;
+  const map = (material as THREE.Material & { map?: THREE.Texture | null }).map;
+  return !!map?.name && map.name.toLowerCase().includes(needle);
 }
 
 /**
@@ -77,6 +94,17 @@ export interface FoliageWindOptions {
  * means this survives the mid-tier decimation and the HLOD merge without
  * needing an attribute that either pass could drop.
  */
+/**
+ * Scene-wide multiplier on every foliage wind — one uniform, so a weather
+ * script can raise a storm without touching a material (a strength baked per
+ * material is what the authored look is; this scales it).
+ */
+const windScale = uniform(1);
+
+export function setFoliageWindScale(scale: number): void {
+  windScale.value = Math.max(0, scale);
+}
+
 export function applyFoliageWind(root: THREE.Object3D, options: FoliageWindOptions): number {
   const strength = Math.max(0, options.strength);
   if (strength === 0) return 0;
@@ -102,11 +130,13 @@ export function applyFoliageWind(root: THREE.Object3D, options: FoliageWindOptio
     const bend = mul(up, up);
     // two waves at an irrational-ish ratio: one period is obvious as a loop
     const wave = add(sin(add(t, place)), mul(sin(add(mul(t, float(0.37)), mul(place, float(0.6)))), float(0.5)));
-    const amount = mul(wave, mul(bend, float(strength)));
+    const amount = mul(wave, mul(bend, mul(float(strength), windScale)));
     offset = vec3(amount, mul(amount, float(-0.12)), mul(amount, float(0.35))) as unknown as N;
   } else {
     const canopy = Math.min(0.95, Math.max(0, options.canopy ?? 0.35));
-    const mask = smoothstep(float(canopy), float(Math.min(0.98, canopy + 0.2)), up);
+    // with a material filter the leaves are chosen by name, so every vertex
+    // of a matching material moves — a low-hanging leaf card is still a leaf
+    const mask = options.materials ? float(1) : smoothstep(float(canopy), float(Math.min(0.98, canopy + 0.2)), up);
     // Phase from the MODEL-LOCAL vertex, so cards on one tree are out of step
     // with each other — that incoherence is the entire difference between a
     // ripple and a sway. `place` is folded in only so two trees standing side
@@ -118,12 +148,14 @@ export function applyFoliageWind(root: THREE.Object3D, options: FoliageWindOptio
     const phase = add(vertex, place);
     const a = sin(add(t, phase));
     const b = sin(add(mul(t, float(1.7)), mul(phase, float(1.3))));
-    const amp = mul(mask, float(strength));
+    const amp = mul(mask, mul(float(strength), windScale));
     offset = vec3(mul(a, amp), mul(b, mul(amp, float(0.45))), mul(b, amp)) as unknown as N;
   }
 
+  const filter = options.materials?.trim();
   return editMeshMaterials(root, (material) => {
     if (material.userData[FOLIAGE_WIND]) return false;
+    if (filter && !windMaterialMatches(material, filter)) return false;
     material.positionNode = add(positionLocal, offset);
     material.userData[FOLIAGE_WIND] = true;
     return true;

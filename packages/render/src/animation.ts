@@ -21,6 +21,8 @@ interface Entry {
  */
 export class AnimationSystem {
   private readonly entries = new Map<string, Entry>();
+  /** Parent entity id -> the child entity whose model answers for it. */
+  private readonly delegates = new Map<string, string>();
   private running = false;
 
   /**
@@ -36,8 +38,17 @@ export class AnimationSystem {
     root: THREE.Object3D,
     clips: THREE.AnimationClip[],
     animator: AnimatorData | null,
+    parentEntityId?: string | null,
   ): void {
     if (clips.length === 0) return;
+    // A character is a physics body with its model on a CHILD entity — the
+    // body's rotation belongs to the sim, so the visual has to be separately
+    // steerable. Scripts live on the body and address animation by their own
+    // id, so the child registers itself as the body's stand-in. First model
+    // under a parent wins; a second one does not displace it.
+    if (parentEntityId && !this.delegates.has(parentEntityId)) {
+      this.delegates.set(parentEntityId, entityId);
+    }
     const mixer = new THREE.AnimationMixer(root);
     const actions = new Map(clips.map((clip) => [clip.name, mixer.clipAction(clip)]));
     mixer.timeScale = animator?.speed ?? 1;
@@ -51,13 +62,26 @@ export class AnimationSystem {
     if (this.running && animator?.play) this.play(entityId, animator.play, 0);
   }
 
+  /**
+   * The entry that answers for an entity: its own model, else the model on the
+   * child it registered through. Everything public here goes via this, so a
+   * script on a physics body and an animator on that body's visual child are
+   * the same thing from the outside.
+   */
+  private entryFor(entityId: string): Entry | undefined {
+    const own = this.entries.get(entityId);
+    if (own) return own;
+    const delegate = this.delegates.get(entityId);
+    return delegate ? this.entries.get(delegate) : undefined;
+  }
+
   clipNames(entityId: string): string[] {
-    return [...(this.entries.get(entityId)?.actions.keys() ?? [])];
+    return [...(this.entryFor(entityId)?.actions.keys() ?? [])];
   }
 
   /** The clip currently playing (net replication reads this per tick). */
   currentClip(entityId: string): string | null {
-    return this.entries.get(entityId)?.current ?? null;
+    return this.entryFor(entityId)?.current ?? null;
   }
 
   /**
@@ -67,7 +91,7 @@ export class AnimationSystem {
    * "animation.completed"); the default loops forever and never finishes.
    */
   play(entityId: string, clip: string, fade = 0.3, loop = true): void {
-    const entry = this.entries.get(entityId);
+    const entry = this.entryFor(entityId);
     if (!entry) return;
     const next = entry.actions.get(clip);
     if (!next) {
@@ -87,6 +111,19 @@ export class AnimationSystem {
     if (prev && fade > 0) next.crossFadeFrom(prev, fade, true);
     else prev?.stop();
     entry.current = clip;
+  }
+
+  /**
+   * Scale playback rate on top of the animator's authored `speed`. This is
+   * what keeps a locomotion clip's feet planted: an in-place walk cycle is
+   * authored for one ground speed, so a character moving faster than that
+   * skates unless the clip plays proportionally faster. Runtime-only, like
+   * every other channel here — the animator component never changes.
+   */
+  setSpeed(entityId: string, multiplier: number): void {
+    const entry = this.entryFor(entityId);
+    if (!entry) return;
+    entry.mixer.timeScale = (entry.animator?.speed ?? 1) * multiplier;
   }
 
   /** Play mode started: run every animator's declared clip. */
@@ -111,9 +148,13 @@ export class AnimationSystem {
   unregister(entityId: string): void {
     this.entries.get(entityId)?.mixer.stopAllAction();
     this.entries.delete(entityId);
+    for (const [parent, child] of this.delegates) {
+      if (child === entityId) this.delegates.delete(parent);
+    }
   }
 
   clear(): void {
     this.entries.clear();
+    this.delegates.clear();
   }
 }

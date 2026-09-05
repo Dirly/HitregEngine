@@ -8,6 +8,7 @@ import {
   setFoliageFade,
   FOLIAGE_FADE,
   FOLIAGE_WIND,
+  windMaterialMatches,
 } from "../src/index.js";
 
 /** A stand-in for a Blockbench plant: cutout material, standing on its base. */
@@ -120,5 +121,38 @@ describe("foliage camera fade", () => {
       setFoliageFade({ enabled: true, player: new THREE.Vector3(1, 2, 3), radius: 2, strength: 0.9 }),
     ).not.toThrow();
     setFoliageFade({ enabled: false });
+  });
+});
+
+describe("foliage wind material filter", () => {
+  /** A tree the way Blockbench exports one: trunk and leaves as two materials, only the leaf TEXTURE named. */
+  function tree(): THREE.Object3D {
+    const root = new THREE.Group();
+    const trunk = new THREE.MeshStandardMaterial({ alphaTest: 0.05 });
+    trunk.map = new THREE.Texture();
+    trunk.map.name = "pasted";
+    const leaves = new THREE.MeshStandardMaterial({ alphaTest: 0.05 });
+    leaves.map = new THREE.Texture();
+    leaves.map.name = "Leaves";
+    root.add(new THREE.Mesh(new THREE.BoxGeometry(0.3, 4, 0.3), trunk));
+    root.add(new THREE.Mesh(new THREE.BoxGeometry(3, 2, 3), leaves));
+    return root;
+  }
+
+  it("moves only the materials whose texture name matches, by name not by height", () => {
+    const root = tree();
+    expect(applyFoliageWind(root, { mode: "ripple", strength: 0.05, speed: 1, materials: "leaves" })).toBe(1);
+    const trunk = (root.children[0] as THREE.Mesh).material as THREE.Material;
+    const leaves = (root.children[1] as THREE.Mesh).material as THREE.NodeMaterial;
+    expect(trunk.userData[FOLIAGE_WIND]).toBeUndefined();
+    expect(leaves.userData[FOLIAGE_WIND]).toBe(true);
+  });
+
+  it("matches a material's own name too, and nothing when nothing is named", () => {
+    const named = new THREE.MeshStandardMaterial();
+    named.name = "Tree_Leaves_Mat";
+    expect(windMaterialMatches(named, "leaves")).toBe(true);
+    const root = tree();
+    expect(applyFoliageWind(root, { mode: "ripple", strength: 0.05, speed: 1, materials: "needles" })).toBe(0);
   });
 });
