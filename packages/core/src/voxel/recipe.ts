@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { hexColor, meshWindSchema } from "../components/core.js";
+import { hexColor, meshWindSchema, MAX_SPLAT_LAYERS } from "../components/core.js";
 
 /**
  * The world recipe: a small, hand-editable JSON document that fully determines
@@ -37,7 +37,7 @@ import { hexColor, meshWindSchema } from "../components/core.js";
  * only the three or four layers it actually blends however big the palette
  * gets.
  */
-export const MAX_SURFACES = 16;
+export const MAX_SURFACES = MAX_SPLAT_LAYERS;
 
 const fbmSchema = z.object({
   frequency: z.number().positive().describe("Cycles per world unit. 0.0008 = continents, 0.01 = hills, 0.08 = rocks."),
@@ -50,6 +50,28 @@ const fbmSchema = z.object({
     .default(false)
     .describe("Sharp crests, flat valleys — the difference between rolling hills and a mountain range."),
   seed: z.number().int().default(0).describe("Added to the world seed so two identically-tuned bands still differ."),
+  erosion: z
+    .number()
+    .min(0)
+    .max(1)
+    .optional()
+    .describe(
+      "Slope-weighted octaves: fine detail is damped where the band is already steep, so valleys come out " +
+        "smooth and walkable while ridgelines stay crisp. This is the single biggest lever against terrain " +
+        "that reads as jagged noise — plain fBm puts the same 30 m crinkle on every slope in the world. " +
+        "0.3-0.6 on the mountain band; costs ~40% more per octave (derivative noise).",
+    ),
+  crest: z
+    .number()
+    .min(0)
+    .max(1)
+    .optional()
+    .describe(
+      "Ridged bands only: round the crests. The ridged fold puts a knife-edge crease at every ridgeline and " +
+        "summit of every octave, and the voxel mesh renders each one as a corner it cannot smooth — the " +
+        "'cliffs that come to a sharp edge at the top'. 0 (default) keeps the crease; 0.2 rounds each crest " +
+        "over about a fifth of the band's swing without moving the summit line. Free.",
+    ),
 });
 
 export type FbmSpecDoc = z.infer<typeof fbmSchema>;
@@ -64,10 +86,124 @@ export const riverSchema = z.object({
   id: z.string().default("river"),
   points: polylineSchema,
   width: z.number().positive().default(8).describe("Full channel width at the bed."),
+  widths: z
+    .array(z.number().positive())
+    .optional()
+    .describe(
+      "Per-point channel width, same length as `points`, overriding `width` along the channel: a river that " +
+        "widens as tributaries join and swells around its bends. `width` must still be the WIDEST of them (it " +
+        "sizes the carve's reach and the bank). `worldgen rivers` writes both.",
+    ),
   depth: z.number().positive().default(3).describe("How far below the surrounding land the bed sits."),
-  bank: z.number().min(0).default(14).describe("Extra distance over which the banks ease back up to natural terrain."),
+  depths: z
+    .array(z.number().positive())
+    .optional()
+    .describe(
+      "Per-point channel depth, same length as `points`, overriding `depth` along the channel: a stream a " +
+        "metre deep at its head that is six metres deep where it meets the sea. The water surface sits 0.7 of " +
+        "the local depth over the bed. `depth` must still be the DEEPEST. `worldgen rivers` writes both.",
+    ),
+  bank: z
+    .number()
+    .min(0)
+    .default(14)
+    .describe(
+      "Extra distance over which the banks ease back up to natural terrain, at the channel's WIDEST; where " +
+        "`widths` are given the local bank is min(bank, 0.7 × local width + 3).",
+    ),
   /** Optional explicit bed height per control point — a real river only flows downhill. */
-  bedY: z.array(z.number()).optional().describe("Per-point bed height. Same length as `points`; omit to carve relative to local terrain."),
+  bedY: z
+    .array(z.number())
+    .optional()
+    .describe(
+      "Per-point bed height, same length as `points`. OMIT IT when writing a river by hand: the field solves a " +
+        "descending bed through the points from the ground they cross (a channel depth under it, capped at a lake's " +
+        "level from the first point under a lake, running-min from the head so a ridge in the way is cut, the mouth " +
+        "a hair under the sea or flush with the river it ends on), and the world carves, banks and waters it live. " +
+        "`worldgen rivers --trace` writes one; a hand-written doc never should.",
+    ),
+  maxGrade: z
+    .number()
+    .min(0)
+    .default(0.05)
+    .describe(
+      "Steepest bed grade the SOLVED bed may carry (rise over run; 0.05 is 5 %), applied only when `bedY` is " +
+        "omitted. Where the ground drops faster — a coastal scarp, a lake's spill — the bed upstream is cut down to " +
+        "keep the grade, so the river reaches the sea through a gorge instead of sliding down the cliff as a tilted " +
+        "sheet. Not applied inside a lake: an outlet leaves flush with its lake and cascades from there. A water " +
+        "sheet reads as a river under about 2 %, as rapids to 5 %; 0 disables the limit.",
+    ),
+  water: z
+    .boolean()
+    .default(true)
+    .describe(
+      "Emit a water surface along the channel (a ribbon at bed + most of `depth`, in the recipe's `riverMaterial`). " +
+        "false is a dry gully: carved and painted, no sheet.",
+    ),
+  surface: z
+    .string()
+    .default("sand")
+    .describe(
+      "Palette surface NAME painted on the bed and banks, so ground cover stops at the water: a channel cut " +
+        "through grassland is still grass to the splat otherwise, and the grass billboards grow in the river. " +
+        "Empty string leaves the biome's cover.",
+    ),
+  surfaceEdge: z.number().min(0).default(3).describe("World units over which the bed surface fades into the bank."),
+  taper: z
+    .number()
+    .min(0)
+    .default(0)
+    .describe(
+      "Metres over which the channel grows from a trickle to full width and depth at its HEAD. Without it a " +
+        "river begins at full size in the middle of a field, which is the single most obvious tell of a traced " +
+        "channel; with it the source reads as a stream forming.",
+    ),
+});
+
+/**
+ * A lake: standing water at ITS OWN level, which is the whole point. The ocean
+ * plane sits at `seaLevel`; a tarn at 300 m or a swamp pool at 4 m needs a
+ * surface of its own, and the basin under it is carved so the water has
+ * somewhere to be. Written by `worldgen rivers` wherever a watercourse
+ * fills a depression on its way to the sea, and hand-placeable.
+ */
+export const lakeSchema = z.object({
+  id: z.string().default("lake"),
+  center: z.tuple([z.number(), z.number()]),
+  polygon: z
+    .array(z.tuple([z.number(), z.number()]))
+    .min(3)
+    .optional()
+    .describe("World-space XZ outline of the shore. Omit for a disc of `radius` about `center`."),
+  radius: z.number().positive().default(60),
+  waterY: z.number().describe("Surface height. The basin is carved to sit below it; land outside the outline is untouched past `bank`."),
+  depth: z.number().positive().default(6).describe("How far below the surface the deepest water is."),
+  bank: z.number().min(0).default(18).describe("Distance over which the shore eases from the waterline back to natural terrain, and the bed from the shore down to `depth`."),
+  carve: z
+    .boolean()
+    .default(true)
+    .describe(
+      "true (hand-placed lakes): dig the basin — everything inside the outline goes down to `depth`, and a " +
+        "`bank` outside it eases to the waterline, whatever the ground was. false (`worldgen rivers` writes " +
+        "this): the terrain already holds the basin the hydrology found, so only ground at or under the " +
+        "surface is deepened, blended over two banks, and ground standing over a metre above it — an island, " +
+        "or an outline that overshot onto a hillside — is left alone. Carving a traced outline dug craters " +
+        "with vertical walls where it strayed uphill.",
+    ),
+  material: z
+    .string()
+    .optional()
+    .describe("Water material for THIS lake, overriding the recipe's `waterMaterial`. A swamp pool is still, murky and opaque; a tarn is clear — one water for both reads wrong in both."),
+  surface: z
+    .string()
+    .default("")
+    .describe(
+      "Palette surface NAME painted on the bed and a `shore` band around the outline — wet sand, gravel — so " +
+        "the ground under and beside the water is not the biome's grass. Empty leaves the biome's cover; an " +
+        "unknown name paints nothing.",
+    ),
+  shore: z.number().min(0).default(8).describe("Metres beyond the outline the `surface` fades out over."),
+  tags: z.array(z.string()).default([]),
 });
 
 /** A road/trail flattened along a polyline. Written by `worldgen roads`. */
@@ -78,6 +214,24 @@ export const roadSchema = z.object({
   shoulder: z.number().min(0).default(8).describe("Distance over which the cut/fill eases back into natural terrain."),
   /** Per-point road surface height — roads are graded, so this is what makes them drivable. */
   surfaceY: z.array(z.number()).optional(),
+  smooth: z
+    .number()
+    .min(0)
+    .default(0)
+    .describe(
+      "Metres BEYOND the shoulder over which the ground is regraded into a smooth embankment: from the road " +
+        "edge out to `shoulder + smooth`, the natural terrain is replaced by a clean slope from the road " +
+        "surface to `leftY`/`rightY` and only fades back into the rough ground at the outer edge. Without it " +
+        "the shoulder merely blends the road height into whatever crinkle is there, and a road across noisy " +
+        "ground reads as a notch in jagged terrain. Needs `leftY`/`rightY`; `worldgen roads` writes all three.",
+    ),
+  /**
+   * Smoothed ground height at the OUTER edge of the smoothing band on each
+   * side, per point. "Left" is the side where the cross product of the travel
+   * direction (a -> b) with the offset from the centreline is positive.
+   */
+  leftY: z.array(z.number()).optional().describe("Per-point ground height at the outer edge of the `smooth` band on the road's left (positive cross-product side)."),
+  rightY: z.array(z.number()).optional().describe("Per-point ground height at the outer edge of the `smooth` band on the road's right."),
   flatten: z.number().min(0).max(1).default(1).describe("How completely the road height wins over natural terrain."),
   surface: z
     .string()
@@ -92,6 +246,70 @@ export const roadSchema = z.object({
     .min(0)
     .default(2.5)
     .describe("World units over which the painted surface fades into the surrounding ground. The verge."),
+  surfaceByBiome: z
+    .record(z.string(), z.string())
+    .optional()
+    .describe(
+      "Palette surface NAME to paint instead of `surface` where a given biome (by id) holds the ground — " +
+        "`{ alpine: \"gravel\" }` makes a footpath gravel across the snow and dirt everywhere else. Blended by " +
+        "biome membership, so the swap fades across the biome boundary. `worldgen paths`/`trails` write " +
+        "gravel for every snow-dominant biome when the palette has gravel.",
+    ),
+});
+
+/**
+ * A river drawn by hand (the editor's path tool, imported by `worldgen
+ * river-path`) or by an agent writing points straight into the recipe. It is
+ * AUTHORING input, not a river: `worldgen rivers` solves a downhill bed along
+ * it, sizes the channel from `width`, splits it into wet and dry reaches and
+ * writes the result into `features.rivers` like any traced channel — and the
+ * land is carved and banked to it, so a path drawn across a ridge becomes a
+ * gorge. Re-running the stage re-solves it; the path itself is never touched.
+ */
+export const riverPathSchema = z.object({
+  id: z.string().default("path"),
+  points: polylineSchema.describe("World-space XZ, head first, mouth last."),
+  width: z.number().positive().default(14).describe("Channel width at the mouth; the head is narrower unless `widths` are given."),
+  widths: z.array(z.number().positive()).optional().describe("Per-point width, same length as `points`."),
+  tags: z.array(z.string()).default([]),
+});
+
+/**
+ * A hollow filled with sediment: ground inside the outline is RAISED to `y`
+ * (never lowered), easing back to natural terrain over `bank` outside it.
+ * Written by `worldgen rivers` for every depression the channel network
+ * crosses that is too small to keep as a lake — the river then cuts its
+ * channel through a flat valley floor instead of running through a chain
+ * of ponds. This is the "terrain around the rivers" half of rivers-first:
+ * the drainage decides the land, not the other way round.
+ */
+export const fillSchema = z.object({
+  id: z.string().default("fill"),
+  polygon: z.array(z.tuple([z.number(), z.number()])).min(3).describe("World-space XZ outline of the hollow."),
+  y: z.number().describe("Height the floor is raised to: the hollow's spill level, a little over."),
+  bank: z.number().min(0).default(12).describe("Distance beyond the outline over which the raise eases out."),
+  tags: z.array(z.string()).default([]),
+});
+
+/**
+ * A road crossing a river: the road is split at the banks and this spans the
+ * gap. Written by `worldgen roads` wherever a route crosses a channel too
+ * wide to ford; the terrain under it is untouched (the water runs through),
+ * and the streamed cell emits a deck for it. A WFC bridge builder can read
+ * these and replace the deck with real architecture.
+ */
+export const bridgeSchema = z.object({
+  id: z.string().default("bridge"),
+  points: z
+    .tuple([z.tuple([z.number(), z.number()]), z.tuple([z.number(), z.number()])])
+    .describe("World-space XZ of the two abutments: where the road stops on one bank and resumes on the other."),
+  width: z.number().positive().default(6).describe("Deck width — the road's."),
+  deckY: z.number().describe("Height of the deck surface; the roads on both banks end at this height."),
+  thickness: z.number().min(0).default(0.6).describe("Deck slab thickness, hanging below `deckY`."),
+  river: z.string().default("").describe("Id of the river crossed."),
+  waterY: z.number().optional().describe("Water surface under the span, for the WFC stage to size piers."),
+  material: z.string().optional().describe("Material for the deck, overriding the recipe's `bridgeMaterial`."),
+  tags: z.array(z.string()).default([]),
 });
 
 /** A settlement pad: terrain pulled flat so WFC buildings have somewhere to stand. */
@@ -277,6 +495,15 @@ const biomeSchema = z.object({
     ),
   cliffEnd: z.number().min(0).max(1).default(0.82).describe("Steepness at which `cliff` fully replaces `surface`. 0.82 is 55 degrees."),
   tint: hexColor.optional().describe("Multiplied over the blended surface color — cheap per-biome variation."),
+  zones: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Zone anchor ids (`climate.zones.anchors[].id`) this rule belongs to. The rule's membership is multiplied " +
+        "by the blended zone weight, so a rule listed here exists ONLY inside those zones — which is how a " +
+        "blighted region and a badland can both be hot-and-dry without fighting over the same climate corner. " +
+        "Omit for a rule that applies wherever its climate/height/slope windows say.",
+    ),
   label: z
     .boolean()
     .default(true)
@@ -479,8 +706,25 @@ const scatterSchema = z.object({
   alignToNormal: z.number().min(0).max(1).default(0).describe("0 = always upright, 1 = fully laid onto the slope."),
   yOffset: z.number().default(0).describe("Sink (negative) or lift the instance along its own up axis."),
   jitter: z.number().min(0).max(1).default(0.85).describe("How far off its lattice point each instance may wander."),
-  /** Keep clear of towns/roads/rivers by this much — nobody wants a tree in the high street. */
-  clearance: z.number().min(0).default(0),
+  /** Keep clear of towns/paths/rivers by this much — nobody wants a tree in the high street. */
+  clearance: z
+    .number()
+    .min(0)
+    .default(1.5)
+    .describe(
+      "Metres kept clear of every feature's EDGE — a path's shoulder, a river's bank foot, a town's radius, a " +
+        "monolith's footprint. 0 lets the rule stand props on a footpath, which is never wanted.",
+    ),
+  footprint: z
+    .number()
+    .min(0)
+    .default(0)
+    .describe(
+      "Radius of the prop's own ground footprint in MODEL units (scaled per instance). Two props are placed " +
+        "no closer than the SUM of their footprints plus `spacing`, and rules are solved largest-footprint " +
+        "first so big things claim ground before small ones fill in around them. 0 = derive from colliderSize.",
+    ),
+  spacing: z.number().min(0).default(0.5).describe("Extra clear ground kept between this prop and any other, in world units."),
   collider: z.enum(["none", "capsule", "box", "cylinder"]).default("none"),
   colliderSize: z.tuple([z.number(), z.number(), z.number()]).default([1, 2, 1]),
   static: z.boolean().default(true),
@@ -525,6 +769,27 @@ const continentSchema = z.object({
     .positive()
     .default(1100)
     .describe("Metres per lobe of coastline wobble. Small values fray the coast into inlets; large ones bend the whole landmass."),
+  coastVariation: z
+    .number()
+    .min(0)
+    .max(0.95)
+    .default(0)
+    .describe(
+      "How much `falloff` varies around the coast, as a fraction. 0.6 means some stretches of shore descend " +
+        "over 40% of the band (steep: headlands and sea cliffs) and others over 160% (gentle: beaches and " +
+        "shallow bays). This is what gives one island a beach on one side and cliffs on the other.",
+    ),
+  coastVariationScale: z.number().positive().default(1800).describe("Metres per cycle of the falloff variation — how long a stretch of cliff or beach coast is."),
+  lobes: z
+    .array(z.tuple([z.number(), z.number(), z.number()]))
+    .default([])
+    .describe(
+      "Extra discs [dx, dz, radius], relative to `center`, smoothly UNIONED with the main one. This is what " +
+        "stops a continent being a circle: two or three lobes make a crescent, an L, a landmass with a " +
+        "peninsula and a gulf. Each lobe still gives an exact distance to its shore, so the shore profile and " +
+        "the land floor hold everywhere.",
+    ),
+  lobeBlend: z.number().min(0).default(500).describe("Metres over which lobes merge into one another instead of meeting at a crease. Wider = softer bays where they join."),
 });
 
 /** Continents + the sea around them. See `worldRecipeSchema.bounds`. */
@@ -537,7 +802,111 @@ const boundsSchema = z.object({
       "Ground height far out to sea, well below seaLevel so open water is unmistakably water. Keep it above " +
         "`minY` or the sea bed falls through the world's solid floor.",
     ),
+  landFloor: z
+    .number()
+    .min(0)
+    .default(0)
+    .describe(
+      "Metres above seaLevel that the INTERIOR of a landmass is held at or above. Above 0 this switches the " +
+        "continent from a height blend to a shore PROFILE: the ground rises from oceanFloor to this floor across " +
+        "the coast band and the terrain's own relief fades in on top of it, so the coastline is exactly the " +
+        "warped outline of the continent and nowhere else. That is what keeps the ocean from bleeding into every " +
+        "inland dip — with the interior held above the sea, standing water inland is only ever a LAKE at its " +
+        "own level. 0 = the legacy blend (inland hollows below seaLevel fill with ocean).",
+    ),
+  shelf: z
+    .number()
+    .min(0.05)
+    .max(0.95)
+    .default(0.58)
+    .describe("Where in the coast band (0 = open sea, 1 = inland) the shoreline sits when `landFloor` is set. Lower = more of the band is beach and shallows."),
+  limit: z
+    .number()
+    .positive()
+    .optional()
+    .describe(
+      "THE WORLD BOUNDARY: distance from the origin beyond which everything is open ocean at oceanFloor, " +
+        "whatever the continents say. Streaming skips cells past it, the ocean plane is sized to it, and " +
+        "nothing is placed beyond it. Omit for no hard edge.",
+    ),
+  limitFalloff: z.number().positive().default(600).describe("Metres over which land is pulled under approaching `limit`."),
 });
+
+/**
+ * One kind of place a zone can be. A zone is assigned exactly one anchor, so
+ * a zone IS a desert, or a forest, or a badland — never a gradient between
+ * them. Its climate values are what the biome rules window on, and the
+ * landform multipliers are what make it a different SHAPE of ground rather
+ * than the same hills in a different colour.
+ */
+const zoneAnchorSchema = z.object({
+  id: z.string(),
+  temperature: z.number().min(0).max(1),
+  moisture: z.number().min(0).max(1),
+  weight: z.number().positive().default(1).describe("How often zones pick this anchor, relative to the others."),
+  latitude: z
+    .number()
+    .min(0)
+    .max(1)
+    .optional()
+    .describe(
+      "Preferred latitude band, 0 = the cold pole, 1 = the hot pole (see `climate.zones.latitude`). A zone " +
+        "picks anchors by weight TIMES how close its own latitude is to this, so tundra collects at one end of " +
+        "the world and jungle at the other instead of both being sprinkled everywhere. Omit = anywhere.",
+    ),
+  relief: z.number().min(0).default(0.15).describe("Multiplies the MOUNTAIN band here. 1 = a mountain zone; 0 = no peaks at all."),
+  hills: z.number().min(0).default(1).describe("Multiplies the hills band. 0 = a plain; 1.5 = broken country."),
+  dunes: z.number().min(0).default(0).describe("Multiplies the dune band (`terrain.dunes`) here. 1 = a dune sea."),
+  mesas: z.number().min(0).default(0).describe("Multiplies the mesa band (`terrain.mesas`) here. 1 = badlands: terraced tables and buttes."),
+  flatten: z
+    .number()
+    .min(0)
+    .max(1)
+    .default(0)
+    .describe("Pulls the continent band down toward the land floor. 1 = a low, level plain hugging the waterline — swamp ground."),
+});
+
+/**
+ * Zones: the world cut into large regions, each one kind of place.
+ *
+ * Climate from smooth noise gives patches — a desert the size of a field next
+ * to a tundra the size of a field, because that is what the middle of a noise
+ * field looks like at every scale. A world you travel through wants regions
+ * you can be IN: a desert that takes ten minutes to cross, a forest with a
+ * heart and an edge. So the plane is cut into jittered Voronoi cells of
+ * roughly `size` metres, each cell picks ONE anchor, and only the border
+ * between two cells is blended. Everything else — the biome rules, the
+ * patches, the scatter — reads the result through the same climate values it
+ * always did, so nothing downstream knows zones exist.
+ */
+const zonesSchema = z.object({
+  size: z.number().positive().default(2400).describe("Mean zone diameter in metres. A region should take minutes to cross, not seconds."),
+  jitter: z.number().min(0).max(1).default(0.85).describe("How far each zone's site wanders from its grid point. 0 is a checkerboard."),
+  warp: z.number().min(0).default(260).describe("Metres the zone borders are pushed around by noise, so they read as coastlines rather than as cell walls."),
+  warpFrequency: z.number().positive().default(0.0009),
+  border: z.number().positive().default(220).describe("Width of the blend between two zones, in metres. Biome rules still see a gradient across it."),
+  latitude: z
+    .object({
+      strength: z.number().min(0).max(1).default(0.7).describe("How strongly zones sort by latitude. 0 = anchors are picked by weight alone."),
+      scale: z.number().positive().default(6000).describe("Metres from the cold pole to the hot one, centred on the origin along `axis`."),
+      axis: z.enum(["x", "z"]).default("z"),
+      flip: z.boolean().default(false).describe("Swap which end is hot."),
+    })
+    .prefault({}),
+  anchors: z.array(zoneAnchorSchema).min(1),
+  seed: z
+    .number()
+    .int()
+    .default(0)
+    .describe(
+      "Added to the world seed for the zone layout alone, so the layout can be re-rolled without moving a " +
+        "single hill. Which anchor a zone gets is a draw, and a small world can draw no desert at all: a " +
+        "generator that needs every kind of place can sweep this until each anchor covers real land.",
+    ),
+});
+
+export type ZoneAnchorDoc = z.infer<typeof zoneAnchorSchema>;
+export type ZonesDoc = z.infer<typeof zonesSchema>;
 
 export const worldRecipeSchema = z.object({
   version: z.literal(1),
@@ -652,6 +1021,34 @@ export const worldRecipeSchema = z.object({
             "makes a desert a different PLACE rather than the same hills in a different colour, and the pattern " +
             "generalises: any biome that should have its own landform gets a masked band like this one.",
         ),
+      mesas: z
+        .object({
+          amplitude: z.number().min(0).default(0).describe("World units of table height. 0 disables the band."),
+          frequency: z.number().positive().default(0.0032),
+          octaves: z.number().int().min(1).max(5).default(3),
+          steps: z.number().int().min(1).max(8).default(4).describe("Strata per table: each is a riser and a tread."),
+          sharpness: z.number().min(0).max(0.98).default(0.8).describe("How square the risers are. 0 is a smooth dome."),
+          seed: z.number().int().default(719),
+        })
+        .prefault({})
+        .describe(
+          "BADLANDS landform: a terraced plateau band, added where a zone anchor's `mesas` says so. Tables, " +
+            "buttes and stepped strata — the shape that reads as badland, which no amount of red texture on " +
+            "rolling hills achieves. The band is masked by the ZONE, so it is off everywhere unless an anchor " +
+            "asks for it.",
+        ),
+      ceiling: z
+        .object({
+          height: z.number().positive().default(560).describe("The highest the ground can be, asymptotically. Peaks approach it and never reach it."),
+          softness: z.number().positive().default(140).describe("Metres below `height` at which the compression begins. Wider = gentler summits."),
+        })
+        .optional()
+        .describe(
+          "MAX HEIGHT: a smooth, monotonic compression of everything above `height - softness` toward `height`. " +
+            "It is what lets the mountain band have a big amplitude (for tall, steep flanks) without any peak " +
+            "punching through `maxY` and being sliced flat — and it gives every summit in the world a common " +
+            "sense of scale. Omit for no ceiling.",
+        ),
       cliffs: z
         .object({
           enabled: z.boolean().default(false),
@@ -676,6 +1073,17 @@ export const worldRecipeSchema = z.object({
             .max(1)
             .default(1)
             .describe("How much of the terraced profile to blend in where the mask is full. Below 1 the risers soften back toward the raw slope."),
+          rounding: z
+            .number()
+            .min(0)
+            .max(0.5)
+            .default(0.25)
+            .describe(
+              "Fraction of each riser's height spent easing into the tread at its top and foot, instead of " +
+                "meeting it at a crease. 0 is the raw clamp — a riser that hits the tread at a corner, which the " +
+                "mesh renders as a knife edge along every cliff top. 0.25 rounds the crest and the foot over a " +
+                "quarter of the riser each while the middle half stays as sheer as `sharpness` asks.",
+            ),
           minBands: z
             .number()
             .min(0)
@@ -714,7 +1122,7 @@ export const worldRecipeSchema = z.object({
           jitterFrequency: z.number().positive().default(0.02),
           seed: z.number().int().default(613),
         })
-        .default({ enabled: false, step: 55, sharpness: 0.86, strength: 1, minBands: 1.6, mask: { frequency: 0.0012, start: 0.44, end: 0.58, octaves: 3, seed: 881 }, jitter: 22, jitterFrequency: 0.02, seed: 613 })
+        .default({ enabled: false, step: 55, sharpness: 0.86, strength: 1, rounding: 0.25, minBands: 1.6, mask: { frequency: 0.0012, start: 0.44, end: 0.58, octaves: 3, seed: 881 }, jitter: 22, jitterFrequency: 0.02, seed: 613 })
         .describe(
           "CLIFF TERRACING — the difference between marching-cubes noise and rock. fBm has a bounded gradient, " +
             "so unshaped terrain arrives as rounded bubbles with no sheer face anywhere, no matter how the " +
@@ -845,6 +1253,14 @@ export const worldRecipeSchema = z.object({
             "field, which is exactly as artificial as it sounds — a clean arc of blight sweeping across a meadow. " +
             "Set `warp` and `strength` to 0 for the old razor-smooth behaviour.",
         ),
+      zones: zonesSchema
+        .optional()
+        .describe(
+          "Cut the world into large single-purpose regions. When set, temperature and moisture come from each " +
+            "zone's anchor (blended only across borders) instead of from the `temperature`/`moisture` noise, " +
+            "and every anchor carries landform multipliers so a mountain zone HAS mountains and a swamp is " +
+            "flat. The noise fields above still add `edge.strength` speckle. Omit for the classic noise climate.",
+        ),
       /** Altitude cools the air — this is what puts snow on peaks in every biome. */
       lapseRate: z
         .number()
@@ -886,7 +1302,14 @@ export const worldRecipeSchema = z.object({
       canyons: z.array(canyonSchema).default([]).describe("Terraced gorges. Written by `worldgen canyons`."),
       roads: z.array(roadSchema).default([]),
       towns: z.array(townSchema).default([]),
-      tunnels: z.array(tunnelSchema).default([]).describe("Carved cave passages. Written by ."),
+      lakes: z.array(lakeSchema).default([]).describe("Standing water at its own level, basin carved beneath. Written by `worldgen rivers`."),
+      bridges: z.array(bridgeSchema).default([]).describe("Road decks spanning rivers. Written by `worldgen roads`."),
+      fills: z.array(fillSchema).default([]).describe("Sediment-filled hollows on the river network. Written by `worldgen rivers`."),
+      riverPaths: z
+        .array(riverPathSchema)
+        .default([])
+        .describe("Hand- or agent-drawn river centrelines. AUTHORING input: `worldgen rivers` solves each into `rivers`."),
+      tunnels: z.array(tunnelSchema).default([]).describe("Carved cave passages. Written by `worldgen caves`."),
       blobs: z.array(blobSchema).default([]),
       pois: z.array(poiSchema).default([]),
     })
@@ -970,6 +1393,28 @@ export const worldRecipeSchema = z.object({
 
   /** Material asset id used for the terrain mesh. `worldgen material` writes one matching `surfaces`. */
   material: z.string().optional(),
+  waterMaterial: z
+    .string()
+    .optional()
+    .describe(
+      "Material asset id for river ribbons and lake sheets emitted into streamed cells. Without it rivers " +
+        "are carved but dry. `worldgen init` writes one beside the terrain material.",
+    ),
+  riverMaterial: z
+    .string()
+    .optional()
+    .describe(
+      "Material asset id for river ribbons specifically — a water material with `flowMode: \"channel\"`, so " +
+        "the water visibly runs downstream. Falls back to `waterMaterial` (standing water). `worldgen rivers` " +
+        "writes `<waterMaterial>-river` and sets this.",
+    ),
+  bridgeMaterial: z
+    .string()
+    .optional()
+    .describe(
+      "Material asset id for the placeholder decks emitted for `features.bridges`. `worldgen roads` writes a " +
+        "plain timber-coloured one when the recipe has none.",
+    ),
 });
 
 export type WorldRecipe = z.infer<typeof worldRecipeSchema>;
@@ -980,6 +1425,10 @@ export type TownDoc = z.infer<typeof townSchema>;
 export type BlobDoc = z.infer<typeof blobSchema>;
 export type TunnelDoc = z.infer<typeof tunnelSchema>;
 export type PoiDoc = z.infer<typeof poiSchema>;
+export type LakeDoc = z.infer<typeof lakeSchema>;
+export type BridgeDoc = z.infer<typeof bridgeSchema>;
+export type FillDoc = z.infer<typeof fillSchema>;
+export type RiverPathDoc = z.infer<typeof riverPathSchema>;
 
 /**
  * A complete, good-looking starting world: beaches, meadows, forested hills,
@@ -1101,6 +1550,158 @@ export function defaultWorldRecipe(overrides: Partial<WorldRecipe> = {}): WorldR
       { id: "desert-dirt", surface: "dirt", biomes: ["desert"], frequency: 0.04, octaves: 2, threshold: 0.22, blend: 0.24, strength: 0.55, seed: 67 },
     ],
     scatter: [],
+  });
+  return { ...base, ...overrides };
+}
+
+/**
+ * The second-generation starting world: continents in a bounded sea, cut into
+ * large zones — tundra, taiga, mountains, highlands, grassland, forest, swamp,
+ * jungle, desert, badlands, blight — each with its own landform, plus a
+ * height ceiling, eroded mountains and a land floor that keeps the ocean out
+ * of the interior. Written by `worldgen init`; `defaultWorldRecipe` remains
+ * the classic endless-noise world.
+ *
+ * Every number here is a starting point, not a law. The design rules that
+ * are not negotiable: a zone is ONE kind of place (its anchor), the biome
+ * rules that belong to a zone are gated to it, and the altitude ladder
+ * (highland / montane / alpine) stays ungated so a peak in any zone reads as
+ * a peak.
+ */
+export function continentalWorldRecipe(overrides: Partial<WorldRecipe> = {}): WorldRecipe {
+  const classic = defaultWorldRecipe();
+  // palette: [grass, sand, rock, snow, dirt, cliff, ice, blighted, mud, redrock]
+  const G = 0;
+  const S = 1;
+  const R = 2;
+  const W = 3;
+  const D = 4;
+  const C = 5;
+  const I = 6;
+  const B = 7;
+  const M = 8;
+  const X = 9;
+  void I;
+  const w = (entries: Partial<Record<number, number>>): number[] => {
+    const out = new Array<number>(10).fill(0);
+    for (const [k, v] of Object.entries(entries)) out[Number(k)] = v ?? 0;
+    return out;
+  };
+  const base = worldRecipeSchema.parse({
+    ...classic,
+    name: "world",
+    seaLevel: 0,
+    minY: -70,
+    maxY: 700,
+    terrain: {
+      ...classic.terrain,
+      base: 55,
+      continent: { frequency: 0.00045, amplitude: 45, octaves: 4, lacunarity: 2, gain: 0.5, ridged: false, seed: 11, erosion: 0.2 },
+      hills: { frequency: 0.0055, amplitude: 14, octaves: 4, lacunarity: 2.1, gain: 0.48, ridged: false, seed: 23, erosion: 0.35 },
+      mountains: { frequency: 0.0017, amplitude: 1050, octaves: 5, lacunarity: 2.05, gain: 0.47, ridged: true, seed: 37, erosion: 0.55, crest: 0.2 },
+      mountainMask: { spec: { frequency: 0.0013, amplitude: 1, octaves: 3, lacunarity: 2, gain: 0.5, ridged: false, seed: 53 }, start: 0.38, end: 0.7 },
+      detail: { frequency: 0.035, amplitude: 1.2, octaves: 3, lacunarity: 2, gain: 0.5, ridged: false, seed: 71 },
+      ceiling: { height: 520, softness: 150 },
+      dunes: { ...classic.terrain.dunes, amplitude: 12, frequency: 0.012, stretch: 3.5, angle: 0.6 },
+      mesas: { amplitude: 70, frequency: 0.0034, octaves: 3, steps: 4, sharpness: 0.82, seed: 719 },
+      // overhangs only on genuinely steep faces: on every 20-degree slope they
+      // read as lumps, and lumps are what "jagged" looks like up close
+      overhang: { strength: 4, frequency: 0.02, slopeStart: 0.62, slopeEnd: 0.88 },
+      coast: { ...classic.terrain.coast, cliff: 2.6, band: 20 },
+    },
+    bounds: {
+      continents: [
+        { center: [0, 0], radius: 2200, falloff: 650, warp: 0.6, warpScale: 1100, coastVariation: 0.55, coastVariationScale: 1600 },
+        { center: [3300, -1900], radius: 520, falloff: 380, warp: 0.5, warpScale: 700, coastVariation: 0.5, coastVariationScale: 900 },
+        { center: [-3100, 2300], radius: 640, falloff: 420, warp: 0.5, warpScale: 700, coastVariation: 0.5, coastVariationScale: 900 },
+      ],
+      oceanFloor: -45,
+      landFloor: 4,
+      shelf: 0.58,
+      limit: 4600,
+      limitFalloff: 600,
+    },
+    climate: {
+      ...classic.climate,
+      lapseRate: 0.0015,
+      edge: { ...classic.climate.edge, warp: 110, strength: 0.06, heightJitter: 4 },
+      zones: {
+        size: 1500,
+        jitter: 0.85,
+        warp: 240,
+        warpFrequency: 0.0009,
+        border: 200,
+        latitude: { strength: 0.7, scale: 7000, axis: "z", flip: false },
+        anchors: [
+          { id: "tundra", temperature: 0.08, moisture: 0.45, weight: 1, latitude: 0.05, relief: 0.5, hills: 0.9 },
+          { id: "taiga", temperature: 0.25, moisture: 0.65, weight: 1.2, latitude: 0.2, relief: 0.35, hills: 1.1 },
+          { id: "peaks", temperature: 0.28, moisture: 0.5, weight: 1, latitude: 0.3, relief: 1.35, hills: 1 },
+          { id: "mountains", temperature: 0.4, moisture: 0.5, weight: 1.5, relief: 1, hills: 1 },
+          { id: "foothills", temperature: 0.48, moisture: 0.55, weight: 1, relief: 0.55, hills: 1.3 },
+          { id: "highlands", temperature: 0.5, moisture: 0.5, weight: 1.1, relief: 0.25, hills: 1.7 },
+          { id: "moor", temperature: 0.35, moisture: 0.6, weight: 0.9, latitude: 0.3, relief: 0.3, hills: 1.5 },
+          { id: "fen", temperature: 0.3, moisture: 0.95, weight: 0.7, latitude: 0.25, relief: 0, hills: 0.2, flatten: 0.9 },
+          { id: "savanna", temperature: 0.78, moisture: 0.3, weight: 1.1, latitude: 0.7, relief: 0.1, hills: 0.5 },
+          { id: "grassland", temperature: 0.58, moisture: 0.42, weight: 1.5, latitude: 0.5, relief: 0.05, hills: 0.7 },
+          { id: "forest", temperature: 0.52, moisture: 0.7, weight: 1.5, latitude: 0.45, relief: 0.15, hills: 1 },
+          { id: "swamp", temperature: 0.62, moisture: 0.95, weight: 0.8, latitude: 0.55, relief: 0, hills: 0.25, flatten: 1 },
+          { id: "jungle", temperature: 0.88, moisture: 0.9, weight: 1, latitude: 0.9, relief: 0.3, hills: 1.2 },
+          { id: "desert", temperature: 0.92, moisture: 0.08, weight: 1.2, latitude: 0.85, relief: 0.08, hills: 0.5, dunes: 1 },
+          { id: "badlands", temperature: 0.8, moisture: 0.22, weight: 0.9, latitude: 0.75, relief: 0.15, hills: 0.6, mesas: 1 },
+          { id: "blight", temperature: 0.75, moisture: 0.15, weight: 0.55, latitude: 0.65, relief: 0.2, hills: 0.9 },
+        ],
+      },
+    },
+    surfaces: [
+      { name: "grass", color: "#5c7a3f", roughness: 0.95, uvScale: 4 },
+      { name: "sand", color: "#c8b184", roughness: 0.9, uvScale: 5 },
+      { name: "rock", color: "#7c7972", roughness: 0.95, uvScale: 11 },
+      { name: "snow", color: "#e8eef4", roughness: 0.7, uvScale: 6 },
+      { name: "dirt", color: "#6b543a", roughness: 0.95, uvScale: 4.5 },
+      { name: "cliff", color: "#6f6659", roughness: 0.95, uvScale: 20 },
+      { name: "ice", color: "#a3bdd4", roughness: 0.3, uvScale: 7 },
+      { name: "blighted", color: "#463c33", roughness: 0.95, uvScale: 4 },
+      { name: "mud", color: "#4a4633", roughness: 0.98, uvScale: 4 },
+      { name: "redrock", color: "#9a5a3c", roughness: 0.95, uvScale: 9 },
+    ],
+    biomes: [
+      { id: "seabed", height: [-500, -1], heightBlend: 4, weight: 1.2, surface: w({ [S]: 0.65, [R]: 0.35 }), cliff: w({ [R]: 0.3, [C]: 0.7 }), cliffStart: 0.72, cliffEnd: 0.88 },
+      { id: "beach", height: [-2, 2.5], heightBlend: 2.5, blend: 2.5, weight: 1.3, surface: w({ [G]: 0.1, [S]: 0.8, [D]: 0.1 }), cliff: w({ [S]: 0.12, [R]: 0.28, [C]: 0.6 }), cliffStart: 0.72, cliffEnd: 0.88 },
+      // zone-gated cover, one rule per kind of place
+      { id: "tundra", zones: ["tundra"], height: [2, 1400], heightBlend: 6, weight: 1.4, surface: w({ [G]: 0.3, [R]: 0.15, [W]: 0.45, [D]: 0.1 }), cliff: w({ [R]: 0.25, [W]: 0.15, [C]: 0.6 }), cliffStart: 0.72, cliffEnd: 0.88, tint: "#c9d3cc" },
+      { id: "taiga", zones: ["taiga"], height: [2, 1400], heightBlend: 6, weight: 1.4, surface: w({ [G]: 0.68, [R]: 0.08, [D]: 0.24 }), cliff: w({ [R]: 0.3, [C]: 0.7 }), cliffStart: 0.72, cliffEnd: 0.88, tint: "#8fa58a" },
+      { id: "grassland", zones: ["grassland", "highlands"], height: [2, 170], heightBlend: 12, weight: 1.4, surface: w({ [G]: 0.9, [D]: 0.1 }), cliff: w({ [R]: 0.3, [D]: 0.1, [C]: 0.6 }), cliffStart: 0.72, cliffEnd: 0.88 },
+      { id: "forest", zones: ["forest"], height: [2, 170], heightBlend: 12, weight: 1.4, surface: w({ [G]: 0.72, [D]: 0.28 }), cliff: w({ [R]: 0.3, [D]: 0.1, [C]: 0.6 }), cliffStart: 0.72, cliffEnd: 0.88, tint: "#8ea36e" },
+      { id: "foothills", zones: ["mountains", "peaks", "foothills"], height: [2, 130], heightBlend: 14, weight: 1.3, surface: w({ [G]: 0.7, [R]: 0.15, [D]: 0.15 }), cliff: w({ [R]: 0.3, [C]: 0.7 }), cliffStart: 0.72, cliffEnd: 0.88 },
+      { id: "moor", zones: ["moor"], height: [2, 260], heightBlend: 14, weight: 1.4, surface: w({ [G]: 0.55, [R]: 0.2, [D]: 0.25 }), cliff: w({ [R]: 0.35, [C]: 0.65 }), cliffStart: 0.72, cliffEnd: 0.88, tint: "#9c8f7a" },
+      { id: "fen", zones: ["fen"], height: [2, 50], heightBlend: 8, weight: 1.6, surface: w({ [G]: 0.35, [D]: 0.15, [M]: 0.5 }), cliff: w({ [D]: 0.3, [M]: 0.3, [R]: 0.4 }), cliffStart: 0.72, cliffEnd: 0.88, tint: "#8a9a86" },
+      { id: "savanna", zones: ["savanna"], height: [1, 200], heightBlend: 12, weight: 1.4, surface: w({ [G]: 0.7, [S]: 0.1, [D]: 0.2 }), cliff: w({ [R]: 0.3, [D]: 0.1, [C]: 0.6 }), cliffStart: 0.72, cliffEnd: 0.88, tint: "#c9b36a" },
+      { id: "swamp", zones: ["swamp"], height: [2, 60], heightBlend: 8, weight: 1.6, surface: w({ [G]: 0.4, [D]: 0.2, [M]: 0.4 }), cliff: w({ [D]: 0.3, [M]: 0.3, [R]: 0.4 }), cliffStart: 0.72, cliffEnd: 0.88, tint: "#7f8b5a" },
+      { id: "jungle", zones: ["jungle"], height: [2, 200], heightBlend: 12, weight: 1.4, surface: w({ [G]: 0.75, [D]: 0.25 }), cliff: w({ [R]: 0.35, [C]: 0.65 }), cliffStart: 0.72, cliffEnd: 0.88, tint: "#5f9a4a" },
+      { id: "desert", zones: ["desert"], height: [1, 240], heightBlend: 10, weight: 1.4, surface: w({ [S]: 0.7, [R]: 0.08, [D]: 0.22 }), cliff: w({ [S]: 0.1, [R]: 0.24, [D]: 0.1, [C]: 0.56 }), cliffStart: 0.72, cliffEnd: 0.88 },
+      { id: "badlands", zones: ["badlands"], height: [1, 260], heightBlend: 10, weight: 1.4, surface: w({ [S]: 0.15, [R]: 0.2, [D]: 0.25, [X]: 0.4 }), cliff: w({ [R]: 0.2, [X]: 0.6, [C]: 0.2 }), cliffStart: 0.66, cliffEnd: 0.84, tint: "#c8927a" },
+      { id: "blight", zones: ["blight"], height: [1, 300], heightBlend: 10, weight: 1.4, surface: w({ [D]: 0.25, [B]: 0.75 }), cliff: w({ [R]: 0.28, [C]: 0.42, [B]: 0.3 }), cliffStart: 0.72, cliffEnd: 0.88, tint: "#b9ad9e" },
+      // the altitude ladder, ungated: a peak in any zone climbs it
+      { id: "highland", height: [120, 240], heightBlend: 26, weight: 1.1, surface: w({ [G]: 0.5, [R]: 0.35, [D]: 0.15 }), cliff: w({ [R]: 0.24, [C]: 0.76 }), cliffStart: 0.74, cliffEnd: 0.9 },
+      { id: "montane", height: [220, 360], heightBlend: 32, weight: 1.2, surface: w({ [G]: 0.16, [R]: 0.4, [W]: 0.3, [D]: 0.14 }), cliff: w({ [R]: 0.2, [W]: 0.12, [C]: 0.68 }), cliffStart: 0.72, cliffEnd: 0.88 },
+      { id: "alpine", height: [340, 1400], heightBlend: 36, temperature: [-0.1, 0.78], blend: 0.1, weight: 1.5, surface: w({ [R]: 0.1, [W]: 0.9 }), cliff: w({ [R]: 0.17, [W]: 0.28, [C]: 0.55 }), cliffStart: 0.74, cliffEnd: 0.9 },
+      { id: "crag", label: false, slope: [0.78, 1.2], blend: 0.12, heightBlend: 6, weight: 2.4, surface: w({ [R]: 0.3, [C]: 0.7 }), cliff: w({ [R]: 0.1, [C]: 0.9 }), cliffStart: 0.7, cliffEnd: 0.86 },
+    ],
+    patches: [
+      { id: "worn-dirt", surface: "dirt", biomes: ["grassland", "foothills", "highland", "taiga", "moor", "savanna"], frequency: 0.022, octaves: 3, threshold: 0.2, blend: 0.26, strength: 0.75, seed: 5 },
+      { id: "fen-pools", surface: "mud", biomes: ["fen"], frequency: 0.028, octaves: 3, threshold: 0.05, blend: 0.2, strength: 0.9, seed: 23 },
+      { id: "moor-rock", surface: "rock", biomes: ["moor"], frequency: 0.03, octaves: 3, threshold: 0.3, blend: 0.16, strength: 0.7, seed: 37 },
+      { id: "forest-floor", surface: "dirt", biomes: ["forest", "jungle"], frequency: 0.03, octaves: 3, threshold: 0.05, blend: 0.3, strength: 0.7, seed: 11 },
+      { id: "swamp-pools", surface: "mud", biomes: ["swamp"], frequency: 0.03, octaves: 3, threshold: 0.1, blend: 0.2, strength: 0.9, seed: 19 },
+      { id: "blight-rot", surface: "blighted", biomes: ["blight"], frequency: 0.017, octaves: 3, threshold: 0.02, blend: 0.3, strength: 0.85, seed: 29 },
+      { id: "blight-scab", surface: "dirt", biomes: ["blight"], frequency: 0.055, octaves: 2, threshold: 0.24, blend: 0.12, strength: 0.7, seed: 41 },
+      { id: "desert-rock", surface: "rock", biomes: ["desert"], frequency: 0.026, octaves: 3, threshold: 0.36, blend: 0.14, strength: 0.85, seed: 53 },
+      { id: "badland-strata", surface: "sand", biomes: ["badlands"], frequency: 0.04, octaves: 2, threshold: 0.3, blend: 0.15, strength: 0.6, seed: 61 },
+      { id: "alpine-ice", surface: "ice", biomes: ["alpine", "tundra", "montane"], frequency: 0.011, octaves: 3, threshold: -0.15, blend: 0.4, strength: 0.9, slope: [0, 0.3], seed: 83 },
+      { id: "cliff-skirt", surface: "rock", biomes: [], frequency: 0.035, octaves: 3, threshold: -0.55, blend: 0.5, strength: 0.85, slope: [0.45, 0.8], seed: 17 },
+    ],
+    scatter: [],
+    features: { rivers: [], canyons: [], roads: [], towns: [], lakes: [], tunnels: [], blobs: [], pois: [] },
   });
   return { ...base, ...overrides };
 }

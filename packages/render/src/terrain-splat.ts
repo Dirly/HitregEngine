@@ -22,6 +22,7 @@ import {
   decodeNormalSample,
   loadSharedTexture,
   sampleTriplanar,
+  sampleTriplanarLayer,
   triplanarNormalToWorld,
   worldNormalToViewNode,
   worldTriplanarBasis,
@@ -281,12 +282,35 @@ export function buildTerrainSplatMaterial(
 
 type LayerTextures = Record<number, { map?: THREE.Texture; normalMap?: THREE.Texture }>;
 
+/**
+ * Every textured layer's albedo packed into one 2D array texture, and which
+ * slice each layer index sits in. See `sampleTriplanarLayer` for why: past
+ * twelve or so separate maps the WebGPU binding limits fail the pipeline.
+ */
+interface LayerArray {
+  texture: THREE.DataArrayTexture;
+  slice: Map<number, number>;
+}
+
+/**
+ * Above this many albedo maps the layers are packed into an array texture.
+ * Twelve separate maps plus the shadow map and the material's own bindings
+ * sit exactly at the 16-per-stage limit, which is the most the proven
+ * per-map path can bind. EXPERIMENTAL past that: the first headless run with
+ * the packed path compiled but wired no textures at all (ground rendered
+ * black) and the cause is not yet found — keep palettes at twelve until it is.
+ */
+export const SPLAT_ARRAY_THRESHOLD = 12;
+/** Longest edge a packed slice is resampled to; every slice must share one size. */
+const SPLAT_ARRAY_MAX_SIZE = 1024;
+
 /** Wire the whole node graph for one set of resolved layer textures. */
 function wireSplat(
   material: THREE.MeshStandardNodeMaterial,
   data: MaterialData,
   splat: SplatData,
   textures: LayerTextures,
+  packed?: LayerArray,
 ): void {
   const layers = splat.layers;
   const weights = layerWeights(splat, layers.length);
@@ -313,6 +337,8 @@ function wireSplat(
 
   const colors: N[] = layers.map((layer, i) => {
     const tint: N = tslColor(layer.color);
+    const slice = packed?.slice.get(i);
+    if (packed && slice !== undefined) return mul(sampleTriplanarLayer(basisFor(i), packed.texture, slice).xyz, tint);
     const map = textures[i]?.map;
     if (map) return mul(sampleTriplanar(basisFor(i), map).xyz, tint);
     return layer.grassy ? mul(tint, grassyTone()) : tint;
@@ -429,5 +455,79 @@ async function loadLayerTextures(
     entry[request.field] = result.value;
   });
   if (Object.keys(textures).length === 0) return;
-  wireSplat(material, data, splat, textures);
+  // A deep palette packs its albedo maps into one array texture. Normal maps
+  // keep the per-map path (a palette that deep with normal maps as well is
+  // past what a fragment should be asked to fetch anyway).
+  const albedo = Object.entries(textures)
+    .filter(([, entry]) => entry.map)
+    .map(([index, entry]) => ({ index: Number(index), texture: entry.map! }));
+  const hasNormals = Object.values(textures).some((entry) => entry.normalMap);
+  let packed: LayerArray | undefined;
+  if (albedo.length > SPLAT_ARRAY_THRESHOLD && !hasNormals) {
+    try {
+      packed = packLayerArray(albedo, filter, maxAnisotropy);
+      console.info(
+        `[render] packed ${albedo.length} splat layers into a ${packed.texture.image.width}² array texture (one binding instead of ${albedo.length})`,
+      );
+    } catch (error) {
+      console.warn(`[render] could not pack ${albedo.length} splat layers into an array texture; binding them separately`, error);
+    }
+  }
+  wireSplat(material, data, splat, textures, packed);
+}
+
+/**
+ * Resample every albedo map to one square size and stack them into a
+ * `DataArrayTexture`. Sizes differ between artists' tiles (this palette's
+ * cliff is four times the grass), and an array needs one size, so each is
+ * drawn through a canvas at the largest edge present, capped. Slices are
+ * stored top-down as drawn (`flipY` is false on array textures); the ground
+ * is triplanar-tiled, so which way up a tile sits is invisible.
+ */
+function packLayerArray(
+  layers: { index: number; texture: THREE.Texture }[],
+  filter: TextureFilter,
+  maxAnisotropy: number,
+): LayerArray {
+  const images = layers.map((l) => l.texture.image as { width?: number; height?: number } | undefined);
+  let size = 0;
+  for (const image of images) size = Math.max(size, image?.width ?? 0, image?.height ?? 0);
+  if (size === 0) throw new Error("no decoded images to pack");
+  size = Math.min(SPLAT_ARRAY_MAX_SIZE, 1 << Math.round(Math.log2(size)));
+  const canvas =
+    typeof OffscreenCanvas !== "undefined"
+      ? new OffscreenCanvas(size, size)
+      : Object.assign(document.createElement("canvas"), { width: size, height: size });
+  const ctx = canvas.getContext("2d", { willReadFrequently: true }) as
+    | OffscreenCanvasRenderingContext2D
+    | CanvasRenderingContext2D
+    | null;
+  if (!ctx) throw new Error("no 2D canvas context to resample with");
+  const depth = layers.length;
+  const data = new Uint8Array(size * size * 4 * depth);
+  const slice = new Map<number, number>();
+  layers.forEach((layer, k) => {
+    ctx.clearRect(0, 0, size, size);
+    ctx.drawImage(layer.texture.image as CanvasImageSource, 0, 0, size, size);
+    const pixels = ctx.getImageData(0, 0, size, size).data;
+    data.set(pixels, k * size * size * 4);
+    slice.set(layer.index, k);
+  });
+  const texture = new THREE.DataArrayTexture(data, size, size, depth);
+  texture.format = THREE.RGBAFormat;
+  texture.type = THREE.UnsignedByteType;
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.generateMipmaps = true;
+  if (filter === "nearest") {
+    texture.magFilter = THREE.NearestFilter;
+    texture.minFilter = THREE.NearestMipmapLinearFilter;
+  } else {
+    texture.magFilter = THREE.LinearFilter;
+    texture.minFilter = THREE.LinearMipmapLinearFilter;
+    if (maxAnisotropy > 1) texture.anisotropy = maxAnisotropy;
+  }
+  texture.needsUpdate = true;
+  return { texture, slice };
 }

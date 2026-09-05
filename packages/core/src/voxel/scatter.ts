@@ -238,9 +238,18 @@ function emitCliffColumn(
 /**
  * Every scattered instance belonging to cell (cx, cz).
  *
- * Rules are evaluated in array order and later rules yield to earlier ones
- * within `clearance`, so the array order is a priority: put the big trees
- * first and the undergrowth after, or the undergrowth wins the good spots.
+ * Spacing is SIZE-AWARE: each instance claims a disc of its own footprint
+ * (`footprint` x scale, or half the collider width), and two instances may
+ * come no closer than the sum of their footprints plus `spacing`. Rules are
+ * solved largest-footprint first, so a tree claims its ground before the
+ * shrubs fill in around it — array order only breaks ties.
+ *
+ * Candidates from a MARGIN around the cell are solved too (and then dropped),
+ * so a prop just over the border in the next cell claims its ground here as
+ * well. Every candidate is a pure hash of its lattice point, so both cells
+ * evaluate the same neighbours in the same global order and agree; a chain of
+ * dependencies longer than the margin can still, rarely, cost a prop at a
+ * seam — it never doubles one.
  */
 export function scatterCell(
   field: WorldField,
@@ -259,38 +268,55 @@ export function scatterCell(
   const z1 = z0 + cellSize;
   const maxInstances = options.maxInstances ?? 4000;
   const overhangs = recipe.terrain.overhang.strength > 0;
+  const limit = field.worldLimit;
+  // nothing exists past the world's edge; skip the whole solve for cells out there
+  if (limit !== Infinity && Math.hypot(Math.max(Math.abs(x0), Math.abs(x1)), Math.max(Math.abs(z0), Math.abs(z1))) > limit) return [];
+
+  /** Footprint radius in world units for a rule at scale 1. */
+  const baseFootprint = (rule: ScatterDoc): number =>
+    rule.footprint > 0 ? rule.footprint : rule.colliderSize[0] * 0.5;
+  // largest first, stable by array index
+  const order = rules
+    .map((rule, index) => ({ index, size: baseFootprint(rule) * rule.scale[1] }))
+    .sort((a, b) => b.size - a.size || a.index - b.index)
+    .map((o) => o.index);
+  let reachMax = 0;
+  for (const rule of rules) reachMax = Math.max(reachMax, baseFootprint(rule) * rule.scale[1] + rule.spacing);
+  const margin = Math.min(10, reachMax * 2);
 
   const out: VoxelScatterInstance[] = [];
-  /** Occupancy for the inter-rule spacing test, bucketed at 4m. */
-  const occupied = new Map<number, { x: number; z: number; r: number }[]>();
+  /** Occupancy for the spacing test, bucketed at 4m. */
+  const occupied = new Map<number, { x: number; z: number; r: number; gap: number }[]>();
   const OCC = 4;
   const occKey = (bx: number, bz: number): number => ((bx & 0xffff) << 16) | (bz & 0xffff);
-  const blocked = (x: number, z: number, radius: number): boolean => {
-    if (radius <= 0) return false;
-    const bx0 = Math.floor((x - radius) / OCC);
-    const bz0 = Math.floor((z - radius) / OCC);
-    const bx1 = Math.floor((x + radius) / OCC);
-    const bz1 = Math.floor((z + radius) / OCC);
+  const blocked = (x: number, z: number, radius: number, gap: number): boolean => {
+    const reach = radius + reachMax + gap;
+    const bx0 = Math.floor((x - reach) / OCC);
+    const bz0 = Math.floor((z - reach) / OCC);
+    const bx1 = Math.floor((x + reach) / OCC);
+    const bz1 = Math.floor((z + reach) / OCC);
     for (let bz = bz0; bz <= bz1; bz++) {
       for (let bx = bx0; bx <= bx1; bx++) {
         const list = occupied.get(occKey(bx, bz));
         if (!list) continue;
         for (const item of list) {
-          const reach = Math.max(radius, item.r);
-          if (Math.hypot(item.x - x, item.z - z) < reach) return true;
+          const minDist = radius + item.r + Math.max(gap, item.gap);
+          const dx = item.x - x;
+          const dz = item.z - z;
+          if (dx * dx + dz * dz < minDist * minDist) return true;
         }
       }
     }
     return false;
   };
-  const occupy = (x: number, z: number, r: number): void => {
+  const occupy = (x: number, z: number, r: number, gap: number): void => {
     const key = occKey(Math.floor(x / OCC), Math.floor(z / OCC));
     const list = occupied.get(key);
-    if (list) list.push({ x, z, r });
-    else occupied.set(key, [{ x, z, r }]);
+    if (list) list.push({ x, z, r, gap });
+    else occupied.set(key, [{ x, z, r, gap }]);
   };
 
-  for (let ruleIndex = 0; ruleIndex < rules.length; ruleIndex++) {
+  for (const ruleIndex of order) {
     const rule: ScatterDoc = rules[ruleIndex]!;
     if (rule.density <= 0) continue;
     if (!rule.prefab && !rule.model) continue;
@@ -305,14 +331,22 @@ export function scatterCell(
     if (latticePerCell > maxInstances) continue;
 
     const ruleSeed = (recipe.seed + ruleIndex * 7919) | 0;
-    const gx0 = Math.ceil(x0 / spacing);
-    const gx1 = Math.floor((x1 - 1e-6) / spacing);
-    const gz0 = Math.ceil(z0 / spacing);
-    const gz1 = Math.floor((z1 - 1e-6) / spacing);
+    const footprint = baseFootprint(rule);
+    // the margin ring is solved for occupancy and discarded; a prop is OWNED
+    // by the cell holding its unjittered lattice point
+    const gx0 = Math.ceil((x0 - margin) / spacing);
+    const gx1 = Math.floor((x1 + margin - 1e-6) / spacing);
+    const gz0 = Math.ceil((z0 - margin) / spacing);
+    const gz1 = Math.floor((z1 + margin - 1e-6) / spacing);
+    const ownedX0 = Math.ceil(x0 / spacing);
+    const ownedX1 = Math.floor((x1 - 1e-6) / spacing);
+    const ownedZ0 = Math.ceil(z0 / spacing);
+    const ownedZ1 = Math.floor((z1 - 1e-6) / spacing);
 
     for (let gz = gz0; gz <= gz1; gz++) {
       for (let gx = gx0; gx <= gx1; gx++) {
         if (out.length >= maxInstances) return out;
+        const owned = gx >= ownedX0 && gx <= ownedX1 && gz >= ownedZ0 && gz <= ownedZ1;
 
         const r1 = hashUnit(gx, gz, 1, ruleSeed);
         const r2 = hashUnit(gx, gz, 2, ruleSeed);
@@ -323,11 +357,13 @@ export function scatterCell(
         const jitter = rule.jitter * spacing * 0.5;
         const wx = gx * spacing + (r1 - 0.5) * 2 * jitter;
         const wz = gz * spacing + (r2 - 0.5) * 2 * jitter;
+        if (limit !== Infinity && wx * wx + wz * wz > limit * limit) continue;
 
         const steep = field.slope(wx, wz);
         if (steep > rule.slopeMax || steep < rule.slopeMin) continue;
 
         if (rule.cliff) {
+          if (!owned) continue; // cliff stacks sit outside the spacing map
           if (rule.clearance > 0 && field.featureClearance(wx, wz) < rule.clearance) continue;
           emitCliffColumn(field, rule, ruleIndex, gx, gz, ruleSeed, wx, wz, x0, z0, out);
           if (out.length >= maxInstances) return out;
@@ -341,14 +377,20 @@ export function scatterCell(
 
         if (rule.height && (groundY < rule.height[0] || groundY > rule.height[1])) continue;
         if (rule.clearance > 0 && field.featureClearance(wx, wz) < rule.clearance) continue;
+        // nothing grows under water, whatever height the water happens to be
+        // at — nor right AT the waterline, where a bush with its base a hand's
+        // breadth under the surface reads as brush standing in the lake
+        const water = field.waterY(wx, wz);
+        if (water !== null && groundY < water + 0.35) continue;
 
         const sample = field.biome(wx, wz, groundY, steep);
         if (rule.biomes.length > 0 && !rule.biomes.includes(sample.id)) continue;
 
         const scale = rule.scale[0] + (rule.scale[1] - rule.scale[0]) * r3;
-        const footprint = Math.max(rule.clearance, rule.colliderSize[0] * scale * 0.5);
-        if (blocked(wx, wz, footprint)) continue;
-        occupy(wx, wz, footprint);
+        const radius = footprint * scale;
+        if (blocked(wx, wz, radius, rule.spacing)) continue;
+        occupy(wx, wz, radius, rule.spacing);
+        if (!owned) continue;
 
         let rotation = quatYaw(r4 * Math.PI * 2);
         if (rule.alignToNormal > 0) {

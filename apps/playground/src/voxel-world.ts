@@ -118,8 +118,18 @@ export function voxelChunkProvider(
   activePool?.dispose();
   const pool = createVoxelWorkerPool(world, options);
   activePool = pool;
+  // the world limit, in cells, with the coast band and a ring of sea floor
+  // beyond it: cells past this are pure ocean floor and never worth building
+  const limit = world.field.worldLimit;
+  const limitCells =
+    limit === Infinity ? Infinity : (limit + (world.field.recipe.bounds?.limitFalloff ?? 600)) / world.field.recipe.cellSize + 2;
   return {
-    has: (cx, cz) => Number.isFinite(cx) && Number.isFinite(cz) && Math.abs(cx) < maxCells && Math.abs(cz) < maxCells,
+    has: (cx, cz) =>
+      Number.isFinite(cx) &&
+      Number.isFinite(cz) &&
+      Math.abs(cx) < maxCells &&
+      Math.abs(cz) < maxCells &&
+      Math.hypot(cx + 0.5, cz + 0.5) <= limitCells,
     // `ChunkProvider.get` has always allowed a Promise; this is what finally
     // uses it. Falls back to generating inline when no worker could start.
     // An urgent (simulation-ring) cell is generated inline: it is about to

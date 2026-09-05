@@ -1,8 +1,10 @@
 # Procedural voxel worlds (marching cubes)
 
-**Status:** built and verified in-browser (WebGPU) 2026-09-01. Terrain,
-streaming, biome texturing, collision, scatter and the worldgen CLI all work
-end to end. Open items are listed at the bottom.
+**Status:** built and verified in-browser (WebGPU) 2026-09-01; second
+generation (continents with a hard edge, zones, hydrology, water at every
+level, roads that follow the ground) built and verified 2026-09-02 — **§30 is
+the current shape of the generator; §1–§29 are the layers under it and the
+lessons that produced them.** Open items are listed at the bottom of §8.
 
 Related: `docs/open-world-streaming-plan.md` (the ring/HLOD machinery this
 reuses), `docs/performance-lessons.md` (read before touching perf),
@@ -172,10 +174,12 @@ Fine for ground; never point this material at anything instanced.
 ## 6. The worldgen CLI
 
 ```bash
-pnpm -F playground worldgen init <world> --project <name> --scene
-pnpm -F playground worldgen rivers <world>   # trace downhill, carve channels
+pnpm -F playground worldgen init <world> --project <name> --scene   # continents + zones (--classic for the old endless noise)
+pnpm -F playground worldgen continents <world> # re-lay the landmasses, islands, land floor, limit
+pnpm -F playground worldgen rivers <world>   # HYDROLOGY: fill, flow, channels, lakes, waterfalls
 pnpm -F playground worldgen towns  <world>   # flat, low, water-adjacent pads
-pnpm -F playground worldgen roads  <world>   # least-cost graded routes
+pnpm -F playground worldgen roads  <world>   # least-cost routes graded on the dense route, cut-biased
+pnpm -F playground worldgen trails <world>   # footpaths from the roads up to the peaks
 pnpm -F playground worldgen pois   <world>   # peaks, cliffs, coves
 pnpm -F playground worldgen caves  <world>   # find mouths, MEASURE fit, carve them open
 pnpm -F playground worldgen map    <world>   # PNG overview
@@ -247,9 +251,14 @@ Two related fixes worth remembering because both failed *silently*:
   vertical band around the surface (`verticalRange`), so tunnels below it are
   capped rather than streamed. Sections are the fix; the mesh source already
   takes an explicit `yRange` for it.
-- **LOD crack at the HLOD boundary.** Coarse cells weld to each other exactly,
-  but there is a resolution mismatch where the coarse ring meets the full-detail
-  ring. Skirts are the usual fix.
+- **LOD crack at the HLOD boundary — fixed 2026-09-02 with skirts.** Every
+  cell hangs a strip three lattice steps deep from each boundary edge (`addSkirts`
+  in mesh.ts): the higher side's strip covers the crack, the lower side's is
+  buried. Both sides emit unconditionally because a cell does not know its
+  neighbour's step; in the simulation ring every neighbour is full detail, so
+  the strip is inside rock and physics never meets it. A test walks the shared
+  plane between a fine cell and a 4x-coarser one and checks the higher skirt
+  reaches below the lower surface at every sample.
 - **Generation now runs in a worker pool.** (Was: "meshing is on the main
   thread ... a worker would remove it from the frame budget entirely"; done
   2026-09-02.) `voxelChunkProvider` hands cells to a pool of
@@ -291,7 +300,8 @@ Two related fixes worth remembering because both failed *silently*:
 ## 9. Caves, mouths, and the voxel-resolution trap
 
 Added 2026-09-01. Two separate problems, and the second is the one that will
-catch you again.
+catch you again. (Town paths kept an uncapped last rung a few hours longer; it is gone
+too — see the next section.)
 
 **Caves were sealed.** `caves.minDepth` held everywhere, so the tunnel network
 never reached the surface — a cave system nobody could enter. Entrances are now
@@ -423,6 +433,19 @@ Asked and measured, because "we have LOD" is not the same as "LOD is running".
   trying: drop one in, point a scatter rule at it via `model:`, and the
   `foliage near/mid/far` counters should go non-zero. Until that has actually
   been measured, "real tree GLBs will fix it" is a hypothesis, not a fact.
+
+- **Supercell props (hlod + far rings): impostors, since 2026-09-04.** A
+  scattered model whose rule leaves `lod` on becomes one batch of octahedral
+  impostor quads per species per supercell — the same atlas the near ring
+  swaps to past its far threshold — instead of its full geometry merged into
+  the proxy. `lod: false` props (rocks, stumps, mushrooms) still merge as
+  geometry in the hlod ring and are dropped from the far ring when under 4 m
+  tall. The far ring also groups on a 2x wider supercell grid than the hlod
+  ring, every species of a supercell shares one impostor draw (the baker
+  pages all atlases onto one texture), and the near rings pool their
+  instanced props world-wide instead of per cell. Read docs/performance-lessons.md ("Draw-count pass") before touching
+  either; the boundary rules there are what keep the two grids from
+  double-drawing.
 
 ### What props actually cost
 
@@ -1182,3 +1205,1189 @@ seams crawl, which looks worse than the tiling it is fixing.
 What it does *not* fix is a texture whose own motif is strongly self-similar;
 past this point the remaining lever is a second sample of the same texture at a
 much larger scale, blended by noise, and that doubles the fetch count.
+
+## 30. Worldgen v2: a world that makes sense
+
+Added 2026-09-02, after the first real look at the demo world as a place to
+walk around in rather than a set of features that each worked. The verdict was
+blunt and correct: land fragmented into islands, mountains dotted about like
+polka dots, five-point rivers plunging from a summit into the sea, roads on
+mounds, a desert the size of a field, blight in patches, ocean in every inland
+hollow. Each of those had a single cause, and each cause is now a layer.
+
+### The height function, in order
+
+```text
+zone            which kind of place (x, z) is, and its landform multipliers
+noise bands     continent, hills, mountains x relief, mesas, dunes, detail
+ceiling         soft compression toward a common summit line
+bounds          the shore profile, the land floor, the world limit
+coast cliffs    steepen whatever profile crosses sea level where rugged
+features        canyons -> lakes -> rivers -> towns -> roads
+```
+
+Every one of these is a monotone, continuous remap or an additive band, so
+the terrain stays a function and the invariants of §4 hold unchanged.
+
+### Zones (`climate.zones`)
+
+Climate from smooth noise gives patches at every scale, because that is what
+the middle of a noise field looks like. A world you travel through wants
+regions you can be *in*. So the plane is cut into jittered Voronoi cells of
+`size` metres (1.5–2.4 km), each cell draws ONE anchor — tundra, taiga,
+mountains, highlands, grassland, forest, swamp, jungle, desert, badlands,
+blight — and only the `border` between cells is blended. Every site within
+`border` of the nearest fades in by distance, not just the runner-up: a
+two-site blend jumps at a triple junction when the runner-up changes identity.
+
+An anchor is a climate (temperature, moisture) **and a landform**: `relief`
+multiplies the mountain band, `hills` the hill band, `dunes` and `mesas`
+switch on their bands, `flatten` pulls a swamp down to the waterline. That is
+what makes a mountain zone *have* mountains and a badland be tables and buttes
+rather than the same hills in a different colour. Biome rules gate to zones
+with `zones: [...]`, so blight and badlands can both be hot-and-dry without
+fighting over a climate corner; the altitude ladder (highland / montane /
+alpine) and `crag` stay ungated so a peak in any zone reads as a peak.
+
+Two things learned building it:
+
+- **Which anchor a zone draws is a draw.** The first demo world drew no desert
+  and no badlands at all. `zones.seed` re-rolls the layout without moving a
+  hill, and the demo's generator sweeps it until every anchor covers land and
+  none swallows it (`projects/voxel-demo/tools/gen-world.mts`).
+- **Every consumer must read the zone through the same warp.** The landform,
+  the biome rules and the public `zone()` all go through the climate edge
+  warp; the first version read the landform unwarped and a tool asked for
+  "meadow" where the ground was being shaped as marsh.
+
+### Bounds: continents that are not circles, and no ocean inland
+
+`bounds.continents[]` are discs with an exact shore distance — that is what
+the shore profile and the "no ocean inland" guarantee are built on — but a
+disc reads as a disc. Three things fix that without losing the distance:
+
+- **Lobes.** A continent is the smooth union (`lobes`, `lobeBlend`) of
+  several discs. Two or three make a crescent, an L, a peninsula and a gulf.
+  The union is a smooth max, and the sign of its blend was inverted the first
+  time — it computed the intersection and the world was 2% land. There is a
+  test for the saddle between two lobes now.
+- **Two warps.** The lobe-scale warp (`warpScale`) frays the rim into
+  headlands and bays; a second warp at the landmass's own scale bends the
+  whole outline.
+- **Coast variation.** `coastVariation` varies the falloff around the coast,
+  so one stretch descends steeply (cliffs, relief reaching the water) and the
+  next gently (a beach). Beach on one side of an island, cliffs on the other,
+  from one knob.
+
+`landFloor` (> 0) switches the continent from a height blend to a **shore
+profile**: the ground rises from `oceanFloor` through the waterline at a
+beach grade to the land floor, slope-continuous across the shoreline, and the
+terrain's own relief fades in on top of it inland. The coastline is then
+exactly the warped outline and nowhere else — an inland hollow can no longer
+fall below sea level, so standing water inland is only ever a **lake** at its
+own level. `limit` is the world boundary: beyond it there is ocean floor,
+the streamer skips the cells, the ocean plane is sized to it, and nothing is
+placed past it. Keep `terrain.base` well above the floor (55 in the preset)
+or half the interior clamps to a level plain.
+
+### Ceiling and erosion: mountains that are tall without being jagged
+
+`terrain.ceiling` compresses everything above `height - softness` toward
+`height` on an exponential: the mountain band can have a big amplitude for
+tall steep flanks, no summit is sliced flat at `maxY`, and every peak in the
+world approaches one summit line. The demo reaches 500 m against a 520 m
+ceiling.
+
+`erosion` on any fBm band weights each octave by the slope accumulated over
+the octaves *below* it, so fine detail is damped where the ground is already
+steep — valleys smooth and walkable, ridgelines crisp. The first version
+weighted the base octave by its own gradient and flattened every range by a
+third before a single detail octave was added; there is a test that the base
+band keeps its relief and the fine detail is calmed more on steep ground than
+on flat. Overhangs are also gated to genuinely steep faces now
+(`slopeStart` 0.62): on every 20° slope they read as lumps, and lumps are
+what "jagged" looks like up close.
+
+### Hydrology: rivers, lakes and waterfalls that are derived
+
+`worldgen rivers` no longer walks downhill from the highest points. It
+samples the world on a 16 m grid and computes drainage the standard way
+(`tools/worldgen-hydrology.mts`): priority-flood depression filling from the
+sea, D8 flow on the filled surface, rain-weighted accumulation (a desert cell
+contributes little, a swamp cell a lot), channels above a catchment threshold
+traced from each outlet up the largest contributor for the main stem and then
+recursively for tributaries — so a network is a trunk plus branches that end
+where they join.
+
+- **Lakes** are the depressions the fill had to raise, at exactly the level
+  they spill (`features.lakes`, a polygon outline traced from the cell mask).
+  A basin bigger than `--max-lake` is DRAINED: its surface is lowered to a
+  few metres over its floor and the outlet river is cut down through the sill
+  to match, so an inland sea the size of a province becomes a lake with a
+  gorge leaving it.
+- **River beds** are the filled surface less a depth that grows with
+  catchment, forced monotone downstream, running just under a lake's surface
+  through it. **Waterfalls** are simply where the bed drops a cliff's worth in
+  one grid step; they are marked as `falls` POIs and nothing smooths them.
+- **Water is emitted per cell** (`recipe.waterMaterial`): a `path` ribbon
+  per river channel crossing the cell, a flat `poly` sheet per lake clipped
+  to the cell. Per cell, not per lake, so water never vanishes when the cell
+  holding the centre unloads while the shore stays; neighbouring sheets share
+  their clipped edge exactly. HLOD defers both kinds rather than merging them.
+  Scatter reads `field.waterY()` and grows nothing under any of it.
+
+Two traps: the `pois` stage used to replace *every* POI and wiped the
+waterfalls the river stage had marked (stages now replace only their own
+kinds); and streamed transparent meshes must sit out the render precompile —
+a water pipeline built off-frame binds a placeholder depth texture whose
+sample count never matches the multisampled scene pass, and every later frame
+fails validation (6,400 errors per probe, and no water drawn). They compile on
+first draw, as the ocean plane always has.
+
+### Roads that follow the ground, and trails up the peaks
+
+Two causes of the mounds, both in the CLI (`tools/worldgen-routing.mts`):
+the profile was solved at a handful of simplified control points and became
+one straight ramp above the ground between them, and the 3D simplifier's
+height weight was divided by the grid step, which allowed ~5 m of profile
+error between points. The profile is now solved on the DENSE route (every
+grid step) by alternating projections — grade clamp both ways, then fill
+capped at ~1 m and cut at ~5 m, repeat — so the road hugs the terrain and digs
+into the uphill side. Control points keep every half-metre of profile change.
+
+The route search costs grade far above distance (a slope is switchbacked,
+not climbed), treats the sea and lakes as walls, charges a toll that grows
+with a river's width (a brook is crossed anywhere, a broad river only where a
+bridge is worth it, and running *along* a river pays every step), and
+multiplies swamp cells. Wide rivers were walls once and a town on a peninsula
+behind one became unreachable.
+
+`worldgen trails` routes a footpath from the nearest point of the road
+network — on the SAME landmass — up to each peak POI, allowed a steeper grade
+and a narrower cut. That is what makes a mountain climbable on purpose: the
+ridge you can walk is the one the trail found, and the faces it avoided stay
+cliffs.
+
+### Scatter that respects size
+
+`footprint` (model units, scaled per instance) and `spacing` on every rule:
+two props come no closer than the sum of their footprints plus spacing, rules
+are solved largest-footprint first whatever the array order, and candidates
+from a margin around the cell are solved too (and discarded) so a prop just
+over the border claims its ground here as well. Both cells evaluate the same
+neighbours in the same global order; a dependency chain longer than the
+margin can, rarely, cost a prop at a seam — it never doubles one.
+
+### Reading the result without a browser
+
+`worldgen map` now draws water at every level, the world limit, trails,
+waterfalls, and `--zones` colours by zone; `worldgen stats` sweeps the land
+for the zone and biome mix, the height percentiles and the feature counts, and
+meshes real land cells spread across the world. On the demo (13.2 km across,
+2 m voxels): 8.6 ms/cell to mesh, 8.6 ms to scatter with 18 props/cell — the
+scatter cost roughly doubled with the margin and the water check, and it runs
+in the worker pool.
+
+### Rivers, second pass: cut, painted, tapered, clipped
+
+The first walk along a river found four things at once, and each is now a
+recipe field or a rule rather than a number somebody remembers:
+
+- **Not sunken.** The bed was 60–100% of a 1.6–6 m depth below the FILLED
+  surface with a bank blend of `width x 1.8`, which is a dish. Depth is now
+  2.4–8 m, the full depth from the first point, and the bank is `width x 0.9`:
+  a channel that is cut, with a bank you can see.
+- **Grass in the water.** The grass billboards gate on the grass SURFACE, and
+  a channel cut through grassland is still grass to the splat. Rivers now
+  paint their bed and banks (`river.surface`, default sand) through the same
+  segment-bucketed painter roads use, and the cover sampler also refuses any
+  point under `field.waterY()`. Two fixes because they answer two questions:
+  what the ground is, and whether it is dry.
+- **Starting at full size in a field.** `river.taper` grows the head from a
+  trickle over its first metres (220 in the demo): width, bank and cut all
+  scale with one smoothstep of distance along the channel, and the water
+  ribbon starts half-way through the taper so it never overhangs the trickle.
+  The along-distance rides on the segment buckets, so it costs nothing.
+- **Trees cut into the bank.** `featureClearance` for a river was measured
+  from the bed's edge; a 4 m clearance put a tree on the bank slope. It is
+  now measured from the bank's foot.
+
+And the z-fighting: each cell's ribbon carried one control point PAST the
+cell edge for tangent continuity, so two cells drew overlapping transparent
+strips at one height. Ribbons are now clipped exactly to the cell
+(`clipPolylineToRect`), ending on the border at the same interpolated point
+the neighbour's run starts on.
+
+### The in-game map (M)
+
+`worldgen map` also writes the overview into the project's `assets/maps/`,
+and the playground draws it full-screen on **M** with the recipe's towns
+labelled, peaks and waterfalls marked, a 1 km scale bar, the nearest town's
+distance, and the player's position and heading (`src/world-map.ts`). It is
+the same picture an agent reads, put in front of the person walking the
+world, so "the river north of town-9" means one thing to both. Re-run
+`worldgen map` after any stage that moves a feature; the overlay reads the
+PNG and the recipe fresh each time it opens.
+
+The map is navigable and it is a dev-mode fast-travel: the wheel zooms
+about the cursor (to 32×; POIs get their names from 8×), drag pans, `0`
+resets, and a **click travels there** — the player body in play mode, the
+editor camera otherwise, with the status line reporting the cursor's world
+coordinates and its distance from you. The ground height comes from the
+recipe field, and in play mode the body is pinned a couple of metres above
+it until a raycast finds the destination cell's collider (streamed on
+demand, usually within a frame or two, 8 s timeout): a dynamic body dropped
+into a cell that has no collider yet falls straight through the world, the
+same trap as a buried spawn. Travel is refused, with the reason on the map,
+outside the world limit and when a dedicated server owns your position.
+The PNG's own resolution bounds what zoom can show — `worldgen map --size
+1800` is the default the demo ships with, 12 m per pixel.
+
+### POIs at open-world density, and a bigger, more varied world
+
+The first POI stage found summits and little else, so the map's markers all
+sat in the mountains. `worldgen pois` now reads twenty-odd KINDS off the
+terrain where each naturally occurs — saddle, overlook, ridge, cove,
+lakeshore, oasis, bog, spring, ford, bridge-site, glade, grove, hollow,
+dune-field, mesa-top, meadow, canyon-floor — plus SITE kinds for prefabs to
+come (ruin-site on a hilltop, camp-site beside a road, watchtower-site on a
+hill near a road, mine-site at a cliff foot). Each kind has a quota, a score
+and its own separation; `--per-km2` (default 9, about Skyrim's 24 per
+square mile) sets the total. Kinds other stages own (falls, cave,
+spire-field) are kept. Tags carry the zone and the reason (`cliff-edge`,
+`near-road`, `crossing`, ...), so a later prefab stage can filter on them.
+Trails now cap at the highest `--max` peaks; a trail to every one of 140
+summits would be a road network.
+
+Zones grew from eleven kinds to sixteen: `peaks` (relief 1.35, colder),
+`foothills` (0.55), `moor` (heath highlands), `fen` (cold wetland) and
+`savanna` (hot dry grass), with heavier mountain weighting so each region
+gets its own ranges. Swamp and fen lakes carry their own water material
+(`lake.material`, written by the river stage as `<waterMaterial>-swamp`:
+murky, near-opaque, no depth fade, no foam), because a bog pool you can see
+the bottom of is a tarn. Towns default to one per ~3 km² of land.
+
+The demo world is now a 21 km circle: three continents and three islands,
+42.5 sq mi of land, 39 towns, ~1,050 POIs, 65 rivers, 44 waterfalls. At
+that size the hydrology grid is 1,340² cells and the whole pipeline runs in
+about four minutes; meshing cost is unchanged per cell (the world is bigger,
+not denser), though a cell crossed by several rivers now pays for their
+segments and the worst cell measured 34 ms.
+
+### Rounded crests, a turning radius, and embankments
+
+Three complaints from walking the first v2 world, each one a crease the
+generator was drawing and the mesh could not hide:
+
+**Every ridgeline was a knife edge.** The demo's mountains are a *ridged*
+band, and the ridged fold `1 - |n|` has a slope discontinuity at every crest
+of every octave — the base octave gives the summit line a corner, the fine
+octaves give every shoulder a row of them. `terrain.cliffs` was off, so
+this, not terracing, was "the cliffs coming to a sharp edge at the top".
+`FbmSpec.crest` (recipe field on any band; `continentalWorldRecipe` sets 0.2
+on the mountains) swaps |n| for the smooth absolute value
+`sqrt(n² + c²) - c`, so each crest arrives on a curve. Two properties are
+worth knowing: the rounded band is never *below* the sharp one (the fold is
+opened outward), and it still touches the same value at the crest itself, so
+the ceiling and the summit line do not move. The eroded path carries the
+change through its derivative, so erosion weights stay consistent. Cost is
+one square root per octave. Terracing had the same disease in its own
+clamp — a riser met its tread at a corner — and `cliffs.rounding` (default
+0.25) eases each riser into the tread over a quarter of its height with a C1
+soft clamp; the test measures the worst second difference along a transect
+and the sheer fraction, which must stay put.
+
+**Roads looped.** The route search was cell-only, so it could reverse
+direction between two adjacent 16 m cells for free, and a steep climb came
+out as a stack of hairpins — 587 vertices bending more than 135° across the
+demo's roads, 31 places turning 300°+ inside 120 m. Smoothing does not
+un-loop a route, so the fix is in the search: `turnWeight` makes A* carry a
+**heading** per cell (`(cell, heading)` states, 8× the memory, reused
+between roads) and allows at most `maxTurn` × 45° of bend per cell. The
+minimum radius that falls out is `step / (π/4)` ≈ 20 m on the 16 m grid; a
+hairpin is four bends over four cells and costs `4 × turnWeight`, so it is
+taken only where the grade would cost more. The heuristic stays admissible
+(every step costs at least its run), so this is the optimal route for the
+new cost, not a rounded version of the old one. The cure for *trails* was
+the same radius as roads: two bends per cell was tried first and every
+remaining loop in the world was a footpath corkscrewing up a peak. After:
+0 sharp vertices, 0 hairpins, 0 loops, worst 120 m window 221° (a rounded
+switchback), network +4% longer. Each search still runs in well under a
+second. The dense route is then rounded in plan (`smoothRoute`, two
+`[1 2 1]` passes, points kept if the rounded position is a wall) *before*
+the profile is solved, so heights are taken where the road actually runs,
+and the 3D simplifier's plan tolerance dropped from 0.45 to 0.25 cells so a
+curve keeps enough points to read as one at road width.
+
+**The ground beside a road stayed jagged.** The shoulder used to blend the
+road height into whatever crinkle the noise had put there, so a road across
+rough ground was a notch in jagged terrain. Blurring the natural height per
+vertex would have cost 4× the dominant term in a road cell (`height()` is
+~4.6 µs), so the smoothing is done at generation time instead: `worldgen
+roads` samples the (five-tap blurred) ground at the outer edge of a
+`smooth` band on each side of every control point and writes it into the
+doc as `leftY`/`rightY`. The field then regrades the ground from the road
+edge out to `shoulder + smooth` as one S-curve from the road surface to the
+side height — a cut slope uphill, a fill slope downhill — and lets the
+natural roughness back in only over the outer half of the band, where it
+blends between two heights that already nearly agree. Zero extra height
+evaluations per vertex; measured 12.2 → 12.4 ms/cell, same triangles.
+"Left" is the positive cross-product side of the travel direction, and the
+generator and the field agree on that by test. A doc without the two edge
+arrays gets the old shoulder blend, so existing worlds are unchanged.
+
+### Water and roads, from nine screenshots
+
+Derek walked the world and sent photographs; each one was a rule the
+generator was breaking. In the order the fixes matter:
+
+**Fins along every climbing trail, and a wall down every switchback.** The
+carve interpolates a road's per-point heights along whichever segment is
+nearest, and on the *inside* of a bend two segments are equally near along
+the bisector. Their projections sit on different parts of the road, so the
+interpolated values differ — by about `2·d·sin(θ/2)·grade` at distance `d`
+from a bend of `θ`, i.e. 4 m at 14 m out on a 20 % trail turning 90° — and
+the hard switch between them was a vertical crack in the ground growing
+with distance from the road: a row of triangular blades on every
+switchbacking climb (the "sawtooth mountain"). The same seam between a
+switchback's two legs — one leg's *left* embankment height against the
+other's *right* — was the sheer wall between them. `nearestPerOwner` now
+keeps the runner-up segment per feature and blends values toward the mean
+where the two are within a span of each other; the span grows with distance
+from the feature (so does the crack) and with the size of the disagreement
+(so the blended bank stays walkable). Straight runs are untouched: the
+runner-up is far behind. Test: a transect across the bisector at 14 m, worst
+step under 0.5 m where it was 4.
+
+**A 57 m corridor for a 7 m road.** Shoulder was `1.25w + 2` and the
+embankment band `1.5w + 4`, so the "clean slope from road edge to sampled
+side height" was, on any hillside, a planar cut face thirty metres tall
+with the dune texture on it — the giant smooth wall in the river photos.
+Now `0.5w + 1` and `w + 2` (a 15 m corridor for the default 6 m road, 9 m
+for a 2.4 m trail; `--width` on `roads`/`trails`). Roads are a bit narrower
+because Derek asked, and because the band scales from the width.
+
+**Cut-throughs.** The route cost only *penalised* grade, so wherever a
+detour cost more than the penalty the search took the steep step and the
+profile solve then trenched through the spur (5 m cut cap, but the final
+grade clamp wins). `RouteOptions.hardGrade` is a wall, not a cost:
+`routeWithGradeCap` tries 1.5× the design grade, then 2.5×, 4×, then none,
+and logs a road that needed relaxing. The ENDS are exempt (`hardGradeExempt`:
+town pads plus their ramps, and 2 cells round a road's ends / 4 round a
+trail's), because a pad edge is a 17 % step on a 16 m grid and a summit's
+last cone is steeper than any trail — without the exemption the cap failed
+on 39 of 40 trails and 23 of 39 roads and every one of them fell back to
+uncapped. With it: 15 of 39 roads route at 1.5×, 24 need 2.5× or 4× (a
+ridge with no pass gentler than that between the two towns — the log names
+them), none is uncapped; 36 of 40 trails route capped. Road points cut
+deeper than 8 m went from 646 to 32 (worst 302 m → 14 m). A town centre is
+always made passable first: a pad the widened waterline had wetted was a
+wall the search could not step into, and the road was silently missing. Contouring a cone at a fixed grade *is* a spiral, which is the
+"follow the outside of the mountain up" Derek wanted; it falls out of the
+cap plus the existing turning radius, nothing is drawn. Trails had a
+second, worse cut-through of their own: the profile solve's LAST pass is
+the grade clamp, and a summit cone is steeper than 22 %, so every one of
+the demo's forty trails ended in a trench 100-300 m deep dug into its peak
+so the last leg could stay at grade. `solveProfile` now takes `finalClamp:
+"cut"` (trails use it): the cut/fill clamp wins at the end and the footpath
+simply steepens into a scramble where the ground does.
+
+**Roads next to and across water.** Three separate bugs. (1) The embankment
+band reached into lakes and rivers and *raised* the water's bed toward the
+road's side height — a pale triangle of lake floor standing out of the
+water beside every lakeside road, and river banks regraded into beaches.
+`applyFeatures` now tracks `wet` (1 inside a lake outline or a river's
+waterline, fading up the bank) and towns and the road band beyond the
+shoulder are weighted by `1 - wet`; the roadway and shoulder are kept, which
+is what a ford is. (2) A road crossing a river followed the carved channel
+down (fill capped at 1.2 m, cut allowed 5 m) and crossed under two metres
+of water, sand strips disappearing into the river. `solveProfile` takes
+per-point pins (`pinned.at`) and `roadFrom` pins every submerged point to
+`waterY - 0.4` — the water is sampled a few metres around each point so the
+drowned part of the bank counts too. A crossing is now a wadeable bar with
+the river's own bed either side of it. Bridges are content, not terrain, and
+still to come. (3) Roads ran along river banks because bank cells cost
+nothing extra; `routeGridFor` marks cells within `width/2 + bank` of a
+channel at ×1.6, so a road keeps off the bank unless it is crossing.
+
+**Rivers stepping *up* into lakes and the sea.** Every bed is monotone (the
+check counts uphill steps: 0 of ~950), but the *surface* is `bed + 0.7 ×
+depth`, and through a lake the bed ran a full depth under the lake level,
+so the river's surface arrived 0.3 × depth *below* the lake it was flowing
+into; at the sea mouth the bed went to `seaLevel - depth - 1` and the sea
+stood 1–3 m above the river; at every confluence the shallower tributary's
+surface sat a metre above the trunk's. Now the *surface* is what meets the
+receiving water: through a lake the bed is `level - 0.7·depth - 0.15`, at
+the sea `seaLevel - 0.7·depth - 0.3`, and a tributary's last point is set
+from its parent's bed and depth (`bedOf`/`depthOf` per cell; parents are
+always traced before their tributaries). The 15–30 cm is so the ribbon slips
+under the receiving sheet instead of z-fighting it.
+
+**Rivers were the D8 walk.** Straight runs joined by 45° corners, at one
+width. `meanderChannel` swings the traced cells sideways on a wave along the
+arc length (wavelength `max(140, 11 × width)`, the classic ratio, plus a
+shorter wave so no two bends match; `--meander` in channel widths, default
+3, capped at 60 m), perpendicular to the smoothed tangent, damped where a
+river would not meander — steep grade (a torrent cuts straight; fades
+between 3 % and 12 %, wider than the textbook because this world's rivers
+drop 5-7 % over most of their length and the textbook window left only the
+last reach before the sea bending), the tapered head, the last cells before
+the mouth, inside a lake. The bed heights are *not* moved (they came from
+the filled surface and stay monotone), so a swing into a hillside is a
+deeper cut — an outer-bank bluff; each offset is halved until the ground
+there is within `--bluff` depths of the bed (3.5), and two `[1 2 1]` passes
+round the grid corners. The stage prints what share of the requested swing
+survived the hillside check (83 % on the demo). Widths are now per
+point (`widths`, interpolated by the carve, the clearance and the ribbon):
+they grow with the catchment (`0.55 + 0.45·√(acc/mouth)`), swell 12 % at the
+apex of each bend, wander 14 %; `width` stays the widest, because the field
+sizes the carve's reach from it.
+
+**The water sheet stopped short of the shore.** The ribbon was `1.25 ×
+width` — the flat bed plus a little — but the bank rises over `bank` metres
+and the surface (0.7 of the depth up) crosses it about 0.63 of the way out,
+so the sheet ended in mid-air over a dry strip of sand and the waterline
+was a hard straight edge. It is now cut to the waterline: `bed width + 1.3
+× bank` per point (the `path` mesh source takes `widths`, interpolated by
+control-point parameter, so a ribbon can vary along its length), clipped
+across cell seams with the width interpolated too. Past the waterline the
+bank hides the sheet, which is the shoreline for free. `waterY` reports
+water out to the same line, so scatter and the ford pins see the drowned
+bank as water.
+
+**Lakes with straight sides.** `simplifyLoop` capped a lake's outline at 56
+points and let the tolerance climb to reach it — dozens of cells on a big
+lake — so the polygon cut straight across bays and headlands, and everything
+inside it was carved to the water: a hillside truncated by a wall where the
+real shore curved away (the dark cliff behind the first lake photo). Cap is
+now 160 (`--lake-points`) at 0.6 cells. `lakeDistance` is bucketed per lake,
+so the cost is only paid in cells the lake's bounds touch.
+
+**The sheet still stopped short of the shore** (second screenshot, standing
+on a tarn at 240 m: the ground went under the lake level 14 m out, the
+sheet began at 24). A basin's cells were the ones holding at least
+`minDepth` (1.2-1.5 m) of water, so on any gentle shelf the outline stopped
+where the water was still knee-deep, and the footprint of a drained basin
+stopped 0.3 m under its surface. `extractBasins` now grows each basin
+through the SHALLOWS (neighbouring cells the same surface covers by 0.2 m or
+more that are not deep cells of any basin — a small basin spilling into a big
+drained one shares its surface level, and walking into the big one's deep
+cells re-flooded the emptied bowl at the spill level, nine metres over a town
+that had been sited on its dry floor) before tracing the outline — `Basin.deep` keeps the deep-cell count,
+which is what the drain test sizes by, or every lake with a shelf would have
+been drained — and `chunk.ts` pushes the outline out by half a bank
+(`offsetPolygon`, mitre-capped) so the carve's own rise through the surface
+hides the edge. `waterY` reports a lake over the same half-bank band; its
+callers all compare the ground against it, so the dry part of the band stays
+dry — the route grid included, which walls only cells whose ground is under
+the reported surface (walling the whole band cut six lakeside towns off). After: the sheet begins 13 m out, the ground goes under at 14.
+
+Still open from the same photos: the jagged white staircase where the lake
+sheet meets the voxel bank is the marching-cubes resolution itself and wants
+a shoreline fade in the water material, not a carve change; wide rivers
+would rather have a bridge prefab than a ford; and towns/POIs were re-sited
+after the rivers moved, so any hand-placed spawn near water wants
+`place-spawn` re-run.
+
+### The full palette, and props from one grouped export
+
+Derek's texture and prop drop (2026-09-03): eight ground textures to fill
+the sixteen slots, and one glTF holding every prop on a shelf. What it took
+to fold them in:
+
+**One file per prop.** `tools/split-gltf.mjs <group.gltf> <outdir> [--skip
+A,B] [--rename Old=New]` cuts a grouped export apart along its root nodes.
+Each output carries only the meshes, accessors, buffer views, materials,
+textures and images its node touches, re-packed into a fresh embedded buffer
+(4-byte aligned), with the root's translation zeroed so the prop stands at
+its own origin — the group's layout was a shelf, not authoring. It prints
+each model's bounds, which are what a scatter rule's `footprint` and
+`colliderSize` want. Skinned nodes are refused (props only). Eleven props
+came out of the first grouping; `RockClif` was renamed to the `RockCliff`
+the scatter rules already used.
+
+**Wind by name.** The ask was "anything with Leaves in it sways".
+`wind.materials` (mesh component and scatter rule alike) moves only
+materials whose own name, or whose colour texture's name, contains the
+string, and skips the canopy height test for them — the leaves are chosen
+by name. The trap: Blockbench exports an unnamed pasted texture as literally
+`pasted`, and that is what every texture in this drop is called, so
+`materials: "leaves"` matched nothing. Name the texture (or the material)
+in Blockbench before export; until then the canopy height rule is what
+moves a tree, and a rule that sets `materials` gets no wind at all on an
+unnamed model — deliberately, because silently falling back to height would
+hide the naming mistake.
+
+**Sixteen surfaces.** The demo palette is now the full `MAX_SURFACES`:
+`drygrass`, `gravel`, `moss`, `leaflitter`, `peat`, `wetsand` after the
+preset's ten, `mud` and `redrock` finally on their own textures. The
+preset's biome rows are ten wide and the field pads them, so widening the
+palette breaks nothing; `gen-world.mts` then REPLACES the ground row of the
+biomes that want the new layers, by name (`groundByBiome` → `weights()`).
+Rivers paint `gravel` and lakes paint `wetsand` on their beds and a ragged
+`shore` band (`LakeDoc.surface`/`shore`, painted like a road verge) — the
+rivers stage picks the first of `gravel`/`sand` and `wetsand`/`sand` the
+palette has, so a world without them still paints something. Cost: mesh
+14.0 → 15.6 ms/cell; the fragment side is 48 triplanar fetches, which the
+budget section above says to watch in the profiler rather than predict.
+
+**Sixteen bindings do not fit.** The first headless run with the full palette
+failed the terrain pipeline outright: `The number of sampled textures (20)
+in the Fragment stage exceeds the maximum per-stage limit`. WebGPU
+guarantees 16 sampled textures AND 16 samplers per stage; this adapter
+allows 48 textures but still only 16 samplers, so asking for higher limits
+does not help. The answer §21 already named is now built: past
+`SPLAT_ARRAY_THRESHOLD` (8) albedo maps, `terrain-splat.ts` resamples every
+layer to one square size (largest edge present, capped at 1024) through a
+canvas and stacks them into a `DataArrayTexture` — one binding, one sampler
+however deep — and `sampleTriplanarLayer` fetches a slice by index. Fetch
+count per fragment is unchanged; binding count is what this fixes. Normal
+maps keep the per-map path, so a deep palette cannot also carry them. If
+packing throws (no canvas) it warns and binds separately, which will fail
+the pipeline the old way rather than silently render nothing. The packed path COMPILED and props streamed, but the ground rendered BLACK:
+a probe of the terrain material found no texture nodes in its colour graph
+at all, with no warning logged, and the cause was not found before the
+session ran out. `SPLAT_ARRAY_THRESHOLD` is therefore 12, and the demo palette is ELEVEN —
+twelve separate maps measured 17 sampled textures in the fragment stage
+(shadow map, noise and the rest take five), so eleven is the true cap for
+the per-map path — with drygrass in the never-weighted `ice` slot so the
+preset's positional rows still line up. Cut: peat, leaf
+litter, moss and the borrowed wet sand are out until the array path is
+debugged. Next step for whoever picks it up: `loadLayerTextures` never
+reaches `wireSplat` with textures when packing is on (the `[render] packed`
+info line never printed), so instrument from the `requests` list down.
+
+**Seven scatter rules** for the new props (dead dried tree, dry brush,
+stump, root, mushroom, palm, hoodoo), sized from the printed bounds, zoned
+by biome id. Scatter went 10.7 → 16.8 ms/cell — that is cell LOAD time, not
+frame time, but it is the number to trim next (the margin solve and
+`waterY` per candidate, as before).
+
+### Water that connects: seams, lakes, outlets and a current
+
+Four complaints from walking the demo after the previous round, and what
+each turned out to be. Verify a world with `worldgen rivers` and the audit
+pattern at the end of this section before believing a screenshot.
+
+**Gaps along every cell seam of every sheet.** The water shader phased its
+waves by the mesh's LOCAL x/y and lifted vertices along local z. That is
+right for the one big ocean plane (rotated flat, local z = world up) and
+wrong for every per-cell lake sheet and river ribbon, which are authored
+flat in local XZ: their "local y" is constant and their "local z" is
+HORIZONTAL, so every sheet slid sideways by its own phase and two
+neighbouring cells slid by different amounts. Waves are now phased in
+WORLD space and applied along the surface's own normal (`normalLocal`), so
+sheets streamed in separate cells agree to the millimetre along a shared
+edge, and a falling ribbon is displaced across its face instead of through
+it. The analytic normal is built in world space and taken into view space
+through `cameraViewMatrix` — `normalNode` is a VIEW-space normal, and the
+old code fed it a local one.
+
+River ribbons had a second seam of their own: each cell's run was clipped
+exactly to the cell, so the Catmull-Rom tangent at the run's end was
+extrapolated from that cell's points alone, and the two ribbons met at one
+point with two side vectors — edge vertices up to half a width apart. The
+`path` source now takes `trim: [start, end]`, spans left undrawn whose
+control points still shape the curve, and `voxelChunkDoc` hands every run
+the point beyond each of its ends as a phantom (`clipPolylineToRect`
+reports the segment each run starts and ends on). The end samples are
+evaluated at the control-point PARAMETER (`getPoint(k / spans)` is exactly
+`points[k]`), so two pieces share the point, the neighbours and hence the
+tangent, width and side vector. `test/path.test.ts` welds two pieces of a
+bending river to three decimals.
+
+**Rivers not connecting to lakes.** Three separate faults:
+
+- *A drained lake could sit below the lake it drains into.* Draining
+  lowered a big basin to `floor + lakeFill` regardless of what waited
+  downstream; where that floor was under the next lake's spill level the
+  river between them ran uphill (one arrived 24 m under the surface of the
+  lake it entered). Levels are settled downstream-first
+  (`receivingBasin`/`settleLevel`): a drained lake sits at least 1.5 m over
+  the lake or sea its outlet reaches. The stage prints how many were held
+  up. Consequence: lakes that used to be drained into a puddle are lakes
+  again, and towns sited on their old dry floors are under water until
+  `worldgen towns` (and then roads/pois/trails) is re-run. **Always re-run
+  the town chain after rivers; check `waterY` at every town centre.**
+- *Tributary mouths missed their parent by up to 60 m.* A tributary was
+  traced to the grid cell its parent flowed through, but the parent had
+  since been swung sideways by its meander. The last point is now moved
+  onto the nearest point of the parent's swung polyline and its bed read
+  off the parent's there (`nearestOnSwung`).
+- *Outlets started as a trickle out in the water.* A channel whose source
+  cell lies under (or one cell beside — the polygon is refined onto the
+  real shoreline, which runs through that ring) a lake is that lake's
+  outlet: it is trimmed to start one cell inside the shore, at full width
+  (`taper: 0`), at the lake's surface.
+
+Beds are now solved from the MOUTH upward — each bed is at least the one
+below it — so a river approaching a lake across a flat arrives flush with
+it instead of sliding in a metre under (solving downward could only lower
+a bed, never lift the approach). From the first cell under drawn water
+onward the bed is CAPPED at that lake's flush level, which is what cuts a
+drained basin's outlet down through its sill; without the cap the
+mouth-first solve lifted the whole lake reach up to the sill. Inside a
+drained basin's dry bowl, upstream of the water, the bed follows the
+ground down instead of dropping to the lake in one step at the basin's
+edge. The audit after the rewrite: 0 uphill bed steps, every confluence
+within 5 m of its parent and 0.2 m under its surface, every inlet and
+outlet within 0.3 m of the lake, no dangling mouths.
+
+**Strange geometry around lakes.** The polygon is an outline traced on a
+16 m grid and simplified, right to within a cell or two — and the field
+carved FROM it: everything inside dug to `depth`, a bank outside pulled
+down to the waterline. Where the outline overshot onto a hillside that was
+a crater with a vertical wall at the polygon edge and a terrace at water
+level beside it. Two changes:
+
+- `worldgen rivers` slides every outline vertex along its outward normal to
+  where the field actually crosses the water level (`refineShoreline`,
+  bounded by a cell and half the distance to each neighbour), so the
+  polygon is the shoreline of THIS terrain.
+- Lakes it writes carry `carve: false`: the terrain already holds the
+  basin the hydrology found, so the field only DEEPENS ground that is at or
+  under the surface (blended over two banks into a bowl, minimum 0.6 m of
+  water at the shore) and leaves anything standing more than a metre and a
+  half above it alone — an island, or an outline that strayed uphill; the
+  sheet is drawn half a bank past the outline and buries itself in it.
+  Nothing outside the outline is carved any more. Hand-placed lakes keep
+  `carve: true` (the default) and dig the basin outright, because an author
+  who drops a lake on a plateau means a lake there.
+
+**Brush standing in the water.** Scatter refuses ground under `waterY`; it
+now also refuses the 35 cm above it, and the refined outline means the wet
+band (`waterY` reports half a bank past the polygon) follows the real
+shore. The ground-cover layers already kept 25 cm.
+
+**Bright sheets of water hanging in a dark sky** with no land under them
+(the screenshot that opened this round) were not missing terrain — every
+far-ring supercell carried its terrain, checked from a headless probe. The
+scene's height fog dissolves distant hills into the sky colour, and the
+water's fresnel rim was a fixed near-white, so at dusk the sheets glowed
+where the land had gone dark. The rim is now multiplied by
+`horizonTint` (atmosphere.ts), a uniform the fog system sets to the fog
+colour: a reflection of the sky it is supposed to be.
+
+**A current.** `riverMaterial` on the recipe names a second water material
+that `worldgen rivers` writes beside the standing one:
+`<waterMaterial>-river`, `flowMode: "channel"`, a `<Name>Flowing` sibling of
+the base texture when the project has one, at a 7 m tile. River ribbons
+carry `flowSpeed` (0.9 m/s on the flat, up to 3 on a steep reach, from the
+bed grade), `uvMetres` and `uvAlong` (distance along the whole river, so
+the texture is continuous across cell pieces), and the ribbon builder
+emits a per-vertex `flow` attribute — tangent times speed. In channel mode
+the shader measures its waves along the ribbon's metre uv and scrolls
+texture and foam down it at the vertex's own speed: the water runs
+downstream, round the bends and over the falls. Standing water keeps
+`drift` mode. Do not put a channel material on geometry without the
+attribute (three warns and substitutes zeros; the editor's material
+thumbnails do exactly that, harmlessly).
+
+**Draw calls.** A lake is emitted as one sheet per streamed cell, and the
+far ring used to render every one of them un-merged — a hundred transparent
+draw calls for a big lake. Single-material poly meshes now merge into the
+HLOD proxy like polygons (the world-space shader makes merged sheets shade
+exactly as separate ones); polys with material slots or face colours still
+defer.
+
+Audit pattern (a scratch tsx over the recipe with `createWorldField`): for
+each river, classify its last point — sea (natural ground under sea
+level), lake (inside a polygon: surface vs `waterY`), confluence (within
+12 m of another river: surface vs the parent's), else DANGLING; count
+uphill `bedY` steps; for each river starting inside a polygon compare its
+first surface with the lake; for each town compare `waterY` at the centre
+with `groundY`. Every number in this section came from that script.
+
+### Rivers first: the network decides the land
+
+Six rounds of patching water onto a noise heightfield ended with a world
+where 41 of 57 rivers ran straight to the sea, 5 ended in a lake, and 45
+of 64 lakes had no river at all — ponds the drainage never visited, every
+one of them 10–13 m wide. The audit that produced those numbers is now a
+command (`worldgen audit`), and the pipeline was turned round: **the
+channel network is computed first and everything else answers to it.**
+This is the hydrology-first approach from Génevaux et al. (2013) adapted
+to a recipe-as-truth engine — the recipe still stores features, not a
+raster, and the field still derives the ground from them.
+
+**Lakes are nodes on the tree.** `worldgen rivers` still fills depressions
+and traces channels above a catchment threshold (now 0.12 km², so brooks
+exist), but a depression becomes a lake ONLY if a traced channel runs
+through its cells. The outlet channel leaves it, so every lake written has
+a river leaving it, and most have one arriving. The biggest `--lakes` (48)
+of those are kept as water. Every other depression on the network is
+written as a **fill** (`features.fills`): its outline at its spill level,
+and the field RAISES the ground inside to that level (never lowers it), so
+the river cuts its channel through a flat valley floor instead of a chain
+of ponds. Depressions the network never crosses stay what they were, dry
+hollows in the ground. The stage prints the split: "316 depressions, 135 on
+the channel network", "48 lakes, 87 filled to valley floors".
+
+**A river builds as well as cuts.** The field used to hold "a river cuts, it
+does not build", and wherever a bed ran above the ground — across a hollow
+the fill had raised, along a slope the meander swung it onto — the ribbon
+floated over a pit with dry ground under the waterline. Inside the channel
+and its banks the ground is now pulled UP to the bed too (`RIVER_MAX_BUILD`
+= 10 m caps it: sediment fills a hollow, nothing builds a dam), taking the
+LOWEST bed among overlapping channels so a tributary never builds a sill
+across the river it joins, and never under a lake's sheet. Fills yield to
+lakes the same way: two basins' shallows can overlap, and a fill raised
+inside the neighbouring lake stood out of the water as a grey sliver.
+
+**One width law for the whole tree.** Width at every channel cell is
+`2.5 + 6.5·√(catchment km²)` clamped to 2.5–30 m, depth `0.9 + 0.2·width`
+clamped to 1–6.5 m, both written per point (`widths`, and the new
+`depths`). A brook at the threshold is 5 m wide and a metre and a half deep;
+the trunk draining sixteen square kilometres is thirty metres and six deep;
+width jumps at every confluence by exactly what the tributary brought. The
+bank follows the LOCAL width — `riverBank()` in field.ts, `min(bank,
+0.7·width + 3)`, used by the carve, `waterY`, `featureClearance` and the
+ribbon alike — because a 3 m stream must not get the banks of the river it
+becomes. The water surface sits 0.7 of the local depth over the bed
+everywhere the depth is read (field, chunk ribbon, audit).
+
+**Drained lakes sit on their river.** A basin over `--max-lake` is still
+drained to `floor + lake-fill`, but the floor is now the lowest ground the
+CHANNEL crosses inside the basin and the wet footprint is grown from that
+cell (`basinFootprint(…, seed)`), not from the basin's deepest side bowl —
+16 drained lakes had water where no river ran. A drained level is bounded
+below by the filled surface at its outlet's mouth (`outletMouthFilled`): the
+outlet's bed is solved from that mouth upward, so a lake lowered under its
+confluence got an outlet that left it fourteen metres above the water. And
+never above its own spill level: a lake that cannot drain below what waits
+downstream simply is not drained.
+
+**Roads cross on bridges.** In `roadFrom`, every dense route point within
+the waterline of a river at least `--bridge-min` (6 m) wide is a crossing;
+each run of them, extended one point onto each bank, is a **bridge**: the
+profile over it is pinned to a deck height (the lower bank, at least 1.2 m
+over the water), the road doc is SPLIT at the two abutments (`road-a-b`,
+`road-a-b.2`, …) and a `features.bridges` entry records abutments, width,
+`deckY`, `waterY` and the river. The water underneath is untouched — a road
+carve there keeps the roadway and shoulder even in water (that is a ford),
+and over a real river that is a dam. Streamed cells emit a placeholder deck
+(a `path` slab with a trimesh collider, in `recipe.bridgeMaterial`, a plain
+timber colour written by the stage) and box piers every eight metres down
+to the bed, so the crossing is walkable the moment it streams in; the WFC
+bridge builder replaces them by reading the feature — the abutments and
+`deckY` are its contract. A crossing at either end of a route (a town on
+the bank), or a run longer than eight points (the road following the bank,
+not crossing), stays a ford. Narrow brooks stay fords. Trails get
+footbridges by the same rule.
+
+**Ribbons stop at the shore.** Where a river runs through a lake its ribbon
+used to run under the sheet — a second water surface a hand below the first,
+and the two wave patterns crossing drew a bright line along every sheet
+edge. `waterEntities` now cuts the line into pieces at the sheet's edge
+(the outline plus half a bank, found by bisection along the entering
+segment) and ends each piece two and a half metres under the sheet.
+
+**Stage order and the audit.** `all` now runs canyons BEFORE rivers, so the
+hydrology drains through the gorges; cut after, a canyon floor under a lake
+outline flooded 90 m deep. The rivers stage samples the world WITHOUT
+towns, roads and bridges (they are re-run once the water moves; sampling
+drainage over the old embankments made every re-run drift). After rivers,
+ALWAYS re-run towns → roads → pois → trails; the stage says so when any
+town is under water. `worldgen audit <world>` (exit 1 on findings,
+`--verbose` for per-river/per-lake detail) checks: every river ends in the
+sea, a lake, or its parent within 12 m; every lake has the network within
+a bank of its outline (or reaches the sea — a lagoon); beds only descend;
+outlets leave flush; no town centre under water; no road point under more
+than a ford's depth; every bridge has a road ending at each abutment. The
+rivers and roads stages print its one-line summary. Two things it had to
+learn: a stream falling from a tarn into the lake below starts inside BOTH
+outlines (pick the lake whose level matches the river's surface), and a
+lake thirty metres from the coast has a thirty-metre outlet (two-point
+rivers are rivers now).
+
+**Reading the result.** `worldgen map --plain` draws terrain and water
+only, rivers at their real width, no markers — at world scale the POI
+squares bury the network; `--cx/--cz --extent 2200` is the scale at which
+a drainage tree is legible. What the demo looked like after this round:
+about a hundred rivers (55 to the sea, the rest into lakes or each other,
+0 dangling), 48 lakes on the network, ~88 bridges, 0 uphill bed steps, 0
+towns or roads under water.
+
+**Cost of an outline per column.** A lake outline is up to 160 vertices, and
+the field used to run point-in-polygon AND nearest-segment over all of them
+for every column inside the lake's bounding box, twice (the carve and
+`waterY`), plus the same again for every fill. `polygon-index.ts` rasterises
+each outline once at about a hundred cells across into OUTSIDE / INSIDE /
+BAND, and only band cells (within two banks of the shore) carry the handful
+of segment indices that reach them; a column deep in the water or far from
+the shore is one array read. The sign in the band comes from the side of
+the nearest segment (outlines normalised counter-clockwise; at a vertex
+the more perpendicular of the two nearest decides), and a band cell whose
+point is beyond the band falls back to the cell's own inside flag rather
+than trusting a partial segment list. Discs stay analytic. On the fixed
+`worldgen stats` sample: 14.9 → 12.9 ms/cell to mesh, 19.4 → 16.0 to
+scatter; cells at a big lake's shore gain far more. `test/polygon-index.test.ts`
+checks it against the exact answer on a concave outline.
+
+**Seeing far.** "I cannot see far, and that breaks the wish to go there." Two
+settings agreed on ~650 m: `rings.farTerrain` 14 cells (672 m) and height fog
+density 0.0032 (85 % opaque at 600 m). The far ring is now meshed TWICE as
+coarse as the hlod ring — `FAR_VOXEL_COARSEN` 6 in the chunk manager, passed
+to `buildHlodProxy` as `hlodVoxelCoarsen` for supercells whose every member
+is in the far ring — so it reaches twice as far for the same triangle and
+bake budget: the voxelWorld default is 24 cells (1.15 km), the demo scene 28
+(1.34 km) with fog density 0.0014 (85 % at 1.35 km). Keep the two matched:
+a ring ending in clear air is a cliff of missing world. And check the CAMERA:
+the editor camera had a 500 m far plane (the play camera has 4000), so in edit
+mode nothing past half a kilometre could draw whatever the streamer held —
+the first "after" screenshot from the highest peak was pure fog for that
+reason alone. It is 4000 now. In far-ring proxies the deferred water is
+thinned too: river ribbons under 12 m wide and bridge decks are skipped
+(`hlod-proxy.ts`, when `hlodVoxelCoarsen` is above the hlod default) — out
+there a brook is narrower than its voxels, and every ribbon was a draw call. The next step, when
+"a mountain five kilometres away" is wanted, is a fourth tier — one
+heightfield mesh per 1-2 km tile sampled straight from `field.height`, no
+marching cubes — not a longer far ring; the supercell count grows with the
+square of the radius.
+
+### Lowland water: only gentle reaches carry a sheet
+
+Derek's two screenshots after the rivers-first round were the same fault:
+a river on a 6 % slope drawn as a tilted sheet, the current streaked down
+it, its straight edges hanging over the bank, and where it reached a lake
+it arrived above the lake's level. The topology was right; the LAND was
+wrong for rivers. This landform drops 5–7 % over most of its length, so
+nearly every channel was a mountain torrent, and a water sheet on a torrent
+is a wall of water. Real rivers live on floodplains under 1 %.
+
+So `worldgen rivers` now writes one document per WET or DRY run of each
+channel: a reach carries a water sheet (`water: true`) only where the bed
+grade over its neighbouring points is at or under `--wet-grade` (0.02);
+steep reaches are written `water: false` — carved exactly the same, painted
+gravel, no ribbon, `waterY` null. Points under or beside a lake and the two
+cells at a sea mouth are always wet so water visibly leaves and arrives,
+and a wet run away from any lake or the sea must be three points long or
+it is a puddle on a slope and is dried. Neighbouring runs share their
+boundary point so the carve is continuous; only the head piece tapers. On
+the demo: 198 wet reaches, 161 dry gullies, 37 mouths wet to the sea.
+
+Lakes: `--lakes` now defaults to 16 (was 48; inland water 14 % → 10 % of
+land), the rest of the on-network hollows become fills. The sheet is drawn a
+FULL bank past the outline (was half): an inlet's river carve lowers the
+bank band beyond the traced shore, and a sheet that stopped short of that
+drew its foam edge in mid-air over water-level ground. `waterY` reports
+over the same band.
+
+The river material is softer (`waveAmplitude` 0.03, three foam steps): the
+two-step foam along a ribbon's edge read as a painted white rectangle.
+
+**Fog, actually visible.** Height fog with `heightFalloff` 0.02 was a
+quarter of its base density at 60 m and nothing at all up a hill: "I don't
+see fog on any geometry" was correct. The demo runs `density` 0.0018 with
+`heightFalloff` 0.004 now — 85 % opaque at the 1.3 km ring from player
+height, and still there on the ridges — and far-ring proxies skip scatter
+props under 4 m tall (`hlod-proxy.ts`), which is where the rocks went:
+prefabs of primitives cannot instance, so every rock was merging into the
+far proxies as static triangles.
+
+Still open, and honest about it: the water SHADER itself. The channel mode
+streaks its texture along the ribbon on any slope and the foam is a
+contour band; a proper pass wants flow-map style two-phase sampling and
+depth-fade foam, iterated against screenshots. The lowland rule keeps the
+sheets flat enough that the current shader is not embarrassing; it does
+not make it good.
+
+**Banks, berms and still vertices (the next two screenshots).** Water
+sheets were hanging in the air over ground below the water level: on a
+side slope a channel's downhill bank is naturally under its own surface,
+and the carve only ever cut, so the ribbon's outer edge floated over dry
+ground; a lake's refined outline sat at the waterline until a later carve
+(an inlet's banks, a road) lowered the shore beyond it. The river build
+target is now the channel's CROSS-SECTION — bed inside the half-width,
+rising to a natural levee (surface plus 0.4 m) by the waterline at 0.63 of
+the bank and held to 0.85 — under wet reaches only; the ribbon ends at 0.75
+of the bank, inside the levee. Lakes hold a berm at water plus 0.4 m over
+the outer half of the bank, only for lifts under 3 m (a shelf metres under
+the water is something the sheet should cover, not a wall to build); the
+sheet and `waterY` reach 0.75 of the bank. And the faceted streaks across
+sheets were the wave DISPLACEMENT: a lake is one polygon fan and a ribbon
+is two vertices wide, so lifting the few vertices tilts whole triangles.
+Water materials carry `displace` now; `worldgen rivers` writes
+`<water>-lake` and `<water>-river` with it off (wave normals still move,
+the geometry does not) and points `recipe.waterMaterial` at the lake twin;
+the ocean plane keeps the base material. Meander default 4.5 widths,
+wavelength `max(110, 9·width)`.
+
+**Bends have a minimum radius.** A sine of amplitude A and wavelength L
+has a minimum radius of L²/(4π²A); a channel folds over itself when that
+drops under about twice its width, and 4.5 widths of swing on a 126 m
+wavelength made every tributary a zigzag of rhombus-shaped sheets at a
+confluence. The wavelength is now `max(160, 14·width)` and the amplitude is
+capped at 0.9 of the curvature bound, so the bends are long and sweeping —
+which is what "rivers need to bend more" meant — and a ribbon never
+overlaps itself.
+
+### Rivers that bend, and rivers you draw
+
+**Sine-generated meanders.** "They just look like straight lines" was
+exactly right: a traced corridor is a run of cell centres, and offsetting
+it by a sine can never make a real bend — capped so the ribbon does not
+fold, a sine offset has a sinuosity of about 1.1. `meanderSine` in
+worldgen.mts is the Langbein–Leopold sine-generated curve: the channel's
+HEADING swings like a sine along its arc length (`--swing`, 1.05 rad, about
+60°) and the position is integrated from it, in a frame that rides the
+smoothed corridor (`corridor(u) + normal(u)·v`). That gives proper loops
+with a bend radius of a couple of widths and a sinuosity of 1.3–1.8, and it
+cannot self-intersect below a swing of ~110°. A weak spring pulls the
+lateral offset back to the corridor so the bluff damping's drift never
+carries the channel off; the swing damps on steep reaches, grows from the
+head, holds its line into the mouth and goes straight through a lake. The
+polyline is RESAMPLED (6 m steps) rather than offset, so bed, depth, width
+and cell are re-read off the corridor at each point's fractional index.
+
+**Drawn rivers.** `features.riverPaths` is authoring input: a centreline
+from the editor's path tool (`worldgen river-path <world> --from-scene
+<scene> --entity <id>`), from a hand-typed list (`--points "x,z;x,z;…"
+--width 18`), or from an agent writing the JSON directly. The rivers stage
+turns each into a channel of its own — densified to half a grid cell,
+snapped to cells so every lookup works, counted for lake selection — and
+solves it like a traced one, with two differences: it is left exactly as
+drawn (no meander, no outlet trim), and its bed is a running MIN from the
+head (a drawn river cuts down through whatever it crosses; a ridge becomes
+a gorge) before the mouth rule. Width ramps from half at the head to the
+author's width at the mouth unless `widths` are given. Re-running the
+stage re-solves the path; the path is never touched.
+
+**Cut banks at a slope limit.** A channel cut six metres into a hillside
+eased back to the ground over the same one bank width as a channel cut a
+metre into a meadow — a canal with a cliff for a bank, the "carved side
+cliff a real river would never have". The cut band is now the larger of
+the bank and 2.5× the cut height (capped at three banks, which is the
+bucket reach), so a deep cut is a valley side at about 22°.
+
+### Rivers are authored: lakes from the hydrology, rivers from a hand
+
+Five rounds of traced rivers — rivers-first hydrology, lowland-only
+sheets, sine-generated meanders, drawn paths — and Derek's verdict on the
+result was still "not fixed". The call (2026-09-04): **take the rivers out
+of the generator, keep the lakes, and have an agent carve and path the
+water**, editing the world directly rather than regenerating it. The
+hydrology is good at one thing — deciding which hollows hold water and
+which are valley floors — and bad at the thing a level designer does by
+eye: choosing where a river is worth having and what shape it takes.
+
+**What the generator does now.** `worldgen rivers` computes the channel
+tree as before, uses it to pick the lakes (a basin is a lake only if the
+tree runs through it) and to fill the other hollows to their spill level,
+and writes NO rivers. `--trace` carves the traced network the old way;
+`features.riverPaths` still solves into rivers for anyone who wants the
+path tool's output solved by the stage. Rivers already in the recipe that
+carry no `bedY` are hand-written and survive every re-run untouched.
+
+**What a hand-written river is.** A `features.rivers` entry with `points`
+(head first), `width`, optional `widths`/`depths` ramps, `depth`, `bank`,
+`maxGrade`, `water: true`, a `surface` — and NO `bedY`. The field solves
+the bed when it is created (`solveRiverBeds` in field.ts), so the recipe
+edit is the whole change: save the file with the dev server running and
+the world carves, banks and waters the river in place. The rules:
+
+- the points are resampled along a centripetal Catmull-Rom spline through
+  them (the curve the ribbon draws), a few metres apart, so a river written
+  as thirty control points carves as a curve, not a polygon;
+- the bed is the ground the river crosses (canyons, fills, lakes and every
+  river solved before it applied; towns and roads NOT — a river cuts a
+  road, the road does not lift the river) less the local depth;
+- from the first point within a bank of a lake onward it is capped at that
+  lake's flush level, and held AT it inside the lake band: an outlet
+  leaves flush with its lake, an inlet arrives flush;
+- on a river already solved it is flush with THAT surface: a tributary
+  listed after its trunk arrives at the trunk's level, not a channel depth
+  under the trunk's bottom (the first version cut a hole in the trunk);
+- running MIN from the head — a drawn river is a decision, it cuts a ridge
+  in its way rather than climbing it — then the mouth: a hair under the
+  sea (every point whose ground is under the sea targets the same level,
+  so an offshore tail is where the ribbon slips under the ocean plane and
+  not a reason to chase the seabed twenty metres down);
+- then `maxGrade`, mouth up: wherever the bed would drop faster than the
+  limit (5 % by default) the reach ABOVE is cut down to it, never under a
+  lake. This is what turns the coastal scarp every continent here ends in
+  into a gorge instead of a slide.
+
+That last rule is the honest trade. This world's shore profile is a
+40–50 m cliff on every coast, so every river has to lose that height in
+its last few hundred metres; the traced generator dodged it with dry
+gullies to the sea. A 5 % limit makes the last ~900 m of a river a gorge
+whose walls reach 25–40 m at the cliff — a water sheet tilted at 5 %, fast
+current, which is what rapids through a gorge look like. 2 % would be a
+2 km canyon. Whoever draws the river decides; the schema describes both.
+
+**The author's tools.** `worldgen descend --from-lake <id>` (or `--from
+x,z`) walks the hydrology's downstream chain from a lake to the sea or the
+next lake and prints the valley floor as a table and a `--points` string;
+`worldgen profile --points "…"` samples ground, grade and the ground a
+bank width to either side along a candidate (`steep`, `side slope`,
+`UPHILL`, `under water` flags and a summary); `worldgen profile --river
+<id>` reads the SOLVED bed of a river in the recipe the same way. The
+loop that produced the three demo rivers: descend → pick the corridor →
+write control points that follow it loosely with bends of a few widths
+(cut the grid's corners, keep off the hillside side of a valley) →
+profile → adjust → `audit`. A lake with no river is a note, not a finding,
+in a world whose rivers are all hand-written.
+
+**Roads.** A hand-written river across an existing road is a ford (the
+roadway is kept even in water) — a 50 m wall of road across a gorge until
+`roads` is re-run, which splits the road and writes the bridge. So the
+chain is still: rivers (yours) → towns → roads → pois → trails.
+
+**What the first three rivers showed.** lake-4 → west coast (2.4 km),
+lake-8 → into it (2.6 km, the confluence), lake-7 → south coast (2.8 km).
+Lake outlets on this terrain are lips — the drained lakes sit perched a
+few metres over the plateau outside — so an outlet is a short cascade
+where the bed leaves the lake band, then a level pool through the notch.
+The grade limit's gorges are the dominant landform on the lower reaches.
+
+### Paths, not roads — and a trail that stops below the summit
+
+Added 2026-09-04, from walking the demo: the 6 m graded roads looked like
+earthworks — a 15 m corridor of embankment on every hillside — while the
+2.4 m trails cut for the peaks looked like the world had been walked in. So
+the roads are gone. `worldgen paths` (`roads` is an alias) builds the
+town-to-town links the way `trails` builds a climb: 2.4 m wide, a 0.18
+design grade, cut-only profile (`finalClamp: "cut"` — the path steepens on
+a spur instead of trenching through it), `path-<a>-<b>` ids. Bridges,
+fords, the audit, `pois`' `near-path` tag and the trail network all read
+`features.roads` exactly as before; only the documents in it changed.
+Nothing in the engine still needs a "road" a path does not provide.
+
+**Trail ends were cliffs.** The last four cells up to a summit are exempt
+from the hard grade cap (a peak's final cone is steeper than any trail, and
+without the exemption the cap failed on 39 of 40 trails). Exempt meant
+UNCAPPED: the search walked straight up the cone and `finalClamp: "cut"`
+kept the tread on the ground, so forty trails in the demo finished with a
+300-500 % wall — 78 m of rise in 14 m on one of them. That is the "a bit
+steep in places". The exemption now has its own cap
+(`RouteOptions.exemptGrade`, 4× the design grade = an 88 % hands-on climb;
+`--scramble`), and when no capped route reaches the summit at all the
+search returns the route to the best reachable cell instead of null
+(`partial: true` — least height still to climb, plan distance as a light
+tie-breaker, so a shoulder just under the peak beats a cell at its foot;
+an A* that cannot reach its goal spends its budget on cheap ground far
+away, so `partialRadius` floods a 40-cell disc round the summit
+exhaustively before choosing): the trail ends on the highest walkable
+point below the peak, and the log says by how much. The UNCAPPED rung of
+the cap ladder is gone for trails — 4× (88 %) is the last, because the
+voxel summits are terraced crags: probing six of them, a 55 % step cap
+tops out 90-340 m below the summit and an 88 % cap reaches summit height
+on most, so a hands-on climb is what a peak trail is. Town paths stop at
+4× too (see below: the uncapped rung once joined two towns up a cliff).
+
+**Gravel across the snow.** A dirt track over a snowfield reads as mud.
+`RoadDoc.surfaceByBiome` maps biome id → palette surface; the painter
+blends the swap by biome membership (the same weights that pick the
+ground's own cover), so it fades over the biome boundary. Both stages
+write it: every biome whose heaviest ground surface is `snow` gets
+`gravel` when the palette has one (`alpine`, `tundra` in the demo);
+`--surface-by-biome alpine=gravel,tundra=rock` names the swaps by hand and
+`--surface` sets the base.
+
+**Props on the path.** `featureClearance` measured a path from the edge of
+its TREAD (1.2 m out on a footpath), and the shoulder beyond it — regraded
+flat, painted dirt, ragged verge — is what reads as the path. A mushroom
+with a 1.5 m clearance stood on the verge. Clearance is now from the
+shoulder's edge (3.4 m on a trail, 7 m on the old roads). Two smaller
+traps fixed with it: the carve's segment buckets stop at the embankment's
+edge, so a boulder rule asking from 9 m out was told "no path here" and
+placed 8 m from the centreline (a second, wider bucket set answers the
+clearance query; the carve pays nothing); and `scatter.clearance` had a
+schema default of 0, which put any rule that forgot it on the path — the
+default is 1.5 m. A live path edit re-cooks the cells out to the shoulder,
+the embankment AND a scatter margin (`featureFootprint`), since the props
+it just invalidated are as much a part of the edit as the ground it
+re-shaped.
+
+### "Thorns" along the paths: cross-slope, cut walls, and the voxel grid
+
+Added 2026-09-04, from four screenshots of the first path-only world: rows of
+triangular spikes beside every climbing trail, a herringbone staircase in a
+rock cut, a washboard along a straight climb. Three causes, measured on
+`trail-peak-3` where the player was standing (heightfield transects at 0.5 m):
+
+- **The path was traversing a 65° face.** The route search caps the grade
+  ALONG each step and never looked at the ground across it, so a trail was
+  free to contour a cliff at a comfortable 20 %. At the point measured the
+  ground rose 17 m in the 7.8 m from the tread to the corridor's outer
+  edge; the bench cut into that face was a 200 % wall, and the 2 m voxel
+  mesh draws a diagonal wall as a staircase — the thorns. Fix:
+  `RouteGrid.gradX/gradZ` (the larger one-sided difference per axis, so a
+  cliff inside one cell is not halved) and `RouteOptions.maxCross` — the
+  gradient's component perpendicular to the step, a wall above `--max-cross`
+  (1.0 = 45°, exactly the 1:1 bank the corridor can hold, twice that in the
+  exempt end cells) and a cost multiplier below it (`crossWeight` 3). Paths
+  and trails both use it. The price: the demo's summits are crags, and a
+  trail that cannot reach one without a traverse now ends below it (the
+  partial route) rather than beside a wall — 1 of 35 reaches its summit at
+  1.0, 4 of 37 at 1.2, 24 of 41 with no cap, and the third of those was the
+  world in the screenshots. 0.8 sent trails 17 km round the hills for no
+  gain.
+- **The band could hold any side height.** The generator samples the ground
+  at the corridor's outer edge and the field draws an S-curve to it, whatever
+  it is. Now the face is clamped to what a bench cut looks like: a cut no
+  steeper than 1:1, a fill at 0.8 (`applyFeatures`, roads). Where a path
+  still skirts a cliff, the bank stops at that and the cliff above stays a
+  cliff — the seam moved out to the band's edge instead of standing beside
+  the tread.
+- **The corridor was finer than the voxel grid.** A 2.2 m shoulder on a 2 m
+  voxel mesh is a one-sample feature; along a diagonal path the samples fall
+  alternately on tread, shoulder and bank, which is the washboard. `roadFrom`
+  now sizes the shoulder and smooth band to at least 1.5 and 2.5 voxels
+  (`cellSize / resolution`), so the blends are something the mesh can
+  reproduce; the painted tread stays 2.4 m. There is no smoothing pass to
+  "slap on" after the fact: the mesh is already a linear reconstruction of
+  the heightfield at voxel spacing, and a feature narrower than two voxels
+  aliases no matter how it is filtered afterwards — the fix is to author
+  nothing narrower than that.
+
+How to check without the browser: sample `field.height` across the path at
+0.5 m (a bench is tread, S-curve, natural ground; a wall is 10+ m inside the
+band), and compare a hillshade of the heightfield at 0.5 m with one sampled
+at the voxel size — if the second is ragged where the first is smooth, the
+feature is under the grid's Nyquist.
+
+### The teeth were a blend, the briars were cover
+
+Same day, two more screenshots. Rows of pointed teeth along the bank of a
+climbing path, and a hillside path carpeted in brambles.
+
+**The teeth were the seam blend.** Sampling the field across the bank of
+`path-town-1-town-27` at 0.1 m: the height flipped between two values by
+three metres every half metre, and the same flip ran along the bank on the
+locus where the path's two neighbouring segments are equidistant. The
+runner-up blend in `nearestPerOwner` (the fix for fins at bends) widens its
+span with the DISAGREEMENT between the nearest and runner-up values — meant
+for a bend, where the two are near and disagree by a metre. On a path
+climbing at 150 %, adjacent segments disagree by thirty metres at any point
+between them, so the span grew until a segment twelve metres further away
+than the nearest was mixed in, and on the equidistant locus the runner-up
+alternated between the segment before and the one after. The disagreement
+term is now capped at 4 m: a runner-up not within a few metres of being
+the nearest is not the feature here. Test: a straight three-point path at
+150 % has a monotone bank across and along. The transect that found it is
+the diagnostic — hillshades hide a 0.5 m-period flip completely.
+
+**That path was climbing a cliff at all** because town paths kept an
+uncapped last rung in the cap ladder ("two towns must connect"). A link
+that only exists as a 150 % scramble up a cliff is worse than no link; the
+ladder for paths now stops at 4× like trails, and an unroutable pair is
+logged as left unlinked.
+
+**The briars were ground cover, not scatter.** Every prop audit said no
+scatter instance lay in any corridor, and that was true: the "briars" are
+the scene's `bramble-cover` grass layer, allowed on the `dirt` surface —
+and to the splat a dirt track IS dirt. The host's cover sampler
+(`voxel-ground.ts`) now refuses any point with `featureClearance < 0.5`,
+so no cover layer grows on a tread, its shoulder, a town pad or a river's
+bank foot whatever surfaces it lists. Lesson: when the data says the props
+are not there, ask what ELSE draws a plant — there are two systems.
+
+**What is left** after all of it, measured as the deviation of a 2 m voxel
+reconstruction from the true heightfield (edge midpoints, by distance from
+the path): natural ground 0.01 m rms; the bank of a path 0.13-0.19 m rms,
+worst 0.5-1 m at the doc points, where `leftY`/`rightY` and the profile
+are piecewise-linear and kink. That is the honest residue of a 2 m mesh
+drawing a 9 m corridor; a Catmull-Rom or moving-average pass over the
+per-point side heights would take it down further if it still shows.

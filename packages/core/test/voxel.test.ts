@@ -250,6 +250,42 @@ describe("noise", () => {
     }
   });
 
+  it("rounds a ridged band's crests without moving its summit line", () => {
+    // The ridged fold 1 - |n| has a crease at every crest: along a transect
+    // the slope flips sign in one sample, and the mesh renders that as a
+    // knife edge along every ridgeline. `crest` swaps |n| for a smooth
+    // absolute value. Three things must hold: the rounded band is never
+    // BELOW the sharp one (the fold is opened outward, so nothing sinks), it
+    // still touches the same summit value (the crest itself is unmoved), and
+    // the worst kink along a transect — the second difference, which is
+    // unbounded at a crease — comes down by a lot.
+    const sharp = { frequency: 0.01, amplitude: 100, octaves: 1, lacunarity: 2, gain: 0.5, ridged: true, seed: 3 };
+    const rounded = { ...sharp, crest: 0.2 };
+    const kink = (spec: typeof sharp): number => {
+      let worst = 0;
+      const h = (i: number): number => fbm2(spec, i * 0.5, 17.25, 5);
+      for (let i = 1; i < 2000; i++) worst = Math.max(worst, Math.abs(h(i - 1) - 2 * h(i) + h(i + 1)));
+      return worst;
+    };
+    let sharpMax = -Infinity;
+    let roundedMax = -Infinity;
+    for (let i = 0; i < 2000; i++) {
+      const a = fbm2(sharp, i * 0.5, 17.25, 5);
+      const b = fbm2(rounded, i * 0.5, 17.25, 5);
+      expect(b).toBeGreaterThanOrEqual(a - 1e-9);
+      sharpMax = Math.max(sharpMax, a);
+      roundedMax = Math.max(roundedMax, b);
+    }
+    expect(roundedMax).toBeCloseTo(sharpMax, 0);
+    expect(kink(rounded)).toBeLessThan(kink(sharp) * 0.35);
+    // the eroded path carries the crest through its derivative too: it must
+    // agree with the plain path at the crest (weights are 1 for one octave)
+    const eroded = { ...rounded, erosion: 0.5 };
+    for (let i = 0; i < 50; i++) {
+      expect(fbm2(eroded, i * 9.5, -3.25, 5)).toBeCloseTo(fbm2(rounded, i * 9.5, -3.25, 5), 6);
+    }
+  });
+
   it("spreads hashUnit over [0, 1)", () => {
     const buckets = new Array(10).fill(0);
     for (let i = 0; i < 4000; i++) {
@@ -535,39 +571,76 @@ describe("terrain features", () => {
     const carved = createWorldField(
       testRecipe({
         features: {
-          rivers: [{ id: "r", points: [[-200, 0], [200, 0]], width: 10, depth: 6, bank: 20 }],
+          // no bedY: the field solves one through these points (a hand-written river)
+          rivers: [{ id: "r", points: [[-200, 0], [-100, 0], [0, 0], [100, 0], [200, 0]], width: 10, depth: 6, bank: 20, maxGrade: 0.05, water: true, surface: "", surfaceEdge: 3, taper: 0 }],
           canyons: [],
           roads: [],
           tunnels: [],
           towns: [],
           blobs: [],
           pois: [],
+          lakes: [], bridges: [], fills: [], riverPaths: [],
         },
       }),
     );
     expect(carved.height(0, 0)).toBeLessThan(naturalMid - 5);
     expect(carved.height(0, 60)).toBeCloseTo(bare.height(0, 60), 5); // outside the bank
+    // the bank rises from the bed to at most the levee (the water surface
+    // plus a hand) — built where the ground beside the channel falls away,
+    // so the sheet's edge is never in the air
     const edge = carved.height(0, 20);
+    const bed = carved.rivers[0]!.bedY![2]!;
     expect(edge).toBeGreaterThan(carved.height(0, 0));
-    expect(edge).toBeLessThanOrEqual(bare.height(0, 20) + 1e-6);
+    expect(edge).toBeLessThanOrEqual(Math.max(bare.height(0, 20), bed + 6 * 0.7 + 0.4) + 1e-6);
   });
 
-  it("never raises land to meet a river bed", () => {
+  it("builds land up to a river bed by a bounded amount, never a dam", () => {
     const bare = createWorldField(testRecipe());
     const carved = createWorldField(
       testRecipe({
         features: {
-          rivers: [{ id: "r", points: [[-200, 500], [200, 500]], width: 10, depth: 3, bank: 10, bedY: [9000, 9000] }],
+          rivers: [{ id: "r", points: [[-200, 500], [200, 500]], width: 10, depth: 3, bank: 10, bedY: [9000, 9000], maxGrade: 0.05, water: true, surface: "", surfaceEdge: 3, taper: 0 }],
           canyons: [],
           roads: [],
           tunnels: [],
           towns: [],
           blobs: [],
           pois: [],
+          lakes: [], bridges: [], fills: [], riverPaths: [],
         },
       }),
     );
-    expect(carved.height(0, 500)).toBeCloseTo(bare.height(0, 500), 5);
+    // rivers-first: a river fills the hollow it crosses (up to RIVER_MAX_BUILD
+    // metres), so the ground rises toward the bed — but a bed at 9000 is not
+    // a reason to build a mountain
+    expect(carved.height(0, 500)).toBeGreaterThan(bare.height(0, 500) + 5);
+    expect(carved.height(0, 500)).toBeLessThanOrEqual(bare.height(0, 500) + 10 + 1e-6);
+    expect(carved.height(0, 560)).toBeCloseTo(bare.height(0, 560), 5); // outside the bank
+  });
+
+  it("solves a descending bed for a river written by hand, and a tributary meets its trunk", () => {
+    const empty = { canyons: [], roads: [], tunnels: [], towns: [], blobs: [], pois: [], lakes: [], bridges: [], fills: [], riverPaths: [] };
+    const trunk = { id: "trunk", points: [[-300, 400], [-100, 420], [100, 380], [300, 400]] as [number, number][], width: 12, depth: 4, bank: 10, maxGrade: 0.05, water: true, surface: "", surfaceEdge: 3, taper: 0 };
+    const branch = { id: "branch", points: [[0, 100], [0, 250], [0, 380]] as [number, number][], width: 6, depth: 2, bank: 8, maxGrade: 0.05, water: true, surface: "", surfaceEdge: 3, taper: 0 };
+    const bare = createWorldField(testRecipe());
+    const field = createWorldField(testRecipe({ features: { ...empty, rivers: [trunk, branch] } }));
+    // the recipe is untouched; the field carries the solved docs
+    expect(field.recipe.features.rivers[0]!.bedY).toBeUndefined();
+    // resampled along a spline through the points, a bed per resampled point
+    const [t, b] = field.rivers;
+    expect(t!.points.length).toBeGreaterThan(4);
+    expect(t!.bedY).toHaveLength(t!.points.length);
+    expect(b!.bedY).toHaveLength(b!.points.length);
+    for (const r of field.rivers) for (let i = 1; i < r.bedY!.length; i++) expect(r.bedY![i]!).toBeLessThanOrEqual(r.bedY![i - 1]! + 1e-9);
+    // the head sits a channel depth under the ground it starts on
+    expect(t!.bedY![0]!).toBeLessThanOrEqual(bare.height(-300, 400) - 4 + 1e-6);
+    // the channel is carved and carries water
+    expect(field.height(0, 390)).toBeLessThan(bare.height(0, 390) - 1);
+    expect(field.waterY(0, 390)).not.toBeNull();
+    // the tributary's mouth surface is flush with the trunk's surface there
+    const trunkSurface = field.waterY(0, 380)!;
+    const mouthSurface = b!.bedY![b!.bedY!.length - 1]! + Math.max(0.4, 2 * 0.7);
+    expect(Math.abs(mouthSurface - trunkSurface)).toBeLessThan(0.5);
   });
 
   it("flattens a town pad to its target height", () => {
@@ -581,6 +654,7 @@ describe("terrain features", () => {
           towns: [{ id: "t", center: [0, 0], radius: 40, falloff: 30, groundY: 12, flatten: 1, tags: [] }],
           blobs: [],
           pois: [],
+          lakes: [], bridges: [], fills: [], riverPaths: [],
         },
       }),
     );
@@ -595,17 +669,79 @@ describe("terrain features", () => {
         features: {
           rivers: [],
           canyons: [],
-          roads: [{ id: "road", points: [[-100, 40], [100, 40]], width: 8, shoulder: 12, surfaceY: [20, 20], flatten: 1, surface: "", surfaceEdge: 2.5 }],
+          roads: [{ id: "road", points: [[-100, 40], [100, 40]], width: 8, shoulder: 12, smooth: 0, surfaceY: [20, 20], flatten: 1, surface: "", surfaceEdge: 2.5 }],
           tunnels: [],
           towns: [],
           blobs: [],
           pois: [],
+          lakes: [], bridges: [], fills: [], riverPaths: [],
         },
       }),
     );
     expect(field.height(0, 40)).toBeCloseTo(20, 4);
     const bare = createWorldField(testRecipe());
     expect(field.height(0, 100)).toBeCloseTo(bare.height(0, 100), 5);
+  });
+
+  it("regrades an embankment beside a road and only lets the rough ground back at the outer edge", () => {
+    // With `smooth` and the two edge profiles, the ground from the road edge
+    // out to shoulder + smooth is a clean S-curve from the road surface to the
+    // sampled edge height — not the road height blended into whatever
+    // crinkle the noise put there. "Left" is the positive cross-product side
+    // of travel: for a road running +x, that is +z.
+    const road = {
+      id: "road",
+      points: [[-100, 40], [100, 40]] as [number, number][],
+      width: 8,
+      shoulder: 6,
+      smooth: 10,
+      surfaceY: [20, 20],
+      leftY: [30, 30],
+      // a 12 m drop over the 16 m band: a 0.75 fill, under the 0.8 the band may hold
+      rightY: [8, 8],
+      flatten: 1,
+      surface: "",
+      surfaceEdge: 2.5,
+    };
+    const field = createWorldField(testRecipe({ features: { ...noFeatures(), roads: [road] } }));
+    const bare = createWorldField(testRecipe());
+    const half = 4;
+    const outer = half + 6 + 10;
+    const s = (e0: number, e1: number, v: number): number => {
+      const t = Math.min(1, Math.max(0, (v - e0) / (e1 - e0)));
+      return t * t * (3 - 2 * t);
+    };
+    // on the road: the surface
+    expect(field.height(0, 40)).toBeCloseTo(20, 4);
+    // inside the fully-regraded part of the band: the analytic embankment,
+    // rising toward leftY on +z and falling toward rightY on -z, whatever the
+    // natural ground does there
+    for (const d of [half + 1, half + 4, half + 6 + 4]) {
+      expect(field.height(0, 40 + d)).toBeCloseTo(20 + (30 - 20) * s(half, outer, d), 4);
+      expect(field.height(0, 40 - d)).toBeCloseTo(20 + (8 - 20) * s(half, outer, d), 4);
+    }
+    // a side height the band cannot hold is clamped to the face it can: a
+    // cut no steeper than 1:1, a fill no steeper than 0.8 — a path skirting
+    // a cliff gets a bench, not a wall
+    const cliff = createWorldField(testRecipe({ features: { ...noFeatures(), roads: [{ ...road, leftY: [80, 80], rightY: [-40, -40] }] } }));
+    const band = outer - half;
+    expect(cliff.height(0, 40 + half + 6 + 4)).toBeCloseTo(20 + band * 1.0 * s(half, outer, half + 6 + 4), 4);
+    expect(cliff.height(0, 40 - (half + 6 + 4))).toBeCloseTo(20 - band * 0.8 * s(half, outer, half + 6 + 4), 4);
+    // past the outer edge: untouched
+    expect(field.height(0, 40 + outer + 0.5)).toBeCloseTo(bare.height(0, 40 + outer + 0.5), 5);
+    expect(field.height(0, 40 - outer - 0.5)).toBeCloseTo(bare.height(0, 40 - outer - 0.5), 5);
+    // and inside the fade, strictly between the embankment and the natural ground
+    const dFade = outer - 2;
+    const emb = 20 + (30 - 20) * s(half, outer, dFade);
+    const nat = bare.height(0, 40 + dFade);
+    const h = field.height(0, 40 + dFade);
+    expect(h).toBeGreaterThanOrEqual(Math.min(emb, nat) - 1e-6);
+    expect(h).toBeLessThanOrEqual(Math.max(emb, nat) + 1e-6);
+    // a doc with `smooth` but no edge profiles falls back to the plain shoulder
+    const plain = createWorldField(
+      testRecipe({ features: { ...noFeatures(), roads: [{ ...road, leftY: undefined, rightY: undefined }] } }),
+    );
+    expect(plain.height(0, 40 + half + 6 + 0.5)).toBeCloseTo(bare.height(0, 40 + half + 6 + 0.5), 5);
   });
 
   it("reports clearance to the nearest feature so scatter can keep off it", () => {
@@ -619,12 +755,29 @@ describe("terrain features", () => {
           towns: [{ id: "t", center: [0, 0], radius: 40, falloff: 30, groundY: 12, flatten: 1, tags: [] }],
           blobs: [],
           pois: [],
+          lakes: [], bridges: [], fills: [], riverPaths: [],
         },
       }),
     );
     expect(field.featureClearance(0, 0)).toBeLessThan(0);
     expect(field.featureClearance(50, 0)).toBeCloseTo(10, 4);
     expect(field.featureClearance(5000, 5000)).toBe(Infinity);
+  });
+
+  it("measures path clearance from the shoulder's edge, and still sees a path from a boulder's clearance away", () => {
+    const field = createWorldField(
+      testRecipe({
+        features: {
+          ...noFeatures(),
+          roads: [{ id: "trail-1", points: [[-400, 0], [400, 0]], width: 2.4, shoulder: 2.2, smooth: 4.4, surfaceY: [14, 14], leftY: [14, 14], rightY: [14, 14], flatten: 1, surface: "dirt", surfaceEdge: 1.5 }],
+        },
+      }),
+    );
+    expect(field.featureClearance(0, 0)).toBeLessThan(0);
+    expect(field.featureClearance(0, 3.4)).toBeCloseTo(0, 4);
+    // the carve's own buckets stop at the embankment's edge (~7.8 m); a
+    // 9 m clearance rule asks from further out than that and must be told
+    expect(field.featureClearance(0, 12)).toBeCloseTo(12 - 3.4, 4);
   });
 });
 
@@ -644,7 +797,7 @@ function paletteIndex(name: string): number {
 }
 
 function noFeatures(): WorldRecipe["features"] {
-  return { rivers: [], canyons: [], roads: [], towns: [], tunnels: [], blobs: [], pois: [] };
+  return { rivers: [], canyons: [], roads: [], towns: [], lakes: [], bridges: [], fills: [], riverPaths: [], tunnels: [], blobs: [], pois: [] };
 }
 
 describe("surface decoration", () => {
@@ -661,7 +814,7 @@ describe("surface decoration", () => {
               id: "r",
               points: [[-400, 0], [400, 0]],
               width: 10,
-              shoulder: 10,
+              shoulder: 10, smooth: 0,
               surfaceY: [14, 14],
               flatten: 1,
               surface: "dirt",
@@ -681,7 +834,7 @@ describe("surface decoration", () => {
       id: "r",
       points: [[-400, 0], [400, 0]] as [number, number][],
       width: 10,
-      shoulder: 10,
+      shoulder: 10, smooth: 0,
       surfaceY: [14, 14],
       flatten: 1,
       surfaceEdge: 3,
@@ -692,6 +845,69 @@ describe("surface decoration", () => {
     expect(bare.height(0, 0)).toBeCloseTo(painted.height(0, 0), 6);
     expect(bare.height(0, 0)).toBeCloseTo(14, 4);
     expect(groundSplat(bare, 0, 0)[dirt]!).toBeLessThan(groundSplat(painted, 0, 0)[dirt]!);
+  });
+
+  it("paints a path with a different surface where a named biome holds the ground", () => {
+    const recipe = defaultWorldRecipe();
+    // the default palette has no gravel; sand stands in for it here
+    const gravel = recipe.surfaces.findIndex((s) => s.name === "sand");
+    const road = {
+      id: "trail-1",
+      points: [[-400, 0], [400, 0]] as [number, number][],
+      width: 2.4,
+      shoulder: 2, smooth: 0,
+      surfaceY: [14, 14],
+      flatten: 1,
+      surface: "dirt",
+      surfaceEdge: 1.5,
+    };
+    const plain = createWorldField(testRecipe({ features: { ...noFeatures(), roads: [road] } }));
+    // whichever biome the test recipe puts at the origin is the one to swap
+    const here = plain.biome(0, 0, 14).id;
+    const swapped = createWorldField(testRecipe({ features: { ...noFeatures(), roads: [{ ...road, surfaceByBiome: { [here]: "sand" } }] } }));
+    expect(gravel).toBeGreaterThanOrEqual(0);
+    expect(groundSplat(plain, 0, 0)[dirt]!).toBeGreaterThan(0.9);
+    expect(groundSplat(swapped, 0, 0)[gravel]!).toBeGreaterThan(0.5);
+    expect(groundSplat(swapped, 0, 0)[dirt]!).toBeLessThan(0.5);
+    // an override for a biome that is not here changes nothing
+    const elsewhere = recipe.biomes.find((b) => b.id !== here)!.id;
+    const untouched = createWorldField(testRecipe({ features: { ...noFeatures(), roads: [{ ...road, surfaceByBiome: { [elsewhere]: "sand" } }] } }));
+    expect(groundSplat(untouched, 0, 0)[dirt]!).toBeCloseTo(groundSplat(plain, 0, 0)[dirt]!, 3);
+  });
+
+  it("keeps the bank of a steep straight path smooth: a far neighbour segment never blends in", () => {
+    // three points climbing at 150 %: adjacent segments disagree by tens of
+    // metres at any point between them, which used to inflate the seam blend
+    // until the runner-up (20 m away) was mixed in and flipped the bank
+    const road = {
+      id: "trail-steep",
+      points: [[-40, 0], [0, 0], [40, 0]] as [number, number][],
+      width: 2.4,
+      shoulder: 3, smooth: 5,
+      surfaceY: [40, 100, 160],
+      leftY: [46, 106, 166],
+      rightY: [34, 94, 154],
+      flatten: 1,
+      surface: "dirt",
+      surfaceEdge: 1.5,
+    };
+    const field = createWorldField(testRecipe({ features: { ...noFeatures(), roads: [road] } }));
+    // across the middle of the first segment (the fully regraded part of the
+    // band — beyond it the test recipe's own ground, 80 m below, fades in),
+    // and along the bank at 5 m out
+    let prev = field.height(-20, 0);
+    for (let d = 0.25; d <= 6; d += 0.25) {
+      const h = field.height(-20, d);
+      expect(Math.abs(h - prev), `step across the bank at ${d} m`).toBeLessThan(0.6);
+      prev = h;
+    }
+    prev = field.height(-24, 5);
+    for (let x = -23.75; x <= -16; x += 0.25) {
+      const h = field.height(x, 5);
+      // the bank climbs with the path (1.5 m per metre); a flip shows as a jump
+      expect(Math.abs(h - prev), `step along the bank at x=${x}`).toBeLessThan(0.6);
+      prev = h;
+    }
   });
 
   it("lays a patch only where its biome gate is open", () => {
@@ -723,7 +939,7 @@ describe("surface decoration", () => {
       testRecipe({
         features: {
           ...noFeatures(),
-          roads: [{ id: "r", points: [[-400, 0], [400, 0]], width: 10, shoulder: 10, surfaceY: [14, 14], flatten: 1, surface: "dirt", surfaceEdge: 3 }],
+          roads: [{ id: "r", points: [[-400, 0], [400, 0]], width: 10, shoulder: 10, smooth: 0, surfaceY: [14, 14], flatten: 1, surface: "dirt", surfaceEdge: 3 }],
         },
       }),
     );
@@ -1159,6 +1375,8 @@ describe("scatter", () => {
         yOffset: 0,
         jitter: 0.8,
         clearance: 0,
+        footprint: 0,
+        spacing: 0.5,
         collider: "none",
         colliderSize: [1, 2, 1],
         static: true,
@@ -1170,8 +1388,8 @@ describe("scatter", () => {
   const field = createWorldField(worldRecipeSchema.parse(recipe));
 
   it("places instances and repeats exactly", () => {
-    const a = scatterCell(field, 2, 3);
-    const b = scatterCell(field, 2, 3);
+    const a = scatterCell(field, 3, -4);
+    const b = scatterCell(field, 3, -4);
     expect(a.length).toBeGreaterThan(0);
     expect(JSON.stringify(a)).toBe(JSON.stringify(b));
   });
@@ -1197,9 +1415,9 @@ describe("scatter", () => {
   });
 
   it("stands props on the ground and refuses ground steeper than slopeMax", () => {
-    for (const instance of scatterCell(field, 1, 1)) {
-      const wx = instance.position[0] + field.recipe.cellSize;
-      const wz = instance.position[2] + field.recipe.cellSize;
+    for (const instance of scatterCell(field, 2, -4)) {
+      const wx = instance.position[0] + 2 * field.recipe.cellSize;
+      const wz = instance.position[2] - 4 * field.recipe.cellSize;
       expect(Math.abs(instance.position[1] - field.height(wx, wz))).toBeLessThan(1.5);
       expect(field.slope(wx, wz)).toBeLessThanOrEqual(0.6 + 1e-6);
     }
@@ -1230,7 +1448,7 @@ describe("scatter", () => {
       id: "r",
       points: [[-300, 0], [300, 0]] as [number, number][],
       width: 8,
-      shoulder: 10,
+      shoulder: 10, smooth: 0,
       surfaceY: [12, 12],
       flatten: 1,
       surface: "dirt",
@@ -1252,7 +1470,9 @@ describe("scatter", () => {
           const wx = instance.position[0] + cx * recipe.cellSize;
           const wz = instance.position[2] + cz * recipe.cellSize;
           checked += 1;
-          const toRoad = Math.abs(wz) - road.width / 2;
+          // clearance is from the SHOULDER's edge: the shoulder is regraded
+          // flat and painted, so a prop on it is a prop on the path
+          const toRoad = Math.abs(wz) - (road.width / 2 + road.shoulder);
           expect(toRoad, `prop ${wx.toFixed(0)},${wz.toFixed(0)} is on the road`).toBeGreaterThan(clearance);
           const toBlob = Math.hypot(wx - blob.center[0], wz - blob.center[2]) - (blob.radius + blob.falloff);
           expect(toBlob, `prop ${wx.toFixed(0)},${wz.toFixed(0)} is inside the monolith`).toBeGreaterThan(clearance);
@@ -1275,6 +1495,7 @@ describe("scatter", () => {
           towns: [{ id: "t", center: [0, 0], radius: 40, falloff: 30, groundY: 12, flatten: 1, tags: [] }],
           blobs: [],
           pois: [],
+          lakes: [], bridges: [], fills: [], riverPaths: [],
         },
       }),
     );
@@ -1322,6 +1543,8 @@ describe("generated chunk documents", () => {
           yOffset: -0.2,
           jitter: 0.9,
           clearance: 0,
+          footprint: 0,
+          spacing: 0.5,
           collider: "box",
           colliderSize: [1.2, 1, 1.2],
           static: true,
@@ -1353,7 +1576,7 @@ describe("generated chunk documents", () => {
   });
 
   it("passes every generated component through the live schemas", () => {
-    const doc = voxelChunkDoc(field, "overworld", 2, 2);
+    const doc = voxelChunkDoc(field, "overworld", 3, -3);
     for (const [id, entity] of Object.entries(doc.entities)) {
       for (const [name, data] of Object.entries(entity.components)) {
         const result = registry.validate(name, data);
@@ -1363,7 +1586,7 @@ describe("generated chunk documents", () => {
   });
 
   it("stays collapsed — one line per prop, whatever it meshes into", () => {
-    const doc = voxelChunkDoc(field, "overworld", 2, 2);
+    const doc = voxelChunkDoc(field, "overworld", 3, -3);
     const props = Object.entries(doc.entities).filter(([id]) => id !== "terrain");
     expect(props.length).toBeGreaterThan(0);
     for (const [, entity] of props) {
@@ -1377,20 +1600,20 @@ describe("generated chunk documents", () => {
     // On a model that is already a couple of hundred triangles that trades the
     // prop for a brown box and saves nothing worth having, and it is invisible
     // from the recipe unless the flag reaches the mesh component.
-    const on = voxelChunkDoc(field, "overworld", 2, 2);
+    const on = voxelChunkDoc(field, "overworld", 3, -3);
     const rock = Object.values(on.entities).find((e) => e.tags?.includes("scatter") && e.components["mesh"] !== undefined);
     expect((rock!.components["mesh"] as { lod: boolean }).lod).toBe(true);
 
     const cheap = createWorldField(
       worldRecipeSchema.parse({ ...field.recipe, scatter: field.recipe.scatter.map((r) => ({ ...r, lod: false })) } as never),
     );
-    const off = voxelChunkDoc(cheap, "overworld", 2, 2);
+    const off = voxelChunkDoc(cheap, "overworld", 3, -3);
     const plain = Object.values(off.entities).find((e) => e.tags?.includes("scatter") && e.components["mesh"] !== undefined);
     expect((plain!.components["mesh"] as { lod: boolean }).lod).toBe(false);
   });
 
   it("omits scatter and collision when asked", () => {
-    const doc = voxelChunkDoc(field, "overworld", 2, 2, { scatter: false, collision: false });
+    const doc = voxelChunkDoc(field, "overworld", 3, -3, { scatter: false, collision: false });
     expect(Object.keys(doc.entities)).toEqual(["terrain"]);
     expect(doc.entities["terrain"]!.components["collider"]).toBeUndefined();
   });
@@ -1567,6 +1790,35 @@ describe("cliff terracing", () => {
     // sharpening only redistributes altitude WITHIN a band, so no amount of it
     // can move a point more than one band's worth
     expect(Math.abs(relief(0.98) - relief(0))).toBeLessThanOrEqual(40);
+  });
+
+  it("arrives at each tread on a curve, not a crease", () => {
+    // The hard clamp put a slope discontinuity along every cliff top and
+    // foot; `rounding` eases the riser into the tread over a fraction of its
+    // height. Measured as the worst second difference of height along a
+    // transect (jitter off so the bands are where the maths says): the
+    // rounded profile must kink far less, and it must still be monotonic in
+    // relief (a terrace is a function of the ground, never a fold).
+    //
+    // The mountain band under it is NOT ridged here: a ridged band has its
+    // own crease at every crest, and the riser stretch multiplies that by
+    // 1/(1 - sharpness), which would swamp the corners this test is about.
+    const world = (rounding: number): ReturnType<typeof createWorldField> => {
+      const recipe = allMountain({ enabled: true, mask: OPEN, minBands: 0, jitter: 0, sharpness: 0.9, rounding });
+      recipe.terrain.mountains.ridged = false;
+      return createWorldField(recipe);
+    };
+    const kink = (field: ReturnType<typeof createWorldField>): number => {
+      let worst = 0;
+      const h = (i: number): number => field.height(i * 0.5 - 600, 77.5);
+      for (let i = 1; i < 2400; i++) worst = Math.max(worst, Math.abs(h(i - 1) - 2 * h(i) + h(i + 1)));
+      return worst;
+    };
+    expect(kink(world(0.25))).toBeLessThan(kink(world(0)) * 0.6);
+    // the same riser is still there: full rounding keeps the middle of the
+    // riser as sheer as the hard clamp does (sheer fraction within a few %)
+    const sheer = (f: ReturnType<typeof createWorldField>): number => slopeProfile(f).steep;
+    expect(Math.abs(sheer(world(0.25)) - sheer(world(0)))).toBeLessThan(0.05);
   });
 });
 

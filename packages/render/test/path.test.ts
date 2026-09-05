@@ -192,3 +192,127 @@ describe("pathScatterPlacements", () => {
     expect(shifted[0]!.position.x).toBeCloseTo(0, 3);
   });
 });
+
+describe("pathGeometry per-point widths", () => {
+  it("interpolates `widths` along the curve, overriding `width`", () => {
+    const geometry = pathGeometry({
+      points: straightLine,
+      closed: false,
+      crossSection: "ribbon",
+      width: 4,
+      widths: [2, 4, 8],
+      radius: 0.15,
+      radialSegments: 6,
+      segmentsPerSpan: 4,
+    });
+    const position = geometry.getAttribute("position");
+    const across = (sample: number): number => Math.abs(position.getZ(sample * 2) - position.getZ(sample * 2 + 1));
+    // 9 samples: the first at the first point, the fifth at the middle point, the last at the end
+    expect(across(0)).toBeCloseTo(2, 3);
+    expect(across(4)).toBeCloseTo(4, 3);
+    expect(across(8)).toBeCloseTo(8, 3);
+    // and monotone between: no sample narrower than the one before it
+    for (let s = 1; s < 9; s++) expect(across(s)).toBeGreaterThanOrEqual(across(s - 1) - 1e-6);
+  });
+
+  it("ignores a `widths` list of the wrong length", () => {
+    const geometry = pathGeometry({
+      points: straightLine,
+      closed: false,
+      crossSection: "ribbon",
+      width: 4,
+      widths: [2, 8],
+      radius: 0.15,
+      radialSegments: 6,
+      segmentsPerSpan: 1,
+    });
+    const position = geometry.getAttribute("position");
+    expect(Math.abs(position.getZ(0) - position.getZ(1))).toBeCloseTo(4, 5);
+  });
+});
+
+describe("pathGeometry pieces of one curve (trim, flow, metre uvs)", () => {
+  // a bending river, cut at its third point into two pieces that each keep
+  // the point beyond the cut as an undrawn phantom neighbour
+  const river: Array<[number, number, number]> = [
+    [0, 10, 0],
+    [12, 9, 4],
+    [22, 8, 12],
+    [30, 7, 24],
+    [36, 6, 40],
+    [40, 5, 58],
+  ];
+  const widths = [6, 7, 8, 9, 10, 11];
+  const along = [0, 13, 26, 40, 57, 76];
+  const base = { closed: false, crossSection: "ribbon" as const, width: 11, radius: 0.15, radialSegments: 6, segmentsPerSpan: 3 };
+  const left = pathGeometry({
+    ...base,
+    points: river.slice(0, 4),
+    widths: widths.slice(0, 4),
+    uvAlong: along.slice(0, 4),
+    uvMetres: true,
+    flowSpeed: 1.5,
+    trim: [0, 1],
+  });
+  const right = pathGeometry({
+    ...base,
+    points: river.slice(1),
+    widths: widths.slice(1),
+    uvAlong: along.slice(1),
+    uvMetres: true,
+    flowSpeed: 1.5,
+    trim: [1, 0],
+  });
+
+  it("draws only the untrimmed spans", () => {
+    // left: 3 spans, 1 trimmed -> 2 drawn * 3 segments + 1 = 7 samples
+    expect(left.getAttribute("position").count).toBe(7 * 2);
+    // right: 4 spans, 1 trimmed -> 3 drawn -> 10 samples
+    expect(right.getAttribute("position").count).toBe(10 * 2);
+  });
+
+  it("welds: the last vertices of one piece are the first of the next, to the millimetre", () => {
+    const a = left.getAttribute("position");
+    const b = right.getAttribute("position");
+    const lastA = a.count - 2;
+    for (const side of [0, 1]) {
+      expect(a.getX(lastA + side)).toBeCloseTo(b.getX(side), 3);
+      expect(a.getY(lastA + side)).toBeCloseTo(b.getY(side), 3);
+      expect(a.getZ(lastA + side)).toBeCloseTo(b.getZ(side), 3);
+    }
+    // and the seam sits ON the shared control point, at its own width
+    const midX = (a.getX(lastA) + a.getX(lastA + 1)) / 2;
+    const midZ = (a.getZ(lastA) + a.getZ(lastA + 1)) / 2;
+    expect(midX).toBeCloseTo(22, 3);
+    expect(midZ).toBeCloseTo(12, 3);
+    expect(Math.hypot(a.getX(lastA) - a.getX(lastA + 1), a.getZ(lastA) - a.getZ(lastA + 1))).toBeCloseTo(8, 3);
+  });
+
+  it("carries a flow attribute along the tangent and metre uvs continuous across the seam", () => {
+    const flow = left.getAttribute("flow");
+    expect(flow.itemSize).toBe(3);
+    expect(flow.count).toBe(left.getAttribute("position").count);
+    // speed 1.5 along a tangent that heads roughly +x/+z and slightly down
+    const speed = Math.hypot(flow.getX(0), flow.getY(0), flow.getZ(0));
+    expect(speed).toBeCloseTo(1.5, 4);
+    expect(flow.getX(0)).toBeGreaterThan(0);
+    expect(flow.getY(0)).toBeLessThan(0);
+    const uvA = left.getAttribute("uv");
+    const uvB = right.getAttribute("uv");
+    const lastA = uvA.count - 2;
+    // x is the signed half-width, y the distance along the WHOLE river
+    expect(uvA.getX(lastA)).toBeCloseTo(-4, 3);
+    expect(uvA.getX(lastA + 1)).toBeCloseTo(4, 3);
+    expect(uvA.getY(lastA)).toBeCloseTo(26, 3);
+    expect(uvB.getY(0)).toBeCloseTo(26, 3);
+    expect(uvA.getY(0)).toBeCloseTo(0, 3);
+  });
+
+  it("emits no flow attribute and classic uvs without the options", () => {
+    const plain = pathGeometry({ ...base, points: river });
+    expect(plain.getAttribute("flow")).toBeUndefined();
+    const uv = plain.getAttribute("uv");
+    expect(uv.getX(0)).toBe(0);
+    expect(uv.getX(1)).toBe(1);
+  });
+});

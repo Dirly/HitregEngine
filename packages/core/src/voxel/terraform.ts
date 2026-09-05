@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   blobSchema,
   canyonSchema,
+  lakeSchema,
   poiSchema,
   riverSchema,
   roadSchema,
@@ -48,6 +49,7 @@ export const FEATURE_KINDS = [
   "canyons",
   "roads",
   "towns",
+  "lakes",
   "tunnels",
   "blobs",
   "pois",
@@ -60,6 +62,7 @@ const FEATURE_SCHEMAS: Record<FeatureKind, z.ZodType> = {
   canyons: canyonSchema,
   roads: roadSchema,
   towns: townSchema,
+  lakes: lakeSchema,
   tunnels: tunnelSchema,
   blobs: blobSchema,
   pois: poiSchema,
@@ -204,6 +207,14 @@ export function featureFootprint(kind: FeatureKind, feature: unknown): Footprint
       const reach = num(f["radius"], 0) + num(f["falloff"], 35);
       return { x0: c[0] - reach, z0: c[1] - reach, x1: c[0] + reach, z1: c[1] + reach };
     }
+    case "lakes": {
+      const bank = num(f["bank"], 18);
+      const polygon = f["polygon"] as number[][] | undefined;
+      if (polygon && polygon.length >= 3) return pointsBounds(polygon, bank);
+      const c = f["center"] as [number, number];
+      const reach = num(f["radius"], 60) + bank;
+      return { x0: c[0] - reach, z0: c[1] - reach, x1: c[0] + reach, z1: c[1] + reach };
+    }
     case "blobs": {
       const c = f["center"] as [number, number, number];
       const r = num(f["radius"], 0);
@@ -221,7 +232,10 @@ export function featureFootprint(kind: FeatureKind, feature: unknown): Footprint
     case "rivers":
       return pointsBounds(f["points"] as number[][], num(f["width"], 8) / 2 + num(f["bank"], 14));
     case "roads":
-      return pointsBounds(f["points"] as number[][], num(f["width"], 6) / 2 + num(f["shoulder"], 8));
+      // the embankment band is regraded too, and scatter keeps a clearance
+      // beyond the shoulder: a path edit has to re-cook the cells whose props
+      // it just invalidated, not only the ones it re-shaped
+      return pointsBounds(f["points"] as number[][], num(f["width"], 6) / 2 + num(f["shoulder"], 8) + num(f["smooth"], 0) + 12);
     case "canyons":
       return pointsBounds(f["points"] as number[][], num(f["width"], 70) / 2 + num(f["rim"], 60));
   }

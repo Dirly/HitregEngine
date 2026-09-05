@@ -5,6 +5,8 @@ export interface PathMeshSource {
   closed: boolean;
   crossSection: "ribbon" | "tube";
   width: number;
+  /** ribbon (flat sheet) only: per-control-point width, interpolated along the curve; overrides `width`. */
+  widths?: number[];
   radius: number;
   radialSegments: number;
   segmentsPerSpan: number;
@@ -12,6 +14,28 @@ export interface PathMeshSource {
   thickness?: number;
   /** ribbon only, flat sheet: also emit the underside so it renders from below. */
   doubleSided?: boolean;
+  /**
+   * ribbon (flat sheet), open curve only: spans left undrawn at the start and
+   * end. The trimmed control points are phantom neighbours: they shape the
+   * curve's tangent and width at the drawn ends without being drawn, so two
+   * pieces of one long curve that each carry the point beyond their border
+   * meet with identical vertices (see `sampleFrames`).
+   */
+  trim?: [number, number];
+  /** ribbon (flat sheet) only: emit a `flow` vec3 attribute = tangent × this (m/s). 0 = none. */
+  flowSpeed?: number;
+  /** ribbon (flat sheet) only: uv in metres (x signed across from the centreline, y along) instead of (0..1, arc length). */
+  uvMetres?: boolean;
+  /** ribbon (flat sheet) only, with uvMetres: y texture coordinate per control point, interpolated (continuity across pieces). */
+  uvAlong?: number[];
+}
+
+/** Per-vertex extras a flat ribbon can carry; see `PathMeshSource`. */
+interface RibbonExtras {
+  trim?: [number, number];
+  flowSpeed: number;
+  uvMetres: boolean;
+  uvAlong?: readonly number[];
 }
 
 /**
@@ -30,13 +54,34 @@ export function pathGeometry(source: PathMeshSource): THREE.BufferGeometry {
   }
   const thickness = source.thickness ?? 0;
   if (thickness > 0) return slabGeometry(curve, segments, source.width, thickness, source.closed);
-  return ribbonGeometry(curve, segments, source.width, source.closed, source.doubleSided ?? false);
+  const widths = source.widths && source.widths.length === source.points.length ? source.widths : undefined;
+  const trim = source.trim && !source.closed && source.trim[0] + source.trim[1] < spans ? source.trim : undefined;
+  const drawn = trim ? spans - trim[0] - trim[1] : spans;
+  const extras: RibbonExtras = {
+    trim,
+    flowSpeed: source.flowSpeed ?? 0,
+    uvMetres: source.uvMetres ?? false,
+    uvAlong: source.uvAlong && source.uvAlong.length === source.points.length ? source.uvAlong : undefined,
+  };
+  return ribbonGeometry(
+    curve,
+    Math.max(1, source.segmentsPerSpan * drawn),
+    source.width,
+    source.closed,
+    source.doubleSided ?? false,
+    widths,
+    extras,
+  );
 }
 
 interface RibbonFrame {
   point: THREE.Vector3;
   side: THREE.Vector3;
   arcLength: number;
+  /** Curve parameter in CONTROL-POINT space (0..spans), so per-point values can be interpolated. */
+  u: number;
+  /** Unit tangent along the direction of travel. */
+  tangent: THREE.Vector3;
 }
 
 /**
@@ -49,21 +94,61 @@ interface RibbonFrame {
  * product. `side` = tangent x up, so it points to the curve's RIGHT when
  * looking along the direction of travel with +Y up.
  */
-function sampleFrames(curve: THREE.CatmullRomCurve3, segments: number): RibbonFrame[] {
+function sampleFrames(curve: THREE.CatmullRomCurve3, segments: number, trim?: [number, number]): RibbonFrame[] {
   const worldUp = new THREE.Vector3(0, 1, 0);
   let side = new THREE.Vector3(1, 0, 0);
   let arcLength = 0;
   let prevPoint: THREE.Vector3 | null = null;
   const frames: RibbonFrame[] = [];
+  const spans = curve.closed ? curve.points.length : curve.points.length - 1;
+  // The drawn range, as arc-length fractions. Without a trim it is the whole
+  // curve; with one, the fractions at the first and last drawn control
+  // points (looked up in the curve's own length table — approximate, which
+  // only shifts the interior samples a little). The two END samples are not
+  // taken from that approximation: they are evaluated at the control-point
+  // PARAMETER itself (`getPoint(k / spans)` is exactly `points[k]`), and
+  // their tangents from the same parameter. That is what makes two pieces
+  // of one river weld: each piece's end vertex is computed from the same
+  // point, the same neighbours on both sides (the phantom supplies the far
+  // one) and hence the same tangent, width and side vector.
+  const t0 = trim ? trim[0] / spans : 0;
+  const t1 = trim ? (spans - trim[1]) / spans : 1;
+  let a0 = 0;
+  let a1 = 1;
+  if (trim) {
+    const lengths = curve.getLengths();
+    const total = lengths[lengths.length - 1]! || 1;
+    const arcAt = (t: number): number => {
+      const f = t * (lengths.length - 1);
+      const i = Math.min(lengths.length - 2, Math.floor(f));
+      const w = f - i;
+      return (lengths[i]! * (1 - w) + lengths[i + 1]! * w) / total;
+    };
+    a0 = arcAt(t0);
+    a1 = arcAt(t1);
+  }
   for (let i = 0; i <= segments; i++) {
-    const t = i / segments;
-    const point = curve.getPointAt(t);
-    const tangent = curve.getTangentAt(t);
+    let point: THREE.Vector3;
+    let tangent: THREE.Vector3;
+    let u: number;
+    if (trim && (i === 0 || i === segments)) {
+      const t = i === 0 ? t0 : t1;
+      point = curve.getPoint(t);
+      tangent = curve.getTangent(t);
+      u = t * spans;
+    } else {
+      const a = a0 + ((a1 - a0) * i) / segments;
+      point = curve.getPointAt(a);
+      tangent = curve.getTangentAt(a);
+      // getPointAt is arc-length parametrised; map back to the control-point
+      // parameter so per-point attributes land where their points are
+      u = curve.getUtoTmapping(a, 0) * spans;
+    }
     if (prevPoint) arcLength += point.distanceTo(prevPoint);
     prevPoint = point;
     const candidate = new THREE.Vector3().crossVectors(tangent, worldUp);
     if (candidate.lengthSq() > 1e-6) side = candidate.normalize();
-    frames.push({ point, side, arcLength });
+    frames.push({ point, side, arcLength, u, tangent });
   }
   return frames;
 }
@@ -84,16 +169,30 @@ function ribbonGeometry(
   width: number,
   closed: boolean,
   doubleSided: boolean,
+  widths?: readonly number[],
+  extras: RibbonExtras = { flowSpeed: 0, uvMetres: false },
 ): THREE.BufferGeometry {
-  const frames = sampleFrames(curve, segments);
+  const frames = sampleFrames(curve, segments, extras.trim);
   const sampleCount = frames.length;
   const positions = new Float32Array(sampleCount * 2 * 3);
   const uvs = new Float32Array(sampleCount * 2 * 2);
+  const flow = extras.flowSpeed > 0 ? new Float32Array(sampleCount * 2 * 3) : null;
+  /** A per-control-point value interpolated at curve parameter u. */
+  const perPoint = (values: readonly number[], u: number): number => {
+    const n = values.length;
+    const i = Math.floor(u);
+    const f = u - i;
+    const a = values[closed ? ((i % n) + n) % n : Math.min(Math.max(i, 0), n - 1)]!;
+    const b = values[closed ? (((i + 1) % n) + n) % n : Math.min(Math.max(i + 1, 0), n - 1)]!;
+    return a + (b - a) * f;
+  };
+  const widthAt = (u: number): number => (widths ? perPoint(widths, u) : width);
 
   for (let i = 0; i < sampleCount; i++) {
-    const { point, side, arcLength } = frames[i]!;
-    const left = point.clone().addScaledVector(side, -width / 2);
-    const right = point.clone().addScaledVector(side, width / 2);
+    const { point, side, arcLength, u, tangent } = frames[i]!;
+    const w = widthAt(u);
+    const left = point.clone().addScaledVector(side, -w / 2);
+    const right = point.clone().addScaledVector(side, w / 2);
     const base = i * 2 * 3;
     positions[base + 0] = left.x;
     positions[base + 1] = left.y;
@@ -102,10 +201,23 @@ function ribbonGeometry(
     positions[base + 4] = right.y;
     positions[base + 5] = right.z;
     const uvBase = i * 2 * 2;
-    uvs[uvBase + 0] = 0;
-    uvs[uvBase + 1] = arcLength;
-    uvs[uvBase + 2] = 1;
-    uvs[uvBase + 3] = arcLength;
+    if (extras.uvMetres) {
+      const along = extras.uvAlong ? perPoint(extras.uvAlong, u) : arcLength;
+      uvs[uvBase + 0] = -w / 2;
+      uvs[uvBase + 1] = along;
+      uvs[uvBase + 2] = w / 2;
+      uvs[uvBase + 3] = along;
+    } else {
+      uvs[uvBase + 0] = 0;
+      uvs[uvBase + 1] = arcLength;
+      uvs[uvBase + 2] = 1;
+      uvs[uvBase + 3] = arcLength;
+    }
+    if (flow) {
+      flow[base + 0] = flow[base + 3] = tangent.x * extras.flowSpeed;
+      flow[base + 1] = flow[base + 4] = tangent.y * extras.flowSpeed;
+      flow[base + 2] = flow[base + 5] = tangent.z * extras.flowSpeed;
+    }
   }
 
   const quadCount = closed ? sampleCount : sampleCount - 1;
@@ -139,6 +251,7 @@ function ribbonGeometry(
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
   geometry.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+  if (flow) geometry.setAttribute("flow", new THREE.BufferAttribute(flow, 3));
   // computeVertexNormals over BOTH copies would sum +Y and -Y faces to zero:
   // compute from the front copy only, then install the full index
   geometry.setIndex(new THREE.BufferAttribute(indices.subarray(0, frontCount), 1));

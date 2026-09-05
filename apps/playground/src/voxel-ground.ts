@@ -79,6 +79,12 @@ export function voxelGroundProbes(field: () => WorldField | null): VoxelGroundPr
     if (steep > data.slopeMax) return null;
     const ground = f.height(x, z) - foliageSink(data, steep);
     if (ground <= f.recipe.seaLevel) return null; // nothing grows in the sea
+    const water = f.waterY(x, z);
+    if (water !== null && ground < water + 0.25) return null; // nor in a river or a lake
+    // nor on a path, in a town or on a river bank, whatever the surface says:
+    // a bramble layer allowed on "dirt" grew on every painted footpath, because
+    // to the splat a dirt track IS dirt. The tread and its shoulder are walked.
+    if (f.featureClearance(x, z) < 0.5) return null;
     if (data.surfaces.length === 0) return ground;
     if (splat.length < f.surfaceCount) splat = new Float32Array(f.surfaceCount);
     // the vertex path's own normal convention, so the gate sees exactly the

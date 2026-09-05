@@ -75,9 +75,15 @@ export {
   type TunnelDoc,
   type PoiDoc,
   type LakeDoc,
+  type BridgeDoc,
+  type FillDoc,
+  type RiverPathDoc,
   type ZoneAnchorDoc,
   type ZonesDoc,
   lakeSchema,
+  bridgeSchema,
+  fillSchema,
+  riverPathSchema,
 } from "./recipe.js";
 
 export {
