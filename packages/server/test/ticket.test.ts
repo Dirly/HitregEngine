@@ -77,6 +77,30 @@ describe("placement", () => {
     expect(reg.place({ scene: "mmo", characterId: "c" })).toBeNull();
   });
 
+  it("a reservation survives the layer's own status reports and blocks retirement until it expires", () => {
+    const reg = new ServerRegistry();
+    reg.register({ id: "layer-1", kind: "layer", url: "ws://a", scene: "mmo", cap: 2 }, 1000);
+    reg.register({ id: "layer-2", kind: "layer", url: "ws://b", scene: "mmo", cap: 2 }, 2000);
+    reg.status("layer-1", [presence("x")], 1, 0, true, 3000); // busy
+    reg.status("layer-2", [], 1, 0, true, 3000);
+    // a transfer ticket was minted for layer-2; the client is still on its way
+    reg.reserve("layer-2", "a", "acct-a", "A", 3000);
+    expect(reg.free(reg.servers.get("layer-2")!)).toBe(1);
+    // the layer keeps reporting nobody: the slot stays reserved, the layer is not idle
+    reg.status("layer-2", [], 1, 0, true, 10_000);
+    expect(reg.free(reg.servers.get("layer-2")!)).toBe(1);
+    expect(reg.retirable("mmo", 5_000, 1, 20_000)).toBeNull();
+    // the character arrives: the reservation becomes a player
+    reg.status("layer-2", [presence("a")], 1, 0, true, 21_000);
+    expect(reg.free(reg.servers.get("layer-2")!)).toBe(1);
+    // a reservation nobody honours expires and the layer becomes retirable again
+    reg.reserve("layer-1", "ghost", "acct-g", "G", 30_000);
+    reg.status("layer-1", [], 1, 0, true, 31_000);
+    expect(reg.retirable("mmo", 5_000, 1, 40_000)).toBeNull();
+    reg.status("layer-1", [], 1, 0, true, 80_000);
+    expect(reg.retirable("mmo", 5_000, 1, 90_000)?.id).toBe("layer-1");
+  });
+
   it("retires the newest idle layer but never below the minimum", () => {
     const reg = new ServerRegistry();
     reg.register({ id: "layer-1", kind: "layer", url: "ws://a", scene: "mmo", cap: 2 }, 1000);

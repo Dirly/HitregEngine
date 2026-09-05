@@ -1,0 +1,39 @@
+# systemd unit for a bare-metal or home box (no Docker): main + its
+# supervised layers as one service. Install:
+#
+#   sudo cp deploy/hitreg-main.service /etc/systemd/system/
+#   sudo systemctl edit hitreg-main      # set Environment= lines below, WorkingDirectory
+#   sudo systemctl enable --now hitreg-main
+#   journalctl -u hitreg-main -f
+#
+# The checkout must have `pnpm install` run once (tsx and the workspace
+# packages come from node_modules). Layers are child processes; stopping the
+# service stops them (KillMode=control-group).
+
+[Unit]
+Description=HitReg main server (gateway, placement, persistence, layer pool)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hitreg
+WorkingDirectory=/opt/hitreg/engine
+Environment=NODE_ENV=production
+Environment=HITREG_SECRET=change-me
+Environment=PUBLIC_HOST=play.example.org
+# Environment=HITREG_DATABASE_URL=postgres://hitreg:pw@127.0.0.1/hitreg
+ExecStart=/usr/bin/node --import tsx packages/server/bin/main.ts \
+  --scene mmo \
+  --public-host ${PUBLIC_HOST} --public-scheme wss \
+  --ports 8801-8810 --cap 40 --min 1 --max 4 \
+  --data /var/lib/hitreg \
+  --child-args "--workers 2"
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=30
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

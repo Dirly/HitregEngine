@@ -134,6 +134,72 @@
         }
       }
     },
+    "spawnArea": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "radius": {
+          "default": 80,
+          "description": "Metres from the area's origin within which a player wakes it: the packs spawn the first time, resume afterwards.",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "sleepRadius": {
+          "default": 120,
+          "description": "Once awake, the area sleeps only when no player is within this (hysteresis — keep it larger than radius).",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "idleSeconds": {
+          "default": 10,
+          "description": "Seconds with no player inside sleepRadius before the pack is paused in place. It does not despawn: a returning player finds it where it was.",
+          "type": "number",
+          "minimum": 0
+        },
+        "spawns": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "template": {
+                "type": "string",
+                "minLength": 1,
+                "description": "NPC template: the id of an npc-tagged scene subtree, or a name registered on the server at runtime."
+              },
+              "count": {
+                "default": 1,
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "spread": {
+                "default": 6,
+                "description": "Metres around the origin the pack is scattered in (uniform disc).",
+                "type": "number",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "template"
+            ]
+          }
+        },
+        "leash": {
+          "default": 25,
+          "description": "Metres from home an enemy may chase before it must turn back. Handed to each NPC's root script as the `leash` param (with `home`, `roam`, `spawnArea`); the server also fences at 1.5× as a backstop.",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "roam": {
+          "default": 10,
+          "description": "Idle wander radius around home, passed as the `roam` param.",
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "description": "Proximity-activated enemy population for dedicated servers. Keep every spawn area at least aggro + leash away from a zone edge or transfer band, so a layer swap never happens in sight of a pack."
+    },
     "visibility": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",

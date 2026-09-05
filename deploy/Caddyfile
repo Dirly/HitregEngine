@@ -1,0 +1,35 @@
+# TLS for the gateway + the built client, on one hostname.
+# Layers are reached on their own ports (wss://host:88xx) — Caddy is not in
+# that path; the WebSocket goes straight to the layer. To put layers behind
+# TLS too, terminate here per port:
+#
+#   {$PUBLIC_HOST}:8801 { reverse_proxy main:8801 }
+#
+# and start main with PUBLIC_SCHEME=wss (the compose file does).
+
+{$PUBLIC_HOST} {
+	encode zstd gzip
+
+	# gateway HTTP (accounts, characters, /play, parties) and the cluster socket
+	@gateway path /auth/* /characters* /play /party* /status /health /admin/* /cluster
+	reverse_proxy @gateway main:8780
+
+	# the playground client, built with `pnpm -F playground build`
+	root * /srv/client
+	try_files {path} /index.html
+	file_server
+}
+
+# one TLS front per layer port (uncomment as many as LAYER_PORTS covers)
+{$PUBLIC_HOST}:8801 {
+	reverse_proxy main:8801
+}
+{$PUBLIC_HOST}:8802 {
+	reverse_proxy main:8802
+}
+{$PUBLIC_HOST}:8803 {
+	reverse_proxy main:8803
+}
+{$PUBLIC_HOST}:8804 {
+	reverse_proxy main:8804
+}

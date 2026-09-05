@@ -310,7 +310,7 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
     if (!player?.identity) return false;
     const rev = await server.commit(peerId);
     const ticket = await mintTicket(player.identity, to.srv, rev, reason);
-    return server.handoff(peerId, { url: to.url, ticket, reason });
+    return server.handoff(peerId, { url: to.url, ticket, reason, srv: to.srv });
   };
 
   if (link) {
@@ -404,12 +404,19 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
     });
   }, 2000);
   const idleExit = opts.idleExitSeconds ?? (kind === "instance" ? 90 : 0);
-  const idleTimer =
-    idleExit > 0
-      ? setInterval(() => {
-          if (server.players.size === 0 && Date.now() - lastPopulatedAt >= idleExit * 1000) finish(`idle for ${idleExit}s`);
-        }, 1000)
-      : null;
+  // an orphan (main gone for two minutes) with nobody on it exits so a
+  // restarted main can start fresh layers on the same ports; one with
+  // players keeps serving and re-registers when main returns
+  let linkDownSince: number | null = null;
+  link?.onLink((up) => {
+    linkDownSince = up ? null : Date.now();
+  });
+  const idleTimer = setInterval(() => {
+    if (idleExit > 0 && server.players.size === 0 && Date.now() - lastPopulatedAt >= idleExit * 1000) finish(`idle for ${idleExit}s`);
+    if (link && linkDownSince !== null && server.players.size === 0 && server.pendingSaveCount === 0 && Date.now() - linkDownSince >= 120_000) {
+      finish("main unreachable for 120s and nobody here");
+    }
+  }, 1000);
 
   const handle: ServeHandle = {
     world,

@@ -81,6 +81,7 @@ export class ServerRegistry {
       if (server.kind === "layer") this.affinity.set(characterId, { layerId: id, at: now });
     }
     this.servers.delete(id);
+    this.reservations.delete(id);
   }
 
   status(id: string, players: PlayerPresence[], tickMs: number, entities: number, accepting: boolean, now = Date.now()): void {
@@ -91,17 +92,46 @@ export class ServerRegistry {
     server.entities = entities;
     server.accepting = accepting && !server.draining;
     server.lastStatusAt = now;
-    for (const p of players) this.whereIs.set(p.characterId, id);
-    server.emptySince = players.length === 0 ? (server.emptySince ?? now) : null;
+    for (const p of players) {
+      this.whereIs.set(p.characterId, id);
+      this.reservations.get(id)?.delete(p.characterId); // arrived
+    }
+    this.expireReservations(id, now);
+    server.emptySince = players.length === 0 && this.reservedCount(id) === 0 ? (server.emptySince ?? now) : null;
   }
 
   joined(id: string, player: PlayerPresence, now = Date.now()): void {
     const server = this.servers.get(id);
     if (!server) return;
     server.players.set(player.characterId, player);
+    this.reservations.get(id)?.delete(player.characterId);
     server.emptySince = null;
     this.whereIs.set(player.characterId, id);
     if (server.kind === "layer") this.affinity.set(player.characterId, { layerId: id, at: now });
+  }
+
+  /**
+   * Slots promised to characters who have not arrived yet (a `/play` grant,
+   * a transfer ticket). Kept apart from the layer's own player reports so a
+   * status message cannot wipe them, and so an empty layer that someone is
+   * on their way to is not retired under them. Expire after `reserveMs`.
+   */
+  private readonly reservations = new Map<string, Map<string, number>>();
+  private readonly reserveMs = 45_000;
+
+  private expireReservations(id: string, now: number): void {
+    const map = this.reservations.get(id);
+    if (!map) return;
+    for (const [characterId, until] of map) if (until <= now) map.delete(characterId);
+  }
+
+  private reservedCount(id: string): number {
+    const map = this.reservations.get(id);
+    if (!map) return 0;
+    const server = this.servers.get(id);
+    let n = 0;
+    for (const characterId of map.keys()) if (!server?.players.has(characterId)) n++;
+    return n;
   }
 
   left(id: string, characterId: string, now = Date.now()): void {
@@ -114,15 +144,20 @@ export class ServerRegistry {
   }
 
   /** Reserve a slot so a burst of logins cannot overfill a layer between status reports. */
-  reserve(id: string, characterId: string, playerId: string, name: string): void {
+  reserve(id: string, characterId: string, _playerId: string, _name: string, now = Date.now()): void {
     const server = this.servers.get(id);
     if (!server || server.players.has(characterId)) return;
-    server.players.set(characterId, { characterId, playerId, name, position: null });
+    let map = this.reservations.get(id);
+    if (!map) {
+      map = new Map();
+      this.reservations.set(id, map);
+    }
+    map.set(characterId, now + this.reserveMs);
     server.emptySince = null;
   }
 
   free(server: ServerEntry): number {
-    return Math.max(0, server.cap - server.players.size);
+    return Math.max(0, server.cap - server.players.size - this.reservedCount(server.id));
   }
 
   layersFor(scene: string): ServerEntry[] {
@@ -160,7 +195,10 @@ export class ServerRegistry {
   retirable(scene: string, idleMs: number, min: number, now = Date.now()): ServerEntry | null {
     const layers = this.layersFor(scene);
     if (layers.length <= min) return null;
-    const idle = layers.filter((s) => s.players.size === 0 && s.emptySince !== null && now - s.emptySince >= idleMs && !s.draining);
+    for (const s of layers) this.expireReservations(s.id, now);
+    const idle = layers.filter(
+      (s) => s.players.size === 0 && this.reservedCount(s.id) === 0 && s.emptySince !== null && now - s.emptySince >= idleMs && !s.draining,
+    );
     idle.sort((a, b) => b.registeredAt - a.registeredAt); // newest first — keep the primary
     return idle[0] ?? null;
   }

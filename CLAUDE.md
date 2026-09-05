@@ -260,6 +260,21 @@ The primary AI channel is **direct file editing** — no MCP required:
   netState ownership, NPCs respawn, and `curl -s http://127.0.0.1:8787/admin/status`
   (`/admin/npcs`, `/admin/spawn`, `/admin/netstate`) is how an agent reads and
   edits the live population. **docs/dedicated-server.md** before touching it.
+- **Hosting** (`pnpm -F @hitreg/server main --scene <name> --secret <s>`): a
+  MAIN process (login, characters, placement, the only database client, the
+  recipe's writer of record, a child-process supervisor) plus a pool of
+  whole-world LAYERS (Diablo-style copies, ~40 players each, the same
+  `serve` binary with `--main`) and on-demand INSTANCES for dungeons.
+  Clients open the playground with `?gateway=http://host:8780`, sign in,
+  and are handed a layer url + a signed ticket; a **transfer** (party pull,
+  dungeon door, drain, admin move) is "bye here, dial there with a ticket
+  bound to the committed save revision". Enemies come from `spawnArea`
+  components (in the spec): they exist only near players and pause in
+  place otherwise, so a layer costs what its players cost. Admin on main:
+  `curl -s -H "Authorization: Bearer <secret>" http://127.0.0.1:8780/admin/status`
+  (`/admin/transfer`, `/admin/instance`, `/admin/scale`, `/admin/drain`,
+  `/admin/terraform`, `/admin/recipe`). One-box deploy: `deploy/`.
+  **docs/hosting.md** before touching placement, tickets, saves or transfers.
 - **Tools are plugins, games are repos.** `tools/` is an install directory:
   each tool is its own git repo cloned in, and only the first-party three
   (`atlas/`, `wfc-3d/`, `texture-intake/`) are tracked by the engine. Each

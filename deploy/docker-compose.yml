@@ -1,0 +1,80 @@
+# One box, the "small community" shape (docs/hosting.md):
+#   caddy      TLS + the playground client, reverse-proxies the gateway
+#   main       login, placement, persistence, and the layer supervisor
+#   postgres   the database (drop this service and HITREG_DATABASE_URL to use files under the volume)
+#
+#   cp deploy/.env.example deploy/.env   # then edit
+#   docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d
+#
+# Layers and instances are child processes of `main` inside its container,
+# on ports 8801-8810 published straight through (WebSocket, one port per
+# layer). Behind Caddy the browser talks to :443 for the gateway and the
+# client, and to wss://host:88xx for the layer it was placed on.
+
+services:
+  main:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: hitreg-server
+    restart: unless-stopped
+    environment:
+      HITREG_SECRET: ${HITREG_SECRET:?set HITREG_SECRET in deploy/.env}
+      HITREG_ADMIN_TOKEN: ${HITREG_ADMIN_TOKEN:-}
+      HITREG_DATABASE_URL: ${HITREG_DATABASE_URL:-postgres://hitreg:${POSTGRES_PASSWORD:-hitreg}@postgres:5432/hitreg}
+      SCENE: ${SCENE:-mmo}
+      PUBLIC_HOST: ${PUBLIC_HOST:?set PUBLIC_HOST in deploy/.env}
+      PUBLIC_SCHEME: ${PUBLIC_SCHEME:-wss}
+      LAYER_PORTS: ${LAYER_PORTS:-8801-8810}
+      CAP: ${CAP:-40}
+      MIN_LAYERS: ${MIN_LAYERS:-1}
+      MAX_LAYERS: ${MAX_LAYERS:-4}
+      MAIN_ARGS: ${MAIN_ARGS:---child-args "--workers 2"}
+    ports:
+      - "8780:8780"
+      - "8801-8810:8801-8810"
+    volumes:
+      - hitreg-data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8780/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: hitreg
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hitreg}
+      POSTGRES_DB: hitreg
+    volumes:
+      - hitreg-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hitreg -d hitreg"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ../apps/playground/dist:/srv/client:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  hitreg-data:
+  hitreg-postgres:
+  caddy-data:
+  caddy-config:

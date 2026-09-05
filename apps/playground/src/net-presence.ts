@@ -242,8 +242,15 @@ function makeLabel(name: string): { sprite: THREE.Sprite; texture: THREE.CanvasT
 export class NetPresence {
   private readonly opts: NetPresenceOptions;
   private readonly enabled: boolean;
-  /** Dedicated-server mode: the url to dial, else null. */
-  private readonly serverUrl: string | null;
+  /**
+   * Dedicated-server mode: the url to dial, else null. In GATEWAY mode it
+   * starts as a placeholder (anything not `ws…`) and `rehome()` sets the
+   * real url + ticket once the gateway has placed this tab — and again on
+   * every `transfer` the layer sends.
+   */
+  private serverUrl: string | null;
+  /** Play ticket presented in the handshake (gateway mode). */
+  private ticket: string | null = null;
   private nextDialAt = 0;
   private readonly selfId = `p-${Math.random().toString(36).slice(2, 10)}`;
   private readonly selfName = `guest-${this.selfId.slice(-4)}`;
@@ -801,14 +808,31 @@ export class NetPresence {
   }
 
   /** Dedicated server: dial it over a WebSocket and run the ordinary client path. */
+  /**
+   * Gateway mode: point this tab at a layer (a `/play` grant, or a
+   * `transfer` from the layer it is on). Drops the current session — the
+   * bye is the handoff completing on the old server — and dials the new
+   * url with the ticket on the next update. The rendered world stays.
+   */
+  rehome(url: string, ticket: string): void {
+    if (this.role !== "off") {
+      this.teardownSession();
+      this.sessionHost = null;
+    }
+    this.serverUrl = url;
+    this.ticket = ticket;
+    this.nextDialAt = 0;
+  }
+
   private dialServer(): void {
-    if (this.serverUrl === null) return;
+    if (this.serverUrl === null || !/^wss?:\/\//.test(this.serverUrl)) return; // gateway mode, not placed yet
     this.nextDialAt = performance.now() + 2000; // backoff if this attempt dies
     let transport: WebSocketClientTransport;
     try {
       transport = new WebSocketClientTransport(this.serverUrl, {
         peerId: this.selfId,
         name: this.selfName,
+        ...(this.ticket ? { ticket: this.ticket } : {}),
       });
     } catch (error) {
       console.warn("[net] cannot dial the server:", error);

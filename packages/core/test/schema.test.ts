@@ -179,6 +179,7 @@ describe("ComponentRegistry", () => {
       "rigidbody",
       "script",
       "sky",
+      "spawnArea",
       "transform",
       "visibility",
       "voxelWorld",

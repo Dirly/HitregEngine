@@ -126,6 +126,7 @@ import { ChunkManager } from "./chunk-manager.js";
 import { SubsceneManager, type SubsceneInstance } from "./subscene-manager.js";
 import { BridgePlayerDataBackend } from "./player-data-bridge.js";
 import { NetPresence, type NetReplica } from "./net-presence.js";
+import { GatewayClient, mountGatewayPanel, resolveGateway, type GatewayPanel } from "./gateway.js";
 import {
   clientLink,
   createComms,
@@ -1054,7 +1055,16 @@ async function main(): Promise<void> {
    * per joiner and sends its docs over the `world` module; those live in
    * netRuntimeDocs and are built/attached like streamed chunk content.
    */
+  /**
+   * GATEWAY mode (`?gateway=http://host:8780`, or localStorage "hitreg:gateway",
+   * see gateway.ts): the same pure-client path, but the layer url and the
+   * ticket come from signing in at main — `netServerUrl` holds a placeholder
+   * until then, and `netPresence.rehome()` sets the real one (again on
+   * every `transfer` the layer sends).
+   */
+  const netGateway = resolveGateway();
   const netServerUrl: string | null = (() => {
+    if (netGateway) return "gateway";
     const fromQuery = new URLSearchParams(location.search).get("server");
     if (fromQuery) return fromQuery;
     try {
@@ -1063,6 +1073,9 @@ async function main(): Promise<void> {
       return null;
     }
   })();
+  /** Gateway mode: set once `/play` granted a layer; play sessions wait for it. */
+  let netGrant: { url: string; ticket: string; server: string; scene: string } | null = null;
+  let gatewayPanel: GatewayPanel | null = null;
   /** Entity docs the server spawned at runtime (players, NPCs), by id. */
   const netRuntimeDocs = new Map<string, SceneDoc["entities"][string]>();
   /** Our own body's id on the server, once the `world` module told us. */
@@ -2094,6 +2107,7 @@ async function main(): Promise<void> {
       if (typeof msg.self === "string") {
         resolveFollowTarget();
         if (playMode.get() !== "edit") refreshCameraColliders();
+        if (gatewayPanel) gatewayPanel.setStatus(`${gatewayPanel.character()?.name ?? ""} · ${netGrant?.server ?? "server"}`);
       }
       console.log(`[net] server spawned ${ids.length} entities${typeof msg.self === "string" ? ` (you are ${msg.self})` : ""}`);
     } else if (msg.t === "despawn" && Array.isArray(msg.ids)) {
@@ -2106,6 +2120,17 @@ async function main(): Promise<void> {
           chunkManager.reloadAll();
           console.log(`[net] world recipe "${m.id}" updated by the server — re-streaming`);
         }
+      }
+    } else if (msg.t === "transfer") {
+      // the layer hands us to another server (party pull, a dungeon, a
+      // rebalance): bye here, dial there with the ticket — the rendered
+      // world stays, only the server's entities (players, NPCs) swap
+      const m = msg as unknown as { url?: unknown; ticket?: unknown; reason?: unknown; srv?: unknown };
+      if (typeof m.url === "string" && typeof m.ticket === "string") {
+        console.log(`[net] transfer → ${m.url} (${typeof m.reason === "string" ? m.reason : "?"})`);
+        netGrant = { url: m.url, ticket: m.ticket, server: typeof m.srv === "string" ? m.srv : "?", scene: netGrant?.scene ?? store.doc.name };
+        gatewayPanel?.setStatus(`${gatewayPanel.character()?.name ?? ""} · transferring (${typeof m.reason === "string" ? m.reason : "?"})…`);
+        netPresence?.rehome(m.url, m.ticket);
       }
     }
   }
@@ -2123,7 +2148,8 @@ async function main(): Promise<void> {
     getSceneName: () => store.doc.name,
     serverUrl: netServerUrl,
     // connect while playing: an editor tab has no business holding a body
-    wantsSession: () => playMode.get() === "playing",
+    // (gateway mode also waits until main has placed us — no grant, no dial)
+    wantsSession: () => playMode.get() === "playing" && (!netGateway || netGrant !== null),
     // a server-spawned body replaces the capsule avatar for that peer
     hasEntityForPeer: (peerId) => {
       const id = netPresence?.netState.get(`player/${peerId}`);
@@ -2266,6 +2292,20 @@ async function main(): Promise<void> {
   netPresence.onSession((session) => {
     if (session?.role === "peer" && netServerUrl) session.client.onModule("world", onWorldModule);
   });
+  // gateway mode: sign in, pick a character, and Play dials the layer main chose
+  if (netGateway) {
+    const gatewayClient = new GatewayClient(netGateway);
+    gatewayPanel = mountGatewayPanel({
+      client: gatewayClient,
+      onPlay: (grant, character) => {
+        netGrant = grant;
+        console.log(`[net] gateway placed ${character.name} on ${grant.server} (${grant.url})`);
+        netPresence?.rehome(grant.url, grant.ticket);
+        if (playMode.get() !== "playing") playMode.set("playing");
+      },
+    });
+    (window as unknown as { __hitregGateway?: unknown }).__hitregGateway = { client: gatewayClient, panel: gatewayPanel, grant: () => netGrant };
+  }
 
   // -- comms: text chat + VoIP (@hitreg/comms), riding the room's module channel --
   // Membership (team/party) is plain netState so scripts assign it with the

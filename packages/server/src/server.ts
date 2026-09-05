@@ -52,7 +52,7 @@ export type WorldModuleMessage =
    * committed before this was sent, and the ticket binds the destination
    * to that revision.
    */
-  | { t: "transfer"; url: string; ticket: string; reason: string };
+  | { t: "transfer"; url: string; ticket: string; reason: string; srv?: string };
 
 /** Who a peer is, from the ticket it presented (absent on an open dev server). */
 export interface PlayerIdentity {
@@ -271,6 +271,7 @@ export class GameServer {
     if (outbox.length > 0) this.host.broadcastEvents(outbox);
     const delta = this.world.netState.takeDelta();
     if (delta) this.host.broadcastState(delta);
+    if (tick % 600 === 0) this.retryPendingSaves();
     // periodic saves, staggered so 50 players do not all commit on one tick
     if (this.commitTicks > 0 && this.persistence) {
       for (const player of this.players.values()) {
@@ -438,11 +439,19 @@ export class GameServer {
   private leave(peerId: string, reason: LeaveReason): void {
     const player = this.players.get(peerId);
     if (!player) return;
-    // a transferred player was committed before the handoff; everyone else saves now
-    if (reason !== "transfer") {
-      void this.commit(peerId).catch((error: unknown) => {
-        console.warn(`[server] final save for ${peerId} failed:`, error instanceof Error ? error.message : error);
-      });
+    // a transferred player was committed before the handoff; everyone else
+    // saves now — and a save that cannot land (main down) is kept and retried
+    if (reason !== "transfer" && player.identity && this.persistence) {
+      const identity = player.identity;
+      const input = this.snapshotFor(player);
+      const inFlight = player.committing;
+      void (inFlight ?? Promise.resolve())
+        .catch(() => undefined)
+        .then(() => this.persistence!.commit(identity, input))
+        .catch((error: unknown) => {
+          console.warn(`[server] final save for ${peerId} failed — queued for retry:`, error instanceof Error ? error.message : error);
+          this.pendingSaves.push({ identity, input, attempts: 1 });
+        });
     }
     this.players.delete(peerId);
     this.peerViews.delete(peerId);
@@ -515,13 +524,45 @@ export class GameServer {
    * body so its bye tears it down immediately (no grace) without a second
    * save. Returns false if the player is not here.
    */
-  handoff(peerId: string, to: { url: string; ticket: string; reason: string }): boolean {
+  handoff(peerId: string, to: { url: string; ticket: string; reason: string; srv?: string }): boolean {
     const player = this.players.get(peerId);
     if (!player || player.disconnectedAt !== null) return false;
     player.transferring = this.world.tick;
     player.input = null;
-    this.host.sendModule(peerId, WORLD_MODULE, { t: "transfer", url: to.url, ticket: to.ticket, reason: to.reason } satisfies WorldModuleMessage);
+    this.host.sendModule(peerId, WORLD_MODULE, { t: "transfer", url: to.url, ticket: to.ticket, reason: to.reason, ...(to.srv ? { srv: to.srv } : {}) } satisfies WorldModuleMessage);
     return true;
+  }
+
+  /**
+   * Saves that failed at leave (main unreachable) wait here and are retried
+   * every few seconds until they land — a player logging out during a main
+   * outage must not lose their session. Bounded; the oldest is dropped past
+   * the cap with a warning, which is the one data-loss path and it is loud.
+   */
+  private readonly pendingSaves: Array<{ identity: PlayerIdentity; input: CommitInput; attempts: number }> = [];
+  private static readonly PENDING_SAVES_MAX = 500;
+
+  private retryPendingSaves(): void {
+    if (!this.persistence || this.pendingSaves.length === 0) return;
+    const batch = this.pendingSaves.splice(0, 20);
+    for (const entry of batch) {
+      this.persistence.commit(entry.identity, entry.input).catch((error: unknown) => {
+        entry.attempts++;
+        if (entry.attempts % 10 === 1) {
+          console.warn(`[server] save for ${entry.identity.characterId} still failing (${entry.attempts}×): ${error instanceof Error ? error.message : String(error)}`);
+        }
+        this.pendingSaves.push(entry);
+        if (this.pendingSaves.length > GameServer.PENDING_SAVES_MAX) {
+          const dropped = this.pendingSaves.shift()!;
+          console.warn(`[server] DROPPED a pending save for ${dropped.identity.characterId} — persistence has been down too long`);
+        }
+      });
+    }
+  }
+
+  /** Saves waiting for persistence to come back (diagnostics). */
+  get pendingSaveCount(): number {
+    return this.pendingSaves.length;
   }
 
   // -- commands --------------------------------------------------------------------
@@ -693,6 +734,7 @@ export class GameServer {
       })),
       accepting: this.accepting,
       paused: this.paused.size,
+      pendingSaves: this.pendingSaves.length,
       entities: this.world.entities.size,
       replicas: this.replicas.length,
       terrainCells: this.terrain?.cells().length ?? 0,

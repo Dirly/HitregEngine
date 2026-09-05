@@ -207,8 +207,15 @@ clients can show "away"; the playground ignores it for now.
   always falls back, which is why a tree trunk can anchor a telegraph. The
   fix is one line in `packages/physics/src/sim.ts` where a voxel source is
   cooked; left alone because it changes both sides at once.
-- One scene per process; Cloudflare Durable Objects (the hosting Derek
-  mentioned) would wrap `GameServer` per zone — `serve()` is the shape.
+- One scene per process. **Hosting many of these is docs/hosting.md
+  (2026-09-05):** a MAIN process places players across a pool of whole-world
+  layers (this process with `--main`), tickets replace open joins, saves go
+  through main, and `handoff` moves a player between processes. Durable
+  Objects were considered and rejected for the sim (Rapier WASM + worker
+  threads + a 60 Hz tick want a real VM); they would fit main.
+- "Nothing else persists yet / nothing is authenticated" above is no longer
+  true when run through main — see docs/hosting.md; it still holds for the
+  open `serve --scene x` dev path.
 - The P2P dev path is untouched and still the default without `?server=`.
 - CLAUDE.md pointer to this doc is left as an uncommitted edit (the file
   carries Derek's own uncommitted changes).
