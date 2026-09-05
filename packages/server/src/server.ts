@@ -25,6 +25,9 @@ import {
 import type { EntityDoc, NetObjectData, RecipeEdit, WorldRecipe } from "@hitreg/core";
 import type { HeadlessWorld } from "./world.js";
 import type { TerrainStreamer } from "./terrain.js";
+import type { CommitInput, PlayerSave } from "./cluster/player-store.js";
+
+export type LeaveReason = "leave" | "grace" | "transfer" | "replaced" | "kicked" | "closing";
 import {
   extractPlayerTemplate,
   instantiatePlayer,
@@ -42,12 +45,45 @@ export type WorldModuleMessage =
   /** A player's link dropped (body held for the grace window) or came back. */
   | { t: "presence"; peerId: string; linked: boolean }
   /** The world recipe changed (terraform): re-register it and re-stream. */
-  | { t: "recipe"; id: string; recipe: WorldRecipe };
+  | { t: "recipe"; id: string; recipe: WorldRecipe }
+  /**
+   * Go there now: say bye here, dial `url` with `ticket`. The body here is
+   * torn down the moment the client leaves (no grace); the save was
+   * committed before this was sent, and the ticket binds the destination
+   * to that revision.
+   */
+  | { t: "transfer"; url: string; ticket: string; reason: string };
+
+/** Who a peer is, from the ticket it presented (absent on an open dev server). */
+export interface PlayerIdentity {
+  playerId: string;
+  characterId: string;
+  name: string;
+  /** Revisions a transfer ticket promised the save is at. */
+  rev?: Record<string, number>;
+}
+
+/** The save authority's two calls. Without one, nothing persists (dev). */
+export interface PlayerPersistence {
+  load(identity: PlayerIdentity, scene: string): Promise<PlayerSave>;
+  commit(identity: PlayerIdentity, input: CommitInput): Promise<Record<string, number>>;
+}
 
 export interface GameServerOptions {
   world: HeadlessWorld;
   transport: Transport;
   terrain?: TerrainStreamer | null;
+  /** Scene name — keys the per-scene saved position. Default "scene". */
+  scene?: string;
+  /** Identity of an authenticated peer; undefined = anonymous (no persistence for it). */
+  identityOf?: (peerId: string) => PlayerIdentity | undefined;
+  persistence?: PlayerPersistence;
+  /** Seconds between periodic saves of every identified player (default 30; 0 = only on leave/transfer). */
+  commitEverySeconds?: number;
+  /** Extra veto on moving a player right now (in combat, mid-cast …). */
+  transferGate?: (peerId: string) => boolean;
+  onPlayerJoined?: (player: PlayerRecord) => void;
+  onPlayerLeft?: (player: PlayerRecord, reason: LeaveReason) => void;
   /** Ticks between snapshots (default 3 → 20 Hz at 60 Hz sim). */
   snapshotEvery?: number;
   /** The player subtree to clone per joiner; default: extracted from the world's base scene. */
@@ -86,6 +122,7 @@ export class GameServer {
   readonly world: HeadlessWorld;
   readonly host: RoomHost;
   readonly terrain: TerrainStreamer | null;
+  private readonly transport: Transport;
   readonly players = new Map<string, PlayerRecord>();
   /** Client-facing docs of every runtime-spawned entity (players, NPCs). */
   readonly runtimeDocs = new Map<string, EntityDoc>();
@@ -97,6 +134,21 @@ export class GameServer {
   private readonly terrainEvery: number;
   private readonly graceTicks: number;
   private readonly onRecipeChanged: ((id: string, recipe: WorldRecipe) => void) | undefined;
+  readonly scene: string;
+  private readonly identityOf: ((peerId: string) => PlayerIdentity | undefined) | undefined;
+  private readonly persistence: PlayerPersistence | undefined;
+  private readonly commitTicks: number;
+  private readonly transferGate: ((peerId: string) => boolean) | undefined;
+  private readonly onPlayerJoined: ((player: PlayerRecord) => void) | undefined;
+  private readonly onPlayerLeft: ((player: PlayerRecord, reason: LeaveReason) => void) | undefined;
+  /** Peers whose save is still loading (no body yet). */
+  private readonly joining = new Set<string>();
+  /** Root entity ids whose simulation is paused (a sleeping spawn area): not terrain foci. */
+  readonly paused = new Set<string>();
+  /** False while draining: new joins are refused. */
+  accepting = true;
+  /** Ticks a told-to-transfer player may linger before being torn down anyway. */
+  private static readonly TRANSFER_LINGER_TICKS = 900;
   /** Wall-clock cost of the last 300 ticks (ms), for /admin/status. */
   private readonly tickCost: number[] = [];
   private readonly unsubs: Array<() => void> = [];
@@ -109,11 +161,20 @@ export class GameServer {
 
   constructor(opts: GameServerOptions) {
     this.world = opts.world;
+    this.transport = opts.transport;
     this.terrain = opts.terrain ?? null;
     this.snapshotEvery = opts.snapshotEvery ?? 3;
     this.terrainEvery = opts.terrainEvery ?? 10;
     this.graceTicks = Math.round((opts.reconnectGraceSeconds ?? 30) / this.world.fixedDt);
     this.onRecipeChanged = opts.onRecipeChanged;
+    this.scene = opts.scene ?? "scene";
+    this.identityOf = opts.identityOf;
+    this.persistence = opts.persistence;
+    const commitSeconds = opts.commitEverySeconds ?? 30;
+    this.commitTicks = commitSeconds > 0 ? Math.round(commitSeconds / this.world.fixedDt) : 0;
+    this.transferGate = opts.transferGate;
+    this.onPlayerJoined = opts.onPlayerJoined;
+    this.onPlayerLeft = opts.onPlayerLeft;
     this.template = opts.playerTemplate === undefined ? extractPlayerTemplate(this.world.expanded) : opts.playerTemplate;
     const authored = (this.template?.entities[this.template.rootId]?.components["transform"] as { position?: number[] } | undefined)?.position;
     const fallback: [number, number, number] = isFiniteVec(authored, 3)
@@ -154,6 +215,7 @@ export class GameServer {
     const foci: Array<[number, number, number]> = [];
     for (const [id, e] of this.world.entities) {
       if (e.parent !== null) continue;
+      if (this.paused.has(id)) continue; // asleep: no weight on the ground, no ground needed
       const rb = e.components["rigidbody"] as { kind?: string } | undefined;
       if (rb?.kind !== "dynamic") continue;
       const p = this.world.positionOf(id);
@@ -209,6 +271,16 @@ export class GameServer {
     if (outbox.length > 0) this.host.broadcastEvents(outbox);
     const delta = this.world.netState.takeDelta();
     if (delta) this.host.broadcastState(delta);
+    // periodic saves, staggered so 50 players do not all commit on one tick
+    if (this.commitTicks > 0 && this.persistence) {
+      for (const player of this.players.values()) {
+        if (!player.identity || player.transferring !== null || player.committing) continue;
+        if ((tick + player.commitPhase) % this.commitTicks !== 0) continue;
+        void this.commit(player.peerId).catch((error: unknown) => {
+          console.warn(`[server] periodic save for ${player.peerId} failed:`, error instanceof Error ? error.message : error);
+        });
+      }
+    }
     this.tickCost.push(performance.now() - started);
     if (this.tickCost.length > 300) this.tickCost.shift();
   }
@@ -219,7 +291,7 @@ export class GameServer {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     for (const unsub of this.unsubs.splice(0)) unsub();
-    for (const peerId of [...this.players.keys()]) this.leave(peerId);
+    for (const peerId of [...this.players.keys()]) this.leave(peerId, "closing");
     this.host.close();
     if (this.driver) this.world.beforeStep.delete(this.driver.step);
   }
@@ -230,23 +302,67 @@ export class GameServer {
     const roster = new Map(this.host.peers().map((p) => [p.peerId, p.name]));
     for (const [peerId, name] of roster) {
       const existing = this.players.get(peerId);
-      if (!existing) this.join(peerId, name);
-      else if (existing.disconnectedAt !== null) this.rejoin(existing, name);
+      if (existing) {
+        if (existing.disconnectedAt !== null) this.rejoin(existing, name);
+        continue;
+      }
+      if (this.joining.has(peerId)) continue;
+      if (!this.accepting) {
+        this.kick(peerId, "server draining");
+        continue;
+      }
+      const identity = this.identityOf?.(peerId);
+      if (identity && this.persistence) {
+        // the save has to exist before the body does: load first, spawn when it lands
+        this.joining.add(peerId);
+        this.persistence.load(identity, this.scene).then(
+          (save) => {
+            this.joining.delete(peerId);
+            if (this.closed || this.players.has(peerId)) return;
+            if (!this.host.peers().some((p) => p.peerId === peerId)) return; // left while loading
+            this.join(peerId, identity.name || name, identity, save);
+          },
+          (error: unknown) => {
+            this.joining.delete(peerId);
+            console.warn(`[server] could not load the save for ${peerId}:`, error instanceof Error ? error.message : error);
+            this.kick(peerId, "save unavailable");
+          },
+        );
+        continue;
+      }
+      this.join(peerId, name, identity ?? null, null);
     }
     const tick = this.world.tick;
     for (const player of [...this.players.values()]) {
-      if (roster.has(player.peerId)) continue;
-      // link gone: hold the body for the grace window, then tear down
-      if (this.graceTicks <= 0) {
-        this.leave(player.peerId);
+      if (roster.has(player.peerId)) {
+        // told to go, still here: the destination has its save; do not keep two bodies forever
+        if (player.transferring !== null && tick - player.transferring >= GameServer.TRANSFER_LINGER_TICKS) {
+          this.kick(player.peerId, "transfer");
+          this.leave(player.peerId, "transfer");
+        }
+        continue;
+      }
+      // link gone: hold the body for the grace window, then tear down —
+      // unless the player was handed to another server, in which case the
+      // bye IS the handoff completing and the body goes at once
+      if (player.transferring !== null) {
+        this.leave(player.peerId, "transfer");
+      } else if (this.graceTicks <= 0) {
+        this.leave(player.peerId, "leave");
       } else if (player.disconnectedAt === null) {
         player.disconnectedAt = tick;
         player.input = null; // stands still; nobody is steering it
         this.host.broadcastModule(WORLD_MODULE, { t: "presence", peerId: player.peerId, linked: false } satisfies WorldModuleMessage);
       } else if (tick - player.disconnectedAt >= this.graceTicks) {
-        this.leave(player.peerId);
+        this.leave(player.peerId, "grace");
       }
     }
+  }
+
+  /** Drop a socket (the transport is a WebSocket host in production; a loopback hub in tests may not support it). */
+  private kick(peerId: string, reason: string): void {
+    const t = this.transport as { disconnect?: (peer: string, reason?: string) => void };
+    t.disconnect?.(peerId, reason);
   }
 
   /** Same peer id back inside the grace window: hand the body back, resend the world. */
@@ -265,16 +381,25 @@ export class GameServer {
     this.host.broadcastModule(WORLD_MODULE, { t: "presence", peerId: player.peerId, linked: true } satisfies WorldModuleMessage, player.peerId);
   }
 
-  private join(peerId: string, name: string): void {
-    const at = this.spawnPoint(peerId);
+  private join(peerId: string, name: string, identity: PlayerIdentity | null, save: PlayerSave | null): void {
+    // a saved position wins over the spawn point (the character stands where it logged out)
+    const at: [number, number, number] = save?.position ?? this.spawnPoint(peerId);
+    const yaw = save?.yaw ?? 0;
     let ids: string[] = [];
     let bodyId = "";
     if (this.template) {
       // the ground has to exist before the body lands on it
       this.terrain?.ensureAround(at[0], at[2], 1);
-      const spawned = instantiatePlayer(this.template, peerId, at);
+      const spawned = instantiatePlayer(this.template, peerId, at, yaw);
       bodyId = spawned.bodyId;
       ids = Object.keys(spawned.server);
+      // the saved sheet goes into netState BEFORE the character-sheet script
+      // starts, so it finds a sheet and keeps it instead of seeding a fresh one
+      if (save?.sheet !== null && save?.sheet !== undefined) {
+        if (!this.world.netState.set(`character/${bodyId}`, save.sheet)) {
+          console.warn(`[server] saved sheet for ${peerId} failed validation — starting fresh`);
+        }
+      }
       this.world.addEntities({ ...this.world.base, entities: spawned.server });
       for (const [id, doc] of Object.entries(spawned.client)) this.runtimeDocs.set(id, doc);
       this.world.netState.set(`owner/${bodyId}`, peerId);
@@ -282,8 +407,23 @@ export class GameServer {
       // everyone else learns the newcomer's body; the newcomer gets the whole runtime set below
       this.host.broadcastModule(WORLD_MODULE, { t: "spawn", entities: spawned.client } satisfies WorldModuleMessage, peerId);
     }
-    this.players.set(peerId, { peerId, name, bodyId, ids, input: null, appliedSeq: 0, disconnectedAt: null });
+    const record: PlayerRecord = {
+      peerId,
+      name,
+      bodyId,
+      ids,
+      input: null,
+      appliedSeq: 0,
+      disconnectedAt: null,
+      identity,
+      rev: { ...(save?.rev ?? {}) },
+      commitPhase: Math.floor(Math.random() * 600),
+      committing: null,
+      transferring: null,
+    };
+    this.players.set(peerId, record);
     this.world.eventBus.emit("player.joined", { peerId, name });
+    this.onPlayerJoined?.(record);
     // joiner sync, in this order on the reliable channel: state, then docs
     this.host.sendStateTo(peerId, this.world.netState.snapshot());
     const entities: Record<string, EntityDoc> = {};
@@ -295,9 +435,15 @@ export class GameServer {
     } satisfies WorldModuleMessage);
   }
 
-  private leave(peerId: string): void {
+  private leave(peerId: string, reason: LeaveReason): void {
     const player = this.players.get(peerId);
     if (!player) return;
+    // a transferred player was committed before the handoff; everyone else saves now
+    if (reason !== "transfer") {
+      void this.commit(peerId).catch((error: unknown) => {
+        console.warn(`[server] final save for ${peerId} failed:`, error instanceof Error ? error.message : error);
+      });
+    }
     this.players.delete(peerId);
     this.peerViews.delete(peerId);
     if (player.ids.length > 0) {
@@ -305,18 +451,84 @@ export class GameServer {
       for (const id of player.ids) this.runtimeDocs.delete(id);
       for (const key of this.world.netState.keys(`combat/${player.bodyId}.`)) this.world.netState.delete(key);
       for (const key of this.world.netState.keys(`cooldown/${player.bodyId}.`)) this.world.netState.delete(key);
+      this.world.netState.delete(`character/${player.bodyId}`);
       this.world.netState.delete(`owner/${player.bodyId}`);
       this.world.netState.delete(`player/${peerId}`);
       this.host.broadcastModule(WORLD_MODULE, { t: "despawn", ids: player.ids } satisfies WorldModuleMessage);
     }
     this.world.eventBus.emit("player.left", { peerId });
+    this.onPlayerLeft?.(player, reason);
+  }
+
+  // -- persistence + transfer ------------------------------------------------------
+
+  /** What the save authority stores: the sheet the scripts maintain, and where the body stands. */
+  private snapshotFor(player: PlayerRecord): CommitInput {
+    const object = this.world.objects.get(player.bodyId);
+    return {
+      sheet: this.world.netState.get(`character/${player.bodyId}`),
+      scene: this.scene,
+      position: this.world.positionOf(player.bodyId),
+      yaw: object ? object.rotation.y : 0,
+    };
+  }
+
+  /**
+   * Save one player now. Coalesces: a commit already in flight is returned
+   * rather than started twice. Resolves with the revisions written (the
+   * ticket for a transfer binds the destination to these). No-op for
+   * anonymous peers or without a persistence hook.
+   */
+  commit(peerId: string): Promise<Record<string, number>> {
+    const player = this.players.get(peerId);
+    if (!player || !player.identity || !this.persistence) return Promise.resolve({});
+    if (player.committing) return player.committing;
+    const input = this.snapshotFor(player); // captured synchronously: the body may be gone by the time the write lands
+    const identity = player.identity;
+    player.committing = this.persistence
+      .commit(identity, input)
+      .then((rev) => {
+        player.rev = { ...player.rev, ...rev };
+        return player.rev;
+      })
+      .finally(() => {
+        player.committing = null;
+      });
+    return player.committing;
+  }
+
+  /**
+   * May this player be moved right now? Never while dead or already going;
+   * then whatever the scene's gate says (combat, an active spawn area in
+   * view — the layer wires that in).
+   */
+  canTransfer(peerId: string): boolean {
+    const player = this.players.get(peerId);
+    if (!player || player.disconnectedAt !== null || player.transferring !== null) return false;
+    if (this.world.netState.get(`combat/${player.bodyId}.dead`) === true) return false;
+    return this.transferGate ? this.transferGate(peerId) : true;
+  }
+
+  /**
+   * Hand the client to another server. The caller has committed and holds a
+   * ticket for the destination; this sends the instruction and marks the
+   * body so its bye tears it down immediately (no grace) without a second
+   * save. Returns false if the player is not here.
+   */
+  handoff(peerId: string, to: { url: string; ticket: string; reason: string }): boolean {
+    const player = this.players.get(peerId);
+    if (!player || player.disconnectedAt !== null) return false;
+    player.transferring = this.world.tick;
+    player.input = null;
+    this.host.sendModule(peerId, WORLD_MODULE, { t: "transfer", url: to.url, ticket: to.ticket, reason: to.reason } satisfies WorldModuleMessage);
+    return true;
   }
 
   // -- commands --------------------------------------------------------------------
 
   private onCommand(peer: string, input: unknown): void {
     const player = this.players.get(peer);
-    if (!player || player.disconnectedAt !== null) return;
+    if (!player || player.disconnectedAt !== null || player.transferring !== null) return;
     const cmd = input as { t?: unknown } | null;
     if (cmd?.t === "event") {
       const e = cmd as { name?: unknown; payload?: unknown };
@@ -476,7 +688,11 @@ export class GameServer {
         position: this.world.positionOf(p.bodyId),
         inputAge: p.input ? Date.now() - p.input.at : null,
         linked: p.disconnectedAt === null,
+        ...(p.identity ? { characterId: p.identity.characterId, playerId: p.identity.playerId } : {}),
+        ...(p.transferring !== null ? { transferring: true } : {}),
       })),
+      accepting: this.accepting,
+      paused: this.paused.size,
       entities: this.world.entities.size,
       replicas: this.replicas.length,
       terrainCells: this.terrain?.cells().length ?? 0,

@@ -19,6 +19,12 @@
  *   --no-persist          do not write terraformed recipes back to their file
  *   --workers <n>         cell-generation worker threads (default min(4, cpus-1); 0 = inline)
  *
+ * Hosting (docs/hosting.md) — a layer in a cluster is started by main, but by hand:
+ *   --secret <s>          require gateway tickets (or HITREG_SECRET); --id <serverId> what they are bound to
+ *   --main <ws-url>       register with main; --kind layer|instance; --public-url <ws://host:port> what clients dial
+ *   --instance-of <key>   (instances) the key main started it for; --idle-exit <s> exit when empty this long
+ *   --commit-every <s>    periodic save interval; --experience <id> persistence scope when standalone
+ *
  * Clients: open the playground with `?server=ws://<host>:<port>` and press play.
  * Admin:   curl -s http://<host>:<port>/admin/status
  */
@@ -59,6 +65,16 @@ async function main(): Promise<void> {
     maxPlayers: num("max-players"),
     persistRecipe: !process.argv.includes("--no-persist"),
     workers: num("workers"),
+    // hosting (docs/hosting.md): a secret makes tickets mandatory; --main joins a cluster
+    ...(arg("secret", process.env["HITREG_SECRET"]) ? { secret: arg("secret", process.env["HITREG_SECRET"])! } : {}),
+    ...(arg("id") ? { serverId: arg("id")! } : {}),
+    ...(arg("kind") === "instance" ? { kind: "instance" as const } : {}),
+    ...(arg("main") ? { mainUrl: arg("main")! } : {}),
+    ...(arg("public-url") ? { publicUrl: arg("public-url")! } : {}),
+    ...(arg("instance-of") ? { instanceOf: arg("instance-of")! } : {}),
+    ...(num("idle-exit") !== undefined ? { idleExitSeconds: num("idle-exit")! } : {}),
+    ...(num("commit-every") !== undefined ? { commitEverySeconds: num("commit-every")! } : {}),
+    ...(arg("experience") ? { experienceId: arg("experience")! } : {}),
   });
   const tickLog = setInterval(() => {
     const s = handle.server.stats() as { players: unknown[]; terrainCells: number; tick: number };

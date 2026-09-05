@@ -31,7 +31,24 @@ export interface WebSocketHostTransportOptions {
   trace?: (event: string, detail?: string) => void;
   /** Called with the handshake name a peer proposed (the room hello carries the real one). */
   onHandshake?: (peerId: string, name: string | undefined) => void;
+  /**
+   * Admission control. Runs on every hello with what the client proposed
+   * (`peerId`, `name`, and the `ticket` if it sent one). Return `{ reject }`
+   * to refuse the socket; return `{ peerId }` to ASSIGN the identity (a
+   * ticketed peer is whoever the ticket names — a second socket presenting
+   * the same identity replaces the first, so a reconnecting tab wins over its
+   * own stale link); return `{}` to accept the proposal. Absent = open server.
+   */
+  authenticate?: (hello: WsHello) => WsAuthResult | Promise<WsAuthResult>;
 }
+
+export interface WsHello {
+  peerId: string;
+  name?: string;
+  ticket?: string;
+}
+
+export type WsAuthResult = { reject: string; peerId?: undefined } | { reject?: undefined; peerId?: string; name?: string };
 
 interface PeerSocket {
   socket: WsSocket;
@@ -55,6 +72,7 @@ export class WebSocketHostTransport implements Transport {
   private readonly backlog: number;
   private readonly maxPeers: number;
   private readonly onHandshake: ((peerId: string, name: string | undefined) => void) | undefined;
+  private readonly authenticate: ((hello: WsHello) => WsAuthResult | Promise<WsAuthResult>) | undefined;
   private closed = false;
   private readonly listening: Promise<void>;
 
@@ -63,6 +81,7 @@ export class WebSocketHostTransport implements Transport {
     this.backlog = options.unreliableBacklogBytes ?? 64 * 1024;
     this.maxPeers = options.maxPeers ?? Infinity;
     this.onHandshake = options.onHandshake;
+    this.authenticate = options.authenticate;
     const wssOptions: ServerOptions = options.server
       ? { server: options.server, ...(options.path ? { path: options.path } : {}) }
       : {
@@ -154,28 +173,64 @@ export class WebSocketHostTransport implements Transport {
       return;
     }
     let peerId: string | null = null;
+    let handshaking = false;
     // a socket that never says hello is not a peer — give it a moment, then drop it
     const helloTimer = setTimeout(() => {
       if (peerId === null) socket.close(4000, "no handshake");
     }, 5000);
+    const reject = (reason: string, code: number): void => {
+      socket.send(JSON.stringify({ ws: "reject", reason } satisfies WsHandshake));
+      socket.close(code, reason.slice(0, 120));
+    };
+    const admit = (hs: WsHello, auth: WsAuthResult): void => {
+      if (this.closed || socket.readyState !== socket.OPEN) return;
+      if (auth.reject !== undefined) {
+        this.trace("ws-reject", `${hs.peerId}: ${auth.reject}`);
+        reject(auth.reject, 4003);
+        return;
+      }
+      if (this.peersById.size >= this.maxPeers) {
+        reject("server full", 4001);
+        return;
+      }
+      if (auth.peerId !== undefined) {
+        // an assigned identity is exclusive: the newest socket owns it
+        if (this.peersById.has(auth.peerId)) this.disconnect(auth.peerId, "replaced by a newer connection");
+        peerId = auth.peerId;
+      } else {
+        peerId = this.peersById.has(hs.peerId) ? `${hs.peerId}-${Math.random().toString(36).slice(2, 6)}` : hs.peerId;
+      }
+      this.peersById.set(peerId, { socket, connected: true });
+      socket.send(JSON.stringify({ ws: "welcome", peerId } satisfies WsHandshake));
+      this.trace("ws-peer", peerId);
+      this.onHandshake?.(peerId, auth.name ?? hs.name);
+      for (const cb of [...this.peerHandlers]) cb(peerId, "connected");
+    };
     socket.on("message", (raw, isBinary) => {
       try {
         if (!isBinary) {
-          if (peerId !== null) return; // a second handshake is noise
+          if (peerId !== null || handshaking) return; // a second handshake is noise
           const hs = parseWsHandshake(raw.toString());
           if (!hs || hs.ws !== "hello") return;
           clearTimeout(helloTimer);
-          if (this.peersById.size >= this.maxPeers) {
-            socket.send(JSON.stringify({ ws: "reject", reason: "server full" } satisfies WsHandshake));
-            socket.close(4001, "server full");
+          const hello: WsHello = { peerId: hs.peerId, ...(hs.name !== undefined ? { name: hs.name } : {}), ...(hs.ticket !== undefined ? { ticket: hs.ticket } : {}) };
+          if (!this.authenticate) {
+            admit(hello, {});
             return;
           }
-          peerId = this.peersById.has(hs.peerId) ? `${hs.peerId}-${Math.random().toString(36).slice(2, 6)}` : hs.peerId;
-          this.peersById.set(peerId, { socket, connected: true });
-          socket.send(JSON.stringify({ ws: "welcome", peerId } satisfies WsHandshake));
-          this.trace("ws-peer", peerId);
-          this.onHandshake?.(peerId, hs.name);
-          for (const cb of [...this.peerHandlers]) cb(peerId, "connected");
+          handshaking = true;
+          let verdict: WsAuthResult | Promise<WsAuthResult>;
+          try {
+            verdict = this.authenticate(hello);
+          } catch (error) {
+            verdict = { reject: error instanceof Error ? error.message : "authentication failed" };
+          }
+          Promise.resolve(verdict)
+            .catch((error: unknown): WsAuthResult => ({ reject: error instanceof Error ? error.message : "authentication failed" }))
+            .then((auth) => {
+              handshaking = false;
+              admit(hello, auth);
+            });
           return;
         }
         if (peerId === null) return; // data before hello — drop
@@ -195,16 +250,19 @@ export class WebSocketHostTransport implements Transport {
     });
     socket.on("close", () => {
       clearTimeout(helloTimer);
-      if (peerId !== null) this.dropPeer(peerId);
+      // only this socket's own entry: a replaced socket closing later must
+      // not take the newer connection that now owns the id down with it
+      if (peerId !== null) this.dropPeer(peerId, socket);
     });
     socket.on("error", (error) => {
       this.trace("ws-socket-error", `${peerId ?? "?"}: ${error.message}`);
     });
   }
 
-  private dropPeer(peerId: string): void {
+  private dropPeer(peerId: string, onlyIf?: WsSocket): void {
     const entry = this.peersById.get(peerId);
     if (!entry) return;
+    if (onlyIf && entry.socket !== onlyIf) return;
     this.peersById.delete(peerId);
     if (entry.connected) {
       entry.connected = false;

@@ -28,12 +28,20 @@ export const WS_HOST_ID = "server";
 export const WS_CHANNEL_RELIABLE = 0;
 export const WS_CHANNEL_UNRELIABLE = 1;
 
+/**
+ * The handshake. A `ticket` is an opaque credential the host may require
+ * (a hosted world's gateway signs one per play session — see
+ * `@hitreg/server`'s cluster tickets); the host's `authenticate` hook reads
+ * it and may assign the peer id itself, so an authenticated peer's identity
+ * is whatever the ticket says, never what the tab proposed.
+ */
 export type WsHandshake =
-  | { ws: "hello"; peerId: string; name?: string }
+  | { ws: "hello"; peerId: string; name?: string; ticket?: string }
   | { ws: "welcome"; peerId: string }
   | { ws: "reject"; reason: string };
 
 const PEER_ID_SHAPE = /^[A-Za-z0-9_-]{3,64}$/;
+const TICKET_MAX_BYTES = 4096;
 
 export function parseWsHandshake(text: string): WsHandshake | null {
   let value: unknown;
@@ -51,6 +59,9 @@ export function parseWsHandshake(text: string): WsHandshake | null {
         ws: "hello",
         peerId: m.peerId,
         ...(typeof m.name === "string" ? { name: m.name.slice(0, 32) } : {}),
+        ...(typeof m.ticket === "string" && m.ticket.length > 0 && m.ticket.length <= TICKET_MAX_BYTES
+          ? { ticket: m.ticket }
+          : {}),
       };
     case "welcome":
       return typeof m.peerId === "string" && PEER_ID_SHAPE.test(m.peerId)
@@ -95,6 +106,8 @@ export interface WebSocketClientTransportOptions {
   peerId?: string;
   /** Display name carried in the handshake (the room `hello` carries the real one). */
   name?: string;
+  /** Credential for a host that requires one (a gateway-issued play ticket). */
+  ticket?: string;
   /** WebSocket constructor to use (default: `globalThis.WebSocket`). */
   WebSocket?: new (url: string) => WebSocketLike;
   /** Lifecycle tap for debugging. Never throws. */
@@ -160,6 +173,7 @@ export class WebSocketClientTransport implements Transport {
         ws: "hello",
         peerId: this._localId,
         ...(options.name ? { name: options.name } : {}),
+        ...(options.ticket ? { ticket: options.ticket } : {}),
       };
       this.socket.send(JSON.stringify(hello));
     });

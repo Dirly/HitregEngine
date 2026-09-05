@@ -1840,8 +1840,59 @@ export const netObjectSchema = z.object({
 
 export type NetObjectData = z.infer<typeof netObjectSchema>;
 
+/**
+ * Server-side enemy population that exists only while a player is near.
+ *
+ * Nothing spawns at boot. The first player inside `radius` wakes the area:
+ * its packs spawn (once) and simulate; when nobody has been inside
+ * `sleepRadius` for `idleSeconds` the pack is paused IN PLACE (scripts
+ * suspended, bodies out of the physics world) and resumed where it stood
+ * when someone returns. This is what lets a whole-world layer cost what its
+ * players cost, not what the map costs (docs/hosting.md). Clients ignore
+ * the component; the dedicated server's SpawnAreaManager reads it.
+ */
+export const spawnAreaSchema = z
+  .object({
+    radius: z
+      .number()
+      .positive()
+      .default(80)
+      .describe("Metres from the area's origin within which a player wakes it: the packs spawn the first time, resume afterwards."),
+    sleepRadius: z
+      .number()
+      .positive()
+      .default(120)
+      .describe("Once awake, the area sleeps only when no player is within this (hysteresis — keep it larger than radius)."),
+    idleSeconds: z
+      .number()
+      .min(0)
+      .default(10)
+      .describe("Seconds with no player inside sleepRadius before the pack is paused in place. It does not despawn: a returning player finds it where it was."),
+    spawns: z
+      .array(
+        z.object({
+          template: z.string().min(1).describe("NPC template: the id of an npc-tagged scene subtree, or a name registered on the server at runtime."),
+          count: z.number().int().min(1).default(1),
+          spread: z.number().min(0).default(6).describe("Metres around the origin the pack is scattered in (uniform disc)."),
+        }),
+      )
+      .default([]),
+    leash: z
+      .number()
+      .positive()
+      .default(25)
+      .describe("Metres from home an enemy may chase before it must turn back. Handed to each NPC's root script as the `leash` param (with `home`, `roam`, `spawnArea`); the server also fences at 1.5× as a backstop."),
+    roam: z.number().min(0).default(10).describe("Idle wander radius around home, passed as the `roam` param."),
+  })
+  .describe(
+    "Proximity-activated enemy population for dedicated servers. Keep every spawn area at least aggro + leash away from a zone edge or transfer band, so a layer swap never happens in sight of a pack.",
+  );
+
+export type SpawnAreaData = z.infer<typeof spawnAreaSchema>;
+
 export function registerCoreComponents(registry: ComponentRegistry): void {
   registry.register("transform", transformSchema);
+  registry.register("spawnArea", spawnAreaSchema);
   registry.register("visibility", visibilitySchema);
   registry.register("mesh", meshSchema);
   registry.register("light", lightSchema);

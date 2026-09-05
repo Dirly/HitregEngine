@@ -6,24 +6,30 @@
     ".": "./src/index.ts"
   },
   "bin": {
-    "hitreg-serve": "./bin/serve.ts"
+    "hitreg-serve": "./bin/serve.ts",
+    "hitreg-main": "./bin/main.ts"
   },
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "serve": "tsx bin/serve.ts"
+    "serve": "tsx bin/serve.ts",
+    "main": "tsx bin/main.ts"
   },
   "dependencies": {
     "@hitreg/core": "workspace:*",
     "@hitreg/net": "workspace:*",
     "@hitreg/physics": "workspace:*",
     "@hitreg/scripting": "workspace:*",
+    "pg": "^8.23.0",
     "three": "^0.185.1",
+    "ws": "^8.18.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "@types/pg": "^8.23.1",
     "@types/three": "^0.185.1",
+    "@types/ws": "^8.18.1",
     "tsx": "^4.23.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"

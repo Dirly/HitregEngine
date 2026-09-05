@@ -190,3 +190,66 @@ describe("WebSocket transport", () => {
     client.leave();
   });
 });
+
+describe("WebSocketHostTransport: authenticate", () => {
+  it("carries the ticket, assigns the identity the hook returns, and replaces a stale socket", async () => {
+    const seen: Array<{ peerId: string; ticket?: string }> = [];
+    host = new WebSocketHostTransport({
+      port: 0,
+      authenticate: (hello) => {
+        seen.push({ peerId: hello.peerId, ...(hello.ticket ? { ticket: hello.ticket } : {}) });
+        if (hello.ticket === "good") return { peerId: "char-42", name: "Forty-Two" };
+        return { reject: "bad ticket" };
+      },
+    });
+    await host.ready();
+    const url = `ws://127.0.0.1:${host.port}`;
+    const joined: string[] = [];
+    const gone: string[] = [];
+    host.onPeer((peer, state) => (state === "connected" ? joined : gone).push(peer));
+
+    const good = new WebSocketClientTransport(url, { peerId: "tab-a", ticket: "good" });
+    clients.push(good);
+    await until(() => joined.includes("char-42"));
+    expect(good.localId).toBe("char-42");
+    expect(seen[0]).toEqual({ peerId: "tab-a", ticket: "good" });
+
+    const bad = new WebSocketClientTransport(url, { peerId: "tab-b", ticket: "forged" });
+    clients.push(bad);
+    let badGone = false;
+    bad.onPeer((_p, state) => {
+      if (state === "disconnected") badGone = true;
+    });
+    await until(() => seen.length === 2);
+    await wait(100);
+    expect(bad.peers()).toEqual([]);
+    expect(host.peers()).toEqual(["char-42"]);
+    expect(badGone || bad.peers().length === 0).toBe(true);
+
+    // the same identity from a second socket takes over (a reconnecting tab)
+    const again = new WebSocketClientTransport(url, { peerId: "tab-c", ticket: "good" });
+    clients.push(again);
+    await until(() => gone.includes("char-42") && joined.filter((p) => p === "char-42").length === 2);
+    expect(host.peers()).toEqual(["char-42"]);
+    expect(again.localId).toBe("char-42");
+  });
+
+  it("rejects when the hook throws or its promise rejects", async () => {
+    host = new WebSocketHostTransport({
+      port: 0,
+      authenticate: async (hello) => {
+        if (hello.ticket === "boom") throw new Error("verifier down");
+        return {};
+      },
+    });
+    await host.ready();
+    const url = `ws://127.0.0.1:${host.port}`;
+    const c = new WebSocketClientTransport(url, { peerId: "tab-x", ticket: "boom" });
+    clients.push(c);
+    await wait(200);
+    expect(host.peers()).toEqual([]);
+    const ok = new WebSocketClientTransport(url, { peerId: "tab-y" });
+    clients.push(ok);
+    await until(() => host!.peers().includes("tab-y"));
+  });
+});

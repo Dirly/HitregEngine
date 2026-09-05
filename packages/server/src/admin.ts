@@ -22,12 +22,17 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { recipeEditSchema, type RecipeEdit } from "@hitreg/core";
 import type { GameServer } from "./server.js";
 import type { NpcManager } from "./npcs.js";
+import type { SpawnAreaManager } from "./spawn-areas.js";
+import type { TransferTarget } from "./cluster/protocol.js";
 
 export interface AdminDeps {
   server: GameServer;
   npcs: NpcManager | null;
+  spawnAreas?: SpawnAreaManager | null;
   /** Extra fields for /admin/status (scene name, uptime …). */
   status?: () => Record<string, unknown>;
+  /** In a cluster: ask main for a destination and move the character there. */
+  transfer?: ((characterId: string, target: TransferTarget) => Promise<{ srv: string; url: string; sent: boolean }>) | null;
 }
 
 function readJson(req: IncomingMessage): Promise<unknown> {
@@ -83,6 +88,31 @@ export async function handleAdmin(deps: AdminDeps, req: IncomingMessage, res: Se
     }
     if (req.method === "GET" && p === "/admin/npcs") {
       send(res, 200, { npcs: npcs?.list() ?? [] });
+      return true;
+    }
+    if (req.method === "GET" && p === "/admin/spawn-areas") {
+      send(res, 200, { areas: deps.spawnAreas?.list() ?? [] });
+      return true;
+    }
+    if (req.method === "POST" && p === "/admin/transfer") {
+      if (!deps.transfer) {
+        send(res, 400, { ok: false, error: "not in a cluster — no main to place the character" });
+        return true;
+      }
+      const body = (await readJson(req)) as { characterId?: unknown; scene?: unknown; srv?: unknown; party?: unknown } | null;
+      if (!body || typeof body.characterId !== "string") {
+        send(res, 400, { ok: false, error: "expected { characterId, scene? | srv?, party? }" });
+        return true;
+      }
+      const target: TransferTarget =
+        typeof body.scene === "string"
+          ? { kind: "instance", scene: body.scene, ...(body.party === true ? { party: true } : {}) }
+          : { kind: "layer", ...(typeof body.srv === "string" ? { layerId: body.srv } : {}), ...(body.party === true ? { party: true } : {}) };
+      try {
+        send(res, 200, { ok: true, ...(await deps.transfer(body.characterId, target)) });
+      } catch (error) {
+        send(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
+      }
       return true;
     }
     if (req.method === "GET" && p === "/admin/templates") {

@@ -38,6 +38,7 @@ import {
   type VoxelMeshSource,
   type VoxelWorldData,
   type WorldField,
+  type WorldRecipe,
 } from "@hitreg/core";
 import type { HeadlessWorld } from "./world.js";
 import { VoxelPool, type VoxelPoolOptions } from "./voxel-pool.js";
@@ -358,5 +359,28 @@ export class TerrainStreamer {
       reloaded.push(key);
     }
     return { result, reloaded, touchedCells };
+  }
+
+  /**
+   * Take a whole new recipe (another layer terraformed, or the agent's
+   * weekly edit arrived from main) and re-cook every resident cell. The
+   * coarse path — `applyEdits` is the precise one — used when the diff is
+   * not known here.
+   */
+  replaceRecipe(recipe: WorldRecipe): string[] {
+    const field = registerVoxelWorld(this.resolved.data.world, recipe);
+    this.resolved = { ...this.resolved, field };
+    this.initPool();
+    this.arrived.length = 0;
+    const limit = field.worldLimit;
+    this.limitCells =
+      limit === Infinity ? Infinity : (limit + (field.recipe.bounds?.limitFalloff ?? 600)) / field.recipe.cellSize + 2;
+    const reloaded: string[] = [];
+    for (const key of [...this.loaded.keys()]) {
+      this.unload(key);
+      this.load(key);
+      reloaded.push(key);
+    }
+    return reloaded;
   }
 }

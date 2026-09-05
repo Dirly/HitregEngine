@@ -142,6 +142,16 @@ export interface PlayerRecord {
   appliedSeq: number;
   /** Server tick the player's link dropped, or null while connected (reconnect grace). */
   disconnectedAt: number | null;
+  /** From the ticket; null on an open dev server (then nothing persists for this peer). */
+  identity: { playerId: string; characterId: string; name: string; rev?: Record<string, number> } | null;
+  /** Latest persisted revisions per namespace (what a transfer ticket will promise). */
+  rev: Record<string, number>;
+  /** Tick offset for the periodic save, so players do not all save at once. */
+  commitPhase: number;
+  /** A save in flight (coalesced), or null. */
+  committing: Promise<Record<string, number>> | null;
+  /** Tick the client was told to go elsewhere, or null. Its bye then tears the body down at once. */
+  transferring: number | null;
 }
 
 export interface PlayerDriverOptions {

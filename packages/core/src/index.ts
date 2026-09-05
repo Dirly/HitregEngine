@@ -33,6 +33,8 @@ export {
   grassSchema,
   netObjectSchema,
   type NetObjectData,
+  spawnAreaSchema,
+  type SpawnAreaData,
   vec3,
   quat,
   hexColor,

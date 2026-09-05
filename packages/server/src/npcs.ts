@@ -174,6 +174,7 @@ export class NpcManager {
     // forever and its scripts keep running, probing air. Put it back.
     if (tick % 30 === 0) {
       for (const record of this.npcs.values()) {
+        if (this.server.paused.has(record.id)) continue; // asleep: no body in the sim to fall
         const p = world.positionOf(record.id);
         if (p && p[1] < record.spawnAt[1] - 60) {
           console.warn(`[server:npcs] ${record.id} fell out of the world (y=${p[1].toFixed(0)}) — returned to spawn`);
@@ -184,6 +185,7 @@ export class NpcManager {
     }
     if (this.respawnTicks === 0) return;
     for (const record of this.npcs.values()) {
+      if (this.server.paused.has(record.id)) continue; // a sleeping pack respawns when it wakes
       const dead = world.netState.get(`combat/${record.id}.dead`) === true;
       if (!dead) {
         record.deadSince = null;
