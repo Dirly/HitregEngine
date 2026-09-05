@@ -35,6 +35,7 @@ import {
   type SpritesheetDoc,
 } from "@hitreg/core";
 import { EngineRenderer, buildScene, type PostFxData, makeMeshGeometryProvider, AnimationSystem, ParticleSystem, BillboardSystem, LightBudgetSystem, FoliageLodSystem, ClusterLodSystem, GrassSystem, type BuildOptions } from "@hitreg/render";
+import { createVfx, makeVfxHost, warmVfx } from "./vfx-host.js";
 import { ScriptRegistry, registerBuiltinScripts, ScriptRuntime, InputService, EventBus } from "@hitreg/scripting";
 import { PhysicsSim, initPhysics } from "@hitreg/physics";
 import { applyBodyState } from "./physics-sync.js";
@@ -141,6 +142,10 @@ async function main(): Promise<void> {
   const animations = new AnimationSystem();
   const particles = new ParticleSystem();
   const billboards = new BillboardSystem();
+  // composed effects + spells (ctx.vfx); its slot lights join the scene at
+  // attach so the light set never changes mid-game (see VfxSystem)
+  const vfx = createVfx(assets);
+  let vfxWarmed = false;
   // Point-light budget. 8 was far too few once levels carried real practicals
   // (see main.ts for the measurements): brightness saturates around 32 while
   // cost climbs steeply past 48. Shared across the main scene AND the chunk
@@ -183,6 +188,7 @@ async function main(): Promise<void> {
     },
   };
   const built = buildScene(expanded, buildOptions);
+  vfx.attach(built.scene);
 
   // post-build: bloom + camera aspects + fallback background
   // the whole component, one per scene (first wins): bloom, grading, AO,
@@ -224,6 +230,8 @@ async function main(): Promise<void> {
     setAnimation: (id, clip, fade, opts) => animations.play(id, clip, fade ?? 0.3, opts?.loop ?? true),
     setBillboard: (id, opts) => billboards.setValue(id, opts),
     setParticles: (id, opts) => particles.setValue(id, opts),
+    vfx: makeVfxHost(vfx),
+    assets,
     setLight: (id, opts) => {
       const obj = built.objects.get(id);
       obj?.traverse((o) => {
@@ -517,6 +525,13 @@ async function main(): Promise<void> {
       const renderCam =
         (activeId && built.cameras.get(activeId)) || (!followId && built.activeCamera) || camera;
       particles.update(dt, renderCam);
+      billboards.update(dt); // flipbook VFX frames
+      if (!vfxWarmed) {
+        // once: every effect pipeline compiles now instead of on the first cast
+        vfxWarmed = true;
+        if (probe.precompile) void warmVfx(vfx, assets, (group) => renderer.precompileGroup(group, renderCam, built.scene), renderCam);
+      }
+      vfx.update(dt, renderCam, built.scene);
       grass.update(renderCam, ground.sampleGround, ground.sampleCover);
       // the near->mid foliage LOD switch is judged in screen pixels, so the
       // system needs the projection actually in use (idempotent when unchanged)
@@ -528,7 +543,9 @@ async function main(): Promise<void> {
       lightBudget.update(built.scene, renderCam);
       if (skyDomeMesh) (skyDomeMesh as THREE.Object3D).position.copy(renderCam.getWorldPosition(camWorldPos));
       profiler.begin("draw");
+      vfx.applyShake(renderCam); // the rig owns the camera; the offset lives only inside the draw
       renderer.render(built.scene, renderCam);
+      vfx.restoreShake(renderCam);
       profiler.end();
       const gpu = renderer.gpuFrameMs();
       if (gpu !== null) profiler.setGpuMs(gpu);

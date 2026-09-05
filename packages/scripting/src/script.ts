@@ -3,6 +3,54 @@ import type { z } from "zod";
 import type { EntityDoc, EventRegistrationOptions, PlayerDataService } from "@hitreg/core";
 
 /** Declared tuning value — drives inspector fields and the AI-facing spec. */
+/** Mirrors `LiveSkyOptions` in @hitreg/render (scripting takes no render dependency). */
+export interface LiveSkyOptions {
+  top?: string;
+  bottom?: string;
+  fog?: { color?: string; density?: number; near?: number; far?: number };
+  hemisphere?: number;
+  sun?: {
+    /** Toward the sun — where it sits on the sky sphere. */
+    direction?: [number, number, number];
+    color?: string;
+    intensity?: number;
+    disc?: { color?: string; size?: number; intensity?: number };
+  };
+  moon?: { direction?: [number, number, number]; color?: string; size?: number; intensity?: number };
+  stars?: { intensity?: number; density?: number; size?: number; rotation?: { axis: [number, number, number]; angle: number } };
+  clouds?: { coverage?: number; light?: number; color?: string; shadow?: string; speed?: [number, number]; scale?: number; softness?: number };
+  ambient?: { color?: string; intensity?: number };
+  /** Applied on top of the day/night values: gloom 0..1 dims sun/fill/ambient/IBL, tint blends fog + horizon, wind scales foliage wind. */
+  weather?: { gloom?: number; tint?: string; tintAmount?: number; wind?: number };
+  environmentIntensity?: number;
+  refreshEnvironment?: boolean;
+}
+
+/** What `ctx.biomeAt` reports: the voxel world's biome blend at a point. */
+export interface BiomeAt {
+  /** The winning labelled biome rule. */
+  id: string;
+  zone: string;
+  /** Membership weight per biome rule id (0..1, blended across biome edges). */
+  weights: Record<string, number>;
+  ground: number;
+  temperature: number;
+  moisture: number;
+  slope: number;
+}
+
+/** Mirrors `LiveSkyBase` in @hitreg/render. */
+export interface LiveSkyBase {
+  top: string;
+  bottom: string;
+  fog: { color: string; density: number; near: number; far: number } | null;
+  hemisphere: number;
+  sun: { direction: [number, number, number]; color: string; intensity: number } | null;
+  ambient: { color: string; intensity: number } | null;
+  environmentIntensity: number;
+  clouds: { coverage: number; softness: number } | null;
+}
+
 export interface ScriptParamSpec {
   default: unknown;
   min?: number;
@@ -85,11 +133,35 @@ export interface ScriptContext {
     visible?: boolean;
     restart?: boolean;
     burst?: number;
+    rate?: number;
     colorStart?: string;
     colorEnd?: string;
   }): void;
   /** Runtime-only control for this entity's light component. */
   setLight?(entityId: string, opts: { enabled?: boolean; intensity?: number; color?: string }): void;
+  /**
+   * Drive the scene's sky per frame without a rebuild: gradient, fog, the
+   * directional light's aim/colour/intensity, the dome's sun and moon discs,
+   * ambient and IBL intensity. Every field is a uniform or a light property;
+   * only `refreshEnvironment` costs anything (an IBL prefilter — use it a few
+   * times per game day, never per frame). See the `day-night` builtin.
+   */
+  setSky?(opts: LiveSkyOptions): void;
+  /** The authored sky and lights a day/night script derives its day from; null when the scene has no sky. */
+  getSky?(): LiveSkyBase | null;
+  /** The procedural world's biome blend under a point (voxel worlds only); null off-world or in a scene without one. */
+  biomeAt?(x: number, z: number): BiomeAt | null;
+  /**
+   * Composed effects and whole spells — the VFX system (`@hitreg/render`
+   * VfxSystem behind it). `play` fires one effect (a module list, or a `vfx`
+   * data-asset id) at a frame; `playSpell` sequences every phase of a
+   * `spell` document (or asset id) on its archetype's timeline: telegraph,
+   * charge, cast, travel, impact, ticks, linger, end. Presentation only —
+   * absent on a dedicated server, so always optional-chain it.
+   */
+  vfx?: ScriptVfx;
+  /** Read a data asset (ScriptableObject) by id — a spell, a loot table, a material. */
+  getDataAsset?(id: string): { id: string; type: string; data: unknown } | undefined;
   /**
    * Rebuild THIS entity's `mesh.source.kind: "path"` geometry from new
    * control points (world space) — for a rope/chain/cable whose shape comes
@@ -129,6 +201,52 @@ export interface ScriptContext {
    * (currency, cosmetics, entitlements) is NOT reachable from here by design.
    */
   playerData?: PlayerDataService;
+}
+
+/**
+ * Where a script wants an effect to happen, in entity terms. The runtime
+ * turns ids into runtime objects and bone sockets (entities tagged
+ * `socket:<name>` under the body) before the renderer sees it.
+ */
+export interface ScriptVfxFrame {
+  /** Where the spell resolves — the volume centre, the impact point. */
+  origin: [number, number, number];
+  /** Horizontal facing [x, z]; defaults to caster → origin. */
+  direction?: [number, number];
+  /** A targeted point (beams, bolts, debuffs). */
+  target?: [number, number, number];
+  casterId?: string;
+  targetId?: string;
+  /** Override the spell's element palette. */
+  palette?: { primary: string; secondary: string; glow: string };
+  /** Terrain height under (x, z); omitted = the runtime probes the physics world. */
+  ground?(x: number, z: number, nearY: number): number | null;
+}
+
+export interface ScriptVfxHandle {
+  /** Wind the effect down over `fade` seconds (a channel interrupted). */
+  stop(fade?: number): void;
+  readonly done: boolean;
+}
+
+export interface ScriptSpellHandle extends ScriptVfxHandle {
+  /** Seconds since the cast started. */
+  readonly time: number;
+  /** Fire a phase now — for phases the host declared `manual`. */
+  trigger(phase: string, at?: [number, number, number]): void;
+  /** Drive the projectile from the real simulation (world position). */
+  setPath(position: [number, number, number], velocity?: [number, number, number]): void;
+}
+
+export interface ScriptVfx {
+  /** An effect document (`{ modules }`) or a `vfx` data-asset id. */
+  play(effect: unknown, frame: ScriptVfxFrame, opts?: { phaseLength?: number }): ScriptVfxHandle | null;
+  /** A spell document or a `spell` data-asset id. `manual` lists phases the script fires itself. */
+  playSpell(spell: unknown, frame: ScriptVfxFrame, opts?: { manual?: string[]; at?: number }): ScriptSpellHandle | null;
+  /** Fade every live effect out (scene end, a cutscene). */
+  stopAll(fade?: number): void;
+  /** Warm textures (masks, sheets) so a first play is not invisible while they load. */
+  preload?(textureIds: string[]): void;
 }
 
 export interface InputLike {

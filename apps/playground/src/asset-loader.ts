@@ -32,6 +32,8 @@ export async function loadAssets(
     { kind: "materials", type: "material" },
     { kind: "terrain", type: "terrain-heightfield", onlyJson: true },
     { kind: "spritesheets", type: "spritesheet", onlyJson: true },
+    { kind: "vfx", type: "vfx", onlyJson: true },
+    { kind: "spells", type: "spell", onlyJson: true },
   ];
   await Promise.all(
     jsonKinds.map(async ({ kind, type, onlyJson }) => {
@@ -70,17 +72,41 @@ export async function loadAssets(
   // world id, the same way they resolve a glTF by asset id.
   await loadWorldRecipes(index, readJson);
 
+  // Every project's assets/ merges into ONE id namespace, so two projects that
+  // both ship "textures/mmo/Grass.png" collide. That must not be fatal: the
+  // add* calls throw on a duplicate id, and an uncaught throw here aborts the
+  // WHOLE asset load — leaving the app on its starter scene with nothing to
+  // suggest a name clash caused it. Skip the loser, name it, carry on; the same
+  // diagnosed-not-crashed contract the data-asset loop above already uses.
+  const addOrWarn = (kind: string, id: string, add: () => void): void => {
+    try {
+      add();
+    } catch (error) {
+      const why = error instanceof Error ? error.message : String(error);
+      console.warn(
+        `[assets] skipped ${kind}/${id}: ${why} — asset ids are shared across ALL ` +
+          "projects; give one of them its own folder",
+      );
+    }
+  };
+
   for (const file of index["models"] ?? []) {
-    if (!/\.(glb|gltf)$/.test(file)) continue;
-    assets.addModel({ id: file, name: file.split("/").pop()!, url: fileUrl("models", file) });
+    if (!/.(glb|gltf)$/.test(file)) continue;
+    addOrWarn("models", file, () =>
+      assets.addModel({ id: file, name: file.split("/").pop()!, url: fileUrl("models", file) }),
+    );
   }
   for (const file of index["textures"] ?? []) {
-    if (!/\.(png|jpe?g|webp)$/i.test(file)) continue;
-    assets.addTexture({ id: file, name: file.split("/").pop()!, url: fileUrl("textures", file) });
+    if (!/.(png|jpe?g|webp)$/i.test(file)) continue;
+    addOrWarn("textures", file, () =>
+      assets.addTexture({ id: file, name: file.split("/").pop()!, url: fileUrl("textures", file) }),
+    );
   }
   for (const file of index["audio"] ?? []) {
-    if (!/\.(wav|mp3|ogg)$/i.test(file)) continue;
-    assets.addSound({ id: file, name: file.split("/").pop()!, url: fileUrl("audio", file) });
+    if (!/.(wav|mp3|ogg)$/i.test(file)) continue;
+    addOrWarn("audio", file, () =>
+      assets.addSound({ id: file, name: file.split("/").pop()!, url: fileUrl("audio", file) }),
+    );
   }
 
   const scenes = (index["scenes"] ?? []).filter((f) => f.endsWith(".scene.json"));

@@ -11,6 +11,8 @@ import {
 import { materialSchema } from "./components/core.js";
 import { spritesheetSchema } from "./spritesheet.js";
 import { worldRecipeSchema } from "./voxel/recipe.js";
+import { vfxEffectSchema } from "./vfx/modules.js";
+import { spellSchema } from "./vfx/spell.js";
 
 export const terrainHeightfieldSchema = z.object({
   version: z.literal(1).default(1),
@@ -32,6 +34,10 @@ export function registerCoreAssetTypes(assets: AssetLibrary): void {
   assets.defineDataType("terrain-heightfield", terrainHeightfieldSchema);
   assets.defineDataType("spritesheet", spritesheetSchema);
   assets.defineDataType("world-recipe", worldRecipeSchema);
+  // Composed effects and whole spells (assets/vfx/*.json, assets/spells/*.json):
+  // the module vocabulary a generator draws from, and what it produced.
+  assets.defineDataType("vfx", vfxEffectSchema);
+  assets.defineDataType("spell", spellSchema);
   registerThemeAssetType(assets);
 }
 
@@ -218,7 +224,9 @@ export class AssetLibrary {
   dataTypeJsonSchemas(): Record<string, unknown> {
     const out: Record<string, unknown> = {};
     for (const [type, schema] of this.dataTypes) {
-      out[type] = z.toJSONSchema(schema, { io: "input" });
+      // `reused: "ref"` — a spell embeds the module vocabulary once per phase;
+      // inlined, that is eight copies of the same 2,000-line union.
+      out[type] = z.toJSONSchema(schema, { io: "input", reused: "ref" });
     }
     return out;
   }

@@ -23,11 +23,14 @@ export {
   type SimRaycastAllOptions,
   type SimRaycastOptions,
   type SimShapecastOptions,
+  type BiomeAt,
+  type LiveSkyOptions,
+  type LiveSkyBase,
 } from "./script.js";
 export { EventBus, type EventHandler, type NetRole, type TraceEntry } from "./events.js";
 export { ScriptRegistry, type DataTypeSink } from "./registry.js";
 export { InputService } from "./input.js";
-export { ScriptRuntime, type RuntimeOptions, type ScriptChatHost } from "./runtime.js";
+export { ScriptRuntime, type RuntimeOptions, type RuntimeVfxFrame, type RuntimeVfxHost, type ScriptChatHost } from "./runtime.js";
 export { registerBuiltinScripts } from "./builtin.js";
 export {
   Easings,
@@ -41,3 +44,5 @@ export {
   type EasingName,
   type LoopMode,
 } from "./easing.js";
+
+export type { ScriptVfx, ScriptVfxFrame, ScriptVfxHandle, ScriptSpellHandle } from "./script.js";

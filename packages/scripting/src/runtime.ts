@@ -1,3 +1,4 @@
+import type { LiveSkyOptions, LiveSkyBase, BiomeAt } from "./script.js";
 import type * as THREE from "three";
 import type { NetStateStore, PlayerDataService, ProfilerLike, SceneDoc } from "@hitreg/core";
 import type {
@@ -5,6 +6,10 @@ import type {
   Script,
   ScriptChatMessage,
   ScriptContext,
+  ScriptSpellHandle,
+  ScriptVfx,
+  ScriptVfxFrame,
+  ScriptVfxHandle,
   SimLike,
 } from "./script.js";
 import type { ScriptRegistry } from "./registry.js";
@@ -42,6 +47,7 @@ export interface RuntimeOptions {
       visible?: boolean;
       restart?: boolean;
       burst?: number;
+      rate?: number;
       colorStart?: string;
       colorEnd?: string;
     },
@@ -51,8 +57,21 @@ export interface RuntimeOptions {
     entityId: string,
     opts: { enabled?: boolean; intensity?: number; color?: string },
   ) => void;
+  /** Host sky hook: live sky/sun/moon control (see ScriptContext.setSky). */
+  setSky?: (opts: LiveSkyOptions) => void;
+  getSky?: () => LiveSkyBase | null;
+  /** Host biome hook: the voxel world's biome blend at a point. */
+  biomeAt?: (x: number, z: number) => BiomeAt | null;
   /** Host path-mesh hook: rebuild an entity's path geometry from new (world-space) control points. */
   setPathPoints?: (entityId: string, points: Array<[number, number, number]>) => void;
+  /**
+   * Host VFX hook (a `@hitreg/render` VfxSystem fits structurally). The
+   * runtime resolves entity ids and bone sockets into objects first, so the
+   * renderer never sees the document.
+   */
+  vfx?: RuntimeVfxHost;
+  /** Data-asset lookup for ctx.getDataAsset and for effects/spells passed by id. */
+  assets?: { getDataAsset(id: string): { id: string; type: string; data: unknown } | undefined };
   /** Experience-scoped persistence for the local player (ARCHITECTURE §3c). */
   playerData?: PlayerDataService;
   /**
@@ -85,6 +104,25 @@ export interface RuntimeOptions {
 interface ScriptComponentData {
   name: string;
   params: Record<string, unknown>;
+}
+
+/** The renderer-side frame: objects, not ids (mirrors @hitreg/render's VfxFrame). */
+export interface RuntimeVfxFrame {
+  origin: [number, number, number];
+  direction: [number, number, number];
+  target?: [number, number, number];
+  caster?: THREE.Object3D | null;
+  targetObject?: THREE.Object3D | null;
+  socket?(body: "caster" | "target", name: string): THREE.Object3D | null;
+  ground?(x: number, z: number, nearY: number): number | null;
+  palette?: { primary: string; secondary: string; glow: string };
+}
+
+export interface RuntimeVfxHost {
+  play(effect: unknown, frame: RuntimeVfxFrame, opts?: { phaseLength?: number }): ScriptVfxHandle;
+  playSpell(spell: unknown, frame: RuntimeVfxFrame, opts?: { manual?: string[]; at?: number }): ScriptSpellHandle;
+  stopAll(fade?: number): void;
+  preload?(textureIds: string[]): void;
 }
 
 /** What the runtime needs from a chat implementation (see ScriptChat for the script-facing shape). */
@@ -295,6 +333,7 @@ export class ScriptRuntime {
                 visible?: boolean;
                 restart?: boolean;
                 burst?: number;
+                rate?: number;
                 colorStart?: string;
                 colorEnd?: string;
               }) => this.opts.setParticles!(entityId, opts),
@@ -308,12 +347,17 @@ export class ScriptRuntime {
               ) => this.opts.setLight!(entityId, opts),
             }
           : {}),
+        ...(this.opts.setSky ? { setSky: (opts: LiveSkyOptions) => this.opts.setSky!(opts) } : {}),
+        ...(this.opts.getSky ? { getSky: () => this.opts.getSky!() } : {}),
+        ...(this.opts.biomeAt ? { biomeAt: (x: number, z: number) => this.opts.biomeAt!(x, z) } : {}),
         ...(this.opts.setPathPoints
           ? {
               setPathPoints: (points: Array<[number, number, number]>) =>
                 this.opts.setPathPoints!(id, points),
             }
           : {}),
+        ...(this.opts.vfx ? { vfx: this.scopedVfx(id, this.opts.vfx) } : {}),
+        ...(this.opts.assets ? { getDataAsset: (assetId: string) => this.opts.assets!.getDataAsset(assetId) } : {}),
         ...(this.opts.playerData ? { playerData: this.opts.playerData } : {}),
         ...(this.opts.events ? { events: this.scopedEvents(id, this.opts.events) } : {}),
         ...(this.opts.netState ? { netState: this.scopedNetState(id, this.opts.netState) } : {}),
@@ -356,6 +400,95 @@ export class ScriptRuntime {
   }
 
   /** ctx.chat for one script: `on` subscriptions auto-unsubscribe. */
+  /**
+   * ctx.vfx: resolve the script's entity-level frame into objects the
+   * renderer can follow. Bone sockets are entities tagged `socket:<name>`
+   * whose runtime object sits under the body's — the same convention the
+   * effects lab established — so "rightHand" on a caster finds THAT caster's
+   * hand and not somebody else's.
+   */
+  private scopedVfx(id: string, host: RuntimeVfxHost): ScriptVfx {
+    const resolveDoc = (doc: unknown, type: string): unknown => {
+      if (typeof doc !== "string") return doc;
+      const asset = this.opts.assets?.getDataAsset(doc);
+      if (!asset) {
+        console.warn(`[scripts] ${id}: no ${type} asset "${doc}"`);
+        return null;
+      }
+      return asset.data;
+    };
+    const socketCache = new Map<string, THREE.Object3D | null>();
+    const socketFor = (bodyId: string | undefined, name: string): THREE.Object3D | null => {
+      if (!bodyId) return null;
+      const key = `${bodyId}:${name}`;
+      const cached = socketCache.get(key);
+      if (cached !== undefined) return cached;
+      const body = this.objects.get(bodyId);
+      let found: THREE.Object3D | null = null;
+      if (body) {
+        for (const socketId of this.findByTag(`socket:${name}`)) {
+          const obj = this.objects.get(socketId);
+          let cur: THREE.Object3D | null = obj ?? null;
+          while (cur && cur !== body) cur = cur.parent;
+          if (cur === body && obj) {
+            found = obj;
+            break;
+          }
+        }
+      }
+      socketCache.set(key, found);
+      return found;
+    };
+    const sim = this.opts.sim;
+    const probeGround = (exclude: string[]) => (x: number, z: number, nearY: number): number | null => {
+      if (!sim?.raycast) return null;
+      const hit = sim.raycast([x, nearY + 2, z], [0, -1, 0], 24, { exclude });
+      return hit ? hit.point[1] : null;
+    };
+    const toRuntimeFrame = (f: ScriptVfxFrame): RuntimeVfxFrame => {
+      const caster = f.casterId ? this.objects.get(f.casterId) ?? null : null;
+      const target = f.targetId ? this.objects.get(f.targetId) ?? null : null;
+      let dir: [number, number, number];
+      if (f.direction) {
+        dir = [f.direction[0], 0, f.direction[1]];
+      } else if (caster) {
+        caster.updateWorldMatrix(true, false);
+        const e = caster.matrixWorld.elements;
+        const dx = f.origin[0] - (e[12] as number);
+        const dz = f.origin[2] - (e[14] as number);
+        const len = Math.hypot(dx, dz);
+        dir = len > 1e-4 ? [dx / len, 0, dz / len] : [-Math.sin(caster.rotation.y), 0, -Math.cos(caster.rotation.y)];
+      } else {
+        dir = [0, 0, -1];
+      }
+      const exclude = [f.casterId, f.targetId].filter((v): v is string => !!v);
+      return {
+        origin: f.origin,
+        direction: dir,
+        ...(f.target ? { target: f.target } : {}),
+        caster,
+        targetObject: target,
+        socket: (body, name) => socketFor(body === "caster" ? f.casterId : f.targetId, name),
+        ground: f.ground ?? probeGround(exclude),
+        ...(f.palette ? { palette: f.palette } : {}),
+      };
+    };
+    return {
+      play: (effect, frame, opts) => {
+        const doc = resolveDoc(effect, "vfx");
+        if (!doc) return null;
+        return host.play(doc, toRuntimeFrame(frame), opts);
+      },
+      playSpell: (spell, frame, opts) => {
+        const doc = resolveDoc(spell, "spell");
+        if (!doc) return null;
+        return host.playSpell(doc, toRuntimeFrame(frame), opts);
+      },
+      stopAll: (fade) => host.stopAll(fade),
+      preload: (ids) => host.preload?.(ids),
+    };
+  }
+
   private scopedChat(id: string, chat: ScriptChatHost): NonNullable<ScriptContext["chat"]> {
     const track = (off: () => void): (() => void) => {
       let subs = this.subscriptions.get(id);
