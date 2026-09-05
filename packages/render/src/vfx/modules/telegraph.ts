@@ -34,7 +34,7 @@ interface Surface {
  * vertical curtain rising from the boundary so the warning survives a
  * shallow camera, grass and a body in the way.
  *
- * Ported into the engine from combat-demo's telegraph-pool so a generated
+ * Ported into the engine from the combat prototype's telegraph-pool so a generated
  * spell carries its own warning: every vertex is draped against the host's
  * ground probe and clamped to the volume's own `height`, so what is drawn
  * and what hits are one shape.

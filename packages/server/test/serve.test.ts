@@ -7,7 +7,7 @@ import { WORLD_MODULE, type WorldModuleMessage } from "../src/index.js";
 
 /**
  * The whole process as the CLI runs it — real WebSocket, real HTTP admin —
- * against the combat-demo `field` scene: join over the wire, spawn an NPC
+ * against the `field` scene: join over the wire, spawn an NPC
  * through the admin endpoint, see it replicate.
  */
 

@@ -45,7 +45,7 @@ preset is authored by a human once, and the generator only ever chooses
 @hitreg/scripting           ctx.vfx.play / ctx.vfx.playSpell / stopAll,
                             ctx.getDataAsset — ids and sockets resolved for you
 apps/playground             src/vfx-host.ts wires one VfxSystem per app
-combat-demo                 the spell lab (scripts/fx-lab.ts) and the sprite
+the project                 the spell lab (scripts/fx-lab.ts) and the sprite
                             catalog that maps the purchased library onto roles
 ```
 
@@ -66,7 +66,7 @@ by one pooled class in `@hitreg/render`:
 | `light` | the secondary light | a borrowed slot light |
 | `mesh` | a real body: drop / rise / hover / orbit / launch | procedural primitive or a model |
 | `trail` | ribbon behind a moving anchor | rebuilt strip |
-| `telegraph` | the declared volume: fill grows over the windup, rim, curtain | ported from combat-demo, draped |
+| `telegraph` | the declared volume: fill grows over the windup, rim, curtain | ported from the combat prototype, draped |
 | `shake` | camera shake | applied inside the draw only |
 | `sound` | one-shot audio | host hook |
 
@@ -129,7 +129,7 @@ fast and stretched, blood drops are normal-blended matter).
 a project maps its library onto `SpriteCatalog` roles (burst, flash, ring,
 rune, slash, vortex, smoke, bolt, pillar, portal, gather, lightning, shard,
 wave). A missing role is simply never chosen — the procedural modules carry the
-effect. combat-demo's catalog is `scripts/lib/spell-catalog.ts`, classified off
+effect. voxel-demo's catalog is `scripts/lib/spell-catalog.ts`, classified off
 a contact sheet of the greyscale row.
 
 ### The generator (`vfx/generator.ts`)
@@ -201,7 +201,7 @@ optional-chain it.
 
 ### The lab
 
-`fx-lab` in combat-demo: **Randomize** (R) rolls a whole spell and plays it on
+`fx-lab` in voxel-demo: **Randomize** (R) rolls a whole spell and plays it on
 the character at a target placed at the archetype's own range; every archetype
 number is a knob that re-generates from the same seed; every module is a card
 whose knobs are rendered from its schema (numbers → sliders with the schema's
@@ -371,7 +371,7 @@ nearest-filtered, so what you draw is what renders.
 
 ## What this replaces
 
-combat-demo's `fx-pool` / `fx-emitter` / tagged-entity-pool arrangement and its
+The combat prototype's `fx-pool` / `fx-emitter` / tagged-entity-pool arrangement and its
 flat `FxLayer[]` lists are now scaffolding on the way out: the pooling lives in
 the engine, a layer list is a subset of a module list, and an ability can carry
 a `spell` id instead. The old telegraph-pool remains the combat scenes' drawer

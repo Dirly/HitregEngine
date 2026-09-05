@@ -95,7 +95,7 @@ curl -s -X POST http://127.0.0.1:8787/admin/spawn -H 'content-type: application/
   -d '{"template":"hero0","at":[1670,50,-6250],"id":"boss"}'
 ```
 
-`--host 0.0.0.0` serves the LAN. `--scene field` hosts combat-demo's terrain
+`--host 0.0.0.0` serves the LAN. `--scene field` hosts the combat terrain
 scene instead; any project scene with a `player`-tagged entity works.
 The setting also persists per browser: `localStorage.setItem("hitreg:server",
 "ws://…")` — remove it to go back to P2P dev rooms.
@@ -104,7 +104,7 @@ The setting also persists per browser: `localStorage.setItem("hitreg:server",
 
 - `packages/net`: real socket pair, both channels, id collision rename,
   reject past maxPeers, the room protocol end to end.
-- `packages/server/test/field.test.ts` (loopback hub, combat-demo `field`):
+- `packages/server/test/field.test.ts` (loopback hub, the `field` scene):
   join → body spawned from the template with params rewritten → docs sent
   with `self` → ground streamed under it → walks from intent, speed clamped
   (a claimed 100 m/s moves at sprint cap) → strike request validated,
@@ -139,16 +139,16 @@ API (terraform), and the edit is the save. Nothing else persists yet
 (player state dies with the body); nothing is authenticated; one scene per
 process; ~50 players per process at 60 Hz with headroom.
 
-**Uncommitted content changes** (project folders are gitignored; combat-demo
-is not a git repo yet, voxel-demo untouched, `mmo` got its own repo):
-- `projects/combat-demo/scripts/combat-caster.ts`: ownership check on
-  `combat.cast.request`, dash as `combat.dash.request` (to-authority, with
-  local prediction).
-- `projects/combat-demo/scripts/{combat-hud,telegraph-pool,fx-pool,fx-emitter,fx-lab}.ts`
-  and `projects/voxel-demo/scripts/motion-dust.ts`: `static clientOnly = true`.
+**Content changes** — all in `projects/voxel-demo`, which is its own git repo
+(the `combat-demo` and `mmo` projects were folded into it on 2026-09-04, so
+the paths below moved with them):
+- `scripts/combat-caster.ts`: ownership check on `combat.cast.request`, dash
+  as `combat.dash.request` (to-authority, with local prediction).
+- `scripts/{combat-hud,telegraph-pool,fx-pool,fx-emitter,fx-lab,motion-dust}.ts`:
+  `static clientOnly = true`.
 - `combat-hud.ts` / `telegraph-pool.ts`: resolve "me" via `ctx.localPlayer()`;
   `dummy-brain.ts`: fights the NEAREST living player, not the first tagged.
-- `projects/mmo/` (new, committed in its own repo).
+- `assets/scenes/mmo.scene.json` + `tools/gen-mmo.mts` (the hosted scene).
 
 **Also verified (later the same night):** a peer sees the other player's
 body RUNNING (server-published gait clip → client animator); another

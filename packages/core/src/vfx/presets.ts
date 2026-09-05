@@ -28,7 +28,7 @@ import type { SpellArchetype, SpellKind, StatusEffect } from "./spell.js";
 
 /**
  * What a flipbook IS, not what it is called. The engine ships no sheets; a
- * project maps its own library onto these roles (combat-demo does it in
+ * project maps its own library onto these roles (voxel-demo does it in
  * `scripts/lib/spell-catalog.ts`). A role the catalog lacks is simply never
  * chosen — the procedural modules carry the effect instead.
  */

@@ -236,7 +236,7 @@ The primary AI channel is **direct file editing** — no MCP required:
   catalog })` in `@hitreg/core` composes one from a hand-authored preset
   library sized off the archetype's radius; `auditSpell` enforces budget /
   readability / lifetime; scripts play them with `ctx.vfx.playSpell(id, frame)`.
-  Iterate in combat-demo's `fx-lab` scene (Randomize, schema-driven knobs,
+  Iterate in a project's `fx-lab` scene (Randomize, schema-driven knobs,
   Save). Sprites are picked by ROLE from a project catalog, never by name —
   the engine ships no sheets. **docs/vfx-architecture.md** before touching any
   of it; two traps: sizes are multiples of the archetype radius (a preset that

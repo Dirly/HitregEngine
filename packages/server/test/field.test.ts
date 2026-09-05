@@ -18,7 +18,7 @@ import {
 } from "../src/index.js";
 
 /**
- * The combat-demo `field` scene (a streamed voxel world + the combat roster)
+ * The `field` scene (a streamed voxel world + the combat roster)
  * hosted headless: a client joins over the in-memory hub, gets a body, walks,
  * and lands a cast on a dummy — the whole movement + combat loop with no
  * browser in the room.
@@ -38,7 +38,7 @@ const flush = async (hub: LoopbackHub, n = 3) => {
   }
 };
 
-describe.skipIf(!field)("combat-demo field, headless", () => {
+describe.skipIf(!field)("combat field, headless", () => {
   let world: HeadlessWorld;
   let server: GameServer;
   let hub: LoopbackHub;
