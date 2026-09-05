@@ -1,6 +1,9 @@
 import type * as THREE from "three";
-import { Script, type BiomeAt, type LiveSkyBase } from "./script.js";
-import type { ScriptRegistry } from "./registry.js";
+import type { EventRegistry } from "@hitreg/core";
+import { Script, type BiomeAt, type LiveSkyBase, type ScriptClass } from "./script.js";
+import type { DataTypeSink, ScriptRegistry } from "./registry.js";
+import { CharacterSheetScript } from "./character-sheet.js";
+import { CharacterUi } from "./character-ui.js";
 import {
   approach,
   approachAngle,
@@ -402,7 +405,9 @@ class Damageable extends Script {
  * game-specific wiring. Reads a few optional runtime channels other scripts
  * may set on object.userData: speedMult (upgrades), frozen (menus pause
  * movement), holdingWeapon (swaps to the *_Hold clips), actionClip/actionUntil
- * (a one-shot clip that overrides locomotion until the given time),
+ * (a one-shot clip that takes over until the given time — on an upper-body
+ * LAYER while the character is moving, so a cast or a swing does not stop the
+ * legs, and full-body when standing still or when actionFullBody is set),
  * impulseVel/impulseUntil (an external horizontal drive — dash, knockback —
  * that input cannot cancel while it lasts).
  *
@@ -484,6 +489,16 @@ class ThirdPersonController extends Script {
     modelYaw: { default: 0, min: -3.1416, max: 3.1416, description: "extra yaw if the model faces backwards" },
     turnSpeed: { default: 14, min: 1, max: 40, description: "how snappily the character turns" },
     face: { default: "camera", description: "camera = always face the aim (strafe shooter); movement = face where you run" },
+    actionBlend: {
+      default: "auto",
+      description:
+        "How a one-shot action clip (userData.actionClip — a cast, a swing) sits on the body. " +
+        "layer = always on an upper-body layer over the gait, so the legs keep running; full = " +
+        "always the whole body, the pre-layer behaviour; auto = layered when the character is " +
+        "actually moving, full-body when it is standing still (a stationary swing then keeps its " +
+        "weight shift). Decided once per action. A caster can force one action full-body with " +
+        "userData.actionFullBody — a dodge roll is not an upper-body affair.",
+    },
   };
 
   private yaw = 0;
@@ -494,6 +509,9 @@ class ThirdPersonController extends Script {
   private lastClip = "";
   private lastRate = 1;
   private clips: Set<string> | null = null;
+  /** The action clip currently owning (part of) the body, and how. */
+  private action: string | null = null;
+  private actionLayered = false;
 
   private play(clip: string, fade: number): void {
     if (this.lastClip === clip) return;
@@ -547,7 +565,16 @@ class ThirdPersonController extends Script {
     this.airTime = 0;
     this.autoRun = false;
     this.clips = null; // the model may still be loading; resolve on first use
+    this.action = null;
+    this.actionLayered = false;
+    this.ctx.clearAnimationLayer?.(0);
     this.play(this.param<string>("idleClip"), 0.2);
+  }
+
+  override onDispose(): void {
+    // the model outlives the script (a rebuild, a respawn); a layer left up
+    // would hold a cast pose on its arms forever
+    if (this.actionLayered) this.ctx.clearAnimationLayer?.(0);
   }
 
   override onFixedUpdate(dt: number): void {
@@ -562,12 +589,24 @@ class ThirdPersonController extends Script {
       holdingWeapon?: boolean;
       actionClip?: string;
       actionUntil?: number;
+      actionFullBody?: boolean;
       impulseVel?: [number, number];
       impulseUntil?: number;
     };
     if (ud.frozen) {
       sim.setLinvel(this.entityId, [0, vel[1], 0]);
-      this.play(this.param<string>("idleClip"), 0.25);
+      // A death or emote clip still plays through a freeze. Freezing stops the
+      // legs; it does not cancel an animation somebody asked for — and a
+      // script that sets actionClip and frozen together (dying is the usual
+      // pair) otherwise watches its death clip get replaced by idle.
+      const held =
+        ud.actionClip && (ud.actionUntil ?? 0) > this.ctx.now() / 1000 ? ud.actionClip : null;
+      if (this.actionLayered) {
+        this.ctx.clearAnimationLayer?.(0.15); // no gait left for it to sit on
+        this.actionLayered = false;
+      }
+      this.action = held;
+      this.play(held ?? this.param<string>("idleClip"), 0.25);
       return;
     }
 
@@ -683,9 +722,36 @@ class ThirdPersonController extends Script {
       this.object.rotation.set(0, this.yaw, 0);
     }
 
-    if (ud.actionClip && (ud.actionUntil ?? 0) > now) {
+    // A one-shot action — a cast, a swing — either owns the whole body or
+    // rides on an upper-body LAYER over whatever gait is underneath, which is
+    // what lets a character cast while running. Which of the two is decided
+    // ONCE, when the action starts: re-deciding per tick would flip a cast
+    // between layered and full-body every time the character crossed the
+    // walking threshold mid-animation.
+    const action = ud.actionClip && (ud.actionUntil ?? 0) > now ? ud.actionClip : null;
+    if (action !== this.action) {
+      const blend = this.param<string>("actionBlend");
+      const layered =
+        action !== null &&
+        blend !== "full" &&
+        ud.actionFullBody !== true &&
+        this.ctx.setAnimationLayer !== undefined &&
+        (blend === "layer" ||
+          Math.hypot(vel[0], vel[2]) > Math.max(0.2, this.param<number>("walkSpeed") * 0.5));
+      if (this.actionLayered && !layered) this.ctx.clearAnimationLayer?.(0.15);
+      this.action = action;
+      this.actionLayered = layered;
+      if (action && layered) {
+        // looped, like the full-body path: the action ends when actionUntil
+        // says so, not when the clip runs out
+        this.ctx.setAnimationLayer?.(action, { fade: 0.08, loop: true });
+      }
+    }
+    // Full-body: the action IS the pose, so nothing below runs. Layered: fall
+    // through and pick a gait as usual — the legs are still ours.
+    if (action && !this.actionLayered) {
       this.setRateRaw(1);
-      this.play(ud.actionClip, 0.05);
+      this.play(action, 0.05);
       return;
     }
 
@@ -1287,18 +1353,33 @@ class Weather extends Script {
   }
 }
 
-export function registerBuiltinScripts(registry: ScriptRegistry): void {
-  registry.register(DayNight);
-  registry.register(Weather);
-  registry.register(Spinner);
-  registry.register(Oscillator);
-  registry.register(PlayerController);
-  registry.register(Collectible);
-  registry.register(PlatformMover);
-  registry.register(Door);
-  registry.register(FaceTarget);
-  registry.register(Tweener);
-  registry.register(Damageable);
-  registry.register(ThirdPersonController);
-  registry.register(BoneSocket);
+/**
+ * Register the standard vocabulary. Pass the session's `events` registry (and
+ * the asset library) so builtins that declare `static events` — the
+ * character-sheet's request/response contracts — register them too; without
+ * it a `to-authority` request has no declared direction and never leaves a
+ * peer.
+ */
+export function registerBuiltinScripts(
+  registry: ScriptRegistry,
+  events?: EventRegistry,
+  dataTypes?: DataTypeSink,
+): void {
+  const add = (cls: ScriptClass): void => registry.register(cls, events, dataTypes);
+  add(DayNight);
+  add(Weather);
+  add(Spinner);
+  add(Oscillator);
+  add(PlayerController);
+  add(Collectible);
+  add(PlatformMover);
+  add(Door);
+  add(FaceTarget);
+  add(Tweener);
+  add(Damageable);
+  add(ThirdPersonController);
+  add(BoneSocket);
+  // RPG progression + grid inventory: the authority's sheet and its client view.
+  add(CharacterSheetScript);
+  add(CharacterUi);
 }

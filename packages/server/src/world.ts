@@ -26,6 +26,7 @@ import {
   AssetLibrary,
   expandScene,
   NetStateStore,
+  registerCharacterNetState,
   type SceneDoc,
   type EntityDoc,
 } from "@hitreg/core";
@@ -91,6 +92,8 @@ export class HeadlessWorld {
   readonly fixedDt: number;
   /** Current animation clip per entity, as scripts requested it (the `anim` replica field). */
   readonly anims = new Map<string, string>();
+  /** Layer clip per entity (the masked clip riding over `anims`) — the `animL` replica field. */
+  readonly animLayers = new Map<string, string>();
   /** Runs at the top of every fixed step, before physics (movement drivers live here). */
   readonly beforeStep = new Set<(dt: number) => void>();
   /** Runs after scripts each fixed step (replication, bookkeeping). */
@@ -113,6 +116,7 @@ export class HeadlessWorld {
     this.eventBus = new EventBus(this.eventRegistry);
     this.eventBus.setNetRole("authority");
     this.netState.setAuthority(true);
+    registerCharacterNetState(this.netState); // character/<bodyId> sheets validate + appear in the spec
     this.scripts = new ScriptRuntime({
       doc: { ...base, entities: {} },
       objects: new Map(),
@@ -123,6 +127,12 @@ export class HeadlessWorld {
       netState: this.netState,
       setAnimation: (id, clip) => {
         this.anims.set(id, clip);
+      },
+      setAnimationLayer: (id, clip) => {
+        this.animLayers.set(id, clip);
+      },
+      clearAnimationLayer: (id) => {
+        this.animLayers.delete(id);
       },
       animationClips: () => [],
       setAnimationSpeed: () => undefined,
@@ -143,7 +153,7 @@ export class HeadlessWorld {
     await initPhysics();
     const registry = opts.registry ?? defaultRegistry();
     const events = opts.events ?? defaultEvents();
-    const scripts = opts.scripts ?? defaultScripts();
+    const scripts = opts.scripts ?? defaultScripts(events, opts.assets);
     const full = expandScene(opts.doc, opts.assets, registry);
     const expanded: SceneDoc = { ...full, entities: { ...full.entities } };
     if (opts.exclude) {
@@ -245,6 +255,7 @@ export class HeadlessWorld {
       this.objects.delete(id);
       this.entities.delete(id);
       this.anims.delete(id);
+      this.animLayers.delete(id);
     }
   }
 
@@ -355,8 +366,9 @@ export function defaultEvents(): EventRegistry {
   return events;
 }
 
-export function defaultScripts(): ScriptRegistry {
+/** Builtins with their event contracts registered into `events` (so to-authority requests route). */
+export function defaultScripts(events?: EventRegistry, assets?: AssetLibrary): ScriptRegistry {
   const scripts = new ScriptRegistry();
-  registerBuiltinScripts(scripts);
+  registerBuiltinScripts(scripts, events, assets);
   return scripts;
 }

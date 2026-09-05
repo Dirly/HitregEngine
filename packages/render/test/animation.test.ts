@@ -60,3 +60,145 @@ describe("AnimationSystem one-shot completion", () => {
     expect(done).toEqual(["emote"]); // no second completion
   });
 });
+
+/** A three-bone humanoid: root > Hips > spine_01 > upperarm_l, plus a thigh. */
+function rig(): THREE.Object3D {
+  const root = new THREE.Object3D();
+  const hips = new THREE.Object3D();
+  hips.name = "Hips";
+  const spine = new THREE.Object3D();
+  spine.name = "spine_01";
+  const arm = new THREE.Object3D();
+  arm.name = "upperarm_l";
+  const thigh = new THREE.Object3D();
+  thigh.name = "thigh_l";
+  root.add(hips);
+  hips.add(spine, thigh);
+  spine.add(arm);
+  return root;
+}
+
+function node(root: THREE.Object3D, name: string): THREE.Object3D {
+  return root.getObjectByName(name)!;
+}
+
+/** One track per named node, ramping its X position between two values. */
+function poseClip(
+  name: string,
+  duration: number,
+  pose: Record<string, [number, number]>,
+): THREE.AnimationClip {
+  const tracks = Object.entries(pose).map(
+    ([bone, [from, to]]) =>
+      new THREE.NumberKeyframeTrack(`${bone}.position[x]`, [0, duration], [from, to]),
+  );
+  return new THREE.AnimationClip(name, duration, tracks);
+}
+
+function layered() {
+  const root = rig();
+  const system = new AnimationSystem();
+  system.register(
+    "hero",
+    root,
+    [
+      poseClip("Run", 4, { thigh_l: [0, 4], spine_01: [0, 4] }),
+      poseClip("Cast", 4, { spine_01: [10, 10], upperarm_l: [10, 10] }),
+    ],
+    { fade: 0, speed: 1 },
+  );
+  system.setRunning(true);
+  return { system, root };
+}
+
+describe("AnimationSystem layers", () => {
+  it("plays a layer on the masked bones while the base keeps the rest", () => {
+    const { system, root } = layered();
+    system.play("hero", "Run", 0);
+    for (let i = 0; i < 60; i++) system.update(1 / 60); // 1s into the run
+    expect(node(root, "thigh_l").position.x).toBeCloseTo(1, 1);
+    expect(node(root, "spine_01").position.x).toBeCloseTo(1, 1);
+
+    system.playLayer("hero", "Cast", { fade: 0 });
+    for (let i = 0; i < 30; i++) system.update(1 / 60); // half a second more
+
+    // legs still running — and running from where they were, not from frame 0
+    expect(node(root, "thigh_l").position.x).toBeCloseTo(1.5, 1);
+    // everything from the spine up is the cast
+    expect(node(root, "spine_01").position.x).toBeCloseTo(10, 1);
+    expect(node(root, "upperarm_l").position.x).toBeCloseTo(10, 1);
+    // the base clip is still what the entity "is" playing; the layer rides it
+    expect(system.currentClip("hero")).toBe("Run");
+    expect(system.layerClip("hero")).toBe("Cast");
+  });
+
+  it("hands the whole body back when the layer clears", () => {
+    const { system, root } = layered();
+    system.play("hero", "Run", 0);
+    system.playLayer("hero", "Cast", { fade: 0 });
+    for (let i = 0; i < 60; i++) system.update(1 / 60);
+    expect(node(root, "spine_01").position.x).toBeCloseTo(10, 1);
+
+    system.clearLayer("hero", 0);
+    for (let i = 0; i < 30; i++) system.update(1 / 60);
+    expect(system.layerClip("hero")).toBeNull();
+    // 1.5s of Run, ramping 0 -> 4 over 4s
+    expect(node(root, "spine_01").position.x).toBeCloseTo(1.5, 1);
+    expect(node(root, "thigh_l").position.x).toBeCloseTo(1.5, 1);
+  });
+
+  it("re-asserting the same layer does not restart it (net sends it every frame)", () => {
+    const { system, root } = layered();
+    system.play("hero", "Run", 0);
+    system.playLayer("hero", "Cast", { fade: 0 });
+    for (let i = 0; i < 30; i++) {
+      system.playLayer("hero", "Cast", { fade: 0 });
+      system.update(1 / 60);
+    }
+    // the base kept advancing under it rather than being re-synced each frame
+    expect(node(root, "thigh_l").position.x).toBeCloseTo(0.5, 1);
+  });
+
+  it("falls back to a full-body play when the rig has no mask bone", () => {
+    const root = new THREE.Object3D();
+    const limb = new THREE.Object3D();
+    limb.name = "arm";
+    root.add(limb);
+    const system = new AnimationSystem();
+    system.register("bot", root, [poseClip("Idle", 4, { arm: [0, 4] }), poseClip("Cast", 4, { arm: [10, 10] })], {
+      fade: 0,
+      speed: 1,
+    });
+    system.setRunning(true);
+    system.play("bot", "Idle", 0);
+    system.playLayer("bot", "Cast", { fade: 0 });
+    for (let i = 0; i < 30; i++) system.update(1 / 60);
+
+    expect(system.layerClip("bot")).toBeNull();
+    expect(system.currentClip("bot")).toBe("Cast");
+    expect(node(root, "arm").position.x).toBeCloseTo(10, 1);
+  });
+
+  it("reports the caller's clip name when a masked one-shot finishes", () => {
+    const { system } = layered();
+    const done: string[] = [];
+    system.onClipFinished = (_id, clip) => done.push(clip);
+    system.play("hero", "Run", 0);
+    system.playLayer("hero", "Cast", { fade: 0, loop: false });
+    for (let i = 0; i < 260; i++) system.update(1 / 60); // past the 4s clip
+
+    expect(done).toEqual(["Cast"]);
+  });
+
+  it("keeps the locomotion rate off the layer", () => {
+    const { system, root } = layered();
+    system.play("hero", "Run", 0);
+    system.setSpeed("hero", 2);
+    system.playLayer("hero", "Cast", { fade: 0 });
+    for (let i = 0; i < 60; i++) system.update(1 / 60);
+
+    // legs at double rate (2s of clip in 1s), cast at its authored rate
+    expect(node(root, "thigh_l").position.x).toBeCloseTo(2, 1);
+    expect(node(root, "spine_01").position.x).toBeCloseTo(10, 1);
+  });
+});

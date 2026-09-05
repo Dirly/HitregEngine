@@ -1033,12 +1033,23 @@ export const scriptSchema = z.object({
 /**
  * Skeletal animation for asset meshes (clips come from the glTF). `play` is
  * the clip started in play mode; scripts blend via ctx.setAnimation (Unity
- * crossfade semantics: transitions fade over `fade` seconds).
+ * crossfade semantics: transitions fade over `fade` seconds). One masked
+ * LAYER may run over that base clip (ctx.setAnimationLayer), which is how a
+ * character casts or swings without its legs stopping.
  */
 export const animatorSchema = z.object({
   play: z.string().optional(),
   fade: z.number().min(0).default(0.3),
   speed: z.number().default(1),
+  upperBody: z
+    .string()
+    .optional()
+    .describe(
+      "Bone the upper-body animation LAYER masks from — ctx.setAnimationLayer plays a clip on " +
+        "this bone and everything under it while the base clip keeps the rest (cast while " +
+        "running). Leave unset and the rig's first spine/waist bone is used, which is right for " +
+        "every humanoid the retarget tool produces; set it to mask somewhere else.",
+    ),
 });
 
 /**

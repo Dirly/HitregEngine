@@ -161,6 +161,8 @@ function hitregBridge(): Plugin {
         "spritesheets",
         "vfx",
         "spells",
+        "items",
+        "progression",
         "models",
         "textures",
         "audio",

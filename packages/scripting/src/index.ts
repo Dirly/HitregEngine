@@ -23,6 +23,7 @@ export {
   type SimRaycastAllOptions,
   type SimRaycastOptions,
   type SimShapecastOptions,
+  type AnimationLayerOptions,
   type BiomeAt,
   type LiveSkyOptions,
   type LiveSkyBase,

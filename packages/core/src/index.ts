@@ -290,6 +290,7 @@ export {
 } from "./components/voxel.js";
 export * from "./voxel/index.js";
 export * from "./vfx/index.js";
+export * from "./character/index.js";
 export {
   projectManifestSchema,
   projectToolDependencySchema,

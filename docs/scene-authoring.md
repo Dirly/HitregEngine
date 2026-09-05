@@ -178,7 +178,10 @@ casterId?, targetId?, direction?, target? }, { manual? })` /
 resolved for you, ground probed from physics; `manual` phases you fire with
 `handle.trigger(phase, at?)`, projectiles driven with `handle.setPath`; absent
 on a dedicated server — see `docs/vfx-architecture.md`); `ctx.getDataAsset(id)`
-to read any data asset; and `ctx.playerData` —
+to read any data asset; `ctx.textureUrl(id)` to turn a texture asset id into
+a URL for DOM UI (an inventory icon); `ctx.input.captureKeyboard(owner, on)`
+so an open menu hides WASD/ability keys from every gameplay script (released
+automatically when the script disposes); and `ctx.playerData` —
 experience-scoped persistence (`get/set/increment/transaction/keys(namespace,
 …)`, async, quota+rate-limited, atomic; survives sessions, e.g.
 `ctx.playerData?.increment("stats", "sessions")`); and `ctx.chat` (when the

@@ -64,6 +64,8 @@ function harness(opts: {
   ]);
 
   const played: Array<{ clip: string; fade: number }> = [];
+  /** Layer calls in order; null is a clear. */
+  const layers: Array<string | null> = [];
   const rates: number[] = [];
   // The mixer's own timeScale, which starts authored (1) and only moves when
   // the controller says so — it deliberately stays quiet for a no-op change,
@@ -83,6 +85,8 @@ function harness(opts: {
       rates.push(multiplier);
       effectiveRate = multiplier;
     },
+    setAnimationLayer: (_id, clip) => layers.push(clip),
+    clearAnimationLayer: () => layers.push(null),
   });
   runtime.start();
 
@@ -90,6 +94,10 @@ function harness(opts: {
     runtime,
     played,
     rates,
+    layers,
+    /** The controller's runtime channels — actionClip, frozen, impulseVel … */
+    ud: obj.userData as Record<string, unknown>,
+    lastLayer: () => layers[layers.length - 1],
     hold: (code: string) => held.add(code),
     release: (code: string) => held.delete(code),
     /** Force the velocity the controller reads back this tick. */
@@ -370,5 +378,95 @@ describe("auto-run", () => {
     h.release("KeyS");
     h.step(3);
     expect(Math.hypot(h.velocity()[0], h.velocity()[2])).toBeCloseTo(0, 3);
+  });
+});
+
+describe("third-person-controller action clips", () => {
+  const moving = { clips: ALL_CLIPS, params: { walkSpeed: 2, speed: 6, sprintSpeed: 10 } };
+
+  it("layers a cast over the gait while the character is moving", () => {
+    const h = harness(moving);
+    h.hold("KeyW");
+    h.setVelocity([0, 0, -6]);
+    h.step();
+    expect(h.lastClip()).toBe("Run");
+
+    h.ud["actionClip"] = "Cast";
+    h.ud["actionUntil"] = 99;
+    h.setVelocity([0, 0, -6]);
+    h.step();
+
+    expect(h.lastLayer()).toBe("Cast");
+    // the legs are still the controller's: the gait never became the cast
+    expect(h.played.some((p) => p.clip === "Cast")).toBe(false);
+    expect(h.lastClip()).toBe("Run");
+  });
+
+  it("gives a standing cast the whole body, and clears the layer when it ends", () => {
+    const h = harness(moving);
+    h.setVelocity([0, 0, 0]);
+    h.step();
+
+    h.ud["actionClip"] = "Cast";
+    h.ud["actionUntil"] = 99;
+    h.setVelocity([0, 0, 0]);
+    h.step();
+    expect(h.lastClip()).toBe("Cast");
+    expect(h.layers.filter((l) => l !== null)).toEqual([]); // onStart clears once
+
+    // now the same action while running: layered, then cleared on expiry
+    h.hold("KeyW");
+    h.ud["actionClip"] = "Slash";
+    h.setVelocity([0, 0, -6]);
+    h.step();
+    expect(h.lastLayer()).toBe("Slash");
+
+    h.ud["actionClip"] = undefined;
+    h.setVelocity([0, 0, -6]);
+    h.step();
+    expect(h.lastLayer()).toBeNull();
+    expect(h.lastClip()).toBe("Run");
+  });
+
+  it("honours actionFullBody — a dodge roll is not an upper-body affair", () => {
+    const h = harness(moving);
+    h.hold("KeyW");
+    h.ud["actionClip"] = "Dodge";
+    h.ud["actionUntil"] = 99;
+    h.ud["actionFullBody"] = true;
+    h.setVelocity([0, 0, -6]);
+    h.step();
+
+    expect(h.layers.filter((l) => l !== null)).toEqual([]); // onStart clears once
+    expect(h.lastClip()).toBe("Dodge");
+  });
+
+  it("actionBlend: full keeps the pre-layer behaviour", () => {
+    const h = harness({
+      clips: ALL_CLIPS,
+      params: { walkSpeed: 2, speed: 6, sprintSpeed: 10, actionBlend: "full" },
+    });
+    h.hold("KeyW");
+    h.ud["actionClip"] = "Cast";
+    h.ud["actionUntil"] = 99;
+    h.setVelocity([0, 0, -6]);
+    h.step();
+
+    expect(h.layers.filter((l) => l !== null)).toEqual([]); // onStart clears once
+    expect(h.lastClip()).toBe("Cast");
+  });
+
+  it("actionBlend: layer keeps the legs even standing still", () => {
+    const h = harness({
+      clips: ALL_CLIPS,
+      params: { walkSpeed: 2, speed: 6, sprintSpeed: 10, actionBlend: "layer" },
+    });
+    h.ud["actionClip"] = "Cast";
+    h.ud["actionUntil"] = 99;
+    h.setVelocity([0, 0, 0]);
+    h.step();
+
+    expect(h.lastLayer()).toBe("Cast");
+    expect(h.lastClip()).toBe("Idle");
   });
 });

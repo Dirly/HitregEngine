@@ -34,6 +34,9 @@ export async function loadAssets(
     { kind: "spritesheets", type: "spritesheet", onlyJson: true },
     { kind: "vfx", type: "vfx", onlyJson: true },
     { kind: "spells", type: "spell", onlyJson: true },
+    // character progression: item definitions and the levelling rules
+    { kind: "items", type: "item", onlyJson: true },
+    { kind: "progression", type: "progression", onlyJson: true },
   ];
   await Promise.all(
     jsonKinds.map(async ({ kind, type, onlyJson }) => {

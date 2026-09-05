@@ -17,6 +17,7 @@ import {
   Profiler,
   registerChunkComponents,
   PlayerDataService,
+  registerCharacterNetState,
   registerCoreAssetTypes,
   registerCoreComponents,
   registerCoreEvents,
@@ -78,6 +79,7 @@ import {
   type StaticBatchHandle,
   type MaterialData,
   type PathMeshSource,
+  PortraitView,
 } from "@hitreg/render";
 import { AudioSystem, type AudioComponentData } from "./audio-system.js";
 import { createVfx, makeVfxHost, warmVfx } from "./vfx-host.js";
@@ -2214,8 +2216,11 @@ async function main(): Promise<void> {
         if (!object) continue;
         object.getWorldPosition(netEntityPos);
         object.getWorldQuaternion(netEntityQuat);
-        const anim =
-          (netObj?.sync.animation ?? true) ? (animations.currentClip(id) ?? undefined) : undefined;
+        const syncAnim = netObj?.sync.animation ?? true;
+        const anim = syncAnim ? (animations.currentClip(id) ?? undefined) : undefined;
+        // the layer rides along with the base clip: without it a peer sees the
+        // gait but never the cast that is playing over it
+        const animL = syncAnim ? (animations.layerClip(id) ?? undefined) : undefined;
         out.push({
           id,
           p: [r3(netEntityPos.x), r3(netEntityPos.y), r3(netEntityPos.z)],
@@ -2226,6 +2231,7 @@ async function main(): Promise<void> {
             r3(netEntityQuat.w),
           ],
           ...(anim ? { anim } : {}),
+          ...(animL ? { animL } : {}),
           relevancy: netObj?.relevancy ?? "always",
           radius: netObj?.radius ?? 50,
           sendEvery: netObj?.sendEvery ?? 1,
@@ -2237,7 +2243,11 @@ async function main(): Promise<void> {
     onWorldEntities: (ids) => suspendForHost(ids),
     getEntityObject: (id) =>
       playMode.get() === "playing" ? (built.objects.get(id) ?? null) : null,
-    setEntityAnim: (id, clip) => animations.play(id, clip, 0.25),
+    setEntityAnim: (id, clip, layer) => {
+      animations.play(id, clip, 0.25);
+      if (layer) animations.playLayer(id, layer, { fade: 0.08, loop: true });
+      else animations.clearLayer(id, 0.15);
+    },
     // replicated gameplay events ride the session event bus in both directions
     collectNetEvents: () => eventBus?.takeOutbox() ?? [],
     onNetEvents: (events) => eventBus?.injectRemote(events),
@@ -2262,6 +2272,8 @@ async function main(): Promise<void> {
   // API they already have; chat routes on the host, voice gates on the sender
   // (docs/comms.md). The link follows the session: host / peer / alone.
   registerCommsNetState(netPresence.netState);
+  // character/<bodyId> sheets (character-sheet builtin) — validated, in the spec
+  registerCharacterNetState(netPresence.netState);
   const commsSelf = netPresence.self();
   const commsPos = new THREE.Vector3();
   const commsFwd = new THREE.Vector3();
@@ -2517,7 +2529,9 @@ async function main(): Promise<void> {
   // -- play mode: physics world + script runtime from the expanded doc --------
 
   const scriptRegistry = new ScriptRegistry();
-  registerBuiltinScripts(scriptRegistry);
+  // events + assets so builtins that declare `static events`/`dataTypes`
+  // (character-sheet's request contracts) register them like project scripts do
+  registerBuiltinScripts(scriptRegistry, events, assets);
   // any default-exported Script class in projects/<game>/scripts/ (self-
   // contained game builds, gitignored — see projects/README.md) or the flat
   // src/scripts/ (throwaway local experiments; the engine repo ships none).
@@ -2618,10 +2632,20 @@ async function main(): Promise<void> {
         animations.play(entityId, clip, fade ?? 0.3, opts?.loop ?? true),
       animationClips: (entityId) => animations.clipNames(entityId),
       setAnimationSpeed: (entityId, multiplier) => animations.setSpeed(entityId, multiplier),
+      setAnimationLayer: (entityId, clip, opts) => animations.playLayer(entityId, clip, opts),
+      clearAnimationLayer: (entityId, fade) => animations.clearLayer(entityId, fade ?? 0.2),
       setBillboard: (entityId, opts) => billboards.setValue(entityId, opts),
       setParticles: (entityId, opts) => particles.setValue(entityId, opts),
       vfx: vfxHost,
       assets,
+      // the character screen's model: the body's runtime object, cloned into a
+      // private scene playing its own idle clip (@hitreg/render PortraitView)
+      renderPortrait: (entityId, canvas, opts) => {
+        const object = built.objects.get(entityId);
+        if (!object) return null;
+        const view = new PortraitView(object, canvas, { ...opts, clips: animations.clipsOf(entityId) });
+        return () => view.dispose();
+      },
       setLight: setRuntimeLight,
       setSky: setRuntimeSky,
       getSky: getRuntimeSky,
@@ -3216,6 +3240,7 @@ async function main(): Promise<void> {
       // but never tell a wrong clip from a wrong playback speed.
       anim: (id: string) => ({
         clip: animations.currentClip(id),
+        layer: animations.layerClip(id),
         clips: animations.clipNames(id),
       }),
       cloth: (id: string) => cloth.swayOf(id)?.toArray() ?? null,

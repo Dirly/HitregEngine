@@ -27,6 +27,7 @@ import {
   FixedTimestepLoop,
   parseManifest,
   NetStateStore,
+  registerCharacterNetState,
   Profiler,
   getVoxelWorld,
   type SceneDoc,
@@ -34,7 +35,7 @@ import {
   type ChunkStreamerData,
   type SpritesheetDoc,
 } from "@hitreg/core";
-import { EngineRenderer, buildScene, type PostFxData, makeMeshGeometryProvider, AnimationSystem, ParticleSystem, BillboardSystem, LightBudgetSystem, FoliageLodSystem, ClusterLodSystem, GrassSystem, type BuildOptions } from "@hitreg/render";
+import { EngineRenderer, buildScene, type PostFxData, makeMeshGeometryProvider, AnimationSystem, ParticleSystem, BillboardSystem, LightBudgetSystem, FoliageLodSystem, ClusterLodSystem, GrassSystem, PortraitView, type BuildOptions } from "@hitreg/render";
 import { createVfx, makeVfxHost, warmVfx } from "./vfx-host.js";
 import { ScriptRegistry, registerBuiltinScripts, ScriptRuntime, InputService, EventBus } from "@hitreg/scripting";
 import { PhysicsSim, initPhysics } from "@hitreg/physics";
@@ -134,8 +135,8 @@ async function main(): Promise<void> {
 
   // 5. scripts
   const scriptRegistry = new ScriptRegistry();
-  registerBuiltinScripts(scriptRegistry);
-  initProjectScripts({ registry: scriptRegistry, events, onReload: undefined });
+  registerBuiltinScripts(scriptRegistry, events, assets);
+  initProjectScripts({ registry: scriptRegistry, events, assets, onReload: undefined });
   const input = new InputService();
 
   // 6. render systems
@@ -183,8 +184,18 @@ async function main(): Promise<void> {
     onClusteredMesh: (_entityId, mesh) => clusterLod.register(mesh),
     bakeImpostor: (object, bounds) => bakeImpostorAtlas(renderer, object, bounds),
     onModelLoaded: (entityId, root, clips) => {
-      const animator = expanded.entities[entityId]?.components["animator"];
-      animations.register(entityId, root, clips, (animator as Parameters<AnimationSystem["register"]>[3]) ?? null);
+      const entity = expanded.entities[entityId];
+      const animator = entity?.components["animator"];
+      // the parent id matters: a character's script sits on the physics body
+      // and its model on a child, and that is how the body's animation calls
+      // reach the model (see AnimationSystem.register)
+      animations.register(
+        entityId,
+        root,
+        clips,
+        (animator as Parameters<AnimationSystem["register"]>[3]) ?? null,
+        entity?.parent ?? null,
+      );
     },
   };
   const built = buildScene(expanded, buildOptions);
@@ -212,6 +223,7 @@ async function main(): Promise<void> {
   // single-player: a local netState store IS the authority (default). Scripts
   // built on netState (like the mall manager) need this to run at all.
   const netState = new NetStateStore();
+  registerCharacterNetState(netState);
   const viewForward = (): [number, number] => {
     const d = camera.getWorldDirection(new THREE.Vector3());
     d.y = 0;
@@ -226,8 +238,18 @@ async function main(): Promise<void> {
     registry: scriptRegistry,
     input,
     viewForward,
+    renderPortrait: (entityId, canvas, opts) => {
+      const object = built.objects.get(entityId);
+      if (!object) return null;
+      const view = new PortraitView(object, canvas, { ...opts, clips: animations.clipsOf(entityId) });
+      return () => view.dispose();
+    },
     netState,
     setAnimation: (id, clip, fade, opts) => animations.play(id, clip, fade ?? 0.3, opts?.loop ?? true),
+    setAnimationLayer: (id, clip, opts) => animations.playLayer(id, clip, opts),
+    clearAnimationLayer: (id, fade) => animations.clearLayer(id, fade ?? 0.2),
+    animationClips: (id) => animations.clipNames(id),
+    setAnimationSpeed: (id, multiplier) => animations.setSpeed(id, multiplier),
     setBillboard: (id, opts) => billboards.setValue(id, opts),
     setParticles: (id, opts) => particles.setValue(id, opts),
     vfx: makeVfxHost(vfx),

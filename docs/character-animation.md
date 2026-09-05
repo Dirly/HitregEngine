@@ -147,6 +147,66 @@ character facing forward and plays the back clip, rather than spinning it round
 to sprint at the camera. Turn it off for the soulslike feel where the character
 always turns to face its movement.
 
+## Layers: casting while running
+
+A character plays **one base clip** — crossfaded, Unity-style — plus **one
+masked layer** over it. The layer is what lets a caster keep running while it
+casts: the clip is restricted to a bone subtree (the upper body by default) and
+the gait keeps everything else.
+
+```ts
+ctx.setAnimationLayer("Cast_Fire", { fade: 0.08, loop: true });
+// … later, or when the action's window ends
+ctx.clearAnimationLayer(0.15);
+```
+
+`third-person-controller` already does this for you. The `actionClip` /
+`actionUntil` channel it has always read now rides on a layer while the
+character is moving and takes the whole body when it is standing still —
+`actionBlend` (`auto` / `layer` / `full`) sets the policy, and a script can
+force one action full-body with `userData.actionFullBody` (a dodge roll is not
+an upper-body affair). **The choice is made once, when the action starts**, so a
+cast does not flip between layered and full-body as you cross the walk
+threshold mid-animation.
+
+**Where the split lands.** The mask defaults to the rig's shallowest
+spine/waist/chest bone — the first joint above the hips, which is the split
+every game uses and the one every rig `retarget` produces has. Override it per
+character with the animator's `upperBody`, or per call with `mask`. A rig with
+no matching bone falls back to a plain full-body play and says so in the
+console: better a cast that stops the legs than a cast nobody sees.
+
+**Why the base clip is re-masked underneath.** Three's mixer *averages* every
+action that touches a binding, weighted. Two full-body actions at weight 1 give
+you a pose half-way between the run and the cast, not a layered one — a
+character casting while doing a strange half-crouch. So an override layer
+re-plays the base clip masked to the complement of what the layer actually
+drives (its playhead carried across, or the legs pop back to frame 0), leaving
+exactly one driver per bone. The complement is measured against the layer
+clip's **tracks**, not against the mask, so a bone the mask covers but the clip
+never animates still gets its motion from the gait instead of freezing.
+
+**Additive layers** (`additive: true`) skip all of that: they accumulate on top
+of the base pose rather than replacing it, which is what aim offsets, leans and
+small hit reactions want. `weight` is meaningful there — it is how much of the
+offset to apply.
+
+Three things to know before you reach for this:
+
+- **A layered clip loses whatever it did below the mask.** A cast animation
+  authored with a big lunge is, layered, a cast with a run underneath. That is
+  usually the point; when it isn't, that clip wants `actionFullBody`.
+- **A one-shot layer holds its last pose until it is cleared.** `loop: false`
+  clamps at the end and raises `animation.completed` (under the name you asked
+  for, not the derived masked clip's). Nothing clears it for you.
+- **Playback rate is the base clip's alone.** `setAnimationSpeed` — the
+  foot-skate cure — scales the gait only, so a cast layered over a sprint plays
+  at its authored speed rather than at sprint rate.
+
+The layer replicates alongside the base clip (`animL` in the entity snapshot,
+and the dedicated server applies the same moving/standing rule to player
+bodies), so other clients see the cast over the run, not one or the other.
+
 ## Free-hanging cloth
 
 A tabard, tassets or a cloak get secondary motion from the `clothSway`

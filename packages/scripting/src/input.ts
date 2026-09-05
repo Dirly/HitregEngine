@@ -34,7 +34,24 @@ export class InputService implements InputLike {
   }
 
   isDown(code: string): boolean {
-    return this.down.has(code);
+    return this.captures.size === 0 && this.down.has(code);
+  }
+
+  private readonly captures = new Set<string>();
+
+  /**
+   * A menu owns the keyboard (see InputLike.captureKeyboard): while any owner
+   * holds a capture, gameplay reads nothing. Keys are still tracked underneath
+   * so releasing mid-press does not leave a phantom key stuck down or lost.
+   */
+  captureKeyboard(owner: string, active: boolean): void {
+    if (active) this.captures.add(owner);
+    else this.captures.delete(owner);
+  }
+
+  /** Whether any menu currently owns the keyboard. */
+  isCaptured(): boolean {
+    return this.captures.size > 0;
   }
 
   /** Host feeds raw pointer-locked mouse movement here (see main.ts's mousemove handler). */

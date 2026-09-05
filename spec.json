@@ -1214,6 +1214,10 @@
         "speed": {
           "default": 1,
           "type": "number"
+        },
+        "upperBody": {
+          "description": "Bone the upper-body animation LAYER masks from — ctx.setAnimationLayer plays a clip on this bone and everything under it while the base clip keeps the rest (cast while running). Leave unset and the rig's first spine/waist bone is used, which is right for every humanoid the retarget tool produces; set it to mask somewhere else.",
+          "type": "string"
         }
       }
     },
@@ -12542,6 +12546,465 @@
         "__schema154": {
           "type": "number",
           "minimum": 0
+        }
+      }
+    },
+    "item": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/__schema0"
+        },
+        "description": {
+          "$ref": "#/$defs/__schema1"
+        },
+        "kind": {
+          "$ref": "#/$defs/__schema2"
+        },
+        "slots": {
+          "$ref": "#/$defs/__schema4"
+        },
+        "stack": {
+          "$ref": "#/$defs/__schema6"
+        },
+        "weight": {
+          "$ref": "#/$defs/__schema8"
+        },
+        "rarity": {
+          "$ref": "#/$defs/__schema10"
+        },
+        "icon": {
+          "$ref": "#/$defs/__schema11"
+        },
+        "tint": {
+          "$ref": "#/$defs/__schema13"
+        },
+        "modifiers": {
+          "$ref": "#/$defs/__schema15"
+        },
+        "requires": {
+          "$ref": "#/$defs/__schema17"
+        },
+        "bag": {
+          "$ref": "#/$defs/__schema19"
+        },
+        "tags": {
+          "$ref": "#/$defs/__schema21"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "description": "An item definition (assets/items/<id>.json). Inventories hold { itemId, qty } stacks — one cell each — that point here, so editing a file updates every copy.",
+      "$defs": {
+        "__schema0": {
+          "type": "string",
+          "minLength": 1
+        },
+        "__schema1": {
+          "default": "",
+          "type": "string"
+        },
+        "__schema2": {
+          "default": "misc",
+          "description": "Broad category for filtering and UI grouping; `slots` decides wearability, not this.",
+          "$ref": "#/$defs/__schema3"
+        },
+        "__schema3": {
+          "type": "string",
+          "enum": [
+            "equipment",
+            "consumable",
+            "material",
+            "quest",
+            "misc"
+          ]
+        },
+        "__schema4": {
+          "default": [],
+          "description": "Slot kinds this item may be worn in (a one-handed sword: [primary, secondary]; a charm: [trinket] fits either trinket slot). Empty = carry-only.",
+          "$ref": "#/$defs/__schema5"
+        },
+        "__schema5": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "helm",
+              "gloves",
+              "chest",
+              "legs",
+              "boots",
+              "jewelry",
+              "trinket",
+              "primary",
+              "secondary",
+              "offhand",
+              "bag"
+            ]
+          }
+        },
+        "__schema6": {
+          "default": 1,
+          "description": "Maximum quantity per stack (one grid cell). 1 = unique instances (every piece of gear).",
+          "$ref": "#/$defs/__schema7"
+        },
+        "__schema7": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9999
+        },
+        "__schema8": {
+          "default": 0,
+          "description": "Kilograms per unit; carried AND worn items count against capacity.",
+          "$ref": "#/$defs/__schema9"
+        },
+        "__schema9": {
+          "type": "number",
+          "minimum": 0
+        },
+        "__schema10": {
+          "default": "common",
+          "type": "string",
+          "enum": [
+            "common",
+            "uncommon",
+            "rare",
+            "epic",
+            "legendary"
+          ]
+        },
+        "__schema11": {
+          "description": "Texture asset id (assets/textures/…) drawn in the inventory cell; absent = the name's initials.",
+          "$ref": "#/$defs/__schema12"
+        },
+        "__schema12": {
+          "type": "string"
+        },
+        "__schema13": {
+          "description": "Accent colour for the cell/tooltip; defaults to the rarity colour.",
+          "$ref": "#/$defs/__schema14"
+        },
+        "__schema14": {
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "__schema15": {
+          "default": {},
+          "description": "Flat additions applied while WORN: attributes (strength…) feed the formulas, derived stats (maxHp, armor…) add after them.",
+          "$ref": "#/$defs/__schema16"
+        },
+        "__schema16": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "enum": [
+              "strength",
+              "dexterity",
+              "constitution",
+              "intelligence",
+              "wisdom",
+              "maxHp",
+              "maxStamina",
+              "maxMana",
+              "armor",
+              "capacity"
+            ]
+          },
+          "additionalProperties": {
+            "type": "number"
+          }
+        },
+        "__schema17": {
+          "default": {},
+          "description": "Minimums to equip, checked against the character's level and EFFECTIVE attributes (base + allocated + worn).",
+          "$ref": "#/$defs/__schema18"
+        },
+        "__schema18": {
+          "type": "object",
+          "properties": {
+            "level": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "strength": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "dexterity": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "constitution": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "intelligence": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "wisdom": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          }
+        },
+        "__schema19": {
+          "description": "For `bag`-slot items: the grid this bag grants while worn. A bag must be empty to be swapped or removed.",
+          "$ref": "#/$defs/__schema20"
+        },
+        "__schema20": {
+          "type": "object",
+          "properties": {
+            "cols": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16
+            },
+            "rows": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16
+            }
+          },
+          "required": [
+            "cols",
+            "rows"
+          ]
+        },
+        "__schema21": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "progression": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "maxLevel": {
+          "$ref": "#/$defs/__schema0"
+        },
+        "pointsPerLevel": {
+          "$ref": "#/$defs/__schema2"
+        },
+        "baseAttributes": {
+          "$ref": "#/$defs/__schema4"
+        },
+        "xp": {
+          "$ref": "#/$defs/__schema6"
+        },
+        "pockets": {
+          "$ref": "#/$defs/__schema8"
+        },
+        "derived": {
+          "$ref": "#/$defs/__schema10"
+        }
+      },
+      "description": "Levelling and stat rules (assets/progression/<id>.json). One per game; a character-sheet script names it by id.",
+      "$defs": {
+        "__schema0": {
+          "default": 20,
+          "description": "Level cap. Experience past the cap is kept but grants nothing.",
+          "$ref": "#/$defs/__schema1"
+        },
+        "__schema1": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200
+        },
+        "__schema2": {
+          "default": 1,
+          "description": "Attribute points granted per level gained; the player spends them one at a time.",
+          "$ref": "#/$defs/__schema3"
+        },
+        "__schema3": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 20
+        },
+        "__schema4": {
+          "description": "Where every attribute starts at level 1, before any points are spent.",
+          "default": {},
+          "$ref": "#/$defs/__schema5"
+        },
+        "__schema5": {
+          "type": "object",
+          "properties": {
+            "strength": {
+              "default": 10,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 999
+            },
+            "dexterity": {
+              "default": 10,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 999
+            },
+            "constitution": {
+              "default": 10,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 999
+            },
+            "intelligence": {
+              "default": 10,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 999
+            },
+            "wisdom": {
+              "default": 10,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 999
+            }
+          }
+        },
+        "__schema6": {
+          "description": "Experience to go from level L to L+1 = round(base × growth^(L−1)).",
+          "default": {},
+          "$ref": "#/$defs/__schema7"
+        },
+        "__schema7": {
+          "type": "object",
+          "properties": {
+            "base": {
+              "default": 100,
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "growth": {
+              "default": 1.25,
+              "type": "number",
+              "minimum": 1,
+              "maximum": 3
+            }
+          }
+        },
+        "__schema8": {
+          "default": {
+            "cols": 4,
+            "rows": 2
+          },
+          "description": "The grid every character always has, bag or no bag.",
+          "$ref": "#/$defs/__schema9"
+        },
+        "__schema9": {
+          "type": "object",
+          "properties": {
+            "cols": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16
+            },
+            "rows": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16
+            }
+          },
+          "required": [
+            "cols",
+            "rows"
+          ]
+        },
+        "__schema10": {
+          "default": {},
+          "type": "object",
+          "properties": {
+            "maxHp": {
+              "default": {
+                "base": 100,
+                "constitution": 10
+              },
+              "$ref": "#/$defs/__schema11"
+            },
+            "maxStamina": {
+              "default": {
+                "base": 100,
+                "dexterity": 4,
+                "constitution": 2
+              },
+              "$ref": "#/$defs/__schema11"
+            },
+            "maxMana": {
+              "default": {
+                "base": 50,
+                "intelligence": 8,
+                "wisdom": 4
+              },
+              "$ref": "#/$defs/__schema11"
+            },
+            "armor": {
+              "default": {
+                "base": 0
+              },
+              "$ref": "#/$defs/__schema11"
+            },
+            "capacity": {
+              "default": {
+                "base": 20,
+                "strength": 2
+              },
+              "$ref": "#/$defs/__schema11"
+            }
+          }
+        },
+        "__schema11": {
+          "type": "object",
+          "properties": {
+            "base": {
+              "$ref": "#/$defs/__schema12"
+            },
+            "strength": {
+              "$ref": "#/$defs/__schema13"
+            },
+            "dexterity": {
+              "$ref": "#/$defs/__schema14"
+            },
+            "constitution": {
+              "$ref": "#/$defs/__schema15"
+            },
+            "intelligence": {
+              "$ref": "#/$defs/__schema16"
+            },
+            "wisdom": {
+              "$ref": "#/$defs/__schema17"
+            }
+          },
+          "description": "base + Σ coefficient × effective attribute; worn-item modifiers add after."
+        },
+        "__schema12": {
+          "default": 0,
+          "type": "number"
+        },
+        "__schema13": {
+          "type": "number"
+        },
+        "__schema14": {
+          "type": "number"
+        },
+        "__schema15": {
+          "type": "number"
+        },
+        "__schema16": {
+          "type": "number"
+        },
+        "__schema17": {
+          "type": "number"
         }
       }
     },

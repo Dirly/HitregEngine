@@ -101,7 +101,7 @@ export class GameServer {
   private readonly tickCost: number[] = [];
   private readonly unsubs: Array<() => void> = [];
   private replicas: ReplicaEntry[] = [];
-  private replicaState = new Map<string, { p: [number, number, number]; q: [number, number, number, number]; anim?: string; syncTransform: boolean }>();
+  private replicaState = new Map<string, { p: [number, number, number]; q: [number, number, number, number]; anim?: string; animL?: string; syncTransform: boolean }>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastMs: number | null = null;
   private accumulator = 0;
@@ -382,7 +382,7 @@ export class GameServer {
   /** Which entities replicate: `netObject`, or the implicit script+rigidbody default. */
   private collectReplicas(): void {
     const replicas: ReplicaEntry[] = [];
-    const state = new Map<string, { p: [number, number, number]; q: [number, number, number, number]; anim?: string; syncTransform: boolean }>();
+    const state = new Map<string, { p: [number, number, number]; q: [number, number, number, number]; anim?: string; animL?: string; syncTransform: boolean }>();
     for (const [id, e] of this.world.entities) {
       const netObj = e.components["netObject"] as NetObjectData | undefined;
       const implicit = e.components["script"] !== undefined && e.components["rigidbody"] !== undefined;
@@ -391,7 +391,9 @@ export class GameServer {
       const p = this.world.positionOf(id);
       const q = this.world.quaternionOf(id);
       if (!p || !q) continue;
-      const anim = (netObj?.sync.animation ?? true) ? this.world.anims.get(id) : undefined;
+      const syncAnim = netObj?.sync.animation ?? true;
+      const anim = syncAnim ? this.world.anims.get(id) : undefined;
+      const animL = syncAnim ? this.world.animLayers.get(id) : undefined;
       replicas.push({
         id,
         p,
@@ -403,6 +405,7 @@ export class GameServer {
         p: [r3(p[0]), r3(p[1]), r3(p[2])],
         q: [r3(q[0]), r3(q[1]), r3(q[2]), r3(q[3])],
         ...(anim ? { anim } : {}),
+        ...(animL ? { animL } : {}),
         syncTransform: netObj?.sync.transform ?? true,
       });
     }
@@ -447,7 +450,12 @@ export class GameServer {
       const s = this.replicaState.get(r.id);
       if (!s || !s.syncTransform) continue;
       if (!enteredSet.has(r.id) && !dueThisTick(r, tick)) continue;
-      updates[r.id] = { p: s.p, q: s.q, ...(s.anim ? { anim: s.anim } : {}) };
+      updates[r.id] = {
+        p: s.p,
+        q: s.q,
+        ...(s.anim ? { anim: s.anim } : {}),
+        ...(s.animL ? { animL: s.animL } : {}),
+      };
     }
     state["entities"] = { managed: visible.map((r) => r.id), updates, removed: left };
     return state;

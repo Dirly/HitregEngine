@@ -13,6 +13,7 @@ import { spritesheetSchema } from "./spritesheet.js";
 import { worldRecipeSchema } from "./voxel/recipe.js";
 import { vfxEffectSchema } from "./vfx/modules.js";
 import { spellSchema } from "./vfx/spell.js";
+import { registerCharacterAssetTypes } from "./character/index.js";
 
 export const terrainHeightfieldSchema = z.object({
   version: z.literal(1).default(1),
@@ -38,6 +39,8 @@ export function registerCoreAssetTypes(assets: AssetLibrary): void {
   // the module vocabulary a generator draws from, and what it produced.
   assets.defineDataType("vfx", vfxEffectSchema);
   assets.defineDataType("spell", spellSchema);
+  // Items and levelling rules (assets/items/*.json, assets/progression/*.json).
+  registerCharacterAssetTypes(assets);
   registerThemeAssetType(assets);
 }
 

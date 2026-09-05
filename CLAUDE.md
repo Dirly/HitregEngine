@@ -242,6 +242,17 @@ The primary AI channel is **direct file editing** — no MCP required:
   of it; two traps: sizes are multiples of the archetype radius (a preset that
   hard-codes metres is a bug), and lights are a fixed slot pool (toggling
   lights recompiles every lit shader).
+- **Character progression + grid inventory** (levels, five attributes, a
+  paper doll of equipment slots, an Arc-Raiders-style grid): items are data
+  assets in `assets/items/<id>.json`, the rules (level cap, xp curve, points,
+  pockets grid, stat formulas) one `assets/progression/<id>.json`; a body
+  carries a `character-sheet` script (authority-owned sheet in netState
+  `character/<bodyId>`, pure reducers in `@hitreg/core`) and a scene carries
+  one `character-ui` (client view, `I` toggles it, 9-slice CSS skins). Clients
+  never write the sheet — every drag is a `to-authority` request, grants
+  (`character.xp`, `inventory.give`) are authority-internal. Field lists: the
+  spec; judgment + the silent traps (`.prefault({})`, pass `events` to
+  `registerBuiltinScripts`): **docs/character-progression.md**.
 - **Dedicated server** (`@hitreg/server`): `pnpm -F @hitreg/server serve --scene <name>`
   hosts any project scene headless — same sim, no renderer — and every tab
   opened with `?server=ws://host:port` becomes its client (no P2P election).

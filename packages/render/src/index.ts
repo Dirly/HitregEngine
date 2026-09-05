@@ -210,4 +210,5 @@ export {
 } from "./decals.js";
 
 export { voxelGeometry, voxelColliderProxyGeometry } from "./voxel-geometry.js";
+export { PortraitView, type PortraitOptions } from "./portrait.js";
 export { buildTerrainSplatMaterial, SPLAT_ATTRIBUTE, type SplatData } from "./terrain-splat.js";

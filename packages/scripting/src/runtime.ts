@@ -1,4 +1,4 @@
-import type { LiveSkyOptions, LiveSkyBase, BiomeAt } from "./script.js";
+import type { AnimationLayerOptions, LiveSkyOptions, LiveSkyBase, BiomeAt } from "./script.js";
 import type * as THREE from "three";
 import type { NetStateStore, PlayerDataService, ProfilerLike, SceneDoc } from "@hitreg/core";
 import type {
@@ -32,6 +32,10 @@ export interface RuntimeOptions {
   animationClips?: (entityId: string) => string[];
   /** Host animation hook: scale playback rate (1 = authored). */
   setAnimationSpeed?: (entityId: string, multiplier: number) => void;
+  /** Host animation hook: play a clip on a masked layer over the base clip. */
+  setAnimationLayer?: (entityId: string, clip: string, opts?: AnimationLayerOptions) => void;
+  /** Host animation hook: fade the layer out, restoring the full-body base. */
+  clearAnimationLayer?: (entityId: string, fadeSeconds?: number) => void;
   /** Host audio hook: play an entity's audio component or a sound asset id. */
   playSound?: (entityId: string, soundId?: string) => void;
   /** Host billboard hook: mutate an entity's billboard (fill/text/visible). */
@@ -71,9 +75,23 @@ export interface RuntimeOptions {
    */
   vfx?: RuntimeVfxHost;
   /** Data-asset lookup for ctx.getDataAsset and for effects/spells passed by id. */
-  assets?: { getDataAsset(id: string): { id: string; type: string; data: unknown } | undefined };
+  assets?: {
+    getDataAsset(id: string): { id: string; type: string; data: unknown } | undefined;
+    /** Texture asset by id (an `AssetLibrary` fits) — backs ctx.textureUrl for DOM UI icons. */
+    getTexture?(id: string): { url: string } | undefined;
+  };
   /** Experience-scoped persistence for the local player (ARCHITECTURE §3c). */
   playerData?: PlayerDataService;
+  /**
+   * Host portrait hook (a `@hitreg/render` PortraitView behind it): render an
+   * entity's live runtime object into a DOM canvas for character-screen UI.
+   * Absent on headless hosts; see ScriptContext.renderPortrait.
+   */
+  renderPortrait?: (
+    entityId: string,
+    canvas: HTMLCanvasElement,
+    opts?: { spin?: number; clip?: string },
+  ) => (() => void) | null;
   /**
    * Session event bus. The runtime emits the built-in engine events on it
    * (entity.spawned/destroyed, collision, trigger.enter/exit), exposes it to
@@ -272,6 +290,8 @@ export class ScriptRuntime {
 
   /** Unhook every event subscription a script's ctx.events made. */
   private dropSubscriptions(id: string): void {
+    // a menu that died while open must not leave the keyboard captured
+    this.opts.input.captureKeyboard?.(id, false);
     const subs = this.subscriptions.get(id);
     if (!subs) return;
     this.subscriptions.delete(id);
@@ -317,6 +337,15 @@ export class ScriptRuntime {
         ...(this.opts.setAnimationSpeed
           ? { setAnimationSpeed: (multiplier: number) => this.opts.setAnimationSpeed!(id, multiplier) }
           : {}),
+        ...(this.opts.setAnimationLayer
+          ? {
+              setAnimationLayer: (clip: string, opts?: AnimationLayerOptions) =>
+                this.opts.setAnimationLayer!(id, clip, opts),
+            }
+          : {}),
+        ...(this.opts.clearAnimationLayer
+          ? { clearAnimationLayer: (fade?: number) => this.opts.clearAnimationLayer!(id, fade) }
+          : {}),
         ...(this.opts.playSound
           ? { playSound: (soundId?: string) => this.opts.playSound!(id, soundId) }
           : {}),
@@ -358,7 +387,16 @@ export class ScriptRuntime {
           : {}),
         ...(this.opts.vfx ? { vfx: this.scopedVfx(id, this.opts.vfx) } : {}),
         ...(this.opts.assets ? { getDataAsset: (assetId: string) => this.opts.assets!.getDataAsset(assetId) } : {}),
+        ...(this.opts.assets?.getTexture
+          ? { textureUrl: (textureId: string) => this.opts.assets!.getTexture!(textureId)?.url }
+          : {}),
         ...(this.opts.playerData ? { playerData: this.opts.playerData } : {}),
+        ...(this.opts.renderPortrait
+          ? {
+              renderPortrait: (entityId: string, canvas: HTMLCanvasElement, opts?: { spin?: number; clip?: string }) =>
+                this.opts.renderPortrait!(entityId, canvas, opts),
+            }
+          : {}),
         ...(this.opts.events ? { events: this.scopedEvents(id, this.opts.events) } : {}),
         ...(this.opts.netState ? { netState: this.scopedNetState(id, this.opts.netState) } : {}),
         ...(this.opts.chat ? { chat: this.scopedChat(id, this.opts.chat) } : {}),

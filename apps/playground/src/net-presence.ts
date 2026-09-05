@@ -104,8 +104,8 @@ export interface NetPresenceOptions {
   onWorldEntities?(ids: string[]): void;
   /** Peer: resolve a replicated entity to its render object (ghost target). */
   getEntityObject?(id: string): THREE.Object3D | null;
-  /** Peer: apply a replicated animation clip change. */
-  setEntityAnim?(id: string, clip: string): void;
+  /** Peer: apply a replicated animation clip change (plus the layer clip over it, if any). */
+  setEntityAnim?(id: string, clip: string, layer?: string | null): void;
 
   // -- replicated gameplay events ----------------------------------------------
   /**
@@ -142,6 +142,8 @@ export interface NetReplica {
   p: [number, number, number];
   q: [number, number, number, number];
   anim?: string;
+  /** Layer clip over `anim` (an upper-body cast while the gait keeps running). */
+  animL?: string;
   relevancy: "always" | "proximity";
   radius: number;
   sendEvery: number;
@@ -154,6 +156,7 @@ export interface NetWorldEntity {
   p: [number, number, number];
   q: [number, number, number, number];
   anim?: string;
+  animL?: string;
 }
 
 interface PresencePlayer {
@@ -516,11 +519,12 @@ export class NetPresence {
       if (!object) continue;
       object.position.set(s.p[0], s.p[1], s.p[2]);
       if (s.q) object.quaternion.set(s.q[0], s.q[1], s.q[2], s.q[3]);
-      const anim = (s.data as { anim?: string } | undefined)?.anim;
+      const state = s.data as { anim?: string; animL?: string } | undefined;
       // applied every frame, NOT cached here: the animation system is the
-      // source of truth (its play() no-ops on the current clip) — a cache
-      // in this layer goes stale whenever the app's play session restarts
-      if (anim) this.opts.setEntityAnim?.(id, anim);
+      // source of truth (its play() and playLayer() no-op on the clip already
+      // running) — a cache in this layer goes stale whenever the app's play
+      // session restarts
+      if (state?.anim) this.opts.setEntityAnim?.(id, state.anim, state.animL ?? null);
     }
   }
 
@@ -755,7 +759,12 @@ export class NetPresence {
       if (!view.has(r.id) || !r.syncTransform) continue;
       // entering entities always get a full update; the rest honor cadence
       if (!enteredSet.has(r.id) && !dueThisTick(r, this.tick)) continue;
-      updates[r.id] = { p: r.p, q: r.q, ...(r.anim ? { anim: r.anim } : {}) };
+      updates[r.id] = {
+        p: r.p,
+        q: r.q,
+        ...(r.anim ? { anim: r.anim } : {}),
+        ...(r.animL ? { animL: r.animL } : {}),
+      };
     }
     state["entities"] = { managed: replicas.map((r) => r.id), updates, removed: left };
     return state;
@@ -1029,14 +1038,17 @@ export class NetPresence {
         : {};
     const entitySnaps: Record<string, TransformSnap> = {};
     for (const [id, raw] of Object.entries(updates)) {
-      const e = raw as { p?: unknown; q?: unknown; anim?: unknown } | null;
+      const e = raw as { p?: unknown; q?: unknown; anim?: unknown; animL?: unknown } | null;
       if (!isFiniteVec(e?.p, 3) || !isFiniteVec(e?.q, 4)) continue;
       const p = e!.p as number[];
       const q = e!.q as number[];
       entitySnaps[id] = {
         p: [p[0]!, p[1]!, p[2]!],
         q: [q[0]!, q[1]!, q[2]!, q[3]!],
-        data: typeof e!.anim === "string" ? { anim: e!.anim } : undefined,
+        data:
+          typeof e!.anim === "string"
+            ? { anim: e!.anim, ...(typeof e!.animL === "string" ? { animL: e!.animL } : {}) }
+            : undefined,
       };
     }
     this.entitiesInterp.push(tick, entitySnaps);

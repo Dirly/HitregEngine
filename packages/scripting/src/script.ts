@@ -26,6 +26,22 @@ export interface LiveSkyOptions {
   refreshEnvironment?: boolean;
 }
 
+/** Mirrors `LayerOptions` in @hitreg/render (scripting takes no render dependency). */
+export interface AnimationLayerOptions {
+  /** Crossfade seconds into the layer, and back out of it on clear. */
+  fade?: number;
+  /** Loop the layer clip; the default plays it once and holds the last pose. */
+  loop?: boolean;
+  /** 0..1 — how much of the layer to apply. Only meaningful for additive. */
+  weight?: number;
+  /** Bone to mask from; defaults to the animator's `upperBody` / the first spine bone. */
+  mask?: string;
+  /** Add onto the base pose (aim offsets, leans) instead of replacing it. */
+  additive?: boolean;
+  /** Replay from frame 0 even if this clip is already the layer. */
+  restart?: boolean;
+}
+
 /** What `ctx.biomeAt` reports: the voxel world's biome blend at a point. */
 export interface BiomeAt {
   /** The winning labelled biome rule. */
@@ -118,6 +134,18 @@ export interface ScriptContext {
    * for foot-skate on in-place locomotion clips — see AnimationSystem.setSpeed.
    */
   setAnimationSpeed?(multiplier: number): void;
+  /**
+   * Play a clip on a masked LAYER over whatever the base clip is doing — cast
+   * or swing while the legs keep running. The mask defaults to the upper body
+   * (the animator's `upperBody` bone, else the rig's first spine bone) and the
+   * layer REPLACES the base on those bones; `additive: true` adds the clip's
+   * motion on top of the base instead, which is what aim offsets and leans
+   * want. A one-shot holds its last pose until cleared, so pair this with
+   * clearAnimationLayer or the "animation.completed" event.
+   */
+  setAnimationLayer?(clip: string, opts?: AnimationLayerOptions): void;
+  /** Fade the animation layer out and give the base clip the whole body back. */
+  clearAnimationLayer?(fadeSeconds?: number): void;
   /** Play this entity's audio component, or any sound asset id, at this entity. */
   playSound?(soundId?: string): void;
   /** Mutate this entity's billboard at runtime (HP bar fill, label text) — never the document. */
@@ -162,6 +190,24 @@ export interface ScriptContext {
   vfx?: ScriptVfx;
   /** Read a data asset (ScriptableObject) by id — a spell, a loot table, a material. */
   getDataAsset?(id: string): { id: string; type: string; data: unknown } | undefined;
+  /**
+   * Resolve a texture asset id (assets/textures/…) to a URL the host can
+   * load — for DOM UI (an inventory cell's icon), never for materials, which
+   * reference textures by id on the material asset. Undefined = unknown id.
+   */
+  textureUrl?(id: string): string | undefined;
+  /**
+   * Draw a portrait of an entity (its runtime object, playing `clip` —
+   * default "Idle" — on its own mixer) into a DOM canvas — the character
+   * screen's model. Returns a dispose function, or null when the host cannot
+   * (headless, or the entity has no runtime object yet). `spin` is a
+   * turntable in rad/s.
+   */
+  renderPortrait?(
+    entityId: string,
+    canvas: HTMLCanvasElement,
+    opts?: { spin?: number; clip?: string },
+  ): (() => void) | null;
   /**
    * Rebuild THIS entity's `mesh.source.kind: "path"` geometry from new
    * control points (world space) — for a rope/chain/cable whose shape comes
@@ -260,6 +306,15 @@ export interface InputLike {
    * hosts may omit this; scripts should treat a missing method as [0, 0].
    */
   mouseDelta?(): [number, number];
+  /**
+   * A menu owns the keyboard. While any owner holds a capture, `isDown`
+   * reports nothing to gameplay scripts (movement stops, abilities do not
+   * fire) — the DOM still receives the keys, so the menu itself keeps
+   * working. Reference-counted by `owner` so two open panels do not fight;
+   * every capture a script holds is released when it disposes. Hosts without
+   * a keyboard (a dedicated server) may omit it.
+   */
+  captureKeyboard?(owner: string, active: boolean): void;
 }
 
 /**

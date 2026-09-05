@@ -131,6 +131,17 @@ export function installLiveSync(deps: LiveSyncDeps): void {
           if (assets.getPrefab(id)) assets.updatePrefab(id, doc);
           else assets.addPrefab(id, doc);
           assetsVersion.set(assetsVersion.get() + 1);
+        } else if (file.startsWith("items/") || file.startsWith("progression/")) {
+          // Item definitions and levelling rules are read live by the
+          // character scripts (ctx.getDataAsset on every reducer call), so
+          // updating the asset is the whole hot-reload — no scene rebuild.
+          // An invalid file is rejected by the schema and the old values stay.
+          const kind = file.slice(0, file.indexOf("/"));
+          const type = kind === "items" ? "item" : "progression";
+          const id = file.slice(kind.length + 1).replace(/\.json$/, "");
+          const asset = { id, type, name: id, data: JSON.parse(content) };
+          if (assets.getDataAsset(id)) assets.updateDataAsset(asset);
+          else assets.addDataAsset(asset);
         } else if (file.startsWith("worlds/")) {
           // A world recipe governs EVERY generated cell at once, so there is
           // nothing finer to invalidate: re-register it, drop the cached cell

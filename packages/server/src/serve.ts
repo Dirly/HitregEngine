@@ -61,7 +61,7 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
   }
   const registry = defaultRegistry();
   const events = defaultEvents();
-  const scripts = defaultScripts();
+  const scripts = defaultScripts(events);
   const report = await loadProjectScripts(content.scriptDirs, scripts, events, content.assets);
   log(`[serve] scripts: ${report.registered.length} registered${report.skipped.length ? `, ${report.skipped.length} skipped` : ""}`);
   for (const s of report.skipped) log(`  - ${s.file}: ${s.reason}`);

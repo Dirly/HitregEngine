@@ -200,24 +200,33 @@ export class PlayerDriver {
    * The clip other clients should see this body play. The client-side
    * controller picks its gait off measured velocity; this is the same ladder
    * (idle / walk / run / sprint, air while off the ground, and the combat
-   * scripts' one-shot `actionClip` override) so a remote player animates
-   * like a local one.
+   * scripts' one-shot `actionClip`) so a remote player animates like a local
+   * one — including the split the controller makes between an action that
+   * owns the whole body and one that rides on an upper-body LAYER over the
+   * gait. Without that split here, a peer would see a caster standing still
+   * casting while it slid along the ground.
    */
   private gaitClip(
-    ud: { actionClip?: string; actionUntil?: number; frozen?: boolean },
+    ud: { actionClip?: string; actionUntil?: number; actionFullBody?: boolean; frozen?: boolean },
     vx: number,
     vy: number,
     vz: number,
     simNow: number,
-  ): string {
-    if (ud.actionClip && (ud.actionUntil ?? 0) > simNow) return ud.actionClip;
-    if (ud.frozen) return this.clips.idle;
-    if (vy > 0.8 || vy < -2) return this.clips.air;
+  ): { clip: string; layer?: string } {
     const moving = Math.hypot(vx, vz);
-    if (moving < Math.max(0.15, this.walkSpeed * 0.35)) return this.clips.idle;
-    if (moving < (this.walkSpeed + this.runSpeed) / 2) return this.clips.walk;
-    if (moving < (this.runSpeed + this.sprintSpeed) / 2) return this.clips.run;
-    return this.clips.sprint;
+    const action = ud.actionClip && (ud.actionUntil ?? 0) > simNow ? ud.actionClip : null;
+    const layered =
+      action !== null &&
+      ud.actionFullBody !== true &&
+      moving > Math.max(0.2, this.walkSpeed * 0.5);
+    if (action && !layered) return { clip: action };
+    const layer = layered ? { layer: action! } : {};
+    if (ud.frozen) return { clip: this.clips.idle, ...layer };
+    if (vy > 0.8 || vy < -2) return { clip: this.clips.air, ...layer };
+    if (moving < Math.max(0.15, this.walkSpeed * 0.35)) return { clip: this.clips.idle, ...layer };
+    if (moving < (this.walkSpeed + this.runSpeed) / 2) return { clip: this.clips.walk, ...layer };
+    if (moving < (this.runSpeed + this.sprintSpeed) / 2) return { clip: this.clips.run, ...layer };
+    return { clip: this.clips.sprint, ...layer };
   }
 
   /** The before-step hook. */
@@ -236,6 +245,7 @@ export class PlayerDriver {
         impulseUntil?: number;
         actionClip?: string;
         actionUntil?: number;
+        actionFullBody?: boolean;
       };
       const input = player.input;
       const fresh = input !== null && nowMs - input.at <= this.staleMs;
@@ -261,7 +271,10 @@ export class PlayerDriver {
       }
       sim.setLinvel(player.bodyId, [vx, vy, vz]);
       if (object && fresh) object.rotation.set(0, input!.yaw, 0);
-      this.world.anims.set(player.bodyId, this.gaitClip(ud, vx, vel[1], vz, simNow));
+      const anim = this.gaitClip(ud, vx, vel[1], vz, simNow);
+      this.world.anims.set(player.bodyId, anim.clip);
+      if (anim.layer) this.world.animLayers.set(player.bodyId, anim.layer);
+      else this.world.animLayers.delete(player.bodyId);
     }
   };
 }
