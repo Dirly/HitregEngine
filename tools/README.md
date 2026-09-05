@@ -17,7 +17,7 @@ arrangement as `apps/playground/projects/`. No submodule, no gitlink.
 | Folder            | Tool id                | What it does |
 | ----------------- | ---------------------- | ------------ |
 | `atlas/`          | `hitreg.armor-atlas`   | Registers generated armor art against the character UV key, preserves cyan cutouts, packs a game-ready atlas with bleed. |
-| `wfc-3d/`         | `hitreg.wfc-3d`        | 3D wave-function-collapse over a prefab tileset; emits a reusable prefab of nested instances. |
+| `wfc-3d/`         | `hitreg.wfc-3d`        | 3D wave-function-collapse over a prefab tileset; emits a reusable prefab of nested instances. `kit.mjs` turns a modelled kit (parts + example structures) into atlased modules, cell prefabs and a learned tileset. |
 | `texture-intake/` | —                      | Normalizes dropped image sets into the material map channels the renderer expects. |
 
 These are tracked because they are the reference implementations of the

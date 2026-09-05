@@ -2,7 +2,7 @@
   "version": 1,
   "id": "hitreg.wfc-3d",
   "name": "3D Prefab WFC",
-  "description": "Collapse a socket-authored 3D tile grid into a reusable composite prefab. Every occupied cell is a nested prefab instance; the tool never emits raw geometry.",
+  "description": "Collapse a 3D tile grid into a reusable composite prefab. Every occupied cell is a nested prefab instance; the tool never emits raw geometry. Tilesets are hand-authored (exact socket matching) or LEARNED from a modelled kit by tools/wfc-3d/kit.mjs (parts + example structures in, atlased modules + cell prefabs + a tileset with learned face pairs out).",
   "category": "World/Generate",
   "surfaces": ["tools", "assets"],
   "permissions": ["assets.write:prefabs"],
@@ -11,7 +11,7 @@
     "tileset": {
       "kind": "file",
       "label": "Prefab tileset",
-      "description": "JSON describing prefab tiles, their six face sockets, weights, allowed Y rotations, optional boundary sockets, and pinned cells. See tools/wfc-3d/README.md.",
+      "description": "JSON describing prefab tiles, their six face sockets, weights, allowed Y rotations, optional boundary sockets, and pinned cells — or a learned tileset written by the kit importer (assets/wfc/<kit>.tileset.json), which adds allowed face pairs, an outside tile and UV-alignment overrides. See tools/wfc-3d/README.md.",
       "accept": ["application/json"],
       "maxBytes": 1048576
     },

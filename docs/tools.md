@@ -92,4 +92,8 @@ remain in the run record.
 format and authoring judgment live beside the tool in its README. Its output is
 a reusable prefab with an empty anchor and nested prefab instances, so placing
 the result remains an ordinary scene op and source prefabs continue to
-propagate edits.
+propagate edits. The tileset is normally not hand-written: `tools/wfc-3d/kit.mjs`
+(`pnpm -F playground wfc import|solve|inspect`) reads a kit of modelled parts
+and example structures built from them, atlases the textures, composes cell
+prefabs and learns the allowed face pairs, and the registered runner consumes
+that tileset unchanged.

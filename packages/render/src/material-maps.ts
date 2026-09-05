@@ -1,9 +1,11 @@
 import * as THREE from "three/webgpu";
+import { bumpShadowPassMaterials } from "./shadow-pass-material.js";
 import {
   abs,
   add,
   cameraViewMatrix,
   float,
+  int,
   max,
   normalWorldGeometry,
   normalize,
@@ -478,7 +480,14 @@ export function applyMaterialCommon(material: THREE.Material, data: MaterialData
   const { transparent, alphaTest } = resolveTransparency(data);
   material.side = SIDES[data.side ?? "front"];
   material.transparent = transparent;
+  // a LIVE material flipping between cutout and opaque changes the shadow
+  // variant its casters need; the shadow-pass materials no longer notice on
+  // their own (see shadow-pass-material.ts), so tell them. `version > 0`
+  // means this material has been through at least one needsUpdate, i.e. it
+  // is being edited rather than built.
+  const cutoutFlips = material.alphaTest > 0 !== alphaTest > 0 && material.version > 0;
   material.alphaTest = alphaTest;
+  if (cutoutFlips) bumpShadowPassMaterials();
   // NEVER force this to false: the poly-mesh path turns vertexColors on for
   // face-tinted meshes by cloning the material after it is built, and the
   // schema field exists for the OTHER case (imported geometry with COLOR_0).
@@ -486,6 +495,8 @@ export function applyMaterialCommon(material: THREE.Material, data: MaterialData
   if ((data.shader ?? "standard") === "standard") {
     const pbr = material as THREE.Material & { envMapIntensity?: number; envMap?: THREE.Texture | null };
     pbr.envMapIntensity = data.envMapIntensity ?? 1;
+    material.userData[ENV_BASE] = pbr.envMapIntensity;
+    pbr.envMapIntensity *= environmentScale;
     if (currentEnvironment) pbr.envMap = currentEnvironment;
     environmentMaterials.add(material);
   }
@@ -520,6 +531,29 @@ const environmentMaterials = new Set<THREE.Material>();
  * it covers materials this module didn't build, e.g. glTF-embedded ones — but
  * this call is what makes the per-material knob mean anything.
  */
+let environmentScale = 1;
+const ENV_BASE = "hitregEnvBase";
+
+/**
+ * Scale every environment-lit material's IBL at once, on top of its authored
+ * `envMapIntensity` — three ignores `scene.environmentIntensity` for a
+ * material that carries its own envMap (see `setEnvironment`), so a
+ * day/night script dims reflections here. A plain uniform write per
+ * material; nothing recompiles.
+ */
+export function setEnvironmentScale(scale: number): void {
+  environmentScale = Math.max(0, scale);
+  for (const material of environmentMaterials) applyEnvironmentScale(material);
+}
+
+function applyEnvironmentScale(material: THREE.Material): void {
+  const pbr = material as THREE.Material & { envMapIntensity?: number };
+  if (pbr.envMapIntensity === undefined) return;
+  const base = (material.userData[ENV_BASE] as number | undefined) ?? pbr.envMapIntensity;
+  material.userData[ENV_BASE] = base;
+  pbr.envMapIntensity = base * environmentScale;
+}
+
 export function setEnvironment(environment: THREE.Texture | null): void {
   currentEnvironment = environment;
   for (const material of environmentMaterials) {
@@ -600,6 +634,24 @@ export function worldTriplanarBasis(scale: N, warp?: N | null): TriplanarBasis {
 /** Blend three axis samples of one texture by a basis's weights. */
 export function sampleTriplanar(basis: TriplanarBasis, texture: THREE.Texture): N {
   return triplanarSample(basis, texture);
+}
+
+/**
+ * Triplanar sample of ONE slice of a 2D array texture.
+ *
+ * A palette of sixteen ground textures cannot be sixteen bindings: WebGPU
+ * guarantees only 16 sampled textures and 16 samplers per shader stage, and
+ * the shadow map and the rest of the material need some of those, so the
+ * terrain pipeline simply failed to build past twelve layers. An array is one
+ * binding and one sampler however deep it is — the fetch count per fragment
+ * is unchanged, the binding count is what this fixes.
+ */
+export function sampleTriplanarLayer(basis: TriplanarBasis, texture: THREE.DataArrayTexture, layer: number): N {
+  const depth = int(layer);
+  const x: N = (tslTexture(texture, basis.uvX) as N).depth(depth).mul(basis.blend.x);
+  const y: N = (tslTexture(texture, basis.uvY) as N).depth(depth).mul(basis.blend.y);
+  const z: N = (tslTexture(texture, basis.uvZ) as N).depth(depth).mul(basis.blend.z);
+  return add(x, y, z);
 }
 
 /** Triplanar tangent-space normal samples -> one world normal (whiteout blend). */

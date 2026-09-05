@@ -34,6 +34,8 @@ interface TileDraft {
   offset: Vec3;
   rotations: Rotation[];
   sockets: Record<Direction, string>;
+  /** Learned tilesets (tools/wfc-3d/kit.mjs): children whose texture counter-rotates; passed through untouched. */
+  alignUv?: unknown;
 }
 
 interface TilesetDraft {
@@ -43,6 +45,11 @@ interface TilesetDraft {
   boundary: Partial<Record<Direction, string>>;
   tiles: TileDraft[];
   pins: Array<{ at: Vec3; tile: string; rotation?: Rotation }>;
+  /** Learned tilesets: allowed face pairs and the tile beyond the grid. The
+   * form does not edit these, but dropping them would silently turn a learned
+   * tileset back into exact-socket matching, so they ride along. */
+  adjacency?: unknown;
+  outside?: unknown;
 }
 
 interface PreviewBounds {
@@ -137,6 +144,7 @@ function normalizeImported(raw: unknown): TilesetDraft {
       sockets: Object.fromEntries(
         DIRECTIONS.map(({ id }) => [id, typeof sockets[id] === "string" ? sockets[id] : "open"]),
       ) as Record<Direction, string>,
+      ...(tile.alignUv !== undefined ? { alignUv: tile.alignUv } : {}),
     };
   });
   const boundaryRaw = value.boundary && typeof value.boundary === "object" && !Array.isArray(value.boundary)
@@ -155,6 +163,8 @@ function normalizeImported(raw: unknown): TilesetDraft {
     boundary,
     tiles,
     pins,
+    ...(value.adjacency !== undefined ? { adjacency: value.adjacency } : {}),
+    ...(typeof value.outside === "string" ? { outside: value.outside } : {}),
   };
 }
 

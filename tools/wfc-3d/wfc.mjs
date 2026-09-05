@@ -75,6 +75,14 @@ export function parseTileset(raw) {
       }
       sockets[direction] = socket;
     }
+    const alignUv = (input.alignUv ?? []).map((entry, i) => {
+      if (!isRecord(entry) || typeof entry.child !== "string" || entry.child === "") {
+        fail(`tile "${input.id}" alignUv[${i}] must be { child, factor? }`);
+      }
+      const factor = entry.factor ?? -1;
+      if (factor !== 1 && factor !== -1) fail(`tile "${input.id}" alignUv[${i}].factor must be 1 or -1`);
+      return { child: entry.child, factor };
+    });
     return {
       id: input.id,
       prefabId: input.prefabId,
@@ -82,6 +90,7 @@ export function parseTileset(raw) {
       offset: [...offset],
       rotations: [...rotations],
       sockets,
+      alignUv,
     };
   });
 
@@ -117,7 +126,53 @@ export function parseTileset(raw) {
     return { at: [...pin.at], tile: pin.tile, rotation: pin.rotation };
   });
 
-  return { version: 1, name: raw.name, cellSize: [...cellSize], tiles, boundary, pins };
+  let adjacency = null;
+  if (raw.adjacency !== undefined) {
+    if (!isRecord(raw.adjacency)) fail("adjacency must be { horizontal: [[a,b]...], vertical: [[lowerPy, upperNy]...] }");
+    const pairs = (list, name) => {
+      if (list === undefined) return [];
+      if (!Array.isArray(list)) fail(`adjacency.${name} must be an array of [a, b] pairs`);
+      return list.map((pair, i) => {
+        if (!Array.isArray(pair) || pair.length !== 2 || pair.some((v) => typeof v !== "string" || v === "")) {
+          fail(`adjacency.${name}[${i}] must be two non-empty socket strings`);
+        }
+        return [pair[0], pair[1]];
+      });
+    };
+    adjacency = { horizontal: pairs(raw.adjacency.horizontal, "horizontal"), vertical: pairs(raw.adjacency.vertical, "vertical") };
+  }
+
+  let outside;
+  if (raw.outside !== undefined) {
+    if (typeof raw.outside !== "string" || !seen.has(raw.outside)) fail("outside must name a declared tile");
+    outside = raw.outside;
+  }
+
+  return { version: 1, name: raw.name, cellSize: [...cellSize], tiles, boundary, pins, adjacency, outside };
+}
+
+/**
+ * Face compatibility. Without `adjacency` two touching faces must carry the
+ * same socket string (the hand-authored model). With it, the LEARNED pairs
+ * are the whole rule: horizontal pairs are unordered, vertical pairs are
+ * (lower cell's py, upper cell's ny). `direction` is the face of the FIRST
+ * socket's cell that touches the second's cell.
+ */
+export function faceCompatibility(tileset) {
+  if (!tileset.adjacency) {
+    return (a, _direction, b) => a === b;
+  }
+  const horizontal = new Set();
+  for (const [a, b] of tileset.adjacency.horizontal) {
+    horizontal.add(`${a}|${b}`);
+    horizontal.add(`${b}|${a}`);
+  }
+  const vertical = new Set(tileset.adjacency.vertical.map(([lower, upper]) => `${lower}|${upper}`));
+  return (a, direction, b) => {
+    if (direction === "py") return vertical.has(`${a}|${b}`);
+    if (direction === "ny") return vertical.has(`${b}|${a}`);
+    return horizontal.has(`${a}|${b}`);
+  };
 }
 
 function directionForVector(x, y, z) {
@@ -155,6 +210,7 @@ function variantsFor(tileset) {
       key: `${tile.id}@${rotation}`,
       tileId: tile.id,
       prefabId: tile.prefabId,
+      alignUv: tile.alignUv,
       rotation,
       // Rotation variants split, rather than multiply, a tile's authored weight.
       weight: tile.weight / tile.rotations.length,
@@ -215,7 +271,7 @@ function entropy(candidates, variants) {
   return Math.log(sum) - weightedLog / sum;
 }
 
-function propagate(cells, queue, variants, width, height, depth) {
+function propagate(cells, queue, variants, width, height, depth, compatible) {
   const queued = new Uint8Array(cells.length);
   for (const index of queue) queued[index] = 1;
   while (queue.length > 0) {
@@ -231,10 +287,13 @@ function propagate(cells, queue, variants, width, height, depth) {
       const nz = z + dz;
       if (nx < 0 || nx >= width || ny < 0 || ny >= height || nz < 0 || nz >= depth) continue;
       const neighborIndex = flatIndex(nx, ny, nz, width, depth);
-      const allowed = new Set(current.map((variant) => variants[variant].sockets[direction]));
+      const allowed = [...new Set(current.map((variant) => variants[variant].sockets[direction]))];
       const opposite = OPPOSITE[direction];
       const before = cells[neighborIndex];
-      const after = before.filter((variant) => allowed.has(variants[variant].sockets[opposite]));
+      const after = before.filter((variant) => {
+        const socket = variants[variant].sockets[opposite];
+        return allowed.some((mine) => compatible(mine, direction, socket));
+      });
       if (after.length === before.length) continue;
       if (after.length === 0) return false;
       cells[neighborIndex] = after;
@@ -247,11 +306,17 @@ function propagate(cells, queue, variants, width, height, depth) {
   return true;
 }
 
-function attempt(tileset, variants, options, attemptIndex) {
+function attempt(tileset, variants, options, attemptIndex, compatible) {
   const { width, height, depth } = options;
   const all = variants.map((_, index) => index);
   const cells = Array.from({ length: width * height * depth }, () => [...all]);
   const initialQueue = [];
+  // `outside`: the world beyond the grid is one fixed tile (at rotation 0),
+  // so a boundary face must be compatible with that tile's opposite face —
+  // the learned-from-example way to say "buildings are enclosed by void".
+  const outside = tileset.outside
+    ? variants.find((v) => v.tileId === tileset.outside && v.rotation === 0) ?? variants.find((v) => v.tileId === tileset.outside)
+    : null;
 
   for (let index = 0; index < cells.length; index++) {
     const [x, y, z] = coordinates(index, width, depth);
@@ -259,6 +324,13 @@ function attempt(tileset, variants, options, attemptIndex) {
     for (const [direction, socket] of Object.entries(tileset.boundary)) {
       if (isBoundary(x, y, z, width, height, depth, direction)) {
         candidates = candidates.filter((variant) => variants[variant].sockets[direction] === socket);
+      }
+    }
+    if (outside) {
+      for (const direction of DIRECTIONS) {
+        if (direction in tileset.boundary || !isBoundary(x, y, z, width, height, depth, direction)) continue;
+        const theirs = outside.sockets[OPPOSITE[direction]];
+        candidates = candidates.filter((variant) => compatible(variants[variant].sockets[direction], direction, theirs));
       }
     }
     if (candidates.length === 0) return null;
@@ -280,7 +352,7 @@ function attempt(tileset, variants, options, attemptIndex) {
     initialQueue.push(index);
   }
 
-  if (!propagate(cells, initialQueue, variants, width, height, depth)) return null;
+  if (!propagate(cells, initialQueue, variants, width, height, depth, compatible)) return null;
   const random = mulberry32((options.seed + Math.imul(attemptIndex, 0x9e3779b9)) >>> 0);
 
   while (true) {
@@ -296,7 +368,7 @@ function attempt(tileset, variants, options, attemptIndex) {
     }
     if (selected === -1) return cells;
     cells[selected] = [weightedChoice(cells[selected], variants, random)];
-    if (!propagate(cells, [selected], variants, width, height, depth)) return null;
+    if (!propagate(cells, [selected], variants, width, height, depth, compatible)) return null;
   }
 }
 
@@ -321,8 +393,9 @@ export function collapseTileset(rawTileset, rawOptions) {
       `grid x rotation variants is ${searchSize.toLocaleString()}, above the 5,000,000 candidate safety limit; reduce dimensions or tile rotations`,
     );
   }
+  const compatible = faceCompatibility(tileset);
   for (let attemptIndex = 0; attemptIndex < options.attempts; attemptIndex++) {
-    const cells = attempt(tileset, variants, options, attemptIndex);
+    const cells = attempt(tileset, variants, options, attemptIndex, compatible);
     if (!cells) continue;
     const collapsed = cells.map((candidates, index) => {
       const [x, y, z] = coordinates(index, options.width, options.depth);
@@ -373,11 +446,35 @@ export function collapsedPrefab(result, outputName, origin = "center") {
           ],
           rotation: rotationQuat(cell.rotation),
         },
-        prefab: { prefabId: cell.prefabId },
+        prefab: {
+          prefabId: cell.prefabId,
+          ...(cell.rotation !== 0 && cell.alignUv?.length
+            ? {
+                overrides: cell.alignUv.map((align) => ({
+                  path: `${align.child}/components/mesh/source/uvRotation`,
+                  value: uvCounterRotation(cell.rotation, align.factor),
+                })),
+              }
+            : {}),
+        },
       },
     };
   }
   return { version: 1, name: outputName, root: "root", entities, props: {} };
+}
+
+/**
+ * The `mesh.source.uvRotation` (degrees, counter-clockwise in UV space —
+ * three's rotateUV) that keeps a UV-aligned child's texture running along
+ * the building's own axis when its cell is placed at grid variant
+ * `rotation`. `factor` is the sign the kit import measured from the part's
+ * UV projection: −1 when the projection preserves handedness (u = x, v = z),
+ * +1 when it mirrors (u = x, v = −z). Normalised to (−180, 180].
+ */
+export function uvCounterRotation(rotation, factor = -1) {
+  let value = (((factor * rotation) % 360) + 360) % 360;
+  if (value > 180) value -= 360;
+  return value;
 }
 
 function colorFor(value) {
