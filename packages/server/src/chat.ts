@@ -13,8 +13,10 @@
  * recipe zone on THIS layer, then published up the cluster link; main fans
  * it to every other layer, each of which delivers it to its own players in
  * that zone (`deliverForeign`). Everyone in the valley talks, whichever copy
- * of the valley they are on. Global rides the same bridge; proximity, team
- * and party stay per layer (team/party are netState the game assigns).
+ * of the valley they are on. Global and PARTY ride the same bridge — main
+ * owns the party list, pushes each member's party into their layer's
+ * netState (`comms.party/<characterId>`) and stamps the sender's party on
+ * every bridged party line; proximity and team stay per layer.
  *
  * A world without zones (a flat test scene) is one zone named after the
  * scene, so zone chat still works there.
@@ -22,7 +24,7 @@
 
 import { WS_HOST_ID } from "@hitreg/net";
 import { regionAt, type RegionDoc } from "@hitreg/core";
-import { ChatService, hostLink, netStateMembership, registerCommsNetState, type ChatMessage } from "@hitreg/comms";
+import { BRIDGED_CHANNELS, ChatService, hostLink, netStateMembership, registerCommsNetState, type BridgeScope, type ChatMessage } from "@hitreg/comms";
 import type { GameServer } from "./server.js";
 import type { ClusterLink } from "./cluster/link.js";
 import type { BridgedChatLine } from "./cluster/protocol.js";
@@ -93,9 +95,9 @@ export function mountLayerChat(opts: LayerChatOptions): LayerChat {
     ...(link
       ? {
           bridge: {
-            publish: (msg: ChatMessage, scope: { zone: string | null }) => {
-              if (msg.channel !== "zone" && msg.channel !== "global") return;
-              link.chat({ id: msg.id, channel: msg.channel, from: msg.from, name: msg.name, text: msg.text, at: msg.at, zone: scope.zone });
+            publish: (msg: ChatMessage, scope: BridgeScope) => {
+              if (msg.channel === "system" || !BRIDGED_CHANNELS.includes(msg.channel)) return;
+              link.chat({ id: msg.id, channel: msg.channel as "zone" | "global" | "party", from: msg.from, name: msg.name, text: msg.text, at: msg.at, zone: scope.zone, party: scope.party ?? null });
             },
           },
         }
@@ -105,9 +107,9 @@ export function mountLayerChat(opts: LayerChatOptions): LayerChat {
 
   const offChat = link?.onChat((line: BridgedChatLine) => {
     const msg: ChatMessage = { id: line.id, channel: line.channel, from: line.from, name: line.name, text: line.text, at: line.at };
-    foreignDelivered += chat.deliverForeign(msg, { zone: line.zone });
+    foreignDelivered += chat.deliverForeign(msg, { zone: line.zone, party: line.party ?? null });
   });
-  log(`[serve] chat: ${link ? "zone/global bridged through main" : "this server only"}`);
+  log(`[serve] chat: ${link ? "zone/global/party bridged through main" : "this server only"}`);
 
   return {
     chat,

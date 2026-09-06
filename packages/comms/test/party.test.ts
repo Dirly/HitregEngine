@@ -1,0 +1,90 @@
+import { describe, expect, it } from "vitest";
+import { ChatService, foreignRecipients, staticMembership, type ChatMessage, type CommsLink, type RoutingContext } from "../src/index.js";
+
+/**
+ * Party chat across a cluster: a party line is bridged with the sender's
+ * party in its scope, and a layer that receives one delivers it to the
+ * members standing there — and to nobody else. Plus `announceTo`, the
+ * one-participant system line a layer uses for "You are entering …".
+ */
+
+const parties: Record<string, string> = { a: "ABC123", b: "ABC123", c: "ZZZ999" };
+const ctx: RoutingContext = {
+  teamOf: () => null,
+  partyOf: (id) => parties[id] ?? null,
+  positionOf: () => [0, 0, 0],
+  zoneOf: () => "valley",
+};
+
+function fakeHost(peers: string[]) {
+  const sent = new Map<string, unknown[]>();
+  const link: CommsLink = {
+    selfId: "host",
+    selfName: "host",
+    role: "host",
+    hostId: "host",
+    peers: () => peers,
+    roster: () => [{ peerId: "host", name: "host" }, ...peers.map((p) => ({ peerId: p, name: p }))],
+    nameOf: (id) => id,
+    send: (_module, to, data) => {
+      sent.set(to, [...(sent.get(to) ?? []), data]);
+    },
+    onMessage: () => () => undefined,
+    onRoster: () => () => undefined,
+  };
+  return { link, sent };
+}
+
+describe("party channel across layers", () => {
+  it("a foreign party line reaches the members of that party here, nobody else", () => {
+    expect(foreignRecipients("party", { zone: null, party: "ABC123" }, ["a", "b", "c", "d"], ctx)).toEqual(["a", "b"]);
+    expect(foreignRecipients("party", { zone: null, party: "NOPE" }, ["a", "b", "c"], ctx)).toEqual([]);
+    expect(foreignRecipients("party", { zone: null, party: null }, ["a", "b", "c"], ctx)).toEqual([]);
+    expect(foreignRecipients("party", { zone: null }, ["a", "b", "c"], ctx)).toEqual([]);
+  });
+
+  it("publishes a party line with the sender's party and delivers foreign ones by party", () => {
+    const { link, sent } = fakeHost(["a", "b", "c", "d"]);
+    const published: Array<{ msg: ChatMessage; zone: string | null; party?: string | null }> = [];
+    const chat = new ChatService({
+      link,
+      membership: staticMembership({ parties }),
+      positionOf: () => [0, 0, 0],
+      zoneOf: () => "valley",
+      bridge: { publish: (msg, scope) => published.push({ msg, zone: scope.zone, party: scope.party }) },
+      now: () => 1000,
+    });
+    const up = chat as unknown as { handleUp(from: string, data: unknown): void };
+    up.handleUp("a", { k: "say", channel: "party", text: "regroup at the pass" });
+    expect(sent.get("a")).toHaveLength(1);
+    expect(sent.get("b")).toHaveLength(1);
+    expect(sent.get("c")).toBeUndefined();
+    expect(sent.get("d")).toBeUndefined();
+    expect(published).toHaveLength(1);
+    expect(published[0]).toMatchObject({ party: "ABC123", zone: "valley", msg: { channel: "party", from: "a" } });
+    // no party: refused locally, never bridged
+    up.handleUp("d", { k: "say", channel: "party", text: "hello?" });
+    expect(published).toHaveLength(1);
+    expect((sent.get("d")![0] as { k: string }).k).toBe("err");
+
+    // a party line from another layer: only the members here hear it
+    const foreign: ChatMessage = { id: "far:1", channel: "party", from: "far-away", name: "Far", text: "on my way", at: 5 };
+    expect(chat.deliverForeign(foreign, { zone: null, party: "ZZZ999" })).toBe(1);
+    expect(sent.get("c")).toHaveLength(1);
+    expect(chat.deliverForeign(foreign, { zone: null, party: "ABC123" })).toBe(2);
+    expect(chat.deliverForeign(foreign, { zone: null })).toBe(0);
+    expect(published).toHaveLength(1); // never re-bridged
+  });
+
+  it("announceTo sends one participant a system line and nobody else", () => {
+    const { link, sent } = fakeHost(["a", "b"]);
+    const chat = new ChatService({ link, membership: staticMembership(), positionOf: () => [0, 0, 0], now: () => 7 });
+    chat.announceTo("b", "You are entering the Hollow Vale.");
+    expect(sent.get("a")).toBeUndefined();
+    expect(sent.get("b")).toHaveLength(1);
+    expect((sent.get("b")![0] as { k: string; msg: ChatMessage }).msg).toMatchObject({ channel: "system", from: "system", text: "You are entering the Hollow Vale." });
+    // the host itself is a participant too
+    chat.announceTo("host", "You are entering the Rim.");
+    expect(chat.history().at(-1)?.text).toBe("You are entering the Rim.");
+  });
+});

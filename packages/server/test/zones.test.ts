@@ -90,10 +90,14 @@ describe.skipIf(!main || !west || !east)("zones: border crossings between layers
 
   /** A client that walks east at run speed and follows any transfer it is sent. */
   function walker(url: string, ticket: string) {
-    const state = { transport: null as WebSocketClientTransport | null, client: null as RoomClient | null, spawned: [] as string[], transfers: [] as Array<{ url: string; srv?: string }>, seq: 0, walking: false };
+    const state = { transport: null as WebSocketClientTransport | null, client: null as RoomClient | null, spawned: [] as string[], transfers: [] as Array<{ url: string; srv?: string }>, chat: [] as string[], seq: 0, walking: false };
     const dial = (u: string, t: string): void => {
       const transport = new WebSocketClientTransport(u, { peerId: "tab-" + Math.random().toString(36).slice(2, 6), ticket: t });
       const client = new RoomClient(transport, WS_HOST_ID);
+      client.onModule("chat", (m) => {
+        const d = m as { k: string; msg?: { channel: string; text: string } };
+        if (d.k === "msg" && d.msg?.channel === "system") state.chat.push(d.msg.text);
+      });
       client.onModule(WORLD_MODULE, (m) => {
         const msg = m as WorldModuleMessage;
         if (msg.t === "spawn" && msg.self) state.spawned.push(msg.self);
@@ -174,6 +178,8 @@ describe.skipIf(!main || !west || !east)("zones: border crossings between layers
     expect(after[0]).toBeGreaterThan(borderX + BAND - 0.5);
     expect(after[0]).toBeGreaterThan(before[0]);
     expect(east!.chat.zoneOf(characterId)).toBe("east");
+    // the layer that saw the crossing told them where they are, before the hop
+    expect(w.chat).toContain("You are entering East.");
     // a freshly landed body is protected for a few seconds, then not
     expect(east!.world.netState.get(`landing/${bodyId}`)).toBeGreaterThan(east!.world.timeMs);
     // and the east copy does not send them straight back: it hosts east

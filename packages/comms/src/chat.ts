@@ -16,6 +16,7 @@ import { z } from "zod";
 import type { EventRegistry } from "@hitreg/core";
 import {
   BRIDGED_CHANNELS,
+  type BridgeScope,
   foreignRecipients,
   isCommsChannel,
   recipientsFor,
@@ -75,7 +76,7 @@ export interface ChatDeps {
    * other layers can deliver it too (`deliverForeign` on their side).
    * `scope.zone` is the sender's zone, which only this host can compute.
    */
-  bridge?: { publish(msg: ChatMessage, scope: { zone: string | null }): void };
+  bridge?: { publish(msg: ChatMessage, scope: BridgeScope): void };
   /**
    * Authority side: apply a membership change ("/team red"). Return false
    * to refuse. Absent = self-assignment is unavailable. Typically writes
@@ -391,7 +392,7 @@ export class ChatService {
       else this.link.send(CHAT_MODULE, recipient, { k: "msg", msg } satisfies ChatDown);
     }
     if (this.deps.bridge && BRIDGED_CHANNELS.includes(channel)) {
-      this.deps.bridge.publish(msg, { zone: this.ctx.zoneOf?.(sender) ?? null });
+      this.deps.bridge.publish(msg, { zone: this.ctx.zoneOf?.(sender) ?? null, party: this.ctx.partyOf(sender) });
     }
     return { ok: true };
   }
@@ -399,10 +400,11 @@ export class ChatService {
   /**
    * Authority (a clustered host): a message another layer already routed and
    * delivered on its side. Deliver it to whoever HERE may hear it — players
-   * standing in `scope.zone` for zone lines, everyone for global — with the
+   * standing in `scope.zone` for zone lines, the members of `scope.party`
+   * for party lines, everyone for global — with the
    * original stamp, so both copies of the world show the same line.
    */
-  deliverForeign(msg: ChatMessage, scope: { zone: string | null }): number {
+  deliverForeign(msg: ChatMessage, scope: BridgeScope): number {
     if (this.disposed || this.link.role === "peer" || msg.channel === "system") return 0;
     if (!BRIDGED_CHANNELS.includes(msg.channel)) return 0;
     const recipients = foreignRecipients(msg.channel, scope, this.participants(), this.ctx);

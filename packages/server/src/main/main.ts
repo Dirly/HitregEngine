@@ -305,6 +305,10 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
     const party = partyOf.get(characterId);
     return party ? [...party.members] : [];
   };
+  /** Tell the layer a character stands on which party they are in (party chat routes on the layer from that). */
+  const pushParty = (characterId: string, srv = registry.whereIs.get(characterId)): void => {
+    if (srv) sendTo(srv, { t: "party", characterId, party: partyOf.get(characterId)?.code ?? null });
+  };
 
   /** Tell the server a character is on to hand it to `dest`. */
   const moveCharacter = (characterId: string, dest: ServerEntry, reason: string): boolean => {
@@ -503,6 +507,7 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
         return;
       case "player.joined":
         registry.joined(id, msg.player);
+        pushParty(msg.player.characterId, id);
         return;
       case "player.left":
         registry.left(id, msg.characterId);
@@ -510,11 +515,15 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
       case "transfer.failed":
         log(`[main] transfer of ${msg.characterId} from "${id}" failed: ${msg.reason}`);
         return;
-      case "chat":
-        // zone/global lines cross layers: every other copy of the world hears
-        // what this one said (the origin already delivered it locally)
-        for (const other of sockets.keys()) if (other !== id) sendTo(other, { t: "chat", line: msg.line, origin: id });
+      case "chat": {
+        // zone/global/party lines cross layers: every other copy of the world
+        // hears what this one said (the origin already delivered it locally).
+        // A party line carries the party MAIN knows, never the layer's guess.
+        const line = msg.line.channel === "party" ? { ...msg.line, party: partyOf.get(msg.line.from)?.code ?? null } : msg.line;
+        if (line.channel === "party" && line.party === null) return;
+        for (const other of sockets.keys()) if (other !== id) sendTo(other, { t: "chat", line, origin: id });
         return;
+      }
       case "rpc":
         void handleRpc(id, msg.call).then(
           (result) => sendTo(id, { t: "rpc.result", id: msg.id, ok: true, result }),
@@ -640,6 +649,7 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
         const party: Party = { code: partyCode(), leader: character.id, members: new Set([character.id]) };
         parties.set(party.code, party);
         partyOf.set(character.id, party);
+        pushParty(character.id);
         return send(res, 200, { party: view(party) });
       }
       if (p === "/party/join" && method === "POST") {
@@ -654,6 +664,7 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
         }
         party.members.add(character.id);
         partyOf.set(character.id, party);
+        pushParty(character.id);
         // playing already, somewhere else than the leader: pull them over
         const leaderOn = registry.whereIs.get(party.leader);
         const leaderServer = leaderOn ? registry.servers.get(leaderOn) : undefined;
@@ -666,6 +677,7 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
         if (party) {
           party.members.delete(character.id);
           partyOf.delete(character.id);
+          pushParty(character.id);
           if (party.members.size === 0) parties.delete(party.code);
           else if (party.leader === character.id) party.leader = [...party.members][0]!;
         }

@@ -23,6 +23,7 @@ export {
   recipientsFor,
   foreignRecipients,
   BRIDGED_CHANNELS,
+  type BridgeScope,
   type CommsChannel,
   type ChannelMeta,
   type ParsedChatInput,

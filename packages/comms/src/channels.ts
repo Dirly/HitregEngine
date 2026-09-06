@@ -9,7 +9,9 @@
  *                of the world they are on.
  * - "global":    everyone in the session (bridged across layers too).
  * - "team":      players sharing the speaker's team (netState `comms.team/*`).
- * - "party":     players sharing the speaker's party (netState `comms.party/*`).
+ * - "party":     players sharing the speaker's party (netState `comms.party/*`);
+ *                bridged across layers too — on a cluster, main owns the party
+ *                list and pushes each member's party into their layer's netState.
  *
  * The routing rule for each lives in ONE place (`recipientsFor` below) so
  * text and voice can never disagree about who is allowed to hear whom.
@@ -22,7 +24,13 @@ export type CommsChannel = "proximity" | "zone" | "global" | "team" | "party";
 export const COMMS_CHANNELS: readonly CommsChannel[] = ["proximity", "zone", "global", "team", "party"];
 
 /** Channels a cluster bridge carries between layers (what one copy of the world says, every copy hears). */
-export const BRIDGED_CHANNELS: readonly CommsChannel[] = ["zone", "global"];
+export const BRIDGED_CHANNELS: readonly CommsChannel[] = ["zone", "global", "party"];
+
+/** What travels with a bridged line so the receiving layer can route it: the sender's zone and party (only the origin — or main — knows them). */
+export interface BridgeScope {
+  zone: string | null;
+  party?: string | null;
+}
 
 export interface ChannelMeta {
   /** Short UI label. */
@@ -162,18 +170,21 @@ export function recipientsFor(
 /**
  * Who on THIS endpoint may hear a message that arrived from another layer of
  * the cluster: `scope.zone` for zone lines (players standing in that zone
- * here), everyone for global. The sender is elsewhere, so nobody is excluded
- * as "self".
+ * here), the members of `scope.party` for party lines, everyone for global.
+ * The sender is elsewhere, so nobody is excluded as "self".
  */
 export function foreignRecipients(
   channel: CommsChannel,
-  scope: { zone: string | null },
+  scope: BridgeScope,
   participants: readonly string[],
   ctx: RoutingContext,
 ): string[] {
   if (channel === "global") return [...participants];
   if (channel === "zone" && ctx.zoneOf && scope.zone !== null) {
     return participants.filter((p) => ctx.zoneOf!(p) === scope.zone);
+  }
+  if (channel === "party" && typeof scope.party === "string") {
+    return participants.filter((p) => ctx.partyOf(p) === scope.party);
   }
   return [];
 }

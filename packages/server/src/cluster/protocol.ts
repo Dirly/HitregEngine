@@ -35,17 +35,21 @@ export interface PlayerPresence {
  * other layer so the copies of the world share a room. `zone` is the
  * sender's world zone (only the origin can compute it); `channel` is a
  * bridged channel — "zone" (delivered to players standing in `zone` on the
- * receiving layer) or "global" (everyone). The stamp (`id`, `at`) is the
- * origin's, so the same line is the same line everywhere.
+ * receiving layer), "party" (delivered to the members of `party`, which
+ * MAIN fills in from its own party list — the layer's copy is a hint) or
+ * "global" (everyone). The stamp (`id`, `at`) is the origin's, so the same
+ * line is the same line everywhere.
  */
 export interface BridgedChatLine {
   id: string;
-  channel: "zone" | "global";
+  channel: "zone" | "global" | "party";
   from: string;
   name: string;
   text: string;
   at: number;
   zone: string | null;
+  /** Party code of the sender, resolved by main on the way through. */
+  party?: string | null;
 }
 
 // -- layer → main ----------------------------------------------------------------
@@ -128,8 +132,10 @@ export type MainToLayer =
   | { t: "zones"; hosted: HostedZones }
   /** Is this spot quiet here (no awake pack in aggro range)? Answer with rpc `arrival.result`. */
   | { t: "arrival.check"; requestId: string; position: [number, number, number] }
-  /** A chat line another layer delivered: deliver it here to whoever may hear it (zone / everyone). */
-  | { t: "chat"; line: BridgedChatLine; origin: string };
+  /** A chat line another layer delivered: deliver it here to whoever may hear it (zone / party / everyone). */
+  | { t: "chat"; line: BridgedChatLine; origin: string }
+  /** This character's party changed (or they just arrived here): write `comms.party/<characterId>` so party chat routes. Main owns parties. */
+  | { t: "party"; characterId: string; party: string | null };
 
 export function parseClusterMessage<T>(raw: unknown): T | null {
   if (typeof raw !== "string") return null;

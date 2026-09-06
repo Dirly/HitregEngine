@@ -273,6 +273,10 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
     onPlayerJoined: (player) => {
       if (player.identity) link?.playerJoined({ characterId: player.identity.characterId, playerId: player.identity.playerId, name: player.name, position: world.positionOf(player.bodyId) });
       lastPopulatedAt = Date.now();
+      // where they stand NOW is their first zone: a crossing in the next
+      // half-second is still a crossing, not a first sight
+      const at = world.positionOf(player.bodyId);
+      lastZone.set(player.peerId, at ? (zoneAt(at[0], at[2])?.id ?? null) : null);
     },
     onPlayerLeft: (player, reason) => {
       if (player.identity) link?.playerLeft(player.identity.characterId, reason === "transfer" ? "transfer" : reason === "grace" ? "grace" : reason === "replaced" ? "replaced" : "leave");
@@ -395,6 +399,14 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
     void link!.rpc({ op: "arrival.result", requestId, clear }).catch(() => undefined);
   });
   link?.onZones((hosted) => log(`[serve] hosting zones: ${hosted === "all" ? "all" : hosted.join(", ") || "(none)"}`));
+  // main owns parties: it tells this layer each member's party so the party
+  // channel routes here (peer id == character id), and stamps the party on
+  // bridged lines itself, so a stale copy here can never misroute one
+  link?.onParty((characterId, party) => {
+    const key = `comms.party/${characterId}`;
+    if (party === null) world.netState.delete(key);
+    else if (!world.netState.set(key, party)) log(`[serve] party "${party}" for ${characterId} refused by netState`);
+  });
   {
     const warnings = spawnAreas.borderWarnings(regions, zoneBand);
     for (const w of warnings) log(`[serve] spawn area "${w.id}" in "${w.zone}" is ${w.distance} m from a border but reaches ${w.reach} m — a swap there can happen in sight of its pack; move it`);

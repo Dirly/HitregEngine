@@ -71,6 +71,7 @@ export class ClusterLink {
     arrival: new Set<(requestId: string, position: [number, number, number]) => void>(),
     link: new Set<(up: boolean) => void>(),
     chat: new Set<(line: BridgedChatLine, origin: string) => void>(),
+    party: new Set<(characterId: string, party: string | null) => void>(),
   };
   private firstRegistration: { resolve: (r: Registered) => void; reject: (e: Error) => void } | null = null;
 
@@ -186,6 +187,9 @@ export class ClusterLink {
       case "chat":
         for (const cb of this.handlers.chat) cb(msg.line, msg.origin);
         return;
+      case "party":
+        for (const cb of this.handlers.party) cb(msg.characterId, msg.party);
+        return;
     }
   }
 
@@ -221,6 +225,12 @@ export class ClusterLink {
   onChat(cb: (line: BridgedChatLine, origin: string) => void): () => void {
     this.handlers.chat.add(cb);
     return () => this.handlers.chat.delete(cb);
+  }
+
+  /** Main says which party a character on this layer is in (null = none). */
+  onParty(cb: (characterId: string, party: string | null) => void): () => void {
+    this.handlers.party.add(cb);
+    return () => this.handlers.party.delete(cb);
   }
 
   rpc<T = unknown>(call: LayerRpc): Promise<T> {
