@@ -90,6 +90,25 @@ Two consequences worth knowing:
   is the default transfer gate (`SpawnAreaManager.clearToTransfer`), so a
   swap never shows enemies blinking. A main-initiated move waits up to
   60 s for a clear moment, then reports `transfer.failed`.
+- **Nobody is moved mid-fight.** `GameServer.canTransfer` also refuses while
+  netState `transferLock/<bodyId>` (a sim-time deadline, `@hitreg/core`
+  `transferLockKey`) is in the future. The engine cannot see combat from
+  outside a game's scripts, so the game's authoritative combat script writes
+  it on every hit taken OR dealt (voxel-demo's `combat-actor` does, param
+  `transferLockSeconds`, default 12 s). A chased player cannot escape into a
+  dungeon, and the attacker cannot pull their party out of a fight they are
+  losing; the lock extends while the fight continues and lapses on its own.
+
+## Chat
+
+Text chat routes on the host, and on a layer the host is the layer: each one
+runs a `ChatService` (`packages/server/src/chat.ts`) with the world supplying
+positions and zones. **Zone** and **global** lines cross the cluster — the
+origin delivers locally, publishes the line up its cluster link, main fans it
+to every other layer, each delivers it to its own players standing in that
+zone (or everyone, for global). This is the answer to a vast world with 40
+players per copy: whoever is in your region talks to you, on every layer.
+Proximity, team and party stay per layer. Details: docs/comms.md.
 - **Keep spawn areas at least aggro + leash away from any place you
   intend to swap people** (a bridge, a pass, a gate). A padding band with
   no spawn table in it is the whole trick; there is no audit for it yet.
@@ -162,12 +181,18 @@ destination and moves the character.
 Clients present tickets and send intent; layers validate against netState
 ownership and are the save authority; main is the only process with a
 database connection and the only signer of tickets. A P2P host never
-touches any of this (ARCHITECTURE §3a/§3c hold unchanged).
+touches any of this. The MMO project declares `multiplayer: "server"` in
+its project.json (ARCHITECTURE §3a amendment, 2026-09-05), so for its
+scenes this cluster is the only multiplayer path — a peer host could fudge
+everything it simulates — and the playground forms no peer room for them
+(`?p2p=1` overrides for a two-tab engine experiment). Other games on the
+engine may still choose peer rooms.
 
 ## What is deliberately not here yet
 
-- Cross-layer chat/party channels through main (the comms module routes on
-  the host; a global channel needs a pub/sub bridge).
+- Cross-layer PARTY chat (zone and global already cross layers — see
+  "Chat" above; party membership lives in main, so party lines need main to
+  tell each layer who is in which party).
 - A spawn-area/zone-edge audit in `worldgen audit`.
 - Pre-spawning the body on the destination before the client dials it
   (today a transfer is one round trip of nothing; with prediction it is

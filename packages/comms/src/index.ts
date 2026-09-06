@@ -21,6 +21,8 @@ export {
   channelForPrefix,
   parseChatInput,
   recipientsFor,
+  foreignRecipients,
+  BRIDGED_CHANNELS,
   type CommsChannel,
   type ChannelMeta,
   type ParsedChatInput,
@@ -68,6 +70,8 @@ export interface CommsOptions {
   membership: MembershipSource;
   /** World position of a participant (self included), or null when not in the world. */
   positionOf(peerId: string): readonly [number, number, number] | null;
+  /** The world zone a participant stands in (recipe zone id, else the scene name); absent = no zone channel. */
+  zoneOf?(peerId: string): string | null;
   /** The local listener (camera) for spatial voice. */
   listenerPose?(): ListenerPose | null;
   /** Authority: apply "/team x" / "/party x" (write netState). Absent = disabled. */
@@ -94,6 +98,7 @@ export function createComms(opts: CommsOptions): Comms {
     link: opts.link,
     membership: opts.membership,
     positionOf: opts.positionOf,
+    ...(opts.zoneOf ? { zoneOf: opts.zoneOf } : {}),
     ...(opts.assign ? { assign: opts.assign } : {}),
     ...(opts.emitEvent ? { emitEvent: opts.emitEvent } : {}),
     ...(opts.chat ? { config: opts.chat } : {}),

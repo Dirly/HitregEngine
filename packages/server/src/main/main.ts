@@ -409,6 +409,11 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
       case "transfer.failed":
         log(`[main] transfer of ${msg.characterId} from "${id}" failed: ${msg.reason}`);
         return;
+      case "chat":
+        // zone/global lines cross layers: every other copy of the world hears
+        // what this one said (the origin already delivered it locally)
+        for (const other of sockets.keys()) if (other !== id) sendTo(other, { t: "chat", line: msg.line, origin: id });
+        return;
       case "rpc":
         void handleRpc(id, msg.call).then(
           (result) => sendTo(id, { t: "rpc.result", id: msg.id, ok: true, result }),

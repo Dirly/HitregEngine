@@ -69,6 +69,15 @@ export const projectManifestSchema = z
       .min(1)
       .optional()
       .describe("Engine version or range this project was built against. Advisory."),
+    multiplayer: z
+      .enum(["p2p", "server"])
+      .default("p2p")
+      .describe(
+        "How this game is played together. \"p2p\": the engine's peer rooms (a tab hosts; fine for co-op, prototypes, " +
+          "anything where a host cheating costs nobody). \"server\": dedicated/layered servers ONLY — the playground " +
+          "never forms a peer room for this project's scenes (a tab with no server plays alone), because a peer host " +
+          "is authoritative over everything it simulates. An MMO with a persistent world declares \"server\".",
+      ),
     tools: z
       .array(projectToolDependencySchema)
       .default([])

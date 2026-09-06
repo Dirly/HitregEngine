@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { hexColor, meshWindSchema, MAX_SPLAT_LAYERS } from "../components/core.js";
+import { regionSchema } from "./regions.js";
 
 /**
  * The world recipe: a small, hand-editable JSON document that fully determines
@@ -1295,6 +1296,15 @@ export const worldRecipeSchema = z.object({
         "one texture.",
     ),
   scatter: z.array(scatterSchema).default([]),
+
+  regions: z
+    .array(regionSchema)
+    .default([])
+    .describe(
+      "The ZONES players and servers know by name — agent-drawn polygons with a story and a hub, borders on " +
+        "landmarks. Coarse (minutes to cross), not biomes, not the climate cells. Chat 'zone' lines and cluster " +
+        "placement read them; docs/world-editing/zones.md is the authoring procedure.",
+    ),
 
   features: z
     .object({

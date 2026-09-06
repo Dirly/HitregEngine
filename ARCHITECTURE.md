@@ -321,6 +321,18 @@ server milestone: netState carries everything a running session needs and
 dies with the room; the dev playerData bridge remains a local-machine
 convenience for single-player prototyping, nothing more.
 
+**Amendment (2026-09-05, per Derek): the multiplayer mode is a PROJECT
+decision, declared in `project.json` (`multiplayer: "p2p" | "server"`).**
+The engine keeps both: peer rooms (§3a — a tab hosts; right for co-op,
+prototypes, anything where a host cheating costs nobody) and the
+dedicated/layered server cluster of `docs/hosting.md`. What changed is
+that a game can rule P2P OUT: a persistent MMO — where a peer host is
+authoritative over everything it simulates and could fudge all of it —
+declares `"server"`, and the playground then never forms a peer room for
+that project's scenes (a tab with no server plays alone; `?p2p=1` overrides
+for a two-tab engine experiment). The MMO project on this engine is
+`"server"`. Nothing else in §3a/§3c changes.
+
 ## 3b. Physics data model (designed now, implemented with the Rapier package)
 
 - `rigidbody` — `{ kind: dynamic|kinematic|static, mass, linearDamping, angularDamping, ccd }`

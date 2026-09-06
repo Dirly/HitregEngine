@@ -166,8 +166,11 @@ The primary AI channel is **direct file editing** — no MCP required:
   the running scene — no regeneration. Route one with `descend --from-lake
   <id>` (the valley floor as `--points`) and `profile --points "x,z;…"`
   (ground, grade, bank heights; `--river <id>` reads the solved bed).
-  **After changing rivers, re-run towns → paths → pois → trails** (a path a
-  river now crosses is a wall across it until `paths` writes the bridge).
+  **After changing rivers, re-run towns → zones → paths → pois → trails**
+  (a path a river now crosses is a wall across it until `paths` writes the
+  bridge; a zone border that followed the old river is now over open
+  ground). `zones` drafts the named ZONES from towns and barriers — the
+  `zone-setup` skill turns the draft into named zones.
   `map` renders a PNG overview (`--plain` for water only, at real river
   widths — this is how you or an agent check the result without opening the
   browser); `stats` reports tris and ms per cell against the frame budget;
@@ -175,7 +178,11 @@ The primary AI channel is **direct file editing** — no MCP required:
   `features.riverPaths` for the stage to solve (the older route); `audit`
   checks every river ends somewhere, beds descend, nothing is under water,
   every bridge has its paths (exit 1 on findings — run it before believing
-  a screenshot). **Procedure for altering a live world by hand — rivers
+  a screenshot); `regions` audits the agent-drawn ZONES (recipe `regions`:
+  named polygons with a hub town, borders on ridges/rivers/canyons/coast —
+  what chat's zone channel and cluster placement key on; the
+  `zone-architect` sub-agent draws them, docs/world-editing/zones.md is its
+  procedure). **Procedure for altering a live world by hand — rivers
   first, ~4 per world, more feature kinds to come: docs/world-editing/.**
   Judgment + the invariants that will break silently: docs/voxel-worlds.md.
 - **Placement toolbox** (settle props instead of eyeballing coordinates): give
@@ -255,7 +262,11 @@ The primary AI channel is **direct file editing** — no MCP required:
   `registerBuiltinScripts`): **docs/character-progression.md**.
 - **Dedicated server** (`@hitreg/server`): `pnpm -F @hitreg/server serve --scene <name>`
   hosts any project scene headless — same sim, no renderer — and every tab
-  opened with `?server=ws://host:port` becomes its client (no P2P election).
+  opened with `?server=ws://host:port` becomes its client. The engine keeps
+  BOTH peer rooms and servers; a project picks in `project.json`
+  (`multiplayer: "p2p" | "server"`, ARCHITECTURE §3a amendment 2026-09-05).
+  A `"server"` project (the MMO, voxel-demo) never forms a peer room — a
+  tab with no server plays alone; `?p2p=1` overrides for an experiment.
   Players are server-spawned entity docs, casts are validated against
   netState ownership, NPCs respawn, and `curl -s http://127.0.0.1:8787/admin/status`
   (`/admin/npcs`, `/admin/spawn`, `/admin/netstate`) is how an agent reads and

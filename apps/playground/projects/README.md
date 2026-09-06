@@ -75,6 +75,7 @@ out loud:
   "name": "my-game",
   "description": "One line about the game.",
   "engine": "^0.1",
+  "multiplayer": "server",
   "tools": [
     {
       "id": "hitreg.wfc-3d",
@@ -89,6 +90,12 @@ out loud:
 
 `name` must match the folder — asset ids namespace by folder name, so a
 mismatch silently breaks id resolution and the dev server warns about it.
+`multiplayer` says how the game is played together: `"p2p"` (the default)
+keeps the engine's peer rooms — a tab hosts, fine wherever a cheating host
+costs nobody; `"server"` means dedicated/layered servers ONLY, so the
+playground never forms a peer room for this project's scenes and a tab with
+no server plays alone (a persistent MMO declares this; `?p2p=1` overrides
+for a two-tab engine experiment).
 `tools` names registered tools (see `tools/README.md`); each is its own repo
 cloned into the engine's `tools/` folder. Mark a tool `optional` when the
 project still runs without it and it only regenerates content.

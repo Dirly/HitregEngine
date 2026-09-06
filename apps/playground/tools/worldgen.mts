@@ -27,6 +27,8 @@
  *   pnpm -F playground worldgen canyons <world> [--count 4]
  *   pnpm -F playground worldgen monoliths <world> [--biome desert] [--count 44] [--tallest 150]
  *   pnpm -F playground worldgen map    <world> [--extent 3000] [--size 800] [--cx 0] [--cz 0]
+ *   pnpm -F playground worldgen zones  <world> [--count N] [--force]   (draft the named zones from towns + barriers; after towns)
+ *   pnpm -F playground worldgen regions <world>        (audit the zones — docs/world-editing/zones.md)
  *   pnpm -F playground worldgen stats  <world> [--cells 9]
  *   pnpm -F playground worldgen all    <world> [--project <name>]
  */
@@ -43,6 +45,9 @@ import {
   scatterCell,
   MAX_SURFACES,
   mulberry32,
+  auditRegions,
+  pointInPolygon,
+  type RegionDoc,
   type WorldField,
   type WorldRecipe,
   type RiverDoc,
@@ -2330,6 +2335,324 @@ function commandTowns(): void {
 }
 
 /** Flood-fill land (8-connected, above sea level) into components. 0 = water. */
+// ---------------------------------------------------------------- zones
+
+/**
+ * `worldgen zones <world> [--count N] [--step 48] [--force]` — a FIRST DRAFT
+ * of the named zones (recipe `regions`), for the zone-setup skill to refine
+ * and name. Runs after towns, before paths (docs/world-editing/zones.md).
+ *
+ * Seeds are towns picked farthest-apart (the capital first, every landmass
+ * with a town guaranteed one). Every land cell is then claimed by the seed
+ * that reaches it CHEAPEST, where crossing a river costs its width many
+ * times over, a steep slope costs several times flat ground, and water is a
+ * wall — so the claim fronts settle on rivers and ridges by themselves,
+ * which is the whole rule for a zone border. Each claim's outline becomes
+ * the polygon (simplified), its seed town the hub, the towns inside the
+ * landmarks. Names are placeholders: "Zone N" — naming is the skill's job.
+ */
+function commandZones(): void {
+  const { recipe, file } = loadRecipe();
+  if (recipe.regions.length > 0 && !flag("force")) {
+    console.log(`${recipe.regions.length} regions already in ${recipe.name} — pass --force to redraft (names and stories will be lost)`);
+    return;
+  }
+  const towns = recipe.features.towns;
+  if (towns.length === 0) {
+    console.log("no towns yet — run `worldgen towns` first (zones are seeded from towns)");
+    return;
+  }
+  const field = createWorldField(recipe);
+  const extent = extentFor(recipe);
+  const grid = sampleWorldGrid(field, extent, option("step", 48));
+  const route = routeGridFor(field, recipe, grid);
+  const n = grid.n;
+  const total = n * n;
+  const landmass = landComponentsOf(grid.height, n, recipe.seaLevel);
+  let landCells = 0;
+  for (let i = 0; i < total; i++) if (grid.height[i]! >= recipe.seaLevel) landCells++;
+  const landKm2 = (landCells * grid.step * grid.step) / 1e6;
+  // ~one zone per 6 km² of land, 3..24 — a zone should take minutes to cross,
+  // and be small enough that its players keep meeting (--count / --per-km2 to tune)
+  const count = Math.max(1, Math.min(towns.length, Math.round(option("count", Math.max(3, Math.min(24, landKm2 / option("per-km2", 6)))))));
+
+  // --- seeds: farthest-apart towns, every landmass big enough to be a zone gets one first
+  const townCell = towns.map((t) => grid.nearest(t.center[0], t.center[1]));
+  const townMass = townCell.map((c) => landmass[c]!);
+  const massCells = new Map<number, number>();
+  for (let i = 0; i < total; i++) if (landmass[i]! > 0) massCells.set(landmass[i]!, (massCells.get(landmass[i]!) ?? 0) + 1);
+  const minZoneCells = 0.5e6 / (grid.step * grid.step); // half a km²: smaller islets join nothing and get no seed
+  const seedable = (i: number): boolean => townMass[i]! > 0 && (massCells.get(townMass[i]!) ?? 0) >= minZoneCells;
+  const seeds: number[] = [];
+  const capital = Math.max(0, towns.findIndex((t) => t.tags.includes("capital")));
+  if (seedable(capital)) seeds.push(capital);
+  const massesSeen = new Set<number>(seeds.map((s) => townMass[s]!));
+  for (let i = 0; i < towns.length; i++) {
+    if (seeds.length >= count) break;
+    if (seedable(i) && !massesSeen.has(townMass[i]!)) {
+      seeds.push(i);
+      massesSeen.add(townMass[i]!);
+    }
+  }
+  while (seeds.length < count) {
+    let best = -1;
+    let bestD = -1;
+    for (let i = 0; i < towns.length; i++) {
+      if (seeds.includes(i) || !seedable(i)) continue;
+      let d = Infinity;
+      for (const s of seeds) d = Math.min(d, Math.hypot(towns[i]!.center[0] - towns[s]!.center[0], towns[i]!.center[1] - towns[s]!.center[1]));
+      if (d > bestD) {
+        bestD = d;
+        best = i;
+      }
+    }
+    if (best < 0) break;
+    seeds.push(best);
+  }
+
+  // --- multi-source Dijkstra: cheapest seed claims each land cell
+  const riverToll = option("river-toll", 18); // metres of flat walking per metre of river width crossed
+  const slopeToll = option("slope-toll", 6); // multiplier on steep ground (a ridge)
+  const stepCost = new Float32Array(total);
+  for (let i = 0; i < total; i++) {
+    const c = route.cost[i]!;
+    if (!Number.isFinite(c)) {
+      stepCost[i] = Infinity;
+      continue;
+    }
+    const ix = i % n;
+    const iz = (i / n) | 0;
+    const h = grid.height[i]!;
+    const hx = ix + 1 < n ? grid.height[i + 1]! : h;
+    const hz = iz + 1 < n ? grid.height[i + n]! : h;
+    const slope = Math.max(Math.abs(hx - h), Math.abs(hz - h)) / grid.step;
+    let m = c * (slope > 0.45 ? slopeToll : slope > 0.25 ? 1 + (slope - 0.25) * (slopeToll - 1) * 5 : 1);
+    if (route.river[i]! > 0) m += (route.river[i]! * riverToll) / grid.step;
+    stepCost[i] = m;
+  }
+  const label = new Int16Array(total).fill(-1);
+  const dist = new Float64Array(total).fill(Infinity);
+  const heap: number[] = [];
+  const heapD: number[] = [];
+  const push = (cell: number, d: number): void => {
+    heap.push(cell);
+    heapD.push(d);
+    let k = heap.length - 1;
+    while (k > 0) {
+      const p = (k - 1) >> 1;
+      if (heapD[p]! <= heapD[k]!) break;
+      [heap[p], heap[k]] = [heap[k]!, heap[p]!];
+      [heapD[p], heapD[k]] = [heapD[k]!, heapD[p]!];
+      k = p;
+    }
+  };
+  const pop = (): [number, number] => {
+    const cell = heap[0]!;
+    const d = heapD[0]!;
+    const lastC = heap.pop()!;
+    const lastD = heapD.pop()!;
+    if (heap.length > 0) {
+      heap[0] = lastC;
+      heapD[0] = lastD;
+      let k = 0;
+      for (;;) {
+        const l = k * 2 + 1;
+        const r = l + 1;
+        let m = k;
+        if (l < heap.length && heapD[l]! < heapD[m]!) m = l;
+        if (r < heap.length && heapD[r]! < heapD[m]!) m = r;
+        if (m === k) break;
+        [heap[m], heap[k]] = [heap[k]!, heap[m]!];
+        [heapD[m], heapD[k]] = [heapD[k]!, heapD[m]!];
+        k = m;
+      }
+    }
+    return [cell, d];
+  };
+  seeds.forEach((townIndex, s) => {
+    const c = townCell[townIndex]!;
+    dist[c] = 0;
+    label[c] = s;
+    push(c, 0);
+  });
+  const DIRS8: Array<[number, number, number]> = [
+    [1, 0, 1], [-1, 0, 1], [0, 1, 1], [0, -1, 1],
+    [1, 1, Math.SQRT2], [1, -1, Math.SQRT2], [-1, 1, Math.SQRT2], [-1, -1, Math.SQRT2],
+  ];
+  while (heap.length > 0) {
+    const [cell, d] = pop();
+    if (d > dist[cell]!) continue;
+    const ix = cell % n;
+    const iz = (cell / n) | 0;
+    for (const [dx, dz, len] of DIRS8) {
+      const nx = ix + dx;
+      const nz = iz + dz;
+      if (nx < 0 || nz < 0 || nx >= n || nz >= n) continue;
+      const ni = nx + nz * n;
+      if (!Number.isFinite(stepCost[ni]!)) continue;
+      const nd = d + len * (stepCost[cell]! + stepCost[ni]!) * 0.5;
+      if (nd < dist[ni]!) {
+        dist[ni] = nd;
+        label[ni] = label[cell]!;
+        push(ni, nd);
+      }
+    }
+  }
+
+  // --- every town belongs somewhere: a town whose cell is a wall (a lakeside
+  // pad under the lake's bank band) never got a label; stamp the nearest
+  // claim onto it and its neighbours so the outline reaches it
+  for (const c of townCell) {
+    if (label[c]! >= 0) continue;
+    const ix = c % n;
+    const iz = (c / n) | 0;
+    let found = -1;
+    for (let r = 1; r <= 6 && found < 0; r++) {
+      for (let dz = -r; dz <= r && found < 0; dz++) {
+        for (let dx = -r; dx <= r; dx++) {
+          const nx = ix + dx;
+          const nz = iz + dz;
+          if (nx < 0 || nz < 0 || nx >= n || nz >= n) continue;
+          const l = label[nx + nz * n]!;
+          if (l >= 0) {
+            found = l;
+            break;
+          }
+        }
+      }
+    }
+    if (found < 0) continue;
+    for (let dz = -1; dz <= 1; dz++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const nx = ix + dx;
+        const nz = iz + dz;
+        if (nx >= 0 && nz >= 0 && nx < n && nz < n) label[nx + nz * n] = found;
+      }
+    }
+  }
+
+  // --- no enclaves: a pocket of one claim inside another (a valley reached
+  // more cheaply round the far side) would make the outer outline enclose it
+  // and two zones share ground. Keep only the piece of each claim that holds
+  // its seed; every other piece goes to the neighbour that borders it most.
+  for (let pass = 0; pass < 400; pass++) {
+    // each pass peels one layer off every pocket, so a deep pocket takes a few
+    const keep = new Uint8Array(total);
+    const stack: number[] = [];
+    seeds.forEach((townIndex, s) => {
+      const start = townCell[townIndex]!;
+      if (label[start] !== s) return;
+      keep[start] = 1;
+      stack.push(start);
+      while (stack.length > 0) {
+        const cell = stack.pop()!;
+        const ix = cell % n;
+        const iz = (cell / n) | 0;
+        for (const [dx, dz] of DIRS8) {
+          const nx = ix + dx;
+          const nz = iz + dz;
+          if (nx < 0 || nz < 0 || nx >= n || nz >= n) continue;
+          const ni = nx + nz * n;
+          if (keep[ni] || label[ni] !== s) continue;
+          keep[ni] = 1;
+          stack.push(ni);
+        }
+      }
+    });
+    let moved = 0;
+    const next = Int16Array.from(label);
+    for (let i = 0; i < total; i++) {
+      if (label[i]! < 0 || keep[i]) continue;
+      const ix = i % n;
+      const iz = (i / n) | 0;
+      const votes = new Map<number, number>();
+      for (const [dx, dz] of DIRS8) {
+        const nx = ix + dx;
+        const nz = iz + dz;
+        if (nx < 0 || nz < 0 || nx >= n || nz >= n) continue;
+        const l = label[nx + nz * n]!;
+        if (l >= 0 && l !== label[i] && keep[nx + nz * n]) votes.set(l, (votes.get(l) ?? 0) + 1);
+      }
+      let best = -1;
+      let bestVotes = 0;
+      for (const [l, v] of votes) if (v > bestVotes) [best, bestVotes] = [l, v];
+      if (best >= 0) {
+        next[i] = best;
+        moved++;
+      }
+    }
+    label.set(next);
+    if (moved === 0) break;
+  }
+
+  // --- outlines: boundary edges of each claim, chained into the longest loop, simplified
+  const regions: RegionDoc[] = [];
+  const cornerX = (ix: number): number => grid.worldX(ix) - grid.step / 2;
+  const cornerZ = (iz: number): number => grid.worldZ(iz) - grid.step / 2;
+  seeds.forEach((townIndex, s) => {
+    // boundary edges between a cell of this label and anything else, as corner→corner
+    const adj = new Map<number, number[]>();
+    const key = (cx: number, cz: number): number => cx * (n + 1) + cz;
+    const addEdge = (a: number, b: number): void => {
+      (adj.get(a) ?? adj.set(a, []).get(a)!).push(b);
+      (adj.get(b) ?? adj.set(b, []).get(b)!).push(a);
+    };
+    let cells = 0;
+    for (let iz = 0; iz < n; iz++) {
+      for (let ix = 0; ix < n; ix++) {
+        const i = ix + iz * n;
+        if (label[i] !== s) continue;
+        cells++;
+        const L = (nx: number, nz: number): number => (nx < 0 || nz < 0 || nx >= n || nz >= n ? -1 : label[nx + nz * n]!);
+        if (L(ix, iz - 1) !== s) addEdge(key(ix, iz), key(ix + 1, iz)); // top
+        if (L(ix, iz + 1) !== s) addEdge(key(ix, iz + 1), key(ix + 1, iz + 1)); // bottom
+        if (L(ix - 1, iz) !== s) addEdge(key(ix, iz), key(ix, iz + 1)); // left
+        if (L(ix + 1, iz) !== s) addEdge(key(ix + 1, iz), key(ix + 1, iz + 1)); // right
+      }
+    }
+    if (cells < minZoneCells) return; // a claim smaller than half a km² is not a zone
+    // walk loops; keep the longest (holes around lakes are dropped)
+    const used = new Set<string>();
+    let bestLoop: number[] = [];
+    for (const start of adj.keys()) {
+      let cur = start;
+      const loop: number[] = [start];
+      for (;;) {
+        const next = (adj.get(cur) ?? []).find((b) => !used.has(`${cur}:${b}`) && !used.has(`${b}:${cur}`));
+        if (next === undefined) break;
+        used.add(`${cur}:${next}`);
+        cur = next;
+        if (cur === start) break;
+        loop.push(cur);
+      }
+      if (loop.length > bestLoop.length) bestLoop = loop;
+    }
+    if (bestLoop.length < 3) return;
+    const pts: [number, number][] = bestLoop.map((k) => [cornerX((k / (n + 1)) | 0), cornerZ(k % (n + 1))]);
+    const capped = simplifyLoop(pts, grid.step * 1.2, 100);
+    if (capped.length < 3) return;
+    const town = towns[townIndex]!;
+    const inside = towns.filter((t) => t.id !== town.id && pointInPolygon(t.center[0], t.center[1], capped)).map((t) => t.id);
+    regions.push({
+      id: `zone-${regions.length + 1}`,
+      name: `Zone ${regions.length + 1}`,
+      story: "",
+      polygon: capped.map(([x, z]) => [Math.round(x), Math.round(z)] as [number, number]),
+      hub: [town.center[0], town.center[1]],
+      landmarks: [town.id, ...inside], // the hub town first
+      tags: ["draft"],
+    });
+  });
+
+  recipe.regions = regions;
+  writeRecipe(recipe, file);
+  console.log(`drafted ${regions.length} zones from ${seeds.length} seed towns over ${landKm2.toFixed(1)} km² of land (step ${grid.step} m)`);
+  const report = auditRegions(recipe.regions, recipe.features);
+  for (const r of report.regions) console.log(`  ${r.id}: ${r.areaKm2} km², hub ${regions.find((x) => x.id === r.id)?.landmarks[0] ?? "?"}, towns ${r.towns.join(",") || "-"}, pois ${r.pois}`);
+  if (report.findings.length > 0) console.log(`  findings:\n    ${report.findings.join("\n    ")}`);
+  console.log("  next: name them and check the borders — the zone-setup skill / docs/world-editing/zones.md");
+}
+
 function landComponentsOf(height: Float32Array, n: number, seaLevel: number): Int32Array {
   const out = new Int32Array(n * n);
   let next = 1;
@@ -4347,6 +4670,38 @@ function commandMap(): void {
     for (let a = 0; a <= Math.PI * 2 + 0.01; a += 0.01) pts.push([Math.cos(a) * limit, Math.sin(a) * limit]);
     stroke(pts, [200, 40, 40], 0);
   }
+  // Regions (the agent-drawn zones): white borders, a white ring on the hub,
+  // the NAME in block capitals beside it (a 5x7 bitmap font — no font files
+  // out here). Names also print below with their pixel position.
+  const labels: Array<{ x: number; y: number; w: number; h: number; text: string; scale: number }> = [];
+  for (const region of recipe.regions) {
+    stroke([...region.polygon, region.polygon[0]!], [255, 255, 255], 1);
+    const at = region.hub ?? region.polygon.reduce<[number, number]>((acc, p) => [acc[0] + p[0] / region.polygon.length, acc[1] + p[1] / region.polygon.length], [0, 0]);
+    const [px, py] = toPixel(at[0], at[1]);
+    if (region.hub) {
+      plot(px, py, [255, 255, 255], 4);
+      plot(px, py, [20, 20, 20], 2);
+    }
+    const scale = size >= 1000 ? 2 : 1;
+    const text = region.name.toUpperCase();
+    const w = text.length * 6 * scale;
+    labels.push({ x: Math.round(px - w / 2), y: py + 7 * scale, w, h: 7 * scale, text, scale });
+  }
+  // two hubs close together would print on top of each other: nudge the
+  // later label down (then up) until its box is clear of every placed one
+  const placed: Array<{ x: number; y: number; w: number; h: number }> = [];
+  const overlaps = (a: { x: number; y: number; w: number; h: number }): boolean =>
+    placed.some((b) => a.x < b.x + b.w + 4 && b.x < a.x + a.w + 4 && a.y < b.y + b.h + 3 && b.y < a.y + a.h + 3);
+  for (const label of labels.sort((a, b) => a.y - b.y)) {
+    const start = label.y;
+    for (let attempt = 0; attempt < 12 && overlaps(label); attempt++) {
+      const step = (label.h + 4) * (Math.floor(attempt / 2) + 1);
+      label.y = attempt % 2 === 0 ? start + step : start - step;
+    }
+    label.x = Math.max(2, Math.min(size - label.w - 2, label.x));
+    placed.push(label);
+    drawText(pixels, size, label.x, label.y, label.text, [255, 255, 255], label.scale);
+  }
 
   const out = path.join(assetsRoot(), "..", `${recipe.name}-map${byZone ? "-zones" : ""}.png`);
   fs.mkdirSync(path.dirname(out), { recursive: true });
@@ -4362,6 +4717,111 @@ function commandMap(): void {
   console.log(`wrote ${path.relative(process.cwd(), out)}  (${size}x${size}, ${extent * 2} world units across, ${step.toFixed(1)} m/px)`);
   console.log("  blue = rivers/lakes, brown = canyons, tan = town paths, thin tan = peak trails, red = towns, yellow = peaks, cyan = waterfalls, red ring = world limit");
   if (byZone) console.log(`  zones: ${anchors.map((a, i) => `${a.id} rgb(${anchorColour[i]!.join(",")})`).join(", ")}`);
+  if (recipe.regions.length > 0) {
+    console.log("  regions (white borders; name @ pixel x,y of the hub or centroid):");
+    for (const region of recipe.regions) {
+      const at = region.hub ?? region.polygon.reduce<[number, number]>((acc, p) => [acc[0] + p[0] / region.polygon.length, acc[1] + p[1] / region.polygon.length], [0, 0]);
+      const [px, py] = toPixel(at[0], at[1]);
+      console.log(`    ${region.name} (${region.id}) @ ${px},${py}`);
+    }
+  }
+}
+
+/**
+ * `worldgen regions <world>` — what the map cannot show about the agent-drawn
+ * zones: size, the towns and POIs each one holds, hubs outside their own
+ * border, overlaps, and towns nobody claims. Exit 1 on findings, like audit.
+ */
+function commandRegions(): void {
+  const { recipe } = loadRecipe();
+  if (recipe.regions.length === 0) {
+    console.log(`no regions in ${recipe.name} — see docs/world-editing/zones.md to draw them`);
+    return;
+  }
+  const report = auditRegions(recipe.regions, recipe.features);
+  for (const r of report.regions) {
+    console.log(
+      `${r.name} (${r.id}): ${r.areaKm2} km², centroid ${r.centroid.join(",")}, towns ${r.towns.length ? r.towns.join(",") : "-"}, pois ${r.pois}` +
+        (r.hubInside === false ? ", HUB OUTSIDE" : "") +
+        (r.overlaps.length ? `, overlaps ${r.overlaps.join(",")}` : ""),
+    );
+  }
+  const claimed = recipe.features.towns.length - report.unclaimedTowns.length;
+  console.log(`${recipe.regions.length} regions claim ${claimed}/${recipe.features.towns.length} towns`);
+  if (report.findings.length > 0) {
+    console.log(`\n${report.findings.length} finding(s):`);
+    for (const f of report.findings) console.log(`  - ${f}`);
+    process.exitCode = 1;
+  }
+}
+
+/** 5x7 block capitals, digits and a few marks — enough to write a zone's name on a PNG with no font files. */
+const FONT: Record<string, string[]> = {
+  A: ["01110", "10001", "10001", "11111", "10001", "10001", "10001"],
+  B: ["11110", "10001", "10001", "11110", "10001", "10001", "11110"],
+  C: ["01110", "10001", "10000", "10000", "10000", "10001", "01110"],
+  D: ["11110", "10001", "10001", "10001", "10001", "10001", "11110"],
+  E: ["11111", "10000", "10000", "11110", "10000", "10000", "11111"],
+  F: ["11111", "10000", "10000", "11110", "10000", "10000", "10000"],
+  G: ["01110", "10001", "10000", "10111", "10001", "10001", "01111"],
+  H: ["10001", "10001", "10001", "11111", "10001", "10001", "10001"],
+  I: ["01110", "00100", "00100", "00100", "00100", "00100", "01110"],
+  J: ["00111", "00010", "00010", "00010", "00010", "10010", "01100"],
+  K: ["10001", "10010", "10100", "11000", "10100", "10010", "10001"],
+  L: ["10000", "10000", "10000", "10000", "10000", "10000", "11111"],
+  M: ["10001", "11011", "10101", "10101", "10001", "10001", "10001"],
+  N: ["10001", "10001", "11001", "10101", "10011", "10001", "10001"],
+  O: ["01110", "10001", "10001", "10001", "10001", "10001", "01110"],
+  P: ["11110", "10001", "10001", "11110", "10000", "10000", "10000"],
+  Q: ["01110", "10001", "10001", "10001", "10101", "10010", "01101"],
+  R: ["11110", "10001", "10001", "11110", "10100", "10010", "10001"],
+  S: ["01111", "10000", "10000", "01110", "00001", "00001", "11110"],
+  T: ["11111", "00100", "00100", "00100", "00100", "00100", "00100"],
+  U: ["10001", "10001", "10001", "10001", "10001", "10001", "01110"],
+  V: ["10001", "10001", "10001", "10001", "10001", "01010", "00100"],
+  W: ["10001", "10001", "10001", "10101", "10101", "10101", "01010"],
+  X: ["10001", "10001", "01010", "00100", "01010", "10001", "10001"],
+  Y: ["10001", "10001", "01010", "00100", "00100", "00100", "00100"],
+  Z: ["11111", "00001", "00010", "00100", "01000", "10000", "11111"],
+  "0": ["01110", "10001", "10011", "10101", "11001", "10001", "01110"],
+  "1": ["00100", "01100", "00100", "00100", "00100", "00100", "01110"],
+  "2": ["01110", "10001", "00001", "00010", "00100", "01000", "11111"],
+  "3": ["11110", "00001", "00001", "01110", "00001", "00001", "11110"],
+  "4": ["00010", "00110", "01010", "10010", "11111", "00010", "00010"],
+  "5": ["11111", "10000", "11110", "00001", "00001", "10001", "01110"],
+  "6": ["00110", "01000", "10000", "11110", "10001", "10001", "01110"],
+  "7": ["11111", "00001", "00010", "00100", "01000", "01000", "01000"],
+  "8": ["01110", "10001", "10001", "01110", "10001", "10001", "01110"],
+  "9": ["01110", "10001", "10001", "01111", "00001", "00010", "01100"],
+  "-": ["00000", "00000", "00000", "11111", "00000", "00000", "00000"],
+  "'": ["00100", "00100", "00000", "00000", "00000", "00000", "00000"],
+  ".": ["00000", "00000", "00000", "00000", "00000", "00000", "00100"],
+  " ": ["00000", "00000", "00000", "00000", "00000", "00000", "00000"],
+};
+
+/** Write `text` at (x, y) in `colour` with a dark outline, `scale` px per font pixel. Unknown characters draw as a dot. */
+function drawText(pixels: Uint8Array, size: number, x: number, y: number, text: string, colour: [number, number, number], scale = 1): void {
+  const set = (px: number, py: number, c: [number, number, number]): void => {
+    if (px < 0 || py < 0 || px >= size || py >= size) return;
+    const o = (py * size + px) * 3;
+    pixels[o] = c[0];
+    pixels[o + 1] = c[1];
+    pixels[o + 2] = c[2];
+  };
+  const cells: Array<[number, number]> = [];
+  let cx = x;
+  for (const ch of text) {
+    const glyph = FONT[ch] ?? FONT["."]!;
+    for (let row = 0; row < 7; row++) {
+      for (let col = 0; col < 5; col++) {
+        if (glyph[row]![col] !== "1") continue;
+        for (let sy = 0; sy < scale; sy++) for (let sx = 0; sx < scale; sx++) cells.push([cx + col * scale + sx, y + row * scale + sy]);
+      }
+    }
+    cx += 6 * scale;
+  }
+  for (const [px, py] of cells) for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) set(px + dx, py + dy, [12, 12, 12]);
+  for (const [px, py] of cells) set(px, py, colour);
 }
 
 function clamp255(v: number): number {
@@ -4570,6 +5030,12 @@ switch (command) {
   case "map":
     commandMap();
     break;
+  case "zones":
+    commandZones();
+    break;
+  case "regions":
+    commandRegions();
+    break;
   case "audit":
     commandAudit();
     break;
@@ -4592,6 +5058,8 @@ switch (command) {
     commandCanyons();
     commandRivers();
     commandTowns();
+    // zones after towns (seeded from them) and rivers (borders follow them)
+    commandZones();
     commandPaths();
     commandPois();
     commandTrails();

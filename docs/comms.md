@@ -1,8 +1,8 @@
 # Comms — text chat and VoIP (`@hitreg/comms`)
 
-A drop-in module for player communication: **text chat and voice, each on
-four channels — proximity, global, team, party** — that plugs into any
-game built on the engine's room protocol. Headless core with tests; the
+A drop-in module for player communication: **text chat on five channels —
+proximity, zone, global, team, party — and voice on all but zone** — that
+plugs into any game built on the engine's room protocol. Headless core with tests; the
 browser parts (mic, WebRTC, WebAudio, the default overlay) are opt-in.
 
 ```ts
@@ -17,6 +17,7 @@ const comms = createComms({
   link: localLink(selfId, name),                 // swap per session (below)
   membership: netStateMembership(netState),      // who is on which team/party
   positionOf: (peer) => world.positionOf(peer),  // null = not in the world
+  zoneOf: (peer) => zoneUnder(peer),             // recipe zone id (or the scene name) — enables "zone"
   listenerPose: () => cameraPose(),              // spatial voice
   assign: (peer, kind, value) => netState.set(`comms.${kind}/${peer}`, value), // "/team red"
   emitEvent: (name, p) => bus.emit(name, p),
@@ -32,7 +33,7 @@ comms.update();
 ```
 
 In the playground this is already wired (`apps/playground/src/main.ts`):
-Enter opens chat, `/g /t /p /s` pick a channel for one line, Tab cycles,
+Enter opens chat, `/s /z /g /t /p` pick a channel for one line, Tab cycles,
 `/team red` and `/party blue` self-assign (a rules-driven game turns
 `allowSelfAssign` off and assigns from a script), the mic button enables
 voice.
@@ -111,6 +112,28 @@ typed `!ready` is `ctx.chat.on` + a Set + `ctx.netState`.
    `voice.onChange` — the services are UI-agnostic.
 5. Gate hotkeys on `ui.isTyping()` if your input layer doesn't already
    ignore form fields.
+
+## Zone chat across a cluster
+
+The hosted world is a pool of whole-world layers (docs/hosting.md), each
+holding a few dozen players spread over a vast map — so "who else is here?"
+is answered by **zone**, not by proximity. A zone is the agent-drawn REGION
+under the speaker when the recipe has `regions` (docs/world-editing/zones.md),
+else the generator's climate cell (`field.zone(x, z).id`), else the scene as
+one zone. A zone line goes to every player in the speaker's zone on the
+speaker's layer, then up the
+cluster link; main fans it to every other layer, and each delivers it to its
+own players in that zone (`ChatService.deliverForeign`, `foreignRecipients`).
+Everyone in the valley talks, whichever copy of the valley they are on.
+Global rides the same bridge. Proximity, team and party stay per layer.
+
+Plumbing: a dedicated layer runs its own `ChatService` as the host
+(`packages/server/src/chat.ts`, mounted by `serve`) — before that, a hosted
+game had no chat at all, because chat routes on the host and the host was a
+process with nobody listening. `BRIDGED_CHANNELS` is the list main carries;
+the stamp (`id`, `at`) is the origin's, so both copies show the same line.
+Voice has no `zoneOf`, so zone voice is refused by `recipientsFor` — a zone
+is a text room, not a hundred open mics.
 
 ## Limits and what comes next
 

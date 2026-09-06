@@ -22,7 +22,7 @@ import {
   type Transport,
   type ReplicaEntry,
 } from "@hitreg/net";
-import type { EntityDoc, NetObjectData, RecipeEdit, WorldRecipe } from "@hitreg/core";
+import { isTransferLocked, type EntityDoc, type NetObjectData, type RecipeEdit, type WorldRecipe } from "@hitreg/core";
 import type { HeadlessWorld } from "./world.js";
 import type { TerrainStreamer } from "./terrain.js";
 import type { CommitInput, PlayerSave } from "./cluster/player-store.js";
@@ -515,6 +515,8 @@ export class GameServer {
     const player = this.players.get(peerId);
     if (!player || player.disconnectedAt !== null || player.transferring !== null) return false;
     if (this.world.netState.get(`combat/${player.bodyId}.dead`) === true) return false;
+    // in combat: an authoritative combat script holds the body here for a while after every hit
+    if (isTransferLocked(this.world.netState, player.bodyId, this.world.timeMs)) return false;
     return this.transferGate ? this.transferGate(peerId) : true;
   }
 

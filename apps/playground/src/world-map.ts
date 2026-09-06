@@ -22,6 +22,8 @@ interface WorldMapRecipe {
     pois: { id: string; kind: string; position: [number, number, number] }[];
     lakes: { id: string; center: [number, number] }[];
   };
+  /** The named zones (recipe `regions`), when the agent has drawn them. */
+  regions?: { id: string; name: string; polygon: [number, number][]; hub?: [number, number] }[];
 }
 
 export interface WorldMapOverlayOptions {
@@ -265,6 +267,45 @@ export function createWorldMapOverlay(options: WorldMapOverlayOptions): { toggle
     for (const town of recipe.features.towns) {
       dot(town.center[0], town.center[1], "#f03c3c", town.tags.includes("capital") ? 6 : 4);
       label(town.center[0], town.center[1], town.id, "#ffd2d2");
+    }
+    // zones: a faint white border and the name, centred on the hub, always
+    // legible whatever the zoom — a player reads "where am I" off this.
+    // Labels that would print on top of each other are nudged apart.
+    ctx.font = "600 13px ui-sans-serif, system-ui, sans-serif";
+    const zoneLabels: Array<{ x: number; y: number; w: number; h: number; text: string }> = [];
+    for (const region of recipe.regions ?? []) {
+      if (region.polygon.length < 3) continue;
+      ctx.beginPath();
+      region.polygon.forEach(([x, z], i) => {
+        const [px, pz] = toPx(x, z);
+        if (i === 0) ctx.moveTo(px, pz);
+        else ctx.lineTo(px, pz);
+      });
+      ctx.closePath();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = "rgba(255,255,255,0.55)";
+      ctx.stroke();
+      const at = region.hub ?? region.polygon.reduce<[number, number]>((acc, p) => [acc[0] + p[0] / region.polygon.length, acc[1] + p[1] / region.polygon.length], [0, 0]);
+      const [px, pz] = toPx(at[0], at[1]);
+      if (px < -200 || pz < -20 || px > size + 200 || pz > size + 20) continue;
+      const w = ctx.measureText(region.name).width;
+      zoneLabels.push({ x: px - w / 2, y: pz - 12, w, h: 14, text: region.name });
+    }
+    const placedLabels: Array<{ x: number; y: number; w: number; h: number }> = [];
+    const collides = (a: { x: number; y: number; w: number; h: number }): boolean =>
+      placedLabels.some((b) => a.x < b.x + b.w + 6 && b.x < a.x + a.w + 6 && a.y - a.h < b.y + 3 && b.y - b.h < a.y + 3);
+    for (const l of zoneLabels.sort((a, b) => a.y - b.y)) {
+      const start = l.y;
+      for (let attempt = 0; attempt < 12 && collides(l); attempt++) {
+        const step = (l.h + 4) * (Math.floor(attempt / 2) + 1);
+        l.y = attempt % 2 === 0 ? start + step : start - step;
+      }
+      placedLabels.push(l);
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = "rgba(0,0,0,0.8)";
+      ctx.strokeText(l.text, l.x, l.y);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(l.text, l.x, l.y);
     }
     const here = options.position();
     if (here) {

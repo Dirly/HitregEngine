@@ -331,7 +331,7 @@ export interface ScriptEvents {
 /** One chat line as scripts see it (structurally @hitreg/comms' ChatMessage). */
 export interface ScriptChatMessage {
   id: string;
-  channel: "proximity" | "global" | "team" | "party" | "system";
+  channel: "proximity" | "zone" | "global" | "team" | "party" | "system";
   /** Sending peer id, or "system". */
   from: string;
   name: string;
@@ -347,7 +347,7 @@ export interface ScriptChatMessage {
  * is a local-only line. Only the messages this tab may see ever arrive.
  */
 export interface ScriptChat {
-  send(channel: "proximity" | "global" | "team" | "party", text: string): boolean;
+  send(channel: "proximity" | "zone" | "global" | "team" | "party", text: string): boolean;
   announce(text: string): void;
   system(text: string): void;
   on(cb: (msg: ScriptChatMessage) => void): () => void;

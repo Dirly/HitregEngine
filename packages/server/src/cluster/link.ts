@@ -14,6 +14,7 @@ import type { PlayerDataBackend, PlayerDataRecord, PlayerDataScope, WorldRecipe 
 import {
   CLUSTER_PATH,
   parseClusterMessage,
+  type BridgedChatLine,
   type LayerRpc,
   type LayerToMain,
   type MainToLayer,
@@ -66,6 +67,7 @@ export class ClusterLink {
     terraform: new Set<(requestId: string, edits: unknown[]) => void>(),
     drain: new Set<() => void>(),
     link: new Set<(up: boolean) => void>(),
+    chat: new Set<(line: BridgedChatLine, origin: string) => void>(),
   };
   private firstRegistration: { resolve: (r: Registered) => void; reject: (e: Error) => void } | null = null;
 
@@ -171,6 +173,9 @@ export class ClusterLink {
       case "drain":
         for (const cb of this.handlers.drain) cb();
         return;
+      case "chat":
+        for (const cb of this.handlers.chat) cb(msg.line, msg.origin);
+        return;
     }
   }
 
@@ -195,6 +200,17 @@ export class ClusterLink {
 
   transferFailed(characterId: string, reason: string): void {
     this.send({ t: "transfer.failed", characterId, reason });
+  }
+
+  /** A zone/global line this layer delivered — for main to fan to the other layers. Dropped while main is down (chat is not worth queuing). */
+  chat(line: BridgedChatLine): void {
+    if (!this.isUp) return;
+    this.socket!.send(JSON.stringify({ t: "chat", line } satisfies LayerToMain));
+  }
+
+  onChat(cb: (line: BridgedChatLine, origin: string) => void): () => void {
+    this.handlers.chat.add(cb);
+    return () => this.handlers.chat.delete(cb);
   }
 
   rpc<T = unknown>(call: LayerRpc): Promise<T> {

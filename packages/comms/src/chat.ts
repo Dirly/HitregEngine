@@ -15,6 +15,8 @@
 import { z } from "zod";
 import type { EventRegistry } from "@hitreg/core";
 import {
+  BRIDGED_CHANNELS,
+  foreignRecipients,
   isCommsChannel,
   recipientsFor,
   type CommsChannel,
@@ -61,6 +63,19 @@ export interface ChatDeps {
   membership: MembershipSource;
   /** World position of a participant, or null when not in the world. */
   positionOf(peerId: string): readonly [number, number, number] | null;
+  /**
+   * The world zone a participant stands in (recipe zone id, or the scene
+   * name for a zoneless world), or null when not in the world. Absent =
+   * no zone channel on this endpoint (a "zone" request is refused).
+   */
+  zoneOf?(peerId: string): string | null;
+  /**
+   * Authority side, clustered hosts only: after a message on a bridged
+   * channel (zone, global) is delivered here, hand it to the cluster so the
+   * other layers can deliver it too (`deliverForeign` on their side).
+   * `scope.zone` is the sender's zone, which only this host can compute.
+   */
+  bridge?: { publish(msg: ChatMessage, scope: { zone: string | null }): void };
   /**
    * Authority side: apply a membership change ("/team red"). Return false
    * to refuse. Absent = self-assignment is unavailable. Typically writes
@@ -199,6 +214,7 @@ export class ChatService {
   private link: CommsLink;
   private readonly config: Required<ChatConfig>;
   private readonly router: ChatRouter;
+  private readonly ctx: RoutingContext;
   private readonly history_: ChatMessage[] = [];
   private readonly handlers = new Set<(msg: ChatMessage) => void>();
   private readonly linkUnsubs: Array<() => void> = [];
@@ -219,7 +235,9 @@ export class ChatService {
       teamOf: (id) => deps.membership.teamOf(id),
       partyOf: (id) => deps.membership.partyOf(id),
       positionOf: (id) => deps.positionOf(id),
+      ...(deps.zoneOf ? { zoneOf: (id: string) => deps.zoneOf!(id) } : {}),
     };
+    this.ctx = ctx;
     this.router = new ChatRouter(this.config, ctx, deps.now ?? (() => Date.now()));
     this.link = deps.link;
     this.bind(deps.link);
@@ -360,7 +378,27 @@ export class ChatService {
       if (recipient === this.link.selfId) this.deliver(msg);
       else this.link.send(CHAT_MODULE, recipient, { k: "msg", msg } satisfies ChatDown);
     }
+    if (this.deps.bridge && BRIDGED_CHANNELS.includes(channel)) {
+      this.deps.bridge.publish(msg, { zone: this.ctx.zoneOf?.(sender) ?? null });
+    }
     return { ok: true };
+  }
+
+  /**
+   * Authority (a clustered host): a message another layer already routed and
+   * delivered on its side. Deliver it to whoever HERE may hear it — players
+   * standing in `scope.zone` for zone lines, everyone for global — with the
+   * original stamp, so both copies of the world show the same line.
+   */
+  deliverForeign(msg: ChatMessage, scope: { zone: string | null }): number {
+    if (this.disposed || this.link.role === "peer" || msg.channel === "system") return 0;
+    if (!BRIDGED_CHANNELS.includes(msg.channel)) return 0;
+    const recipients = foreignRecipients(msg.channel, scope, this.participants(), this.ctx);
+    for (const recipient of recipients) {
+      if (recipient === this.link.selfId) this.deliver(msg);
+      else this.link.send(CHAT_MODULE, recipient, { k: "msg", msg } satisfies ChatDown);
+    }
+    return recipients.length;
   }
 
   private requestAssign(kind: "team" | "party", value: string | null): void {
@@ -427,13 +465,13 @@ export function registerCommsEvents(registry: EventRegistry): void {
     "chat.message",
     z
       .object({
-        channel: z.enum(["proximity", "global", "team", "party"]),
+        channel: z.enum(["proximity", "zone", "global", "team", "party"]),
         from: z.string().describe("Sending peer id."),
         name: z.string(),
         text: z.string(),
       })
       .describe(
-        "A chat line THIS tab received (proximity/global/team/party). Local-only by construction: the host routes each message to the peers allowed to see it, so listening here never leaks another team's chat. Emitted on the session event bus after delivery; scripts use it for chat commands ('!ready'), bots, or reactions.",
+        "A chat line THIS tab received (proximity/zone/global/team/party). Local-only by construction: the host routes each message to the peers allowed to see it, so listening here never leaks another team's chat. Zone and global lines may originate on another layer of the cluster. Emitted on the session event bus after delivery; scripts use it for chat commands ('!ready'), bots, or reactions.",
       ),
   );
 }

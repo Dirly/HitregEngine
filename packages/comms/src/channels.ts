@@ -2,24 +2,34 @@
  * Communication channels — shared by text chat and voice.
  *
  * - "proximity": heard by players within a radius of the speaker ("say").
- * - "global":    everyone in the session.
+ * - "zone":      heard by every player in the speaker's world ZONE — across
+ *                every layer of the cluster when a bridge is mounted. The
+ *                answer to "the world is vast and I never see the other 40":
+ *                everyone standing in the same region talks, whichever copy
+ *                of the world they are on.
+ * - "global":    everyone in the session (bridged across layers too).
  * - "team":      players sharing the speaker's team (netState `comms.team/*`).
  * - "party":     players sharing the speaker's party (netState `comms.party/*`).
  *
  * The routing rule for each lives in ONE place (`recipientsFor` below) so
  * text and voice can never disagree about who is allowed to hear whom.
+ * Voice never offers a `zoneOf`, so zone voice is refused by construction —
+ * a zone is a text room, not a hundred open mics.
  */
 
-export type CommsChannel = "proximity" | "global" | "team" | "party";
+export type CommsChannel = "proximity" | "zone" | "global" | "team" | "party";
 
-export const COMMS_CHANNELS: readonly CommsChannel[] = ["proximity", "global", "team", "party"];
+export const COMMS_CHANNELS: readonly CommsChannel[] = ["proximity", "zone", "global", "team", "party"];
+
+/** Channels a cluster bridge carries between layers (what one copy of the world says, every copy hears). */
+export const BRIDGED_CHANNELS: readonly CommsChannel[] = ["zone", "global"];
 
 export interface ChannelMeta {
   /** Short UI label. */
   label: string;
   /**
    * Text glyph shown beside the label — meaning is never carried by color
-   * alone (WCAG / colorblind-safe): "[S]ay", "[G]lobal", "[T]eam", "[P]arty".
+   * alone (WCAG / colorblind-safe): "[S]ay", "[Z]one", "[G]lobal", "[T]eam", "[P]arty".
    */
   glyph: string;
   /** Slash-prefixes that select this channel for one message ("/t hello"). */
@@ -30,6 +40,7 @@ export interface ChannelMeta {
 // are membership commands, so the long words can't double as channels.
 export const CHANNEL_META: Readonly<Record<CommsChannel, ChannelMeta>> = {
   proximity: { label: "say", glyph: "[S]", prefixes: ["/s", "/say", "/l"] },
+  zone: { label: "zone", glyph: "[Z]", prefixes: ["/z", "/zone"] },
   global: { label: "global", glyph: "[G]", prefixes: ["/g", "/all"] },
   team: { label: "team", glyph: "[T]", prefixes: ["/t"] },
   party: { label: "party", glyph: "[P]", prefixes: ["/p"] },
@@ -85,6 +96,12 @@ export interface RoutingContext {
   partyOf(peerId: string): string | null;
   /** World position of a participant, or null when not in the world (not playing). */
   positionOf(peerId: string): readonly [number, number, number] | null;
+  /**
+   * The world zone a participant stands in (the recipe's zone id, or the
+   * scene name for a world without zones), or null when not in the world.
+   * Absent entirely = this endpoint has no zone chat (voice, a bare host).
+   */
+  zoneOf?(peerId: string): string | null;
 }
 
 export type RoutingResult =
@@ -94,8 +111,8 @@ export type RoutingResult =
 /**
  * Who may hear `sender` on `channel`, out of `participants` (which should
  * include the sender — a speaker always hears themselves). Team/party
- * require membership; proximity requires the sender to be in the world.
- * Pure: the host uses it to route text, every client uses it to gate
+ * require membership; proximity and zone require the sender to be in the
+ * world. Pure: the host uses it to route text, every client uses it to gate
  * outgoing voice, and tests pin it down.
  */
 export function recipientsFor(
@@ -118,6 +135,12 @@ export function recipientsFor(
       if (party === null) return { ok: false, reason: "you are not in a party" };
       return { ok: true, recipients: participants.filter((p) => ctx.partyOf(p) === party) };
     }
+    case "zone": {
+      if (!ctx.zoneOf) return { ok: false, reason: "zone chat is not available here" };
+      const zone = ctx.zoneOf(sender);
+      if (zone === null) return { ok: false, reason: "you are not in the world" };
+      return { ok: true, recipients: participants.filter((p) => p === sender || ctx.zoneOf!(p) === zone) };
+    }
     case "proximity": {
       const origin = ctx.positionOf(sender);
       if (origin === null) return { ok: false, reason: "you are not in the world" };
@@ -134,4 +157,23 @@ export function recipientsFor(
       return { ok: true, recipients };
     }
   }
+}
+
+/**
+ * Who on THIS endpoint may hear a message that arrived from another layer of
+ * the cluster: `scope.zone` for zone lines (players standing in that zone
+ * here), everyone for global. The sender is elsewhere, so nobody is excluded
+ * as "self".
+ */
+export function foreignRecipients(
+  channel: CommsChannel,
+  scope: { zone: string | null },
+  participants: readonly string[],
+  ctx: RoutingContext,
+): string[] {
+  if (channel === "global") return [...participants];
+  if (channel === "zone" && ctx.zoneOf && scope.zone !== null) {
+    return participants.filter((p) => ctx.zoneOf!(p) === scope.zone);
+  }
+  return [];
 }

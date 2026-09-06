@@ -15,8 +15,9 @@ The contract every playbook relies on:
   the affected chunks in place. No generator run is needed for a feature the
   field can solve itself (rivers are the first; see the file).
 - **Stages that come after your feature must be re-run** when it moves them:
-  towns → paths → pois → trails, in that order, because paths are routed on
-  the current ground and split at rivers.
+  towns → zones → paths → pois → trails, in that order, because zones are
+  seeded from towns with borders on rivers, and paths are routed on the
+  current ground and split at rivers.
 - **Verify with data before an image, and with an image before believing
   it**: `worldgen audit` (exit 1 on findings), `worldgen map --plain`, then a
   headless screenshot if it matters.
@@ -25,6 +26,10 @@ Playbooks:
 
 - [rivers.md](rivers.md) — carve a river from a lake to the sea or into
   another river, by hand, and check it.
+- [zones.md](zones.md) — cut the world into the named zones chat and
+  server placement key on (`regions`): borders on landmarks, a hub town
+  each, checked with `worldgen regions`. The `zone-architect` sub-agent
+  (`.claude/agents/`) runs this procedure.
 
 Planned: lakes, paths and bridges, towns, points of interest, scatter and
 props, canyons. Add a file when a second world needs the procedure.

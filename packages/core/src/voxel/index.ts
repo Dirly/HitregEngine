@@ -85,6 +85,15 @@ export {
   fillSchema,
   riverPathSchema,
 } from "./recipe.js";
+export {
+  regionSchema,
+  regionAt,
+  auditRegions,
+  type RegionDoc,
+  type RegionInput,
+  type RegionReport,
+  type RegionsAudit,
+} from "./regions.js";
 
 export {
   createWorldField,

@@ -27,6 +27,7 @@ import {
   expandScene,
   NetStateStore,
   registerCharacterNetState,
+  registerTransferLockNetState,
   type SceneDoc,
   type EntityDoc,
 } from "@hitreg/core";
@@ -38,6 +39,7 @@ import {
   type InputLike,
 } from "@hitreg/scripting";
 import { PhysicsSim, initPhysics, type BodyState, type MeshGeometryData } from "@hitreg/physics";
+import { registerCommsEvents } from "@hitreg/comms";
 import { isClientOnlyScript } from "./scripts.js";
 
 /** A keyboard nobody is pressing — the server has no local player. */
@@ -117,6 +119,7 @@ export class HeadlessWorld {
     this.eventBus.setNetRole("authority");
     this.netState.setAuthority(true);
     registerCharacterNetState(this.netState); // character/<bodyId> sheets validate + appear in the spec
+    registerTransferLockNetState(this.netState); // transferLock/<bodyId> — combat scripts hold a body on this server
     this.scripts = new ScriptRuntime({
       doc: { ...base, entities: {} },
       objects: new Map(),
@@ -363,6 +366,7 @@ export function defaultRegistry(): ComponentRegistry {
 export function defaultEvents(): EventRegistry {
   const events = new EventRegistry();
   registerCoreEvents(events);
+  registerCommsEvents(events); // "chat.message" — the layer routes chat (see chat.ts)
   return events;
 }
 

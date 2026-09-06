@@ -52,8 +52,18 @@ import {
 
 export interface NetPresenceOptions {
   getSceneName(): string;
-  /** Dedicated-server url (`ws://…`). Null = P2P dev rooms via the vite relay. */
+  /** Dedicated-server url (`ws://…`). Null = P2P dev rooms via the vite relay (when the scene's project allows). */
   serverUrl?: string | null;
+  /**
+   * May THIS scene form a P2P dev room right now? The engine keeps peer
+   * rooms (a tab hosts) for games where a host cheating costs nobody; a
+   * project that declares `multiplayer: "server"` in its project.json — a
+   * persistent MMO, where a peer host could fudge everything it simulates —
+   * answers false here and its tabs play alone unless a server is given.
+   * Re-evaluated every frame, so switching scenes switches policy. Default:
+   * always allowed.
+   */
+  allowP2P?: () => boolean;
   /**
    * Dedicated server only: should this tab be connected right now? Default
    * always. The playground answers "while playing", so an editor tab does not
@@ -443,6 +453,10 @@ export class NetPresence {
         this.teardownSession(); // sends bye; the server's grace window takes it from here
         this.sessionHost = null;
       }
+    } else if (this.opts.allowP2P?.() === false) {
+      // a "server" project: no peer room for this scene — play alone
+      if (this.room) this.leaveRoom();
+      return;
     } else {
       const room = `scene:${this.opts.getSceneName()}`;
       if (room !== this.room) this.joinRoom(room);

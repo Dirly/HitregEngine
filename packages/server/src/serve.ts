@@ -26,6 +26,7 @@ import { GameServer, type PlayerIdentity, type PlayerPersistence } from "./serve
 import { extractPlayerTemplate } from "./players.js";
 import { NpcManager } from "./npcs.js";
 import { SpawnAreaManager } from "./spawn-areas.js";
+import { mountLayerChat, type LayerChat } from "./chat.js";
 import { handleAdmin } from "./admin.js";
 import { ClusterLink } from "./cluster/link.js";
 import { PlayerStore } from "./cluster/player-store.js";
@@ -84,6 +85,8 @@ export interface ServeHandle {
   server: GameServer;
   npcs: NpcManager;
   spawnAreas: SpawnAreaManager;
+  /** Text chat host for this layer (zone/global bridged through main when clustered). */
+  chat: LayerChat;
   terrain: TerrainStreamer | null;
   transport: WebSocketHostTransport;
   httpServer: http.Server;
@@ -270,6 +273,9 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
   });
   const npcs = new NpcManager(server, { respawnSeconds: opts.respawnSeconds ?? 20 });
   spawnAreas = new SpawnAreaManager(server, npcs);
+  // text chat routes on the host, and here the host is this process; zone and
+  // global lines cross the cluster through main (docs/comms.md, docs/hosting.md)
+  const chat = mountLayerChat({ server, scene: opts.scene, link, log });
   log(`[serve] npcs: ${npcs.npcs.size} authored, templates: ${[...npcs.templates.keys()].join(", ") || "(none)"}, spawn areas: ${spawnAreas.areas.size}`);
 
   // -- transfers ------------------------------------------------------------------------
@@ -423,6 +429,7 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
     server,
     npcs,
     spawnAreas,
+    chat,
     terrain,
     transport,
     httpServer,
@@ -437,6 +444,7 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
       new Promise<void>((resolve) => {
         clearInterval(statusTimer);
         if (idleTimer) clearInterval(idleTimer);
+        chat.dispose();
         server.close();
         link?.close();
         transport.close();

@@ -30,6 +30,24 @@ export interface PlayerPresence {
   position: [number, number, number] | null;
 }
 
+/**
+ * A chat line one layer routed and delivered on its side, carried to every
+ * other layer so the copies of the world share a room. `zone` is the
+ * sender's world zone (only the origin can compute it); `channel` is a
+ * bridged channel — "zone" (delivered to players standing in `zone` on the
+ * receiving layer) or "global" (everyone). The stamp (`id`, `at`) is the
+ * origin's, so the same line is the same line everywhere.
+ */
+export interface BridgedChatLine {
+  id: string;
+  channel: "zone" | "global";
+  from: string;
+  name: string;
+  text: string;
+  at: number;
+  zone: string | null;
+}
+
 // -- layer → main ----------------------------------------------------------------
 
 export type LayerToMain =
@@ -50,7 +68,9 @@ export type LayerToMain =
   | { t: "player.left"; characterId: string; reason: "leave" | "transfer" | "grace" | "replaced" }
   | { t: "rpc"; id: number; call: LayerRpc }
   /** A main-initiated transfer could not happen (gate never opened, player gone). */
-  | { t: "transfer.failed"; characterId: string; reason: string };
+  | { t: "transfer.failed"; characterId: string; reason: string }
+  /** A zone/global chat line this layer delivered — main fans it to every other layer. */
+  | { t: "chat"; line: BridgedChatLine };
 
 export type LayerRpc =
   | { op: "data.load"; scope: PlayerDataScope; namespace: string }
@@ -88,7 +108,9 @@ export type MainToLayer =
   /** Apply a terraform batch here (the primary layer persists) and answer over `recipe.changed`. */
   | { t: "terraform"; requestId: string; edits: unknown[] }
   /** Stop accepting joins; move everyone off; exit when empty. */
-  | { t: "drain" };
+  | { t: "drain" }
+  /** A chat line another layer delivered: deliver it here to whoever may hear it (zone / everyone). */
+  | { t: "chat"; line: BridgedChatLine; origin: string };
 
 export function parseClusterMessage<T>(raw: unknown): T | null {
   if (typeof raw !== "string") return null;

@@ -28,6 +28,7 @@ import {
   parseManifest,
   NetStateStore,
   registerCharacterNetState,
+  registerTransferLockNetState,
   Profiler,
   getVoxelWorld,
   type SceneDoc,
@@ -224,6 +225,7 @@ async function main(): Promise<void> {
   // built on netState (like the mall manager) need this to run at all.
   const netState = new NetStateStore();
   registerCharacterNetState(netState);
+  registerTransferLockNetState(netState);
   const viewForward = (): [number, number] => {
     const d = camera.getWorldDirection(new THREE.Vector3());
     d.y = 0;

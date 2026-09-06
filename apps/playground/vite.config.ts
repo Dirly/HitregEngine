@@ -258,7 +258,14 @@ function hitregBridge(): Plugin {
             );
           }
           const report = resolveProjectTools(parsed.data, installedTools.keys());
-          projectReports.set(entry.name, report);
+          // the client needs two more facts per project: which scenes are its
+          // (to map the active scene back to a project) and how the project is
+          // played together (a "server" project never forms a P2P dev room)
+          const scenesDir = path.join(projectsRoot, entry.name, "assets", "scenes");
+          const scenes = fs.existsSync(scenesDir)
+            ? fs.readdirSync(scenesDir).filter((f) => f.endsWith(".scene.json")).map((f) => f.replace(/\.scene\.json$/, ""))
+            : [];
+          projectReports.set(entry.name, { ...report, multiplayer: parsed.data.multiplayer, scenes } as ProjectToolReport);
           const message = describeMissingTools(report);
           if (message) console.warn(`[hitreg] ${message}`);
         }

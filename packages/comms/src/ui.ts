@@ -72,6 +72,7 @@ const CSS = `
 .hitreg-comms[data-open="true"] .hitreg-comms-line[data-faded="true"]{opacity:1}
 .hitreg-comms-tag{font-family:ui-monospace,monospace;font-weight:600;margin-right:4px}
 .hitreg-comms-line[data-channel="proximity"] .hitreg-comms-tag{color:#c9d1d9}
+.hitreg-comms-line[data-channel="zone"] .hitreg-comms-tag{color:#5fd07a}
 .hitreg-comms-line[data-channel="global"] .hitreg-comms-tag{color:#ffd633}
 .hitreg-comms-line[data-channel="team"] .hitreg-comms-tag{color:#79c0ff}
 .hitreg-comms-line[data-channel="party"] .hitreg-comms-tag{color:#d2a8ff}

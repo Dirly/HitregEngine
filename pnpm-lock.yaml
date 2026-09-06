@@ -216,6 +216,9 @@ importers:
 
   packages/server:
     dependencies:
+      '@hitreg/comms':
+        specifier: workspace:*
+        version: link:../comms
       '@hitreg/core':
         specifier: workspace:*
         version: link:../core

@@ -294,6 +294,13 @@ export * from "./voxel/index.js";
 export * from "./vfx/index.js";
 export * from "./character/index.js";
 export {
+  TRANSFER_LOCK_NETSTATE,
+  transferLockKey,
+  transferLockSchema,
+  registerTransferLockNetState,
+  isTransferLocked,
+} from "./transfer-lock.js";
+export {
   projectManifestSchema,
   projectToolDependencySchema,
   resolveProjectTools,

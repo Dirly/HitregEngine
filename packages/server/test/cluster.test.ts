@@ -2,7 +2,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 import { RoomClient, WebSocketClientTransport, WS_HOST_ID } from "@hitreg/net";
-import { MemoryPlayerDataBackend, createSheet, DEFAULT_PROGRESSION } from "@hitreg/core";
+import { MemoryPlayerDataBackend, createSheet, DEFAULT_PROGRESSION, transferLockKey } from "@hitreg/core";
 import { serve, type ServeHandle } from "../src/serve.js";
 import { startMain, type MainHandle } from "../src/main/main.js";
 import { MemoryAccountStore } from "../src/persistence/accounts.js";
@@ -251,5 +251,65 @@ describe.skipIf(!main || !layer1 || !layer2)("cluster: main + two layers", { tim
     expect(pulled[0]!.reason).toBe("party");
     const dest = aldricOn === "layer-1" ? layer1! : layer2!;
     expect(pulled[0]!.url).toBe(dest.url);
+  });
+
+  it("zone chat crosses layers through main; proximity stays on its layer", async () => {
+    // two fresh characters, forced onto DIFFERENT layers
+    async function player(name: string, chr: string, wantLayer: ServeHandle) {
+      const reg = (await post(`${main!.url}/auth/register`, { name, password: "hunter22" })).json as Session;
+      const c = (await post(`${main!.url}/characters`, { name: chr }, reg.session)).json.character as { id: string };
+      let play = (await post(`${main!.url}/play`, { characterId: c.id }, reg.session)).json as { url: string; ticket: string; server: string };
+      let tab = dial(play.url, play.ticket, chr);
+      await until(() => tab.world.some((m) => m.t === "spawn" && m.self === `player:${c.id}`));
+      if (play.server !== wantLayer.serverId) {
+        const moved: Array<{ url: string; ticket: string }> = [];
+        tab.client.onModule(WORLD_MODULE, (m) => {
+          const msg = m as WorldModuleMessage;
+          if (msg.t === "transfer") moved.push(msg);
+        });
+        await post(`${main!.url}/admin/transfer`, { characterId: c.id, srv: wantLayer.serverId }, SECRET);
+        await until(() => moved.length === 1);
+        tab.client.leave();
+        tab = dial(moved[0]!.url, moved[0]!.ticket, chr);
+        await until(() => tab.world.some((m) => m.t === "spawn" && m.self === `player:${c.id}`));
+      }
+      await until(() => main!.registry.whereIs.get(c.id) === wantLayer.serverId);
+      const heard: Array<{ channel: string; text: string; from: string }> = [];
+      tab.client.onModule("chat", (m) => {
+        const d = m as { k: string; msg?: { channel: string; text: string; from: string } };
+        if (d.k === "msg" && d.msg) heard.push(d.msg);
+      });
+      return { tab, id: c.id, heard };
+    }
+    const cara = await player("CaraAcct", "Cara", layer1!);
+    const dan = await player("DanAcct", "Dan", layer2!);
+    expect(layer1!.chat.zoneOf(cara.id)).toBe("field"); // a zoneless scene is one zone named after itself
+    expect(layer2!.chat.zoneOf(dan.id)).toBe("field");
+
+    cara.tab.client.sendModule("chat", { k: "say", channel: "zone", text: "anyone out there?" });
+    await until(() => dan.heard.some((m) => m.text === "anyone out there?"));
+    expect(dan.heard.at(-1)).toMatchObject({ channel: "zone", from: cara.id });
+    expect(cara.heard.some((m) => m.text === "anyone out there?")).toBe(true); // the speaker hears themself
+    expect(layer2!.chat.foreignDelivered).toBeGreaterThan(0);
+
+    // "say" is heard on Cara's layer only — Dan is a world away in every sense
+    cara.tab.client.sendModule("chat", { k: "say", channel: "proximity", text: "psst" });
+    await until(() => cara.heard.some((m) => m.text === "psst"));
+    await wait(300);
+    expect(dan.heard.some((m) => m.text === "psst")).toBe(false);
+  });
+
+  it("a combat transfer lock holds a body until it expires", async () => {
+    const layer = layer1!;
+    // a player still connected (earlier tests left bodies in reconnect grace)
+    const [peerId, player] = [...layer.server.players.entries()].find(
+      ([, p]) => p.disconnectedAt === null && p.transferring === null,
+    )!;
+    expect(layer.server.canTransfer(peerId)).toBe(true);
+    layer.world.netState.set(transferLockKey(player.bodyId), layer.world.timeMs + 60_000);
+    expect(layer.server.canTransfer(peerId)).toBe(false);
+    layer.world.netState.set(transferLockKey(player.bodyId), layer.world.timeMs - 1);
+    expect(layer.server.canTransfer(peerId)).toBe(true);
+    expect(layer.world.netState.set(transferLockKey(player.bodyId), "soon")).toBe(false); // schema-guarded
   });
 });

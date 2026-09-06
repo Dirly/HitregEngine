@@ -98,7 +98,9 @@ curl -s -X POST http://127.0.0.1:8787/admin/spawn -H 'content-type: application/
 `--host 0.0.0.0` serves the LAN. `--scene field` hosts the combat terrain
 scene instead; any project scene with a `player`-tagged entity works.
 The setting also persists per browser: `localStorage.setItem("hitreg:server",
-"ws://…")` — remove it to go back to P2P dev rooms.
+"ws://…")` — remove it to go back to the engine's P2P dev rooms, unless the
+scene's project declares `multiplayer: "server"` (the MMO does), in which
+case the tab plays alone (`?p2p=1` overrides for an experiment).
 
 ## What was verified (2026-09-03, all headless)
 
@@ -216,6 +218,8 @@ clients can show "away"; the playground ignores it for now.
 - "Nothing else persists yet / nothing is authenticated" above is no longer
   true when run through main — see docs/hosting.md; it still holds for the
   open `serve --scene x` dev path.
-- The P2P dev path is untouched and still the default without `?server=`.
+- The P2P dev path is untouched and still the default without `?server=`
+  for projects that allow it; a `multiplayer: "server"` project (the MMO)
+  gets no peer room — its tabs play alone without a server.
 - CLAUDE.md pointer to this doc is left as an uncommitted edit (the file
   carries Derek's own uncommitted changes).

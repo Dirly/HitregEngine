@@ -18,6 +18,8 @@ import {
   registerChunkComponents,
   PlayerDataService,
   registerCharacterNetState,
+  registerTransferLockNetState,
+  regionAt,
   registerCoreAssetTypes,
   registerCoreComponents,
   registerCoreEvents,
@@ -2144,9 +2146,24 @@ async function main(): Promise<void> {
 
   // the host-side comms link learns about joins/leaves from here (RoomHost has no roster hook)
   let hostCommsLink: (CommsLink & { notifyRoster(): void }) | null = null;
+  // Which scenes belong to a project that plays on dedicated servers ONLY
+  // (project.json `multiplayer: "server"`): those never form a P2P dev room,
+  // so a tab with no server plays alone. `?p2p=1` overrides for a two-tab
+  // engine experiment. Other projects keep the engine's peer rooms.
+  const serverOnlyScenes = new Set<string>();
+  void fetch("/__hitreg/projects")
+    .then((r) => (r.ok ? r.json() : null))
+    .then((body: { projects?: Array<{ multiplayer?: string; scenes?: string[] }> } | null) => {
+      for (const p of body?.projects ?? []) {
+        if (p.multiplayer === "server") for (const scene of p.scenes ?? []) serverOnlyScenes.add(scene);
+      }
+    })
+    .catch(() => undefined);
+  const forceP2P = new URLSearchParams(location.search).has("p2p");
   netPresence = new NetPresence({
     getSceneName: () => store.doc.name,
     serverUrl: netServerUrl,
+    allowP2P: () => forceP2P || !serverOnlyScenes.has(store.doc.name),
     // connect while playing: an editor tab has no business holding a body
     // (gateway mode also waits until main has placed us — no grant, no dial)
     wantsSession: () => playMode.get() === "playing" && (!netGateway || netGrant !== null),
@@ -2314,6 +2331,7 @@ async function main(): Promise<void> {
   registerCommsNetState(netPresence.netState);
   // character/<bodyId> sheets (character-sheet builtin) — validated, in the spec
   registerCharacterNetState(netPresence.netState);
+  registerTransferLockNetState(netPresence.netState); // transferLock/<bodyId> — combat holds a body on its server
   const commsSelf = netPresence.self();
   const commsPos = new THREE.Vector3();
   const commsFwd = new THREE.Vector3();
@@ -2324,6 +2342,18 @@ async function main(): Promise<void> {
     link: localLink(commsSelf.peerId, commsSelf.name),
     membership: netStateMembership(netPresence.netState),
     positionOf: (peerId) => netPresence?.positionOf(peerId) ?? null,
+    // zone chat: the recipe zone under the player, or the scene as one zone
+    // (a P2P host routes it here; a dedicated layer routes it server-side)
+    zoneOf: (peerId) => {
+      const p = netPresence?.positionOf(peerId);
+      if (!p) return null;
+      // an agent-drawn region first (recipe.regions), else the climate cell, else the scene
+      const field = activeVoxelWorld ? getVoxelWorld(activeVoxelWorld) : null;
+      const region = field ? regionAt(field.recipe.regions, p[0], p[2]) : null;
+      if (region) return region.id;
+      const zone = runtimeBiomeAt(p[0], p[2])?.zone;
+      return zone && zone.length > 0 ? zone : store.doc.name;
+    },
     listenerPose: () => {
       if (playMode.get() !== "playing") return null;
       const cam = commsListenerCamera;
@@ -2373,7 +2403,7 @@ async function main(): Promise<void> {
   });
   mountCommsUI({ chat: comms.chat, voice: comms.voice }); // bottom-left overlay; Enter opens
   comms.voice.attachKeyboard(window); // V = say, B = team, N = party (push-to-talk)
-  comms.chat.system("Enter: chat · /g /t /p /s pick a channel · /team x · /party x · mic button for voice");
+  comms.chat.system("Enter: chat · /s /z /g /t /p pick a channel · /team x · /party x · mic button for voice");
   // "unpack model parts": each named sub-object of a loaded kit becomes a child
   // entity referencing that node; the original keeps only the group transform
   function unpackModel(id: string): void {

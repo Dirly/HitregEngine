@@ -16,6 +16,7 @@
     "main": "tsx bin/main.ts"
   },
   "dependencies": {
+    "@hitreg/comms": "workspace:*",
     "@hitreg/core": "workspace:*",
     "@hitreg/net": "workspace:*",
     "@hitreg/physics": "workspace:*",
