@@ -503,6 +503,7 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
         server,
         npcs,
         spawnAreas,
+        terrain,
         status: () => ({
           scene: opts.scene,
           serverId,

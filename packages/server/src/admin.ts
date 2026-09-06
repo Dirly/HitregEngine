@@ -29,6 +29,8 @@ export interface AdminDeps {
   server: GameServer;
   npcs: NpcManager | null;
   spawnAreas?: SpawnAreaManager | null;
+  /** Terrain streamer, so a teleport can make ground under the body first. */
+  terrain?: { ensureAround(x: number, z: number, radius?: number): void } | null;
   /** Extra fields for /admin/status (scene name, uptime …). */
   status?: () => Record<string, unknown>;
   /** In a cluster: ask main for a destination and move the character there. */
@@ -113,6 +115,33 @@ export async function handleAdmin(deps: AdminDeps, req: IncomingMessage, res: Se
       } catch (error) {
         send(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
       }
+      return true;
+    }
+    if (req.method === "GET" && p === "/admin/players") {
+      // who is here and where: what an agent reads to check a crossing landed in place
+      const players = [...server.players.values()].map((pl) => ({
+        peerId: pl.peerId,
+        name: pl.name,
+        bodyId: pl.bodyId,
+        characterId: pl.identity?.characterId ?? null,
+        position: server.world.positionOf(pl.bodyId),
+        connected: pl.disconnectedAt === null,
+        transferring: pl.transferring !== null,
+      }));
+      send(res, 200, { players });
+      return true;
+    }
+    if (req.method === "POST" && p === "/admin/teleport") {
+      // move a player body outright (a probe walking a pass, an admin unsticking someone)
+      const body = (await readJson(req)) as { peerId?: unknown; position?: unknown } | null;
+      const player = body && typeof body.peerId === "string" ? server.players.get(body.peerId) : undefined;
+      if (!player || !isVec3(body?.position)) {
+        send(res, 400, { ok: false, error: "expected { peerId, position: [x, y, z] } for a player on this server" });
+        return true;
+      }
+      deps.terrain?.ensureAround(body.position[0], body.position[2], 1);
+      server.world.sim.setPosition(player.bodyId, body.position);
+      send(res, 200, { ok: true, bodyId: player.bodyId, position: body.position });
       return true;
     }
     if (req.method === "GET" && p === "/admin/templates") {
