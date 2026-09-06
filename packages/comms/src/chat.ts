@@ -314,6 +314,18 @@ export class ChatService {
     this.deliver(msg);
   }
 
+  /**
+   * Authority-side line to ONE participant ("You are entering the Hollow
+   * Vale."). Delivered locally when the target is this endpoint; a no-op on
+   * a peer.
+   */
+  announceTo(peerId: string, text: string): void {
+    if (this.disposed || this.link.role === "peer") return;
+    const msg = this.stamp("system", "system", "system", text);
+    if (peerId === this.link.selfId) this.deliver(msg);
+    else this.link.send(CHAT_MODULE, peerId, { k: "msg", msg } satisfies ChatDown);
+  }
+
   /** "/team red" — applied here on the authority, requested from a peer. */
   requestTeam(team: string | null): void {
     this.requestAssign("team", team);

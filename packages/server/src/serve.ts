@@ -17,7 +17,17 @@
 import fs from "node:fs";
 import http from "node:http";
 import { WebSocketHostTransport } from "@hitreg/net/server";
-import { polygonEdgeDistance, recipeEditSchema, regionAt, type PlayerDataBackend, type RegionDoc } from "@hitreg/core";
+import {
+  polygonEdgeDistance,
+  recipeEditSchema,
+  regionAt,
+  sanctuariesFromPois,
+  SANCTUARIES_KEY,
+  type PlayerDataBackend,
+  type PoiDoc,
+  type RegionDoc,
+  type SanctuaryCircle,
+} from "@hitreg/core";
 import { loadContent, playgroundRoots } from "./assets.js";
 import { loadProjectScripts, type ScriptLoadReport } from "./scripts.js";
 import { HeadlessWorld, defaultEvents, defaultRegistry, defaultScripts } from "./world.js";
@@ -78,6 +88,8 @@ export interface ServeOptions {
   transferGate?: (peerId: string) => boolean;
   /** Zones to use instead of the recipe's `regions` (a flat test scene given borders). */
   regions?: RegionDoc[];
+  /** POIs to use instead of the recipe's (a flat test scene given a sanctuary). */
+  pois?: PoiDoc[];
   /**
    * Metres a player must be INSIDE a zone this layer does not host before a
    * border transfer is asked for (default 20) — the band where nothing is
@@ -110,6 +122,8 @@ export interface ServeHandle {
   identities: Map<string, PlayerIdentity>;
   /** Zone lookup this layer uses (recipe regions, or the `regions` option). */
   zoneAt(x: number, z: number): RegionDoc | null;
+  /** The sanctuary circles published as `sanctuaries/list` at boot. */
+  readonly sanctuaries: readonly SanctuaryCircle[];
   /** Zones main places players here for ("all" when standalone or until main says otherwise). */
   hostedZones(): "all" | string[];
   /**
@@ -301,14 +315,51 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
   const zoneAt = (x: number, z: number): RegionDoc | null => regionAt(regions, x, z);
   const hostsZone = (zone: string): boolean => !link || link.hosted === "all" || link.hosted.includes(zone);
   const chat = mountLayerChat({ server, scene: opts.scene, link, regions, log });
+  // -- sanctuaries: every safe poi's circle and every safe zone, once, in netState -----
+  // (docs/world-editing/barriers.md → "Runtime"): a game's authoritative combat
+  // script reads `sanctuaries/list` and refuses player-on-player damage inside
+  const pois: ReadonlyArray<PoiDoc> = opts.pois ?? terrain?.resolved.field.recipe.features.pois ?? [];
+  const sanctuaries: SanctuaryCircle[] = sanctuariesFromPois(pois);
+  for (const region of regions) {
+    // a safe ZONE (a town) is a polygon; the list carries circles, so publish
+    // the circle round its hub that covers every vertex — a hand past the
+    // wall, never short of it
+    if (!region.tags.includes("safe")) continue;
+    const [cx, cz] = region.hub ?? region.polygon.reduce<[number, number]>((acc, p) => [acc[0] + p[0] / region.polygon.length, acc[1] + p[1] / region.polygon.length], [0, 0]);
+    let r = 0;
+    for (const [x, z] of region.polygon) r = Math.max(r, Math.hypot(x - cx, z - cz));
+    if (r > 0) sanctuaries.push([cx, cz, r]);
+  }
+  if (!world.netState.set(SANCTUARIES_KEY, sanctuaries)) log("[serve] sanctuaries/list failed validation — no sanctuaries published");
+  else if (sanctuaries.length > 0) log(`[serve] sanctuaries: ${sanctuaries.length} (${sanctuariesFromPois(pois).length} waystations, ${sanctuaries.length - sanctuariesFromPois(pois).length} safe zones)`);
+
+  // -- zone tracking: `zone.entered` + "you are entering …" on every crossing ------
+  const lastZone = new Map<string, string | null>();
+  const trackZone = (peerId: string, bodyId: string, zone: RegionDoc | null): void => {
+    const prev = lastZone.get(peerId);
+    const id = zone?.id ?? null;
+    if (prev === undefined) {
+      lastZone.set(peerId, id); // first sight: where they logged in or landed, no announcement
+      return;
+    }
+    if (prev === id) return;
+    lastZone.set(peerId, id);
+    if (!zone) return;
+    world.eventBus.emit("zone.entered", { bodyId, peerId, zone: zone.id, name: zone.name, from: prev });
+    chat.chat.announceTo(peerId, `You are entering ${zone.name}.`);
+  };
   const crossing = new Map<string, { zone: string; since: number; waits: number }>();
   const watchBorders = (): void => {
-    if (!link || link.hosted === "all" || regions.length === 0) return;
+    if (regions.length === 0) return;
+    for (const id of lastZone.keys()) if (!server.players.has(id)) lastZone.delete(id);
+    const transfers = link !== null && link.hosted !== "all";
     for (const player of server.players.values()) {
-      if (!player.identity || player.disconnectedAt !== null || player.transferring !== null) continue;
+      if (player.disconnectedAt !== null || player.transferring !== null) continue;
       const p = world.positionOf(player.bodyId);
       if (!p) continue;
       const zone = zoneAt(p[0], p[2]);
+      trackZone(player.peerId, player.bodyId, zone);
+      if (!transfers || !link || !player.identity) continue;
       const characterId = player.identity.characterId;
       if (!zone || hostsZone(zone.id) || polygonEdgeDistance(p[0], p[2], zone.polygon) < zoneBand) {
         crossing.delete(characterId);
@@ -512,6 +563,7 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
     scripts: report,
     identities,
     zoneAt,
+    sanctuaries,
     hostedZones: () => (link ? link.hosted : "all"),
     moveOut,
     close: () =>

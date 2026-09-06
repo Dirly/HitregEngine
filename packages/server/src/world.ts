@@ -29,6 +29,7 @@ import {
   registerCharacterNetState,
   registerTransferLockNetState,
   registerLandingNetState,
+  registerSanctuariesNetState,
   type SceneDoc,
   type EntityDoc,
 } from "@hitreg/core";
@@ -122,6 +123,7 @@ export class HeadlessWorld {
     registerCharacterNetState(this.netState); // character/<bodyId> sheets validate + appear in the spec
     registerTransferLockNetState(this.netState); // transferLock/<bodyId> — combat scripts hold a body on this server
     registerLandingNetState(this.netState); // landing/<bodyId> — a body that just arrived; brains leave it alone
+    registerSanctuariesNetState(this.netState); // sanctuaries/list — no player-on-player damage inside (serve.ts publishes it)
     this.scripts = new ScriptRuntime({
       doc: { ...base, entities: {} },
       objects: new Map(),
