@@ -574,6 +574,7 @@ describe("terrain features", () => {
           // no bedY: the field solves one through these points (a hand-written river)
           rivers: [{ id: "r", points: [[-200, 0], [-100, 0], [0, 0], [100, 0], [200, 0]], width: 10, depth: 6, bank: 20, maxGrade: 0.05, water: true, surface: "", surfaceEdge: 3, taper: 0 }],
           canyons: [],
+          ridges: [],
           roads: [],
           tunnels: [],
           towns: [],
@@ -601,6 +602,7 @@ describe("terrain features", () => {
         features: {
           rivers: [{ id: "r", points: [[-200, 500], [200, 500]], width: 10, depth: 3, bank: 10, bedY: [9000, 9000], maxGrade: 0.05, water: true, surface: "", surfaceEdge: 3, taper: 0 }],
           canyons: [],
+          ridges: [],
           roads: [],
           tunnels: [],
           towns: [],
@@ -619,7 +621,7 @@ describe("terrain features", () => {
   });
 
   it("solves a descending bed for a river written by hand, and a tributary meets its trunk", () => {
-    const empty = { canyons: [], roads: [], tunnels: [], towns: [], blobs: [], pois: [], lakes: [], bridges: [], fills: [], riverPaths: [] };
+    const empty = { canyons: [], ridges: [], roads: [], tunnels: [], towns: [], blobs: [], pois: [], lakes: [], bridges: [], fills: [], riverPaths: [] };
     const trunk = { id: "trunk", points: [[-300, 400], [-100, 420], [100, 380], [300, 400]] as [number, number][], width: 12, depth: 4, bank: 10, maxGrade: 0.05, water: true, surface: "", surfaceEdge: 3, taper: 0 };
     const branch = { id: "branch", points: [[0, 100], [0, 250], [0, 380]] as [number, number][], width: 6, depth: 2, bank: 8, maxGrade: 0.05, water: true, surface: "", surfaceEdge: 3, taper: 0 };
     const bare = createWorldField(testRecipe());
@@ -649,6 +651,7 @@ describe("terrain features", () => {
         features: {
           rivers: [],
           canyons: [],
+          ridges: [],
           tunnels: [],
           roads: [],
           towns: [{ id: "t", center: [0, 0], radius: 40, falloff: 30, groundY: 12, flatten: 1, tags: [] }],
@@ -669,6 +672,7 @@ describe("terrain features", () => {
         features: {
           rivers: [],
           canyons: [],
+          ridges: [],
           roads: [{ id: "road", points: [[-100, 40], [100, 40]], width: 8, shoulder: 12, smooth: 0, surfaceY: [20, 20], flatten: 1, surface: "", surfaceEdge: 2.5 }],
           tunnels: [],
           towns: [],
@@ -750,6 +754,7 @@ describe("terrain features", () => {
         features: {
           rivers: [],
           canyons: [],
+          ridges: [],
           tunnels: [],
           roads: [],
           towns: [{ id: "t", center: [0, 0], radius: 40, falloff: 30, groundY: 12, flatten: 1, tags: [] }],
@@ -797,7 +802,7 @@ function paletteIndex(name: string): number {
 }
 
 function noFeatures(): WorldRecipe["features"] {
-  return { rivers: [], canyons: [], roads: [], towns: [], lakes: [], bridges: [], fills: [], riverPaths: [], tunnels: [], blobs: [], pois: [] };
+  return { rivers: [], canyons: [], ridges: [], roads: [], towns: [], lakes: [], bridges: [], fills: [], riverPaths: [], tunnels: [], blobs: [], pois: [] };
 }
 
 describe("surface decoration", () => {
@@ -1490,6 +1495,7 @@ describe("scatter", () => {
         features: {
           rivers: [],
           canyons: [],
+          ridges: [],
           tunnels: [],
           roads: [],
           towns: [{ id: "t", center: [0, 0], radius: 40, falloff: 30, groundY: 12, flatten: 1, tags: [] }],
@@ -1625,6 +1631,7 @@ describe("generated chunk documents", () => {
         features: {
           rivers: [],
           canyons: [],
+          ridges: [],
           tunnels: [],
           roads: [],
           towns: [],

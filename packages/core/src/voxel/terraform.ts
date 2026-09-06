@@ -4,6 +4,7 @@ import {
   canyonSchema,
   lakeSchema,
   poiSchema,
+  ridgeSchema,
   riverSchema,
   roadSchema,
   townSchema,
@@ -47,6 +48,7 @@ import { cellsInRect } from "./chunk.js";
 export const FEATURE_KINDS = [
   "rivers",
   "canyons",
+  "ridges",
   "roads",
   "towns",
   "lakes",
@@ -60,6 +62,7 @@ export type FeatureKind = (typeof FEATURE_KINDS)[number];
 const FEATURE_SCHEMAS: Record<FeatureKind, z.ZodType> = {
   rivers: riverSchema,
   canyons: canyonSchema,
+  ridges: ridgeSchema,
   roads: roadSchema,
   towns: townSchema,
   lakes: lakeSchema,
@@ -238,6 +241,11 @@ export function featureFootprint(kind: FeatureKind, feature: unknown): Footprint
       return pointsBounds(f["points"] as number[][], num(f["width"], 6) / 2 + num(f["shoulder"], 8) + num(f["smooth"], 0) + 12);
     case "canyons":
       return pointsBounds(f["points"] as number[][], num(f["width"], 70) / 2 + num(f["rim"], 60));
+    case "ridges":
+      // the round end caps reach `width/2 + falloff` past the last point, the
+      // same as the flanks: a pass between two pieces spans 3–4 cells and
+      // both must re-cook when either piece moves
+      return pointsBounds(f["points"] as number[][], num(f["width"], 24) / 2 + num(f["falloff"], 60));
   }
 }
 

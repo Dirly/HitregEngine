@@ -19,7 +19,7 @@
  *   -> ceiling (soft max height)
  *   -> bounds (continent shore profile, land floor, world limit)
  *   -> coast cliffs (steepen the shoreline where rugged)
- *   -> features: canyons -> lakes -> rivers -> towns -> roads
+ *   -> features: canyons -> ridges -> lakes -> rivers -> towns -> roads
  * ```
  *
  * so a road entering a town lands on the town's pad, a river meeting a lake
@@ -33,6 +33,7 @@ import {
   type BiomeDoc,
   type BlobDoc,
   type CanyonDoc,
+  type RidgeDoc,
   type LakeDoc,
   type PatchDoc,
   type RiverDoc,
@@ -823,6 +824,8 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
   const roadReach = (i: number): number =>
     roadDocs[i]!.width / 2 + Math.max(roadDocs[i]!.shoulder + roadSmooth(roadDocs[i]!), roadDocs[i]!.surfaceEdge + 2);
   const canyonReach = (i: number): number => canyonDocs[i]!.width / 2 + canyonDocs[i]!.rim;
+  const ridgeDocs: readonly RidgeDoc[] = recipe.features.ridges;
+  const ridgeReach = (i: number): number => ridgeDocs[i]!.width / 2 + ridgeDocs[i]!.falloff;
   const buildRiverSegs = (docs: readonly RiverDoc[]): FeatureBuckets<PolySegment> =>
     segmentBuckets(
       segmentsOf(
@@ -854,6 +857,11 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     (i) => roadReach(i) + CLEARANCE_REACH,
   );
   const canyonSegs = segmentBuckets(segmentsOf(canyonDocs, (c) => c.floorY), canyonReach);
+  // per-point crest heights ride the value channel; NaN falls back to the doc's height
+  const ridgeSegs = segmentBuckets(
+    segmentsOf(ridgeDocs, (r) => (r.heights && r.heights.length === r.points.length ? r.heights : undefined)),
+    ridgeReach,
+  );
   const towns = makeBuckets<TownDoc>(recipe.features.towns, (tw) => [
     tw.center[0] - tw.radius - tw.falloff,
     tw.center[1] - tw.radius - tw.falloff,
@@ -883,7 +891,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     b.center[2] + blobReach(b) * b.scaleZ + b.falloff,
   ]);
   const hasFeatures =
-    riverDocs.length + canyonDocs.length + roadDocs.length + recipe.features.towns.length + lakeDocs.length + fillDocs.length > 0;
+    riverDocs.length + canyonDocs.length + ridgeDocs.length + roadDocs.length + recipe.features.towns.length + lakeDocs.length + fillDocs.length > 0;
   const hasBlobs = recipe.features.blobs.length > 0;
   const hits: OwnerHit[] = [];
   /** While solving a hand-written river's bed: applyFeatures stops after the water stage (no towns, no roads). */
@@ -1461,6 +1469,27 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       // a canyon only ever cuts down; it must not build a wall where the
       // surrounding land already sits below its floor
       if (carved < out) out = carved;
+    }
+
+    // Ridges after canyons, before water: a barrier RAISED along a zone
+    // border that had none (docs/world-editing/barriers.md). Flat crest
+    // `width` wide, flanks easing to natural ground over `falloff`, round
+    // caps at the ends (the segment distance already gives those) — so a gap
+    // between two pieces is a saddle, a PASS, not a doorway. Raise only: a
+    // ridge never digs, and the river cut below runs after it, so a ridge
+    // across a channel stays out of the water.
+    if (ridgeDocs.length > 0) {
+      count = nearestPerOwner(ridgeSegs, x, z, hits);
+      for (let k = 0; k < count; k++) {
+        const hit = hits[k]!;
+        const ridge = ridgeDocs[hit.owner]!;
+        const half = ridge.width / 2;
+        if (hit.distance > half + ridge.falloff) continue;
+        const crest = Number.isNaN(hit.value) ? ridge.height : hit.value;
+        const profile = hit.distance <= half ? 1 : 1 - smoothstep(0, ridge.falloff, hit.distance - half);
+        const raised = out + crest * profile;
+        if (raised > out) out = raised;
+      }
     }
 
     // How much of this column is under standing or flowing water, 0..1 —
@@ -2526,6 +2555,9 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     }
     count = nearestPerOwner(canyonSegs, x, z, hits);
     for (let k = 0; k < count; k++) best = Math.min(best, hits[k]!.distance - canyonDocs[hits[k]!.owner]!.width / 2);
+    // a ridge crest is a knife-edge like a canyon rim: nothing stands on it
+    count = nearestPerOwner(ridgeSegs, x, z, hits);
+    for (let k = 0; k < count; k++) best = Math.min(best, hits[k]!.distance - ridgeDocs[hits[k]!.owner]!.width / 2);
     // from the SHOULDER's edge, not the roadway's: the shoulder is regraded
     // flat and painted, so it reads as the path — a mushroom a metre off
     // the tread of a footpath is a mushroom on the path

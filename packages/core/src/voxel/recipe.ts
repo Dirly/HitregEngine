@@ -430,6 +430,42 @@ export const tunnelSchema = z.object({
     .describe("Radius at the last point; omit for a uniform tube. Lets a passage open out into a chamber."),
 });
 
+/**
+ * A ridge: terrain RAISED along a polyline — the generator's answer to a zone
+ * border that runs over open ground. A zone border is a server line
+ * (docs/hosting.md → "Zones"), and a swap there is invisible only where
+ * nobody can see across; rivers are authored, not generated, so where the
+ * world offers no barrier the `barriers` stage writes one of these
+ * (docs/world-editing/barriers.md). Raise only: a ridge never digs, and the
+ * river cut runs later in the chain, so a ridge crossing a channel stays out
+ * of the water. Polyline ends have round caps of `width/2 + falloff`, which is
+ * what makes a gap between two pieces read as a col — a PASS — rather than a
+ * doorway.
+ */
+export const ridgeSchema = z.object({
+  id: z.string().default("ridge"),
+  points: polylineSchema,
+  height: z.number().positive().default(35).describe("Metres the crest stands ABOVE the natural terrain."),
+  width: z.number().positive().default(24).describe("Crest width — the flat top."),
+  falloff: z
+    .number()
+    .min(0)
+    .default(60)
+    .describe("Horizontal distance the flanks take to meet natural ground on either side of the crest."),
+  heights: z
+    .array(z.number().min(0))
+    .optional()
+    .describe(
+      "Per-point crest heights (one per point), overriding `height`. The barriers stage sets each so the crest " +
+        "sits `height` above the HIGHER flank measured `falloff` out — a 35 m ridge on a 30 m slope is a step, " +
+        "not a wall, unless it is measured that way.",
+    ),
+  tags: z
+    .array(z.string())
+    .default([])
+    .describe('"barrier" plus "zone:<id>" for each zone it separates, when written by `worldgen barriers`.'),
+});
+
 /** A named point of interest. Carried through so downstream stages can find it. */
 export const poiSchema = z.object({
   id: z.string(),
@@ -437,7 +473,15 @@ export const poiSchema = z.object({
   position: z.tuple([z.number(), z.number(), z.number()]),
   rotationY: z.number().default(0),
   prefab: z.string().optional(),
-  tags: z.array(z.string()).default([]),
+  radius: z
+    .number()
+    .positive()
+    .optional()
+    .describe("Area of effect for kinds that have one — a waystation's sanctuary circle (metres)."),
+  tags: z
+    .array(z.string())
+    .default([])
+    .describe('Free-form; "safe" marks a sanctuary (no player-on-player damage within `radius`), "pass" a zone-border pass.'),
 });
 
 /**
@@ -1310,6 +1354,13 @@ export const worldRecipeSchema = z.object({
     .object({
       rivers: z.array(riverSchema).default([]),
       canyons: z.array(canyonSchema).default([]).describe("Terraced gorges. Written by `worldgen canyons`."),
+      ridges: z
+        .array(ridgeSchema)
+        .default([])
+        .describe(
+          "Terrain raised along a polyline — barriers on the zone borders that had none. Written by `worldgen barriers` " +
+            "(ids `barrier-*`, rewritten on every run); hand-written ridges are kept.",
+        ),
       roads: z.array(roadSchema).default([]),
       towns: z.array(townSchema).default([]),
       lakes: z.array(lakeSchema).default([]).describe("Standing water at its own level, basin carved beneath. Written by `worldgen rivers`."),
@@ -1430,6 +1481,7 @@ export const worldRecipeSchema = z.object({
 export type WorldRecipe = z.infer<typeof worldRecipeSchema>;
 export type RiverDoc = z.infer<typeof riverSchema>;
 export type CanyonDoc = z.infer<typeof canyonSchema>;
+export type RidgeDoc = z.infer<typeof ridgeSchema>;
 export type RoadDoc = z.infer<typeof roadSchema>;
 export type TownDoc = z.infer<typeof townSchema>;
 export type BlobDoc = z.infer<typeof blobSchema>;
@@ -1711,7 +1763,7 @@ export function continentalWorldRecipe(overrides: Partial<WorldRecipe> = {}): Wo
       { id: "cliff-skirt", surface: "rock", biomes: [], frequency: 0.035, octaves: 3, threshold: -0.55, blend: 0.5, strength: 0.85, slope: [0.45, 0.8], seed: 17 },
     ],
     scatter: [],
-    features: { rivers: [], canyons: [], roads: [], towns: [], lakes: [], tunnels: [], blobs: [], pois: [] },
+    features: { rivers: [], canyons: [], ridges: [], roads: [], towns: [], lakes: [], tunnels: [], blobs: [], pois: [] },
   });
   return { ...base, ...overrides };
 }

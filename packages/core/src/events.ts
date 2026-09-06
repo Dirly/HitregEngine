@@ -122,4 +122,17 @@ export function registerCoreEvents(registry: EventRegistry): void {
     replicate: true,
   });
   registry.register("player.left", z.object({ peerId: z.string() }), { replicate: true });
+  // a player's body moved from one recipe zone (region) into another — fired
+  // on the server that saw the crossing (docs/hosting.md → "Zones"); the
+  // layer also tells the player in chat ("you are entering …")
+  registry.register(
+    "zone.entered",
+    z.object({
+      bodyId: z.string().describe("The body that crossed."),
+      peerId: z.string().describe("Its owner's peer id (the character id on a cluster)."),
+      zone: z.string().describe("Region id entered."),
+      name: z.string().describe("Region name, what the player reads."),
+      from: z.string().nullable().describe("Region id left, or null when the body was in no zone."),
+    }),
+  );
 }

@@ -302,6 +302,16 @@ export {
 } from "./transfer-lock.js";
 export { LANDING_NETSTATE, landingKey, landingSchema, registerLandingNetState, isLanding, clearLanding } from "./landing.js";
 export {
+  SANCTUARIES_NETSTATE,
+  SANCTUARIES_KEY,
+  sanctuariesSchema,
+  registerSanctuariesNetState,
+  sanctuariesFromPois,
+  sanctuaryAt,
+  inSanctuary,
+  type SanctuaryCircle,
+} from "./sanctuary.js";
+export {
   projectManifestSchema,
   projectToolDependencySchema,
   resolveProjectTools,

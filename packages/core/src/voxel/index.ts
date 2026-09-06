@@ -84,10 +84,14 @@ export {
   bridgeSchema,
   fillSchema,
   riverPathSchema,
+  ridgeSchema,
+  type RidgeDoc,
 } from "./recipe.js";
 export {
   regionSchema,
   regionAt,
+  townRegionOf,
+  polygonEnclosesCircle,
   auditRegions,
   type RegionDoc,
   type RegionInput,

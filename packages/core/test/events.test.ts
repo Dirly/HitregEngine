@@ -20,6 +20,7 @@ describe("EventRegistry", () => {
       "player.left",
       "trigger.enter",
       "trigger.exit",
+"zone.entered",
     ]);
     expect(registry.has("trigger.enter")).toBe(true);
     expect(registry.has("nope")).toBe(false);
