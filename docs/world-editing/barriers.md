@@ -55,6 +55,37 @@ PvP happens, which is both the fun and the danger.
    `barriers` is idempotent (ids `barrier-<a>-<b>-<n>`, `pass-<a>-<b>-<n>`)
    and rewrites its own features only.
 
+## Towns are zones of their own (decided 2026-09-06)
+
+Derek: a town in the middle of a wilderness zone is where players actually
+gather, and it is also where PvP cannot sensibly be enforced. So a town is
+its OWN zone: a small region drawn on the town's outskirts (its wall or
+palisade line, or `radius + falloff` for a town without one), with
+
+- a **higher cap** than a wilderness zone — a town simulates no packs, so
+  a copy of it is cheap; default `cap` 3× the wilderness cap (120 at 40),
+  set per region as usual. Everyone in a region who goes to town lands in
+  the same copy until it is full, which is what "feels populated" means;
+- **the whole town a sanctuary** (`safe` on the town region, honoured by
+  the same combat rule as a waystation): no player damage inside. A chase
+  ends at the gate — that is the classic rule and the intended one;
+  pursuers who wait outside are the game working;
+- **gates as passes**: the town zone's border crosses each road out of
+  town at a gate; the pass sanctuary extends 35 m OUTSIDE the gate so gate
+  camping cannot kill someone mid-swap. No ridge is built on a town border
+  (the wall or the outskirts are the barrier; a swap at a gate is a swap in
+  a doorway, invisible by construction).
+
+Consequences the build must respect: `worldgen zones` seeds one region per
+town AND the wilderness region around it (the town polygon is cut out of
+its wilderness zone — regions never overlap); `auditRegions` stops
+reporting "no town inside" for wilderness zones that contain a town zone,
+and reports a town whose polygon lies in no zone at all; placement treats
+a town zone like any other (a party leaving town through the same gate is
+co-placed by the party rule, strangers may not be — Diablo's trade-off,
+accepted); the old edge case "a border through a town is a finding"
+becomes "a town not fully enclosed by its own region is a finding".
+
 ## The `ridges` feature
 
 ```jsonc
@@ -116,8 +147,8 @@ For each pair of regions that share border geometry:
      you cannot see over, not a hillside you can
    - `coast`: `field.height(x,z) <= seaLevel + 2` or beyond the world limit
    - `ridge`: within `width/2 + falloff` of an existing `ridges` feature
-   - `town`: inside a town's `radius + falloff` — never build here; it is
-     an audit finding instead (a border through a town is a zoning bug)
+   - `town`: inside a town's `radius + falloff` — never build here: the
+     town is its own zone and its border is a wall or a gate, not a ridge
    - `open`: none of the above
 3. **Runs**: consecutive `open` samples; keep runs ≥ `--min-run`. Bridge
    single non-open samples inside a run (a puddle does not end a wall).
@@ -186,8 +217,8 @@ red on any border.
 - **Two runs on the same pair separated by a short river.** Separate
   ridges, one pass each only if a path crosses each; otherwise the pair's
   single guaranteed pass goes on the longest run.
-- **Towns on a border.** Finding, no build. The zone-setup skill's step 2
-  says move the vertex; the audit now names the town.
+- **Towns.** Their own zones (above); a town border gets no ridge, and a
+  town whose region does not enclose its `radius + falloff` is a finding.
 - **Coast borders.** `coast` is a barrier class; a zone that is an island
   (Frostcrag, Greenspire) has no land border and no passes. Its "pass" is
   wherever the game puts a boat later — out of scope.
