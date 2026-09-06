@@ -2666,8 +2666,17 @@ function commandZones(): void {
     }
     if (bestLoop.length < 3) return;
     const pts: [number, number][] = bestLoop.map((k) => [cornerX((k / (n + 1)) | 0), cornerZ(k % (n + 1))]);
-    const capped = simplifyLoop(pts, grid.step * 1.2, 100);
+    let capped = simplifyLoop(pts, grid.step * 1.2, 100);
     if (capped.length < 3) return;
+    // the simplifier straightens a lake shore or a coast right through the
+    // bulge the town stamp made (its tolerance grows past a cell on a big
+    // zone): put the raw boundary points back wherever a town of this claim
+    // is within reach, so the outline follows the stamp there
+    const protectedTowns = towns.filter((t, i) => label[townCell[i]!] === s);
+    if (protectedTowns.length > 0) {
+      const kept = new Set(capped.map((q) => `${q[0]},${q[1]}`));
+      capped = pts.filter((q) => kept.has(`${q[0]},${q[1]}`) || protectedTowns.some((t) => Math.hypot(q[0] - t.center[0], q[1] - t.center[1]) <= t.radius + t.falloff + 4 + grid.step * 2));
+    }
     const town = towns[townIndex]!;
     const inside = towns.filter((t) => t.id !== town.id && pointInPolygon(capped, t.center[0], t.center[1])).map((t) => t.id);
     regions.push({
@@ -3086,6 +3095,14 @@ function roadFrom(
     { maxGrade: options.maxGrade, maxFill: options.maxFill, maxCut: options.maxCut, finalClamp: options.finalClamp },
     { start: options.pinStart, end: options.pinEnd, at: pins },
   );
+  // The solver cuts to hold the grade, and at a lake shore — natural ground
+  // a metre ABOVE the water, so no ford pin — that cut went under the
+  // surface: a trail 0.7 m under a lake. A road never sits deeper than a ford
+  // wherever there is water; the lift is centimetres over a cell.
+  for (let i = 0; i < surfaceY.length; i++) {
+    const water = waterAt(points[i]!);
+    if (water !== null && surfaceY[i]! < water - fordDepth) surfaceY[i] = water - fordDepth;
+  }
   // keep a control point wherever the road bends or the profile moves by more
   // than half a metre: a road is only as smooth as its densest stretch.
   // Tolerance in grid units (0.25 of a 16 m cell is 4 m of plan drift, so a
