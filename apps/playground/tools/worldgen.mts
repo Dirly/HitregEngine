@@ -155,7 +155,9 @@ const HELP = `worldgen — procedural world pipeline
   init   <world>   write a complete starting recipe: continents in a bounded sea, zoned into
                    tundra/taiga/mountains/highlands/grassland/forest/swamp/jungle/desert/badlands/
                    blight (+ terrain & water materials; --scene for a scene; --classic for the old
-                   endless-noise world)
+                   endless-noise world; --from <world> takes an existing world's LOOK — textured
+                   palette, biomes, patches, scatter with the project's models, water and bridge
+                   materials — and starts only seed, landmasses, features and zones fresh)
   continents <world> re-lay the landmasses (--count 1 --islands 2 --radius 2200 --gap 900 --lobes 2
                    --limit auto --land-floor 4 --variation 0.55 --ocean -45); lobes stop a landmass being a disc
   rivers <world>   HYDROLOGY: fill depressions, accumulate rain, trace the channel network,
@@ -209,17 +211,52 @@ function commandInit(): void {
   const material = `terrain/${worldName}`;
   const waterMaterial = `terrain/${worldName}-water`;
   const preset = flag("classic") ? defaultWorldRecipe() : continentalWorldRecipe();
+  // --from <world>: a new world with an EXISTING world's look — its textured
+  // palette, biomes, patches, scatter rules (the project's own models),
+  // terrain style, climate, filter, macro noise, water and bridge materials.
+  // The engine preset is flat colours and four generic scatter rules: right
+  // for a smoke test, wrong for a game that has spent days on its assets.
+  // Only the seed, the landmasses, the features and the zones start fresh.
+  const from = stringOption("from", "");
+  const source = from ? loadRecipe(from) : null;
   const recipe = worldRecipeSchema.parse({
-    ...preset,
+    ...(source ? source.recipe : preset),
+    ...(source ? { bounds: preset.bounds } : {}),
     name: worldName,
     seed,
     material,
     waterMaterial,
-    scatter: defaultScatter(),
+    riverMaterial: undefined,
+    bridgeMaterial: source?.recipe.bridgeMaterial ? `${worldName}-bridge` : undefined,
+    scatter: source ? source.recipe.scatter : defaultScatter(),
+    features: {},
+    regions: [],
   });
   writeRecipe(recipe, file);
-  writeTerrainMaterial(recipe, material);
-  writeWaterMaterial(recipe, waterMaterial);
+  writeTerrainMaterial(recipe, material, source !== null);
+  if (source) {
+    // the water (and its lake/river/swamp variants) and the bridge deck are
+    // files, not recipe fields: copy them under the new name
+    const srcMaterials = path.join(path.dirname(source.file), "..", "materials");
+    const dstMaterials = path.join(assetsRoot(), "materials");
+    const terrainDir = path.join(srcMaterials, "terrain");
+    let copied = 0;
+    if (fs.existsSync(terrainDir)) {
+      for (const entry of fs.readdirSync(terrainDir)) {
+        if (!entry.startsWith(`${source.recipe.name}-`) || !entry.endsWith(".json")) continue;
+        const suffix = entry.slice(source.recipe.name.length);
+        fs.mkdirSync(path.join(dstMaterials, "terrain"), { recursive: true });
+        fs.copyFileSync(path.join(terrainDir, entry), path.join(dstMaterials, "terrain", `${worldName}${suffix}`));
+        copied++;
+      }
+    }
+    const bridge = path.join(srcMaterials, `${source.recipe.name}-bridge.json`);
+    if (fs.existsSync(bridge)) {
+      fs.copyFileSync(bridge, path.join(dstMaterials, `${worldName}-bridge.json`));
+      copied++;
+    }
+    console.log(`took the look of ${source.recipe.name}: ${recipe.surfaces.length} surfaces (${recipe.surfaces.filter((s) => s.map).length} textured), ${recipe.biomes.length} biomes, ${recipe.patches.length} patches, ${recipe.scatter.length} scatter rules, ${copied} material file(s) copied`);
+  } else writeWaterMaterial(recipe, waterMaterial);
   if (flag("scene")) writeScene(recipe);
   const limit = recipe.bounds?.limit;
   console.log(
