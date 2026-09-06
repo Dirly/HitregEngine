@@ -160,3 +160,9 @@ that makes true of your borders:
   cluster's eyes — it is a place where two players a few metres apart can
   be on different copies and see nothing of each other. Ridges, rivers,
   the coast.
+
+**Where a border has no barrier** (open ground after the draft), the plan is
+not to move the line but to build one: `docs/world-editing/barriers.md` —
+ridges written by a `barriers` stage, passes where paths cross, a
+waystation sanctuary at each pass. Design only as of 2026-09-06; read it
+before hand-fixing an open border.
