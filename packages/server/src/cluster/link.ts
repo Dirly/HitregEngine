@@ -15,6 +15,7 @@ import {
   CLUSTER_PATH,
   parseClusterMessage,
   type BridgedChatLine,
+  type HostedZones,
   type LayerRpc,
   type LayerToMain,
   type MainToLayer,
@@ -66,6 +67,8 @@ export class ClusterLink {
     recipe: new Set<(id: string, recipe: WorldRecipe) => void>(),
     terraform: new Set<(requestId: string, edits: unknown[]) => void>(),
     drain: new Set<() => void>(),
+    zones: new Set<(hosted: HostedZones) => void>(),
+    arrival: new Set<(requestId: string, position: [number, number, number]) => void>(),
     link: new Set<(up: boolean) => void>(),
     chat: new Set<(line: BridgedChatLine, origin: string) => void>(),
   };
@@ -173,6 +176,13 @@ export class ClusterLink {
       case "drain":
         for (const cb of this.handlers.drain) cb();
         return;
+      case "zones":
+        this.hosted = msg.hosted;
+        for (const cb of this.handlers.zones) cb(msg.hosted);
+        return;
+      case "arrival.check":
+        for (const cb of this.handlers.arrival) cb(msg.requestId, msg.position);
+        return;
       case "chat":
         for (const cb of this.handlers.chat) cb(msg.line, msg.origin);
         return;
@@ -245,6 +255,19 @@ export class ClusterLink {
   onLink(cb: (up: boolean) => void): () => void {
     this.handlers.link.add(cb);
     return () => this.handlers.link.delete(cb);
+  }
+
+  /** Zones main places players here for ("all" until main says otherwise). */
+  hosted: HostedZones = "all";
+
+  onZones(cb: (hosted: HostedZones) => void): () => void {
+    this.handlers.zones.add(cb);
+    return () => this.handlers.zones.delete(cb);
+  }
+  /** Main asks whether a spot is quiet here; answer with rpc `arrival.result`. */
+  onArrivalCheck(cb: (requestId: string, position: [number, number, number]) => void): () => void {
+    this.handlers.arrival.add(cb);
+    return () => this.handlers.arrival.delete(cb);
   }
 
   /** Core's persistence contract, served by main over this socket. */

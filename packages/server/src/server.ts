@@ -82,6 +82,8 @@ export interface GameServerOptions {
   commitEverySeconds?: number;
   /** Extra veto on moving a player right now (in combat, mid-cast …). */
   transferGate?: (peerId: string) => boolean;
+  /** Seconds a freshly spawned body is `landing/<bodyId>` (brains leave it alone). Default 5; 0 disables. */
+  landingSeconds?: number;
   onPlayerJoined?: (player: PlayerRecord) => void;
   onPlayerLeft?: (player: PlayerRecord, reason: LeaveReason) => void;
   /** Ticks between snapshots (default 3 → 20 Hz at 60 Hz sim). */
@@ -139,6 +141,7 @@ export class GameServer {
   private readonly persistence: PlayerPersistence | undefined;
   private readonly commitTicks: number;
   private readonly transferGate: ((peerId: string) => boolean) | undefined;
+  private readonly landingSeconds: number;
   private readonly onPlayerJoined: ((player: PlayerRecord) => void) | undefined;
   private readonly onPlayerLeft: ((player: PlayerRecord, reason: LeaveReason) => void) | undefined;
   /** Peers whose save is still loading (no body yet). */
@@ -173,6 +176,7 @@ export class GameServer {
     const commitSeconds = opts.commitEverySeconds ?? 30;
     this.commitTicks = commitSeconds > 0 ? Math.round(commitSeconds / this.world.fixedDt) : 0;
     this.transferGate = opts.transferGate;
+    this.landingSeconds = opts.landingSeconds ?? 5;
     this.onPlayerJoined = opts.onPlayerJoined;
     this.onPlayerLeft = opts.onPlayerLeft;
     this.template = opts.playerTemplate === undefined ? extractPlayerTemplate(this.world.expanded) : opts.playerTemplate;
@@ -405,6 +409,8 @@ export class GameServer {
       for (const [id, doc] of Object.entries(spawned.client)) this.runtimeDocs.set(id, doc);
       this.world.netState.set(`owner/${bodyId}`, peerId);
       this.world.netState.set(`player/${peerId}`, bodyId);
+      // landing grace: brains leave a body that just logged in / arrived alone for a few seconds
+      if (this.landingSeconds > 0) this.world.netState.set(`landing/${bodyId}`, this.world.timeMs + this.landingSeconds * 1000);
       // everyone else learns the newcomer's body; the newcomer gets the whole runtime set below
       this.host.broadcastModule(WORLD_MODULE, { t: "spawn", entities: spawned.client } satisfies WorldModuleMessage, peerId);
     }
@@ -461,6 +467,8 @@ export class GameServer {
       for (const key of this.world.netState.keys(`combat/${player.bodyId}.`)) this.world.netState.delete(key);
       for (const key of this.world.netState.keys(`cooldown/${player.bodyId}.`)) this.world.netState.delete(key);
       this.world.netState.delete(`character/${player.bodyId}`);
+      this.world.netState.delete(`landing/${player.bodyId}`);
+      this.world.netState.delete(`transferLock/${player.bodyId}`);
       this.world.netState.delete(`owner/${player.bodyId}`);
       this.world.netState.delete(`player/${peerId}`);
       this.host.broadcastModule(WORLD_MODULE, { t: "despawn", ids: player.ids } satisfies WorldModuleMessage);

@@ -88,11 +88,26 @@ export type LayerRpc =
   /** A layer applied a terraform: main persists the recipe (writer of record) and fans it to the rest. */
   | { op: "recipe.changed"; id: string; recipe: WorldRecipe }
   /** Answer to a main-forwarded `terraform` (the admin's HTTP response). */
-  | { op: "terraform.result"; requestId: string; ok: boolean; result?: unknown; error?: string };
+  | { op: "terraform.result"; requestId: string; ok: boolean; result?: unknown; error?: string }
+  /** Answer to `arrival.check`: whether the spot is quiet on this layer. */
+  | { op: "arrival.result"; requestId: string; clear: boolean };
 
 export type TransferTarget =
   | { kind: "instance"; scene: string; party?: boolean }
-  | { kind: "layer"; layerId?: string; party?: boolean };
+  | { kind: "layer"; layerId?: string; party?: boolean }
+  /**
+   * The character walked into a zone this layer does not host: place them on
+   * a copy that does. `position` is where the body stands (main asks the
+   * destination whether that spot is quiet — no awake pack — before
+   * answering; `force` skips that after the layer has waited long enough).
+   */
+  | { kind: "zone"; zone: string; position: [number, number, number]; force?: boolean };
+
+/** Main's answer to a transfer request: go there, or not yet. */
+export type TransferAnswer = { srv: string; url: string; wait?: undefined } | { wait: true; retryMs: number; srv?: undefined };
+
+/** Which zones a layer hosts — the set main places players into it for. "all" = every zone (the low-population shape). */
+export type HostedZones = "all" | string[];
 
 // -- main → layer ----------------------------------------------------------------
 
@@ -109,6 +124,10 @@ export type MainToLayer =
   | { t: "terraform"; requestId: string; edits: unknown[] }
   /** Stop accepting joins; move everyone off; exit when empty. */
   | { t: "drain" }
+  /** The zones this layer hosts from now on (placement + border transfers key off it). */
+  | { t: "zones"; hosted: HostedZones }
+  /** Is this spot quiet here (no awake pack in aggro range)? Answer with rpc `arrival.result`. */
+  | { t: "arrival.check"; requestId: string; position: [number, number, number] }
   /** A chat line another layer delivered: deliver it here to whoever may hear it (zone / everyone). */
   | { t: "chat"; line: BridgedChatLine; origin: string };
 

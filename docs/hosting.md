@@ -9,8 +9,19 @@ exercised: a real Postgres (the backend is written and typed, the compose
 file runs one), TLS in front, and the `mmo` scene under load across layers.
 
 This is the topology decided on 2026-09-05 for the open world: a
-**Diablo-style pool of whole-world copies** rather than spatial shards.
+**Diablo-style pool of copies** rather than spatial shards, **scoped by
+zone** so that a copy's players are near each other (→ "Zones" below).
 Nobody sees everyone; everybody sees the same world.
+
+**Zones (added later the same day, verified in `test/zones.test.ts`):** a
+layer hosts a SET of the recipe's regions. At low population one process
+hosts all of them; when a zone's players on a copy reach its cap, main opens
+a dedicated copy of that zone; a player who walks into a zone their layer
+does not host is handed to a copy that does, out of combat and clear of
+packs on both sides. Derek's objection to whole-world copies — "why would
+someone on one end of the continent be on the same layer as someone in the
+south" — is what this answers: a zone with 40 players online has all 40 on
+one copy.
 
 ```
                        browser (playground, ?gateway=…)
@@ -72,6 +83,67 @@ dungeons, party pulls, rebalancing, and zero-downtime content rollout.
    `serve.ts --kind instance --instance-of <party>`, waits for it to
    register, and pushes `transfer.begin` to every member's layer. The
    instance exits when empty for `--instance-idle` seconds.
+
+## Zones
+
+With `regions` in the recipe (docs/world-editing/zones.md), main runs
+zone-scoped placement; without them everything below is inert and layers
+are whole-world.
+
+**Hosted sets.** Every layer carries a hosted set: `"all"` or a list of zone
+ids. The first layer is always `"all"` (somebody has to take the quiet
+zones); a layer main starts because a zone's copies are full hosts exactly
+that zone. Main tells a layer its set on registration and whenever it
+changes (`zones` message; `POST /admin/zones { id, hosted }` by hand). A
+layer simulates the world wherever its players stand regardless — spawn
+areas wake around anyone — the set only says which zones main places
+players there for, and which zones a player may stand in without being
+moved.
+
+**Placement** (`ServerRegistry.placeInZone`): the zone is the character's
+saved position's zone, else the spawn point's. Candidates are layers that
+host that zone with room in the process AND fewer than the zone's `cap`
+(the region's own, else `--zone-cap`, else the process cap) standing in
+it; party first, affinity second, then the copy with the most people in
+that zone. None → start a dedicated copy of the zone (up to `--max`).
+Main counts zone populations from the positions in every layer's status
+report, plus reservations, so a burst of logins cannot overfill a copy.
+
+**Crossing a border.** Twice a second each layer looks at every player's
+zone (`regionAt`). A player standing in a zone the layer does not host,
+more than `--zone-band` metres (default 20) inside it, is a crossing:
+
+1. the layer checks its own gate — not dead, no combat lock, no awake
+   pack in view here — and otherwise leaves them be: **someone in combat
+   stays on the server they are on, wherever they run**, until the lock
+   lapses (12 s after the last hit taken or dealt);
+2. it asks main for a copy of that zone that is not itself; main asks that
+   copy whether the spot is quiet there (`arrival.check` → no awake pack in
+   aggro range) and answers "go" or "wait" — the layer asks again every
+   two seconds, and after fifteen waits asks with `force`;
+3. commit, mint a ticket bound to the revision, hand the client over. The
+   body spawns on the far side exactly where it stood; the terrain never
+   changes for the client, only the server's entities do.
+
+**Landing grace.** A body that just spawned — login or transfer — carries
+`landing/<bodyId>` (sim time, 5 s, `--landing`… `landingSeconds`). NPC
+brains must neither target nor aggro a landing body (`isLanding` in
+`@hitreg/core`; voxel-demo's `dummy-brain` honours it), and an
+authoritative combat script clears it on the first hit the body deals
+(`clearLanding`; voxel-demo's `combat-actor` does). This is the backstop for
+the one case the arrival check cannot wait out: a camp on the far copy that
+stays awake because players are fighting in it.
+
+**Bands.** Nothing should be spawned within a band of any border, on either
+side, so a normal crossing shows nothing. At boot a layer warns for every
+spawn area whose reach (spread + leash + roam + band) crosses its zone's
+border, and `/admin/spawn-areas` lists them; the fix is to move the area or
+the border. The playbook's rule that a border must sit where nobody can see
+across it (a ridge, a river, the coast) is what makes the swap invisible
+for OTHER players.
+
+`GET /admin/status` on main reports `zones` (population and cap per zone)
+and each server's `hosted` set and per-zone counts.
 
 ## Layers cost what their players cost
 
@@ -196,6 +268,12 @@ engine may still choose peer rooms.
 - A spawn-area/zone-edge audit in `worldgen audit`.
 - Pre-spawning the body on the destination before the client dials it
   (today a transfer is one round trip of nothing; with prediction it is
-  invisible on a LAN and a short hitch on a bad link).
+  invisible on a LAN and a short hitch on a bad link). The destination is
+  asked whether the spot is quiet, but the body is not built there early.
+- Merging two sparse copies of a zone back into one (a copy retires only
+  when empty; players are not moved to consolidate).
+- Splitting a hosted set: a dedicated copy hosts one zone; an `"all"` host
+  is never narrowed. Fine at hobby scale, revisit when one process should
+  host a handful of neighbouring zones.
 - Owner-authoritative anything; binary snapshots; a 30 Hz sim tick — the
   per-layer capacity levers from `docs/dedicated-server.md` still apply.

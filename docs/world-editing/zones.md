@@ -143,3 +143,20 @@ for the spawn tables and the cluster. Exact fields: the `regions` entry in
 - **Zones as biomes.** A zone that is "the desert" because the climate
   cell is desert has a border on a climate blend, which is open ground.
   Zones are about barriers and places; biomes are the ground texture.
+
+## The band, and spawn areas (hosting)
+
+Since 2026-09-05 the cluster really does key placement by zone and moves a
+player who walks past the **band** (20 m inside a zone their layer does
+not host) to a copy of that zone — docs/hosting.md → "Zones". Two things
+that makes true of your borders:
+
+- nothing may be spawned within the band on either side. A layer warns at
+  boot for every `spawnArea` whose reach (spread + leash + roam + band)
+  crosses its zone's border, and `/admin/spawn-areas` on the layer lists
+  them; move the area or the border;
+- a crossing waits for the player to be out of combat and clear of packs
+  on both sides, so a border over open ground is not a bug in the
+  cluster's eyes — it is a place where two players a few metres apart can
+  be on different copies and see nothing of each other. Ridges, rivers,
+  the coast.

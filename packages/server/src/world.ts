@@ -28,6 +28,7 @@ import {
   NetStateStore,
   registerCharacterNetState,
   registerTransferLockNetState,
+  registerLandingNetState,
   type SceneDoc,
   type EntityDoc,
 } from "@hitreg/core";
@@ -120,6 +121,7 @@ export class HeadlessWorld {
     this.netState.setAuthority(true);
     registerCharacterNetState(this.netState); // character/<bodyId> sheets validate + appear in the spec
     registerTransferLockNetState(this.netState); // transferLock/<bodyId> — combat scripts hold a body on this server
+    registerLandingNetState(this.netState); // landing/<bodyId> — a body that just arrived; brains leave it alone
     this.scripts = new ScriptRuntime({
       doc: { ...base, entities: {} },
       objects: new Map(),

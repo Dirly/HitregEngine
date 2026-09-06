@@ -25,7 +25,7 @@ import fs from "node:fs";
 import http from "node:http";
 import { randomBytes } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
-import type { PlayerDataBackend, WorldRecipe } from "@hitreg/core";
+import { regionAt, type PlayerDataBackend, type RegionDoc, type WorldRecipe } from "@hitreg/core";
 import { ServerRegistry, type ServerEntry } from "./registry.js";
 import type { Supervisor } from "./supervisor.js";
 import { signSession, signTicket, verifySession } from "../cluster/ticket.js";
@@ -44,8 +44,10 @@ import {
   CLUSTER_PATH,
   parseClusterMessage,
   type LayerRpc,
+  type HostedZones,
   type LayerToMain,
   type MainToLayer,
+  type TransferAnswer,
   type TransferTarget,
 } from "../cluster/protocol.js";
 
@@ -85,6 +87,23 @@ export interface MainOptions {
   supervisor?: Supervisor | null;
   /** Recipe files by world id, so main can persist a terraformed recipe (from `loadContent().worldFiles`). */
   worldFiles?: Map<string, string>;
+  /**
+   * Zone-scoped placement (docs/hosting.md → "Zones"). With regions, a layer
+   * hosts a SET of zones: at low population one process hosts all of them;
+   * when a zone's players on a copy reach its cap main opens a dedicated copy
+   * of that zone, and a player who walks into a zone their layer does not
+   * host is handed to a copy that does. Without regions every layer is
+   * whole-world and this is inert.
+   */
+  zones?: {
+    regions: ReadonlyArray<RegionDoc>;
+    /** Players per copy of a zone (a region's own `cap` wins). Default: the process cap. */
+    zoneCap?: number;
+    /** Zone a character with no save starts in (the spawn point's zone). */
+    spawnZone?: string | null;
+    /** Metres inside the far zone before a crossing counts (the layers' `zoneBand`; informational here). */
+    band?: number;
+  };
   ticketTtlSeconds?: number;
   sessionTtlSeconds?: number;
   /** Told to layers: seconds between periodic saves (default 30). */
@@ -168,6 +187,16 @@ function partyCode(): string {
 export async function startMain(opts: MainOptions): Promise<MainHandle> {
   const log = opts.log ?? ((line: string) => console.log(line));
   const registry = new ServerRegistry();
+  const regions: ReadonlyArray<RegionDoc> = opts.zones?.regions ?? [];
+  const zoned = regions.length > 0;
+  registry.zoneAt = (x, z) => regionAt(regions, x, z)?.id ?? null;
+  const zoneCapOf = (zone: string | null): number => {
+    const region = zone ? regions.find((r) => r.id === zone) : undefined;
+    return region?.cap ?? opts.zones?.zoneCap ?? opts.world.cap ?? 40;
+  };
+  /** Hosted set to hand a child when it registers (a dedicated copy of one zone). */
+  const pendingHosted = new Map<string, HostedZones>();
+  const arrivalWaiters = new Map<string, Waiter<boolean>>();
   const sockets = new Map<string, LayerSocket>();
   const parties = new Map<string, Party>();
   const partyOf = new Map<string, Party>();
@@ -220,13 +249,44 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
       booting.set(id, { resolve, reject, timer });
     });
 
-  const spawnLayer = (): Promise<ServerEntry> => {
+  const spawnLayer = (hosted: HostedZones = "all"): Promise<ServerEntry> => {
     if (!supervisor) return Promise.reject(new Error("no supervisor: start another layer externally"));
     const id = `layer-${++layerCounter}`;
+    pendingHosted.set(id, hosted);
     const wait = waitForRegister(id);
+    log(`[main] starting ${id} for zones ${hosted === "all" ? "all" : hosted.join(", ")}`);
     supervisor.spawn("layer", world.scene, id, { cap: world.cap, persist: false });
     return wait;
   };
+
+  /** The zone a character will stand in when placed: their saved position's, else the spawn zone. */
+  const zoneForCharacter = async (playerId: string): Promise<string | null> => {
+    if (!zoned) return null;
+    try {
+      const record = await opts.playerData.load({ playerId, experienceId: opts.experienceId }, "world");
+      const pos = record?.data[`pos:${world.scene}`] as { position?: number[] } | undefined;
+      if (pos && Array.isArray(pos.position) && pos.position.length === 3) return registry.zoneAt(pos.position[0]!, pos.position[2]!);
+    } catch {
+      // no save yet
+    }
+    return opts.zones?.spawnZone ?? null;
+  };
+
+  /** Ask the destination whether a spot is quiet (no awake pack in range). Unreachable = assume clear. */
+  const arrivalClear = (dest: ServerEntry, position: [number, number, number]): Promise<boolean> =>
+    new Promise((resolve) => {
+      const requestId = randomBytes(4).toString("hex");
+      const timer = setTimeout(() => {
+        arrivalWaiters.delete(requestId);
+        resolve(true);
+      }, 3000);
+      arrivalWaiters.set(requestId, { resolve, reject: () => resolve(true), timer });
+      if (!sendTo(dest.id, { t: "arrival.check", requestId, position })) {
+        clearTimeout(timer);
+        arrivalWaiters.delete(requestId);
+        resolve(true);
+      }
+    });
 
   const ensureInstance = async (scene: string, key: string): Promise<ServerEntry> => {
     if (instances.scenes && !instances.scenes.includes(scene)) throw new HttpError(400, `scene "${scene}" is not instanceable`);
@@ -253,9 +313,20 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
     return sendTo(on, { t: "transfer.begin", characterId, srv: dest.id, url: dest.url, reason });
   };
 
-  const placeOrGrow = async (characterId: string, exclude?: string): Promise<ServerEntry> => {
+  /**
+   * Where a character goes: with zones, the copy of THEIR zone with the most
+   * neighbours below the zone cap (party/affinity first); without, the
+   * fullest layer with room. Nothing has room → open another layer: a
+   * dedicated copy of that zone when zoned, a whole-world one otherwise.
+   */
+  const placeOrGrow = async (characterId: string, zone: string | null = null, exclude?: string): Promise<ServerEntry> => {
     const attempt = (): ServerEntry | null => {
-      const p = registry.place({ scene: world.scene, characterId, partyMembers: partyMembersOf(characterId) });
+      const partyMembers = partyMembersOf(characterId);
+      if (zoned) {
+        const p = registry.placeInZone({ scene: world.scene, characterId, partyMembers, zone, zoneCap: zoneCapOf(zone), ...(exclude ? { exclude } : {}) });
+        return p?.server ?? null;
+      }
+      const p = registry.place({ scene: world.scene, characterId, partyMembers });
       if (p && p.server.id !== exclude) return p.server;
       if (exclude) {
         const others = registry
@@ -270,7 +341,7 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
     if (server) return server;
     const layers = registry.layersFor(world.scene).length + [...booting.keys()].filter((id) => id.startsWith("layer-")).length;
     if (layers < world.max && supervisor) {
-      await spawnLayer().catch((error: unknown) => log(`[main] layer boot failed: ${error instanceof Error ? error.message : String(error)}`));
+      await spawnLayer(zoned && zone ? [zone] : "all").catch((error: unknown) => log(`[main] layer boot failed: ${error instanceof Error ? error.message : String(error)}`));
       server = attempt();
       if (server) return server;
     }
@@ -299,12 +370,16 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
       const key = target.party ? (partyOf.get(characterId)?.code ?? characterId) : characterId;
       return ensureInstance(target.scene, key);
     }
-    if (target.layerId) {
+    if (target.kind === "layer" && target.layerId) {
       const s = registry.servers.get(target.layerId);
       if (!s) throw new HttpError(404, `no server "${target.layerId}"`);
       return s;
     }
-    return placeOrGrow(characterId, registry.whereIs.get(characterId));
+    // somewhere else that takes them: with zones, a copy of the zone they stand in
+    const on = registry.whereIs.get(characterId);
+    const presence = on ? registry.servers.get(on)?.players.get(characterId) : undefined;
+    const zone = presence?.position ? registry.zoneAt(presence.position[0], presence.position[2]) : await zoneForCharacter(owners.get(characterId)?.playerId ?? "");
+    return placeOrGrow(characterId, zone, on);
   };
 
   const persistRecipe = (id: string, recipe: WorldRecipe): void => {
@@ -337,6 +412,18 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
         };
       }
       case "transfer.request": {
+        if (call.target.kind === "zone") {
+          // a border crossing: a copy of that zone (never the layer asking),
+          // and only once the far side says the spot is quiet — unless the
+          // layer has waited long enough and says force
+          const origin = registry.whereIs.get(call.characterId) ?? layerId;
+          const dest = await placeOrGrow(call.characterId, call.target.zone, origin);
+          if (!call.target.force && !(await arrivalClear(dest, call.target.position))) {
+            return { wait: true, retryMs: 2000 } satisfies TransferAnswer;
+          }
+          registry.reserve(dest.id, call.characterId, "", "", Date.now(), call.target.zone);
+          return { srv: dest.id, url: dest.url } satisfies TransferAnswer;
+        }
         const dest = await resolveTarget(call.characterId, call.target);
         if (call.target.party) {
           for (const member of partyMembersOf(call.characterId)) {
@@ -350,6 +437,15 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
         persistRecipe(call.id, call.recipe);
         for (const id of sockets.keys()) if (id !== layerId) sendTo(id, { t: "recipe", id: call.id, recipe: call.recipe });
         return { fanned: sockets.size - 1 };
+      }
+      case "arrival.result": {
+        const w = arrivalWaiters.get(call.requestId);
+        if (w) {
+          arrivalWaiters.delete(call.requestId);
+          clearTimeout(w.timer);
+          w.resolve(call.clear);
+        }
+        return null;
       }
       case "terraform.result": {
         const w = terraformWaiters.get(call.requestId);
@@ -381,9 +477,14 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
       }
       state.id = msg.id;
       sockets.set(msg.id, { socket, id: msg.id });
-      const entry = registry.register({ id: msg.id, kind: msg.kind, url: msg.url, scene: msg.scene, cap: msg.cap, ...(msg.instanceOf ? { instanceOf: msg.instanceOf } : {}) });
+      // hosted zones: what main asked this child to be (a dedicated copy), what it
+      // was before a reconnect, else everything — the first layer is always "all"
+      const hosted: HostedZones = pendingHosted.get(msg.id) ?? registry.servers.get(msg.id)?.hosted ?? "all";
+      pendingHosted.delete(msg.id);
+      const entry = registry.register({ id: msg.id, kind: msg.kind, url: msg.url, scene: msg.scene, cap: msg.cap, hosted, ...(msg.instanceOf ? { instanceOf: msg.instanceOf } : {}) });
       const primary = registry.layersFor(world.scene).sort((a, b) => a.registeredAt - b.registeredAt)[0]?.id === msg.id;
       socket.send(JSON.stringify({ t: "registered", id: msg.id, experienceId: opts.experienceId, primary, commitEverySeconds: opts.commitEverySeconds ?? 30 } satisfies MainToLayer));
+      if (msg.kind === "layer" && zoned) sendTo(msg.id, { t: "zones", hosted });
       for (const [id, recipe] of recipes) sendTo(msg.id, { t: "recipe", id, recipe });
       log(`[main] ${msg.kind} "${msg.id}" registered (${msg.scene}, cap ${msg.cap}, ${msg.url})`);
       const waiter = booting.get(msg.id);
@@ -519,8 +620,9 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
       const body = (await readJson(req)) as { characterId?: unknown } | null;
       const character = characterOf(account, body?.characterId);
       owners.set(character.id, { playerId: account.id, name: character.name });
-      const server = await placeOrGrow(character.id);
-      registry.reserve(server.id, character.id, account.id, character.name);
+      const zone = await zoneForCharacter(account.id);
+      const server = await placeOrGrow(character.id, zone);
+      registry.reserve(server.id, character.id, account.id, character.name, Date.now(), zone);
       const ticket = signTicket(opts.secret, { sub: account.id, chr: character.id, name: character.name, srv: server.id, reason: "join", ttlSeconds: ticketTtl });
       return send(res, 200, { url: server.url, ticket, server: server.id, scene: server.scene });
     }
@@ -584,7 +686,28 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
           parties: [...parties.values()].map((x) => ({ code: x.code, leader: x.leader, members: [...x.members] })),
           characters: Object.fromEntries([...registry.whereIs]),
           recipes: [...recipes.keys()],
+          zones: zoned
+            ? {
+                count: regions.length,
+                spawnZone: opts.zones?.spawnZone ?? null,
+                caps: Object.fromEntries(regions.map((r) => [r.id, zoneCapOf(r.id)])),
+                population: Object.fromEntries(
+                  regions.map((r) => [r.id, registry.layersFor(world.scene).reduce((n, s) => n + registry.playersInZone(s, r.id), 0)]),
+                ),
+              }
+            : null,
         });
+      }
+      if (p === "/admin/zones" && method === "POST") {
+        // hand a layer a hosted set by hand: {"id":"layer-2","hosted":["fenrun-vale"]} or "all"
+        const body = (await readJson(req)) as { id?: unknown; hosted?: unknown } | null;
+        const server = typeof body?.id === "string" ? registry.servers.get(body.id) : undefined;
+        if (!server) throw new HttpError(404, "no such server");
+        const hosted: HostedZones =
+          body!.hosted === "all" ? "all" : Array.isArray(body!.hosted) ? body!.hosted.filter((z): z is string => typeof z === "string" && regions.some((r) => r.id === z)) : [];
+        if (hosted !== "all" && hosted.length === 0) throw new HttpError(400, "hosted: \"all\" or a list of known zone ids");
+        registry.setHosted(server.id, hosted);
+        return send(res, 200, { ok: sendTo(server.id, { t: "zones", hosted }), id: server.id, hosted });
       }
       if (p === "/admin/transfer" && method === "POST") {
         const body = (await readJson(req)) as { characterId?: unknown; srv?: unknown; scene?: unknown; party?: unknown } | null;
@@ -722,6 +845,14 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
     }
     const idle = registry.retirable(world.scene, world.retireAfterMs, world.min);
     if (idle) {
+      // never retire the only whole-world host: somebody has to take the quiet zones
+      if (idle.hosted === "all" && !layers.some((s) => s.id !== idle.id && s.hosted === "all" && !s.draining)) {
+        const heir = layers.filter((s) => s.id !== idle.id && !s.draining).sort((a, b) => a.registeredAt - b.registeredAt)[0];
+        if (!heir) return;
+        registry.setHosted(heir.id, "all");
+        sendTo(heir.id, { t: "zones", hosted: "all" });
+        log(`[main] "${heir.id}" now hosts all zones (taking over from idle "${idle.id}")`);
+      }
       idle.draining = true;
       idle.accepting = false;
       log(`[main] retiring idle layer "${idle.id}"`);

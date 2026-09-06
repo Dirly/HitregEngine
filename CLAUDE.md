@@ -278,8 +278,14 @@ The primary AI channel is **direct file editing** — no MCP required:
   `serve` binary with `--main`) and on-demand INSTANCES for dungeons.
   Clients open the playground with `?gateway=http://host:8780`, sign in,
   and are handed a layer url + a signed ticket; a **transfer** (party pull,
-  dungeon door, drain, admin move) is "bye here, dial there with a ticket
-  bound to the committed save revision". Enemies come from `spawnArea`
+  dungeon door, drain, admin move, **zone border**) is "bye here, dial
+  there with a ticket bound to the committed save revision". With recipe
+  `regions`, placement is **per zone**: a layer hosts a set of zones
+  (`"all"` at low population, one zone per dedicated copy when it fills),
+  and a player who walks past the band into a zone their layer does not
+  host is moved to a copy that does — never in combat (`transferLock`),
+  never in sight of a pack on either side (`arrival.check`), and with a
+  `landing/<bodyId>` grace brains must honour on arrival. Enemies come from `spawnArea`
   components (in the spec): they exist only near players and pause in
   place otherwise, so a layer costs what its players cost. Admin on main:
   `curl -s -H "Authorization: Bearer <secret>" http://127.0.0.1:8780/admin/status`

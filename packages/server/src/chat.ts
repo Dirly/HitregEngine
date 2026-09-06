@@ -21,7 +21,7 @@
  */
 
 import { WS_HOST_ID } from "@hitreg/net";
-import { regionAt } from "@hitreg/core";
+import { regionAt, type RegionDoc } from "@hitreg/core";
 import { ChatService, hostLink, netStateMembership, registerCommsNetState, type ChatMessage } from "@hitreg/comms";
 import type { GameServer } from "./server.js";
 import type { ClusterLink } from "./cluster/link.js";
@@ -34,6 +34,8 @@ export interface LayerChatOptions {
   link: ClusterLink | null;
   /** Meters for "say" (default 25). */
   proximityRadius?: number;
+  /** Zones to use instead of the recipe's (a flat test scene given borders). */
+  regions?: ReadonlyArray<RegionDoc>;
   log?: (line: string) => void;
 }
 
@@ -63,10 +65,11 @@ export function mountLayerChat(opts: LayerChatOptions): LayerChat {
   // A zone is an agent-drawn REGION (recipe.regions) when the world has them;
   // failing that the generator's climate cell; failing that the whole scene.
   const field = server.terrain?.resolved.field ?? null;
+  const regions: ReadonlyArray<RegionDoc> = opts.regions ?? field?.recipe.regions ?? [];
   const zoneOf = (peerId: string): string | null => {
     const p = positionOf(peerId);
     if (!p) return null;
-    const region = field ? regionAt(field.recipe.regions, p[0], p[2]) : null;
+    const region = regionAt(regions, p[0], p[2]);
     if (region) return region.id;
     const id = field ? field.zone(p[0], p[2]).id : "";
     return id.length > 0 ? id : opts.scene;

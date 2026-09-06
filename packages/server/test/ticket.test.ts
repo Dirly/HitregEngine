@@ -101,6 +101,38 @@ describe("placement", () => {
     expect(reg.retirable("mmo", 5_000, 1, 90_000)?.id).toBe("layer-1");
   });
 
+  it("zone-scoped placement: hosts, zone cap, fullest-in-zone, dedicated copies", () => {
+    const reg = new ServerRegistry();
+    // two zones split at x = 0
+    reg.zoneAt = (x) => (x < 0 ? "west" : "east");
+    const at = (id: string, x: number) => ({ characterId: id, playerId: `acct-${id}`, name: id, position: [x, 0, 0] as [number, number, number] });
+    reg.register({ id: "layer-1", kind: "layer", url: "ws://a", scene: "mmo", cap: 10 }, 1000); // hosted "all"
+    reg.register({ id: "layer-2", kind: "layer", url: "ws://b", scene: "mmo", cap: 10, hosted: ["east"] }, 2000);
+    reg.status("layer-1", [at("a", -5), at("b", 5)], 1, 0, true, 3000);
+    reg.status("layer-2", [at("c", 5), at("d", 6)], 1, 0, true, 3000);
+    expect(reg.servers.get("layer-1")!.zoneOfPlayer.get("b")).toBe("east");
+    expect(reg.playersInZone(reg.servers.get("layer-2")!, "east")).toBe(2);
+    // west: only the "all" host takes it
+    expect(reg.placeInZone({ scene: "mmo", characterId: "n", zone: "west", zoneCap: 5 })).toMatchObject({ server: { id: "layer-1" } });
+    // east: the copy with the most east players wins (layer-2 has 2, layer-1 has 1)
+    expect(reg.placeInZone({ scene: "mmo", characterId: "n", zone: "east", zoneCap: 5 })).toMatchObject({ server: { id: "layer-2" }, why: "fullest" });
+    // a full zone copy is skipped even with process room to spare
+    expect(reg.placeInZone({ scene: "mmo", characterId: "n", zone: "east", zoneCap: 2 })).toMatchObject({ server: { id: "layer-1" } });
+    // every copy of the zone full → null (open another)
+    expect(reg.placeInZone({ scene: "mmo", characterId: "n", zone: "east", zoneCap: 1 })).toBeNull();
+    // a border crossing never lands back on the layer that asked
+    expect(reg.placeInZone({ scene: "mmo", characterId: "b", zone: "east", zoneCap: 5, exclude: "layer-1" })).toMatchObject({ server: { id: "layer-2" } });
+    // reservations count toward zone density
+    reg.reserve("layer-2", "e", "acct-e", "E", 4000, "east");
+    expect(reg.playersInZone(reg.servers.get("layer-2")!, "east")).toBe(3);
+    expect(reg.copiesOf("mmo", "east").map((s) => s.id)).toEqual(["layer-2"]);
+    expect(reg.copiesOf("mmo", "west")).toEqual([]);
+    expect(reg.hosts(reg.servers.get("layer-2")!, "west")).toBe(false);
+    reg.setHosted("layer-2", "all");
+    expect(reg.hosts(reg.servers.get("layer-2")!, "west")).toBe(true);
+    expect(reg.summary().find((s) => s["id"] === "layer-2")).toMatchObject({ hosted: "all", zones: { east: 3 } });
+  });
+
   it("retires the newest idle layer but never below the minimum", () => {
     const reg = new ServerRegistry();
     reg.register({ id: "layer-1", kind: "layer", url: "ws://a", scene: "mmo", cap: 2 }, 1000);

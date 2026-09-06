@@ -32,8 +32,10 @@
  * Admin:   curl -s -H "Authorization: Bearer <secret>" http://127.0.0.1:8780/admin/status
  */
 
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { regionAt, worldRecipeSchema, type RegionDoc } from "@hitreg/core";
 import { loadContent, playgroundRoots } from "../src/assets.js";
 import { FileAccountStore, FilePlayerDataBackend } from "../src/persistence/file.js";
 import { PostgresStore } from "../src/persistence/postgres.js";
@@ -89,6 +91,27 @@ async function main(): Promise<void> {
     console.error(`scene "${scene}" not found. Known: ${[...content.scenes.keys()].join(", ") || "(none)"}`);
     process.exit(2);
   }
+  // zones: the scene's voxel world recipe carries `regions`; the spawn zone is
+  // where the scene's player template stands (a character with no save starts there)
+  const sceneDoc = content.scenes.get(scene)!;
+  let regions: RegionDoc[] = [];
+  let spawnZone: string | null = null;
+  {
+    const voxel = Object.values(sceneDoc.entities).map((e) => e.components["voxelWorld"] as { world?: string } | undefined).find((v) => v?.world);
+    const file = voxel?.world ? content.worldFiles.get(voxel.world) : undefined;
+    if (file) {
+      try {
+        const recipe = worldRecipeSchema.parse(JSON.parse(fs.readFileSync(file, "utf8")));
+        regions = recipe.regions ?? [];
+      } catch (error) {
+        console.warn(`[main] could not read regions from ${file}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    const player = Object.values(sceneDoc.entities).find((e) => e.parent === null && e.tags.includes("player"));
+    const at = (player?.components["transform"] as { position?: number[] } | undefined)?.position;
+    if (regions.length > 0 && at && at.length === 3) spawnZone = regionAt(regions, at[0]!, at[2]!)?.id ?? null;
+    console.log(regions.length > 0 ? `[main] zones: ${regions.length} regions, spawn zone ${spawnZone ?? "(none)"}` : "[main] zones: none (whole-world layers)");
+  }
   const mainUrl = `ws://127.0.0.1:${port}`;
   const supervisor = flag("no-supervisor")
     ? null
@@ -126,6 +149,7 @@ async function main(): Promise<void> {
     },
     supervisor,
     worldFiles: content.worldFiles,
+    ...(regions.length > 0 ? { zones: { regions, spawnZone, ...(num("zone-cap") !== undefined ? { zoneCap: num("zone-cap")! } : {}) } } : {}),
   });
   console.log(`[main] gateway ${handle.url} · layers dial ${mainUrl}/cluster · clients will be sent to ${publicHost}:${from}-${to}`);
 

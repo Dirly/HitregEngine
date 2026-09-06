@@ -17,7 +17,7 @@
 import fs from "node:fs";
 import http from "node:http";
 import { WebSocketHostTransport } from "@hitreg/net/server";
-import { recipeEditSchema, type PlayerDataBackend } from "@hitreg/core";
+import { polygonEdgeDistance, recipeEditSchema, regionAt, type PlayerDataBackend, type RegionDoc } from "@hitreg/core";
 import { loadContent, playgroundRoots } from "./assets.js";
 import { loadProjectScripts, type ScriptLoadReport } from "./scripts.js";
 import { HeadlessWorld, defaultEvents, defaultRegistry, defaultScripts } from "./world.js";
@@ -76,6 +76,16 @@ export interface ServeOptions {
   persistence?: PlayerPersistence;
   /** Extra veto on moving a player (default: no awake spawn area within 60 m). */
   transferGate?: (peerId: string) => boolean;
+  /** Zones to use instead of the recipe's `regions` (a flat test scene given borders). */
+  regions?: RegionDoc[];
+  /**
+   * Metres a player must be INSIDE a zone this layer does not host before a
+   * border transfer is asked for (default 20) — the band where nothing is
+   * spawned on either side, so the swap happens out of sight.
+   */
+  zoneBand?: number;
+  /** Seconds a freshly spawned body is `landing/<bodyId>` (default 5; 0 disables). */
+  landingSeconds?: number;
   /** Called when the process should exit (an idle instance, a finished drain). Default: process.exit(0). */
   onExit?: (why: string) => void;
 }
@@ -98,6 +108,10 @@ export interface ServeHandle {
   scripts: ScriptLoadReport;
   /** Identities of authenticated peers (peer id = character id). */
   identities: Map<string, PlayerIdentity>;
+  /** Zone lookup this layer uses (recipe regions, or the `regions` option). */
+  zoneAt(x: number, z: number): RegionDoc | null;
+  /** Zones main places players here for ("all" when standalone or until main says otherwise). */
+  hostedZones(): "all" | string[];
   /**
    * Move a character to another server: waits for a legal moment, commits,
    * mints a ticket through main (or signs one locally when standalone),
@@ -238,6 +252,7 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
     ...(persistence ? { persistence } : {}),
     ...(commitEverySeconds !== undefined ? { commitEverySeconds } : {}),
     transferGate: opts.transferGate ?? ((peerId) => (spawnAreas ? spawnAreas.clearToTransfer(peerId) : true)),
+    ...(opts.landingSeconds !== undefined ? { landingSeconds: opts.landingSeconds } : {}),
     ...(opts.snapshotEvery ? { snapshotEvery: opts.snapshotEvery } : {}),
     ...(opts.maxPlayers !== undefined ? { maxPlayers: opts.maxPlayers } : {}),
     ...(opts.reconnectGraceSeconds !== undefined ? { reconnectGraceSeconds: opts.reconnectGraceSeconds } : {}),
@@ -275,7 +290,64 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
   spawnAreas = new SpawnAreaManager(server, npcs);
   // text chat routes on the host, and here the host is this process; zone and
   // global lines cross the cluster through main (docs/comms.md, docs/hosting.md)
-  const chat = mountLayerChat({ server, scene: opts.scene, link, log });
+  // -- zones: which ones this layer hosts, and the border watcher ------------------
+  // A layer simulates the world wherever its players stand (spawn areas wake
+  // around anyone); the hosted set only says which zones main PLACES players
+  // here for. A player who walks deep enough into a zone hosted elsewhere is
+  // handed to a copy of that zone — out of combat, clear of packs on both
+  // sides (docs/hosting.md → "Crossing a border").
+  const regions: ReadonlyArray<RegionDoc> = opts.regions ?? terrain?.resolved.field.recipe.regions ?? [];
+  const zoneBand = opts.zoneBand ?? 20;
+  const zoneAt = (x: number, z: number): RegionDoc | null => regionAt(regions, x, z);
+  const hostsZone = (zone: string): boolean => !link || link.hosted === "all" || link.hosted.includes(zone);
+  const chat = mountLayerChat({ server, scene: opts.scene, link, regions, log });
+  const crossing = new Map<string, { zone: string; since: number; waits: number }>();
+  const watchBorders = (): void => {
+    if (!link || link.hosted === "all" || regions.length === 0) return;
+    for (const player of server.players.values()) {
+      if (!player.identity || player.disconnectedAt !== null || player.transferring !== null) continue;
+      const p = world.positionOf(player.bodyId);
+      if (!p) continue;
+      const zone = zoneAt(p[0], p[2]);
+      const characterId = player.identity.characterId;
+      if (!zone || hostsZone(zone.id) || polygonEdgeDistance(p[0], p[2], zone.polygon) < zoneBand) {
+        crossing.delete(characterId);
+        continue;
+      }
+      const state = crossing.get(characterId);
+      if (state && Date.now() - state.since < 2000) continue; // one ask per couple of seconds
+      if (!server.canTransfer(player.peerId)) continue; // in combat / a pack in view: stay, keep playing here
+      const waits = state?.zone === zone.id ? state.waits : 0;
+      crossing.set(characterId, { zone: zone.id, since: Date.now(), waits });
+      void link
+        .rpc<import("./cluster/protocol.js").TransferAnswer>({
+          op: "transfer.request",
+          characterId,
+          target: { kind: "zone", zone: zone.id, position: p, ...(waits >= 15 ? { force: true } : {}) },
+        })
+        .then(async (answer) => {
+          if (answer.wait) {
+            const s = crossing.get(characterId);
+            if (s) s.waits++;
+            return;
+          }
+          crossing.delete(characterId);
+          const sent = await moveOut(characterId, answer, `zone:${zone.id}`);
+          if (sent) log(`[serve] ${characterId} crossed into "${zone.name}" → ${answer.srv}`);
+        })
+        .catch((error: unknown) => log(`[serve] border transfer for ${characterId} failed: ${error instanceof Error ? error.message : String(error)}`));
+    }
+  };
+  const borderTimer = setInterval(watchBorders, 500);
+  link?.onArrivalCheck((requestId, position) => {
+    const clear = spawnAreas ? spawnAreas.clearAt(position) : true;
+    void link!.rpc({ op: "arrival.result", requestId, clear }).catch(() => undefined);
+  });
+  link?.onZones((hosted) => log(`[serve] hosting zones: ${hosted === "all" ? "all" : hosted.join(", ") || "(none)"}`));
+  {
+    const warnings = spawnAreas.borderWarnings(regions, zoneBand);
+    for (const w of warnings) log(`[serve] spawn area "${w.id}" in "${w.zone}" is ${w.distance} m from a border but reaches ${w.reach} m — a swap there can happen in sight of its pack; move it`);
+  }
   log(`[serve] npcs: ${npcs.npcs.size} authored, templates: ${[...npcs.templates.keys()].join(", ") || "(none)"}, spawn areas: ${spawnAreas.areas.size}`);
 
   // -- transfers ------------------------------------------------------------------------
@@ -439,10 +511,13 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
     serverId,
     scripts: report,
     identities,
+    zoneAt,
+    hostedZones: () => (link ? link.hosted : "all"),
     moveOut,
     close: () =>
       new Promise<void>((resolve) => {
         clearInterval(statusTimer);
+        clearInterval(borderTimer);
         if (idleTimer) clearInterval(idleTimer);
         chat.dispose();
         server.close();

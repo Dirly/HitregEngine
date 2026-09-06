@@ -21,7 +21,7 @@
  * shows enemies blinking.
  */
 
-import type { EntityDoc, SpawnAreaData } from "@hitreg/core";
+import { polygonEdgeDistance, regionAt, type EntityDoc, type SpawnAreaData } from "@hitreg/core";
 import type { GameServer } from "./server.js";
 import type { NpcManager } from "./npcs.js";
 
@@ -204,12 +204,37 @@ export class SpawnAreaManager {
     if (!player) return false;
     const p = this.server.world.positionOf(player.bodyId);
     if (!p) return true;
+    return this.clearAt(p);
+  }
+
+  /** Is this spot quiet: no awake pack within radius + margin of it? (The destination's answer to `arrival.check`.) */
+  clearAt(p: readonly [number, number, number]): boolean {
     for (const area of this.areas.values()) {
       if (!area.awake) continue;
       const d = Math.hypot(area.position[0] - p[0], area.position[2] - p[2]);
       if (d <= area.data.radius + this.transferMargin) return false;
     }
     return true;
+  }
+
+  /**
+   * Spawn areas whose reach (spread + leash + roam, plus the transfer band)
+   * crosses a zone border — where a swap could happen in sight of a pack.
+   * The audit the playbook asks for; warned at boot, listed on /admin.
+   */
+  borderWarnings(regions: ReadonlyArray<{ id: string; polygon: ReadonlyArray<readonly [number, number]> }>, band: number): Array<{ id: string; zone: string; distance: number; reach: number }> {
+    if (regions.length === 0) return [];
+    const out: Array<{ id: string; zone: string; distance: number; reach: number }> = [];
+    for (const area of this.areas.values()) {
+      const [x, , z] = area.position;
+      const spread = area.data.spawns.reduce((m, s) => Math.max(m, s.spread), 0);
+      const reach = spread + area.data.leash + area.data.roam + band;
+      const home = regionAt(regions as never, x, z);
+      if (!home) continue;
+      const distance = polygonEdgeDistance(x, z, home.polygon);
+      if (distance < reach) out.push({ id: area.id, zone: home.id, distance: Math.round(distance), reach: Math.round(reach) });
+    }
+    return out;
   }
 
   list(): Array<{ id: string; position: [number, number, number]; awake: boolean; npcs: number; woke: number }> {
