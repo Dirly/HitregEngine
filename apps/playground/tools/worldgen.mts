@@ -27,8 +27,9 @@
  *   pnpm -F playground worldgen canyons <world> [--count 4]
  *   pnpm -F playground worldgen monoliths <world> [--biome desert] [--count 44] [--tallest 150]
  *   pnpm -F playground worldgen map    <world> [--extent 3000] [--size 800] [--cx 0] [--cz 0]
- *   pnpm -F playground worldgen zones  <world> [--count N] [--force]   (draft the named zones from towns + barriers; after towns)
- *   pnpm -F playground worldgen regions <world>        (audit the zones — docs/world-editing/zones.md)
+ *   pnpm -F playground worldgen zones  <world> [--count N] [--force] [--towns-only]   (draft the named zones + a zone per town; after towns)
+ *   pnpm -F playground worldgen barriers <world> [--dry]  (ridges over open zone borders, passes where paths cross; after paths)
+ *   pnpm -F playground worldgen regions <world>        (audit the zones and measure every border — docs/world-editing/zones.md)
  *   pnpm -F playground worldgen stats  <world> [--cells 9]
  *   pnpm -F playground worldgen all    <world> [--project <name>]
  */
@@ -46,7 +47,7 @@ import {
   MAX_SURFACES,
   mulberry32,
   auditRegions,
-  pointInPolygon,
+  BORDER_CLASSES,
   type RegionDoc,
   type WorldField,
   type WorldRecipe,
@@ -63,6 +64,7 @@ import {
 import { basinFootprint, computeHydrology, extractBasins, extractChannels, simplifyLoop, type Channel, type HydroGrid } from "./worldgen-hydrology.mts";
 import { nearestRouteCell, routeBetween, smoothRoute, solveProfile, type RouteGrid, type RouteOptions } from "./worldgen-routing.mts";
 import { auditWorld } from "./worldgen-audit.mts";
+import { borderClassifier, borderReport, planBarriers, snowLineOf, stripBarrierFeatures, type BorderPairReport } from "./worldgen-borders.mts";
 
 // ---------------------------------------------------------------- cli plumbing
 
@@ -183,7 +185,18 @@ const HELP = `worldgen — procedural world pipeline
                    --width 18, or --from-scene <scene> --entity <id> to import a path-tool entity; --remove <id>)
   audit  <world>   water & paths: every river ends somewhere, every lake has a river, beds descend,
                    no town or path under water, every bridge has its paths (exit 1 on findings)
-  all    <world>   init (if missing) + canyons + rivers + towns + paths + pois + trails + caves + map + stats
+  zones  <world>   draft the named ZONES (recipe regions): farthest-apart towns seed a cost flood that prefers
+                   river and ridge borders (--count N, --per-km2 6, --force to redraft; names lost), then a zone
+                   of its own per town, cut out of the wilderness around it (--town-cap 120; --towns-only adds
+                   the town zones to zones already drawn)
+  barriers <world> RIDGES over every open run (>= --min-run 60 m) of a zone border, a PASS wherever a path
+                   crosses (one guaranteed pass per pair no path crosses), a waystation sanctuary at each pass
+                   and at every town gate (--height 35 --width 24 --falloff 60 --sample 15 --pass-width auto
+                   --sanctuary-radius 35 --no-safe --dry); idempotent — rewrites barrier-*/pass-* only
+  regions <world>  audit the zones: area, towns and pois per zone, hubs outside, overlaps, unclaimed towns, and
+                   every shared border measured — metres of water/steep/canyon/coast/ridge/town/pass/OPEN; an
+                   open run >= 60 m is a finding (exit 1) until 'barriers' walls it
+  all    <world>   init (if missing) + canyons + rivers + towns + zones + paths + barriers + pois + trails + caves + map + stats
 
 Options: --project <name>  --seed N  --extent <world units, default = the world limit>  --count N  --size <px>  --scene`;
 
@@ -2632,7 +2645,7 @@ function commandZones(): void {
     const capped = simplifyLoop(pts, grid.step * 1.2, 100);
     if (capped.length < 3) return;
     const town = towns[townIndex]!;
-    const inside = towns.filter((t) => t.id !== town.id && pointInPolygon(t.center[0], t.center[1], capped)).map((t) => t.id);
+    const inside = towns.filter((t) => t.id !== town.id && pointInPolygon(capped, t.center[0], t.center[1])).map((t) => t.id);
     regions.push({
       id: `zone-${regions.length + 1}`,
       name: `Zone ${regions.length + 1}`,
@@ -2644,13 +2657,66 @@ function commandZones(): void {
     });
   });
 
-  recipe.regions = regions;
+  recipe.regions = [...regions, ...townZones(regions, towns, option("town-cap", 120))];
   writeRecipe(recipe, file);
-  console.log(`drafted ${regions.length} zones from ${seeds.length} seed towns over ${landKm2.toFixed(1)} km² of land (step ${grid.step} m)`);
+  console.log(`drafted ${regions.length} zones from ${seeds.length} seed towns over ${landKm2.toFixed(1)} km² of land (step ${grid.step} m), plus ${recipe.regions.length - regions.length} town zones`);
   const report = auditRegions(recipe.regions, recipe.features);
-  for (const r of report.regions) console.log(`  ${r.id}: ${r.areaKm2} km², hub ${regions.find((x) => x.id === r.id)?.landmarks[0] ?? "?"}, towns ${r.towns.join(",") || "-"}, pois ${r.pois}`);
+  for (const r of report.regions) console.log(`  ${r.id}: ${r.areaKm2} km², hub ${regions.find((x) => x.id === r.id)?.landmarks[0] ?? "?"}, towns ${r.towns.join(",") || "-"}, pois ${r.pois}${r.within ? `, within ${r.within}` : ""}`);
   if (report.findings.length > 0) console.log(`  findings:\n    ${report.findings.join("\n    ")}`);
   console.log("  next: name them and check the borders — the zone-setup skill / docs/world-editing/zones.md");
+}
+
+/**
+ * A zone of its own per town, CUT OUT of the wilderness zone around it
+ * (docs/world-editing/barriers.md → "Towns are zones of their own"): a
+ * 12-gon on the town's outskirts (radius + falloff, plus a hand so the
+ * audit's enclosure test passes with rounding), a higher cap because a
+ * town simulates no packs, the whole thing a sanctuary. Placeholder names;
+ * the zone-setup pass names them.
+ */
+function townZones(wilderness: readonly RegionDoc[], towns: readonly TownDoc[], cap: number): RegionDoc[] {
+  const out: RegionDoc[] = [];
+  towns.forEach((town, i) => {
+    const parent = wilderness.find((r) => r.within === undefined && pointInPolygon(r.polygon, town.center[0], town.center[1]));
+    if (!parent) {
+      console.log(`  ${town.id}: in no wilderness zone — no town zone written (claim it first)`);
+      return;
+    }
+    const reach = town.radius + town.falloff + 4;
+    const polygon: [number, number][] = [];
+    for (let k = 0; k < 12; k++) {
+      const a = (k / 12) * Math.PI * 2;
+      polygon.push([Math.round(town.center[0] + Math.cos(a) * reach), Math.round(town.center[1] + Math.sin(a) * reach)]);
+    }
+    out.push({
+      id: `${town.id}-zone`,
+      name: `Town ${i + 1}`,
+      story: "",
+      polygon,
+      hub: [town.center[0], town.center[1]],
+      landmarks: [town.id],
+      cap,
+      within: parent.id,
+      tags: ["town", "safe", "draft"],
+    });
+  });
+  return out;
+}
+
+/** `worldgen zones --towns-only`: keep the wilderness draft, (re)write the town zones inside it. */
+function commandTownZones(): void {
+  const { recipe, file } = loadRecipe();
+  const kept = recipe.regions.filter((r) => r.within === undefined && !r.tags.includes("town"));
+  if (kept.length === 0) {
+    console.log("no zones yet — run `worldgen zones` first");
+    return;
+  }
+  const towns = townZones(kept, recipe.features.towns, option("town-cap", 120));
+  recipe.regions = [...kept, ...towns];
+  writeRecipe(recipe, file);
+  console.log(`wrote ${towns.length} town zones inside ${kept.length} wilderness zones (cap ${option("town-cap", 120)})`);
+  const report = auditRegions(recipe.regions, recipe.features);
+  if (report.findings.length > 0) console.log(`  findings:\n    ${report.findings.join("\n    ")}`);
 }
 
 function landComponentsOf(height: Float32Array, n: number, seaLevel: number): Int32Array {
@@ -4675,7 +4741,8 @@ function commandMap(): void {
   // out here). Names also print below with their pixel position.
   const labels: Array<{ x: number; y: number; w: number; h: number; text: string; scale: number }> = [];
   for (const region of recipe.regions) {
-    stroke([...region.polygon, region.polygon[0]!], [255, 255, 255], 1);
+    stroke([...region.polygon, region.polygon[0]!], [255, 255, 255], region.within ? 0 : 1);
+    if (region.within) continue; // a town zone is a small ring round its town; the parent's label stands for both
     const at = region.hub ?? region.polygon.reduce<[number, number]>((acc, p) => [acc[0] + p[0] / region.polygon.length, acc[1] + p[1] / region.polygon.length], [0, 0]);
     const [px, py] = toPixel(at[0], at[1]);
     if (region.hub) {
@@ -4703,6 +4770,35 @@ function commandMap(): void {
     drawText(pixels, size, label.x, label.y, label.text, [255, 255, 255], label.scale);
   }
 
+  // Barriers: every OPEN run of a border in RED (a swap there shows two
+  // worlds), every pass a white diamond with its number. A world is ready
+  // for hosting when no red is left on any border.
+  let openRunCount = 0;
+  if (recipe.regions.length > 0) {
+    const { pairs } = auditBorders(recipe, field);
+    for (const pair of pairs) {
+      for (const run of pair.runs) {
+        openRunCount++;
+        stroke(
+          run.run.samples.map((s) => [s.x, s.z] as [number, number]),
+          [255, 40, 40],
+          2,
+        );
+      }
+    }
+  }
+  // the ridges themselves, pale grey at their crest width: the hillshade alone
+  // under-reads a 35 m wall at 18 m/px
+  for (const ridge of recipe.features.ridges) stroke(ridge.points, [225, 225, 235], Math.max(1, Math.round(ridge.width / (2 * step))));
+  const passes = recipe.features.pois.filter((p) => p.id.startsWith("pass-"));
+  let passNo = 0;
+  for (const poi of passes) {
+    const [px, py] = toPixel(poi.position[0], poi.position[2]);
+    const gate = poi.tags.includes("gate");
+    const r = gate ? 3 : 5;
+    for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) if (Math.abs(dx) + Math.abs(dy) <= r) plot(px + dx, py + dy, Math.abs(dx) + Math.abs(dy) === r ? [20, 20, 20] : [255, 255, 255]);
+    if (!gate) drawText(pixels, size, px + r + 2, py - 3, String(++passNo), [255, 255, 255], 1);
+  }
   const out = path.join(assetsRoot(), "..", `${recipe.name}-map${byZone ? "-zones" : ""}.png`);
   fs.mkdirSync(path.dirname(out), { recursive: true });
   const png = encodePng(pixels, size, size);
@@ -4716,6 +4812,7 @@ function commandMap(): void {
   }
   console.log(`wrote ${path.relative(process.cwd(), out)}  (${size}x${size}, ${extent * 2} world units across, ${step.toFixed(1)} m/px)`);
   console.log("  blue = rivers/lakes, brown = canyons, tan = town paths, thin tan = peak trails, red = towns, yellow = peaks, cyan = waterfalls, red ring = world limit");
+  if (recipe.regions.length > 0) console.log(`  barriers: ${openRunCount} OPEN border run(s) in red (must be 0 before hosting), ${passes.length} pass(es) as white diamonds (${passNo} numbered, the rest town gates), ridges pale grey`);
   if (byZone) console.log(`  zones: ${anchors.map((a, i) => `${a.id} rgb(${anchorColour[i]!.join(",")})`).join(", ")}`);
   if (recipe.regions.length > 0) {
     console.log("  regions (white borders; name @ pixel x,y of the hub or centroid):");
@@ -4740,19 +4837,144 @@ function commandRegions(): void {
   }
   const report = auditRegions(recipe.regions, recipe.features);
   for (const r of report.regions) {
+    if (r.within) continue; // town zones are summarised below
     console.log(
       `${r.name} (${r.id}): ${r.areaKm2} km², centroid ${r.centroid.join(",")}, towns ${r.towns.length ? r.towns.join(",") : "-"}, pois ${r.pois}` +
         (r.hubInside === false ? ", HUB OUTSIDE" : "") +
         (r.overlaps.length ? `, overlaps ${r.overlaps.join(",")}` : ""),
     );
   }
+  const townZoneCount = report.regions.filter((r) => r.within).length;
   const claimed = recipe.features.towns.length - report.unclaimedTowns.length;
-  console.log(`${recipe.regions.length} regions claim ${claimed}/${recipe.features.towns.length} towns`);
-  if (report.findings.length > 0) {
-    console.log(`\n${report.findings.length} finding(s):`);
-    for (const f of report.findings) console.log(`  - ${f}`);
+  console.log(`${recipe.regions.length - townZoneCount} zones + ${townZoneCount} town zones claim ${claimed}/${recipe.features.towns.length} towns`);
+  const findings = [...report.findings];
+
+  // every shared border, measured against the world
+  const field = createWorldField(recipe);
+  const { pairs, findings: borderFindings } = auditBorders(recipe, field);
+  console.log(`\n${pairs.length} shared borders (metres by class; OPEN runs >= ${option("min-run", 60)} m are findings):`);
+  for (const pair of pairs) console.log(`  ${describePair(pair)}`);
+  findings.push(...borderFindings);
+  if (findings.length > 0) {
+    console.log(`\n${findings.length} finding(s):`);
+    for (const f of findings) console.log(`  - ${f}`);
     process.exitCode = 1;
+  } else console.log("\nno findings — every border is a barrier or a pass");
+}
+
+/** The ridge/path geometry the barriers stage and the audit agree on, from the flags and the recipe's own paths. */
+function barrierGeometry(recipe: WorldRecipe): { ridge: { width: number; falloff: number }; path: { width: number; shoulder: number }; height: number } {
+  const roads = recipe.features.roads;
+  return {
+    ridge: { width: option("width", 24), falloff: option("falloff", 60) },
+    path: {
+      width: roads.length > 0 ? Math.max(...roads.map((r) => r.width)) : 2.4,
+      shoulder: roads.length > 0 ? Math.max(...roads.map((r) => r.shoulder)) : 8,
+    },
+    height: option("height", 35),
+  };
+}
+
+/** Measure every shared border with the real field; open runs are findings. */
+function auditBorders(recipe: WorldRecipe, field: WorldField): { pairs: BorderPairReport[]; findings: string[] } {
+  const geometry = barrierGeometry(recipe);
+  const classify = borderClassifier(field, recipe, { ridge: geometry.ridge });
+  const pairs = borderReport(recipe.regions, recipe.features.roads, {
+    sample: option("sample", 15),
+    tolerance: option("border-tolerance", 48),
+    minRun: option("min-run", 60),
+    ridge: geometry.ridge,
+    path: geometry.path,
+    classify,
+    existingPasses: recipe.features.pois.filter((p) => p.id.startsWith("pass-")),
+  });
+  const findings: string[] = [];
+  for (const pair of pairs) {
+    for (const run of pair.runs) {
+      findings.push(
+        `border ${pair.a}/${pair.b}: ${Math.round(run.length)} m of OPEN ground from ${run.from.map(Math.round).join(",")} to ${run.to.map(Math.round).join(",")} — a swap there shows two worlds; run \`worldgen barriers\``,
+      );
+    }
   }
+  return { pairs, findings };
+}
+
+function describePair(pair: BorderPairReport): string {
+  const classes = BORDER_CLASSES.filter((c) => pair.classes[c] > 0)
+    .map((c) => `${c === "open" ? "OPEN" : c} ${Math.round(pair.classes[c])}`)
+    .join(", ");
+  const passes = pair.passes.length ? `; passes: ${pair.passes.map((p) => `${p.id ?? p.source}@${Math.round(p.x)},${Math.round(p.z)}`).join(" ")}` : "";
+  return `${pair.a}/${pair.b}: ${Math.round(pair.length)} m — ${classes}${pair.runs.length ? `; ${pair.runs.length} open run(s)` : ""}${passes}`;
+}
+
+/**
+ * `worldgen barriers <world>` — build the barriers the borders lack
+ * (docs/world-editing/barriers.md). Every open run of a zone border becomes
+ * a ridge; a pass is left wherever a path crosses (and one at the midpoint
+ * of the longest run for a pair no path crosses); a waystation sanctuary
+ * marks every pass and every town gate. Idempotent: rewrites its own
+ * `barrier-*` ridges and `pass-*` pois from the CURRENT borders.
+ */
+function commandBarriers(): void {
+  const { recipe, file } = loadRecipe();
+  if (recipe.regions.length === 0) {
+    console.log(`no regions in ${recipe.name} — run \`worldgen zones\` first (barriers are built on zone borders)`);
+    return;
+  }
+  const removed = stripBarrierFeatures(recipe);
+  if (removed.ridges + removed.pois > 0) console.log(`removed ${removed.ridges} barrier ridge(s) and ${removed.pois} pass(es) from the last run`);
+  const geometry = barrierGeometry(recipe);
+  const field = createWorldField(recipe);
+  const snowLine = snowLineOf(recipe);
+  const safe = !flag("no-safe");
+  const classify = borderClassifier(field, recipe, { ridge: geometry.ridge });
+  const explicitPass = option("pass-width", 0);
+  const pathGeometry = explicitPass > 0 ? { width: explicitPass - geometry.ridge.width - 2 * geometry.ridge.falloff, shoulder: 0 } : geometry.path;
+  const plan = planBarriers(recipe.regions, recipe.features.roads, {
+    sample: option("sample", 15),
+    tolerance: option("border-tolerance", 48),
+    minRun: option("min-run", 60),
+    ridge: geometry.ridge,
+    path: pathGeometry,
+    classify,
+    height: geometry.height,
+    field,
+    heightCap: snowLine + 40,
+    sanctuaryRadius: option("sanctuary-radius", 35),
+    safe,
+    lakes: recipe.features.lakes,
+  });
+  const passWidth = geometry.ridge.width + 2 * geometry.ridge.falloff + pathGeometry.width + 2 * pathGeometry.shoulder;
+  console.log(`${plan.report.length} shared borders; ridge ${geometry.height} m high, ${geometry.ridge.width} m crest, ${geometry.ridge.falloff} m flanks; pass ${Math.round(passWidth)} m; crest cap ${Math.round(snowLine + 40)} m (snow line ${Math.round(snowLine)} + 40)${safe ? "" : "; sanctuaries OFF"}`);
+  for (const pair of plan.report) {
+    const ridges = plan.ridges.filter((r) => r.id.startsWith(`barrier-${pair.a}-${pair.b}-`));
+    const passes = plan.passes.filter((x) => x.a === pair.a && x.b === pair.b);
+    if (pair.runs.length === 0 && passes.length === 0) continue;
+    console.log(`  ${describePair(pair)}`);
+    for (const r of ridges) console.log(`    ridge ${r.id}: ${r.points.length} points, crest ${Math.min(...r.heights!)}–${Math.max(...r.heights!)} m`);
+    for (const x of passes) console.log(`    pass ${x.id} @ ${Math.round(x.pass.x)},${Math.round(x.pass.z)} (${x.pass.source}${x.pass.paths.length ? `: ${x.pass.paths.join(", ")}` : ""})`);
+  }
+  console.log(`${plan.ridges.length} ridge(s), ${plan.pois.length} pass(es) — ${plan.pois.filter((x) => x.tags.includes("gate")).length} of them town gates`);
+  if (flag("dry")) {
+    console.log("(--dry: nothing written)");
+    return;
+  }
+  recipe.features.ridges.push(...plan.ridges);
+  recipe.features.pois.push(...plan.pois);
+  writeRecipe(recipe, file);
+  // measure again on the built world: the only open ground left should be inside a pass
+  const after = auditBorders(recipe, createWorldField(recipe));
+  const before = new Map(plan.report.map((x) => [`${x.a}/${x.b}`, x.classes.open]));
+  for (const pair of after.pairs) {
+    const was = before.get(`${pair.a}/${pair.b}`) ?? 0;
+    if (was > 0 || pair.classes.open > 0) console.log(`  ${pair.a}/${pair.b}: OPEN ${Math.round(was)} m → ${Math.round(pair.classes.open)} m, pass ${Math.round(pair.classes.pass)} m, ridge ${Math.round(pair.classes.ridge)} m`);
+  }
+  if (after.findings.length > 0) {
+    console.log(`\n${after.findings.length} finding(s) remain:`);
+    for (const f of after.findings) console.log(`  - ${f}`);
+    process.exitCode = 1;
+  } else console.log("no open border left outside a pass");
+  console.log("next: `worldgen pois` (keeps the waystations), then `worldgen trails`; a pass with no path wants `worldgen paths` once more");
 }
 
 /** 5x7 block capitals, digits and a few marks — enough to write a zone's name on a PNG with no font files. */
@@ -5031,7 +5253,11 @@ switch (command) {
     commandMap();
     break;
   case "zones":
-    commandZones();
+    if (flag("towns-only")) commandTownZones();
+    else commandZones();
+    break;
+  case "barriers":
+    commandBarriers();
     break;
   case "regions":
     commandRegions();
@@ -5061,6 +5287,8 @@ switch (command) {
     // zones after towns (seeded from them) and rivers (borders follow them)
     commandZones();
     commandPaths();
+    // barriers after paths (passes are cut where paths cross) and before pois (waystations exist when pois places its own)
+    commandBarriers();
     commandPois();
     commandTrails();
     commandCaves();

@@ -100,6 +100,28 @@ export {
 } from "./regions.js";
 
 export {
+  sharedBorderChains,
+  outlineChain,
+  allSharedBorders,
+  classifyChain,
+  classBreakdown,
+  openRuns,
+  passesOnRun,
+  guaranteedPass,
+  ridgePieces,
+  simplifyPolyline,
+  passWidthFor,
+  BORDER_CLASSES,
+  type BorderClass,
+  type BorderSample,
+  type ClassifiedSample,
+  type BorderChain,
+  type OpenRun,
+  type PassPlan,
+  type PathLike,
+} from "./borders.js";
+
+export {
   createWorldField,
   type WorldField,
   type BiomeSample,

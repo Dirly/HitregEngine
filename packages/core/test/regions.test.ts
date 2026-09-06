@@ -93,6 +93,7 @@ describe("town zones (a town is a zone of its own)", () => {
     expect(report.regions[0]!.towns).toEqual(["town-1"]); // the vale holds town-1 through its town zone
     expect(report.regions[2]).toMatchObject({ id: "town-1-zone", within: "hollow-vale", towns: ["town-1"] });
     expect(report.findings.filter((f) => f.includes("no town inside"))).toEqual([]);
+    expect(report.findings.filter((f) => f.includes("km²"))).toEqual([]); // a town zone is small by design
     expect(report.unclaimedTowns).toEqual([]);
   });
 

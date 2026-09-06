@@ -169,7 +169,8 @@ export function auditRegions(
     cz /= region.polygon.length;
     const hubInside = region.hub ? pointInPolygon(region.hub[0], region.hub[1], region.polygon) : null;
     if (hubInside === false) findings.push(`region "${region.id}": hub is outside its own border`);
-    if (area < 0.5) findings.push(`region "${region.id}": only ${area.toFixed(2)} km² — a zone should take minutes to cross`);
+    // a town zone is small by design: the town and its outskirts
+    if (area < 0.5 && !region.tags.includes("town")) findings.push(`region "${region.id}": only ${area.toFixed(2)} km² — a zone should take minutes to cross`);
     const towns = features.towns.filter((t) => pointInPolygon(t.center[0], t.center[1], region.polygon)).map((t) => t.id);
     const pois = features.pois.filter((p) => pointInPolygon(p.position[0], p.position[2], region.polygon)).length;
     // a town zone holds its town by construction; a wilderness zone holds a
