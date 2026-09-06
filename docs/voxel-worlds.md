@@ -180,6 +180,9 @@ pnpm -F playground worldgen rivers <world>   # HYDROLOGY: fill, flow, channels, 
 pnpm -F playground worldgen towns  <world>   # flat, low, water-adjacent pads
 pnpm -F playground worldgen roads  <world>   # least-cost routes graded on the dense route, cut-biased
 pnpm -F playground worldgen trails <world>   # footpaths from the roads up to the peaks
+pnpm -F playground worldgen zones  <world>   # draft the named zones + a zone per town (after towns)
+pnpm -F playground worldgen barriers <world> # ridges over open zone borders, passes where paths cross, sanctuaries
+pnpm -F playground worldgen regions <world>  # audit the zones and measure every border (open runs = findings)
 pnpm -F playground worldgen pois   <world>   # peaks, cliffs, coves
 pnpm -F playground worldgen caves  <world>   # find mouths, MEASURE fit, carve them open
 pnpm -F playground worldgen map    <world>   # PNG overview
@@ -1223,11 +1226,20 @@ noise bands     continent, hills, mountains x relief, mesas, dunes, detail
 ceiling         soft compression toward a common summit line
 bounds          the shore profile, the land floor, the world limit
 coast cliffs    steepen whatever profile crosses sea level where rugged
-features        canyons -> lakes -> rivers -> towns -> roads
+features        canyons -> ridges -> lakes -> rivers -> towns -> roads
 ```
 
 Every one of these is a monotone, continuous remap or an additive band, so
 the terrain stays a function and the invariants of §4 hold unchanged.
+
+**Ridges** (`features.ridges`, 2026-09-06) are the one feature that only
+RAISES: a polyline with a flat crest `width` wide, flanks over `falloff`,
+round caps, per-point `heights`. They exist so a zone border can be walled
+where the land offered nothing (docs/world-editing/barriers.md): raise-only
+means a ridge across a river bed stays out of the water (the river's cut
+runs later in the chain), the caps make a gap between two pieces read as a
+col — a pass — rather than a doorway, and scatter keeps off the crest like a
+canyon rim. A terraform edit of one re-cooks points ± width/2 + falloff.
 
 ### Zones (`climate.zones`)
 

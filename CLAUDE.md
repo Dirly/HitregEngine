@@ -153,7 +153,11 @@ The primary AI channel is **direct file editing** — no MCP required:
   dense route with a hard grade cap so they follow the ground; SPLIT at any
   river ≥ 6 m wide with a `bridge` feature + placeholder deck between the
   pieces, fords over brooks; dirt, gravel across snow biomes — there are no
-  wide roads any more, `roads` is an alias), `trails` (footpaths from that
+  wide roads any more, `roads` is an alias), `barriers` (RIDGES over every
+  open run ≥ 60 m of a zone border, a PASS wherever a path crosses — one
+  guaranteed per pair no path crosses — and a `waystation` sanctuary poi at
+  each pass and town gate; idempotent, rewrites its own `barrier-*`/`pass-*`;
+  docs/world-editing/barriers.md), `trails` (footpaths from that
   network up the peaks, a capped scramble for the last leg, stopping below
   a summit no scramble reaches), `pois` each compute from the CURRENT terrain and
   write a few lines back into the recipe's `features`, so every stage stays
@@ -166,11 +170,14 @@ The primary AI channel is **direct file editing** — no MCP required:
   the running scene — no regeneration. Route one with `descend --from-lake
   <id>` (the valley floor as `--points`) and `profile --points "x,z;…"`
   (ground, grade, bank heights; `--river <id>` reads the solved bed).
-  **After changing rivers, re-run towns → zones → paths → pois → trails**
+  **After changing rivers, re-run towns → zones → paths → barriers → pois → trails**
   (a path a river now crosses is a wall across it until `paths` writes the
   bridge; a zone border that followed the old river is now over open
-  ground). `zones` drafts the named ZONES from towns and barriers — the
-  `zone-setup` skill turns the draft into named zones.
+  ground; a moved border wants `barriers` again — ridges follow borders).
+  `zones` drafts the named ZONES from towns and barriers PLUS a zone of its
+  own per town (`within` its wilderness zone, cap 120, `safe`; `--towns-only`
+  adds them to zones already drawn) — the `zone-setup` skill turns the
+  draft into named zones.
   `map` renders a PNG overview (`--plain` for water only, at real river
   widths — this is how you or an agent check the result without opening the
   browser); `stats` reports tris and ms per cell against the frame budget;
@@ -182,7 +189,9 @@ The primary AI channel is **direct file editing** — no MCP required:
   named polygons with a hub town, borders on ridges/rivers/canyons/coast —
   what chat's zone channel and cluster placement key on; the
   `zone-architect` sub-agent draws them, docs/world-editing/zones.md is its
-  procedure). **Procedure for altering a live world by hand — rivers
+  procedure) and MEASURES every shared border — metres of water/steep/
+  canyon/coast/ridge/town/pass/OPEN; an open run ≥ 60 m is a finding (exit
+  1) and draws RED on `map`; a world is ready to host when there is none. **Procedure for altering a live world by hand — rivers
   first, ~4 per world, more feature kinds to come: docs/world-editing/.**
   Judgment + the invariants that will break silently: docs/voxel-worlds.md.
 - **Placement toolbox** (settle props instead of eyeballing coordinates): give

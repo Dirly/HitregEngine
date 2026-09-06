@@ -12,12 +12,14 @@ go, and you decide by looking at the map.
 Read this whole file once. Then work through **Steps** with the commands.
 
 **Where it sits in the pipeline:** `init → canyons → rivers → towns →
-zones → paths → pois → trails`. `worldgen zones <world>` writes a FIRST
-DRAFT (seeded from towns, borders settled on rivers and ridges by a cost
-flood, placeholder names) and `worldgen all` runs it in that slot; the
-steps below are how you turn the draft into zones a player would name.
+zones → paths → barriers → pois → trails`. `worldgen zones <world>` writes a
+FIRST DRAFT (seeded from towns, borders settled on rivers and ridges by a
+cost flood, placeholder names — plus a zone of its own per town, see
+"Towns are zones of their own") and `worldgen all` runs it in that slot;
+the steps below are how you turn the draft into zones a player would name.
 After rivers or towns move, the zones are stale: fix the affected border by
-hand, or `worldgen zones --force` to redraft (names are lost).
+hand, or `worldgen zones --force` to redraft (names are lost). After ANY
+border moves, re-run `worldgen barriers` — the ridges follow the borders.
 
 ## Why the borders matter more than the names
 
@@ -115,17 +117,29 @@ for the spawn tables and the cluster. Exact fields: the `regions` entry in
    zones share a river, both polygons use the SAME river points, so the
    border is the centreline on both sides. Set `hub` to the main town's
    centre. List `landmarks`.
-5. **Check with data.** `pnpm -F playground worldgen regions <world>` —
+5. **Wall what is still open.** `pnpm -F playground worldgen barriers
+   <world>` (after `paths`): every run of open ground ≥ 60 m on a shared
+   border becomes a `ridges` feature, a PASS is left wherever a footpath
+   crosses (one guaranteed pass per pair no path crosses), and a
+   `waystation` poi with a 35 m sanctuary marks each pass and each town
+   gate. Idempotent — it rewrites its own `barrier-*` / `pass-*` entries
+   from the current borders, so run it again after moving any vertex.
+   docs/world-editing/barriers.md is the design and the trade-offs.
+6. **Check with data.** `pnpm -F playground worldgen regions <world>` —
    area, towns and POIs per zone, hubs outside their border, overlaps,
-   unclaimed towns; exit 1 on findings. Fix until clean.
-6. **Check with the picture.** `worldgen map <world>` again: zone borders
-   are white, hubs are white rings, and the names print with their pixel
-   position. Every white line should sit on a blue river, a yellow chain of
-   peaks, a brown canyon or the coast. A white line over plain green is the
-   mistake this whole file exists to prevent.
-7. **Save the recipe whole and valid.** While `pnpm dev` runs the file
+   unclaimed towns, and every shared border MEASURED: metres of water,
+   steep ground, canyon, coast, ridge, town, pass and OPEN. An open run of
+   60 m or more is a finding; exit 1 on findings. Fix until clean.
+7. **Check with the picture.** `worldgen map <world>` again: zone borders
+   are white, hubs are white rings, the names print with their pixel
+   position; open border runs are RED, passes are white diamonds (numbered;
+   town gates small and unnumbered), ridges pale grey. Every white line
+   should sit on a blue river, a yellow chain of peaks, a brown canyon, a
+   grey ridge or the coast. Red anywhere means the world is not ready to
+   host.
+8. **Save the recipe whole and valid.** While `pnpm dev` runs the file
    live-syncs; regions change no terrain, so nothing re-cooks — chat and
-   the map pick them up at once.
+   the map pick them up at once (ridges DO re-cook their cells).
 
 ## What goes wrong
 
@@ -144,6 +158,47 @@ for the spawn tables and the cluster. Exact fields: the `regions` entry in
   cell is desert has a border on a climate blend, which is open ground.
   Zones are about barriers and places; biomes are the ground texture.
 
+## Towns are zones of their own
+
+A town in the middle of a wilderness zone is where players gather, and it
+is where PvP cannot sensibly be enforced — so every town is its OWN zone
+(decided 2026-09-06, docs/world-editing/barriers.md). `worldgen zones`
+writes one per town (`worldgen zones --towns-only` adds them to zones you
+have already drawn and named):
+
+```json
+{
+  "id": "town-5-zone",
+  "name": "Fordstead",
+  "polygon": [[4405, 3479], [4394, 3521], /* … a 12-gon at radius + falloff + 4 m */],
+  "hub": [4318.39, 3478.7],
+  "landmarks": ["town-5"],
+  "cap": 120,
+  "within": "zone-11",
+  "tags": ["town", "safe"]
+}
+```
+
+- `within` says which wilderness zone it is cut out of. A simple polygon
+  cannot hold a hole, so the cut-out is declared: `regionAt` prefers the
+  nested zone wherever its polygon lies, and the audit treats the pair as
+  neighbours rather than an overlap. A town zone whose polygon leaks past
+  its parent's border is a finding ("not wholly inside") — bulge the parent
+  round the town and pull the neighbour back (the demo's Cinderford, on the
+  Ashmouth/Longmere river, is the worked example: a 9-point arc on both
+  polygons anchored on river points).
+- `cap` is higher (default 120, `--town-cap`) because a town simulates no
+  packs; everyone in a region who goes to town lands in the same copy until
+  it fills, which is what "feels populated" means.
+- `safe` makes the whole town a sanctuary: no player-on-player damage
+  inside. A chase ends at the gate; pursuers waiting outside are the game
+  working. `barriers` writes a waystation at every gate (where a path
+  crosses the town border) whose 35 m circle extends OUTSIDE it, so nobody
+  dies mid-swap on the threshold.
+- Name them from the wilderness zone and the landmark (the zone-architect
+  pass does; `draft` is dropped once named). Once a world has ANY town
+  zone, the audit requires one per town, enclosing radius + falloff.
+
 ## The band, and spawn areas (hosting)
 
 Since 2026-09-05 the cluster really does key placement by zone and moves a
@@ -161,8 +216,10 @@ that makes true of your borders:
   be on different copies and see nothing of each other. Ridges, rivers,
   the coast.
 
-**Where a border has no barrier** (open ground after the draft), the plan is
-not to move the line but to build one: `docs/world-editing/barriers.md` —
-ridges written by a `barriers` stage, passes where paths cross, a
-waystation sanctuary at each pass. Design only as of 2026-09-06; read it
-before hand-fixing an open border.
+**Where a border has no barrier** (open ground after the draft), do not move
+the line — build one: `worldgen barriers` (step 5 above) writes the ridges,
+leaves the passes where paths cross, and marks each with a waystation
+sanctuary — the one spot where a player is briefly alone on a copy of the
+world cannot be the spot they die, while the chase across the range stays
+allowed. docs/world-editing/barriers.md is the design, its trade-offs, and
+what changed in practice; read it before hand-fixing an open border.

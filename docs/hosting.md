@@ -125,6 +125,21 @@ more than `--zone-band` metres (default 20) inside it, is a crossing:
    body spawns on the far side exactly where it stood; the terrain never
    changes for the client, only the server's entities do.
 
+Every crossing — transfer or not, on every layer — also fires the core
+`zone.entered` event (`bodyId`, `zone`, `name`, `from`) and sends the
+player "You are entering <zone name>." as a system chat line.
+
+**Barriers, passes and sanctuaries.** The world is generated so that every
+border IS somewhere nobody can see across: `worldgen barriers` raises a
+`ridges` feature over every open run of a border and leaves a PASS where a
+footpath crosses — the transfer band lives in the passes. Each pass and each
+town gate carries a `waystation` poi tagged `safe` with a 35 m radius, and
+every town is its own `safe` zone; the layer publishes them all as
+`sanctuaries/list` in netState at boot, and the game's authoritative combat
+script refuses player-on-player damage inside one (voxel-demo's
+`combat-actor`; NPC damage untouched). The chase across a range is allowed;
+dying to someone you cannot see is not. docs/world-editing/barriers.md.
+
 **Landing grace.** A body that just spawned — login or transfer — carries
 `landing/<bodyId>` (sim time, 5 s, `--landing`… `landingSeconds`). NPC
 brains must neither target nor aggro a landing body (`isLanding` in
@@ -175,12 +190,16 @@ Two consequences worth knowing:
 
 Text chat routes on the host, and on a layer the host is the layer: each one
 runs a `ChatService` (`packages/server/src/chat.ts`) with the world supplying
-positions and zones. **Zone** and **global** lines cross the cluster — the
-origin delivers locally, publishes the line up its cluster link, main fans it
-to every other layer, each delivers it to its own players standing in that
-zone (or everyone, for global). This is the answer to a vast world with 40
-players per copy: whoever is in your region talks to you, on every layer.
-Proximity, team and party stay per layer. Details: docs/comms.md.
+positions and zones. **Zone**, **global** and **party** lines cross the
+cluster — the origin delivers locally, publishes the line up its cluster
+link, main fans it to every other layer, each delivers it to its own players
+standing in that zone (the members of that party; everyone, for global).
+Main owns parties: it pushes each member's party into their layer's netState
+(`comms.party/<characterId>`, on join and on every change) so the local
+routing rule works, and stamps the sender's party on every bridged party
+line from its own table. This is the answer to a vast world with 40 players
+per copy: whoever is in your region — or your party — talks to you, on
+every layer. Proximity and team stay per layer. Details: docs/comms.md.
 - **Keep spawn areas at least aggro + leash away from any place you
   intend to swap people** (a bridge, a pass, a gate). A padding band with
   no spawn table in it is the whole trick; there is no audit for it yet.
@@ -230,7 +249,10 @@ saves through `--playerData`-style backends — only tests use that.
 
 Each layer keeps its own `/admin/*` (players, NPCs, spawn areas, netState,
 events) on its port — plus `POST /admin/transfer` that asks main for a
-destination and moves the character.
+destination and moves the character, `GET /admin/players` (peer, body,
+position — read it to check a crossing landed in place) and
+`POST /admin/teleport { peerId, position }` (a probe walking a pass; ground
+is made under the body first).
 
 ## The agent's weekly edit and running servers
 
@@ -262,9 +284,6 @@ engine may still choose peer rooms.
 
 ## What is deliberately not here yet
 
-- Cross-layer PARTY chat (zone and global already cross layers — see
-  "Chat" above; party membership lives in main, so party lines need main to
-  tell each layer who is in which party).
 - A spawn-area/zone-edge audit in `worldgen audit`.
 - Pre-spawning the body on the destination before the client dials it
   (today a transfer is one round trip of nothing; with prediction it is

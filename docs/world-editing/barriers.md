@@ -1,11 +1,41 @@
 # Barriers, passes and sanctuaries — making a generated world net-codable
 
-**Status: DESIGN, not built (2026-09-06).** Decided with Derek on 2026-09-05/06
-after zone-scoped layers shipped (`docs/hosting.md` → "Zones",
-`packages/server/test/zones.test.ts`). Everything below is the lead's call
-on the open questions; build it in the order under "Build plan". Nothing in
-this document changes the cluster's rules — it changes the WORLD so those
-rules produce a good game.
+**Status: BUILT (2026-09-06), all five steps.** Decided with Derek on
+2026-09-05/06 after zone-scoped layers shipped (`docs/hosting.md` → "Zones",
+`packages/server/test/zones.test.ts`); built the same day. Nothing in this
+document changes the cluster's rules — it changes the WORLD so those rules
+produce a good game. Tests: `packages/core/test/{barriers,borders,regions}.test.ts`,
+`packages/server/test/{sanctuary,party-chat,zones}.test.ts`,
+`packages/comms/test/party.test.ts`; the demo world carries the result.
+
+**What practice changed from the design below** (the text is left as decided;
+these are the deviations, each with its reason):
+
+- **Border samples match at 48 m, not 2 m** (`--border-tolerance`). The draft
+  simplifies each zone's outline on its own, so two neighbours' polygons sit
+  up to a grid cell apart along a shared edge; at 2 m the audit saw 15 m of a
+  1.5 km border. The ridge is built on the first zone's outline; its flanks
+  (72 m) cover the gap between the two.
+- **There is no `recipe.snowLine`.** The cap is read off the biome height
+  windows: the lowest `height[0]` of a snow-topped biome that is NOT gated to
+  climate zones (tundra is snow by latitude, not altitude), else the ceiling.
+- **A crest is capped at 3× `height`**, and a plateau already above the cap
+  still gets the minimum ridge. Measured literally, "above the higher flank"
+  built a 357 m wall at a cliff foot, and the cap left every high border open.
+- **A town zone is `within` its wilderness zone, not cut out of its polygon.**
+  A simple polygon cannot hold a hole; `regionAt` prefers the nested zone,
+  the audit treats the pair as neighbours, and the town's polygon is a 12-gon
+  at radius + falloff + 4 m. The sanctuary list publishes a town as the
+  circle round its hub that covers every vertex.
+- **Far more open ground than "two of seventeen".** Under the classifier's
+  thresholds the demo had 39 open runs on 21 borders (≈ 22 km of border, a
+  third of it open); the stage wrote 71 ridges. The two the eye had found
+  were the longest.
+- **Cross-layer party chat** rides the existing bridge with a party scope
+  MAIN resolves, and main pushes each member's party into their layer's
+  netState so the local routing rule works unchanged (docs/comms.md).
+- Two admin routes were needed to verify it: `GET /admin/players` and
+  `POST /admin/teleport` on a layer (docs/hosting.md → admin table).
 
 ## The problem this solves
 

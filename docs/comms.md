@@ -125,7 +125,11 @@ speaker's layer, then up the
 cluster link; main fans it to every other layer, and each delivers it to its
 own players in that zone (`ChatService.deliverForeign`, `foreignRecipients`).
 Everyone in the valley talks, whichever copy of the valley they are on.
-Global rides the same bridge. Proximity, team and party stay per layer.
+Global and party ride the same bridge: a bridged line carries a `BridgeScope`
+(the sender's zone and party); for party lines main replaces the party with
+the one from its own list and pushes each member's `comms.party/<id>` into
+their layer, so `foreignRecipients` on the receiving layer delivers to the
+members standing there. Proximity and team stay per layer.
 
 Plumbing: a dedicated layer runs its own `ChatService` as the host
 (`packages/server/src/chat.ts`, mounted by `serve`) — before that, a hosted
