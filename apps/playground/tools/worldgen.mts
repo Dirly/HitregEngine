@@ -156,8 +156,8 @@ const HELP = `worldgen — procedural world pipeline
                    tundra/taiga/mountains/highlands/grassland/forest/swamp/jungle/desert/badlands/
                    blight (+ terrain & water materials; --scene for a scene; --classic for the old
                    endless-noise world)
-  continents <world> re-lay the landmasses (--count 1 --islands 2 --radius 2200 --gap 900
-                   --limit auto --land-floor 4 --variation 0.55 --ocean -45)
+  continents <world> re-lay the landmasses (--count 1 --islands 2 --radius 2200 --gap 900 --lobes 2
+                   --limit auto --land-floor 4 --variation 0.55 --ocean -45); lobes stop a landmass being a disc
   rivers <world>   HYDROLOGY: fill depressions, accumulate rain, trace the channel network,
                    fill the LAKES (--lakes 16) and the hollows on the network; rivers are AUTHORED
                    (write { points, width } into features.rivers — the field solves the bed) unless
@@ -2616,7 +2616,8 @@ function commandZones(): void {
         if (ix < 0 || iz < 0 || ix >= n || iz >= n) continue;
         const wx = grid.worldX(ix) - town.center[0];
         const wz = grid.worldZ(iz) - town.center[1];
-        if (wx * wx + wz * wz <= reach * reach && label[ix + iz * n]! >= 0) label[ix + iz * n] = l;
+        // sea cells too: a coastal town wants its parent outline to bulge round it
+        if (wx * wx + wz * wz <= reach * reach) label[ix + iz * n] = l;
       }
     }
   });
@@ -3541,7 +3542,27 @@ function commandContinents(): void {
 
   type Continent = NonNullable<WorldRecipe["bounds"]>["continents"][number];
   const continents: Continent[] = [];
-  const make = (center: [number, number], r: number, f: number, scale: number): Continent => ({
+  // A disc reads as a disc from any height. Every landmass gets LOBES —
+  // extra discs unioned with the main one (recipe `lobes`) — so a continent
+  // is a crescent, an L or a peninsula-and-gulf, and an island is not a coin.
+  // Placed at 0.8–1.25 of the radius out, 0.5–0.75 of it in size, in
+  // directions at least a third of a turn apart; the union keeps an exact
+  // shore distance, so the land floor and the shore profile hold as before.
+  const lobeCount = Math.max(0, Math.round(option("lobes", 2)));
+  const lobesFor = (r: number, count: number): [number, number, number][] => {
+    const out: [number, number, number][] = [];
+    let angle = random() * Math.PI * 2;
+    for (let i = 0; i < count; i++) {
+      // pushed well out (0.8–1.25 r) and big (0.5–0.75 r): a lobe tucked
+      // inside the blend just fattens the disc; one standing proud makes a
+      // peninsula and the gulf beside it
+      const d = r * (0.8 + random() * 0.45);
+      out.push([round(Math.cos(angle) * d), round(Math.sin(angle) * d), round(r * (0.5 + random() * 0.25))]);
+      angle += (Math.PI * 2) / count + (random() - 0.5) * 0.8;
+    }
+    return out;
+  };
+  const make = (center: [number, number], r: number, f: number, scale: number, lobes = 0): Continent => ({
     center: [round(center[0]), round(center[1])],
     radius: round(r),
     falloff: round(f),
@@ -3549,36 +3570,39 @@ function commandContinents(): void {
     warpScale: round(scale),
     coastVariation: variation,
     coastVariationScale: round(scale * 1.5),
+    lobes: lobesFor(r, lobes),
+    lobeBlend: round(r * 0.3),
   });
-  if (count === 1) continents.push(make([0, 0], radius, falloff, warpScale));
+  if (count === 1) continents.push(make([0, 0], radius * 0.8, falloff, warpScale, lobeCount));
   else {
     const ringRadius = ((radius + falloff) * 2 + gap) / 2 / Math.sin(Math.PI / count);
     for (let i = 0; i < count; i++) {
       const a = (i / count) * Math.PI * 2;
       // a second landmass is smaller — an equal pair reads as a symmetry, not a world
       const r = i === 0 ? radius : radius * 0.72;
-      continents.push(make([Math.cos(a) * ringRadius, Math.sin(a) * ringRadius], r, falloff, warpScale));
+      continents.push(make([Math.cos(a) * ringRadius, Math.sin(a) * ringRadius], r * 0.85, falloff, warpScale, Math.max(1, lobeCount - (i === 0 ? 0 : 1))));
     }
   }
   // islands: out past the continents' coasts, spaced around the compass
-  const outer = Math.max(...continents.map((c) => Math.hypot(c.center[0], c.center[1]) + c.radius + c.falloff));
+  const reachOf = (c: Continent): number => Math.max(c.radius, ...c.lobes.map((l) => Math.hypot(l[0], l[1]) + l[2]));
+  const outer = Math.max(...continents.map((c) => Math.hypot(c.center[0], c.center[1]) + reachOf(c) + c.falloff));
   for (let i = 0; i < islands; i++) {
     const r = radius * (0.2 + random() * 0.14);
     const f = falloff * 0.6;
     const a = ((i + 0.5 + random() * 0.4) / islands) * Math.PI * 2 + (count === 1 ? 0 : Math.PI / count);
     const d = outer + gap * 0.6 + r + f;
-    continents.push(make([Math.cos(a) * d, Math.sin(a) * d], r, f, warpScale * 0.65));
+    continents.push(make([Math.cos(a) * d, Math.sin(a) * d], r, f, warpScale * 0.65, lobeCount > 0 ? 1 : 0));
   }
-  const reach = Math.max(...continents.map((c) => Math.hypot(c.center[0], c.center[1]) + c.radius + c.falloff));
+  const reach = Math.max(...continents.map((c) => Math.hypot(c.center[0], c.center[1]) + reachOf(c) + c.falloff));
   const limit = option("limit", Math.ceil((reach + 500) / 100) * 100);
 
   recipe.bounds = { continents, oceanFloor, landFloor, shelf: recipe.bounds?.shelf ?? 0.58, limit, limitFalloff: recipe.bounds?.limitFalloff ?? 600 };
   writeRecipe(recipe, file);
 
-  const land = continents.reduce((a, c) => a + Math.PI * c.radius * c.radius, 0) / 1e6;
+  const land = continents.reduce((a, c) => a + Math.PI * c.radius * c.radius + c.lobes.reduce((b, l) => b + Math.PI * l[2] * l[2] * 0.5, 0), 0) / 1e6;
   console.log(`${count} continent${count === 1 ? "" : "s"} + ${islands} island${islands === 1 ? "" : "s"}, ocean floor ${oceanFloor}m, land floor +${landFloor}m, limit ${limit}m:`);
   for (const c of continents) {
-    console.log(`  centre [${c.center[0]}, ${c.center[1]}]  radius ${c.radius}m  coast band ${c.falloff}m`);
+    console.log(`  centre [${c.center[0]}, ${c.center[1]}]  radius ${c.radius}m  coast band ${c.falloff}m${c.lobes.length ? `  lobes ${c.lobes.map((l) => `[${l[0]},${l[1]} r${l[2]}]`).join(" ")}` : ""}`);
   }
   console.log(`~${land.toFixed(1)} km² of land; the world is ${limit * 2}m across`);
   console.log("re-run rivers/towns/paths/trails/pois: the old ones were sited on terrain that no longer exists.");

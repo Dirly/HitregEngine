@@ -1673,9 +1673,25 @@ export function continentalWorldRecipe(overrides: Partial<WorldRecipe> = {}): Wo
     },
     bounds: {
       continents: [
-        { center: [0, 0], radius: 2200, falloff: 650, warp: 0.6, warpScale: 1100, coastVariation: 0.55, coastVariationScale: 1600 },
-        { center: [3300, -1900], radius: 520, falloff: 380, warp: 0.5, warpScale: 700, coastVariation: 0.5, coastVariationScale: 900 },
-        { center: [-3100, 2300], radius: 640, falloff: 420, warp: 0.5, warpScale: 700, coastVariation: 0.5, coastVariationScale: 900 },
+        // a disc reads as a disc from any height: the main landmass is a
+        // crescent of three lobes with a gulf on its south-east, the islands
+        // each carry a lobe so they are not coins either
+        {
+          center: [-300, 200],
+          radius: 1700,
+          falloff: 650,
+          warp: 0.7,
+          warpScale: 1300,
+          coastVariation: 0.6,
+          coastVariationScale: 1600,
+          lobes: [
+            [1500, -1300, 1300],
+            [-1400, 1500, 1200],
+          ],
+          lobeBlend: 700,
+        },
+        { center: [3300, -1900], radius: 520, falloff: 380, warp: 0.5, warpScale: 700, coastVariation: 0.5, coastVariationScale: 900, lobes: [[380, 300, 360]], lobeBlend: 400 },
+        { center: [-3100, 2300], radius: 640, falloff: 420, warp: 0.5, warpScale: 700, coastVariation: 0.5, coastVariationScale: 900, lobes: [[-420, -380, 420]], lobeBlend: 450 },
       ],
       oceanFloor: -45,
       landFloor: 4,
