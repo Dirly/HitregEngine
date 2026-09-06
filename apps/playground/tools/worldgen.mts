@@ -196,7 +196,7 @@ const HELP = `worldgen — procedural world pipeline
   regions <world>  audit the zones: area, towns and pois per zone, hubs outside, overlaps, unclaimed towns, and
                    every shared border measured — metres of water/steep/canyon/coast/ridge/town/pass/OPEN; an
                    open run >= 60 m is a finding (exit 1) until 'barriers' walls it
-  all    <world>   init (if missing) + canyons + rivers + towns + zones + paths + barriers + pois + trails + caves + map + stats
+  all    <world>   init (if missing) + canyons + rivers + towns + zones + paths + barriers + pois + trails + barriers + caves + map + stats
 
 Options: --project <name>  --seed N  --extent <world units, default = the world limit>  --count N  --size <px>  --scene`;
 
@@ -2597,6 +2597,29 @@ function commandZones(): void {
     label.set(next);
     if (moved === 0) break;
   }
+
+  // --- a town is never split: its whole pad (radius + falloff, plus the
+  // hand its zone polygon takes) goes to the claim that holds its centre, so
+  // the town zone cut out of it lies wholly inside — a border through a town
+  // is a finding the draft should not produce
+  towns.forEach((town, i) => {
+    const l = label[townCell[i]!]!;
+    if (l < 0) return;
+    const reach = town.radius + town.falloff + 4 + grid.step;
+    const r = Math.ceil(reach / grid.step);
+    const cx = townCell[i]! % n;
+    const cz = (townCell[i]! / n) | 0;
+    for (let dz = -r; dz <= r; dz++) {
+      for (let dx = -r; dx <= r; dx++) {
+        const ix = cx + dx;
+        const iz = cz + dz;
+        if (ix < 0 || iz < 0 || ix >= n || iz >= n) continue;
+        const wx = grid.worldX(ix) - town.center[0];
+        const wz = grid.worldZ(iz) - town.center[1];
+        if (wx * wx + wz * wz <= reach * reach && label[ix + iz * n]! >= 0) label[ix + iz * n] = l;
+      }
+    }
+  });
 
   // --- outlines: boundary edges of each claim, chained into the longest loop, simplified
   const regions: RegionDoc[] = [];
@@ -5291,6 +5314,9 @@ switch (command) {
     commandBarriers();
     commandPois();
     commandTrails();
+    // once more after trails: a trail that leaves a town or crosses a ridge is
+    // a path like any other and wants its gate / pass (idempotent, seconds)
+    commandBarriers();
     commandCaves();
     commandMap();
     commandStats();
