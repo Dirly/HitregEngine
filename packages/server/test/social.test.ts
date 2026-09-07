@@ -9,12 +9,15 @@ import { MemoryAccountStore } from "../src/persistence/accounts.js";
 import { SOCIAL_MODULE, WORLD_MODULE, type SocialEvent, type WorldModuleMessage } from "../src/index.js";
 
 /**
- * Friends and parties across the cluster (docs/hosting.md → "Parties and
- * friends"): a friend request reaches the other player's tab on another
- * layer as a `social` module event and a chat line; accepting makes both
- * lists agree, with presence; a party invitation pulls the accepter onto
- * the leader's layer; the leader can kick and hand over; a friend can be
- * travelled to; going offline is announced; friendships are durable.
+ * Friends, blocks and parties across the cluster (docs/hosting.md →
+ * "Parties and friends"): a friend request reaches the other player's tab
+ * on another layer as a `social` module event and a chat line; accepting
+ * makes both lists agree, with presence; a friendship is between ACCOUNTS
+ * and every character sees it; a block makes an account unreachable —
+ * no requests, no invitations, no chat — without saying so; a party
+ * invitation pulls the accepter onto the leader's layer; the leader can
+ * kick and hand over; a friend can be travelled to; going offline is
+ * announced; friendships are durable.
  */
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -71,7 +74,7 @@ async function get(url: string, token: string): Promise<any> {
   return (await fetch(url, { headers: { authorization: `Bearer ${token}` } })).json();
 }
 
-describe.skipIf(!main || !layer1 || !layer2)("friends and parties across layers", { timeout: 60_000 }, () => {
+describe.skipIf(!main || !layer1 || !layer2)("friends, blocks and parties across layers", { timeout: 60_000 }, () => {
   const transports: WebSocketClientTransport[] = [];
   const clients: RoomClient[] = [];
   afterAll(async () => {
@@ -87,12 +90,12 @@ describe.skipIf(!main || !layer1 || !layer2)("friends and parties across layers"
     const client = new RoomClient(transport, WS_HOST_ID);
     const world: WorldModuleMessage[] = [];
     const social: SocialEvent[] = [];
-    const chat: string[] = [];
+    const chat: Array<{ channel: string; text: string; from: string }> = [];
     client.onModule(WORLD_MODULE, (m) => world.push(m as WorldModuleMessage));
     client.onModule(SOCIAL_MODULE, (m) => social.push(m as SocialEvent));
     client.onModule("chat", (m) => {
-      const d = m as { k: string; msg?: { channel: string; text: string } };
-      if (d.k === "msg" && d.msg?.channel === "system") chat.push(d.msg.text);
+      const d = m as { k: string; msg?: { channel: string; text: string; from: string } };
+      if (d.k === "msg" && d.msg) chat.push(d.msg);
     });
     transport.onPeer((peer, state) => {
       if (peer === WS_HOST_ID && state === "connected") client.join(name);
@@ -101,6 +104,7 @@ describe.skipIf(!main || !layer1 || !layer2)("friends and parties across layers"
     clients.push(client);
     return { transport, client, world, social, chat };
   }
+  const lines = (tab: ReturnType<typeof dial>): string[] => tab.chat.filter((m) => m.channel === "system").map((m) => m.text);
 
   async function moveTo(tab: ReturnType<typeof dial>, characterId: string, to: ServeHandle): Promise<ReturnType<typeof dial>> {
     const moved: Array<{ url: string; ticket: string }> = [];
@@ -112,7 +116,6 @@ describe.skipIf(!main || !layer1 || !layer2)("friends and parties across layers"
     await until(() => moved.length === 1);
     tab.client.leave();
     const next = dial(moved[0]!.url, moved[0]!.ticket, "moved");
-    // events already received travel with us
     next.social.push(...tab.social);
     next.chat.push(...tab.chat);
     await until(() => next.world.some((m) => m.t === "spawn" && m.self === `player:${characterId}`));
@@ -136,7 +139,7 @@ describe.skipIf(!main || !layer1 || !layer2)("friends and parties across layers"
   let finn: P;
   let gus: P;
 
-  it("a friend request reaches the other player wherever they are, and accepting makes both lists agree", async () => {
+  it("a friend request reaches the other player wherever they are; accepting makes both accounts agree", async () => {
     await until(() => main!.registry.layersFor("field").length === 2);
     eve = await player("EveAcct", "Eve", layer1!);
     finn = await player("FinnAcct", "Finn", layer2!);
@@ -150,29 +153,56 @@ describe.skipIf(!main || !layer1 || !layer2)("friends and parties across layers"
     expect(req.json).toMatchObject({ outcome: "sent", name: "Finn" });
     await until(() => finn.tab.social.some((e) => e.kind === "friend.request"));
     expect(finn.tab.social.at(-1)).toMatchObject({ kind: "friend.request", characterId: eve.id, name: "Eve" });
-    await until(() => finn.tab.chat.some((l) => l.startsWith("Eve wants to be your friend")));
+    await until(() => lines(finn.tab).some((l) => l.startsWith("Eve wants to be your friend")));
     expect(gus.tab.social).toEqual([]);
-    // both sides see the request in flight; asking again is not a second request
-    expect((await get(`${main!.url}/social?characterId=${finn.id}`, finn.session)).incoming).toEqual([{ characterId: eve.id, name: "Eve" }]);
-    expect((await get(`${main!.url}/social?characterId=${eve.id}`, eve.session)).outgoing).toEqual([{ characterId: finn.id, name: "Finn" }]);
+    expect((await get(`${main!.url}/social?characterId=${finn.id}`, finn.session)).incoming).toEqual([{ playerId: eve.account.id, characterId: eve.id, name: "Eve" }]);
+    expect((await get(`${main!.url}/social?characterId=${eve.id}`, eve.session)).outgoing).toEqual([{ playerId: finn.account.id, characterId: finn.id, name: "Finn" }]);
     expect((await post(`${main!.url}/social/friend/request`, { characterId: eve.id, name: "Finn" }, eve.session)).json.outcome).toBe("already-sent");
 
-    const acc = await post(`${main!.url}/social/friend/accept`, { characterId: finn.id, name: "Eve" }, finn.session);
-    expect(acc.json).toEqual({ friend: "Eve" });
+    expect((await post(`${main!.url}/social/friend/accept`, { characterId: finn.id, name: "Eve" }, finn.session)).json).toEqual({ friend: "Eve" });
     await until(() => eve.tab.social.some((e) => e.kind === "friend.accepted"));
     const eves = await get(`${main!.url}/social?characterId=${eve.id}`, eve.session);
-    expect(eves.friends).toEqual([{ characterId: finn.id, name: "Finn", online: true, server: "layer-2", zone: null }]);
+    expect(eves.friends).toEqual([{ playerId: finn.account.id, characterId: finn.id, name: "Finn", online: true, server: "layer-2", zone: null }]);
     expect(eves.incoming).toEqual([]);
     expect(eves.outgoing).toEqual([]);
-    const finns = await get(`${main!.url}/social?characterId=${finn.id}`, finn.session);
-    expect(finns.friends).toMatchObject([{ characterId: eve.id, name: "Eve", online: true, server: "layer-1" }]);
-    // and the friendship is durable: it is in the player-data store, not in main's memory
+    expect((await get(`${main!.url}/social?characterId=${finn.id}`, finn.session)).friends).toMatchObject([{ characterId: eve.id, name: "Eve", online: true, server: "layer-1" }]);
+    // durable: in the player-data store, not main's memory
     const saved = await playerData.load({ playerId: eve.account.id, experienceId: "test-social" }, "social");
-    expect((saved!.data as { characters: Record<string, { friends: unknown[] }> }).characters[eve.id]!.friends).toHaveLength(1);
+    expect((saved!.data as { friends: unknown[] }).friends).toHaveLength(1);
+    // account-wide: Eve's second character sees Finn without asking again
+    const eva = (await post(`${main!.url}/characters`, { name: "Eva" }, eve.session)).json.character as { id: string };
+    expect((await get(`${main!.url}/social?characterId=${eva.id}`, eve.session)).friends.map((f: { name: string }) => f.name)).toEqual(["Finn"]);
+    expect((await post(`${main!.url}/social/friend/request`, { characterId: eva.id, name: "Finn" }, eve.session)).json.outcome).toBe("already-friends");
     // a request the other way round while one is pending is an acceptance
     await post(`${main!.url}/social/friend/request`, { characterId: gus.id, name: "Eve" }, gus.session);
     expect((await post(`${main!.url}/social/friend/request`, { characterId: eve.id, name: "Gus" }, eve.session)).json.outcome).toBe("accepted");
     expect((await get(`${main!.url}/social?characterId=${eve.id}`, eve.session)).friends).toHaveLength(2);
+  });
+
+  it("a block makes an account unreachable: no requests, no invitations, no chat — and says nothing", async () => {
+    // Gus blocks Eve: the friendship goes on both sides
+    expect((await post(`${main!.url}/social/block`, { characterId: gus.id, name: "Eve" }, gus.session)).json).toEqual({ blocked: "Eve" });
+    expect((await get(`${main!.url}/social?characterId=${gus.id}`, gus.session)).blocked).toEqual([{ playerId: eve.account.id, characterId: eve.id, name: "Eve" }]);
+    expect((await get(`${main!.url}/social?characterId=${eve.id}`, eve.session)).friends.map((f: { name: string }) => f.name)).toEqual(["Finn"]);
+    // Eve cannot tell: her request looks unavailable, her invitation is refused without a reason
+    expect((await post(`${main!.url}/social/friend/request`, { characterId: eve.id, name: "Gus" }, eve.session)).json.outcome).toBe("unavailable");
+    expect((await post(`${main!.url}/party/invite`, { characterId: eve.id, name: "Gus" }, eve.session)).status).toBe(400);
+    await post(`${main!.url}/party/leave`, { characterId: eve.id }, eve.session);
+    // and Gus never hears Eve, on a bridged channel from another layer or in the same room
+    await until(() => (layer2!.world.netState.get("owner/player:" + gus.id) as string | undefined) === gus.id);
+    const heard = () => gus.tab.chat.filter((m) => m.channel === "global").map((m) => m.text);
+    eve.tab.client.sendModule("chat", { k: "say", channel: "global", text: "can you hear me" });
+    await until(() => finn.tab.chat.some((m) => m.text === "can you hear me"));
+    await wait(300);
+    expect(heard()).not.toContain("can you hear me");
+    // unblock: chat comes through again
+    expect((await post(`${main!.url}/social/unblock`, { characterId: gus.id, name: "Eve" }, gus.session)).json).toEqual({ unblocked: "Eve" });
+    await wait(300);
+    eve.tab.client.sendModule("chat", { k: "say", channel: "global", text: "now?" });
+    await until(() => heard().includes("now?"));
+    // Gus's own side of the block list: blocking me is not something I can see
+    expect((await post(`${main!.url}/social/friend/request`, { characterId: gus.id, name: "Eve" }, gus.session)).json.outcome).toBe("sent");
+    await post(`${main!.url}/social/friend/accept`, { characterId: eve.id, name: "Gus" }, eve.session);
   });
 
   it("a party invitation is delivered, accepting pulls the member to the leader's layer, the leader can kick", async () => {
@@ -183,7 +213,6 @@ describe.skipIf(!main || !layer1 || !layer2)("friends and parties across layers"
     await until(() => finn.tab.social.some((e) => e.kind === "party.invite"));
     expect(finn.tab.social.at(-1)).toMatchObject({ kind: "party.invite", code, name: "Eve" });
     expect((await get(`${main!.url}/party?characterId=${finn.id}`, finn.session)).invites).toEqual([{ code, from: eve.id, name: "Eve" }]);
-    // only the leader invites
     expect((await post(`${main!.url}/party/kick`, { characterId: finn.id, name: "Eve" }, finn.session)).status).toBe(400);
 
     const pulled: Array<{ url: string; ticket: string; reason: string }> = [];
@@ -211,7 +240,6 @@ describe.skipIf(!main || !layer1 || !layer2)("friends and parties across layers"
     ]);
     expect(layer1!.world.netState.get(`comms.party/${finn.id}`)).toBe(code);
 
-    // hand over, then kick
     expect((await post(`${main!.url}/party/leader`, { characterId: eve.id, name: "Finn" }, eve.session)).json.party.leader).toBe(finn.id);
     await until(() => eve.tab.social.some((e) => e.kind === "party.leader" && e.characterId === finn.id));
     expect((await post(`${main!.url}/party/kick`, { characterId: eve.id, name: "Finn" }, eve.session)).status).toBe(403);
@@ -219,7 +247,6 @@ describe.skipIf(!main || !layer1 || !layer2)("friends and parties across layers"
     await until(() => eve.tab.social.some((e) => e.kind === "party.kicked"));
     expect((await get(`${main!.url}/party?characterId=${eve.id}`, eve.session)).party).toBeNull();
     await until(() => layer1!.world.netState.get(`comms.party/${eve.id}`) === undefined);
-    // a declined invitation tells the inviter
     const inv2 = await post(`${main!.url}/party/invite`, { characterId: finn.id, name: "Gus" }, finn.session);
     expect(inv2.status).toBe(200);
     expect((await post(`${main!.url}/party/decline`, { characterId: gus.id }, gus.session)).status).toBe(200);
@@ -227,7 +254,6 @@ describe.skipIf(!main || !layer1 || !layer2)("friends and parties across layers"
   });
 
   it("travel to a friend moves you to their layer; going offline is announced; removing forgets both ways", async () => {
-    // Eve (layer-1) travels to Gus (layer-2), her friend
     expect((await post(`${main!.url}/social/travel`, { characterId: eve.id, name: "Finn" }, eve.session)).json).toMatchObject({ moved: false, reason: "already there" });
     const moved: Array<{ url: string; ticket: string; reason: string }> = [];
     eve.tab.client.onModule(WORLD_MODULE, (m) => {
@@ -242,17 +268,14 @@ describe.skipIf(!main || !layer1 || !layer2)("friends and parties across layers"
     eve.tab = dial(moved[0]!.url, moved[0]!.ticket, "Eve");
     await until(() => eve.tab.world.some((m) => m.t === "spawn" && m.self === `player:${eve.id}`));
     await until(() => main!.registry.whereIs.get(eve.id) === "layer-2");
-    // not a friend: refused
     expect((await post(`${main!.url}/social/travel`, { characterId: gus.id, name: "Finn" }, gus.session)).status).toBe(403);
 
-    // Gus logs off: Eve (his friend) hears it, Finn (not his friend) does not
     const before = finn.tab.social.length;
     gus.tab.client.leave();
     await until(() => eve.tab.social.some((e) => e.kind === "friend.offline" && e.name === "Gus"), 10_000);
     expect(finn.tab.social.slice(before).some((e) => e.kind === "friend.offline")).toBe(false);
     expect((await get(`${main!.url}/social?characterId=${eve.id}`, eve.session)).friends.find((f: { name: string }) => f.name === "Gus")).toMatchObject({ online: false, server: null });
 
-    // remove: both sides forget
     expect((await post(`${main!.url}/social/friend/remove`, { characterId: eve.id, name: "Finn" }, eve.session)).json).toEqual({ removed: "Finn" });
     await until(() => finn.tab.social.some((e) => e.kind === "friend.removed" && e.name === "Eve"));
     expect((await get(`${main!.url}/social?characterId=${finn.id}`, finn.session)).friends).toEqual([]);

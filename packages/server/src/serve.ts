@@ -281,6 +281,7 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
     onPlayerLeft: (player, reason) => {
       if (player.identity) link?.playerLeft(player.identity.characterId, reason === "transfer" ? "transfer" : reason === "grace" ? "grace" : reason === "replaced" ? "replaced" : "leave");
       identities.delete(player.peerId);
+      blocks.delete(player.peerId);
       lastPopulatedAt = Date.now();
       if (draining && server.players.size === 0) finish("drained");
     },
@@ -318,7 +319,13 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
   const zoneBand = opts.zoneBand ?? 20;
   const zoneAt = (x: number, z: number): RegionDoc | null => regionAt(regions, x, z);
   const hostsZone = (zone: string): boolean => !link || link.hosted === "all" || link.hosted.includes(zone);
-  const chat = mountLayerChat({ server, scene: opts.scene, link, regions, log });
+  // block lists, from main: a character never hears anyone it blocked
+  const blocks = new Map<string, Set<string>>();
+  const chat = mountLayerChat({ server, scene: opts.scene, link, regions, mayHear: (recipient, sender) => !blocks.get(recipient)?.has(sender), log });
+  link?.onBlocks((characterId, blocked) => {
+    if (blocked.length === 0) blocks.delete(characterId);
+    else blocks.set(characterId, new Set(blocked));
+  });
   // -- sanctuaries: every safe poi's circle and every safe zone, once, in netState -----
   // (docs/world-editing/barriers.md → "Runtime"): a game's authoritative combat
   // script reads `sanctuaries/list` and refuses player-on-player damage inside

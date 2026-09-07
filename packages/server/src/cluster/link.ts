@@ -74,6 +74,7 @@ export class ClusterLink {
     chat: new Set<(line: BridgedChatLine, origin: string) => void>(),
     party: new Set<(characterId: string, party: string | null) => void>(),
     social: new Set<(characterId: string, event: SocialEvent) => void>(),
+    blocks: new Set<(characterId: string, blocked: string[]) => void>(),
   };
   private firstRegistration: { resolve: (r: Registered) => void; reject: (e: Error) => void } | null = null;
 
@@ -195,6 +196,9 @@ export class ClusterLink {
       case "social":
         for (const cb of this.handlers.social) cb(msg.characterId, msg.event);
         return;
+      case "blocks":
+        for (const cb of this.handlers.blocks) cb(msg.characterId, msg.blocked);
+        return;
     }
   }
 
@@ -242,6 +246,12 @@ export class ClusterLink {
   onSocial(cb: (characterId: string, event: SocialEvent) => void): () => void {
     this.handlers.social.add(cb);
     return () => this.handlers.social.delete(cb);
+  }
+
+  /** Main says which characters this character must not hear. */
+  onBlocks(cb: (characterId: string, blocked: string[]) => void): () => void {
+    this.handlers.blocks.add(cb);
+    return () => this.handlers.blocks.delete(cb);
   }
 
   rpc<T = unknown>(call: LayerRpc): Promise<T> {

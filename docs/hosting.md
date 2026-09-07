@@ -165,14 +165,27 @@ and each server's `hosted` set and per-zone counts.
 Built 2026-09-07 (`packages/server/test/social.test.ts`). Main owns both;
 a layer only delivers.
 
-**Friends are durable and between characters.** A friendship lives in a
-`social` player-data record on each owning account (`main/social.ts`,
-`SocialStore`): per character, `friends`, `incoming` and `outgoing`
-requests, each a `{ characterId, name, playerId }`. Main is the only
-writer (compare-and-swap on revision, two accounts per change, retried on
+**Friends are durable and between ACCOUNTS.** You befriend a person, not
+one of their characters: a friendship lives in a `social` player-data
+record on each account (`main/social.ts`, `SocialStore`) — `friends`,
+`incoming` and `outgoing` requests and `blocked`, each a `{ playerId,
+characterId, characterName }` where the character is the one the link was
+made through (its name shows while they are offline; online, the list
+shows whichever character they are playing, with server and zone). Every
+character on both accounts sees the friendship. Main is the only writer
+(compare-and-swap on revision, two accounts per change, retried on
 conflict); a request the other way round while one is pending is an
 acceptance. Characters are found by NAME, case-insensitively
-(`AccountStore.findCharacter`), so "/friend finn" works.
+(`AccountStore.findCharacter`), so "/friend finn" works — which is why
+character names are unique world-wide (a taken name is a 409).
+
+**Blocks.** `/block <name>` blocks that character's ACCOUNT: the
+friendship and any request go on both sides, their friend requests come
+back `unavailable` and their party invitations are refused, without
+saying which side blocked whom; and main pushes the blocked accounts'
+character ids to the blocker's layer (`{ t: "blocks" }`), where the chat
+service's `mayHear` drops every line from them on every channel, local or
+bridged. Blocking a party member removes them (or you, if they lead).
 
 **Parties are session state.** Same `Party` as before (a code, a leader, up
 to eight members), now with invitations: the leader invites by name, the
@@ -206,15 +219,16 @@ request), `/kick <name>`, `/leader <name>`, `/leave`, `/travel <name>`
 | `POST /social/friend/accept` / `decline` `{ characterId, name? }` | answer a request (the latest when no name) |
 | `POST /social/friend/remove { characterId, name }` | both sides forget |
 | `POST /social/travel { characterId, name }` | move to the layer a friend stands on |
+| `POST /social/block` / `unblock` `{ characterId, name }` | block that character's account (no requests, invitations or chat), and undo |
 | `GET /party?characterId=` | the party with names and presence, plus invitations waiting |
 | `POST /party/create` · `/party/join { code }` · `/party/leave` | as before |
 | `POST /party/invite { characterId, name }` | leader invites (creates the party if none) |
 | `POST /party/accept` / `decline` `{ characterId, code? }` | answer an invitation (the latest when no code) |
 | `POST /party/kick` / `leader` `{ characterId, name }` | leader only |
 
-Not here: cross-account block lists, a "recent players" list, friend
-notes, guilds. Friends are per character on purpose (peer id = character
-id everywhere); an account-wide list can sit on top later.
+Not here: a "recent players" list, friend notes. Party invitations are
+per character (you invite the character you see); friendships and blocks
+are per account.
 
 ## Layers cost what their players cost
 
@@ -341,8 +355,7 @@ engine may still choose peer rooms.
 ## What is deliberately not here yet
 
 - A spawn-area/zone-edge audit in `worldgen audit`.
-- Block lists, guilds, an account-wide friend list (friends are per
-  character today — "Parties and friends").
+- Guilds (next), friend notes, a "recent players" list.
 - Pre-spawning the body on the destination before the client dials it
   (today a transfer is one round trip of nothing; with prediction it is
   invisible on a LAN and a short hitch on a bad link). The destination is

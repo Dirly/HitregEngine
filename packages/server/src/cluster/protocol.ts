@@ -137,7 +137,9 @@ export type MainToLayer =
   /** This character's party changed (or they just arrived here): write `comms.party/<characterId>` so party chat routes. Main owns parties. */
   | { t: "party"; characterId: string; party: string | null }
   /** Something happened to this character's friends or party: hand it to their client (a module message + a chat line). */
-  | { t: "social"; characterId: string; event: SocialEvent };
+  | { t: "social"; characterId: string; event: SocialEvent }
+  /** The characters this character must not hear (every character of every account they blocked). */
+  | { t: "blocks"; characterId: string; blocked: string[] };
 
 /** Module id the layer delivers social events on to the client (`sendModule(peerId, SOCIAL_MODULE, event)`). */
 export const SOCIAL_MODULE = "social";

@@ -88,3 +88,28 @@ describe("party channel across layers", () => {
     expect(chat.history().at(-1)?.text).toBe("You are entering the Rim.");
   });
 });
+
+describe("block lists", () => {
+  it("a recipient who blocked the sender hears nothing on any channel, local or foreign", () => {
+    const { link, sent } = fakeHost(["a", "b", "c"]);
+    const blocks: Record<string, string[]> = { c: ["a", "far-away"] };
+    const chat = new ChatService({
+      link,
+      membership: staticMembership({ parties }),
+      positionOf: () => [0, 0, 0],
+      zoneOf: () => "valley",
+      mayHear: (recipient, sender) => !(blocks[recipient] ?? []).includes(sender),
+      now: () => 1,
+    });
+    const up = chat as unknown as { handleUp(from: string, data: unknown): void };
+    up.handleUp("a", { k: "say", channel: "global", text: "hello all" });
+    expect(sent.get("a")).toHaveLength(1);
+    expect(sent.get("b")).toHaveLength(1);
+    expect(sent.get("c")).toBeUndefined(); // c blocked a
+    up.handleUp("b", { k: "say", channel: "global", text: "hi" });
+    expect(sent.get("c")).toHaveLength(1); // b is fine
+    const foreign: ChatMessage = { id: "far:1", channel: "global", from: "far-away", name: "Far", text: "yo", at: 5 };
+    expect(chat.deliverForeign(foreign, { zone: null })).toBe(3); // a, b and the host — not c
+    expect(sent.get("c")).toHaveLength(1);
+  });
+});

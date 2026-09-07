@@ -38,6 +38,8 @@ export interface LayerChatOptions {
   proximityRadius?: number;
   /** Zones to use instead of the recipe's (a flat test scene given borders). */
   regions?: ReadonlyArray<RegionDoc>;
+  /** Block lists: may `recipient` hear `sender`? Absent = everyone. */
+  mayHear?: (recipient: string, sender: string) => boolean;
   log?: (line: string) => void;
 }
 
@@ -92,6 +94,7 @@ export function mountLayerChat(opts: LayerChatOptions): LayerChat {
       return world.netState.set(key, value);
     },
     emitEvent: (name, payload) => world.eventBus.emit(name, payload),
+    ...(opts.mayHear ? { mayHear: opts.mayHear } : {}),
     ...(link
       ? {
           bridge: {

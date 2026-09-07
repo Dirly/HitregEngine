@@ -1,56 +1,78 @@
 import type { PlayerDataBackend, PlayerDataRecord } from "@hitreg/core";
 
 /**
- * Friends — the durable half of the social system (docs/hosting.md →
- * "Parties and friends").
+ * Friends, blocks and guild membership — the durable half of the social
+ * system (docs/hosting.md → "Parties and friends").
  *
- * A friendship is between CHARACTERS (peer id = character id everywhere in
- * the cluster), stored on the owning account: one `social` player-data
- * record per account, `characters[<characterId>]` holding that character's
- * friends and the requests in flight. Main is the only writer and the
- * backend is compare-and-swap on revision, so a request that touches two
- * accounts is two writes, each retried on conflict; the pair is repaired
- * on read (an `outgoing` with no matching `incoming` is dropped when the
- * other side answers, never shown twice).
+ * A friendship is between ACCOUNTS: you befriend a person, not one of
+ * their characters, and every character on either account sees it. It is
+ * made through a character name ("/friend finn" finds Finn's account), and
+ * the character it was made through is remembered so a friend who is
+ * offline still has a name in the list. One `social` player-data record
+ * per account holds friends, requests in flight, the accounts it has
+ * blocked, and the guild its characters belong to. Main is the only writer
+ * and the backend is compare-and-swap on revision, so a change that touches
+ * two accounts is two writes, each retried on conflict.
  *
  * Parties are not here: they are session state on main (`Party` in
  * main.ts) and die with the process, which is what a party is.
  */
 
 export const SOCIAL_NAMESPACE = "social";
-export const MAX_FRIENDS = 100;
+export const MAX_FRIENDS = 200;
 export const MAX_PENDING = 50;
+export const MAX_BLOCKED = 200;
 
+/** Another account, and the character the link was made through (its name is what the list shows while they are offline). */
 export interface FriendRef {
-  characterId: string;
-  name: string;
-  /** Owning account — where that character's own social record lives. */
   playerId: string;
+  characterId: string;
+  characterName: string;
 }
 
-export interface CharacterSocial {
-  friends: FriendRef[];
-  /** Requests others sent this character. */
-  incoming: FriendRef[];
-  /** Requests this character sent. */
-  outgoing: FriendRef[];
+export interface GuildMembership {
+  id: string;
+  name: string;
+  /** "leader" | "officer" | "member" — the guild record is the authority; this is the login-time hint. */
+  rank: string;
 }
 
 export interface SocialRecord {
-  characters: Record<string, CharacterSocial>;
+  friends: FriendRef[];
+  /** Requests other accounts sent us. */
+  incoming: FriendRef[];
+  /** Requests we sent. */
+  outgoing: FriendRef[];
+  /** Accounts we hear nothing from: no requests, no invitations, no chat. */
+  blocked: FriendRef[];
+  /** Guild per CHARACTER (a guild is a character's, like a party). */
+  guilds?: Record<string, GuildMembership>;
 }
 
-function empty(): CharacterSocial {
-  return { friends: [], incoming: [], outgoing: [] };
+export function emptySocial(): SocialRecord {
+  return { friends: [], incoming: [], outgoing: [], blocked: [], guilds: {} };
 }
 
-/** The character's slice of a record, created on demand. */
-export function socialOf(record: SocialRecord, characterId: string): CharacterSocial {
-  return (record.characters[characterId] ??= empty());
+/** A stored record with every list present (older records may lack some). */
+export function normalizeSocial(data: unknown): SocialRecord {
+  const d = (data ?? {}) as Partial<SocialRecord>;
+  return {
+    friends: Array.isArray(d.friends) ? d.friends : [],
+    incoming: Array.isArray(d.incoming) ? d.incoming : [],
+    outgoing: Array.isArray(d.outgoing) ? d.outgoing : [],
+    blocked: Array.isArray(d.blocked) ? d.blocked : [],
+    guilds: d.guilds && typeof d.guilds === "object" ? d.guilds : {},
+  };
 }
 
-const has = (list: readonly FriendRef[], id: string): boolean => list.some((f) => f.characterId === id);
-const without = (list: readonly FriendRef[], id: string): FriendRef[] => list.filter((f) => f.characterId !== id);
+const has = (list: readonly FriendRef[], playerId: string): boolean => list.some((f) => f.playerId === playerId);
+const without = (list: readonly FriendRef[], playerId: string): FriendRef[] => list.filter((f) => f.playerId !== playerId);
+
+export function isBlocked(record: SocialRecord, playerId: string): boolean {
+  return has(record.blocked, playerId);
+}
+
+export type RequestOutcome = "sent" | "already-friends" | "already-sent" | "accepted" | "full" | "unavailable";
 
 export class SocialStore {
   constructor(
@@ -60,7 +82,7 @@ export class SocialStore {
 
   async load(playerId: string): Promise<SocialRecord> {
     const record = await this.backend.load({ playerId, experienceId: this.experienceId }, SOCIAL_NAMESPACE);
-    return record ? (record.data as unknown as SocialRecord) : { characters: {} };
+    return normalizeSocial(record?.data);
   }
 
   /** Read-modify-write with compare-and-swap; the mutation runs again on a conflict. */
@@ -68,8 +90,7 @@ export class SocialStore {
     const scope = { playerId, experienceId: this.experienceId };
     for (let attempt = 0; attempt < 6; attempt++) {
       const current = await this.backend.load(scope, SOCIAL_NAMESPACE);
-      const record: SocialRecord = current ? (structuredClone(current.data) as unknown as SocialRecord) : { characters: {} };
-      if (!record.characters) record.characters = {};
+      const record = normalizeSocial(current ? structuredClone(current.data) : undefined);
       fn(record);
       const next: PlayerDataRecord = {
         schemaVersion: current?.schemaVersion ?? 1,
@@ -80,72 +101,107 @@ export class SocialStore {
       const outcome = await this.backend.store(scope, SOCIAL_NAMESPACE, next, current?.revision ?? null);
       if (outcome === "ok") return record;
     }
-    throw new Error("social record: too many concurrent writes");
+    throw new SocialError("social record: too many concurrent writes", 503);
   }
 
-  /** `from` asks `to` to be friends. Returns what happened, for the caller to tell both sides. */
-  async request(from: FriendRef, to: FriendRef): Promise<"sent" | "already-friends" | "already-sent" | "accepted" | "full"> {
-    if (from.characterId === to.characterId) throw new SocialError("you cannot befriend yourself");
-    const mine = socialOf(await this.load(from.playerId), from.characterId);
-    if (has(mine.friends, to.characterId)) return "already-friends";
-    if (has(mine.outgoing, to.characterId)) return "already-sent";
+  /**
+   * `from` asks `to` to be friends. A block either way answers "unavailable"
+   * without saying which side — the blocked one never learns they are.
+   */
+  async request(from: FriendRef, to: FriendRef): Promise<RequestOutcome> {
+    if (from.playerId === to.playerId) throw new SocialError("that is you");
+    const mine = await this.load(from.playerId);
+    if (isBlocked(mine, to.playerId)) throw new SocialError(`you have blocked ${to.characterName}`);
+    if (has(mine.friends, to.playerId)) return "already-friends";
+    if (has(mine.outgoing, to.playerId)) return "already-sent";
     if (mine.friends.length >= MAX_FRIENDS) return "full";
+    const theirs = await this.load(to.playerId);
+    if (isBlocked(theirs, from.playerId)) return "unavailable";
     // they asked first: that is an acceptance, not a second request
-    if (has(mine.incoming, to.characterId)) {
+    if (has(mine.incoming, to.playerId)) {
       await this.accept(from, to);
       return "accepted";
     }
     if (mine.outgoing.length >= MAX_PENDING) throw new SocialError("too many requests waiting");
     await this.mutate(from.playerId, (r) => {
-      const s = socialOf(r, from.characterId);
-      if (!has(s.outgoing, to.characterId)) s.outgoing.push(to);
+      if (!has(r.outgoing, to.playerId)) r.outgoing.push(to);
     });
     await this.mutate(to.playerId, (r) => {
-      const s = socialOf(r, to.characterId);
-      if (!has(s.incoming, from.characterId) && !has(s.friends, from.characterId)) s.incoming.push(from);
+      if (!has(r.incoming, from.playerId) && !has(r.friends, from.playerId)) r.incoming.push(from);
     });
     return "sent";
   }
 
   /** `me` accepts `other`'s request (also used when both asked). */
   async accept(me: FriendRef, other: FriendRef): Promise<void> {
+    const mine = await this.load(me.playerId);
+    if (!has(mine.incoming, other.playerId) && !has(mine.friends, other.playerId)) throw new SocialError("no such friend request", 404);
     await this.mutate(me.playerId, (r) => {
-      const s = socialOf(r, me.characterId);
-      s.incoming = without(s.incoming, other.characterId);
-      s.outgoing = without(s.outgoing, other.characterId);
-      if (!has(s.friends, other.characterId)) s.friends.push(other);
+      r.incoming = without(r.incoming, other.playerId);
+      r.outgoing = without(r.outgoing, other.playerId);
+      if (!has(r.friends, other.playerId)) r.friends.push(other);
     });
     await this.mutate(other.playerId, (r) => {
-      const s = socialOf(r, other.characterId);
-      s.outgoing = without(s.outgoing, me.characterId);
-      s.incoming = without(s.incoming, me.characterId);
-      if (!has(s.friends, me.characterId)) s.friends.push(me);
+      r.outgoing = without(r.outgoing, me.playerId);
+      r.incoming = without(r.incoming, me.playerId);
+      if (!has(r.friends, me.playerId)) r.friends.push(me);
     });
   }
 
   /** `me` declines (or withdraws) a request with `other`. */
   async decline(me: FriendRef, other: FriendRef): Promise<void> {
     await this.mutate(me.playerId, (r) => {
-      const s = socialOf(r, me.characterId);
-      s.incoming = without(s.incoming, other.characterId);
-      s.outgoing = without(s.outgoing, other.characterId);
+      r.incoming = without(r.incoming, other.playerId);
+      r.outgoing = without(r.outgoing, other.playerId);
     });
     await this.mutate(other.playerId, (r) => {
-      const s = socialOf(r, other.characterId);
-      s.outgoing = without(s.outgoing, me.characterId);
-      s.incoming = without(s.incoming, me.characterId);
+      r.outgoing = without(r.outgoing, me.playerId);
+      r.incoming = without(r.incoming, me.playerId);
     });
   }
 
   /** Both sides forget each other. */
   async remove(me: FriendRef, other: FriendRef): Promise<void> {
     await this.mutate(me.playerId, (r) => {
-      const s = socialOf(r, me.characterId);
-      s.friends = without(s.friends, other.characterId);
+      r.friends = without(r.friends, other.playerId);
     });
     await this.mutate(other.playerId, (r) => {
-      const s = socialOf(r, other.characterId);
-      s.friends = without(s.friends, me.characterId);
+      r.friends = without(r.friends, me.playerId);
+    });
+  }
+
+  /** `me` blocks `other`: the friendship and any request go, and nothing from them reaches `me` again. */
+  async block(me: FriendRef, other: FriendRef): Promise<void> {
+    if (me.playerId === other.playerId) throw new SocialError("that is you");
+    const mine = await this.load(me.playerId);
+    if (mine.blocked.length >= MAX_BLOCKED) throw new SocialError("block list is full");
+    await this.mutate(me.playerId, (r) => {
+      r.friends = without(r.friends, other.playerId);
+      r.incoming = without(r.incoming, other.playerId);
+      r.outgoing = without(r.outgoing, other.playerId);
+      if (!has(r.blocked, other.playerId)) r.blocked.push(other);
+    });
+    await this.mutate(other.playerId, (r) => {
+      r.friends = without(r.friends, me.playerId);
+      r.incoming = without(r.incoming, me.playerId);
+      r.outgoing = without(r.outgoing, me.playerId);
+    });
+  }
+
+  async unblock(me: FriendRef, other: FriendRef): Promise<boolean> {
+    let was = false;
+    await this.mutate(me.playerId, (r) => {
+      was = has(r.blocked, other.playerId);
+      r.blocked = without(r.blocked, other.playerId);
+    });
+    return was;
+  }
+
+  async setGuild(playerId: string, characterId: string, guild: GuildMembership | null): Promise<void> {
+    await this.mutate(playerId, (r) => {
+      r.guilds ??= {};
+      if (guild) r.guilds[characterId] = guild;
+      else delete r.guilds[characterId];
     });
   }
 }

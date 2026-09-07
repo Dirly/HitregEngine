@@ -75,4 +75,4 @@ export { Supervisor, type SupervisorOptions, type ChildInfo, type SpawnChildOpti
 export { startMain, type MainOptions, type MainHandle } from "./main/main.js";
 export { VoxelPool, defaultWorkerCount, type VoxelPoolOptions, type GeneratedCell } from "./voxel-pool.js";
 export { SOCIAL_MODULE, socialLine, type SocialEvent } from "./cluster/protocol.js";
-export { SocialStore, socialOf, SOCIAL_NAMESPACE, type FriendRef, type SocialRecord, type CharacterSocial } from "./main/social.js";
+export { SocialStore, isBlocked, normalizeSocial, SOCIAL_NAMESPACE, type FriendRef, type SocialRecord, type GuildMembership } from "./main/social.js";

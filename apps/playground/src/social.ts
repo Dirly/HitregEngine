@@ -9,8 +9,10 @@
  * a chat line, so the panel refreshes on an event and polls slowly while
  * open. Slash commands in chat (`/friend <name>`, `/invite <name>`,
  * `/accept`, `/decline`, `/kick <name>`, `/leader <name>`, `/leave`,
- * `/travel <name>`, `/unfriend <name>`, `/social`) are the keyboard route
- * to the same calls.
+ * `/travel <name>`, `/unfriend <name>`, `/block <name>`, `/unblock <name>`,
+ * `/social`) are the keyboard route to the same calls. Friends are per
+ * ACCOUNT: the list shows whichever character a friend is playing, else the
+ * one the friendship was made through.
  */
 
 import type { GatewayClient } from "./gateway.js";
@@ -35,6 +37,7 @@ interface SocialView {
   friends: Presence[];
   incoming: Array<{ characterId: string; name: string }>;
   outgoing: Array<{ characterId: string; name: string }>;
+  blocked: Array<{ characterId: string; name: string }>;
   party: { code: string; leader: string; members: Presence[] } | null;
   invites: Array<{ code: string; from: string; name: string }>;
 }
@@ -147,7 +150,17 @@ export function mountSocialPanel(opts: SocialPanelOptions): SocialPanel {
   const calls = {
     friend: (name: string) => act("add friend", async () => {
       const r = await api("/social/friend/request", { name });
-      return r.outcome === "sent" ? `Friend request sent to ${r.name}.` : r.outcome === "accepted" ? `${r.name} is now your friend.` : r.outcome === "already-friends" ? `${r.name} is already your friend.` : r.outcome === "already-sent" ? `${r.name} already has your request.` : "Your friend list is full.";
+      return r.outcome === "sent"
+        ? `Friend request sent to ${r.name}.`
+        : r.outcome === "accepted"
+          ? `${r.name} is now your friend.`
+          : r.outcome === "already-friends"
+            ? `${r.name} is already your friend.`
+            : r.outcome === "already-sent"
+              ? `${r.name} already has your request.`
+              : r.outcome === "unavailable"
+                ? `${r.name} cannot be reached.`
+                : "Your friend list is full.";
     }),
     acceptFriend: (name?: string) => act("accept", async () => `${(await api("/social/friend/accept", name ? { name } : {})).friend} is now your friend.`),
     declineFriend: (name?: string) => act("decline", async () => `Declined ${(await api("/social/friend/decline", name ? { name } : {})).declined}.`),
@@ -179,6 +192,11 @@ export function mountSocialPanel(opts: SocialPanelOptions): SocialPanel {
     travel: (name: string) => act("travel", async () => {
       const r = await api("/social/travel", { name });
       return r.moved ? `Travelling to ${name}…` : r.reason === "already there" ? `You are already where ${name} is.` : `Could not travel to ${name}.`;
+    }),
+    block: (name: string) => act("block", async () => `Blocked ${(await api("/social/block", { name })).blocked}: no requests, invitations or chat from them.`),
+    unblock: (name: string) => act("unblock", async () => {
+      const r = await api("/social/unblock", { name });
+      return r.unblocked ? `Unblocked ${r.unblocked}.` : `${name} was not blocked.`;
     }),
   };
 
@@ -245,6 +263,16 @@ export function mountSocialPanel(opts: SocialPanelOptions): SocialPanel {
       }
       body.append(list);
     }
+    if (view.blocked.length > 0) {
+      body.append(el("h2", { text: "Blocked" }));
+      const list = el("ul");
+      for (const b of view.blocked) {
+        const un = el("button", { text: "unblock" });
+        un.onclick = () => void calls.unblock(b.name);
+        list.append(el("li", {}, el("span", { className: "who", text: b.name }), un));
+      }
+      body.append(list);
+    }
     if (view.incoming.length > 0) {
       body.append(el("h2", { text: "Friend requests" }));
       const list = el("ul");
@@ -253,7 +281,9 @@ export function mountSocialPanel(opts: SocialPanelOptions): SocialPanel {
         yes.onclick = () => void calls.acceptFriend(r.name);
         const no = el("button", { text: "decline" });
         no.onclick = () => void calls.declineFriend(r.name);
-        list.append(el("li", {}, el("span", { className: "who", text: r.name }), yes, no));
+        const block = el("button", { className: "hg-danger", text: "block" });
+        block.onclick = () => void calls.block(r.name);
+        list.append(el("li", {}, el("span", { className: "who", text: r.name }), yes, no, block));
       }
       body.append(list);
     }
@@ -356,6 +386,16 @@ export function mountSocialPanel(opts: SocialPanelOptions): SocialPanel {
       case "travel": {
         const n = need("friend's name");
         if (n) void calls.travel(n);
+        return true;
+      }
+      case "block": {
+        const n = need("character name");
+        if (n) void calls.block(n);
+        return true;
+      }
+      case "unblock": {
+        const n = need("character name");
+        if (n) void calls.unblock(n);
         return true;
       }
       case "social":

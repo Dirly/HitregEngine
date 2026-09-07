@@ -27,7 +27,7 @@ import { randomBytes } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
 import { regionAt, type PlayerDataBackend, type RegionDoc, type WorldRecipe } from "@hitreg/core";
 import { ServerRegistry, type ServerEntry } from "./registry.js";
-import { SocialError, SocialStore, socialOf, type FriendRef } from "./social.js";
+import { SocialError, SocialStore, isBlocked, type FriendRef } from "./social.js";
 import type { Supervisor } from "./supervisor.js";
 import { signSession, signTicket, verifySession } from "../cluster/ticket.js";
 import {
@@ -316,28 +316,59 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
   const social = new SocialStore(opts.playerData, opts.experienceId);
   /** Party invitations waiting on a character — session state, like parties. */
   const invites = new Map<string, Array<{ code: string; from: FriendRef; at: number }>>();
-  /** Where a character is right now, as a friend list shows it. */
+  /** Where a character is right now, as a party list shows it. */
   const presenceOf = (characterId: string): { online: boolean; server: string | null; zone: string | null } => {
     const srv = registry.whereIs.get(characterId) ?? null;
     const server = srv ? registry.servers.get(srv) : undefined;
     return { online: srv !== null, server: srv, zone: server?.zoneOfPlayer.get(characterId) ?? null };
   };
+  /** The characters of an account that are online right now (every one of them passed /play on this main). */
+  const onlineCharactersOf = (playerId: string): Array<{ characterId: string; name: string }> => {
+    const out: Array<{ characterId: string; name: string }> = [];
+    for (const characterId of registry.whereIs.keys()) {
+      const owner = owners.get(characterId);
+      if (owner?.playerId === playerId) out.push({ characterId, name: owner.name });
+    }
+    return out;
+  };
+  /** A friend as the list shows them: the character they are playing, else the one the link was made through. */
+  const friendView = (f: FriendRef): { playerId: string; characterId: string; name: string; online: boolean; server: string | null; zone: string | null } => {
+    const playing = onlineCharactersOf(f.playerId)[0];
+    if (!playing) return { playerId: f.playerId, characterId: f.characterId, name: f.characterName, online: false, server: null, zone: null };
+    return { playerId: f.playerId, characterId: playing.characterId, name: playing.name, ...presenceOf(playing.characterId) };
+  };
   /** A character reference by id — from this session's owners, else the account store. */
   const refOf = async (characterId: string): Promise<FriendRef | null> => {
     const known = owners.get(characterId);
-    if (known) return { characterId, name: known.name, playerId: known.playerId };
+    if (known) return { playerId: known.playerId, characterId, characterName: known.name };
     const found = await opts.accounts.findCharacterById(characterId);
-    return found ? { characterId, name: found.character.name, playerId: found.account.id } : null;
+    return found ? { playerId: found.account.id, characterId, characterName: found.character.name } : null;
   };
   const refByName = async (name: string): Promise<FriendRef> => {
     const found = name ? await opts.accounts.findCharacter(name) : null;
     if (!found) throw new HttpError(404, `no character called "${name}"`);
-    return { characterId: found.character.id, name: found.character.name, playerId: found.account.id };
+    return { playerId: found.account.id, characterId: found.character.id, characterName: found.character.name };
   };
   /** Hand a social event to the layer a character stands on (nothing if offline — the list catches up on read). */
   const notify = (characterId: string, event: SocialEvent): void => {
     const srv = registry.whereIs.get(characterId);
     if (srv) sendTo(srv, { t: "social", characterId, event });
+  };
+  /** The same, to every character of an account that is online. */
+  const notifyAccount = (playerId: string, event: SocialEvent): void => {
+    for (const c of onlineCharactersOf(playerId)) notify(c.characterId, event);
+  };
+  /** Tell a character's layer which characters it must not hear (every character of every account it blocked). */
+  const pushBlocks = async (characterId: string, srv = registry.whereIs.get(characterId)): Promise<void> => {
+    const owner = owners.get(characterId);
+    if (!srv || !owner) return;
+    const mine = await social.load(owner.playerId);
+    const blocked: string[] = [];
+    for (const b of mine.blocked) {
+      const account = await opts.accounts.get(b.playerId);
+      for (const c of account?.characters ?? []) blocked.push(c.id);
+    }
+    sendTo(srv, { t: "blocks", characterId, blocked });
   };
   const lastOnline = new Map<string, boolean>();
   /** Friends learn a character came or went (not on a transfer — they never left). */
@@ -346,16 +377,16 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
     lastOnline.set(characterId, online);
     const me = await refOf(characterId);
     if (!me) return;
-    const mine = socialOf(await social.load(me.playerId), characterId);
+    const mine = await social.load(me.playerId);
     const zone = presenceOf(characterId).zone;
-    for (const f of mine.friends) notify(f.characterId, { kind: online ? "friend.online" : "friend.offline", characterId, name: me.name, zone });
+    for (const f of mine.friends) notifyAccount(f.playerId, { kind: online ? "friend.online" : "friend.offline", characterId, name: me.characterName, zone });
   };
   const partyView = async (party: Party | undefined): Promise<unknown> =>
     party
       ? {
           code: party.code,
           leader: party.leader,
-          members: await Promise.all([...party.members].map(async (id) => ({ characterId: id, name: (await refOf(id))?.name ?? id, ...presenceOf(id) }))),
+          members: await Promise.all([...party.members].map(async (id) => ({ characterId: id, name: (await refOf(id))?.characterName ?? id, ...presenceOf(id) }))),
         }
       : null;
   const tellParty = (party: Party, event: SocialEvent, except?: string): void => {
@@ -577,6 +608,7 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
       case "player.joined":
         registry.joined(id, msg.player);
         pushParty(msg.player.characterId, id);
+        void pushBlocks(msg.player.characterId, id).catch(() => undefined);
         void announcePresence(msg.player.characterId, true).catch((error: unknown) => log(`[main] presence: ${error instanceof Error ? error.message : String(error)}`));
         return;
       case "player.left":
@@ -714,10 +746,10 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
       const body = method === "POST" ? ((await readJson(req)) as Record<string, unknown> | null) : null;
       const characterId = method === "POST" ? body?.["characterId"] : url.searchParams.get("characterId");
       const character = characterOf(account, characterId);
-      const me: FriendRef = { characterId: character.id, name: character.name, playerId: account.id };
+      const me: FriendRef = { playerId: account.id, characterId: character.id, characterName: character.name };
       owners.set(me.characterId, { playerId: account.id, name: character.name });
       const str = (key: string): string => (typeof body?.[key] === "string" ? (body[key] as string).trim() : "");
-      /** The other character named in the request: by `name`, or by `characterId`-style id fields. */
+      /** The other character named in the request: by `name`, or by an id field. */
       const other = async (...keys: string[]): Promise<FriendRef> => {
         for (const key of keys) {
           const v = str(key);
@@ -728,15 +760,16 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
         }
         throw new HttpError(400, `expected ${keys.join(" or ")}`);
       };
+      const asFriendView = (list: FriendRef[]) => list.map(friendView);
       const joinParty = (party: Party): boolean => {
         if (party.members.size >= 8) throw new HttpError(400, "party is full");
         const previous = partyOf.get(me.characterId);
-        if (previous && previous !== party) removeFromParty(me.characterId, me.name);
+        if (previous && previous !== party) removeFromParty(me.characterId, me.characterName);
         party.members.add(me.characterId);
         partyOf.set(me.characterId, party);
         pushParty(me.characterId);
         invites.delete(me.characterId);
-        tellParty(party, { kind: "party.joined", characterId: me.characterId, name: me.name }, me.characterId);
+        tellParty(party, { kind: "party.joined", characterId: me.characterId, name: me.characterName }, me.characterId);
         // playing already, somewhere else than the leader: pull them over
         const leaderOn = registry.whereIs.get(party.leader);
         const leaderServer = leaderOn ? registry.servers.get(leaderOn) : undefined;
@@ -752,9 +785,16 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
         if (party.leader !== me.characterId) throw new HttpError(403, "only the party leader can do that");
         return party;
       };
+      /** A block either way makes the other account unreachable, without saying which way. */
+      const reachable = async (target: FriendRef): Promise<boolean> => {
+        const mine = await social.load(account.id);
+        if (isBlocked(mine, target.playerId)) return false;
+        const theirs = await social.load(target.playerId);
+        return !isBlocked(theirs, account.id);
+      };
       try {
         // -- parties (session state) --
-        if (p === "/party" && method === "GET") return send(res, 200, { party: await partyView(partyOf.get(me.characterId)), invites: (invites.get(me.characterId) ?? []).map((i) => ({ code: i.code, from: i.from.characterId, name: i.from.name })) });
+        if (p === "/party" && method === "GET") return send(res, 200, { party: await partyView(partyOf.get(me.characterId)), invites: (invites.get(me.characterId) ?? []).map((i) => ({ code: i.code, from: i.from.characterId, name: i.from.characterName })) });
         if (p === "/party/create" && method === "POST") {
           const existing = partyOf.get(me.characterId);
           if (existing) return send(res, 200, { party: await partyView(existing) });
@@ -773,7 +813,8 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
         }
         if (p === "/party/invite" && method === "POST") {
           const target = await other("name", "target");
-          if (target.characterId === me.characterId) throw new HttpError(400, "that is you");
+          if (target.playerId === me.playerId) throw new HttpError(400, "that is you");
+          if (!(await reachable(target))) throw new HttpError(400, `${target.characterName} cannot be invited`);
           let party = partyOf.get(me.characterId);
           if (!party) {
             party = { code: partyCode(), leader: me.characterId, members: new Set([me.characterId]) };
@@ -782,13 +823,13 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
             pushParty(me.characterId);
           }
           if (party.leader !== me.characterId) throw new HttpError(403, "only the party leader can invite");
-          if (party.members.has(target.characterId)) throw new HttpError(400, `${target.name} is already in the party`);
+          if (party.members.has(target.characterId)) throw new HttpError(400, `${target.characterName} is already in the party`);
           if (party.members.size >= 8) throw new HttpError(400, "party is full");
           const list = invites.get(target.characterId) ?? [];
           if (!list.some((i) => i.code === party!.code)) list.push({ code: party.code, from: me, at: Date.now() });
           invites.set(target.characterId, list.slice(-8));
-          notify(target.characterId, { kind: "party.invite", code: party.code, characterId: me.characterId, name: me.name });
-          return send(res, 200, { party: await partyView(party), invited: target.name, online: presenceOf(target.characterId).online });
+          notify(target.characterId, { kind: "party.invite", code: party.code, characterId: me.characterId, name: me.characterName });
+          return send(res, 200, { party: await partyView(party), invited: target.characterName, online: presenceOf(target.characterId).online });
         }
         if (p === "/party/accept" && method === "POST") {
           const list = invites.get(me.characterId) ?? [];
@@ -809,78 +850,98 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
           const invite = code ? list.find((i) => i.code === code) : list[list.length - 1];
           if (!invite) throw new HttpError(404, "no party invitation waiting");
           invites.set(me.characterId, list.filter((i) => i !== invite));
-          notify(invite.from.characterId, { kind: "party.declined", characterId: me.characterId, name: me.name });
+          notify(invite.from.characterId, { kind: "party.declined", characterId: me.characterId, name: me.characterName });
           return send(res, 200, { declined: invite.code });
         }
         if (p === "/party/leave" && method === "POST") {
-          removeFromParty(me.characterId, me.name);
+          removeFromParty(me.characterId, me.characterName);
           return send(res, 200, { party: null });
         }
         if (p === "/party/kick" && method === "POST") {
           const party = asLeader();
           const target = await other("name", "target");
-          if (!party.members.has(target.characterId) || target.characterId === me.characterId) throw new HttpError(400, `${target.name} is not in your party`);
-          removeFromParty(target.characterId, target.name);
+          if (!party.members.has(target.characterId) || target.characterId === me.characterId) throw new HttpError(400, `${target.characterName} is not in your party`);
+          removeFromParty(target.characterId, target.characterName);
           notify(target.characterId, { kind: "party.kicked", code: party.code });
           return send(res, 200, { party: await partyView(party) });
         }
         if (p === "/party/leader" && method === "POST") {
           const party = asLeader();
           const target = await other("name", "target");
-          if (!party.members.has(target.characterId)) throw new HttpError(400, `${target.name} is not in your party`);
+          if (!party.members.has(target.characterId)) throw new HttpError(400, `${target.characterName} is not in your party`);
           party.leader = target.characterId;
-          tellParty(party, { kind: "party.leader", characterId: target.characterId, name: target.name });
+          tellParty(party, { kind: "party.leader", characterId: target.characterId, name: target.characterName });
           return send(res, 200, { party: await partyView(party) });
         }
-        // -- friends (durable) --
+        // -- friends and blocks (durable, per account) --
         if (p === "/social" && method === "GET") {
-          const mine = socialOf(await social.load(account.id), me.characterId);
-          const withPresence = (list: FriendRef[]) => list.map((f) => ({ characterId: f.characterId, name: f.name, ...presenceOf(f.characterId) }));
+          const mine = await social.load(account.id);
           return send(res, 200, {
-            friends: withPresence(mine.friends),
-            incoming: mine.incoming.map((f) => ({ characterId: f.characterId, name: f.name })),
-            outgoing: mine.outgoing.map((f) => ({ characterId: f.characterId, name: f.name })),
+            friends: asFriendView(mine.friends),
+            incoming: mine.incoming.map((f) => ({ playerId: f.playerId, characterId: f.characterId, name: f.characterName })),
+            outgoing: mine.outgoing.map((f) => ({ playerId: f.playerId, characterId: f.characterId, name: f.characterName })),
+            blocked: mine.blocked.map((f) => ({ playerId: f.playerId, characterId: f.characterId, name: f.characterName })),
             party: await partyView(partyOf.get(me.characterId)),
-            invites: (invites.get(me.characterId) ?? []).map((i) => ({ code: i.code, from: i.from.characterId, name: i.from.name })),
+            invites: (invites.get(me.characterId) ?? []).map((i) => ({ code: i.code, from: i.from.characterId, name: i.from.characterName })),
           });
         }
         if (p === "/social/friend/request" && method === "POST") {
-          const target = await other("name", "characterId2", "friend");
+          const target = await other("name", "friend");
           const outcome = await social.request(me, target);
-          if (outcome === "sent") notify(target.characterId, { kind: "friend.request", characterId: me.characterId, name: me.name });
-          if (outcome === "accepted") notify(target.characterId, { kind: "friend.accepted", characterId: me.characterId, name: me.name });
-          return send(res, 200, { outcome, name: target.name });
+          if (outcome === "sent") notifyAccount(target.playerId, { kind: "friend.request", characterId: me.characterId, name: me.characterName });
+          if (outcome === "accepted") notifyAccount(target.playerId, { kind: "friend.accepted", characterId: me.characterId, name: me.characterName });
+          return send(res, 200, { outcome, name: target.characterName });
         }
         if (p === "/social/friend/accept" && method === "POST") {
-          const mine = socialOf(await social.load(account.id), me.characterId);
+          const mine = await social.load(account.id);
           const from = str("name") || str("from") ? await other("name", "from") : mine.incoming[mine.incoming.length - 1];
-          if (!from || !mine.incoming.some((f) => f.characterId === from.characterId)) throw new HttpError(404, "no such friend request");
+          if (!from) throw new HttpError(404, "no friend request waiting");
           await social.accept(me, from);
-          notify(from.characterId, { kind: "friend.accepted", characterId: me.characterId, name: me.name });
-          return send(res, 200, { friend: from.name });
+          notifyAccount(from.playerId, { kind: "friend.accepted", characterId: me.characterId, name: me.characterName });
+          return send(res, 200, { friend: from.characterName });
         }
         if (p === "/social/friend/decline" && method === "POST") {
-          const mine = socialOf(await social.load(account.id), me.characterId);
+          const mine = await social.load(account.id);
           const from = str("name") || str("from") ? await other("name", "from") : mine.incoming[mine.incoming.length - 1];
-          if (!from) throw new HttpError(404, "no such friend request");
+          if (!from) throw new HttpError(404, "no friend request waiting");
           await social.decline(me, from);
-          return send(res, 200, { declined: from.name });
+          return send(res, 200, { declined: from.characterName });
         }
         if (p === "/social/friend/remove" && method === "POST") {
           const friend = await other("name", "friend");
           await social.remove(me, friend);
-          notify(friend.characterId, { kind: "friend.removed", characterId: me.characterId, name: me.name });
-          return send(res, 200, { removed: friend.name });
+          notifyAccount(friend.playerId, { kind: "friend.removed", characterId: me.characterId, name: me.characterName });
+          return send(res, 200, { removed: friend.characterName });
+        }
+        if (p === "/social/block" && method === "POST") {
+          const target = await other("name", "target");
+          await social.block(me, target);
+          // they are out of my party too, whichever of us leads
+          const party = partyOf.get(me.characterId);
+          if (party && party.members.has(target.characterId)) {
+            if (party.leader === me.characterId) {
+              removeFromParty(target.characterId, target.characterName);
+              notify(target.characterId, { kind: "party.kicked", code: party.code });
+            } else removeFromParty(me.characterId, me.characterName);
+          }
+          for (const c of onlineCharactersOf(account.id)) void pushBlocks(c.characterId);
+          return send(res, 200, { blocked: target.characterName });
+        }
+        if (p === "/social/unblock" && method === "POST") {
+          const target = await other("name", "target");
+          const was = await social.unblock(me, target);
+          for (const c of onlineCharactersOf(account.id)) void pushBlocks(c.characterId);
+          return send(res, 200, { unblocked: was ? target.characterName : null });
         }
         if (p === "/social/travel" && method === "POST") {
           // go where a friend is: the layer they stand on, if it has room and is not an instance
           const friend = await other("name", "friend");
-          const mine = socialOf(await social.load(account.id), me.characterId);
-          if (!mine.friends.some((f) => f.characterId === friend.characterId)) throw new HttpError(403, `${friend.name} is not your friend`);
-          const where = presenceOf(friend.characterId);
-          if (!where.server) throw new HttpError(400, `${friend.name} is not online`);
+          const mine = await social.load(account.id);
+          if (!mine.friends.some((f) => f.playerId === friend.playerId)) throw new HttpError(403, `${friend.characterName} is not your friend`);
+          const where = friendView(mine.friends.find((f) => f.playerId === friend.playerId)!);
+          if (!where.server) throw new HttpError(400, `${where.name} is not online`);
           const dest = registry.servers.get(where.server);
-          if (!dest || dest.kind !== "layer") throw new HttpError(400, `${friend.name} is somewhere you cannot follow`);
+          if (!dest || dest.kind !== "layer") throw new HttpError(400, `${where.name} is somewhere you cannot follow`);
           if (registry.whereIs.get(me.characterId) === dest.id) return send(res, 200, { moved: false, server: dest.id, reason: "already there" });
           if (registry.free(dest) <= 0) throw new HttpError(400, "no room where they are");
           return send(res, 200, { moved: moveCharacter(me.characterId, dest, "friend"), server: dest.id });

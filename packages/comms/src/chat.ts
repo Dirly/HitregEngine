@@ -83,6 +83,12 @@ export interface ChatDeps {
    * `comms.team/<peerId>` into netState.
    */
   assign?(peerId: string, kind: "team" | "party", value: string | null): boolean;
+  /**
+   * Authority side: may `recipient` hear `sender` at all? False drops the
+   * line for that recipient on every channel (a block list). A sender always
+   * hears themself; absent = everyone hears everyone the channel allows.
+   */
+  mayHear?(recipient: string, sender: string): boolean;
   /** Every locally delivered message is also emitted as a "chat.message" gameplay event. */
   emitEvent?(name: string, payload: unknown): void;
   now?(): number;
@@ -388,6 +394,7 @@ export class ChatService {
     if (!routed.ok) return routed;
     const msg = this.stamp(channel, sender, this.link.nameOf(sender), routed.text);
     for (const recipient of routed.recipients) {
+      if (recipient !== sender && this.deps.mayHear && !this.deps.mayHear(recipient, sender)) continue;
       if (recipient === this.link.selfId) this.deliver(msg);
       else this.link.send(CHAT_MODULE, recipient, { k: "msg", msg } satisfies ChatDown);
     }
@@ -407,7 +414,7 @@ export class ChatService {
   deliverForeign(msg: ChatMessage, scope: BridgeScope): number {
     if (this.disposed || this.link.role === "peer" || msg.channel === "system") return 0;
     if (!BRIDGED_CHANNELS.includes(msg.channel)) return 0;
-    const recipients = foreignRecipients(msg.channel, scope, this.participants(), this.ctx);
+    const recipients = foreignRecipients(msg.channel, scope, this.participants(), this.ctx).filter((r) => !this.deps.mayHear || this.deps.mayHear(r, msg.from));
     for (const recipient of recipients) {
       if (recipient === this.link.selfId) this.deliver(msg);
       else this.link.send(CHAT_MODULE, recipient, { k: "msg", msg } satisfies ChatDown);

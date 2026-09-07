@@ -141,6 +141,7 @@ import {
 } from "@hitreg/comms";
 import { mountCommsUI } from "@hitreg/comms/ui";
 import { mountSocialPanel, type SocialPanel } from "./social.js";
+import { mountToasts } from "./toasts.js";
 import { loadAssets } from "./asset-loader.js";
 import { saveAsset, clientLog } from "./dev-log.js";
 import { applyBodyState } from "./physics-sync.js";
@@ -2327,17 +2328,35 @@ async function main(): Promise<void> {
       },
     });
     // friends and party: main's facts, the layer's events, one panel (O) and the slash commands
+    const socialZoneName = (id: string): string => {
+      const field = activeVoxelWorld ? getVoxelWorld(activeVoxelWorld) : null;
+      return field?.recipe.regions.find((r) => r.id === id)?.name ?? id;
+    };
     socialPanel = mountSocialPanel({
       client: gatewayClient,
       character: () => playing,
       say: (text) => comms?.chat.system(text),
-      zoneName: (id) => {
-        const field = activeVoxelWorld ? getVoxelWorld(activeVoxelWorld) : null;
-        return field?.recipe.regions.find((r) => r.id === id)?.name ?? id;
-      },
+      zoneName: socialZoneName,
     });
+    // the things worth a glance even with chat scrolled away: a friend arriving, an ask
+    const toasts = mountToasts();
     netPresence.onSession((session) => {
-      if (session?.role === "peer" && netServerUrl) session.client.onModule("social", (event) => socialPanel?.handleEvent(event as { kind: string }));
+      if (session?.role === "peer" && netServerUrl) {
+        session.client.onModule("social", (raw) => {
+          const event = raw as { kind: string; name?: string; zone?: string | null };
+          socialPanel?.handleEvent(event);
+          const zone = event.zone ? ` in ${socialZoneName(event.zone)}` : "";
+          if (event.kind === "friend.online") toasts.show(`${event.name} is online${zone}`, "friend");
+          else if (event.kind === "friend.offline") toasts.show(`${event.name} went offline`, "friend");
+          else if (event.kind === "friend.request") toasts.show(`${event.name} wants to be your friend — O to answer`, "friend", 8000);
+          else if (event.kind === "friend.accepted") toasts.show(`${event.name} is now your friend`, "friend");
+          else if (event.kind === "party.invite") toasts.show(`${event.name} invited you to a party — /accept or O`, "party", 8000);
+          else if (event.kind === "party.joined") toasts.show(`${event.name} joined the party`, "party");
+          else if (event.kind === "party.left") toasts.show(`${event.name} left the party`, "party");
+          else if (event.kind === "party.kicked") toasts.show("You were removed from the party", "party");
+          else if (event.kind.startsWith("guild.") && event.name) toasts.show(`${event.name}: ${event.kind.slice(6)}`, "guild");
+        });
+      }
     });
     (window as unknown as { __hitregGateway?: unknown }).__hitregGateway = { client: gatewayClient, panel: gatewayPanel, social: socialPanel, grant: () => netGrant };
   }
