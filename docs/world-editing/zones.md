@@ -76,10 +76,14 @@ for the spawn tables and the cluster. Exact fields: the `regions` entry in
   is first in the file. `worldgen regions` lists both cases.
 - Every zone has at least one town — that is where its players gather and
   where its hub goes. A zone with none is scenery; fold it into a neighbour.
-- A world of the demo's size (110 km² of land over four landmasses) is
-  15–20 zones. Err small: the point is that the people in a valley keep
-  meeting, and a zone nobody can cross in ten minutes is a zone nobody
-  crosses.
+- The count follows the land, not the other way round: the draft has no
+  ceiling but the number of towns. The MMO wants forty-odd zones, which is
+  roughly 300 km² of land — `worldgen all <world> --from <look>
+  --continents 4 --islands 3 --continent-radius 5000 --gap 1200` lays a
+  45 km world that drafts about that many (`--zones N` forces a count).
+  The demo's 110 km² over four landmasses is 17. Whatever the count, err
+  small per zone: the point is that the people in a valley keep meeting,
+  and a zone nobody can cross in ten minutes is a zone nobody crosses.
 - Water between landmasses needs no zone. Ocean is nobody's zone; the coast
   is a border.
 

@@ -2427,7 +2427,10 @@ function commandZones(): void {
   const landKm2 = (landCells * grid.step * grid.step) / 1e6;
   // ~one zone per 6 km² of land, 3..24 — a zone should take minutes to cross,
   // and be small enough that its players keep meeting (--count / --per-km2 to tune)
-  const count = Math.max(1, Math.min(towns.length, Math.round(option("count", Math.max(3, Math.min(24, landKm2 / option("per-km2", 6)))))));
+  // one zone per 6 km² of land, no ceiling but the town count: a 300 km²
+  // world is forty-odd zones, which is the size the MMO wants (`--zones N`
+  // from `all`, where --count is the towns' flag)
+  const count = Math.max(1, Math.min(towns.length, Math.round(option("zones", option("count", Math.max(3, landKm2 / option("per-km2", 6)))))));
 
   // --- seeds: farthest-apart towns, every landmass big enough to be a zone gets one first
   const townCell = towns.map((t) => grid.nearest(t.center[0], t.center[1]));
