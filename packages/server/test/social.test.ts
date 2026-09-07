@@ -142,6 +142,8 @@ describe.skipIf(!main || !layer1 || !layer2)("friends and parties across layers"
     finn = await player("FinnAcct", "Finn", layer2!);
     gus = await player("GusAcct", "Gus", layer2!);
 
+    // a name is how players find each other: one character per name, world-wide
+    expect((await post(`${main!.url}/characters`, { name: "eve" }, gus.session)).status).toBe(409);
     expect((await post(`${main!.url}/social/friend/request`, { characterId: eve.id, name: "Nobody" }, eve.session)).status).toBe(404);
     expect((await post(`${main!.url}/social/friend/request`, { characterId: eve.id, name: "eve" }, eve.session)).status).toBe(400);
     const req = await post(`${main!.url}/social/friend/request`, { characterId: eve.id, name: "finn" }, eve.session); // case-insensitive

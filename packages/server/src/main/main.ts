@@ -691,6 +691,8 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
       const name = typeof body?.name === "string" ? body.name.trim() : "";
       if (!CHARACTER_NAME.test(name)) throw new HttpError(400, "character name: 3-20 letters");
       if (account.characters.length >= MAX_CHARACTERS) throw new HttpError(400, `at most ${MAX_CHARACTERS} characters`);
+      // names are how players find each other (/friend, /invite): one character per name, world-wide
+      if (await opts.accounts.findCharacter(name)) throw new HttpError(409, `a character called "${name}" already exists — pick another name`);
       const character: CharacterRecord = { id: newId("chr"), name, createdAt: new Date().toISOString() };
       account.characters.push(character);
       await opts.accounts.update(account);
