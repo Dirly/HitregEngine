@@ -27,6 +27,7 @@ import { randomBytes } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
 import { regionAt, type PlayerDataBackend, type RegionDoc, type WorldRecipe } from "@hitreg/core";
 import { ServerRegistry, type ServerEntry } from "./registry.js";
+import { SocialError, SocialStore, socialOf, type FriendRef } from "./social.js";
 import type { Supervisor } from "./supervisor.js";
 import { signSession, signTicket, verifySession } from "../cluster/ticket.js";
 import {
@@ -49,6 +50,7 @@ import {
   type MainToLayer,
   type TransferAnswer,
   type TransferTarget,
+  type SocialEvent,
 } from "../cluster/protocol.js";
 
 export interface MainOptions {
@@ -310,6 +312,73 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
     if (srv) sendTo(srv, { t: "party", characterId, party: partyOf.get(characterId)?.code ?? null });
   };
 
+  // -- friends and party events (docs/hosting.md → "Parties and friends") --------------
+  const social = new SocialStore(opts.playerData, opts.experienceId);
+  /** Party invitations waiting on a character — session state, like parties. */
+  const invites = new Map<string, Array<{ code: string; from: FriendRef; at: number }>>();
+  /** Where a character is right now, as a friend list shows it. */
+  const presenceOf = (characterId: string): { online: boolean; server: string | null; zone: string | null } => {
+    const srv = registry.whereIs.get(characterId) ?? null;
+    const server = srv ? registry.servers.get(srv) : undefined;
+    return { online: srv !== null, server: srv, zone: server?.zoneOfPlayer.get(characterId) ?? null };
+  };
+  /** A character reference by id — from this session's owners, else the account store. */
+  const refOf = async (characterId: string): Promise<FriendRef | null> => {
+    const known = owners.get(characterId);
+    if (known) return { characterId, name: known.name, playerId: known.playerId };
+    const found = await opts.accounts.findCharacterById(characterId);
+    return found ? { characterId, name: found.character.name, playerId: found.account.id } : null;
+  };
+  const refByName = async (name: string): Promise<FriendRef> => {
+    const found = name ? await opts.accounts.findCharacter(name) : null;
+    if (!found) throw new HttpError(404, `no character called "${name}"`);
+    return { characterId: found.character.id, name: found.character.name, playerId: found.account.id };
+  };
+  /** Hand a social event to the layer a character stands on (nothing if offline — the list catches up on read). */
+  const notify = (characterId: string, event: SocialEvent): void => {
+    const srv = registry.whereIs.get(characterId);
+    if (srv) sendTo(srv, { t: "social", characterId, event });
+  };
+  const lastOnline = new Map<string, boolean>();
+  /** Friends learn a character came or went (not on a transfer — they never left). */
+  const announcePresence = async (characterId: string, online: boolean): Promise<void> => {
+    if (lastOnline.get(characterId) === online) return;
+    lastOnline.set(characterId, online);
+    const me = await refOf(characterId);
+    if (!me) return;
+    const mine = socialOf(await social.load(me.playerId), characterId);
+    const zone = presenceOf(characterId).zone;
+    for (const f of mine.friends) notify(f.characterId, { kind: online ? "friend.online" : "friend.offline", characterId, name: me.name, zone });
+  };
+  const partyView = async (party: Party | undefined): Promise<unknown> =>
+    party
+      ? {
+          code: party.code,
+          leader: party.leader,
+          members: await Promise.all([...party.members].map(async (id) => ({ characterId: id, name: (await refOf(id))?.name ?? id, ...presenceOf(id) }))),
+        }
+      : null;
+  const tellParty = (party: Party, event: SocialEvent, except?: string): void => {
+    for (const m of party.members) if (m !== except) notify(m, event);
+  };
+  /** Take a character out of their party (leave, kick); the party dissolves when empty, the leadership moves when the leader goes. */
+  const removeFromParty = (characterId: string, name: string): Party | null => {
+    const party = partyOf.get(characterId);
+    if (!party) return null;
+    party.members.delete(characterId);
+    partyOf.delete(characterId);
+    pushParty(characterId);
+    if (party.members.size === 0) parties.delete(party.code);
+    else {
+      if (party.leader === characterId) {
+        party.leader = [...party.members][0]!;
+        tellParty(party, { kind: "party.leader", characterId: party.leader, name: owners.get(party.leader)?.name ?? party.leader });
+      }
+      tellParty(party, { kind: "party.left", characterId, name });
+    }
+    return party;
+  };
+
   /** Tell the server a character is on to hand it to `dest`. */
   const moveCharacter = (characterId: string, dest: ServerEntry, reason: string): boolean => {
     const on = registry.whereIs.get(characterId);
@@ -508,9 +577,12 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
       case "player.joined":
         registry.joined(id, msg.player);
         pushParty(msg.player.characterId, id);
+        void announcePresence(msg.player.characterId, true).catch((error: unknown) => log(`[main] presence: ${error instanceof Error ? error.message : String(error)}`));
         return;
       case "player.left":
         registry.left(id, msg.characterId);
+        // a transfer is not a departure: they are dialling the next layer
+        if (msg.reason !== "transfer") void announcePresence(msg.characterId, false).catch(() => undefined);
         return;
       case "transfer.failed":
         log(`[main] transfer of ${msg.characterId} from "${id}" failed: ${msg.reason}`);
@@ -635,55 +707,187 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
       const ticket = signTicket(opts.secret, { sub: account.id, chr: character.id, name: character.name, srv: server.id, reason: "join", ttlSeconds: ticketTtl });
       return send(res, 200, { url: server.url, ticket, server: server.id, scene: server.scene });
     }
-    if (p.startsWith("/party")) {
+    if (p.startsWith("/party") || p.startsWith("/social")) {
       const account = await requireAccount(req);
-      const body = method === "POST" ? ((await readJson(req)) as { characterId?: unknown; code?: unknown } | null) : null;
-      const characterId = method === "POST" ? body?.characterId : url.searchParams.get("characterId");
+      const body = method === "POST" ? ((await readJson(req)) as Record<string, unknown> | null) : null;
+      const characterId = method === "POST" ? body?.["characterId"] : url.searchParams.get("characterId");
       const character = characterOf(account, characterId);
-      const view = (party: Party | undefined): unknown =>
-        party ? { code: party.code, leader: party.leader, members: [...party.members].map((id) => ({ characterId: id, server: registry.whereIs.get(id) ?? null })) } : null;
-      if (p === "/party" && method === "GET") return send(res, 200, { party: view(partyOf.get(character.id)) });
-      if (p === "/party/create" && method === "POST") {
-        const existing = partyOf.get(character.id);
-        if (existing) return send(res, 200, { party: view(existing) });
-        const party: Party = { code: partyCode(), leader: character.id, members: new Set([character.id]) };
-        parties.set(party.code, party);
-        partyOf.set(character.id, party);
-        pushParty(character.id);
-        return send(res, 200, { party: view(party) });
-      }
-      if (p === "/party/join" && method === "POST") {
-        const code = typeof body?.code === "string" ? body.code.toUpperCase().trim() : "";
-        const party = parties.get(code);
-        if (!party) throw new HttpError(404, "no party with that code");
-        if (party.members.size >= 8) throw new HttpError(400, "party is full");
-        const previous = partyOf.get(character.id);
-        if (previous && previous !== party) {
-          previous.members.delete(character.id);
-          if (previous.members.size === 0) parties.delete(previous.code);
+      const me: FriendRef = { characterId: character.id, name: character.name, playerId: account.id };
+      owners.set(me.characterId, { playerId: account.id, name: character.name });
+      const str = (key: string): string => (typeof body?.[key] === "string" ? (body[key] as string).trim() : "");
+      /** The other character named in the request: by `name`, or by `characterId`-style id fields. */
+      const other = async (...keys: string[]): Promise<FriendRef> => {
+        for (const key of keys) {
+          const v = str(key);
+          if (!v) continue;
+          if (key === "name") return refByName(v);
+          const ref = await refOf(v);
+          if (ref) return ref;
         }
-        party.members.add(character.id);
-        partyOf.set(character.id, party);
-        pushParty(character.id);
+        throw new HttpError(400, `expected ${keys.join(" or ")}`);
+      };
+      const joinParty = (party: Party): boolean => {
+        if (party.members.size >= 8) throw new HttpError(400, "party is full");
+        const previous = partyOf.get(me.characterId);
+        if (previous && previous !== party) removeFromParty(me.characterId, me.name);
+        party.members.add(me.characterId);
+        partyOf.set(me.characterId, party);
+        pushParty(me.characterId);
+        invites.delete(me.characterId);
+        tellParty(party, { kind: "party.joined", characterId: me.characterId, name: me.name }, me.characterId);
         // playing already, somewhere else than the leader: pull them over
         const leaderOn = registry.whereIs.get(party.leader);
         const leaderServer = leaderOn ? registry.servers.get(leaderOn) : undefined;
-        let pulled = false;
-        if (leaderServer && registry.free(leaderServer) > 0) pulled = moveCharacter(character.id, leaderServer, "party");
-        return send(res, 200, { party: view(party), pulled });
-      }
-      if (p === "/party/leave" && method === "POST") {
-        const party = partyOf.get(character.id);
-        if (party) {
-          party.members.delete(character.id);
-          partyOf.delete(character.id);
-          pushParty(character.id);
-          if (party.members.size === 0) parties.delete(party.code);
-          else if (party.leader === character.id) party.leader = [...party.members][0]!;
+        return leaderServer && registry.free(leaderServer) > 0 ? moveCharacter(me.characterId, leaderServer, "party") : false;
+      };
+      const myParty = (): Party => {
+        const party = partyOf.get(me.characterId);
+        if (!party) throw new HttpError(400, "you are not in a party");
+        return party;
+      };
+      const asLeader = (): Party => {
+        const party = myParty();
+        if (party.leader !== me.characterId) throw new HttpError(403, "only the party leader can do that");
+        return party;
+      };
+      try {
+        // -- parties (session state) --
+        if (p === "/party" && method === "GET") return send(res, 200, { party: await partyView(partyOf.get(me.characterId)), invites: (invites.get(me.characterId) ?? []).map((i) => ({ code: i.code, from: i.from.characterId, name: i.from.name })) });
+        if (p === "/party/create" && method === "POST") {
+          const existing = partyOf.get(me.characterId);
+          if (existing) return send(res, 200, { party: await partyView(existing) });
+          const party: Party = { code: partyCode(), leader: me.characterId, members: new Set([me.characterId]) };
+          parties.set(party.code, party);
+          partyOf.set(me.characterId, party);
+          pushParty(me.characterId);
+          return send(res, 200, { party: await partyView(party) });
         }
-        return send(res, 200, { party: null });
+        if (p === "/party/join" && method === "POST") {
+          const code = str("code").toUpperCase();
+          const party = parties.get(code);
+          if (!party) throw new HttpError(404, "no party with that code");
+          const pulled = joinParty(party);
+          return send(res, 200, { party: await partyView(party), pulled });
+        }
+        if (p === "/party/invite" && method === "POST") {
+          const target = await other("name", "target");
+          if (target.characterId === me.characterId) throw new HttpError(400, "that is you");
+          let party = partyOf.get(me.characterId);
+          if (!party) {
+            party = { code: partyCode(), leader: me.characterId, members: new Set([me.characterId]) };
+            parties.set(party.code, party);
+            partyOf.set(me.characterId, party);
+            pushParty(me.characterId);
+          }
+          if (party.leader !== me.characterId) throw new HttpError(403, "only the party leader can invite");
+          if (party.members.has(target.characterId)) throw new HttpError(400, `${target.name} is already in the party`);
+          if (party.members.size >= 8) throw new HttpError(400, "party is full");
+          const list = invites.get(target.characterId) ?? [];
+          if (!list.some((i) => i.code === party!.code)) list.push({ code: party.code, from: me, at: Date.now() });
+          invites.set(target.characterId, list.slice(-8));
+          notify(target.characterId, { kind: "party.invite", code: party.code, characterId: me.characterId, name: me.name });
+          return send(res, 200, { party: await partyView(party), invited: target.name, online: presenceOf(target.characterId).online });
+        }
+        if (p === "/party/accept" && method === "POST") {
+          const list = invites.get(me.characterId) ?? [];
+          const code = str("code").toUpperCase();
+          const invite = code ? list.find((i) => i.code === code) : list[list.length - 1];
+          if (!invite) throw new HttpError(404, "no party invitation waiting");
+          const party = parties.get(invite.code);
+          if (!party) {
+            invites.set(me.characterId, list.filter((i) => i !== invite));
+            throw new HttpError(404, "that party is gone");
+          }
+          const pulled = joinParty(party);
+          return send(res, 200, { party: await partyView(party), pulled });
+        }
+        if (p === "/party/decline" && method === "POST") {
+          const list = invites.get(me.characterId) ?? [];
+          const code = str("code").toUpperCase();
+          const invite = code ? list.find((i) => i.code === code) : list[list.length - 1];
+          if (!invite) throw new HttpError(404, "no party invitation waiting");
+          invites.set(me.characterId, list.filter((i) => i !== invite));
+          notify(invite.from.characterId, { kind: "party.declined", characterId: me.characterId, name: me.name });
+          return send(res, 200, { declined: invite.code });
+        }
+        if (p === "/party/leave" && method === "POST") {
+          removeFromParty(me.characterId, me.name);
+          return send(res, 200, { party: null });
+        }
+        if (p === "/party/kick" && method === "POST") {
+          const party = asLeader();
+          const target = await other("name", "target");
+          if (!party.members.has(target.characterId) || target.characterId === me.characterId) throw new HttpError(400, `${target.name} is not in your party`);
+          removeFromParty(target.characterId, target.name);
+          notify(target.characterId, { kind: "party.kicked", code: party.code });
+          return send(res, 200, { party: await partyView(party) });
+        }
+        if (p === "/party/leader" && method === "POST") {
+          const party = asLeader();
+          const target = await other("name", "target");
+          if (!party.members.has(target.characterId)) throw new HttpError(400, `${target.name} is not in your party`);
+          party.leader = target.characterId;
+          tellParty(party, { kind: "party.leader", characterId: target.characterId, name: target.name });
+          return send(res, 200, { party: await partyView(party) });
+        }
+        // -- friends (durable) --
+        if (p === "/social" && method === "GET") {
+          const mine = socialOf(await social.load(account.id), me.characterId);
+          const withPresence = (list: FriendRef[]) => list.map((f) => ({ characterId: f.characterId, name: f.name, ...presenceOf(f.characterId) }));
+          return send(res, 200, {
+            friends: withPresence(mine.friends),
+            incoming: mine.incoming.map((f) => ({ characterId: f.characterId, name: f.name })),
+            outgoing: mine.outgoing.map((f) => ({ characterId: f.characterId, name: f.name })),
+            party: await partyView(partyOf.get(me.characterId)),
+            invites: (invites.get(me.characterId) ?? []).map((i) => ({ code: i.code, from: i.from.characterId, name: i.from.name })),
+          });
+        }
+        if (p === "/social/friend/request" && method === "POST") {
+          const target = await other("name", "characterId2", "friend");
+          const outcome = await social.request(me, target);
+          if (outcome === "sent") notify(target.characterId, { kind: "friend.request", characterId: me.characterId, name: me.name });
+          if (outcome === "accepted") notify(target.characterId, { kind: "friend.accepted", characterId: me.characterId, name: me.name });
+          return send(res, 200, { outcome, name: target.name });
+        }
+        if (p === "/social/friend/accept" && method === "POST") {
+          const mine = socialOf(await social.load(account.id), me.characterId);
+          const from = str("name") || str("from") ? await other("name", "from") : mine.incoming[mine.incoming.length - 1];
+          if (!from || !mine.incoming.some((f) => f.characterId === from.characterId)) throw new HttpError(404, "no such friend request");
+          await social.accept(me, from);
+          notify(from.characterId, { kind: "friend.accepted", characterId: me.characterId, name: me.name });
+          return send(res, 200, { friend: from.name });
+        }
+        if (p === "/social/friend/decline" && method === "POST") {
+          const mine = socialOf(await social.load(account.id), me.characterId);
+          const from = str("name") || str("from") ? await other("name", "from") : mine.incoming[mine.incoming.length - 1];
+          if (!from) throw new HttpError(404, "no such friend request");
+          await social.decline(me, from);
+          return send(res, 200, { declined: from.name });
+        }
+        if (p === "/social/friend/remove" && method === "POST") {
+          const friend = await other("name", "friend");
+          await social.remove(me, friend);
+          notify(friend.characterId, { kind: "friend.removed", characterId: me.characterId, name: me.name });
+          return send(res, 200, { removed: friend.name });
+        }
+        if (p === "/social/travel" && method === "POST") {
+          // go where a friend is: the layer they stand on, if it has room and is not an instance
+          const friend = await other("name", "friend");
+          const mine = socialOf(await social.load(account.id), me.characterId);
+          if (!mine.friends.some((f) => f.characterId === friend.characterId)) throw new HttpError(403, `${friend.name} is not your friend`);
+          const where = presenceOf(friend.characterId);
+          if (!where.server) throw new HttpError(400, `${friend.name} is not online`);
+          const dest = registry.servers.get(where.server);
+          if (!dest || dest.kind !== "layer") throw new HttpError(400, `${friend.name} is somewhere you cannot follow`);
+          if (registry.whereIs.get(me.characterId) === dest.id) return send(res, 200, { moved: false, server: dest.id, reason: "already there" });
+          if (registry.free(dest) <= 0) throw new HttpError(400, "no room where they are");
+          return send(res, 200, { moved: moveCharacter(me.characterId, dest, "friend"), server: dest.id });
+        }
+      } catch (error) {
+        if (error instanceof SocialError) throw new HttpError(error.status, error.message);
+        throw error;
       }
-      throw new HttpError(404, "no such party route");
+      throw new HttpError(404, "no such party or social route");
     }
 
     if (p.startsWith("/admin/")) {

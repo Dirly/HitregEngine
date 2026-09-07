@@ -93,6 +93,11 @@ export class GatewayClient {
     }
   }
 
+  /** Any signed-in call on main (the social panel's friends/party routes): GET without a body, POST with one. */
+  api<T = unknown>(path: string, body?: unknown): Promise<T> {
+    return this.call<T>(path, body);
+  }
+
   async register(name: string, password: string): Promise<GatewaySession> {
     const s = await this.call<GatewaySession>("/auth/register", { name, password });
     this.remember(s);

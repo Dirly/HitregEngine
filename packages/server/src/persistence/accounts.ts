@@ -40,6 +40,22 @@ export interface AccountStore {
   create(record: AccountRecord): Promise<"ok" | "taken">;
   /** Replace the whole record (characters changed). */
   update(record: AccountRecord): Promise<void>;
+  /** A character by NAME (case-insensitive) with its account — "/friend <name>", "/invite <name>". */
+  findCharacter(name: string): Promise<CharacterMatch | null>;
+  /** A character by id with its account — the owner of a friend, the name of a party member. */
+  findCharacterById(id: string): Promise<CharacterMatch | null>;
+}
+
+export interface CharacterMatch {
+  account: AccountRecord;
+  character: CharacterRecord;
+}
+
+/** The match inside one record, or null. */
+export function matchCharacter(record: AccountRecord, by: { name?: string; id?: string }): CharacterMatch | null {
+  const lower = by.name?.toLowerCase();
+  const character = record.characters.find((c) => (by.id !== undefined && c.id === by.id) || (lower !== undefined && c.name.toLowerCase() === lower));
+  return character ? { account: record, character } : null;
 }
 
 export const ACCOUNT_NAME = /^[A-Za-z0-9_][A-Za-z0-9_ -]{1,22}[A-Za-z0-9_]$/;
@@ -82,5 +98,19 @@ export class MemoryAccountStore implements AccountStore {
   update(record: AccountRecord): Promise<void> {
     this.byId.set(record.id, structuredClone(record));
     return Promise.resolve();
+  }
+  findCharacter(name: string): Promise<CharacterMatch | null> {
+    for (const r of this.byId.values()) {
+      const m = matchCharacter(r, { name });
+      if (m) return Promise.resolve(structuredClone(m));
+    }
+    return Promise.resolve(null);
+  }
+  findCharacterById(id: string): Promise<CharacterMatch | null> {
+    for (const r of this.byId.values()) {
+      const m = matchCharacter(r, { id });
+      if (m) return Promise.resolve(structuredClone(m));
+    }
+    return Promise.resolve(null);
   }
 }

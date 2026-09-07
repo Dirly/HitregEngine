@@ -16,7 +16,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { PlayerDataBackend, PlayerDataRecord, PlayerDataScope } from "@hitreg/core";
-import type { AccountRecord, AccountStore } from "./accounts.js";
+import { matchCharacter, type AccountRecord, type AccountStore, type CharacterMatch } from "./accounts.js";
 
 const SAFE = /^[A-Za-z0-9_.-]{1,64}$/;
 
@@ -109,5 +109,23 @@ export class FileAccountStore implements AccountStore {
     return this.locks.run(file, () => {
       writeJsonAtomic(file, record);
     });
+  }
+  /** Scan every account file — hobby scale; an index would be a premature file to keep in sync. */
+  private scan(by: { name?: string; id?: string }): CharacterMatch | null {
+    const dir = path.join(this.dir, "accounts");
+    if (!fs.existsSync(dir)) return null;
+    for (const entry of fs.readdirSync(dir)) {
+      if (!entry.endsWith(".json")) continue;
+      const record = readJson<AccountRecord>(path.join(dir, entry));
+      const m = record ? matchCharacter(record, by) : null;
+      if (m) return m;
+    }
+    return null;
+  }
+  findCharacter(name: string): Promise<CharacterMatch | null> {
+    return Promise.resolve(this.scan({ name }));
+  }
+  findCharacterById(id: string): Promise<CharacterMatch | null> {
+    return Promise.resolve(this.scan({ id }));
   }
 }

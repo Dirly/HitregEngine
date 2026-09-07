@@ -16,6 +16,7 @@ import {
   parseClusterMessage,
   type BridgedChatLine,
   type HostedZones,
+  type SocialEvent,
   type LayerRpc,
   type LayerToMain,
   type MainToLayer,
@@ -72,6 +73,7 @@ export class ClusterLink {
     link: new Set<(up: boolean) => void>(),
     chat: new Set<(line: BridgedChatLine, origin: string) => void>(),
     party: new Set<(characterId: string, party: string | null) => void>(),
+    social: new Set<(characterId: string, event: SocialEvent) => void>(),
   };
   private firstRegistration: { resolve: (r: Registered) => void; reject: (e: Error) => void } | null = null;
 
@@ -190,6 +192,9 @@ export class ClusterLink {
       case "party":
         for (const cb of this.handlers.party) cb(msg.characterId, msg.party);
         return;
+      case "social":
+        for (const cb of this.handlers.social) cb(msg.characterId, msg.event);
+        return;
     }
   }
 
@@ -231,6 +236,12 @@ export class ClusterLink {
   onParty(cb: (characterId: string, party: string | null) => void): () => void {
     this.handlers.party.add(cb);
     return () => this.handlers.party.delete(cb);
+  }
+
+  /** A friends/party event for a character standing here — deliver it to their client. */
+  onSocial(cb: (characterId: string, event: SocialEvent) => void): () => void {
+    this.handlers.social.add(cb);
+    return () => this.handlers.social.delete(cb);
   }
 
   rpc<T = unknown>(call: LayerRpc): Promise<T> {

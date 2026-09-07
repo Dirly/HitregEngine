@@ -135,7 +135,54 @@ export type MainToLayer =
   /** A chat line another layer delivered: deliver it here to whoever may hear it (zone / party / everyone). */
   | { t: "chat"; line: BridgedChatLine; origin: string }
   /** This character's party changed (or they just arrived here): write `comms.party/<characterId>` so party chat routes. Main owns parties. */
-  | { t: "party"; characterId: string; party: string | null };
+  | { t: "party"; characterId: string; party: string | null }
+  /** Something happened to this character's friends or party: hand it to their client (a module message + a chat line). */
+  | { t: "social"; characterId: string; event: SocialEvent };
+
+/** Module id the layer delivers social events on to the client (`sendModule(peerId, SOCIAL_MODULE, event)`). */
+export const SOCIAL_MODULE = "social";
+
+/**
+ * What main tells a player about their friends and party, through the
+ * layer they stand on (docs/hosting.md → "Parties and friends"). Every one
+ * is also a chat line (`socialLine`); the module message is for a UI.
+ */
+export type SocialEvent =
+  | { kind: "friend.request"; characterId: string; name: string }
+  | { kind: "friend.accepted"; characterId: string; name: string }
+  | { kind: "friend.removed"; characterId: string; name: string }
+  | { kind: "friend.online" | "friend.offline"; characterId: string; name: string; zone: string | null }
+  | { kind: "party.invite"; code: string; characterId: string; name: string }
+  | { kind: "party.declined"; characterId: string; name: string }
+  | { kind: "party.joined" | "party.left" | "party.leader"; characterId: string; name: string }
+  | { kind: "party.kicked"; code: string };
+
+export function socialLine(e: SocialEvent): string {
+  switch (e.kind) {
+    case "friend.request":
+      return `${e.name} wants to be your friend — /accept or /decline.`;
+    case "friend.accepted":
+      return `${e.name} is now your friend.`;
+    case "friend.removed":
+      return `${e.name} removed you as a friend.`;
+    case "friend.online":
+      return `${e.name} is online${e.zone ? ` in ${e.zone}` : ""}.`;
+    case "friend.offline":
+      return `${e.name} went offline.`;
+    case "party.invite":
+      return `${e.name} invited you to their party — /accept or /decline.`;
+    case "party.declined":
+      return `${e.name} declined your party invitation.`;
+    case "party.joined":
+      return `${e.name} joined the party.`;
+    case "party.left":
+      return `${e.name} left the party.`;
+    case "party.leader":
+      return `${e.name} is now the party leader.`;
+    case "party.kicked":
+      return "You were removed from the party.";
+  }
+}
 
 export function parseClusterMessage<T>(raw: unknown): T | null {
   if (typeof raw !== "string") return null;

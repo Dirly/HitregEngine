@@ -160,6 +160,62 @@ for OTHER players.
 `GET /admin/status` on main reports `zones` (population and cap per zone)
 and each server's `hosted` set and per-zone counts.
 
+## Parties and friends
+
+Built 2026-09-07 (`packages/server/test/social.test.ts`). Main owns both;
+a layer only delivers.
+
+**Friends are durable and between characters.** A friendship lives in a
+`social` player-data record on each owning account (`main/social.ts`,
+`SocialStore`): per character, `friends`, `incoming` and `outgoing`
+requests, each a `{ characterId, name, playerId }`. Main is the only
+writer (compare-and-swap on revision, two accounts per change, retried on
+conflict); a request the other way round while one is pending is an
+acceptance. Characters are found by NAME, case-insensitively
+(`AccountStore.findCharacter`), so "/friend finn" works.
+
+**Parties are session state.** Same `Party` as before (a code, a leader, up
+to eight members), now with invitations: the leader invites by name, the
+invitee accepts (and is pulled onto the leader's layer when there is room,
+as a code join always was) or declines; the leader can kick and hand over;
+the leadership moves when the leader leaves; the party dissolves when
+empty. Main pushes each member's party into their layer's netState so
+party chat routes (→ "Chat").
+
+**Every event reaches the player through their layer.** Main sends
+`{ t: "social", characterId, event }` to the layer the character stands
+on; the layer sends the event to that client on the `social` module and
+says it in chat (`socialLine`): a friend request, an acceptance, a
+removal, a friend coming online or going offline (with their zone), an
+invitation, a decline, a member joining or leaving, a kick, a new leader.
+Offline players get nothing; their lists catch up on the next read. A
+transfer is not a departure — no offline/online pair for a border crossing.
+
+**The client** (playground, gateway mode): **O** opens the social panel
+(party with leader star, presence and zone per member, invitations,
+friends with online/zone, requests in and out; buttons for every action)
+and chat takes `/friend <name>`, `/unfriend <name>`, `/invite <name>`,
+`/accept`, `/decline` (a party invitation first, else the latest friend
+request), `/kick <name>`, `/leader <name>`, `/leave`, `/travel <name>`
+(go to a friend's layer if it has room and is not an instance), `/social`.
+
+| call (bearer = the session; `characterId` = your character) | does |
+| --- | --- |
+| `GET /social?characterId=` | friends with presence (online, server, zone), requests in/out, party, invitations |
+| `POST /social/friend/request { characterId, name }` | ask; outcome `sent` / `accepted` / `already-friends` / `already-sent` / `full` |
+| `POST /social/friend/accept` / `decline` `{ characterId, name? }` | answer a request (the latest when no name) |
+| `POST /social/friend/remove { characterId, name }` | both sides forget |
+| `POST /social/travel { characterId, name }` | move to the layer a friend stands on |
+| `GET /party?characterId=` | the party with names and presence, plus invitations waiting |
+| `POST /party/create` · `/party/join { code }` · `/party/leave` | as before |
+| `POST /party/invite { characterId, name }` | leader invites (creates the party if none) |
+| `POST /party/accept` / `decline` `{ characterId, code? }` | answer an invitation (the latest when no code) |
+| `POST /party/kick` / `leader` `{ characterId, name }` | leader only |
+
+Not here: cross-account block lists, a "recent players" list, friend
+notes, guilds. Friends are per character on purpose (peer id = character
+id everywhere); an account-wide list can sit on top later.
+
 ## Layers cost what their players cost
 
 A whole-world layer is only affordable because the population is
@@ -285,6 +341,8 @@ engine may still choose peer rooms.
 ## What is deliberately not here yet
 
 - A spawn-area/zone-edge audit in `worldgen audit`.
+- Block lists, guilds, an account-wide friend list (friends are per
+  character today — "Parties and friends").
 - Pre-spawning the body on the destination before the client dials it
   (today a transfer is one round trip of nothing; with prediction it is
   invisible on a LAN and a short hitch on a bad link). The destination is

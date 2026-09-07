@@ -302,7 +302,13 @@ The primary AI channel is **direct file editing** — no MCP required:
   place otherwise, so a layer costs what its players cost. Admin on main:
   `curl -s -H "Authorization: Bearer <secret>" http://127.0.0.1:8780/admin/status`
   (`/admin/transfer`, `/admin/instance`, `/admin/scale`, `/admin/drain`,
-  `/admin/terraform`, `/admin/recipe`). One-box deploy: `deploy/`.
+  `/admin/terraform`, `/admin/recipe`). **Parties and friends** live on
+  main too (`/social/*`, `/party/invite|accept|decline|kick|leader`): friends
+  are durable per character (a `social` player-data record), parties are
+  session state with invitations, and every event reaches the player as a
+  `social` module message plus a chat line through their layer; the
+  playground's O panel and `/friend`, `/invite`, `/accept`, `/travel`
+  commands are the client. One-box deploy: `deploy/`.
   **docs/hosting.md** before touching placement, tickets, saves or transfers.
 - **Tools are plugins, games are repos.** `tools/` is an install directory:
   each tool is its own git repo cloned in, and only the first-party three

@@ -125,7 +125,11 @@ speaker's layer, then up the
 cluster link; main fans it to every other layer, and each delivers it to its
 own players in that zone (`ChatService.deliverForeign`, `foreignRecipients`).
 Everyone in the valley talks, whichever copy of the valley they are on.
-Global and party ride the same bridge: a bridged line carries a `BridgeScope`
+On a cluster the playground's chat also takes the social commands —
+`/friend`, `/unfriend`, `/invite`, `/accept`, `/decline`, `/kick`,
+`/leader`, `/leave`, `/travel`, `/social` — through the UI's `onCommand`
+hook; they are REST calls on main, not chat (docs/hosting.md → "Parties and
+friends"). Global and party ride the same bridge: a bridged line carries a `BridgeScope`
 (the sender's zone and party); for party lines main replaces the party with
 the one from its own list and pushes each member's `comms.party/<id>` into
 their layer, so `foreignRecipients` on the receiving layer delivers to the

@@ -12,7 +12,7 @@
 
 import pg from "pg";
 import type { PlayerDataBackend, PlayerDataRecord, PlayerDataScope } from "@hitreg/core";
-import type { AccountRecord, AccountStore } from "./accounts.js";
+import { matchCharacter, type CharacterMatch, type AccountRecord, AccountStore } from "./accounts.js";
 
 export class PostgresStore {
   readonly pool: pg.Pool;
@@ -112,5 +112,21 @@ class PostgresAccountStore implements AccountStore {
   async update(record: AccountRecord): Promise<void> {
     await this.db.migrate();
     await this.db.pool.query("UPDATE hitreg_accounts SET record=$2, updated_at=now() WHERE id=$1", [record.id, JSON.stringify(record)]);
+  }
+  async findCharacter(name: string): Promise<CharacterMatch | null> {
+    await this.db.migrate();
+    const r = await this.db.pool.query<{ record: AccountRecord }>(
+      "SELECT record FROM hitreg_accounts WHERE EXISTS (SELECT 1 FROM jsonb_array_elements(record->'characters') c WHERE lower(c->>'name') = $1) LIMIT 1",
+      [name.toLowerCase()],
+    );
+    return r.rows[0] ? matchCharacter(r.rows[0].record, { name }) : null;
+  }
+  async findCharacterById(id: string): Promise<CharacterMatch | null> {
+    await this.db.migrate();
+    const r = await this.db.pool.query<{ record: AccountRecord }>(
+      "SELECT record FROM hitreg_accounts WHERE EXISTS (SELECT 1 FROM jsonb_array_elements(record->'characters') c WHERE c->>'id' = $1) LIMIT 1",
+      [id],
+    );
+    return r.rows[0] ? matchCharacter(r.rows[0].record, { id }) : null;
   }
 }

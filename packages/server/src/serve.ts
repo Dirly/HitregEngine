@@ -41,7 +41,7 @@ import { handleAdmin } from "./admin.js";
 import { ClusterLink } from "./cluster/link.js";
 import { PlayerStore } from "./cluster/player-store.js";
 import { verifyTicket } from "./cluster/ticket.js";
-import type { ServerKind } from "./cluster/protocol.js";
+import { SOCIAL_MODULE, socialLine, type ServerKind } from "./cluster/protocol.js";
 
 export interface ServeOptions {
   /** Playground checkout whose projects/ supply the content. */
@@ -406,6 +406,13 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
     const key = `comms.party/${characterId}`;
     if (party === null) world.netState.delete(key);
     else if (!world.netState.set(key, party)) log(`[serve] party "${party}" for ${characterId} refused by netState`);
+  });
+  // friends and party events: main decides, the layer the player stands on
+  // delivers — a module message for the social panel, a chat line for everyone
+  link?.onSocial((characterId, event) => {
+    if (!server.players.has(characterId)) return;
+    server.host.sendModule(characterId, SOCIAL_MODULE, event);
+    chat.chat.announceTo(characterId, socialLine(event));
   });
   {
     const warnings = spawnAreas.borderWarnings(regions, zoneBand);

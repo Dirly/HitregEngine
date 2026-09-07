@@ -140,6 +140,7 @@ import {
   type CommsLink,
 } from "@hitreg/comms";
 import { mountCommsUI } from "@hitreg/comms/ui";
+import { mountSocialPanel, type SocialPanel } from "./social.js";
 import { loadAssets } from "./asset-loader.js";
 import { saveAsset, clientLog } from "./dev-log.js";
 import { applyBodyState } from "./physics-sync.js";
@@ -2310,18 +2311,35 @@ async function main(): Promise<void> {
     if (session?.role === "peer" && netServerUrl) session.client.onModule("world", onWorldModule);
   });
   // gateway mode: sign in, pick a character, and Play dials the layer main chose
+  let socialPanel: SocialPanel | null = null;
   if (netGateway) {
     const gatewayClient = new GatewayClient(netGateway);
+    let playing: { id: string; name: string } | null = null;
     gatewayPanel = mountGatewayPanel({
       client: gatewayClient,
       onPlay: (grant, character) => {
         netGrant = grant;
+        playing = { id: character.id, name: character.name };
         console.log(`[net] gateway placed ${character.name} on ${grant.server} (${grant.url})`);
         netPresence?.rehome(grant.url, grant.ticket);
         if (playMode.get() !== "playing") playMode.set("playing");
+        void socialPanel?.refresh();
       },
     });
-    (window as unknown as { __hitregGateway?: unknown }).__hitregGateway = { client: gatewayClient, panel: gatewayPanel, grant: () => netGrant };
+    // friends and party: main's facts, the layer's events, one panel (O) and the slash commands
+    socialPanel = mountSocialPanel({
+      client: gatewayClient,
+      character: () => playing,
+      say: (text) => comms?.chat.system(text),
+      zoneName: (id) => {
+        const field = activeVoxelWorld ? getVoxelWorld(activeVoxelWorld) : null;
+        return field?.recipe.regions.find((r) => r.id === id)?.name ?? id;
+      },
+    });
+    netPresence.onSession((session) => {
+      if (session?.role === "peer" && netServerUrl) session.client.onModule("social", (event) => socialPanel?.handleEvent(event as { kind: string }));
+    });
+    (window as unknown as { __hitregGateway?: unknown }).__hitregGateway = { client: gatewayClient, panel: gatewayPanel, social: socialPanel, grant: () => netGrant };
   }
 
   // -- comms: text chat + VoIP (@hitreg/comms), riding the room's module channel --
@@ -2401,9 +2419,13 @@ async function main(): Promise<void> {
       );
     }
   });
-  mountCommsUI({ chat: comms.chat, voice: comms.voice }); // bottom-left overlay; Enter opens
+  mountCommsUI({ chat: comms.chat, voice: comms.voice, onCommand: (name, args) => socialPanel?.command(name, args) ?? false }); // bottom-left overlay; Enter opens
   comms.voice.attachKeyboard(window); // V = say, B = team, N = party (push-to-talk)
-  comms.chat.system("Enter: chat · /s /z /g /t /p pick a channel · /team x · /party x · mic button for voice");
+  comms.chat.system(
+    socialPanel
+      ? "Enter: chat · /s /z /g /t /p pick a channel · O: friends & party · /friend /invite /accept /decline /travel <name> · mic button for voice"
+      : "Enter: chat · /s /z /g /t /p pick a channel · /team x · /party x · mic button for voice",
+  );
   // "unpack model parts": each named sub-object of a loaded kit becomes a child
   // entity referencing that node; the original keeps only the group transform
   function unpackModel(id: string): void {
@@ -2541,6 +2563,10 @@ async function main(): Promise<void> {
       return;
     if (e.code === "KeyM" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
       worldMap.toggle();
+      return;
+    }
+    if (e.code === "KeyO" && socialPanel && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+      socialPanel.toggle();
       return;
     }
     if (e.code === "Backquote") {
