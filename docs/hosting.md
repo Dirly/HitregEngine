@@ -206,7 +206,7 @@ transfer is not a departure — no offline/online pair for a border crossing.
 
 **Guilds are durable and per character** (`main/guilds.ts`, `GuildStore`):
 a record per guild in the same player-data store under a synthetic scope
-(`guild:<id>`), a name index (`guilds`/`index`) that keeps names unique
+(player id = the guild id, `gld-…`), a name index (`guilds-index`/`index`) that keeps names unique
 under compare-and-swap, and each member's own social record carrying the
 membership so login finds it. Ranks: one leader; officers invite, kick
 members and set the message of the day; the leader promotes, demotes,

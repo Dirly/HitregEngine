@@ -7,8 +7,8 @@ import { SocialError, type FriendRef, type SocialStore } from "./social.js";
  *
  * A guild is a CHARACTER's (like a party; an account can be in several
  * guilds through its characters). It lives in the player-data backend
- * under a synthetic scope — player id `guild:<id>` — with a name index at
- * `guilds` / `index`, so the same compare-and-swap store main already
+ * under a synthetic scope — player id = the guild id (`gld-…`) — with a name
+ * index at `guilds-index` / `index`, so the same compare-and-swap store main already
  * owns keeps guild names unique and every write atomic. A member's own
  * social record carries the membership (`guilds[characterId]`) so login
  * finds it without a scan.
@@ -42,7 +42,7 @@ export interface GuildRecord {
 export const GUILD_NAME = /^[A-Za-z][A-Za-z' -]{2,30}[A-Za-z]$/;
 export const MAX_GUILD_MEMBERS = 200;
 export const GUILD_NAMESPACE = "guild";
-const INDEX_SCOPE_ID = "guilds";
+const INDEX_SCOPE_ID = "guilds-index";
 const INDEX_NAMESPACE = "index";
 
 interface GuildIndex {
@@ -60,7 +60,8 @@ export class GuildStore {
   ) {}
 
   private scope(id: string) {
-    return { playerId: `guild:${id}`, experienceId: this.experienceId };
+    // the id itself ("gld-…"): a file-backed store rejects a colon in a scope id
+    return { playerId: id, experienceId: this.experienceId };
   }
 
   async load(id: string): Promise<GuildRecord | null> {
