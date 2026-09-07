@@ -75,6 +75,7 @@ export class ClusterLink {
     party: new Set<(characterId: string, party: string | null) => void>(),
     social: new Set<(characterId: string, event: SocialEvent) => void>(),
     blocks: new Set<(characterId: string, blocked: string[]) => void>(),
+    guild: new Set<(characterId: string, guild: string | null) => void>(),
   };
   private firstRegistration: { resolve: (r: Registered) => void; reject: (e: Error) => void } | null = null;
 
@@ -199,6 +200,9 @@ export class ClusterLink {
       case "blocks":
         for (const cb of this.handlers.blocks) cb(msg.characterId, msg.blocked);
         return;
+      case "guild":
+        for (const cb of this.handlers.guild) cb(msg.characterId, msg.guild);
+        return;
     }
   }
 
@@ -252,6 +256,12 @@ export class ClusterLink {
   onBlocks(cb: (characterId: string, blocked: string[]) => void): () => void {
     this.handlers.blocks.add(cb);
     return () => this.handlers.blocks.delete(cb);
+  }
+
+  /** Main says which guild a character on this layer is in (null = none). */
+  onGuild(cb: (characterId: string, guild: string | null) => void): () => void {
+    this.handlers.guild.add(cb);
+    return () => this.handlers.guild.delete(cb);
   }
 
   rpc<T = unknown>(call: LayerRpc): Promise<T> {

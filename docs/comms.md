@@ -1,7 +1,7 @@
 # Comms — text chat and VoIP (`@hitreg/comms`)
 
 A drop-in module for player communication: **text chat on five channels —
-proximity, zone, global, team, party — and voice on all but zone** — that
+proximity, zone, global, team, party, guild — and voice on all but zone and guild** — that
 plugs into any game built on the engine's room protocol. Headless core with tests; the
 browser parts (mic, WebRTC, WebAudio, the default overlay) are opt-in.
 

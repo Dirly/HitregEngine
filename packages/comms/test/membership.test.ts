@@ -40,7 +40,7 @@ describe("netState membership", () => {
   it("exposes the namespaces in the spec", () => {
     const store = new NetStateStore();
     registerCommsNetState(store);
-    expect(Object.keys(store.jsonSchemas()).sort()).toEqual(["comms.party", "comms.team"]);
+    expect(Object.keys(store.jsonSchemas()).sort()).toEqual(["comms.guild", "comms.party", "comms.team"]);
   });
 
   it("isValidGroupName", () => {

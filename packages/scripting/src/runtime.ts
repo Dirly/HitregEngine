@@ -145,7 +145,7 @@ export interface RuntimeVfxHost {
 
 /** What the runtime needs from a chat implementation (see ScriptChat for the script-facing shape). */
 export interface ScriptChatHost {
-  send(channel: "proximity" | "zone" | "global" | "team" | "party", text: string): { ok: boolean };
+  send(channel: "proximity" | "zone" | "global" | "team" | "party" | "guild", text: string): { ok: boolean };
   announce(text: string): void;
   system(text: string): void;
   onMessage(cb: (msg: ScriptChatMessage) => void): () => void;

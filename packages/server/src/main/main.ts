@@ -28,6 +28,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { regionAt, type PlayerDataBackend, type RegionDoc, type WorldRecipe } from "@hitreg/core";
 import { ServerRegistry, type ServerEntry } from "./registry.js";
 import { SocialError, SocialStore, isBlocked, type FriendRef } from "./social.js";
+import { GuildStore, rankAbove, type GuildRank, type GuildRecord } from "./guilds.js";
 import type { Supervisor } from "./supervisor.js";
 import { signSession, signTicket, verifySession } from "../cluster/ticket.js";
 import {
@@ -381,6 +382,32 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
     const zone = presenceOf(characterId).zone;
     for (const f of mine.friends) notifyAccount(f.playerId, { kind: online ? "friend.online" : "friend.offline", characterId, name: me.characterName, zone });
   };
+  // -- guilds: durable on the same store; membership mirrored in memory for chat routing and lookups
+  const guilds = new GuildStore(opts.playerData, opts.experienceId, social);
+  const guildOf = new Map<string, { id: string; name: string }>();
+  const guildInvites = new Map<string, Array<{ guild: string; guildName: string; from: FriendRef; at: number }>>();
+  /** Tell a character's layer which guild they are in, so guild chat routes there. */
+  const pushGuild = (characterId: string, srv = registry.whereIs.get(characterId)): void => {
+    if (srv) sendTo(srv, { t: "guild", characterId, guild: guildOf.get(characterId)?.id ?? null });
+  };
+  const setGuildOf = (characterId: string, guild: { id: string; name: string } | null): void => {
+    if (guild) guildOf.set(characterId, guild);
+    else guildOf.delete(characterId);
+    pushGuild(characterId);
+  };
+  /** On arrival: the character's own record says which guild they are in. */
+  const loadGuildOf = async (characterId: string, srv: string): Promise<void> => {
+    const owner = owners.get(characterId);
+    if (!owner) return;
+    const mine = await social.load(owner.playerId);
+    const g = mine.guilds?.[characterId];
+    if (g) guildOf.set(characterId, { id: g.id, name: g.name });
+    else guildOf.delete(characterId);
+    pushGuild(characterId, srv);
+  };
+  const tellGuild = (g: GuildRecord, event: SocialEvent, except?: string): void => {
+    for (const m of Object.values(g.members)) if (m.characterId !== except) notify(m.characterId, event);
+  };
   const partyView = async (party: Party | undefined): Promise<unknown> =>
     party
       ? {
@@ -609,6 +636,7 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
         registry.joined(id, msg.player);
         pushParty(msg.player.characterId, id);
         void pushBlocks(msg.player.characterId, id).catch(() => undefined);
+        void loadGuildOf(msg.player.characterId, id).catch(() => undefined);
         void announcePresence(msg.player.characterId, true).catch((error: unknown) => log(`[main] presence: ${error instanceof Error ? error.message : String(error)}`));
         return;
       case "player.left":
@@ -623,8 +651,14 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
         // zone/global/party lines cross layers: every other copy of the world
         // hears what this one said (the origin already delivered it locally).
         // A party line carries the party MAIN knows, never the layer's guess.
-        const line = msg.line.channel === "party" ? { ...msg.line, party: partyOf.get(msg.line.from)?.code ?? null } : msg.line;
+        const line =
+          msg.line.channel === "party"
+            ? { ...msg.line, party: partyOf.get(msg.line.from)?.code ?? null }
+            : msg.line.channel === "guild"
+              ? { ...msg.line, guild: guildOf.get(msg.line.from)?.id ?? null }
+              : msg.line;
         if (line.channel === "party" && line.party === null) return;
+        if (line.channel === "guild" && line.guild === null) return;
         for (const other of sockets.keys()) if (other !== id) sendTo(other, { t: "chat", line, origin: id });
         return;
       }
@@ -741,7 +775,7 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
       const ticket = signTicket(opts.secret, { sub: account.id, chr: character.id, name: character.name, srv: server.id, reason: "join", ttlSeconds: ticketTtl });
       return send(res, 200, { url: server.url, ticket, server: server.id, scene: server.scene });
     }
-    if (p.startsWith("/party") || p.startsWith("/social")) {
+    if (p.startsWith("/party") || p.startsWith("/social") || p.startsWith("/guild")) {
       const account = await requireAccount(req);
       const body = method === "POST" ? ((await readJson(req)) as Record<string, unknown> | null) : null;
       const characterId = method === "POST" ? body?.["characterId"] : url.searchParams.get("characterId");
@@ -873,6 +907,129 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
           tellParty(party, { kind: "party.leader", characterId: target.characterId, name: target.characterName });
           return send(res, 200, { party: await partyView(party) });
         }
+        // -- guilds (durable, per character) --
+        const guildView = async (g: GuildRecord): Promise<unknown> => ({
+          id: g.id,
+          name: g.name,
+          leader: g.leader,
+          motd: g.motd,
+          members: Object.values(g.members)
+            .sort((a, b) => (a.rank === b.rank ? a.name.localeCompare(b.name) : a.rank === "leader" ? -1 : b.rank === "leader" ? 1 : a.rank === "officer" ? -1 : 1))
+            .map((m) => ({ characterId: m.characterId, name: m.name, rank: m.rank, joinedAt: m.joinedAt, ...presenceOf(m.characterId) })),
+        });
+        const myGuild = async (): Promise<GuildRecord> => {
+          const membership = guildOf.get(me.characterId);
+          const g = membership ? await guilds.load(membership.id) : null;
+          if (!g || !g.members[me.characterId]) {
+            guildOf.delete(me.characterId);
+            throw new HttpError(400, "you are not in a guild");
+          }
+          return g;
+        };
+        const myRank = (g: GuildRecord): GuildRank => g.members[me.characterId]?.rank ?? "member";
+        const asOfficer = async (): Promise<GuildRecord> => {
+          const g = await myGuild();
+          if (myRank(g) === "member") throw new HttpError(403, "officers and the leader can do that");
+          return g;
+        };
+        const asGuildLeader = async (): Promise<GuildRecord> => {
+          const g = await myGuild();
+          if (g.leader !== me.characterId) throw new HttpError(403, "only the guild leader can do that");
+          return g;
+        };
+        if (p === "/guild" && method === "GET") {
+          const membership = guildOf.get(me.characterId);
+          const g = membership ? await guilds.load(membership.id) : null;
+          return send(res, 200, { guild: g && g.members[me.characterId] ? await guildView(g) : null, invites: (guildInvites.get(me.characterId) ?? []).map((i) => ({ guild: i.guild, name: i.guildName, from: i.from.characterName })) });
+        }
+        if (p === "/guild/create" && method === "POST") {
+          if (guildOf.has(me.characterId)) throw new HttpError(400, "leave your guild first");
+          const g = await guilds.create(str("name"), me);
+          setGuildOf(me.characterId, { id: g.id, name: g.name });
+          return send(res, 200, { guild: await guildView(g) });
+        }
+        if (p === "/guild/invite" && method === "POST") {
+          const g = await asOfficer();
+          const target = await other("name", "target");
+          if (g.members[target.characterId]) throw new HttpError(400, `${target.characterName} is already in the guild`);
+          if (guildOf.has(target.characterId)) throw new HttpError(400, `${target.characterName} is in another guild`);
+          if (!(await reachable(target))) throw new HttpError(400, `${target.characterName} cannot be invited`);
+          const list = guildInvites.get(target.characterId) ?? [];
+          if (!list.some((i) => i.guild === g.id)) list.push({ guild: g.id, guildName: g.name, from: me, at: Date.now() });
+          guildInvites.set(target.characterId, list.slice(-8));
+          notify(target.characterId, { kind: "guild.invite", guild: g.id, guildName: g.name, characterId: me.characterId, name: me.characterName });
+          return send(res, 200, { invited: target.characterName, online: presenceOf(target.characterId).online });
+        }
+        if ((p === "/guild/accept" || p === "/guild/decline") && method === "POST") {
+          const list = guildInvites.get(me.characterId) ?? [];
+          const wanted = str("guild") || str("name");
+          const invite = wanted ? list.find((i) => i.guild === wanted || i.guildName.toLowerCase() === wanted.toLowerCase()) : list[list.length - 1];
+          if (!invite) throw new HttpError(404, "no guild invitation waiting");
+          guildInvites.set(me.characterId, list.filter((i) => i !== invite));
+          if (p === "/guild/decline") {
+            notify(invite.from.characterId, { kind: "guild.declined", guild: invite.guild, guildName: invite.guildName, characterId: me.characterId, name: me.characterName });
+            return send(res, 200, { declined: invite.guildName });
+          }
+          if (guildOf.has(me.characterId)) throw new HttpError(400, "leave your guild first");
+          const g = await guilds.addMember(invite.guild, me);
+          setGuildOf(me.characterId, { id: g.id, name: g.name });
+          tellGuild(g, { kind: "guild.joined", guild: g.id, guildName: g.name, characterId: me.characterId, name: me.characterName }, me.characterId);
+          return send(res, 200, { guild: await guildView(g) });
+        }
+        if (p === "/guild/leave" && method === "POST") {
+          const g = await myGuild();
+          const { guild, newLeader, disbanded } = await guilds.removeMember(g.id, me.characterId);
+          setGuildOf(me.characterId, null);
+          if (!disbanded) {
+            tellGuild(guild, { kind: "guild.left", guild: g.id, guildName: g.name, characterId: me.characterId, name: me.characterName });
+            if (newLeader) tellGuild(guild, { kind: "guild.leader", guild: g.id, guildName: g.name, characterId: newLeader.characterId, name: newLeader.name });
+          }
+          return send(res, 200, { guild: null, disbanded });
+        }
+        if (p === "/guild/kick" && method === "POST") {
+          const g = await asOfficer();
+          const target = await other("name", "target");
+          const m = g.members[target.characterId];
+          if (!m || target.characterId === me.characterId) throw new HttpError(400, `${target.characterName} is not in your guild`);
+          if (!rankAbove(myRank(g), m.rank)) throw new HttpError(403, `you cannot remove ${m.name} (${m.rank})`);
+          const { guild } = await guilds.removeMember(g.id, target.characterId);
+          setGuildOf(target.characterId, null);
+          notify(target.characterId, { kind: "guild.kicked", guild: g.id, guildName: g.name, characterId: me.characterId, name: me.characterName });
+          tellGuild(guild, { kind: "guild.left", guild: g.id, guildName: g.name, characterId: target.characterId, name: m.name });
+          return send(res, 200, { guild: await guildView(guild) });
+        }
+        if ((p === "/guild/promote" || p === "/guild/demote") && method === "POST") {
+          const g = await asGuildLeader();
+          const target = await other("name", "target");
+          const m = g.members[target.characterId];
+          if (!m || m.rank === "leader") throw new HttpError(400, `${target.characterName} is not a member you can change`);
+          const rank = p === "/guild/promote" ? "officer" : "member";
+          const guild = await guilds.setRank(g.id, target.characterId, rank);
+          tellGuild(guild, { kind: rank === "officer" ? "guild.promoted" : "guild.demoted", guild: g.id, guildName: g.name, characterId: target.characterId, name: m.name });
+          return send(res, 200, { guild: await guildView(guild) });
+        }
+        if (p === "/guild/leader" && method === "POST") {
+          const g = await asGuildLeader();
+          const target = await other("name", "target");
+          const m = g.members[target.characterId];
+          if (!m || target.characterId === me.characterId) throw new HttpError(400, `${target.characterName} is not in your guild`);
+          const { guild } = await guilds.setLeader(g.id, target.characterId);
+          tellGuild(guild, { kind: "guild.leader", guild: g.id, guildName: g.name, characterId: target.characterId, name: m.name });
+          return send(res, 200, { guild: await guildView(guild) });
+        }
+        if (p === "/guild/motd" && method === "POST") {
+          const g = await asOfficer();
+          const guild = await guilds.setMotd(g.id, str("text"));
+          tellGuild(guild, { kind: "guild.motd", guild: g.id, guildName: g.name, text: guild.motd });
+          return send(res, 200, { guild: await guildView(guild) });
+        }
+        if (p === "/guild/disband" && method === "POST") {
+          const g = await asGuildLeader();
+          const guild = await guilds.disband(g.id);
+          for (const m of Object.values(guild.members)) setGuildOf(m.characterId, null);
+          tellGuild(guild, { kind: "guild.disbanded", guild: g.id, guildName: g.name });
+          return send(res, 200, { guild: null });
+        }
         // -- friends and blocks (durable, per account) --
         if (p === "/social" && method === "GET") {
           const mine = await social.load(account.id);
@@ -950,7 +1107,7 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
         if (error instanceof SocialError) throw new HttpError(error.status, error.message);
         throw error;
       }
-      throw new HttpError(404, "no such party or social route");
+      throw new HttpError(404, "no such party, social or guild route");
     }
 
     if (p.startsWith("/admin/")) {

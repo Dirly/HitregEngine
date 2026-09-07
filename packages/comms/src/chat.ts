@@ -241,6 +241,7 @@ export class ChatService {
     const ctx: RoutingContext = {
       teamOf: (id) => deps.membership.teamOf(id),
       partyOf: (id) => deps.membership.partyOf(id),
+      ...(deps.membership.guildOf ? { guildOf: (id: string) => deps.membership.guildOf!(id) } : {}),
       positionOf: (id) => deps.positionOf(id),
       ...(deps.zoneOf ? { zoneOf: (id: string) => deps.zoneOf!(id) } : {}),
     };
@@ -399,7 +400,7 @@ export class ChatService {
       else this.link.send(CHAT_MODULE, recipient, { k: "msg", msg } satisfies ChatDown);
     }
     if (this.deps.bridge && BRIDGED_CHANNELS.includes(channel)) {
-      this.deps.bridge.publish(msg, { zone: this.ctx.zoneOf?.(sender) ?? null, party: this.ctx.partyOf(sender) });
+      this.deps.bridge.publish(msg, { zone: this.ctx.zoneOf?.(sender) ?? null, party: this.ctx.partyOf(sender), guild: this.ctx.guildOf?.(sender) ?? null });
     }
     return { ok: true };
   }
@@ -486,7 +487,7 @@ export function registerCommsEvents(registry: EventRegistry): void {
     "chat.message",
     z
       .object({
-        channel: z.enum(["proximity", "zone", "global", "team", "party"]),
+        channel: z.enum(["proximity", "zone", "global", "team", "party", "guild"]),
         from: z.string().describe("Sending peer id."),
         name: z.string(),
         text: z.string(),

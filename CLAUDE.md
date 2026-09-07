@@ -306,9 +306,11 @@ The primary AI channel is **direct file editing** — no MCP required:
   main too (`/social/*`, `/party/invite|accept|decline|kick|leader`): friends
   are durable per character (a `social` player-data record), parties are
   session state with invitations, and every event reaches the player as a
-  `social` module message plus a chat line through their layer; the
-  playground's O panel and `/friend`, `/invite`, `/accept`, `/travel`
-  commands are the client. One-box deploy: `deploy/`.
+  `social` module message plus a chat line through their layer; blocks
+  (per account) silence chat on the layer; guilds (`/guild/*`, durable,
+  ranked, a `guild` chat channel bridged like party) — the playground's O
+  panel, `/friend`, `/invite`, `/accept`, `/travel`, `/guild …` and the
+  voxel-demo HUD's party frames are the client. One-box deploy: `deploy/`.
   **docs/hosting.md** before touching placement, tickets, saves or transfers.
 - **Tools are plugins, games are repos.** `tools/` is an install directory:
   each tool is its own git repo cloned in, and only the first-party three

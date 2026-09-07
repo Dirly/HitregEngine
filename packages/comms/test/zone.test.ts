@@ -29,7 +29,7 @@ describe("zone channel", () => {
   it("is a real channel with a prefix and a glyph", () => {
     expect(channelForPrefix("/z")).toBe("zone");
     expect(parseChatInput("/zone hello valley", "proximity")).toEqual({ kind: "message", channel: "zone", text: "hello valley" });
-    expect(BRIDGED_CHANNELS).toEqual(["zone", "global", "party"]);
+    expect(BRIDGED_CHANNELS).toEqual(["zone", "global", "party", "guild"]);
   });
 
   it("routes to everyone in the sender's zone and nobody outside it", () => {

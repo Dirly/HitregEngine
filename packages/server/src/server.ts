@@ -409,6 +409,7 @@ export class GameServer {
       for (const [id, doc] of Object.entries(spawned.client)) this.runtimeDocs.set(id, doc);
       this.world.netState.set(`owner/${bodyId}`, peerId);
       this.world.netState.set(`player/${peerId}`, bodyId);
+      this.world.netState.set(`name/${bodyId}`, name); // what a party frame or a nameplate shows
       // landing grace: brains leave a body that just logged in / arrived alone for a few seconds
       if (this.landingSeconds > 0) this.world.netState.set(`landing/${bodyId}`, this.world.timeMs + this.landingSeconds * 1000);
       // everyone else learns the newcomer's body; the newcomer gets the whole runtime set below
@@ -470,6 +471,7 @@ export class GameServer {
       this.world.netState.delete(`landing/${player.bodyId}`);
       this.world.netState.delete(`transferLock/${player.bodyId}`);
       this.world.netState.delete(`owner/${player.bodyId}`);
+      this.world.netState.delete(`name/${player.bodyId}`);
       this.world.netState.delete(`player/${peerId}`);
       this.host.broadcastModule(WORLD_MODULE, { t: "despawn", ids: player.ids } satisfies WorldModuleMessage);
     }

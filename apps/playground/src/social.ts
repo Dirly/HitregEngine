@@ -42,6 +42,11 @@ interface SocialView {
   invites: Array<{ code: string; from: string; name: string }>;
 }
 
+interface GuildView {
+  guild: { id: string; name: string; leader: string; motd: string; members: Array<Presence & { rank: "leader" | "officer" | "member" }> } | null;
+  invites: Array<{ guild: string; name: string; from: string }>;
+}
+
 export interface SocialPanelOptions {
   client: GatewayClient;
   /** The character this tab is playing (null before Play). */
@@ -108,7 +113,7 @@ export function mountSocialPanel(opts: SocialPanelOptions): SocialPanel {
   const root = el("div", { className: "hg-social" });
   root.hidden = true;
   root.setAttribute("aria-label", "Friends and party");
-  const title = el("h1", {}, "Friends & party", el("span", { text: "O to close" }));
+  const title = el("h1", {}, "Friends, party & guild", el("span", { text: "O to close" }));
   const body = el("div");
   const nameInput = el("input", { placeholder: "character name" });
   const addBtn = el("button", { text: "Add friend" });
@@ -118,6 +123,7 @@ export function mountSocialPanel(opts: SocialPanelOptions): SocialPanel {
   document.body.appendChild(root);
 
   let view: SocialView | null = null;
+  let guild: GuildView | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;
   let busy = false;
   const zoneName = (id: string | null): string => (id ? (opts.zoneName?.(id) ?? id) : "");
@@ -194,6 +200,39 @@ export function mountSocialPanel(opts: SocialPanelOptions): SocialPanel {
       return r.moved ? `Travelling to ${name}…` : r.reason === "already there" ? `You are already where ${name} is.` : `Could not travel to ${name}.`;
     }),
     block: (name: string) => act("block", async () => `Blocked ${(await api("/social/block", { name })).blocked}: no requests, invitations or chat from them.`),
+    // -- guild --
+    gcreate: (name: string) => act("guild", async () => `Founded ${(await api("/guild/create", { name })).guild.name}.`),
+    ginvite: (name: string) => act("guild", async () => {
+      const r = await api("/guild/invite", { name });
+      return `Invited ${r.invited} to the guild${r.online ? "" : " (they are offline; the invitation waits)"}.`;
+    }),
+    gaccept: (name?: string) => act("guild", async () => `Joined ${(await api("/guild/accept", name ? { name } : {})).guild.name}.`),
+    gdecline: (name?: string) => act("guild", async () => `Declined ${(await api("/guild/decline", name ? { name } : {})).declined}.`),
+    gleave: () => act("guild", async () => ((await api("/guild/leave")).disbanded ? "You left; the guild is no more." : "You left the guild.")),
+    gkick: (name: string) => act("guild", async () => {
+      await api("/guild/kick", { name });
+      return `${name} was removed from the guild.`;
+    }),
+    gpromote: (name: string) => act("guild", async () => {
+      await api("/guild/promote", { name });
+      return `${name} is now an officer.`;
+    }),
+    gdemote: (name: string) => act("guild", async () => {
+      await api("/guild/demote", { name });
+      return `${name} is a member again.`;
+    }),
+    gleader: (name: string) => act("guild", async () => {
+      await api("/guild/leader", { name });
+      return `${name} now leads the guild.`;
+    }),
+    gmotd: (text: string) => act("guild", async () => {
+      await api("/guild/motd", { text });
+      return text ? "Message of the day set." : "Message of the day cleared.";
+    }),
+    gdisband: () => act("guild", async () => {
+      await api("/guild/disband");
+      return "The guild was disbanded.";
+    }),
     unblock: (name: string) => act("unblock", async () => {
       const r = await api("/social/unblock", { name });
       return r.unblocked ? `Unblocked ${r.unblocked}.` : `${name} was not blocked.`;
@@ -263,6 +302,60 @@ export function mountSocialPanel(opts: SocialPanelOptions): SocialPanel {
       }
       body.append(list);
     }
+    // -- guild --
+    const g = guild?.guild ?? null;
+    body.append(el("h2", { text: g ? `Guild · ${g.name} · ${g.members.length}` : "Guild" }));
+    if (g) {
+      const myRank = g.members.find((m) => m.characterId === me.id)?.rank ?? "member";
+      if (g.motd) body.append(el("div", { className: "muted", text: g.motd }));
+      const list = el("ul");
+      for (const m of g.members) {
+        const li = el("li", {}, el("span", { className: `dot${m.online ? " on" : ""}` }), el("span", { className: "who" }, m.rank === "leader" ? el("span", { className: "lead", text: "★ " }) : m.rank === "officer" ? el("span", { className: "lead", text: "☆ " }) : "", m.name, " ", el("span", { className: "where", text: presenceLine(m) })));
+        if (m.characterId !== me.id) {
+          if (myRank === "leader") {
+            const rank = el("button", { text: m.rank === "officer" ? "demote" : "promote" });
+            rank.onclick = () => void (m.rank === "officer" ? calls.gdemote(m.name) : calls.gpromote(m.name));
+            const lead = el("button", { text: "leader" });
+            lead.onclick = () => void calls.gleader(m.name);
+            li.append(rank, lead);
+          }
+          if (myRank !== "member" && m.rank === "member") {
+            const kick = el("button", { className: "hg-danger", text: "kick" });
+            kick.onclick = () => void calls.gkick(m.name);
+            li.append(kick);
+          }
+        }
+        list.append(li);
+      }
+      body.append(list);
+      const row = el("div", { className: "row" });
+      if (myRank !== "member") {
+        const inv = el("button", { text: "Invite to guild" });
+        inv.onclick = () => {
+          const n = nameInput.value.trim();
+          if (n) void calls.ginvite(n).then(() => (nameInput.value = ""));
+        };
+        row.append(inv);
+      }
+      const leave = el("button", { className: "hg-danger", text: myRank === "leader" && g.members.length === 1 ? "Disband" : "Leave guild" });
+      leave.onclick = () => void (myRank === "leader" && g.members.length === 1 ? calls.gdisband() : calls.gleave());
+      row.append(leave);
+      body.append(row);
+    } else {
+      body.append(el("div", { className: "muted", text: "No guild. /guild create <name>, or accept an invitation." }));
+    }
+    if (guild && guild.invites.length > 0) {
+      body.append(el("h2", { text: "Guild invitations" }));
+      const list = el("ul");
+      for (const inv of guild.invites) {
+        const yes = el("button", { className: "hg-primary", text: "join" });
+        yes.onclick = () => void calls.gaccept(inv.name);
+        const no = el("button", { text: "decline" });
+        no.onclick = () => void calls.gdecline(inv.name);
+        list.append(el("li", {}, el("span", { className: "who", text: `${inv.name} (from ${inv.from})` }), yes, no));
+      }
+      body.append(list);
+    }
     if (view.blocked.length > 0) {
       body.append(el("h2", { text: "Blocked" }));
       const list = el("ul");
@@ -307,6 +400,7 @@ export function mountSocialPanel(opts: SocialPanelOptions): SocialPanel {
     }
     try {
       view = (await api("/social", {}, "GET")) as SocialView;
+      guild = (await api("/guild", {}, "GET")) as GuildView;
       err.textContent = "";
     } catch (error) {
       err.textContent = error instanceof Error ? error.message : String(error);
@@ -402,6 +496,67 @@ export function mountSocialPanel(opts: SocialPanelOptions): SocialPanel {
       case "friends":
         toggle();
         return true;
+      case "guild": {
+        // /guild create <name> | invite <name> | accept [guild] | decline [guild] | leave | kick <name>
+        // | promote <name> | demote <name> | leader <name> | motd <text> | disband
+        const [sub = "", ...restArgs] = args;
+        const arg = restArgs.join(" ").trim();
+        const needArg = (what: string): string | null => {
+          if (arg) return arg;
+          opts.say(`/guild ${sub} needs a ${what}`);
+          return null;
+        };
+        switch (sub.toLowerCase()) {
+          case "create": {
+            const n = needArg("guild name");
+            if (n) void calls.gcreate(n);
+            return true;
+          }
+          case "invite": {
+            const n = needArg("character name");
+            if (n) void calls.ginvite(n);
+            return true;
+          }
+          case "accept":
+            void calls.gaccept(arg || undefined);
+            return true;
+          case "decline":
+            void calls.gdecline(arg || undefined);
+            return true;
+          case "leave":
+            void calls.gleave();
+            return true;
+          case "kick": {
+            const n = needArg("member name");
+            if (n) void calls.gkick(n);
+            return true;
+          }
+          case "promote": {
+            const n = needArg("member name");
+            if (n) void calls.gpromote(n);
+            return true;
+          }
+          case "demote": {
+            const n = needArg("member name");
+            if (n) void calls.gdemote(n);
+            return true;
+          }
+          case "leader": {
+            const n = needArg("member name");
+            if (n) void calls.gleader(n);
+            return true;
+          }
+          case "motd":
+            void calls.gmotd(arg);
+            return true;
+          case "disband":
+            void calls.gdisband();
+            return true;
+          default:
+            opts.say("/guild create <name> · invite <name> · accept · decline · leave · kick <name> · promote <name> · demote <name> · leader <name> · motd <text> · disband — /gu <text> talks to the guild");
+            return true;
+        }
+      }
       default:
         return false;
     }
@@ -413,6 +568,10 @@ export function mountSocialPanel(opts: SocialPanelOptions): SocialPanel {
     if (view) {
       if (event.kind === "party.invite" && event.code && event.characterId && event.name) view.invites.push({ code: event.code, from: event.characterId, name: event.name });
       if (event.kind === "friend.request" && event.characterId && event.name) view.incoming.push({ characterId: event.characterId, name: event.name });
+    }
+    if (guild && event.kind === "guild.invite") {
+      const e = event as SocialEvent & { guild?: string; guildName?: string };
+      if (e.guild && e.guildName && e.name) guild.invites.push({ guild: e.guild, name: e.guildName, from: e.name });
     }
     if (!root.hidden) void refresh();
     else void refresh(); // cheap, and the next open shows the truth without a flash

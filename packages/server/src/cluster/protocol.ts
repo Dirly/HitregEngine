@@ -42,7 +42,7 @@ export interface PlayerPresence {
  */
 export interface BridgedChatLine {
   id: string;
-  channel: "zone" | "global" | "party";
+  channel: "zone" | "global" | "party" | "guild";
   from: string;
   name: string;
   text: string;
@@ -50,6 +50,8 @@ export interface BridgedChatLine {
   zone: string | null;
   /** Party code of the sender, resolved by main on the way through. */
   party?: string | null;
+  /** Guild id of the sender's character, resolved by main on the way through. */
+  guild?: string | null;
 }
 
 // -- layer → main ----------------------------------------------------------------
@@ -139,7 +141,9 @@ export type MainToLayer =
   /** Something happened to this character's friends or party: hand it to their client (a module message + a chat line). */
   | { t: "social"; characterId: string; event: SocialEvent }
   /** The characters this character must not hear (every character of every account they blocked). */
-  | { t: "blocks"; characterId: string; blocked: string[] };
+  | { t: "blocks"; characterId: string; blocked: string[] }
+  /** This character's guild (id) changed or they just arrived: write `comms.guild/<characterId>` so guild chat routes. */
+  | { t: "guild"; characterId: string; guild: string | null };
 
 /** Module id the layer delivers social events on to the client (`sendModule(peerId, SOCIAL_MODULE, event)`). */
 export const SOCIAL_MODULE = "social";
@@ -157,7 +161,10 @@ export type SocialEvent =
   | { kind: "party.invite"; code: string; characterId: string; name: string }
   | { kind: "party.declined"; characterId: string; name: string }
   | { kind: "party.joined" | "party.left" | "party.leader"; characterId: string; name: string }
-  | { kind: "party.kicked"; code: string };
+  | { kind: "party.kicked"; code: string }
+  | { kind: "guild.invite" | "guild.declined" | "guild.joined" | "guild.left" | "guild.kicked" | "guild.promoted" | "guild.demoted" | "guild.leader"; guild: string; guildName: string; characterId: string; name: string }
+  | { kind: "guild.motd"; guild: string; guildName: string; text: string }
+  | { kind: "guild.disbanded"; guild: string; guildName: string };
 
 export function socialLine(e: SocialEvent): string {
   switch (e.kind) {
@@ -183,6 +190,26 @@ export function socialLine(e: SocialEvent): string {
       return `${e.name} is now the party leader.`;
     case "party.kicked":
       return "You were removed from the party.";
+    case "guild.invite":
+      return `${e.name} invited you to the guild ${e.guildName} — /guild accept or /guild decline.`;
+    case "guild.declined":
+      return `${e.name} declined the invitation to ${e.guildName}.`;
+    case "guild.joined":
+      return `${e.name} joined ${e.guildName}.`;
+    case "guild.left":
+      return `${e.name} left ${e.guildName}.`;
+    case "guild.kicked":
+      return `You were removed from ${e.guildName} by ${e.name}.`;
+    case "guild.promoted":
+      return `${e.name} is now an officer of ${e.guildName}.`;
+    case "guild.demoted":
+      return `${e.name} is a member of ${e.guildName} again.`;
+    case "guild.leader":
+      return `${e.name} now leads ${e.guildName}.`;
+    case "guild.motd":
+      return e.text ? `${e.guildName}: ${e.text}` : `${e.guildName}'s message of the day was cleared.`;
+    case "guild.disbanded":
+      return `${e.guildName} was disbanded.`;
   }
 }
 

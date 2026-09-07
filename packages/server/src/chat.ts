@@ -100,7 +100,7 @@ export function mountLayerChat(opts: LayerChatOptions): LayerChat {
           bridge: {
             publish: (msg: ChatMessage, scope: BridgeScope) => {
               if (msg.channel === "system" || !BRIDGED_CHANNELS.includes(msg.channel)) return;
-              link.chat({ id: msg.id, channel: msg.channel as "zone" | "global" | "party", from: msg.from, name: msg.name, text: msg.text, at: msg.at, zone: scope.zone, party: scope.party ?? null });
+              link.chat({ id: msg.id, channel: msg.channel as "zone" | "global" | "party" | "guild", from: msg.from, name: msg.name, text: msg.text, at: msg.at, zone: scope.zone, party: scope.party ?? null, guild: scope.guild ?? null });
             },
           },
         }
@@ -110,7 +110,7 @@ export function mountLayerChat(opts: LayerChatOptions): LayerChat {
 
   const offChat = link?.onChat((line: BridgedChatLine) => {
     const msg: ChatMessage = { id: line.id, channel: line.channel, from: line.from, name: line.name, text: line.text, at: line.at };
-    foreignDelivered += chat.deliverForeign(msg, { zone: line.zone, party: line.party ?? null });
+    foreignDelivered += chat.deliverForeign(msg, { zone: line.zone, party: line.party ?? null, guild: line.guild ?? null });
   });
   log(`[serve] chat: ${link ? "zone/global/party bridged through main" : "this server only"}`);
 

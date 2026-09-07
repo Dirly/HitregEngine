@@ -76,6 +76,7 @@ const CSS = `
 .hitreg-comms-line[data-channel="global"] .hitreg-comms-tag{color:#ffd633}
 .hitreg-comms-line[data-channel="team"] .hitreg-comms-tag{color:#79c0ff}
 .hitreg-comms-line[data-channel="party"] .hitreg-comms-tag{color:#d2a8ff}
+.hitreg-comms-line[data-channel="guild"] .hitreg-comms-tag{color:#a371f7}
 .hitreg-comms-line[data-channel="system"]{color:#8b949e;font-style:italic}
 .hitreg-comms-name{font-weight:600;color:#e6edf3;margin-right:4px}
 .hitreg-comms-input{display:none;align-items:center;gap:6px;pointer-events:auto}
@@ -236,7 +237,7 @@ export function mountCommsUI(opts: CommsUIOptions): CommsUI {
   const renderChannel = () => {
     const meta = CHANNEL_META[channel];
     chanBtn.textContent = `${meta.glyph} ${meta.label}`;
-    field.placeholder = `${meta.label}… (/g /t /p /s, /team x, /party x)`;
+    field.placeholder = `${meta.label}… (/g /t /p /gu /s, /team x, /party x)`;
   };
   const setChannel = (next: CommsChannel) => {
     channel = next;

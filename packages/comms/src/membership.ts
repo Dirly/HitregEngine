@@ -17,6 +17,7 @@ import type { NetStateStore } from "@hitreg/core";
 export const COMMS_NETSTATE = {
   team: "comms.team",
   party: "comms.party",
+  guild: "comms.guild",
 } as const;
 
 const GROUP_NAME = z
@@ -43,6 +44,12 @@ export function registerCommsNetState(store: NetStateStore): void {
       "Party name of a player, keyed by peer id (comms.party/<peerId>). Party text/voice chat reaches exactly the peers sharing this value. Authority-written.",
     ),
   );
+  store.define(
+    COMMS_NETSTATE.guild,
+    GROUP_NAME.describe(
+      "Guild id of a player's character, keyed by peer id (comms.guild/<peerId>). Guild text chat reaches exactly the peers sharing this value, across every layer of a cluster. Written by the server from main's guild list.",
+    ),
+  );
 }
 
 export function isValidGroupName(value: unknown): value is string {
@@ -52,6 +59,8 @@ export function isValidGroupName(value: unknown): value is string {
 export interface MembershipSource {
   teamOf(peerId: string): string | null;
   partyOf(peerId: string): string | null;
+  /** Guild id, or null; may be absent on a source that has no guilds (a P2P room). */
+  guildOf?(peerId: string): string | null;
   /** Fires when any membership changes (voice re-gates, UI re-labels). */
   onChange(cb: () => void): () => void;
 }
@@ -65,9 +74,10 @@ export function netStateMembership(store: NetStateStore): MembershipSource {
   return {
     teamOf: (peerId) => read(COMMS_NETSTATE.team, peerId),
     partyOf: (peerId) => read(COMMS_NETSTATE.party, peerId),
+    guildOf: (peerId) => read(COMMS_NETSTATE.guild, peerId),
     onChange: (cb) =>
       store.onChange((key) => {
-        if (key.startsWith(`${COMMS_NETSTATE.team}/`) || key.startsWith(`${COMMS_NETSTATE.party}/`)) {
+        if (key.startsWith(`${COMMS_NETSTATE.team}/`) || key.startsWith(`${COMMS_NETSTATE.party}/`) || key.startsWith(`${COMMS_NETSTATE.guild}/`)) {
           cb();
         }
       }),
@@ -76,13 +86,14 @@ export function netStateMembership(store: NetStateStore): MembershipSource {
 
 /** In-memory membership for tests and apps without netState. */
 export function staticMembership(
-  init: { teams?: Record<string, string>; parties?: Record<string, string> } = {},
+  init: { teams?: Record<string, string>; parties?: Record<string, string>; guilds?: Record<string, string> } = {},
 ): MembershipSource & {
   setTeam(peerId: string, team: string | null): void;
   setParty(peerId: string, party: string | null): void;
 } {
   const teams = new Map(Object.entries(init.teams ?? {}));
   const parties = new Map(Object.entries(init.parties ?? {}));
+  const guilds = new Map(Object.entries(init.guilds ?? {}));
   const handlers = new Set<() => void>();
   const notify = () => {
     for (const cb of [...handlers]) cb();
@@ -90,6 +101,7 @@ export function staticMembership(
   return {
     teamOf: (id) => teams.get(id) ?? null,
     partyOf: (id) => parties.get(id) ?? null,
+    guildOf: (id) => guilds.get(id) ?? null,
     onChange: (cb) => {
       handlers.add(cb);
       return () => {

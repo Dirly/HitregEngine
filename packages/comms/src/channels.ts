@@ -12,6 +12,8 @@
  * - "party":     players sharing the speaker's party (netState `comms.party/*`);
  *                bridged across layers too — on a cluster, main owns the party
  *                list and pushes each member's party into their layer's netState.
+ * - "guild":     players in the speaker's guild (netState `comms.guild/*`),
+ *                bridged the same way. Text only, like zone.
  *
  * The routing rule for each lives in ONE place (`recipientsFor` below) so
  * text and voice can never disagree about who is allowed to hear whom.
@@ -19,17 +21,18 @@
  * a zone is a text room, not a hundred open mics.
  */
 
-export type CommsChannel = "proximity" | "zone" | "global" | "team" | "party";
+export type CommsChannel = "proximity" | "zone" | "global" | "team" | "party" | "guild";
 
-export const COMMS_CHANNELS: readonly CommsChannel[] = ["proximity", "zone", "global", "team", "party"];
+export const COMMS_CHANNELS: readonly CommsChannel[] = ["proximity", "zone", "global", "team", "party", "guild"];
 
 /** Channels a cluster bridge carries between layers (what one copy of the world says, every copy hears). */
-export const BRIDGED_CHANNELS: readonly CommsChannel[] = ["zone", "global", "party"];
+export const BRIDGED_CHANNELS: readonly CommsChannel[] = ["zone", "global", "party", "guild"];
 
-/** What travels with a bridged line so the receiving layer can route it: the sender's zone and party (only the origin — or main — knows them). */
+/** What travels with a bridged line so the receiving layer can route it: the sender's zone, party and guild (only the origin — or main — knows them). */
 export interface BridgeScope {
   zone: string | null;
   party?: string | null;
+  guild?: string | null;
 }
 
 export interface ChannelMeta {
@@ -52,6 +55,7 @@ export const CHANNEL_META: Readonly<Record<CommsChannel, ChannelMeta>> = {
   global: { label: "global", glyph: "[G]", prefixes: ["/g", "/all"] },
   team: { label: "team", glyph: "[T]", prefixes: ["/t"] },
   party: { label: "party", glyph: "[P]", prefixes: ["/p"] },
+  guild: { label: "guild", glyph: "[GU]", prefixes: ["/gu"] },
 };
 
 export function isCommsChannel(value: unknown): value is CommsChannel {
@@ -110,6 +114,8 @@ export interface RoutingContext {
    * Absent entirely = this endpoint has no zone chat (voice, a bare host).
    */
   zoneOf?(peerId: string): string | null;
+  /** The guild a participant's character belongs to (id), or null. Absent = no guild chat here (voice). */
+  guildOf?(peerId: string): string | null;
 }
 
 export type RoutingResult =
@@ -142,6 +148,12 @@ export function recipientsFor(
       const party = ctx.partyOf(sender);
       if (party === null) return { ok: false, reason: "you are not in a party" };
       return { ok: true, recipients: participants.filter((p) => ctx.partyOf(p) === party) };
+    }
+    case "guild": {
+      if (!ctx.guildOf) return { ok: false, reason: "guild chat is not available here" };
+      const guild = ctx.guildOf(sender);
+      if (guild === null) return { ok: false, reason: "you are not in a guild" };
+      return { ok: true, recipients: participants.filter((p) => p === sender || ctx.guildOf!(p) === guild) };
     }
     case "zone": {
       if (!ctx.zoneOf) return { ok: false, reason: "zone chat is not available here" };
@@ -185,6 +197,9 @@ export function foreignRecipients(
   }
   if (channel === "party" && typeof scope.party === "string") {
     return participants.filter((p) => ctx.partyOf(p) === scope.party);
+  }
+  if (channel === "guild" && ctx.guildOf && typeof scope.guild === "string") {
+    return participants.filter((p) => ctx.guildOf!(p) === scope.guild);
   }
   return [];
 }

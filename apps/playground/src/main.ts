@@ -2354,7 +2354,13 @@ async function main(): Promise<void> {
           else if (event.kind === "party.joined") toasts.show(`${event.name} joined the party`, "party");
           else if (event.kind === "party.left") toasts.show(`${event.name} left the party`, "party");
           else if (event.kind === "party.kicked") toasts.show("You were removed from the party", "party");
-          else if (event.kind.startsWith("guild.") && event.name) toasts.show(`${event.name}: ${event.kind.slice(6)}`, "guild");
+          else if (event.kind === "guild.invite") toasts.show(`${event.name} invited you to ${(event as { guildName?: string }).guildName ?? "a guild"} — /guild accept or O`, "guild", 8000);
+          else if (event.kind === "guild.joined") toasts.show(`${event.name} joined the guild`, "guild");
+          else if (event.kind === "guild.left") toasts.show(`${event.name} left the guild`, "guild");
+          else if (event.kind === "guild.kicked") toasts.show("You were removed from the guild", "guild");
+          else if (event.kind === "guild.leader") toasts.show(`${event.name} now leads the guild`, "guild");
+          else if (event.kind === "guild.motd") toasts.show(`Guild: ${(event as { text?: string }).text ?? ""}`, "guild", 8000);
+          else if (event.kind === "guild.disbanded") toasts.show("The guild was disbanded", "guild");
         });
       }
     });
@@ -2442,7 +2448,7 @@ async function main(): Promise<void> {
   comms.voice.attachKeyboard(window); // V = say, B = team, N = party (push-to-talk)
   comms.chat.system(
     socialPanel
-      ? "Enter: chat · /s /z /g /t /p pick a channel · O: friends & party · /friend /invite /accept /decline /travel <name> · mic button for voice"
+      ? "Enter: chat · /s /z /g /t /p /gu pick a channel · O: friends, party & guild · /friend /invite /accept /decline /travel <name> · /guild … · mic button for voice"
       : "Enter: chat · /s /z /g /t /p pick a channel · /team x · /party x · mic button for voice",
   );
   // "unpack model parts": each named sub-object of a loaded kit becomes a child

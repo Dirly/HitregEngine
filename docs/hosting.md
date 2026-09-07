@@ -204,13 +204,30 @@ invitation, a decline, a member joining or leaving, a kick, a new leader.
 Offline players get nothing; their lists catch up on the next read. A
 transfer is not a departure — no offline/online pair for a border crossing.
 
+**Guilds are durable and per character** (`main/guilds.ts`, `GuildStore`):
+a record per guild in the same player-data store under a synthetic scope
+(`guild:<id>`), a name index (`guilds`/`index`) that keeps names unique
+under compare-and-swap, and each member's own social record carrying the
+membership so login finds it. Ranks: one leader; officers invite, kick
+members and set the message of the day; the leader promotes, demotes,
+hands over and disbands. When the leader leaves, the oldest officer (else
+the oldest member) leads; the last one out disbands the guild and frees
+the name. Main mirrors membership in memory, pushes it into each member's
+layer (`comms.guild/<characterId>`) so the **guild** chat channel (`/gu`)
+routes there and across layers like party chat, and tells the guild about
+every change (`guild.*` social events).
+
 **The client** (playground, gateway mode): **O** opens the social panel
 (party with leader star, presence and zone per member, invitations,
 friends with online/zone, requests in and out; buttons for every action)
 and chat takes `/friend <name>`, `/unfriend <name>`, `/invite <name>`,
 `/accept`, `/decline` (a party invitation first, else the latest friend
 request), `/kick <name>`, `/leader <name>`, `/leave`, `/travel <name>`
-(go to a friend's layer if it has room and is not an instance), `/social`.
+(go to a friend's layer if it has room and is not an instance), `/social`,
+and `/guild create|invite|accept|decline|leave|kick|promote|demote|leader|motd|disband`.
+voxel-demo's combat HUD shows a frame (name, health) for every party member
+standing on the same server, read from netState (`comms.party/*`,
+`player/*`, `name/*`, `combat/*`).
 
 | call (bearer = the session; `characterId` = your character) | does |
 | --- | --- |
@@ -225,10 +242,14 @@ request), `/kick <name>`, `/leader <name>`, `/leave`, `/travel <name>`
 | `POST /party/invite { characterId, name }` | leader invites (creates the party if none) |
 | `POST /party/accept` / `decline` `{ characterId, code? }` | answer an invitation (the latest when no code) |
 | `POST /party/kick` / `leader` `{ characterId, name }` | leader only |
+| `GET /guild?characterId=` | the guild with ranks and presence, plus invitations waiting |
+| `POST /guild/create { characterId, name }` | found one (4–32 letters, unique) |
+| `POST /guild/invite { characterId, name }` · `/guild/accept` / `decline` `{ characterId, name? }` | officers and the leader invite |
+| `POST /guild/leave` · `/guild/kick { name }` · `/guild/promote` / `demote` / `leader` `{ name }` · `/guild/motd { text }` · `/guild/disband` | ranks as described |
 
-Not here: a "recent players" list, friend notes. Party invitations are
-per character (you invite the character you see); friendships and blocks
-are per account.
+Not here: a "recent players" list, friend notes, guild banks or ranks
+beyond three. Party invitations and guilds are per character (you invite
+the character you see); friendships and blocks are per account.
 
 ## Layers cost what their players cost
 
@@ -355,7 +376,7 @@ engine may still choose peer rooms.
 ## What is deliberately not here yet
 
 - A spawn-area/zone-edge audit in `worldgen audit`.
-- Guilds (next), friend notes, a "recent players" list.
+- Friend notes, a "recent players" list, guild banks.
 - Pre-spawning the body on the destination before the client dials it
   (today a transfer is one round trip of nothing; with prediction it is
   invisible on a LAN and a short hitch on a bad link). The destination is

@@ -322,6 +322,11 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
   // block lists, from main: a character never hears anyone it blocked
   const blocks = new Map<string, Set<string>>();
   const chat = mountLayerChat({ server, scene: opts.scene, link, regions, mayHear: (recipient, sender) => !blocks.get(recipient)?.has(sender), log });
+  link?.onGuild((characterId, guild) => {
+    const key = `comms.guild/${characterId}`;
+    if (guild === null) world.netState.delete(key);
+    else if (!world.netState.set(key, guild)) log(`[serve] guild "${guild}" for ${characterId} refused by netState`);
+  });
   link?.onBlocks((characterId, blocked) => {
     if (blocked.length === 0) blocks.delete(characterId);
     else blocks.set(characterId, new Set(blocked));

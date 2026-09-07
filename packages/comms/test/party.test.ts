@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ChatService, foreignRecipients, staticMembership, type ChatMessage, type CommsLink, type RoutingContext } from "../src/index.js";
+import { ChatService, foreignRecipients, recipientsFor, staticMembership, type ChatMessage, type CommsLink, type RoutingContext } from "../src/index.js";
 
 /**
  * Party chat across a cluster: a party line is bridged with the sender's
@@ -111,5 +111,30 @@ describe("block lists", () => {
     const foreign: ChatMessage = { id: "far:1", channel: "global", from: "far-away", name: "Far", text: "yo", at: 5 };
     expect(chat.deliverForeign(foreign, { zone: null })).toBe(3); // a, b and the host — not c
     expect(sent.get("c")).toHaveLength(1);
+  });
+});
+
+describe("guild channel", () => {
+  it("routes to guild mates, is bridged with the guild in scope, and is refused without a guild", () => {
+    const guilds: Record<string, string> = { a: "gld-1", b: "gld-1", c: "gld-2" };
+    const gctx: RoutingContext = { ...ctx, guildOf: (id) => guilds[id] ?? null };
+    expect(recipientsFor("a", "guild", ["a", "b", "c", "d"], gctx, 25)).toEqual({ ok: true, recipients: ["a", "b"] });
+    expect(recipientsFor("d", "guild", ["a", "d"], gctx, 25)).toMatchObject({ ok: false, reason: /not in a guild/ });
+    expect(recipientsFor("a", "guild", ["a", "b"], ctx, 25)).toMatchObject({ ok: false, reason: /not available/ });
+    expect(foreignRecipients("guild", { zone: null, guild: "gld-2" }, ["a", "b", "c"], gctx)).toEqual(["c"]);
+    expect(foreignRecipients("guild", { zone: null, guild: "gld-2" }, ["a", "b", "c"], ctx)).toEqual([]);
+    const { link, sent } = fakeHost(["a", "b", "c"]);
+    const published: Array<{ guild?: string | null }> = [];
+    const chat = new ChatService({
+      link,
+      membership: staticMembership({ guilds }),
+      positionOf: () => [0, 0, 0],
+      bridge: { publish: (_msg, scope) => published.push(scope) },
+      now: () => 1,
+    });
+    (chat as unknown as { handleUp(from: string, data: unknown): void }).handleUp("a", { k: "say", channel: "guild", text: "raid at nine" });
+    expect(sent.get("b")).toHaveLength(1);
+    expect(sent.get("c")).toBeUndefined();
+    expect(published[0]?.guild).toBe("gld-1");
   });
 });
