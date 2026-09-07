@@ -344,7 +344,7 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
     const [cx, cz] = region.hub ?? region.polygon.reduce<[number, number]>((acc, p) => [acc[0] + p[0] / region.polygon.length, acc[1] + p[1] / region.polygon.length], [0, 0]);
     let r = 0;
     for (const [x, z] of region.polygon) r = Math.max(r, Math.hypot(x - cx, z - cz));
-    if (r > 0) sanctuaries.push([cx, cz, r]);
+    if (r > 0) sanctuaries.push([cx, cz, r, terrain ? terrain.groundHeight(cx, cz) : 0]);
   }
   if (!world.netState.set(SANCTUARIES_KEY, sanctuaries)) log("[serve] sanctuaries/list failed validation — no sanctuaries published");
   else if (sanctuaries.length > 0) log(`[serve] sanctuaries: ${sanctuaries.length} (${sanctuariesFromPois(pois).length} waystations, ${sanctuaries.length - sanctuariesFromPois(pois).length} safe zones)`);

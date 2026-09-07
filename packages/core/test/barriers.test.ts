@@ -5,6 +5,7 @@ import {
   featureFootprint,
   worldRecipeSchema,
   sanctuaryAt,
+  nearestSanctuary,
   inSanctuary,
   sanctuariesFromPois,
   ridgeSchema,
@@ -141,7 +142,7 @@ describe("sanctuaries", () => {
   });
 
   it("lists every safe poi with a radius as [x, z, r]", () => {
-    expect(sanctuariesFromPois(pois)).toEqual([[100, 200, 35]]);
+    expect(sanctuariesFromPois(pois)).toEqual([[100, 200, 35, 20]]);
   });
 
   it("sanctuaryAt finds the circle under a point, tolerating junk", () => {
@@ -153,5 +154,7 @@ describe("sanctuaries", () => {
     expect(inSanctuary(list, 900, 900)).toBe(false);
     expect(sanctuaryAt(undefined, 0, 0)).toBe(-1);
     expect(sanctuaryAt([[1, 2], "x", null], 1, 2)).toBe(-1);
+    expect(nearestSanctuary([[0, 0, 10, 5], [100, 100, 10, 7]], 90, 90)).toBe(1);
+    expect(nearestSanctuary([], 0, 0)).toBe(-1);
   });
 });

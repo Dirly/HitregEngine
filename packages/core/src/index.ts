@@ -308,6 +308,7 @@ export {
   registerSanctuariesNetState,
   sanctuariesFromPois,
   sanctuaryAt,
+  nearestSanctuary,
   inSanctuary,
   type SanctuaryCircle,
 } from "./sanctuary.js";

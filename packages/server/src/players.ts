@@ -60,13 +60,21 @@ export function playerBodyId(peerId: string): string {
   return `player:${peerId}`;
 }
 
+/**
+ * Params whose value is a WORD, never a reference: a template whose root is
+ * called "player" and whose combat script says `faction: "player"` must not
+ * end up with a faction of "player:chr-…" — every player in its own faction,
+ * and no two able to share one.
+ */
+const WORD_KEYS = new Set(["faction", "tag", "tags", "name", "label", "team", "party"]);
+
 /** Deep-rewrite every string equal to an old id (script params reference ids by value). */
 function rewriteIds(value: unknown, map: Map<string, string>): unknown {
   if (typeof value === "string") return map.get(value) ?? value;
   if (Array.isArray(value)) return value.map((v) => rewriteIds(v, map));
   if (value && typeof value === "object") {
     const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = rewriteIds(v, map);
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = WORD_KEYS.has(k) ? v : rewriteIds(v, map);
     return out;
   }
   return value;

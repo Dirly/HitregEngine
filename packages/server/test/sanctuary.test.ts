@@ -94,8 +94,8 @@ describe.skipIf(!layer)("sanctuaries and zone crossings on a layer", { timeout: 
   const bodyB = "player:bob";
 
   it("publishes every safe poi as a sanctuary circle at boot", async () => {
-    expect(layer!.sanctuaries).toEqual([[spawn[0], spawn[2], RADIUS]]);
-    expect(layer!.world.netState.get(SANCTUARIES_KEY)).toEqual([[spawn[0], spawn[2], RADIUS]]);
+    expect(layer!.sanctuaries).toEqual([[spawn[0], spawn[2], RADIUS, spawn[1]]]);
+    expect(layer!.world.netState.get(SANCTUARIES_KEY)).toEqual([[spawn[0], spawn[2], RADIUS, spawn[1]]]);
     a = join("alice");
     b = join("bob");
     await until(() => a.spawned.length === 1 && b.spawned.length === 1);

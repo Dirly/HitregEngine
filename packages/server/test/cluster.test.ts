@@ -173,7 +173,12 @@ describe.skipIf(!main || !layer1 || !layer2)("cluster: main + two layers", { tim
     }
     await until(() => main!.registry.whereIs.get(characterId) === undefined);
     expect((saved?.data["sheet"] as { level: number }).level).toBe(3);
-    const world = await playerData.load({ playerId: session.account.id, experienceId: "test-world" }, "world");
+    // the world save (position) lands after the character save — two writes, in order
+    let world: Awaited<ReturnType<typeof playerData.load>> = null;
+    for (let i = 0; i < 100 && !world?.data["pos:field"]; i++) {
+      await wait(50);
+      world = await playerData.load({ playerId: session.account.id, experienceId: "test-world" }, "world");
+    }
     expect((world?.data["pos:field"] as { position: number[] }).position[0]).toBeCloseTo(at[0], 1);
 
     // affinity: placed on the same layer; the sheet is already in netState when the body spawns

@@ -2965,6 +2965,25 @@ async function main(): Promise<void> {
     controls.enabled = !locked;
   }
   document.addEventListener("pointerlockchange", syncPointerLockState);
+  // mouse buttons reach gameplay only while the pointer is locked on the canvas:
+  // a click on a panel is a click on a panel, never a swing
+  const mouseButton = (e: MouseEvent, down: boolean): void => {
+    if (document.pointerLockElement !== canvas) {
+      if (!down) input.setMouseButton(e.button, false);
+      return;
+    }
+    input.setMouseButton(e.button, down);
+    if (down) e.preventDefault();
+  };
+  canvas.addEventListener("mousedown", (e) => mouseButton(e, true));
+  window.addEventListener("mouseup", (e) => mouseButton(e, false));
+  canvas.addEventListener("contextmenu", (e) => {
+    if (document.pointerLockElement === canvas) e.preventDefault();
+  });
+  document.addEventListener("pointerlockchange", () => {
+    if (document.pointerLockElement !== canvas) input.releaseMouse();
+  });
+  window.addEventListener("blur", () => input.releaseMouse());
   document.addEventListener("mousemove", (e) => {
     if (document.pointerLockElement !== canvas) return;
     // chase rig: the mouse steers the TARGET (e.g. a vehicle's nose) via

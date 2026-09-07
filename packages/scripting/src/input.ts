@@ -3,7 +3,10 @@ import type { InputLike } from "./script.js";
 /**
  * Browser keyboard state. Codes are KeyboardEvent.code ("KeyW", "Space").
  * Keys typed into form fields are ignored so the editor UI doesn't drive
- * the player around.
+ * the player around. Mouse buttons are the codes "Mouse0" (left), "Mouse1"
+ * (middle) and "Mouse2" (right), fed by the host through `setMouseButton`
+ * — only while the pointer is locked on the game canvas, so a click on the
+ * editor UI never fires an ability (see main.ts).
  */
 export class InputService implements InputLike {
   private readonly down = new Set<string>();
@@ -52,6 +55,18 @@ export class InputService implements InputLike {
   /** Whether any menu currently owns the keyboard. */
   isCaptured(): boolean {
     return this.captures.size > 0;
+  }
+
+  /** Host feeds mouse button state here as "Mouse<n>" codes; a capture or blur releases them like keys. */
+  setMouseButton(button: number, down: boolean): void {
+    const code = `Mouse${button}`;
+    if (down) this.down.add(code);
+    else this.down.delete(code);
+  }
+
+  /** Release every mouse button (pointer lock ended, window blurred). */
+  releaseMouse(): void {
+    for (const code of [...this.down]) if (code.startsWith("Mouse")) this.down.delete(code);
   }
 
   /** Host feeds raw pointer-locked mouse movement here (see main.ts's mousemove handler). */

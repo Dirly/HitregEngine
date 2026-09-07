@@ -23,15 +23,15 @@ export const SANCTUARIES_NETSTATE = "sanctuaries";
 /** The one key under the namespace. */
 export const SANCTUARIES_KEY = `${SANCTUARIES_NETSTATE}/list`;
 
-/** `[x, z, radius]` in world metres. */
-export type SanctuaryCircle = [number, number, number];
+/** `[x, z, radius, groundY]` in world metres — the ground height is where a body respawning there is placed. */
+export type SanctuaryCircle = [number, number, number, number];
 
 export const sanctuariesSchema = z
-  .array(z.tuple([z.number(), z.number(), z.number().positive()]))
+  .array(z.tuple([z.number(), z.number(), z.number().positive(), z.number()]))
   .describe(
-    "Sanctuary circles as [x, z, radius] in world metres (sanctuaries/list, written once by the server at boot from " +
-      "every recipe POI tagged \"safe\"). Inside one, an authoritative combat script refuses damage between two " +
-      "player-owned bodies; NPC damage is untouched.",
+    "Sanctuary circles as [x, z, radius, groundY] in world metres (sanctuaries/list, written once by the server at boot " +
+      "from every recipe POI tagged \"safe\" and every safe zone). Inside one, an authoritative combat script refuses " +
+      "damage between two player-owned bodies; NPC damage is untouched. A dead player respawns at the nearest one.",
   );
 
 /** Register the namespace so writes validate and it shows in the spec. Once per store. */
@@ -46,9 +46,26 @@ export function sanctuariesFromPois(
   const out: SanctuaryCircle[] = [];
   for (const poi of pois) {
     if (!poi.tags.includes("safe") || !(typeof poi.radius === "number" && poi.radius > 0)) continue;
-    out.push([poi.position[0], poi.position[2], poi.radius]);
+    out.push([poi.position[0], poi.position[2], poi.radius, poi.position[1]]);
   }
   return out;
+}
+
+/** Index of the circle in `list` whose centre is nearest (x, z), or -1 for an empty or malformed list. */
+export function nearestSanctuary(list: unknown, x: number, z: number): number {
+  if (!Array.isArray(list)) return -1;
+  let best = -1;
+  let bestD = Infinity;
+  for (let i = 0; i < list.length; i++) {
+    const c = list[i] as unknown;
+    if (!Array.isArray(c) || c.length < 3) continue;
+    const d = Math.hypot(x - (c[0] as number), z - (c[1] as number));
+    if (d < bestD) {
+      bestD = d;
+      best = i;
+    }
+  }
+  return best;
 }
 
 /** Index of the first circle in `list` containing (x, z), or -1. Tolerant of a missing or malformed list. */
