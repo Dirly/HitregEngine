@@ -199,6 +199,9 @@ const HELP = `worldgen — procedural world pipeline
                    every shared border measured — metres of water/steep/canyon/coast/ridge/town/pass/OPEN; an
                    open run >= 60 m is a finding (exit 1) until 'barriers' walls it
   all    <world>   init (if missing) + canyons + rivers + towns + zones + paths + barriers + pois + trails + barriers + caves + map + stats
+                   — one line from nothing to a hostable world: --from <world> (the look), --continents 3
+                   --islands 2 --lobes 2 --continent-radius 2000 --gap 700 (the landmasses, fresh worlds
+                   only), --seed N, --scene
 
 Options: --project <name>  --seed N  --extent <world units, default = the world limit>  --count N  --size <px>  --scene`;
 
@@ -3576,12 +3579,14 @@ function spanningEdges(towns: TownDoc[], extra: number): [number, number][] {
  * ocean, and neither is a map anyone wants. `--gap` is the water between
  * their coasts, so the sailing distance is authored rather than discovered.
  */
-function commandContinents(): void {
+function commandContinents(countOverride?: number): void {
   const { recipe, file } = loadRecipe();
-  const count = Math.max(1, Math.round(option("count", 1)));
+  const count = Math.max(1, Math.round(countOverride ?? option("count", 1)));
   const islands = Math.max(0, Math.round(option("islands", 2)));
-  const radius = option("radius", 2200);
-  const falloff = option("falloff", 650);
+  // --continent-radius / --continent-falloff exist because `all` forwards its
+  // flags to every stage, and towns read --radius, barriers --falloff
+  const radius = option("continent-radius", option("radius", 2200));
+  const falloff = option("continent-falloff", option("falloff", 650));
   const gap = option("gap", 900);
   const warp = option("warp", 0.6);
   const warpScale = option("warpScale", 1100);
@@ -5379,7 +5384,16 @@ switch (command) {
     commandStats();
     break;
   case "all": {
-    if (!findRecipeFile(worldName)) commandInit();
+    // One line from nothing to a hostable world: `all <world> --from <look>
+    // --continents 3 --islands 2 --seed N --scene` writes the recipe with an
+    // existing world's look, lays the landmasses, and runs every stage.
+    // `--continents` (not `--count`, which towns and pois read) re-lays the
+    // landmasses only on a FRESH world; an existing recipe keeps its bounds.
+    const fresh = !findRecipeFile(worldName);
+    if (fresh) commandInit();
+    const continents = option("continents", 0);
+    if (fresh && continents > 0) commandContinents(continents);
+    else if (!fresh && continents > 0) console.log("(--continents ignored: the recipe exists — run `worldgen continents` to re-lay it, then `all` again)");
     // canyons BEFORE rivers: the hydrology then drains through the gorges it
     // finds; cut after, a canyon floor under a lake outline flooded 90 m deep
     commandCanyons();

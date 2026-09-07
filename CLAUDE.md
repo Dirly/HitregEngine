@@ -145,7 +145,10 @@ The primary AI channel is **direct file editing** — no MCP required:
 - **World generation** (procedural open worlds): `pnpm -F playground worldgen`
   — `init` writes a complete recipe (continents in a bounded sea, cut into
   large single-purpose ZONES with their own landforms) + terrain and water
-  materials + scene, then `canyons`, `rivers` (real hydrology — depression
+  materials + scene (`--from <world>` takes an existing world's LOOK — its
+  textured palette, patches, scatter models, water — the engine preset is flat
+  colours; `worldgen all <world> --from <look> --continents 3 --islands 2
+  --seed N --scene` is the one-line fresh hostable world), then `canyons`, `rivers` (real hydrology — depression
   fill, flow accumulation, a channel tree — used to pick the LAKES: a lake
   exists only where the tree runs through a depression, the other hollows
   are FILLED to valley floors; it writes NO rivers unless `--trace`),

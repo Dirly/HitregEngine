@@ -187,7 +187,10 @@ pnpm -F playground worldgen pois   <world>   # peaks, cliffs, coves
 pnpm -F playground worldgen caves  <world>   # find mouths, MEASURE fit, carve them open
 pnpm -F playground worldgen map    <world>   # PNG overview
 pnpm -F playground worldgen stats  <world>   # tris/cell, ms/cell, biome mix
-pnpm -F playground worldgen all    <world>   # everything, in order
+pnpm -F playground worldgen all    <world>   # everything, in order — from nothing to a hostable world in one line:
+#   worldgen all <world> --project <p> --from <existing world> --continents 3 --islands 2 --seed N --scene
+#   (--from takes the existing world's textured palette, patches, scatter models, water and bridge
+#   materials; the engine preset is flat colours and four generic scatter rules)
 ```
 
 Two of these deserve a note.
