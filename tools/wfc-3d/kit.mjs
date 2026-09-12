@@ -191,6 +191,31 @@ function upFacingUvSamples(g) {
   return samples;
 }
 
+// Bounds alone do not establish symmetry: chamfered floors can have full-cell bounds.
+export function quarterTurnSymmetric(points) {
+  const key = p => p.map(v => Math.round(v * 10000)).join(",");
+  const keys = new Set(points.map(key));
+  return points.length > 0 && points.every(([x,y,z]) => keys.has(key([z,y,-x])));
+}
+
+function geometryQuarterTurnSymmetric(g) {
+  const points = [];
+  for (const n of sceneNodes(g)) {
+    if (n.node.mesh === undefined) continue;
+    const m = n.world;
+    for (const prim of g.doc.meshes[n.node.mesh].primitives) {
+      if (prim.attributes?.POSITION === undefined) continue;
+      const p = accessorFloats(g, prim.attributes.POSITION);
+      for (let i=0; i<p.length; i+=3) points.push([
+        m[0]*p[i]+m[4]*p[i+1]+m[8]*p[i+2]+m[12],
+        m[1]*p[i]+m[5]*p[i+1]+m[9]*p[i+2]+m[13],
+        m[2]*p[i]+m[6]*p[i+1]+m[10]*p[i+2]+m[14],
+      ]);
+    }
+  }
+  return quarterTurnSymmetric(points);
+}
+
 /** Read one part file and classify it. */
 export function analyzePart(file, cellSize, warn) {
   const g = readGltf(file);
@@ -240,7 +265,8 @@ export function analyzePart(file, cellSize, warn) {
     Math.abs(size[0] - cellSize[0]) < cellSize[0] * 0.05 &&
     Math.abs(size[2] - cellSize[2]) < cellSize[2] * 0.05 &&
     Math.abs(centre[0]) < cellSize[0] * 0.05 &&
-    Math.abs(centre[2]) < cellSize[2] * 0.05;
+    Math.abs(centre[2]) < cellSize[2] * 0.05 &&
+    geometryQuarterTurnSymmetric(g);
   if (Math.abs(centre[0]) > cellSize[0] * 0.5 || Math.abs(centre[2]) > cellSize[2] * 0.5 || stats.min[1] < -cellSize[1] * 0.25) {
     warn(`${name}: geometry centre ${centre.map((v) => v.toFixed(2)).join(", ")} is outside its cell — is the origin at the cell's bottom centre?`);
   }
@@ -657,7 +683,16 @@ function tileIdFor(items, canonicalKey) {
  * examples' bounding box plus a one-cell margin counts, so "wall next to
  * nothing" and "floor over nothing" (the ground) are learned from the void.
  */
-export function learnFromExamples(examples, parts, warn) {
+// Preserve complete oriented cell identity on every face. This opt-in mode
+// prevents partial roof/support profiles from generalizing into unseen pairs.
+function observedProfiles(items, layer = 0) {
+  if (!items.length) return Object.fromEntries(["px", "nx", "py", "ny", "pz", "nz"].map(d => [d, VOID]));
+  const identity = compositionKey(items);
+  return Object.fromEntries(["px", "nx", "py", "ny", "pz", "nz"].map(d => [d, `observed:${layer}:${identity}:${d}`]));
+}
+
+export function learnFromExamples(examples, parts, warn, mode = "profiles") {
+  if (!["profiles", "observed"].includes(mode)) throw new Error(`unknown adjacency mode: ${mode}`);
   const partsByName = new Map(parts.map((p) => [p.name, p]));
   const tiles = new Map(); // canonicalKey → { id, items, count, rotations }
   const horizontal = new Set();
@@ -688,7 +723,7 @@ export function learnFromExamples(examples, parts, warn) {
       for (let z = lo[2] - 1; z <= hi[2] + 1; z++) {
         for (let x = lo[0] - 1; x <= hi[0] + 1; x++) {
           const items = itemsAt(x, y, z);
-          profileAt.set(`${x},${y},${z}`, faceProfiles(items, partsByName));
+          profileAt.set(`${x},${y},${z}`, (mode === "observed" ? observedProfiles(items, y - lo[1]) : faceProfiles(items, partsByName)));
           const inside = x >= lo[0] && x <= hi[0] && y >= lo[1] && y <= hi[1] && z >= lo[2] && z <= hi[2];
           if (items.length === 0) {
             if (inside) voidCount += 1;
@@ -697,9 +732,9 @@ export function learnFromExamples(examples, parts, warn) {
           // canonicalize under the four Y rotations
           let best = null;
           const keys = [];
-          for (let k = 0; k < 4; k++) {
+          for (let k = 0; k < (mode === "observed" ? 1 : 4); k++) {
             const rotated = rotateComposition(items, partsByName, k);
-            const key = compositionKey(rotated);
+            const key = (mode === "observed" ? `layer:${y - lo[1]}:` : "") + compositionKey(rotated);
             keys.push(key);
             if (best === null || key < best.key) best = { key, items: rotated, k };
           }
@@ -707,13 +742,13 @@ export function learnFromExamples(examples, parts, warn) {
           if (!tiles.has(best.key)) {
             const distinct = [];
             const seenKeys = new Set();
-            for (let r = 0; r < 4; r++) {
+            for (let r = 0; r < (mode === "observed" ? 1 : 4); r++) {
               const key = compositionKey(rotateComposition(best.items, partsByName, r));
               if (seenKeys.has(key)) continue;
               seenKeys.add(key);
               distinct.push(r * 90);
             }
-            tiles.set(best.key, { id: tileIdFor(best.items, best.key), items: best.items, count: 0, rotations: distinct });
+            tiles.set(best.key, { id: tileIdFor(best.items, best.key), items: best.items, count: 0, rotations: distinct, ...(mode === "observed" ? { layer: y - lo[1] } : {}) });
           }
           const tile = tiles.get(best.key);
           tile.count += 1;
@@ -745,7 +780,7 @@ export function learnFromExamples(examples, parts, warn) {
     if (ids.has(tile.id)) throw new Error(`tile id collision "${tile.id}"`);
     ids.add(tile.id);
   }
-  return { tiles: [...tiles.values()], horizontal: horizontalPairs, vertical: verticalPairs, voidCount, observations };
+  return { tiles: [...tiles.values()], horizontal: horizontalPairs, vertical: verticalPairs, voidCount, observations, mode };
 }
 
 // ---------------------------------------------------------------------------
@@ -776,7 +811,7 @@ export function cellPrefab(tile, partsByName, kit, assetIdFor) {
       components: {
         transform: { position: [0, 0, 0], rotation: yawQuaternion(it.rotation) },
         mesh: {
-          source: { kind: "asset", assetId: assetIdFor(part) },
+          source: { kind: "asset", assetId: assetIdFor(part), ...(part.uvAlign && it.rotation ? { uvRotation: uvCounterRotation(it.rotation, part.uvAlign.factor) } : {}) },
           renderMode: "instanced",
           lod: false,
           castShadow: true,
@@ -790,7 +825,7 @@ export function cellPrefab(tile, partsByName, kit, assetIdFor) {
   const alignUv = tile.items
     .map((it, i) => ({ it, id: ids[i] }))
     .filter(({ it }) => partsByName.get(it.part).uvAlign)
-    .map(({ it, id }) => ({ child: id, factor: partsByName.get(it.part).uvAlign.factor }));
+    .map(({ it, id }) => ({ child: id, factor: partsByName.get(it.part).uvAlign.factor, ...(it.rotation ? { rotation: it.rotation } : {}) }));
   return { prefab: { version: 1, name: tile.id, root: "root", entities, props: {} }, alignUv };
 }
 
@@ -802,7 +837,8 @@ export function tilesetDoc({ kit, cellSize, learned, partsByName, prefabIdFor })
       prefabId: prefabIdFor(tile),
       weight: tile.count,
       rotations: tile.rotations,
-      sockets: faceProfiles(tile.items, partsByName),
+      ...(learned.mode === "observed" ? { layers: [tile.layer] } : {}),
+      sockets: learned.mode === "observed" ? observedProfiles(tile.items, tile.layer) : faceProfiles(tile.items, partsByName),
       ...(alignUv.length ? { alignUv } : {}),
       parts: tile.items.map((it) => `${it.part}@${it.slot}@${it.rotation}`),
     };
@@ -842,7 +878,7 @@ function writeJson(file, doc) {
 }
 
 /**
- * @param {{ kitDir: string, assetsDir: string, kit?: string, atlas?: string, cellSize: number[], examplesDir?: string, pageSize?: number, pad?: number, log?: (s: string) => void }} options
+ * @param {{ kitDir: string, assetsDir: string, kit?: string, atlas?: string, cellSize: number[], examplesDir?: string, adjacency?: "profiles" | "observed", pageSize?: number, pad?: number, log?: (s: string) => void }} options
  */
 export async function importKit(options) {
   const log = options.log ?? (() => {});
@@ -851,6 +887,7 @@ export async function importKit(options) {
     warnings.push(message);
     log(`  ! ${message}`);
   };
+  if (options.adjacency !== undefined && !["profiles", "observed"].includes(options.adjacency)) throw new Error(`unknown adjacency mode: ${options.adjacency}`);
   const kitDir = path.resolve(options.kitDir);
   const kit = slug(options.kit ?? path.basename(kitDir));
   if (!kit) throw new Error("kit id is empty");
@@ -890,7 +927,7 @@ export async function importKit(options) {
     return ex;
   });
   if (exampleFiles.length === 0) warn(`no examples in ${examplesDir} — nothing to learn; the tileset only has the void tile`);
-  const learned = learnFromExamples(examples, parts, warn);
+  const learned = learnFromExamples(examples, parts, warn, options.adjacency ?? "profiles");
   log(`  learned ${learned.tiles.length} cell type(s), ${learned.horizontal.length} horizontal + ${learned.vertical.length} vertical face pair(s)`);
 
   // prefabs + tileset
@@ -910,6 +947,7 @@ export async function importKit(options) {
     version: 1,
     kit,
     cellSize,
+    adjacency: learned.mode,
     importedAt: new Date().toISOString(),
     source: { kitDir, examplesDir },
     parts: parts.map((p) => ({
@@ -1054,6 +1092,7 @@ async function main() {
       atlas: opts.atlas,
       cellSize: triple(opts.cell, "--cell"),
       examplesDir: opts.examples,
+      adjacency: opts.adjacency,
       pageSize: opts.page ? Number(opts.page) : undefined,
       pad: opts.pad ? Number(opts.pad) : undefined,
       log,

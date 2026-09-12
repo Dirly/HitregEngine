@@ -2,11 +2,13 @@ import RAPIER from "@dimforge/rapier3d-compat";
 import {
   heightmapMesh,
   polyMeshCollision,
+  csgMesh,
   voxelMesh,
   worldTransforms,
   type HeightmapParams,
   type PolyMeshSource,
   type Quat,
+  type CsgMeshSource,
   type VoxelMeshSource,
   type SceneDoc,
   type Vec3,
@@ -58,6 +60,7 @@ interface MeshComponentData {
   source:
     | ({ kind: "heightmap" } & Partial<HeightmapParams>)
     | VoxelMeshSource
+    | CsgMeshSource
     | { kind: "asset"; assetId: string; node?: string }
     | { kind: "primitive"; shape: string; size?: Vec3 }
     | PolyMeshSource
@@ -420,6 +423,18 @@ export class PhysicsSim {
       // collide with, which is not a failure: falling back to a box here would
       // drop an invisible cube in the middle of the world.
       const mesh = voxelMesh(source as unknown as VoxelMeshSource);
+      if (mesh.triangleCount === 0) return null;
+      return (
+        this.cookShape(id, kind, scaleVertices(mesh.positions, scale), mesh.indices) ??
+        boxFallback()
+      );
+    }
+
+    if (source?.kind === "csg") {
+      // Same contract as the voxel branch: the collider IS the drawn surface,
+      // out of the same cache, so a wall you can see is a wall you can't walk
+      // through. A volume with no solid in it yields nothing rather than a box.
+      const mesh = csgMesh(source as unknown as CsgMeshSource);
       if (mesh.triangleCount === 0) return null;
       return (
         this.cookShape(id, kind, scaleVertices(mesh.positions, scale), mesh.indices) ??

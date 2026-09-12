@@ -99,6 +99,15 @@ export class NpcManager {
   /**
    * Spawn a template at a point. `id` defaults to `<template>#<n>`. Returns
    * the record, or null when the template is unknown.
+   *
+   * `opts.params` reaches EVERY scripted entity in the subtree, not just the
+   * root. An entity carries one script, so a character is always at least two
+   * of them — body with the controller, a child with the brain — and a spawn
+   * area handing down `home`/`leash`/`roam` would otherwise reach the
+   * controller (which has no use for them) and miss the brain (whose whole job
+   * they are). Scripts ignore params they did not declare, so the spray is
+   * free; the spawner wins over an authored value, because the spawn area is
+   * the source of truth for where a pack belongs.
    */
   spawn(template: string, at: [number, number, number], opts: { id?: string; yaw?: number; params?: Record<string, unknown> } = {}): NpcRecord | null {
     const tpl = this.templates.get(template);
@@ -121,10 +130,10 @@ export class NpcManager {
         doc.name = id;
         const transform = (doc.components["transform"] ?? {}) as Record<string, unknown>;
         doc.components["transform"] = { ...transform, position: at, rotation: [0, Math.sin(yaw / 2), 0, Math.cos(yaw / 2)] };
-        if (opts.params) {
-          const script = doc.components["script"] as { name: string; params?: Record<string, unknown> } | undefined;
-          if (script) script.params = { ...(script.params ?? {}), ...opts.params };
-        }
+      }
+      if (opts.params) {
+        const script = doc.components["script"] as { name: string; params?: Record<string, unknown> } | undefined;
+        if (script) script.params = { ...(script.params ?? {}), ...opts.params };
       }
       entities[map.get(oldId)!] = doc;
     }
@@ -146,14 +155,24 @@ export class NpcManager {
     return true;
   }
 
-  /** Everything the manager knows, for the admin endpoint. */
-  list(): Array<NpcRecord & { position: [number, number, number] | null; hp: unknown; dead: boolean }> {
+  /**
+   * Everything the manager knows, for the admin endpoint.
+   *
+   * `ai` is whatever the subtree's scripts report from `onDebug` — for a mob
+   * that is its state, its target and its threat table. Position and hp tell
+   * you WHAT a misbehaving camp is doing; only this tells you why, and on a
+   * live layer there is no debugger to reach for.
+   */
+  list(): Array<NpcRecord & { position: [number, number, number] | null; hp: unknown; dead: boolean; ai: Record<string, unknown> }> {
     const world = this.server.world;
     return [...this.npcs.values()].map((r) => ({
       ...r,
       position: world.positionOf(r.id),
       hp: world.netState.get(`combat/${r.id}.hp`),
       dead: world.netState.get(`combat/${r.id}.dead`) === true,
+      // A paused pack has no script instances at all, so this is empty rather
+      // than stale — which is the honest answer for something asleep.
+      ai: world.scripts.debugTree(r.ids),
     }));
   }
 

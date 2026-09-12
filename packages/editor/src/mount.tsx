@@ -61,6 +61,7 @@ export interface MountOptions {
   pathThickness: Observable<number>;
   pathRadius: Observable<number>;
   thumbnails: Observable<Record<string, string>>;
+  thumbnailRequests?: Observable<string[]>;
   dockSizes: Observable<DockSizes>;
   assetsVersion: Observable<number>;
   /** Entity id -> bone names of its loaded skinned model (bone dropdowns). */
@@ -134,6 +135,7 @@ export function mountEditor(options: MountOptions): { unmount(): void } {
       pathThickness={options.pathThickness}
       pathRadius={options.pathRadius}
       thumbnails={options.thumbnails}
+      thumbnailRequests={options.thumbnailRequests}
       dockSizes={options.dockSizes}
       assetsVersion={options.assetsVersion}
       modelBones={options.modelBones}

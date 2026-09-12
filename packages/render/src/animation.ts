@@ -26,6 +26,12 @@ export interface LayerOptions {
   additive?: boolean;
   /** Replay from frame 0 even if this clip is already the layer. */
   restart?: boolean;
+  /**
+   * Playback rate for the layer clip (1 = authored). The layer keeps its own
+   * rate: a cast stretched to fill its window should not also be sped up by
+   * the sprint the legs are doing underneath.
+   */
+  speed?: number;
 }
 
 interface Layer {
@@ -33,6 +39,8 @@ interface Layer {
   clip: string;
   action: THREE.AnimationAction;
   additive: boolean;
+  /** Playback rate asked for, kept so an idempotent re-assert can change it. */
+  speed: number;
 }
 
 interface Entry {
@@ -229,12 +237,32 @@ export class AnimationSystem {
   }
 
   /**
+   * Authored length of a clip in seconds, or null when this entity has no such
+   * clip (or no model yet). This is what lets a caller FIT a clip to a window
+   * — stretch a one-second cast over a three-second channel — instead of
+   * looping it, so it is asked for by the controller on every action start.
+   */
+  clipDuration(entityId: string, clip: string): number | null {
+    return this.entryFor(entityId)?.clips.get(clip)?.duration ?? null;
+  }
+
+  /** Current base playback multiplier (replicated so peers match, not just guess). */
+  speedOf(entityId: string): number {
+    return this.entryFor(entityId)?.speedMul ?? 1;
+  }
+
+  /** Current layer playback multiplier. */
+  layerSpeedOf(entityId: string): number {
+    return this.entryFor(entityId)?.layer?.speed ?? 1;
+  }
+
+  /**
    * Crossfade to a clip (fade seconds). The core blending primitive.
    * `loop: false` plays the clip once, holds the final pose, and raises the
    * mixer's "finished" event → {@link onClipFinished} (drives
    * "animation.completed"); the default loops forever and never finishes.
    */
-  play(entityId: string, clip: string, fade = 0.3, loop = true): void {
+  play(entityId: string, clip: string, fade = 0.3, loop = true, restart = false): void {
     const entry = this.entryFor(entityId);
     if (!entry) return;
     if (!entry.actions.has(clip)) {
@@ -243,10 +271,14 @@ export class AnimationSystem {
       );
       return;
     }
-    if (entry.current === clip) return;
+    // Idempotent by default — callers re-assert the clip every tick. `restart`
+    // is how a one-shot plays a SECOND time: a clip that ran to its end and
+    // clamped there is still "current", so without this the second cast of a
+    // spell holds the pose from the first.
+    if (entry.current === clip && !restart) return;
     entry.current = clip;
     entry.baseLoop = loop;
-    this.applyBase(entry, fade, false);
+    this.applyBase(entry, fade, false, restart);
   }
 
   /**
@@ -271,10 +303,20 @@ export class AnimationSystem {
     const fade = opts.fade ?? entry.animator?.fade ?? 0.2;
     const loop = opts.loop ?? false;
     const additive = opts.additive === true;
+    const speed = opts.speed ?? 1;
     // Idempotent, like play(): net replication re-asserts the layer every
     // frame it is up, and restarting the clip each time would freeze it on
     // its first frame. `restart` is how a caller replays the same clip.
-    if (!opts.restart && entry.layer?.clip === clip && entry.layer.additive === additive) return;
+    if (!opts.restart && entry.layer?.clip === clip && entry.layer.additive === additive) {
+      // …but a re-assert MAY retune the rate. A cast whose window is extended
+      // mid-flight (a channel that got longer) slows down where it stands
+      // rather than starting over.
+      if (speed !== entry.layer.speed) {
+        entry.layer.speed = speed;
+        entry.layer.action.timeScale = speed;
+      }
+      return;
+    }
     const maskRoot = opts.mask ?? this.maskRootOf(entry);
     const nodes = maskRoot ? subtreeNames(entry.root, maskRoot) : null;
     if (!nodes || nodes.size === 0) {
@@ -311,7 +353,7 @@ export class AnimationSystem {
     }
 
     const previous = entry.layer;
-    entry.layer = { clip, action, additive };
+    entry.layer = { clip, action, additive, speed };
     // The base moves off the full-body clip FIRST for an override layer,
     // otherwise both drive the masked bones and the mixer averages them.
     if (!additive) this.applyBase(entry, fade, true);
@@ -319,7 +361,7 @@ export class AnimationSystem {
     this.transition(entry, action, null, fade, {
       loop,
       weight: opts.weight ?? 1,
-      timeScale: 1,
+      timeScale: speed,
     });
   }
 
@@ -338,7 +380,7 @@ export class AnimationSystem {
    * the complement of the layer while an override layer is up. Called on every
    * gait change and every layer change, so the two never fight over a bone.
    */
-  private applyBase(entry: Entry, fade: number, syncTime: boolean): void {
+  private applyBase(entry: Entry, fade: number, syncTime: boolean, restart = false): void {
     if (!entry.current) return;
     const clip = entry.clips.get(entry.current);
     if (!clip) return;
@@ -363,6 +405,7 @@ export class AnimationSystem {
       loop: entry.baseLoop,
       timeScale: entry.speedMul,
       syncTime,
+      restart,
     });
     entry.baseAction = action;
   }
@@ -385,23 +428,38 @@ export class AnimationSystem {
     next: THREE.AnimationAction,
     from: THREE.AnimationAction | null,
     fade: number,
-    opts: { loop: boolean; weight?: number; timeScale?: number; syncTime?: boolean },
+    opts: { loop: boolean; weight?: number; timeScale?: number; syncTime?: boolean; restart?: boolean },
   ): void {
-    if (next === from) return;
+    if (next === from) {
+      // Same action, played again (a repeated one-shot): rewind it in place.
+      // Crossfading an action with itself would ramp its own weight from zero
+      // and drop the pose on the floor for the length of the fade.
+      if (!opts.restart) return;
+      next.stopFading();
+      next.enabled = true;
+      next.paused = false;
+      next.weight = opts.weight ?? 1;
+      next.setLoop(opts.loop ? THREE.LoopRepeat : THREE.LoopOnce, Infinity);
+      next.clampWhenFinished = !opts.loop;
+      next.timeScale = opts.timeScale ?? 1;
+      next.time = 0;
+      next.play();
+      return;
+    }
     next.enabled = true;
     next.paused = false;
     next.setLoop(opts.loop ? THREE.LoopRepeat : THREE.LoopOnce, Infinity);
     next.clampWhenFinished = !opts.loop; // one-shots hold their last frame
     next.timeScale = opts.timeScale ?? 1;
     const duration = next.getClip().duration;
-    next.time = opts.syncTime && from && duration > 0 ? from.time % duration : 0;
+    next.time = opts.syncTime && from && from !== next && duration > 0 ? from.time % duration : 0;
     next.weight = opts.weight ?? 1;
     next.stopFading();
     next.play();
     if (fade > 0) {
       next.fadeIn(fade);
-      if (from) this.fadeOut(entry, from, fade);
-    } else from?.stop();
+      if (from && from !== next) this.fadeOut(entry, from, fade);
+    } else if (from !== next) from?.stop();
   }
 
   /** Fade an action out and stop it once it has actually reached zero. */

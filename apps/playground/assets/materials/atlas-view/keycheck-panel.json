@@ -1,0 +1,7 @@
+{
+  "shader": "unlit",
+  "color": "#ffffff",
+  "map": "atlas-carousel-sheet-keycheck.png",
+  "filter": "nearest",
+  "side": "double"
+}

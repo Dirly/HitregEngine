@@ -788,6 +788,71 @@ A boulder in the middle of the highway is the single most obvious way a
 generated world announces that nothing was thought about. Defaults: boulders
 3.5 m, shrubs 2.5 m, trees 4 m.
 
+## 25a. `density` is a lattice, not an outcome — and a uniform one is an orchard
+
+Two separate traps, and between them they are why a first-cut generated world
+is simultaneously too dense everywhere you look and too sparse where it should
+be thick.
+
+**The number in the recipe is not the number on the ground.** `density` sets a
+lattice spacing (`1 / sqrt(density)`). Every candidate on it then has to clear
+slope, height, water, clearance, biome — and above all the SPACING test, which
+places nothing closer to its neighbour than the sum of the two footprints. A
+rule whose `footprint * scale[1]` exceeds half its lattice spacing is
+**packing-limited**, so raising its density changes nothing at all and nothing
+says so. Measured on the demo world before this pass: three tree rules
+authored at 13,000, 14,000 and 18,000/km² all landed within a few percent of
+5,000, all three footprint-limited. The forest, the meadow and the jungle
+therefore had the *same* tree density — which is exactly what it looked like.
+
+`pnpm -F playground worldgen scatter <world>` now solves real cells and
+prints **realized props/km² per rule per biome**, plus what each `clump` mask
+actually keeps. Tune against that; the nominal column is only useful for
+spotting a typo.
+
+**A uniform density reads as an orchard.** The lattice is global and the biome
+gate is a step function, so a rule fills every biome it is allowed in, evenly,
+to the horizon. Real ground is not like that: woodland is groves and
+clearings, a desert is bare with thickets in it. Two fields fix it, and both
+only ever THIN — `density` fixes the lattice before either runs, so it is the
+PEAK, and a multiplier above 1 could not place a candidate that was never
+generated:
+
+- **`clump`** — an fBm mask, the same idea `patches` applies to the ground
+  surface. `frequency` is the grove size (2/frequency is roughly its width in
+  metres), `threshold` how rare, `floor` what survives *between* the groves. 0
+  gives clearings you can walk across; 0.1–0.2 gives the thinned scatter most
+  woodland actually has.
+- **`biomeDensity`** — biome id -> fraction of the density that survives
+  there. This is how one `maple` rule is a forest in the forest (1.0) and a
+  copse in the meadow (0.09), instead of two rules that have to be kept in
+  step. A biome absent from `biomes` is still excluded outright; this only
+  grades the ones that are in.
+
+Three things that will cost you an afternoon otherwise:
+
+- **fBm does not fill -1..1.** It piles up around zero, so a `threshold` that
+  reads like "the top 40%" is nearer the top 20%, and the rule quietly loses
+  most of its density with nothing in the recipe to show for it. (The same
+  trap the climate bands hit, § biomes.) `worldgen scatter` prints the
+  measured keep per rule; a rule keeping under ~12% is flagged.
+- **The mask must be tested BEFORE `slope`.** `slope` is four height
+  evaluations — 22 us on this world, the most expensive thing a candidate can
+  be asked — and a clumped rule authors a *higher* peak density, so testing
+  the mask after it makes every rejected candidate cost more than the prop it
+  did not place. Measured: 10.6 -> 19.9 ms per cell that way round, 11.4 the
+  right way. Scatter runs in the chunk worker pool, so this is chunk latency
+  rather than a frame hitch, but it is a doubling for nothing.
+- **Flat biomes get denser for free.** A swamp is 93% walkable-slope ground
+  and a jungle 64%, so the same weight in both makes the swamp the denser of
+  the two. Grade against the measured table, not against intent.
+
+And one gate that fails silently in the other direction: a `height` window
+authored for a world that no longer exists. `pine-snow` had a 260 m floor on a
+world whose treeline sits at ~120 m, so the only ground clearing it was bare
+alpine rock too steep for the rule anyway. It placed **nothing, anywhere**,
+and looked exactly like a rule that was working.
+
 ## 26. Yes, slope picks the texture — and it was measuring the wrong angle
 
 There are three slope-driven mechanisms, and they were all reading a number
@@ -894,10 +959,10 @@ about **2 ms of render time**, ~82 fps in a meadow. Density is the lever, and
 it is steep — 9/m² read as a solid textured carpet rather than as tufts, which
 is both slower and worse-looking than 3/m².
 
-### Two ways scattered cover betrays itself
+### Four ways scattered cover betrays itself
 
-Both were live in the first cut, and both are worth knowing because every
-scatter system grows them:
+All four were live at one point, and all four are worth knowing because
+every scatter system grows them:
 
 - **Floating on slopes.** A billboard is a VERTICAL card standing on one
   sampled point, but it has width — so on a gradient its downhill edge lifts
@@ -928,6 +993,63 @@ scatter system grows them:
   of the patch empty behind a straight edge across the middle of the view.
   Outward order puts any shortfall at the rim, where the distance fade is
   already dissolving it.
+
+- **Trailing the player.** The third one, and the only one you notice while
+  *running* rather than while turning. A recenter re-places the whole disc,
+  and behind every tuft is a host ground query that on a generated world is
+  `slope` + `height` + `splatAt` — **25 us**, of which `slope` alone is 18
+  because it is four height evaluations around the point. Twenty thousand of
+  those is 386 ms of sampling, spent 2 ms per frame (deliberately: the budget
+  is a clock, because a "sample unit" count is not a stable currency across
+  worlds), and the centre is not reconsidered while a placement is in flight.
+  So the disc is always being built for ground the player has already left:
+  bare ahead, a crescent of grass behind. Three fixes, and the order matters —
+  the first two make the work smaller, the third stops it mattering:
+
+  1. **Sample the expensive properties coarsely.** Slope and the surface mix
+     come from noise bands and patch blotches tens of metres across, and the
+     terrain is a 2 m voxel isosurface, so there is nothing under 2 m for them
+     to resolve. The host samples them on a **2 m lattice** and bilinearly
+     interpolates (`FOLIAGE_PROBE` in main.ts) — bilinear, not nearest, or the
+     gate's edge around a dirt patch becomes a 2 m staircase. Height stays
+     exact per blade: a tuft an interpolated hand's breadth off the ground is
+     the one artefact nobody misses. Measured: 25 us -> 7 us a blade, and the
+     blade count out of the gate moved by 0.3%.
+  2. **Resolve the surface names once.** The gate was doing a `toLowerCase`
+     and a linear scan of the palette *per blade, per named surface*, to find
+     an index that never changes.
+  3. **Centre the disc where the camera is GOING.** Even at 7 us a blade the
+     work finishes after the player arrives; a smoothed camera velocity, 1.4 s
+     of lead capped at 0.45 of the radius, cancels it. Standing still the lead
+     is zero and the behaviour is exactly what it was.
+
+  Net on the demo world: a cold field 386 -> 144 ms, a recenter ~1.0 s -> ~0.4
+  s, against a recenter every 3-4 s at running speed. If it ever comes back,
+  the next lever is the per-blade `height` call — 5.8 us and now the whole
+  floor — not the budget.
+
+- **Ending inside its own fade.** The one you see while RUNNING, and the one
+  that survived every fix above. The fade is measured from the CAMERA; the
+  disc is placed around a snapped, hysteretic CENTRE. Those are different
+  points, and the gap between them is most of a recenter cell — so on the side
+  the centre has drifted away from, the field simply STOPS, in a hard arc, at
+  around 0.6 of the radius, while the fade does not even begin until 0.7.
+  Measured in the test rig: 14.8 m of coverage on a 24 m layer. Running
+  forward, that arc is a horizon of grass a few metres ahead of you that jumps
+  outward on every recenter — which reads as cover "loading in", though
+  nothing is loading at all. Two parts to the fix:
+
+  1. **Place wider than you draw.** `radius` keeps its authored meaning (where
+     cover has faded out) and the disc is sampled `PLACEMENT_PAD` beyond it —
+     the ring the camera moves into between recenters. Costs blades: the pad
+     is squared.
+  2. **Clamp the fade to the coverage that actually exists.** The band is a
+     per-frame uniform, `min(radius, placeRadius - |camera - centre|)`, so
+     cover ALWAYS reaches zero opacity before it runs out of blades whatever
+     the pad, the recenter fraction and the lead happen to add up to. When
+     there is headroom it sits at the authored radius and costs nothing. Do
+     not be tempted to anchor the fade to the CENTRE instead: the centre jumps
+     a whole cell on a recenter, so every blade's opacity would jump with it.
 
 ## 29. Tiling: break the grid, don't chase a better texture
 
@@ -1711,7 +1833,9 @@ the sixteen slots, and one glTF holding every prop on a shelf. What it took
 to fold them in:
 
 **One file per prop.** `tools/split-gltf.mjs <group.gltf> <outdir> [--skip
-A,B] [--rename Old=New]` cuts a grouped export apart along its root nodes.
+A,B] [--rename Old=New|index=New] [--texnames 3=Leaves,…] [--reorigin]` cuts a
+grouped export apart along its root nodes (or, when the whole shelf is wrapped
+in one empty group, along that group's children).
 Each output carries only the meshes, accessors, buffer views, materials,
 textures and images its node touches, re-packed into a fresh embedded buffer
 (4-byte aligned), with the root's translation zeroed so the prop stands at
@@ -1777,6 +1901,86 @@ stump, root, mushroom, palm, hoodoo), sized from the printed bounds, zoned
 by biome id. Scatter went 10.7 → 16.8 ms/cell — that is cell LOAD time, not
 frame time, but it is the number to trim next (the margin solve and
 `waterY` per candidate, as before).
+
+### The second prop drop: origins, a name for every sheet, and less rock
+
+The nature grouping came back (2026-09-08) with twenty props — pines, snowy
+pines, a jungle tree and bush, granite and sandstone rock in three sizes
+each, two hoodoos — and the world it went into had three complaints against
+it: too much rock everywhere, rock geometry that read wrong, and colliders
+sitting off their models. All three had the same shape of cause.
+
+**A prop stands on its own origin, or its collider is a lie.** The voxel
+scatter emits a prop's collider at `offset: [0, size.y / 2, 0]` — rising
+from the ENTITY origin. That is only ever the right place if the MODEL's
+base sits at its own origin too, and half a shelf does not: the old hoodoo
+was modelled about its middle, so its geometry started 4.01 m BELOW its
+origin and its collider stood 4.4 m in the air above the rock. Nothing
+draws a collider, so this is invisible until a player walks through a
+spire. `split-gltf.mjs --reorigin` fixes it at import: it walks the split
+output's node transforms (raw accessor min/max is a DIFFERENT box — a DCC
+tool nests parts under nodes with their own rotation), then translates the
+root so the lowest point is y=0 and the XZ centre is 0. The jungle tree
+moved 3.18 m, the bushes 0.5 m, the hoodoo 4.01 m. With the base on the
+origin, mesh and collider are locked together by construction: `yOffset`
+sinks the whole entity and `alignToNormal` rotates it, both of them moving
+the collider with the mesh, so no per-prop fudging is left to get wrong.
+
+**Name every texture at import, not in the DCC tool.** The `pasted` trap
+from the last drop was still there — sixteen of seventeen textures came
+back called `pasted`, and the palm's `wind.materials: "leaves"` had
+therefore been matching NOTHING since the day it was written. Renaming in
+Blockbench means re-doing it on every re-export, so `split-gltf.mjs
+--texnames 0=Bark,1=Leaves,…` now names the source images by index before
+the split, and every prop that shares a sheet carries the same name out.
+The convention that makes one rule cover the shelf: leaf sheets are
+`Leaves*`, bush sheets `Bush*`, trunks `Bark*`/`*Wood`, rock `Rock` and
+`Sandstone*`. `wind.materials` then takes a COMMA-SEPARATED list, so every
+foliage rule in the world is the same string — `"leaves,bush"` — which
+moves the canopy of every tree and the whole of every bush and leaves every
+trunk, stump and rock standing. A dead tree's twigs are a `LeavesDead`
+sheet, so they now move too; before, that rule had no wind at all.
+
+**`worldgen scatter <world>` is the check.** A scatter rule is three
+numbers away from a wrong-looking world and none of them fail loudly, so
+the audit reads each rule's MODEL off disk and reports: a base that is not
+at the origin (the collider will float by that much), a collider bigger
+than the prop in any axis (an invisible wall — the one collision bug
+players feel and no screenshot shows), a box collider far smaller than its
+prop, a wind filter that matches none of the model's texture names, and a
+model carrying foliage with no wind rule at all. Exit 1 on findings. Run it
+after any prop or scatter change; on the table as it stood it found the
+palm's dead wind filter and the hoodoo's floating collider immediately.
+
+**Rock: 1,946/km² → 384/km².** The clutter was two rules. `boulder` put a
+4 m boulder in EVERY biome at 4,000/km², and `boulder-rock` put a cliff
+rock over eight more at 2,500/km² — measured over a 970-cell sample that
+was 1,946 rocks per square kilometre, **24% of every prop in the world**.
+Rock now goes where rock is exposed, in three sizes, with the sandstone
+cuts of the same three shapes for the arid biomes so a desert is not
+scattered with granite: 384/km², 3.7% of props, with big rock at 11/km²
+and hoodoos at 15/km² — landmarks you steer around rather than ground
+cover. The number that matters is per-km² and per-biome, not `density`:
+`clearance`, `footprint` and `spacing` cut a requested density by a factor
+of five to twenty, differently per rule, so the census (scatterCell over a
+wide lattice, tallied by `instance.rule`) is the only honest before/after.
+
+**Cloud colour follows the sun's DIRECTION, not just the hour.** The
+`day-night` script already tinted the cloud layer by time of day, but with
+one colour for the whole dome — which gives the flat everything-is-orange
+sunset, and left midnight cloud a dim brown, because at night the blend
+landed on the dawn colour. Split in two: `clouds.color`/`shadow` are the
+ambient half (daylight white over grey, cooling to a moonlit blue at
+night), and the new `clouds.sun`/`sunAmount` are the directional half the
+dome resolves per pixel against the same `sunDirection` the sun disc uses.
+Cloud near the sun's azimuth burns; the far side of the sky stays cold.
+`sunAmount` opens while the sun is within ~20° of the horizon either side
+and shuts by mid-morning; `sun` deepens toward red at the exact horizon.
+Weighted up by cloud thickness, so it is the piled parts that catch it.
+Measured on a frozen dusk sky: the sun-facing band went r/b 0.994 → 1.067
+with the glow on while the away-facing band did not move at all. Authored
+default is `sunAmount: 0`, so nothing changes for a sky no script drives,
+and `cloudGlow: 0` on the script turns it off.
 
 ### Water that connects: seams, lakes, outlets and a current
 
@@ -2406,3 +2610,5 @@ worst 0.5-1 m at the doc points, where `leftY`/`rightY` and the profile
 are piecewise-linear and kink. That is the honest residue of a 2 m mesh
 drawing a 9 m corridor; a Catmull-Rom or moving-average pass over the
 per-point side heights would take it down further if it still shows.
+
+For native CSG dungeon brush painting and angle-limited area fills, see [volume painting](volume-paint.md).

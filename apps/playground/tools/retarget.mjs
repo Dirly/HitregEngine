@@ -35,6 +35,7 @@ import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
 import fs from "node:fs";
 import path from "node:path";
 import { RIG_MAPS, CLIP_PRESETS } from "./rig-map.mjs";
+import { sanitizeFbx } from "./_fbx.mjs";
 
 // ---------------------------------------------------------------- args
 
@@ -93,7 +94,7 @@ function loadFbx(file) {
   }
   addTextureSearchRoot(path.dirname(abs));
   const buf = fs.readFileSync(abs);
-  const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+  const ab = sanitizeFbx(buf); // see _fbx.mjs — a no-op unless three would refuse the file
   // Silence the loader's per-curve chatter; a 68MB library emits thousands of
   // lines about unused curves and 5-influence vertices, none actionable here.
   const warn = console.warn;

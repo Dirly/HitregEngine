@@ -6,14 +6,19 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "echo \"(no tests yet)\"",
+    "test": "tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit && node tools/typecheck-projects.mjs",
     "build:game": "node tools/publish.mjs",
     "typecheck:projects": "node tools/typecheck-projects.mjs",
     "place": "tsx tools/place.mts",
     "worldgen": "tsx tools/worldgen.mts",
     "retarget": "node tools/retarget.mjs",
-    "wfc": "node ../../tools/wfc-3d/kit.mjs"
+    "autorig": "node tools/autorig.mjs",
+    "unwrap-weapon": "node tools/unwrap-weapon.mjs",
+    "atlas-view": "node tools/atlas-view.mjs",
+    "atlas-pack": "node tools/atlas-pack.mjs",
+    "wfc": "node ../../tools/wfc-3d/kit.mjs",
+    "dungeon": "tsx tools/dungeon.mts"
   },
   "dependencies": {
     "@hitreg/comms": "workspace:*",

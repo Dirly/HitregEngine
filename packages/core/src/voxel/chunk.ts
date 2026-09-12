@@ -20,6 +20,7 @@ import type { EntityDoc } from "../scene.js";
 import type { VoxelWorldData } from "../components/voxel.js";
 import { riverBank, type WorldField } from "./field.js";
 import { scatterCell, type ScatterCellOptions } from "./scatter.js";
+import type { VoxelMesher } from "./mesh.js";
 import { smoothstep } from "./noise.js";
 import type { BridgeDoc, LakeDoc, RiverDoc, ScatterDoc, WorldRecipe } from "./recipe.js";
 
@@ -49,6 +50,8 @@ export interface VoxelChunkOptions extends ScatterCellOptions {
   terrainCastShadow?: boolean;
   /** Mesh at a coarser lattice (HLOD/preview). 1 = full detail. */
   lodStep?: number;
+  /** Which mesher the terrain cell asks for. Omit for marching cubes. */
+  mesher?: VoxelMesher;
   /** Emit river ribbons and lake sheets (needs `recipe.waterMaterial`). Default on. */
   water?: boolean;
 }
@@ -96,14 +99,21 @@ function propEntity(rule: ScatterDoc, instance: ReturnType<typeof scatterCell>[n
     };
   }
   if (rule.collider !== "none") {
+    // Size and offset are the MODEL-space numbers, NOT pre-multiplied by
+    // `instance.scale`. The transform above already carries that scale and
+    // the physics sim applies a body's world scale to its collider itself
+    // (`sim.ts`: `size[i] * s`, `offset[i] * s`) — Rapier colliders do not
+    // scale with their body, so the sim has to, and a rule that scaled them
+    // here as well got scale SQUARED. At the 0.9-1.7 a rock rule asks for
+    // that is a collider up to 2.9x the rock, floating at twice the right
+    // height: an invisible boulder several metres across, and invisible is
+    // the whole problem — nothing draws a collider, so it survived a static
+    // audit of the recipe against the model. `worldgen scatter` compares the
+    // rule to the model on the same assumption this line now honours.
     components["collider"] = {
       shape: rule.collider,
-      size: [
-        rule.colliderSize[0] * instance.scale,
-        rule.colliderSize[1] * instance.scale,
-        rule.colliderSize[2] * instance.scale,
-      ],
-      offset: [0, (rule.colliderSize[1] * instance.scale) / 2, 0],
+      size: [rule.colliderSize[0], rule.colliderSize[1], rule.colliderSize[2]],
+      offset: [0, rule.colliderSize[1] / 2, 0],
     };
   }
   return { name: instance.id, parent: null, tags: ["scatter", rule.id], components };
@@ -640,6 +650,7 @@ export function voxelChunkDoc(
         world,
         cell: [cx, cz],
         ...(options.lodStep && options.lodStep > 1 ? { lodStep: options.lodStep } : {}),
+        ...(options.mesher && options.mesher !== "mc" ? { mesher: options.mesher } : {}),
       },
       ...(options.material ?? recipe.material ? { material: options.material ?? recipe.material } : {}),
       // NOT `static: true`, which would opt the cell into static draw-call
@@ -821,6 +832,7 @@ export function voxelChunkOptionsFrom(data: VoxelWorldData): VoxelChunkOptions {
     colliderLodStep: data.colliderLodStep,
     material: data.material,
     terrainCastShadow: data.terrainCastShadow,
+    mesher: data.mesher,
   };
 }
 

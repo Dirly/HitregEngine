@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "name": "dc-empty",
+  "entities": {
+    "sky": {
+      "name": "Sky",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "sky": {
+          "top": "#232a33",
+          "bottom": "#4a5360",
+          "light": 0.9
+        }
+      }
+    },
+    "sun": {
+      "name": "Sun",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            4,
+            8,
+            5
+          ]
+        },
+        "light": {
+          "kind": "directional",
+          "intensity": 2,
+          "color": "#fff3e2"
+        }
+      }
+    },
+    "camera": {
+      "name": "Camera",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            1.2,
+            4
+          ]
+        },
+        "camera": {
+          "active": true,
+          "fov": 45,
+          "near": 0.01,
+          "far": 200
+        }
+      }
+    }
+  }
+}

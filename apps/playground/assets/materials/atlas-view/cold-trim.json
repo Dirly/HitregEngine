@@ -1,0 +1,10 @@
+{
+  "shader": "standard",
+  "color": "#ffffff",
+  "map": "longsword-unwrapped-atlas-cold.png",
+  "filter": "nearest",
+  "roughness": 0.6,
+  "metalness": 0.1,
+  "alphaTest": 0.5,
+  "side": "double"
+}

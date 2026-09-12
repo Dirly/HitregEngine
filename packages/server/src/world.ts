@@ -99,6 +99,12 @@ export class HeadlessWorld {
   readonly anims = new Map<string, string>();
   /** Layer clip per entity (the masked clip riding over `anims`) — the `animL` replica field. */
   readonly animLayers = new Map<string, string>();
+  /**
+   * Playback rate per entity — the `animR` replica field. A clip name alone
+   * makes every remote body play its walk cycle at the authored speed whatever
+   * pace it is actually travelling at, which is foot-skate by construction.
+   */
+  readonly animRates = new Map<string, number>();
   /** Runs at the top of every fixed step, before physics (movement drivers live here). */
   readonly beforeStep = new Set<(dt: number) => void>();
   /** Runs after scripts each fixed step (replication, bookkeeping). */
@@ -144,7 +150,11 @@ export class HeadlessWorld {
         this.animLayers.delete(id);
       },
       animationClips: () => [],
-      setAnimationSpeed: () => undefined,
+      // no mixer here, but the rate a script asks for still replicates: it is
+      // the only thing that keeps an NPC's feet planted on the clients
+      setAnimationSpeed: (id, multiplier) => {
+        this.animRates.set(id, multiplier);
+      },
       setBillboard: () => undefined,
       setParticles: () => undefined,
       setLight: () => undefined,
@@ -264,6 +274,7 @@ export class HeadlessWorld {
       this.objects.delete(id);
       this.entities.delete(id);
       this.anims.delete(id);
+      this.animRates.delete(id);
       this.animLayers.delete(id);
     }
   }

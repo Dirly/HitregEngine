@@ -115,7 +115,17 @@ export interface NetPresenceOptions {
   /** Peer: resolve a replicated entity to its render object (ghost target). */
   getEntityObject?(id: string): THREE.Object3D | null;
   /** Peer: apply a replicated animation clip change (plus the layer clip over it, if any). */
-  setEntityAnim?(id: string, clip: string, layer?: string | null): void;
+  setEntityAnim?(
+    id: string,
+    clip: string,
+    layer?: string | null,
+    opts?: {
+      /** Playback rate the authority is using for the base clip. */
+      rate?: number;
+      /** Seconds left of a one-shot action, so the clip can be fitted to it. */
+      action?: number;
+    },
+  ): void;
 
   // -- replicated gameplay events ----------------------------------------------
   /**
@@ -154,6 +164,10 @@ export interface NetReplica {
   anim?: string;
   /** Layer clip over `anim` (an upper-body cast while the gait keeps running). */
   animL?: string;
+  /** Playback rate for `anim` — without it every remote body skates. */
+  animR?: number;
+  /** Seconds left of a one-shot action, so the client can fit the clip to it. */
+  animD?: number;
   relevancy: "always" | "proximity";
   radius: number;
   sendEvery: number;
@@ -167,6 +181,8 @@ export interface NetWorldEntity {
   q: [number, number, number, number];
   anim?: string;
   animL?: string;
+  animR?: number;
+  animD?: number;
 }
 
 interface PresencePlayer {
@@ -540,12 +556,19 @@ export class NetPresence {
       if (!object) continue;
       object.position.set(s.p[0], s.p[1], s.p[2]);
       if (s.q) object.quaternion.set(s.q[0], s.q[1], s.q[2], s.q[3]);
-      const state = s.data as { anim?: string; animL?: string } | undefined;
+      const state = s.data as
+        | { anim?: string; animL?: string; animR?: number; animD?: number }
+        | undefined;
       // applied every frame, NOT cached here: the animation system is the
       // source of truth (its play() and playLayer() no-op on the clip already
       // running) — a cache in this layer goes stale whenever the app's play
       // session restarts
-      if (state?.anim) this.opts.setEntityAnim?.(id, state.anim, state.animL ?? null);
+      if (state?.anim) {
+        this.opts.setEntityAnim?.(id, state.anim, state.animL ?? null, {
+          ...(typeof state.animR === "number" ? { rate: state.animR } : {}),
+          ...(typeof state.animD === "number" ? { action: state.animD } : {}),
+        });
+      }
     }
   }
 
@@ -785,6 +808,8 @@ export class NetPresence {
         q: r.q,
         ...(r.anim ? { anim: r.anim } : {}),
         ...(r.animL ? { animL: r.animL } : {}),
+        ...(r.animR !== undefined && r.animR !== 1 ? { animR: r.animR } : {}),
+        ...(r.animD !== undefined ? { animD: r.animD } : {}),
       };
     }
     state["entities"] = { managed: replicas.map((r) => r.id), updates, removed: left };
@@ -1076,7 +1101,9 @@ export class NetPresence {
         : {};
     const entitySnaps: Record<string, TransformSnap> = {};
     for (const [id, raw] of Object.entries(updates)) {
-      const e = raw as { p?: unknown; q?: unknown; anim?: unknown; animL?: unknown } | null;
+      const e = raw as
+        | { p?: unknown; q?: unknown; anim?: unknown; animL?: unknown; animR?: unknown; animD?: unknown }
+        | null;
       if (!isFiniteVec(e?.p, 3) || !isFiniteVec(e?.q, 4)) continue;
       const p = e!.p as number[];
       const q = e!.q as number[];
@@ -1085,7 +1112,16 @@ export class NetPresence {
         q: [q[0]!, q[1]!, q[2]!, q[3]!],
         data:
           typeof e!.anim === "string"
-            ? { anim: e!.anim, ...(typeof e!.animL === "string" ? { animL: e!.animL } : {}) }
+            ? {
+                anim: e!.anim,
+                ...(typeof e!.animL === "string" ? { animL: e!.animL } : {}),
+                ...(typeof e!.animR === "number" && Number.isFinite(e!.animR)
+                  ? { animR: e!.animR }
+                  : {}),
+                ...(typeof e!.animD === "number" && Number.isFinite(e!.animD)
+                  ? { animD: e!.animD }
+                  : {}),
+              }
             : undefined,
       };
     }

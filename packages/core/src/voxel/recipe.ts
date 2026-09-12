@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { hexColor, meshWindSchema, MAX_SPLAT_LAYERS } from "../components/core.js";
+import { hexColor, meshWindSchema, spawnAreaSchema, MAX_SPLAT_LAYERS } from "../components/core.js";
 import { regionSchema } from "./regions.js";
 
 /**
@@ -316,6 +316,7 @@ export const bridgeSchema = z.object({
 /** A settlement pad: terrain pulled flat so WFC buildings have somewhere to stand. */
 export const townSchema = z.object({
   id: z.string().default("town"),
+  excludeScatter: z.boolean().optional().describe("When omitted or true, exclude scatter and ground cover across the whole town pad. Set false for landscaped towns whose roads and building foundations provide local clearances."),
   center: z.tuple([z.number(), z.number()]),
   radius: z.number().positive().default(45),
   falloff: z.number().min(0).default(35).describe("Distance beyond `radius` over which the pad blends into natural terrain."),
@@ -482,6 +483,34 @@ export const poiSchema = z.object({
     .array(z.string())
     .default([])
     .describe('Free-form; "safe" marks a sanctuary (no player-on-player damage within `radius`), "pass" a zone-border pass.'),
+});
+
+/**
+ * An enemy camp: a place monsters live.
+ *
+ * The recipe half of a `spawnArea`. It exists here rather than only in the
+ * scene because WHERE monsters live is a fact about the world — derived from
+ * its terrain, its towns and its zone borders — and every other such fact in
+ * this pipeline is a few lines of hand-editable JSON that a stage recomputes
+ * and a human can override. `worldgen spawn` writes these and patches the
+ * matching entities into the scene; nothing reads camps at runtime, because
+ * the entity is what the server adopts.
+ *
+ * The border rule is the load-bearing one: a camp whose reach (spread + leash
+ * + roam) crosses a zone border puts a pack in the transfer band, and the
+ * cluster then refuses to move players across there while it is awake. The
+ * stage places camps clear of that by construction; `SpawnAreaManager.
+ * borderWarnings` is the audit that catches a hand-placed one that is not.
+ */
+export const campSchema = z.object({
+  id: z.string().default("camp"),
+  center: z.tuple([z.number(), z.number()]).describe("World-space XZ. Ground height is sampled from the field, so no Y is stored — the camp follows the terrain when it changes."),
+  zone: z
+    .string()
+    .default("")
+    .describe("Region id this camp sits in (recipe `regions`), or empty in an unzoned world. What a difficulty tier, a faction or a story hook keys on."),
+  area: spawnAreaSchema.describe("The spawnArea component emitted onto the scene entity, verbatim."),
+  tags: z.array(z.string()).default([]).describe('Free-form. `worldgen spawn` writes a distance tier ("near", "far") off the zone hub.'),
 });
 
 /**
@@ -676,6 +705,61 @@ const cliffScatterSchema = z.object({
 
 export type CliffScatterDoc = z.infer<typeof cliffScatterSchema>;
 
+/**
+ * A noise mask that gathers one scatter rule into CLUMPS — groves with
+ * clearings between them, thickets of brush across otherwise bare desert.
+ *
+ * The scatter lattice is uniform by construction: a rule at one density fills
+ * its biomes evenly to the horizon, which is why a generated forest reads as
+ * an orchard and a generated desert reads as a lawn of dead bushes. This is
+ * the second scale, and it is the same idea `patches` applies to the ground
+ * surface — one fBm lookup decides how much of the rule's nominal density
+ * survives HERE, and the survivors are picked by the same lattice hash
+ * everything else in scatter uses, so a clumped rule is still
+ * chunk-independent and still costs nothing to re-tune.
+ *
+ * `density` stays the PEAK: a clump mask only ever THINS. That is deliberate —
+ * the lattice spacing is fixed by `density` before any of this is evaluated,
+ * so a multiplier above 1 could not place a prop it never generated a
+ * candidate for. Author the density you want in the thick of a grove, then
+ * hollow out the ground between the groves with `floor`.
+ */
+const scatterClumpSchema = z.object({
+  frequency: z
+    .number()
+    .positive()
+    .default(0.004)
+    .describe("Cycles per world unit — the size of one grove. 0.004 ~ 250 m stands, 0.02 ~ 50 m thickets."),
+  octaves: z.number().int().min(1).max(6).default(3),
+  threshold: z
+    .number()
+    .min(-1)
+    .max(1)
+    .default(0)
+    .describe("Noise level (-1..1) at which the clump starts. Higher = rarer, smaller, further-apart clumps."),
+  blend: z
+    .number()
+    .min(0)
+    .default(0.35)
+    .describe("Noise range over which it fades in. Small = a hard treeline, large = a stand that thins out at its edge."),
+  floor: z
+    .number()
+    .min(0)
+    .max(1)
+    .default(0)
+    .describe(
+      "Fraction of the density that survives OUTSIDE the clumps. 0 = real clearings you can walk across; " +
+        "0.15 = a thinned scatter between the stands, which is what most woodland actually looks like.",
+    ),
+  seed: z
+    .number()
+    .int()
+    .default(0)
+    .describe("Added to the world seed, so two rules with identical settings clump in different places."),
+});
+
+export type ScatterClumpDoc = z.infer<typeof scatterClumpSchema>;
+
 /** One kind of thing scattered across the world: trees, rocks, bushes, grass tufts. */
 const scatterSchema = z.object({
   id: z.string(),
@@ -717,6 +801,22 @@ const scatterSchema = z.object({
     ),
   material: z.string().optional(),
   biomes: z.array(z.string()).default([]).describe("Biome ids this may appear in; empty = anywhere."),
+  biomeDensity: z
+    .record(z.string(), z.number().min(0).max(1))
+    .default({})
+    .describe(
+      "Per-biome thinning, biome id -> fraction of `density` that survives there (absent = 1, the full " +
+        "density). This is how ONE rule is a forest in the forest and a copse in the meadow, instead of two " +
+        "rules that have to be kept in step. Capped at 1 for the same reason `clump.floor` is: `density` " +
+        "fixes the lattice before any of this runs, so it is the PEAK and everything else thins it. A biome " +
+        "not in `biomes` at all is still excluded outright — this only grades the ones that are in.",
+    ),
+  clump: scatterClumpSchema
+    .optional()
+    .describe(
+      "Gather this rule into groves/thickets with open ground between, instead of spreading it evenly over " +
+        "every biome it is allowed in. See the schema — this is the difference between a forest and an orchard.",
+    ),
   density: z
     .number()
     .min(0)
@@ -1373,6 +1473,13 @@ export const worldRecipeSchema = z.object({
       tunnels: z.array(tunnelSchema).default([]).describe("Carved cave passages. Written by `worldgen caves`."),
       blobs: z.array(blobSchema).default([]),
       pois: z.array(poiSchema).default([]),
+      camps: z
+        .array(campSchema)
+        .default([])
+        .describe(
+          "Enemy camps — where monsters live. Written by `worldgen spawn`, which also patches the matching " +
+            "spawnArea entities into the scene (ids `camp-*`, rewritten on every run); hand-written camps are kept.",
+        ),
     })
     .prefault({}),
 
@@ -1487,6 +1594,7 @@ export type TownDoc = z.infer<typeof townSchema>;
 export type BlobDoc = z.infer<typeof blobSchema>;
 export type TunnelDoc = z.infer<typeof tunnelSchema>;
 export type PoiDoc = z.infer<typeof poiSchema>;
+export type CampDoc = z.infer<typeof campSchema>;
 export type LakeDoc = z.infer<typeof lakeSchema>;
 export type BridgeDoc = z.infer<typeof bridgeSchema>;
 export type FillDoc = z.infer<typeof fillSchema>;

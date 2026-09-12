@@ -43,25 +43,23 @@ async function snapshotObject(renderer: EngineRenderer, backend: Backend, object
   cam.lookAt(center);
 
   const target = new THREE.RenderTarget(THUMB, THUMB);
-  renderer.renderer.setRenderTarget(target);
-  renderer.renderer.render(scene, cam);
-  // Unbind BEFORE awaiting the readback, not after. The await yields to the
-  // event loop, and the app's own render loop keeps running — so while a bake
-  // was in flight, every main-loop frame rendered into this 96x96 thumbnail
-  // target instead of the canvas. The viewport visibly alternated between the
-  // scene and a stale frame for the whole bake pass, which reads as the
-  // renderer flickering rather than as anything to do with thumbnails.
-  // `readRenderTargetPixelsAsync` takes the target explicitly, so it does not
-  // need it to still be bound.
-  renderer.renderer.setRenderTarget(null);
-  const pixels = (await renderer.renderer.readRenderTargetPixelsAsync(
-    target,
-    0,
-    0,
-    THUMB,
-    THUMB,
-  )) as Uint8Array;
-  target.dispose();
+  const previousTarget = renderer.renderer.getRenderTarget();
+  let pixels: Uint8Array;
+  try {
+    try {
+      renderer.renderer.setRenderTarget(target);
+      renderer.renderer.render(scene, cam);
+    } finally {
+      renderer.renderer.setRenderTarget(previousTarget);
+    }
+    // Restore the viewport target before yielding to its render loop.
+    pixels = (await renderer.renderer.readRenderTargetPixelsAsync(
+      target, 0, 0, THUMB, THUMB,
+    )) as Uint8Array;
+  } finally {
+    target.dispose();
+    object.removeFromParent();
+  }
 
   const canvas2d = document.createElement("canvas");
   canvas2d.width = THUMB;
@@ -74,7 +72,7 @@ async function snapshotObject(renderer: EngineRenderer, backend: Backend, object
   // bytes early at our 96px thumbnail size, producing horizontal strips.
   // WebGPU uses top-left row order, while the WebGL fallback is bottom-up.
   const bytesPerPixel = 4; // RenderTarget's default RGBA UnsignedByteType
-  const sourceRowStride = Math.ceil((THUMB * bytesPerPixel) / 256) * 256;
+  const sourceRowStride = backend === "webgpu" ? Math.ceil((THUMB * bytesPerPixel) / 256) * 256 : THUMB * bytesPerPixel;
   const destinationRowStride = THUMB * bytesPerPixel;
   for (let y = 0; y < THUMB; y++) {
     const sourceY = backend === "webgl" ? THUMB - 1 - y : y;
@@ -139,6 +137,8 @@ export interface RenderThumbnailsDeps {
   renderer: EngineRenderer;
   backend: Backend;
   thumbnails: Observable<Record<string, string>>;
+  thumbnailRequests: Observable<string[]>;
+  span?: (name: string, detail: string) => () => void;
 }
 
 // renderThumbnails is triggered from boot AND every assetsVersion bump; now
@@ -167,6 +167,8 @@ export function renderThumbnails(deps: RenderThumbnailsDeps): Promise<void> {
 
 async function renderThumbnailsOnce(deps: RenderThumbnailsDeps): Promise<void> {
   const { assets, registry, renderer, backend, thumbnails } = deps;
+  const requested = new Set(deps.thumbnailRequests.get());
+  const wanted = (id: string) => deps.thumbnailRequests.get().includes(id);
   const out: Record<string, string> = { ...thumbnails.get() };
   let changed = false;
 
@@ -184,6 +186,7 @@ async function renderThumbnailsOnce(deps: RenderThumbnailsDeps): Promise<void> {
     cacheKey: string,
     bake: () => Promise<string>,
   ): Promise<void> {
+    if (!wanted(id)) return;
     if (out[marker] === contentKey && out[id]) return; // already current in memory
     const cached = await getThumb(cacheKey);
     if (cached) {
@@ -193,17 +196,24 @@ async function renderThumbnailsOnce(deps: RenderThumbnailsDeps): Promise<void> {
       return;
     }
     await idle(); // unblock the viewport before the GPU roundtrip
-    const dataUrl = await bake();
+    if (!wanted(id)) return;
+    const end = deps.span?.("editor.thumbnail", id);
+    let dataUrl: string;
+    try {
+      dataUrl = await bake();
+    } finally {
+      end?.();
+    }
     out[id] = dataUrl;
     out[marker] = contentKey;
     changed = true;
     void putThumb(cacheKey, dataUrl);
   }
 
-  for (const pid of assets.prefabIds()) {
+  for (const pid of assets.prefabIds().filter((id) => requested.has(id))) {
     try {
       const json = JSON.stringify(assets.getPrefab(pid));
-      const contentKey = `${pid}:${json.length}`;
+      const contentKey = `${pid}:${hash(json)}`;
       await fill(pid, `__key_${pid}`, contentKey, `p:${pid}:${hash(json)}`, async () => {
         const expanded = expandScene(buildStreetDocEmpty(pid), assets, registry);
         // resolveModel/resolveTexture are as necessary here as resolveMaterial:
@@ -224,7 +234,7 @@ async function renderThumbnailsOnce(deps: RenderThumbnailsDeps): Promise<void> {
     }
   }
 
-  for (const mid of assets.modelIds()) {
+  for (const mid of assets.modelIds().filter((id) => requested.has(id))) {
     try {
       const model = assets.getModel(mid);
       if (!model) continue;
@@ -238,12 +248,20 @@ async function renderThumbnailsOnce(deps: RenderThumbnailsDeps): Promise<void> {
     }
   }
 
-  for (const asset of assets.dataAssetsOfType("material")) {
+  for (const asset of assets.dataAssetsOfType("material").filter((a) => requested.has(a.id))) {
     try {
       const json = JSON.stringify(asset.data);
       await fill(asset.id, `__key_material_${asset.id}`, json, `mat:${asset.id}:${hash(json)}`, async () => {
         const data = asset.data as MaterialData;
-        const material = makeMaterial(data) as THREE.Material & { map?: THREE.Texture | null };
+        // The `map` texture below is loaded by hand (a snapshot is one-shot, so
+        // it has to be awaited), but the shaders that resolve their OWN
+        // textures — water, terrain-splat — read the resolver instead, and
+        // without it they render untextured AND log "[render] no texture asset
+        // … for the water surface", which reads exactly like the world's water
+        // having lost its texture. It is a thumbnail sphere.
+        const material = makeMaterial(data, {
+          resolveTexture: (assetId) => assets.getTexture(assetId)?.url,
+        }) as THREE.Material & { map?: THREE.Texture | null };
         const textureUrl = data.map ? assets.getTexture(data.map)?.url : undefined;
         if (textureUrl && data.shader !== "wireframe") {
           // snapshot is one-shot (no render loop to pick up a later-arriving
@@ -260,7 +278,13 @@ async function renderThumbnailsOnce(deps: RenderThumbnailsDeps): Promise<void> {
         const geometry = new THREE.SphereGeometry(1, 48, 32);
         addSplatPreviewWeights(geometry, data);
         const sphere = new THREE.Mesh(geometry, material);
-        return snapshotObject(renderer, backend, sphere);
+        try {
+          return await snapshotObject(renderer, backend, sphere);
+        } finally {
+          geometry.dispose();
+          material.map?.dispose();
+          material.dispose();
+        }
       });
     } catch (error) {
       console.warn(`[thumbnails] failed for material ${asset.id}:`, error);

@@ -1,0 +1,118 @@
+{
+  "size": 128,
+  "bleed": 3,
+  "bgLum": 228,
+  "keyColor": "#00ffff",
+  "groundFringe": 1,
+  "fitSearch": 1.6,
+  "slots": {
+    "#1f00ff": {
+      "name": "blade1",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#a900ff": {
+      "name": "blade2",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#00a2ff": {
+      "name": "blade3",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#11008a": {
+      "name": "blade4",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#ff0000": {
+      "name": "guard1",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#a80000": {
+      "name": "guard2",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#ff7d00": {
+      "name": "guard3",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#b35300": {
+      "name": "guard4",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#00c08b": {
+      "name": "flavor1",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#007a5a": {
+      "name": "flavor2",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#7ae0c0": {
+      "name": "flavor3",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#3cff00": {
+      "name": "pommel1",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#0f3e00": {
+      "name": "pommel2",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#9dffa8": {
+      "name": "pommel3",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#6b1511": {
+      "name": "grip",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#ff8b8b": {
+      "name": "ornate",
+      "transparency": true,
+      "cut": true,
+      "openEnclosed": true,
+      "fit": "contain",
+      "anchor": "bottom",
+      "fitPadding": 0
+    },
+    "#ffc76b": {
+      "name": "ornate-bottom",
+      "transparency": true,
+      "cut": true,
+      "openEnclosed": true,
+      "fit": "contain",
+      "anchor": "top",
+      "fitPadding": 0
+    }
+  }
+}

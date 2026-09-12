@@ -895,7 +895,7 @@ export const BASE_PRESETS: readonly Preset[] = [
     slot: "shake",
     phases: ["cast"],
     kinds: ["shout"],
-    build: (ctx) => ({ kind: "shake", strength: 0.06 + 0.1 * ctx.I, duration: 0.25, frequency: 20 }),
+    build: (ctx) => ({ kind: "shake", strength: 0.06 + 0.1 * ctx.I, duration: 0.25, frequency: 20, range: 14 + 10 * ctx.I }),
   },
 
   // ----- travel ------------------------------------------------------------
@@ -1351,7 +1351,14 @@ export const BASE_PRESETS: readonly Preset[] = [
     slot: "shake",
     phases: ["impact"],
     minI: 0.5,
-    build: (ctx) => ({ kind: "shake", strength: clamp(0.05 + 0.2 * ctx.I * Math.min(1, ctx.R / 3), 0.05, 0.3), duration: 0.35, frequency: 18 }),
+    build: (ctx) => ({
+      kind: "shake",
+      strength: clamp(0.05 + 0.2 * ctx.I * Math.min(1, ctx.R / 3), 0.05, 0.3),
+      duration: 0.35,
+      frequency: 18,
+      // A bigger, heavier impact is felt further out; nothing carries the map.
+      range: clamp(12 + 4 * ctx.R + 16 * ctx.I, 12, 60),
+    }),
   },
   {
     id: "impact.summonRing",

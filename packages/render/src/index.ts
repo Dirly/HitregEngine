@@ -17,7 +17,7 @@ export { buildHlodProxy, type HlodProxy, type HlodProxyStats } from "./hlod-prox
 export { reconcileScene, type ReconcileHooks } from "./reconcile.js";
 export { attachPhysicsDebug, detachPhysicsDebug } from "./physics-debug.js";
 export { attachLightDebug, detachLightDebug } from "./light-debug.js";
-export { attachSkeletonDebug, collectBones } from "./skeleton-debug.js";
+export { attachSkeletonDebug, collectBones, countAttachedSkeletonDebug, setSkeletonDebugAttached } from "./skeleton-debug.js";
 export { extractCollisionGeometry, makeMeshGeometryProvider, type CollisionGeometry } from "./collision-geometry.js";
 export { AnimationSystem, type AnimatorData } from "./animation.js";
 export { ClothSwaySystem, DEFAULT_CLOTH_SWAY, markClothVertices, type ClothSwayOptions, type IslandReport } from "./cloth-sway.js";
@@ -209,6 +209,14 @@ export {
   type DecalRequest,
 } from "./decals.js";
 
-export { voxelGeometry, voxelColliderProxyGeometry } from "./voxel-geometry.js";
+export {
+  ThirdPersonCameraRig,
+  DEFAULT_CAMERA_RIG,
+  type CameraRigConfig,
+  type CameraSweep,
+  type RigVec3,
+} from "./camera-rig.js";
+
+export { voxelGeometry, csgGeometry, voxelColliderProxyGeometry } from "./voxel-geometry.js";
 export { PortraitView, type PortraitOptions } from "./portrait.js";
-export { buildTerrainSplatMaterial, SPLAT_ATTRIBUTE, type SplatData } from "./terrain-splat.js";
+export { buildTerrainSplatMaterial, SPLAT_ATTRIBUTE, SPLAT_ATTRIBUTES, type SplatData } from "./terrain-splat.js";

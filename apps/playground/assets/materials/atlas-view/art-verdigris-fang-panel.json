@@ -1,0 +1,7 @@
+{
+  "shader": "unlit",
+  "color": "#ffffff",
+  "map": "atlas-carousel-sheet-art-verdigris-fang.png",
+  "filter": "nearest",
+  "side": "double"
+}

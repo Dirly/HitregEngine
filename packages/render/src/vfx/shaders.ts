@@ -70,6 +70,13 @@ export function noise01(p: N, octaves = 2): N {
   return saturate(n.mul(0.5).add(0.5));
 }
 
+/** Shared FX Lab ring/portal field; persistent portals use the same noise graph. */
+export function ringEnergy(quv: N, r: N, angle: N, swirl: N, time: N, scale: N, noise: N): N {
+  const spiralA: N = angle.add(r.mul(swirl).mul(6)).sub(time.mul(1.5));
+  const coord: N = mix(vec3(quv.mul(scale), time.mul(0.6)), vec3(r.mul(scale), spiralA.mul(1.6), time.mul(0.35)), swirl.min(1));
+  return mix(float(1), noise01(coord, 1).mul(1.6), noise);
+}
+
 /** Fade in over [0, lo] and out over [1 - hi, 1] of a 0..1 coordinate. */
 export function capFade(v: N, lo: N, hi: N): N {
   const inA: N = smoothstep(float(0), lo.max(0.001), v);

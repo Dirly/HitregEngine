@@ -56,21 +56,32 @@ export interface FoliageWindOptions {
    */
   canopy?: number;
   /**
-   * Only move materials whose name, or whose colour map's name, contains
-   * this (case-insensitive). The rest of the model stands still and the
-   * canopy height test is skipped: the leaves are picked by NAME. Blockbench
-   * exports an unnamed pasted texture as literally "pasted", so a model
-   * whose textures were never named matches nothing and gets no wind.
+   * Only move materials whose name, or whose colour map's name, contains one
+   * of these (case-insensitive, comma-separated). The rest of the model
+   * stands still and the canopy height test is skipped: the leaves are picked
+   * by NAME. Blockbench exports an unnamed pasted texture as literally
+   * "pasted", so a model whose textures were never named matches nothing and
+   * gets no wind.
+   *
+   * A LIST, not one needle, because one rule has to cover a whole shelf of
+   * props: "leaves,bush" moves the canopy of every tree and the whole of
+   * every bush, whatever each model happens to call its own foliage sheet,
+   * and leaves every trunk, rock and stump standing.
    */
   materials?: string;
 }
 
 /** Does this material answer to the `materials` filter — by its own name, or its colour map's? */
 export function windMaterialMatches(material: THREE.Material, filter: string): boolean {
-  const needle = filter.toLowerCase();
-  if (material.name && material.name.toLowerCase().includes(needle)) return true;
+  const needles = filter
+    .split(",")
+    .map((part) => part.trim().toLowerCase())
+    .filter(Boolean);
+  if (needles.length === 0) return false;
+  const own = material.name?.toLowerCase() ?? "";
   const map = (material as THREE.Material & { map?: THREE.Texture | null }).map;
-  return !!map?.name && map.name.toLowerCase().includes(needle);
+  const mapName = map?.name?.toLowerCase() ?? "";
+  return needles.some((needle) => own.includes(needle) || mapName.includes(needle));
 }
 
 /**

@@ -580,6 +580,7 @@ describe("terrain features", () => {
           towns: [],
           blobs: [],
           pois: [],
+          camps: [],
           lakes: [], bridges: [], fills: [], riverPaths: [],
         },
       }),
@@ -608,6 +609,7 @@ describe("terrain features", () => {
           towns: [],
           blobs: [],
           pois: [],
+          camps: [],
           lakes: [], bridges: [], fills: [], riverPaths: [],
         },
       }),
@@ -621,7 +623,7 @@ describe("terrain features", () => {
   });
 
   it("solves a descending bed for a river written by hand, and a tributary meets its trunk", () => {
-    const empty = { canyons: [], ridges: [], roads: [], tunnels: [], towns: [], blobs: [], pois: [], lakes: [], bridges: [], fills: [], riverPaths: [] };
+    const empty = { canyons: [], ridges: [], roads: [], tunnels: [], towns: [], blobs: [], pois: [], camps: [], lakes: [], bridges: [], fills: [], riverPaths: [] };
     const trunk = { id: "trunk", points: [[-300, 400], [-100, 420], [100, 380], [300, 400]] as [number, number][], width: 12, depth: 4, bank: 10, maxGrade: 0.05, water: true, surface: "", surfaceEdge: 3, taper: 0 };
     const branch = { id: "branch", points: [[0, 100], [0, 250], [0, 380]] as [number, number][], width: 6, depth: 2, bank: 8, maxGrade: 0.05, water: true, surface: "", surfaceEdge: 3, taper: 0 };
     const bare = createWorldField(testRecipe());
@@ -657,6 +659,7 @@ describe("terrain features", () => {
           towns: [{ id: "t", center: [0, 0], radius: 40, falloff: 30, groundY: 12, flatten: 1, tags: [] }],
           blobs: [],
           pois: [],
+          camps: [],
           lakes: [], bridges: [], fills: [], riverPaths: [],
         },
       }),
@@ -678,6 +681,7 @@ describe("terrain features", () => {
           towns: [],
           blobs: [],
           pois: [],
+          camps: [],
           lakes: [], bridges: [], fills: [], riverPaths: [],
         },
       }),
@@ -760,6 +764,7 @@ describe("terrain features", () => {
           towns: [{ id: "t", center: [0, 0], radius: 40, falloff: 30, groundY: 12, flatten: 1, tags: [] }],
           blobs: [],
           pois: [],
+          camps: [],
           lakes: [], bridges: [], fills: [], riverPaths: [],
         },
       }),
@@ -767,6 +772,17 @@ describe("terrain features", () => {
     expect(field.featureClearance(0, 0)).toBeLessThan(0);
     expect(field.featureClearance(50, 0)).toBeCloseTo(10, 4);
     expect(field.featureClearance(5000, 5000)).toBe(Infinity);
+  });
+
+  it("can retain vegetation on a town grade while roads still exclude it", () => {
+    const field = createWorldField(testRecipe({ features: {
+      ...noFeatures(),
+      towns: [{id:"landscaped",center:[0,0],radius:40,falloff:10,groundY:12,flatten:1,tags:[],excludeScatter:false}],
+      roads: [{id:"foundation",points:[[-5,0],[5,0]],width:4,shoulder:1,smooth:0,flatten:1,surfaceY:[12,12],surface:"",surfaceEdge:0}],
+    }}));
+    expect(field.height(0,20)).toBeCloseTo(12);
+    expect(field.featureClearance(0,20)).toBeGreaterThan(0);
+    expect(field.featureClearance(0,0)).toBeLessThan(0);
   });
 
   it("measures path clearance from the shoulder's edge, and still sees a path from a boulder's clearance away", () => {
@@ -802,7 +818,7 @@ function paletteIndex(name: string): number {
 }
 
 function noFeatures(): WorldRecipe["features"] {
-  return { rivers: [], canyons: [], ridges: [], roads: [], towns: [], lakes: [], bridges: [], fills: [], riverPaths: [], tunnels: [], blobs: [], pois: [] };
+  return { rivers: [], canyons: [], ridges: [], roads: [], towns: [], lakes: [], bridges: [], fills: [], riverPaths: [], tunnels: [], blobs: [], pois: [], camps: [] };
 }
 
 describe("surface decoration", () => {
@@ -1369,6 +1385,8 @@ describe("scatter", () => {
         model: undefined,
         material: undefined,
         biomes: [],
+        biomeDensity: {},
+        clump: undefined,
         density: 0.01,
         slopeMax: 0.6,
         slopeMin: 0,
@@ -1425,6 +1443,69 @@ describe("scatter", () => {
       const wz = instance.position[2] - 4 * field.recipe.cellSize;
       expect(Math.abs(instance.position[1] - field.height(wx, wz))).toBeLessThan(1.5);
       expect(field.slope(wx, wz)).toBeLessThanOrEqual(0.6 + 1e-6);
+    }
+  });
+
+  /** Instances of `rule` over a block of cells — the sample every density test needs. */
+  function countOver(f: ReturnType<typeof createWorldField>, span = 6): number {
+    let n = 0;
+    for (let cz = -span; cz <= span; cz++) for (let cx = -span; cx <= span; cx++) n += scatterCell(f, cx, cz).length;
+    return n;
+  }
+  const withRule = (patch: Record<string, unknown>): ReturnType<typeof createWorldField> =>
+    createWorldField(worldRecipeSchema.parse({ ...recipe, scatter: [{ ...recipe.scatter![0], ...patch }] }));
+
+  it("thins a rule into clumps without moving the props that survive", () => {
+    const plain = withRule({});
+    const clumped = withRule({
+      clump: { frequency: 0.004, octaves: 3, threshold: 0, blend: 0.3, floor: 0, seed: 3 },
+    });
+    const before = countOver(plain);
+    const after = countOver(clumped);
+    // a mask only ever thins — and it has to thin enough to be worth having
+    expect(after).toBeLessThan(before * 0.85);
+    expect(after).toBeGreaterThan(0);
+    // and the survivors are the SAME props in the same places: clumping picks
+    // which lattice points fire, it does not re-roll the lattice
+    const kept = new Map(scatterCell(clumped, 1, 1).map((i) => [i.id, i]));
+    for (const instance of scatterCell(plain, 1, 1)) {
+      const match = kept.get(instance.id);
+      if (match) expect(match.position).toEqual(instance.position);
+    }
+  });
+
+  it("keeps a clumped rule chunk-independent", () => {
+    const clumped = withRule({
+      clump: { frequency: 0.01, octaves: 3, threshold: 0, blend: 0.25, floor: 0.1, seed: 7 },
+    });
+    // the mask is a function of world position, so a cell's answer cannot
+    // depend on which of its neighbours was solved first
+    expect(JSON.stringify(scatterCell(clumped, 2, -3))).toBe(JSON.stringify(scatterCell(clumped, 2, -3)));
+    const ids = new Set<string>();
+    for (let cz = -1; cz <= 1; cz++) for (let cx = -1; cx <= 1; cx++) {
+      for (const instance of scatterCell(clumped, cx, cz)) {
+        expect(ids.has(instance.id), `${instance.id} claimed twice`).toBe(false);
+        ids.add(instance.id);
+      }
+    }
+  });
+
+  it("floor: 1 and an empty biomeDensity change nothing at all", () => {
+    const plain = JSON.stringify(scatterCell(withRule({}), 1, 2));
+    const floored = withRule({
+      clump: { frequency: 0.004, octaves: 3, threshold: 0, blend: 0.3, floor: 1, seed: 3 },
+      biomeDensity: {},
+    });
+    expect(JSON.stringify(scatterCell(floored, 1, 2))).toBe(plain);
+  });
+
+  it("grades density per biome without excluding the biome", () => {
+    // 0 is 'allowed here but never actually placed' — distinct from dropping
+    // the biome out of `biomes`, which is what the caller usually wants, but
+    // the two must not be the same code path
+    const graded = withRule({ biomeDensity: { alpine: 0 } });
+    for (let cx = -4; cx <= 4; cx++) {
+      for (const instance of scatterCell(graded, cx, 0)) expect(instance.biome).not.toBe("alpine");
     }
   });
 
@@ -1501,6 +1582,7 @@ describe("scatter", () => {
           towns: [{ id: "t", center: [0, 0], radius: 40, falloff: 30, groundY: 12, flatten: 1, tags: [] }],
           blobs: [],
           pois: [],
+          camps: [],
           lakes: [], bridges: [], fills: [], riverPaths: [],
         },
       }),
@@ -1538,6 +1620,8 @@ describe("generated chunk documents", () => {
           model: "models/rock.glb",
           material: undefined,
           biomes: [],
+          biomeDensity: {},
+          clump: undefined,
           density: 0.004,
           slopeMax: 0.8,
           slopeMin: 0,
@@ -1599,6 +1683,29 @@ describe("generated chunk documents", () => {
       expect(entity.parent).toBe(null);
       expect(Object.keys(entity.components).sort()).toEqual(["collider", "mesh", "transform"]);
     }
+  });
+
+  // Rapier colliders do not scale with their body, so the physics sim applies
+  // a body's world scale to its collider itself (`sim.ts`: size[i] * s,
+  // offset[i] * s). A chunk prop already carries `instance.scale` on its
+  // TRANSFORM, so pre-multiplying the collider here too gave scale SQUARED —
+  // at the 0.9-1.7 a rock rule asks for, a collider up to 2.9x the rock,
+  // floating at twice the right height. Nothing draws a collider, so the only
+  // thing that catches this is an assertion.
+  it("emits collider size and offset in MODEL space — the transform's scale is applied once, by physics", () => {
+    const doc = voxelChunkDoc(field, "overworld", 3, -3);
+    const props = Object.values(doc.entities).filter((e) => e.tags?.includes("scatter"));
+    expect(props.length).toBeGreaterThan(0);
+    let sawScaled = false;
+    for (const entity of props) {
+      const collider = entity.components["collider"] as { size: number[]; offset: number[] };
+      const transform = entity.components["transform"] as { scale: number[] };
+      expect(collider.size).toEqual([1.2, 1, 1.2]);
+      expect(collider.offset).toEqual([0, 0.5, 0]);
+      if (Math.abs(transform.scale[0]! - 1) > 0.01) sawScaled = true;
+    }
+    // the assertions above only mean anything if some instance is NOT at scale 1
+    expect(sawScaled).toBe(true);
   });
 
   it("passes a rule's lod flag to the emitted mesh, so a cheap model can refuse the box proxy", () => {

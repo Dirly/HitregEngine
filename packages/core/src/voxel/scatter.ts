@@ -22,7 +22,7 @@
 
 import type { Quat, Vec3 } from "../math.js";
 import { quatMultiply } from "../math.js";
-import { hashUnit, clamp } from "./noise.js";
+import { hashUnit, clamp, fbm2, smoothstep, type FbmSpec } from "./noise.js";
 import type { WorldField } from "./field.js";
 import type { ScatterDoc } from "./recipe.js";
 
@@ -244,6 +244,13 @@ function emitCliffColumn(
  * solved largest-footprint first, so a tree claims its ground before the
  * shrubs fill in around it — array order only breaks ties.
  *
+ * Density is UNIFORM per rule by construction, which is what makes a
+ * generated forest read as an orchard. Two fields grade it without breaking
+ * any of the above, because both are pure functions of the lattice point and
+ * the world position: `clump` (an fBm mask — groves with clearings between)
+ * and `biomeDensity` (per-biome thinning). Both only ever THIN: `density`
+ * fixes the lattice before either is evaluated, so it is the peak.
+ *
  * Candidates from a MARGIN around the cell are solved too (and then dropped),
  * so a prop just over the border in the next cell claims its ground here as
  * well. Every candidate is a pure hash of its lattice point, so both cells
@@ -331,6 +338,24 @@ export function scatterCell(
     if (latticePerCell > maxInstances) continue;
 
     const ruleSeed = (recipe.seed + ruleIndex * 7919) | 0;
+    // fBm spec for the clump mask, built once per rule rather than per candidate
+    const clump = rule.clump;
+    const clumpSpec: FbmSpec | null = clump
+      ? {
+          frequency: clump.frequency,
+          amplitude: 1,
+          octaves: clump.octaves,
+          lacunarity: 2,
+          gain: 0.5,
+          ridged: false,
+          seed: clump.seed,
+        }
+      : null;
+    const clumpBlend = clump ? Math.max(1e-4, clump.blend) : 0;
+    // absent/empty means every allowed biome runs at full density; the lookup
+    // is skipped entirely in that case, which is the common one
+    const biomeDensity = rule.biomeDensity as Record<string, number | undefined>;
+    const graded = Object.keys(biomeDensity).length > 0;
     const footprint = baseFootprint(rule);
     // the margin ring is solved for occupancy and discarded; a prop is OWNED
     // by the cell holding its unjittered lattice point
@@ -359,6 +384,21 @@ export function scatterCell(
         const wz = gz * spacing + (r2 - 0.5) * 2 * jitter;
         if (limit !== Infinity && wx * wx + wz * wz > limit * limit) continue;
 
+        // CLUMPING FIRST, before `slope` — which is four height evaluations
+        // and by far the most expensive thing a candidate can be asked. A
+        // clumped rule authors a HIGHER peak density (the lattice is what the
+        // mask thins), so testing the mask after the slope query would make
+        // every rejected candidate cost more than the prop it did not place:
+        // measured 10.6 -> 19.9 ms per cell that way round, and back to 11.4
+        // this way. One fBm lookup and one lattice hash, both pure functions
+        // of world position, so two cells solving the same margin candidate
+        // still always agree.
+        if (clumpSpec && clump) {
+          const mask = smoothstep(clump.threshold, clump.threshold + clumpBlend, fbm2(clumpSpec, wx, wz, recipe.seed));
+          const keep = clump.floor + (1 - clump.floor) * mask;
+          if (keep < 1 && hashUnit(gx, gz, 6, ruleSeed) >= keep) continue;
+        }
+
         const steep = field.slope(wx, wz);
         if (steep > rule.slopeMax || steep < rule.slopeMin) continue;
 
@@ -385,6 +425,12 @@ export function scatterCell(
 
         const sample = field.biome(wx, wz, groundY, steep);
         if (rule.biomes.length > 0 && !rule.biomes.includes(sample.id)) continue;
+        // per-biome thinning: one rule that is a forest in the forest and a
+        // copse in the meadow, rather than two rules kept in step by hand
+        if (graded) {
+          const weight = biomeDensity[sample.id];
+          if (weight !== undefined && weight < 1 && hashUnit(gx, gz, 7, ruleSeed) >= weight) continue;
+        }
 
         const scale = rule.scale[0] + (rule.scale[1] - rule.scale[0]) * r3;
         const radius = footprint * scale;

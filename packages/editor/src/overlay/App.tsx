@@ -69,6 +69,7 @@ export interface AppProps {
   pathRadius: Observable<number>;
   /** prefab id -> data-url thumbnail rendered by the host. */
   thumbnails: Observable<Record<string, string>>;
+  thumbnailRequests?: Observable<string[]>;
   /** World-anchored notes + the host's persistence callbacks (see PinOverlay). */
   pins?: Pins;
   camera?: THREE.PerspectiveCamera;
@@ -318,6 +319,7 @@ export function App(props: AppProps) {
 
         <div style={{ ...dockStyle, gridColumn: 2, gridRow: 3 }}>
           <AssetsDock
+            thumbnailRequests={props.thumbnailRequests}
             assets={props.assets}
             registry={props.registry}
             store={props.store}

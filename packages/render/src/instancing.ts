@@ -3,6 +3,7 @@ import {
   Fn,
   attribute,
   context,
+  float,
   mat4,
   materialAO,
   materialColor,
@@ -17,6 +18,7 @@ import {
   transformNormal,
   uv,
   vec2,
+  vec3,
   vec4,
 } from "three/tsl";
 
@@ -224,6 +226,100 @@ export function isInstanceUvRotationMaterial(material: THREE.Material): boolean 
 }
 
 /**
+ * Per-instance ATLAS TILE and PART MASK, as one vec4:
+ * `(uOffset, vOffset, scale, mask)`.
+ *
+ * This is what lets an UBERMESH — every variant of a modular weapon welded
+ * into one geometry — be a different weapon per instance while every weapon in
+ * sight stays ONE draw call. A material boundary is a draw-call boundary, so
+ * the two things that vary between weapons both have to be per-instance:
+ *
+ *   the TILE   which sheet of a packed atlas this weapon wears. `uv * scale +
+ *              offset`, so one packed texture serves every theme.
+ *   the MASK   which parts it is made of. Bit i shows the part whose index is
+ *              i; the rest are collapsed to a degenerate triangle IN THE
+ *              VERTEX STAGE, which costs no fragments at all. Hiding them with
+ *              alpha instead would rasterise every hidden part and run the
+ *              fragment shader only to discard it — four stacked blades of
+ *              overdraw, and `discard` gives up early-Z on some hardware.
+ *
+ * The part index rides in the geometry's `uv1` (glTF TEXCOORD_1), written by
+ * the unwrap tool. NOTE that {@link applyInstanceUvRotation} also reads `uv1`,
+ * as its rotation centre — a mesh may carry one or the other, never both. They
+ * belong to different pipelines (WFC kit modules, modular weapons) and no
+ * asset has ever wanted both, but nothing here would catch it if one did.
+ */
+export const INSTANCE_UBER_ATTRIBUTE = "instanceUber";
+
+const UBER_FLAG = "isInstanceUberMaterial";
+
+/**
+ * Make an {@link applyInstancedProps} material read
+ * {@link INSTANCE_UBER_ATTRIBUTE}. Idempotent.
+ *
+ * Call it AFTER `applyInstancedProps`: the position node wraps whatever is
+ * already there, so the collapse runs on the instance-placed vertex.
+ */
+export function applyInstanceUber(material: THREE.Material): void {
+  const node = material as THREE.NodeMaterial & Record<string, unknown>;
+  if (node.isNodeMaterial !== true) {
+    console.warn(`[render] applyInstanceUber: ${material.type} is not a NodeMaterial; ubermesh masking ignored`);
+    return;
+  }
+  if (node.userData[UBER_FLAG] === true) return;
+  const props = attribute<"vec4">(INSTANCE_UBER_ATTRIBUTE, "vec4");
+
+  // --- the tile: every texture slot samples this instance's rectangle
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const tiled = (Fn as any)(() => uv().mul(props.z).add(vec2(props.x, props.y)))();
+  const hook = { getUV: () => tiled };
+  const slots: Array<[map: string, slot: string, stock: unknown]> = [
+    ["map", "colorNode", materialColor],
+    ["emissiveMap", "emissiveNode", materialEmissive],
+    ["normalMap", "normalNode", materialNormal],
+    ["roughnessMap", "roughnessNode", materialRoughness],
+    ["metalnessMap", "metalnessNode", materialMetalness],
+    ["alphaMap", "opacityNode", materialOpacity],
+    ["aoMap", "aoNode", materialAO],
+  ];
+  for (const [map, slot, stock] of slots) {
+    const texture = node[map] as THREE.Texture | null | undefined;
+    if (!texture || texture.isTexture !== true) continue;
+    const existing = node[slot] as THREE.Node | null | undefined;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    node[slot] = (context as any)(existing ?? stock, hook);
+  }
+
+  // --- the mask: collapse the parts this instance does not use
+  //
+  // The bit test is done in FLOAT arithmetic rather than with integer bitwise
+  // ops, which keeps it identical on both backends and is exact: a mask below
+  // 2^24 and a power-of-two divisor are both represented exactly by a float32,
+  // so `fract(mask / 2^i * 0.5) > 0.25` is true precisely when bit i is set.
+  const inner = node.positionNode as THREE.Node | null | undefined;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  node.positionNode = (Fn as any)((_: unknown, builder: { hasGeometryAttribute(name: string): boolean }) => {
+    const placed = inner ?? positionLocal;
+    if (!builder.hasGeometryAttribute("uv1")) return placed;
+    const index = vec2(uv(1)).x;
+    const bit = float(2).pow(index);
+    const shown = props.w.div(bit).mul(0.5).fract().greaterThan(0.25);
+    // Every vertex of a hidden part lands on the same point, so its triangles
+    // have zero area and never reach the rasteriser.
+    positionLocal.assign(shown.select(placed, vec3(0, 0, 0)));
+    return positionLocal;
+  })();
+
+  node.userData[UBER_FLAG] = true;
+  node.needsUpdate = true;
+}
+
+/** True when {@link applyInstanceUber} has been applied to the material. */
+export function isInstanceUberMaterial(material: THREE.Material): boolean {
+  return material.userData[UBER_FLAG] === true;
+}
+
+/**
  * A per-batch `InstancedBufferGeometry` over a shared base geometry.
  *
  * Attribute OBJECTS are new (so disposing this batch frees only its own GPU
@@ -278,11 +374,14 @@ export class InstancedProps extends THREE.Mesh {
   boundingSphere: THREE.Sphere | null = null;
   /** Per-instance UV rotation (radians); null until {@link enableUvRotation}. */
   private uvRotation: THREE.InstancedBufferAttribute | null = null;
+  /** Per-instance tile + part mask; null until {@link enableUber}. */
+  private uber: THREE.InstancedBufferAttribute | null = null;
 
   constructor(base: THREE.BufferGeometry, material: THREE.Material | THREE.Material[], count: number) {
     const capacity = Math.max(count, 1);
     const geometry = instancedGeometryFrom(base);
     const buffer = new THREE.InstancedInterleavedBuffer(new Float32Array(capacity * FLOATS_PER_INSTANCE), FLOATS_PER_INSTANCE, 1);
+    Object.assign(buffer, { name: "prop-matrices" });
     INSTANCE_MATRIX_ATTRIBUTES.forEach((name, column) => {
       geometry.setAttribute(name, new THREE.InterleavedBufferAttribute(buffer, 4, column * 4));
     });
@@ -325,6 +424,37 @@ export class InstancedProps extends THREE.Mesh {
     if (this.uvRotation) return;
     this.uvRotation = new THREE.InstancedBufferAttribute(new Float32Array(this.capacity), 1);
     this.geometry.setAttribute(INSTANCE_UV_ROTATION_ATTRIBUTE, this.uvRotation);
+  }
+
+  /**
+   * Allocate {@link INSTANCE_UBER_ATTRIBUTE}. Every batch drawn with an
+   * {@link applyInstanceUber} material must have called this: a missing vertex
+   * attribute is a pipeline error, not a fallback.
+   */
+  enableUber(): void {
+    if (this.uber) return;
+    this.uber = new THREE.InstancedBufferAttribute(new Float32Array(this.capacity * 4), 4);
+    // Every part shown and the whole sheet, so a slot nobody sets still draws
+    // something rather than vanishing.
+    for (let i = 0; i < this.capacity; i++) {
+      this.uber.array[i * 4 + 2] = 1;
+      this.uber.array[i * 4 + 3] = 16777215;
+    }
+    this.geometry.setAttribute(INSTANCE_UBER_ATTRIBUTE, this.uber);
+  }
+
+  /** `(uOffset, vOffset, scale)` of this instance's atlas tile, and its part mask. */
+  setUberAt(index: number, u: number, v: number, scale: number, mask: number): void {
+    if (!this.uber) {
+      console.warn("[render] InstancedProps.setUberAt before enableUber(); ignored");
+      return;
+    }
+    const a = this.uber.array as Float32Array;
+    a[index * 4] = u;
+    a[index * 4 + 1] = v;
+    a[index * 4 + 2] = scale;
+    a[index * 4 + 3] = mask;
+    this.uber.needsUpdate = true;
   }
 
   /** True once {@link enableUvRotation} has run. */

@@ -17,10 +17,28 @@ const pngBytes = (file) => Buffer.from(file.data, "base64");
 const asBase64 = (file) => fs.readFileSync(file).toString("base64");
 
 /**
+ * One slot table per key. `manifest-layered` is the armor sheet's — the one
+ * where an empty area on the body actually cuts a hole; plain `manifest.json`
+ * silently fills every skin cutout. The weapon sheet's is generated beside the
+ * key it belongs to, by apps/playground/tools/unwrap-weapon.mjs.
+ */
+const MANIFESTS = {
+  armor: "manifest-layered.json",
+  longsword: "manifest-longsword.json",
+};
+
+const PRESETS = {
+  armor: { size: 256, bleed: 8, filter: "box" },
+  longsword: { size: 128, bleed: 3, filter: "box" },
+};
+
+/**
  * @param {{ runDir: string, writeAsset(file: string, data: Buffer): string }} context
  * @param {Record<string, any>} inputs
  */
 export async function run(context, inputs) {
+  const sheet = inputs.sheet ?? "armor";
+  const preset = PRESETS[sheet] ?? PRESETS.armor;
   const keyPath = path.join(context.runDir, "key.png");
   const artPath = path.join(context.runDir, "art.png");
   const outputDir = path.join(context.runDir, "output");
@@ -35,15 +53,15 @@ export async function run(context, inputs) {
     "--art",
     artPath,
     "--manifest",
-    path.join(here, "manifest-layered.json"),
+    path.join(here, MANIFESTS[sheet] ?? MANIFESTS.armor),
     "--out",
     outputDir,
     "--size",
-    String(inputs.size),
+    String(inputs.size ?? preset.size),
     "--bleed",
-    String(inputs.bleed),
+    String(inputs.bleed ?? preset.bleed),
     "--filter",
-    String(inputs.filter),
+    String(inputs.filter ?? preset.filter),
   ];
   if (inputs.slices) args.push("--slices");
   if (inputs.artMargin) args.push("--art-margin");

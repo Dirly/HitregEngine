@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { run } from "./run.mjs";
-import { collapseTileset, collapsedPrefab } from "./wfc.mjs";
+import { collapseTileset, collapsedPrefab, occupiedConnected } from "./wfc.mjs";
 
 const tile = (id, prefabId, socket, weight = 1) => ({
   id,
@@ -21,6 +21,26 @@ const tileset = {
   tiles: [tile("stone", "kit/stone", "same", 4), tile("moss", "kit/moss", "same", 1)],
   pins: [{ at: [0, 0, 0], tile: "moss", rotation: 90 }],
 };
+
+const layered = {...tileset, pins: [], tiles: [
+  {...tile("ground", "kit/ground", "same"), layers: [0]},
+  {...tile("upper", "kit/upper", "same"), layers: [1]},
+]};
+const layeredResult = collapseTileset(layered, {width: 2, height: 2, depth: 2, seed: 9, attempts: 1});
+assert.ok(layeredResult.cells.every(c => c.tileId === (c.y === 0 ? "ground" : "upper")));
+assert.throws(() => collapseTileset({...layered, tiles: [{...layered.tiles[0], layers: [-1]}]}, {width: 1, height: 1, depth: 1, seed: 1, attempts: 1}), /layers/);
+assert.throws(() => collapseTileset({...layered, pins: [{at:[0,1,0],tile:"ground"}]}, {width: 1, height: 2, depth: 1, seed: 1, attempts: 1}), /contradict|collapse|exhaust/i);
+
+assert.equal(occupiedConnected([{x:0,y:0,z:0,prefabId:"a"},{x:2,y:0,z:0,prefabId:"a"}]), false);
+assert.equal(occupiedConnected([{x:0,y:0,z:0,prefabId:"a"},{x:1,y:0,z:0,prefabId:"a"}]), true);
+assert.equal(occupiedConnected([]), false);
+const disconnected = {...tileset, connected:true, tiles:[tile("solid","kit/a","same"),tile("air",undefined,"same")], pins:[{at:[0,0,0],tile:"solid"},{at:[1,0,0],tile:"air"},{at:[2,0,0],tile:"solid"}]};
+assert.throws(() => collapseTileset(disconnected,{width:3,height:1,depth:1,seed:1,attempts:2}), /connectivity/);
+assert.equal(collapseTileset({...disconnected,connected:false},{width:3,height:1,depth:1,seed:1,attempts:1}).cells.length,3);
+
+const partialTile = {...tile("partial","kit/partial","same"), alignUv:[{child:"floor",factor:1,rotation:90}]};
+const partialResult = collapseTileset({...tileset,tiles:[partialTile],pins:[{at:[0,0,0],tile:"partial",rotation:90}]},{width:1,height:1,depth:1,seed:1,attempts:1});
+assert.equal(collapsedPrefab(partialResult,"partial").entities["cell-0-0-0"].components.prefab.overrides[0].value,180);
 
 const a = collapseTileset(tileset, { width: 4, height: 2, depth: 3, seed: 42, attempts: 2 });
 const b = collapseTileset(tileset, { width: 4, height: 2, depth: 3, seed: 42, attempts: 2 });

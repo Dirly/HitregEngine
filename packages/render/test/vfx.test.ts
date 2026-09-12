@@ -167,6 +167,32 @@ describe("VfxSystem", () => {
     sys.dispose();
   });
 
+  it("shake falls off with distance and dies past its range", () => {
+    const random = Math.random;
+    Math.random = () => 0.25; // fixed phase: the sine is off zero, so the offset is comparable
+    const measure = (camAt: THREE.Vector3): number => {
+      const sys = new VfxSystem();
+      const scene = new THREE.Scene();
+      const cam = new THREE.PerspectiveCamera();
+      cam.position.copy(camAt);
+      sys.play(effect([{ kind: "shake", strength: 0.3, duration: 0.5, range: 30 }]), frame());
+      sys.update(0.05, cam, scene);
+      sys.applyShake(cam);
+      const moved = cam.position.distanceTo(camAt);
+      sys.restoreShake(cam);
+      sys.dispose();
+      return moved;
+    };
+    // origin is (4, 0, -3): close, mid, and well outside the 30 m range
+    const near = measure(new THREE.Vector3(4, 0, -2));
+    const mid = measure(new THREE.Vector3(4, 0, 12));
+    expect(near).toBeGreaterThan(0);
+    expect(mid).toBeGreaterThan(0);
+    expect(mid).toBeLessThan(near);
+    expect(measure(new THREE.Vector3(4, 0, 200))).toBe(0);
+    Math.random = random;
+  });
+
   it("drapes a ground ring and a telegraph over the host's ground probe", () => {
     const sys = new VfxSystem();
     const scene = new THREE.Scene();

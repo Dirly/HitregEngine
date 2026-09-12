@@ -1,0 +1,8 @@
+{
+  "shader": "standard",
+  "color": "#ffffff",
+  "map": "atlas-carousel-atlas-key-longsword.png",
+  "filter": "nearest",
+  "roughness": 0.6,
+  "metalness": 0.1
+}

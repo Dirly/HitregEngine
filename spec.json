@@ -384,7 +384,7 @@
                       "maximum": 0.95
                     },
                     "materials": {
-                      "description": "Only move materials whose NAME, or whose colour texture's name, contains this (case-insensitive) — `leaves` for a model whose leaf texture is called Leaves. The rest of the model stands still and the `canopy` height test is skipped, so the trunk stays put by NAME rather than by height. Name the texture or material in the DCC tool before export: Blockbench exports a pasted texture as literally 'pasted', which matches nothing, and an unmatched model gets no wind at all.",
+                      "description": "Only move materials whose NAME, or whose colour texture's name, contains one of these (case-insensitive, COMMA-SEPARATED) — `leaves` for a model whose leaf texture is called Leaves, `leaves,bush` for one rule that covers a whole shelf of props whatever each model calls its own foliage sheet. The rest of the model stands still and the `canopy` height test is skipped, so the trunk stays put by NAME rather than by height. Name the texture or material in the DCC tool before export: Blockbench exports a pasted texture as literally 'pasted', which matches nothing, and an unmatched model gets no wind at all (`split-gltf.mjs --texnames` names them after the fact).",
                       "type": "string"
                     }
                   },
@@ -840,12 +840,45 @@
                       "type": "number"
                     }
                   ]
+                },
+                "mesher": {
+                  "description": "EXPERIMENT: which mesher builds this cell. Omit for marching cubes; 'dc'/'nets' contour the same field dually. Written by the voxel streamer from the scene's voxelWorld component.",
+                  "type": "string",
+                  "enum": [
+                    "mc",
+                    "dc",
+                    "nets"
+                  ]
                 }
               },
               "required": [
                 "kind",
                 "world",
                 "cell"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "csg"
+                },
+                "volume": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Volume asset id (assets/volumes/<id>, sans extension)."
+                },
+                "lodStep": {
+                  "description": "Coarsen the lattice by this factor. Omit for full detail.",
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 8
+                }
+              },
+              "required": [
+                "kind",
+                "volume"
               ]
             },
             {
@@ -1189,10 +1222,53 @@
             },
             "height": {
               "default": 3.5,
+              "description": "Eye elevation above the target's origin. In chase it is literal. In follow it is the FRAMING the rig starts at — the camera orbits `pivotHeight` and this sets how far above that it begins, so a height above pivotHeight starts looking down at the character. The player's mouse owns it after that.",
               "type": "number"
             },
+            "pivotHeight": {
+              "default": 1.6,
+              "description": "Height above the target's origin of the point the camera orbits and looks at, and the origin every collision sweep starts from. Chest height, not the feet: orbiting the feet swings the character around the screen, and a sweep starting at ground level is stopped by the ground.",
+              "type": "number"
+            },
+            "shoulder": {
+              "default": 0,
+              "description": "Lateral pivot offset in metres, +right. Over-the-shoulder framing; 0 is centred.",
+              "type": "number"
+            },
+            "minDistance": {
+              "default": 0.25,
+              "description": "Floor for the boom when collision squeezes it. Small on purpose: backed into a corner the camera goes effectively FIRST PERSON, which shows the player their surroundings, where a boom floored a metre out just fills the screen with the wall it is inside. The body is hidden on the way down.",
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "maxDistance": {
+              "default": 14,
+              "description": "Ceiling for the player's wheel zoom.",
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "collision": {
+              "default": true,
+              "description": "Resolve the boom against the physics world (terrain, buildings, props — never actors, so an NPC walking behind the player cannot shove the camera). Off gives a rigid boom that clips through walls.",
+              "type": "boolean"
+            },
+            "lookUp": {
+              "default": 32,
+              "description": "How far the player may angle the view UP, in degrees. Shallow on purpose: past the angle where the eye would sit under the ground (roughly asin(pivotHeight / distance)), collision crushes the boom to first person for as long as the angle is held, which reads as the camera being stuck rather than as a limit.",
+              "type": "number",
+              "minimum": 0,
+              "maximum": 89
+            },
+            "lookDown": {
+              "default": 66,
+              "description": "How far the player may angle the view DOWN, in degrees — i.e. how far the camera may rise above the pivot.",
+              "type": "number",
+              "minimum": 0,
+              "maximum": 89
+            },
             "damping": {
-              "default": 5,
+              "default": 14,
+              "description": "How tightly the orbit pivot tracks the target, per second. Higher is tighter. Loose damping reads as cinematic in open country and as the camera falling behind into walls in a town.",
               "type": "number",
               "exclusiveMinimum": 0
             }
@@ -1719,6 +1795,19 @@
               "description": "Colour of the thick, shadowed parts.",
               "type": "string",
               "pattern": "^#[0-9a-fA-F]{6}$"
+            },
+            "sun": {
+              "default": "#ffb27a",
+              "description": "Colour the cloud takes on the SUN'S SIDE of the sky, mixed in by `sunAmount`. This is what makes a sunset read as one: a low sun lights the deck from the side, so the cloud near its azimuth burns while the far sky stays cold. Tinting the whole layer at once instead (one `color` for the dome) gives the flat everything-is-orange sunset.",
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$"
+            },
+            "sunAmount": {
+              "default": 0,
+              "description": "How far the sun-facing cloud goes toward `sun`. 0 = no directional glow (the authored default; the layer is lit by `color`/`shadow` alone). The `day-night` script drives this: open at the horizon, shut by mid-morning.",
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
             }
           }
         }
@@ -3381,6 +3470,16 @@
           "description": "Cook a trimesh collider for simulation-ring cells. Off only for a fly-through preview.",
           "type": "boolean"
         },
+        "mesher": {
+          "default": "mc",
+          "description": "EXPERIMENT. How the sampled field becomes triangles: 'mc' marching cubes (the shipping mesher), 'dc' dual contouring (a QEF vertex per cell — sharp rims and scarps survive), 'nets' surface nets (the same dual topology, smoothed). The dual meshers have no skirts, so an LOD transition cracks: use them on a scene whose fullRender ring covers what you are looking at, not on a streaming world.",
+          "type": "string",
+          "enum": [
+            "mc",
+            "dc",
+            "nets"
+          ]
+        },
         "colliderLodStep": {
           "default": 1,
           "description": "Coarsen the COLLISION mesh relative to the visual one. Leave at 1: anything else breaks 'what you see is what you collide with', which is the invariant this whole terrain path exists to keep.",
@@ -3507,7 +3606,7 @@
       "properties": {
         "shader": {
           "default": "standard",
-          "description": "Built-in shader. unlit = flat/PS1-style, ignores lights; toon = banded; standard = PBR; terrain-splat = blends `splat.layers` by height/slope (seamless heightmap terrain, no per-tile hard edges); water = animated fresnel/ripple shader driven by `water` (bounded brightness — safe under bloom).",
+          "description": "Built-in shader. unlit = flat/PS1-style, ignores lights; toon = banded; standard = PBR; terrain-splat = blends `splat.layers` by height/slope (seamless heightmap terrain, no per-tile hard edges); portal = persistent unlit FX Lab procedural gate using color/opacity and optional map luminance as rotating paint detail on local 0..1 UVs; visual only, no zone transfer. water = animated fresnel/ripple shader driven by `water` (bounded brightness — safe under bloom).",
           "$ref": "#/$defs/__schema0"
         },
         "color": {
@@ -3660,9 +3759,13 @@
           "description": "Only read when shader is 'terrain-splat'.",
           "$ref": "#/$defs/__schema26"
         },
+        "portal": {
+          "description": "Only read by shader 'portal'. Uses optional map as rotating luminance paint detail while retaining color as its single hue.",
+          "$ref": "#/$defs/__schema50"
+        },
         "water": {
           "description": "Only read when shader is 'water'. Procedural by default (no textures needed) — depth-based color and shoreline foam read the depth buffer against whatever's actually beneath the surface, so they need real opaque geometry (terrain/seafloor) there to work. Add `texture` for scrolling surface detail on top.",
-          "$ref": "#/$defs/__schema48"
+          "$ref": "#/$defs/__schema52"
         }
       },
       "$defs": {
@@ -3674,7 +3777,8 @@
             "toon",
             "wireframe",
             "terrain-splat",
-            "water"
+            "water",
+            "portal"
           ]
         },
         "__schema1": {
@@ -3800,32 +3904,42 @@
         "__schema26": {
           "type": "object",
           "properties": {
+            "dominantAxis": {
+              "default": false,
+              "description": "Select one triplanar projection per face instead of blending axes. Pair with flatShading for masonry to prevent doubled mortar on bevels; leaves geometry and colliders unchanged. Organic terrain defaults to blended projection.",
+              "$ref": "#/$defs/__schema27"
+            },
+            "flatShading": {
+              "default": false,
+              "description": "Use triangle face normals for lighting and triplanar texture projection. Useful for DC masonry: smooth corner normals can bend straight mortar courses. Does not move vertices or change colliders; curved surfaces become faceted. Leave false for organic terrain.",
+              "$ref": "#/$defs/__schema28"
+            },
             "source": {
               "default": "height",
               "description": "Where the blend weights come from. 'height' = each layer overtakes the previous through its own [heightStart, heightEnd] band (heightmap terrain). 'vertex' = the mesh carries a per-vertex vec4 weight, which is what marching-cubes voxel terrain generates from its biome rules — that is the only way a desert and a snowfield at the SAME altitude can look different. A 'vertex' material on geometry with no splat attribute falls back to height bands rather than rendering untextured.",
-              "$ref": "#/$defs/__schema27"
+              "$ref": "#/$defs/__schema29"
             },
             "layers": {
               "minItems": 2,
               "maxItems": 16,
               "type": "array",
               "items": {
-                "$ref": "#/$defs/__schema28"
+                "$ref": "#/$defs/__schema30"
               },
               "description": "Up to four surfaces. With source 'height' they are ascending bands; with source 'vertex' the array ORDER is the weight vector's channel order and must match the world recipe's `surfaces`."
             },
             "slopeRock": {
               "description": "Blends a rock color over steep slopes regardless of height band (cliffs, crater rims). Mostly for source 'height'; with 'vertex' the biome rules already carry their own cliff surfaces, so this layers a second, global cliff tint on top of them.",
-              "$ref": "#/$defs/__schema35"
+              "$ref": "#/$defs/__schema37"
             },
             "tintByVertexColor": {
               "default": false,
               "description": "Multiply the blended result by the mesh's per-vertex color. Voxel terrain writes its per-biome tint there, which is how two biomes sharing the grass channel still read as different places.",
-              "$ref": "#/$defs/__schema37"
+              "$ref": "#/$defs/__schema39"
             },
             "macroNoise": {
               "description": "Breaks up texture repetition by multiplying gradient-noise brightness over the WHOLE blended result — one overlay across every layer, not a per-layer effect. Tiling reads as tiling because the same pattern recurs on a fixed grid; a second variation at a scale that shares no factor with the tile hides that grid without touching the art. Costs two noise evaluations per fragment and no texture fetches, so it is far cheaper than the stochastic-sampling alternative (3x the fetches).",
-              "$ref": "#/$defs/__schema38"
+              "$ref": "#/$defs/__schema40"
             }
           },
           "required": [
@@ -3833,13 +3947,19 @@
           ]
         },
         "__schema27": {
+          "type": "boolean"
+        },
+        "__schema28": {
+          "type": "boolean"
+        },
+        "__schema29": {
           "type": "string",
           "enum": [
             "height",
             "vertex"
           ]
         },
-        "__schema28": {
+        "__schema30": {
           "type": "object",
           "properties": {
             "color": {
@@ -3855,53 +3975,53 @@
             "heightStart": {
               "default": 0,
               "description": "Local Y where this layer starts blending in. Only read when splat.source is 'height'.",
-              "$ref": "#/$defs/__schema29"
+              "$ref": "#/$defs/__schema31"
             },
             "heightEnd": {
               "default": 10,
               "description": "Local Y where this layer is fully blended in. Only read when splat.source is 'height'.",
-              "$ref": "#/$defs/__schema30"
+              "$ref": "#/$defs/__schema32"
             },
             "grassy": {
               "default": false,
               "description": "Adds cheap procedural mottling (no textures/geometry — a per-pixel color variation) so this layer reads as grass texture instead of a flat tint. Meant for exactly one grass-colored layer. Skip it once the layer has a real `map`.",
-              "$ref": "#/$defs/__schema31"
+              "$ref": "#/$defs/__schema33"
             },
             "map": {
               "description": "Texture asset id (assets/textures/) for this layer's albedo, projected TRIPLANAR from world space. Triplanar is not optional here: voxel terrain has cliffs and overhangs with no sane UV unwrap, and it is also what keeps one texture continuous across a chunk seam. `color` still tints it.",
-              "$ref": "#/$defs/__schema32"
+              "$ref": "#/$defs/__schema34"
             },
             "normalMap": {
               "description": "Tangent-space normal map for this layer, sampled triplanar alongside `map`.",
-              "$ref": "#/$defs/__schema33"
+              "$ref": "#/$defs/__schema35"
             },
             "uvScale": {
               "default": 4,
               "description": "World units per texture tile for this layer. Larger = coarser. Give neighbouring layers different scales or their tiling beats in sync.",
-              "$ref": "#/$defs/__schema34"
+              "$ref": "#/$defs/__schema36"
             }
           }
         },
-        "__schema29": {
-          "type": "number"
-        },
-        "__schema30": {
-          "type": "number"
-        },
         "__schema31": {
-          "type": "boolean"
+          "type": "number"
         },
         "__schema32": {
-          "type": "string"
+          "type": "number"
         },
         "__schema33": {
-          "type": "string"
+          "type": "boolean"
         },
         "__schema34": {
+          "type": "string"
+        },
+        "__schema35": {
+          "type": "string"
+        },
+        "__schema36": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema35": {
+        "__schema37": {
           "type": "object",
           "properties": {
             "color": {
@@ -3917,7 +4037,7 @@
             "start": {
               "default": 0.55,
               "description": "Steepness (0=flat,1=vertical) where rock starts.",
-              "$ref": "#/$defs/__schema36"
+              "$ref": "#/$defs/__schema38"
             },
             "end": {
               "default": 0.8,
@@ -3927,26 +4047,26 @@
             }
           }
         },
-        "__schema36": {
+        "__schema38": {
           "type": "number",
           "minimum": 0,
           "maximum": 1
         },
-        "__schema37": {
+        "__schema39": {
           "type": "boolean"
         },
-        "__schema38": {
+        "__schema40": {
           "type": "object",
           "properties": {
             "scale": {
               "default": 90,
               "description": "World units per cycle of the broad band. Well clear of any layer's `uvScale` — that mismatch is the whole point.",
-              "$ref": "#/$defs/__schema39"
+              "$ref": "#/$defs/__schema41"
             },
             "strength": {
               "default": 0.22,
               "description": "How far the broad band swings brightness, plus and minus. 0.22 is a visible but natural mottle.",
-              "$ref": "#/$defs/__schema40"
+              "$ref": "#/$defs/__schema42"
             },
             "octaves": {
               "default": 3,
@@ -3956,26 +4076,26 @@
             },
             "detailScale": {
               "description": "Second, finer band, near tile size (10-20 world units). This is the one that breaks the visible grid up close; the broad band only fixes the view to the horizon.",
-              "$ref": "#/$defs/__schema41"
+              "$ref": "#/$defs/__schema43"
             },
             "detailStrength": {
               "default": 0.1,
               "description": "Swing of the detail band. Read only when `detailScale` is set.",
-              "$ref": "#/$defs/__schema42"
+              "$ref": "#/$defs/__schema44"
             },
             "roughnessStrength": {
               "default": 0,
               "description": "Optional matching swing on roughness. Terrain that tiles in specular under a low sun needs this; flat-lit terrain does not.",
-              "$ref": "#/$defs/__schema43"
+              "$ref": "#/$defs/__schema45"
             },
             "colorStrength": {
               "default": 0,
               "description": "How far the overlay shifts COLOUR, per channel, on top of the brightness swing. Brightness alone makes a large area read as one material under uneven light; letting the channels drift apart slightly — warmer here, greyer there — is what reads as the ground actually being different from place to place. 0.06-0.15 is a natural mottle; past ~0.25 the terrain goes tie-dye.",
-              "$ref": "#/$defs/__schema44"
+              "$ref": "#/$defs/__schema46"
             },
             "colorScale": {
               "description": "World units per cycle of the colour band. Defaults to `scale`. Set it larger for broad regional colour shifts that survive being seen from a distance.",
-              "$ref": "#/$defs/__schema45"
+              "$ref": "#/$defs/__schema47"
             },
             "colorOctaves": {
               "default": 3,
@@ -3986,23 +4106,14 @@
             "warp": {
               "default": 0,
               "description": "How far the texture PROJECTION is pushed around by noise before it is sampled, as a fraction of each layer's OWN tile, so one setting means the same thing to a 3.5m grass tile and a 9m cliff tile. This is the one that actually kills tiling: brightness noise can only shade OVER a grid, and the grid is still underneath it — on a big flat-lit face seen from a distance the eye finds it anyway. Warping the projection means neighbouring tiles no longer line up, so there is no grid left to find. 0.25-0.5 is usually enough; past about 0.6 the texture visibly smears.",
-              "$ref": "#/$defs/__schema46"
+              "$ref": "#/$defs/__schema48"
             },
             "warpScale": {
               "default": 18,
               "description": "World units per cycle of the warp. Measured: keep it near TWICE the tile size, not far above it. A warp much coarser than the tile slides whole tiles around and leaves the motif inside each one perfectly intact, so a strongly patterned texture still reads as a pattern; a warp at roughly tile scale distorts the motif itself, which is what stops a big rock face looking stamped.",
-              "$ref": "#/$defs/__schema47"
+              "$ref": "#/$defs/__schema49"
             }
           }
-        },
-        "__schema39": {
-          "type": "number",
-          "exclusiveMinimum": 0
-        },
-        "__schema40": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 1
         },
         "__schema41": {
           "type": "number",
@@ -4015,8 +4126,7 @@
         },
         "__schema43": {
           "type": "number",
-          "minimum": 0,
-          "maximum": 1
+          "exclusiveMinimum": 0
         },
         "__schema44": {
           "type": "number",
@@ -4025,19 +4135,55 @@
         },
         "__schema45": {
           "type": "number",
-          "exclusiveMinimum": 0
+          "minimum": 0,
+          "maximum": 1
         },
         "__schema46": {
           "type": "number",
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 1
         },
         "__schema47": {
           "type": "number",
           "exclusiveMinimum": 0
         },
         "__schema48": {
+          "type": "number",
+          "minimum": 0
+        },
+        "__schema49": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "__schema50": {
           "type": "object",
           "properties": {
+            "aperture": {
+              "default": "disc",
+              "description": "Disc feathers to an oval; opening fills the full local-UV quad with a narrow edge fade for a framed doorway. Place sealed architecture several metres behind it; this shader does not implement travel or collision.",
+              "$ref": "#/$defs/__schema51"
+            }
+          }
+        },
+        "__schema51": {
+          "type": "string",
+          "enum": [
+            "disc",
+            "opening"
+          ]
+        },
+        "__schema52": {
+          "type": "object",
+          "properties": {
+            "lighting": {
+              "default": true,
+              "description": "False keeps animated water color, waves, foam and fog but removes scene-light shading and specular highlights. Useful for graphic sewer water. True preserves the standard lit ocean appearance.",
+              "$ref": "#/$defs/__schema53"
+            },
+            "textureTint": {
+              "description": "When set, recolor the scrolling texture by its luminance before blending, preserving visible moving detail without importing its original hue. Omit to retain the original texture colors. Combine with textureStrength to control moving detail.",
+              "$ref": "#/$defs/__schema1"
+            },
             "shallowColor": {
               "default": "#3fa8c9",
               "$ref": "#/$defs/__schema1"
@@ -4099,27 +4245,27 @@
             },
             "texture": {
               "description": "Surface texture ADDED over the procedural water, scrolled in two directions at two scales so it never reads as one tile sliding past. It contributes light rather than replacing colour, so the depth banding, shoreline foam and fresnel rim underneath all survive — the texture supplies the moving detail those cannot.",
-              "$ref": "#/$defs/__schema49"
+              "$ref": "#/$defs/__schema54"
             },
             "textureScale": {
               "default": 24,
               "description": "World units per texture tile. Sampled in WORLD XZ, not UV, so tiling is continuous across a huge plane and independent of how the mesh happens to be unwrapped.",
-              "$ref": "#/$defs/__schema50"
+              "$ref": "#/$defs/__schema55"
             },
             "textureStrength": {
               "default": 0.9,
               "description": "How far the surface reads as the TEXTURE rather than the procedural bands. 1 is texture-led (still shaded by depth, foam and fresnel); low values leave it as a faint tint over the original look.",
-              "$ref": "#/$defs/__schema51"
+              "$ref": "#/$defs/__schema56"
             },
             "foamPixel": {
               "default": 0.7,
               "description": "World units per foam BLOCK. The shoreline band's breakup is sampled on a snapped grid, so the edge steps in squares of this size instead of wandering smoothly — which is what makes it sit beside nearest-filtered pixel-art terrain instead of looking airbrushed onto it. 0 disables the snap.",
-              "$ref": "#/$defs/__schema52"
+              "$ref": "#/$defs/__schema57"
             },
             "foamSteps": {
               "default": 3,
               "description": "Quantisation levels in the foam band. Fewer = chunkier, more poster-like; 1 is a hard on/off edge.",
-              "$ref": "#/$defs/__schema53"
+              "$ref": "#/$defs/__schema58"
             },
             "flow": {
               "default": [
@@ -4127,41 +4273,44 @@
                 0.008
               ],
               "description": "Texture drift in tiles per second [x, z]. The second sample layer moves at a different scale and roughly perpendicular, which is what stops the eye locking onto a single repeating direction.",
-              "$ref": "#/$defs/__schema54"
+              "$ref": "#/$defs/__schema59"
             },
             "flowMode": {
               "default": "drift",
               "description": "drift: standing water — waves and texture are laid out in WORLD space (so sheets streamed cell by cell agree along their shared edges) and drift by `flow`. channel: moving water — the geometry carries a per-vertex `flow` vector and metre uvs (a `path` ribbon with `flowSpeed` and `uvMetres`), and waves, texture and foam all travel along it at that speed: a river runs downstream and over its falls. Only use channel on geometry that has the attribute.",
-              "$ref": "#/$defs/__schema55"
+              "$ref": "#/$defs/__schema60"
             },
             "displace": {
               "default": true,
               "description": "Move the vertices with the waves. Right for a finely subdivided plane (the ocean); WRONG for a lake sheet (one polygon fan) or a river ribbon (two vertices across), where lifting the few vertices tilts whole triangles into faceted streaks. false keeps the wave NORMALS (lighting still moves) and leaves the geometry flat. `worldgen rivers` writes the lake and river materials with false.",
-              "$ref": "#/$defs/__schema56"
+              "$ref": "#/$defs/__schema61"
             }
           }
         },
-        "__schema49": {
+        "__schema53": {
+          "type": "boolean"
+        },
+        "__schema54": {
           "type": "string"
         },
-        "__schema50": {
+        "__schema55": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema51": {
+        "__schema56": {
           "type": "number",
           "minimum": 0
         },
-        "__schema52": {
+        "__schema57": {
           "type": "number",
           "minimum": 0
         },
-        "__schema53": {
+        "__schema58": {
           "type": "integer",
           "minimum": 1,
           "maximum": 8
         },
-        "__schema54": {
+        "__schema59": {
           "type": "array",
           "prefixItems": [
             {
@@ -4172,14 +4321,14 @@
             }
           ]
         },
-        "__schema55": {
+        "__schema60": {
           "type": "string",
           "enum": [
             "drift",
             "channel"
           ]
         },
-        "__schema56": {
+        "__schema61": {
           "type": "boolean"
         }
       }
@@ -4715,29 +4864,38 @@
                 "description": "Biome ids this may appear in; empty = anywhere.",
                 "$ref": "#/$defs/__schema121"
               },
+              "biomeDensity": {
+                "default": {},
+                "description": "Per-biome thinning, biome id -> fraction of `density` that survives there (absent = 1, the full density). This is how ONE rule is a forest in the forest and a copse in the meadow, instead of two rules that have to be kept in step. Capped at 1 for the same reason `clump.floor` is: `density` fixes the lattice before any of this runs, so it is the PEAK and everything else thins it. A biome not in `biomes` at all is still excluded outright — this only grades the ones that are in.",
+                "$ref": "#/$defs/__schema122"
+              },
+              "clump": {
+                "description": "Gather this rule into groves/thickets with open ground between, instead of spreading it evenly over every biome it is allowed in. See the schema — this is the difference between a forest and an orchard.",
+                "$ref": "#/$defs/__schema123"
+              },
               "density": {
                 "default": 0.01,
                 "description": "Expected instances per square world unit. 0.01 = one per 10x10m, i.e. a light forest.",
-                "$ref": "#/$defs/__schema122"
+                "$ref": "#/$defs/__schema129"
               },
               "slopeMax": {
                 "default": 0.5,
                 "description": "Steepest ground it will stand on.",
-                "$ref": "#/$defs/__schema123"
+                "$ref": "#/$defs/__schema130"
               },
               "slopeMin": {
                 "default": 0,
                 "description": "Shallowest ground it will stand on, in the same sin(angle) units as slopeMax (0.71 = 45 degrees, 0.87 = 60). Raise it to make a rule STEEP-ONLY — scree, cliff rock, ledge growth — instead of the usual 'anywhere flat enough'.",
-                "$ref": "#/$defs/__schema124"
+                "$ref": "#/$defs/__schema131"
               },
               "yawOffset": {
                 "default": 0,
                 "description": "Radians added to every instance's yaw. The fix for a model whose front does not face +Z: cliff rocks turn their +Z out of the face, so a model authored facing -Z needs Math.PI here.",
-                "$ref": "#/$defs/__schema125"
+                "$ref": "#/$defs/__schema132"
               },
               "cliff": {
                 "description": "Turn this rule into a CLIFF FACE rule: instead of one prop standing on the ground, it emits a vertical STACK of props bedded into the face below the clifftop. This is how a sheer voxel face stops reading as a painted texture and starts reading as rock. Pair it with a high `slopeMin` — a stack on gentle ground is just a tower of floating boulders.",
-                "$ref": "#/$defs/__schema126"
+                "$ref": "#/$defs/__schema133"
               },
               "height": {
                 "description": "World-Y window the ground must fall in.",
@@ -4763,32 +4921,32 @@
               "alignToNormal": {
                 "default": 0,
                 "description": "0 = always upright, 1 = fully laid onto the slope.",
-                "$ref": "#/$defs/__schema140"
+                "$ref": "#/$defs/__schema147"
               },
               "yOffset": {
                 "default": 0,
                 "description": "Sink (negative) or lift the instance along its own up axis.",
-                "$ref": "#/$defs/__schema141"
+                "$ref": "#/$defs/__schema148"
               },
               "jitter": {
                 "default": 0.85,
                 "description": "How far off its lattice point each instance may wander.",
-                "$ref": "#/$defs/__schema142"
+                "$ref": "#/$defs/__schema149"
               },
               "clearance": {
                 "default": 1.5,
                 "description": "Metres kept clear of every feature's EDGE — a path's shoulder, a river's bank foot, a town's radius, a monolith's footprint. 0 lets the rule stand props on a footpath, which is never wanted.",
-                "$ref": "#/$defs/__schema143"
+                "$ref": "#/$defs/__schema150"
               },
               "footprint": {
                 "default": 0,
                 "description": "Radius of the prop's own ground footprint in MODEL units (scaled per instance). Two props are placed no closer than the SUM of their footprints plus `spacing`, and rules are solved largest-footprint first so big things claim ground before small ones fill in around them. 0 = derive from colliderSize.",
-                "$ref": "#/$defs/__schema144"
+                "$ref": "#/$defs/__schema151"
               },
               "spacing": {
                 "default": 0.5,
                 "description": "Extra clear ground kept between this prop and any other, in world units.",
-                "$ref": "#/$defs/__schema145"
+                "$ref": "#/$defs/__schema152"
               },
               "collider": {
                 "default": "none",
@@ -4830,7 +4988,7 @@
               "lod": {
                 "default": true,
                 "description": "Passed to the emitted mesh: swap to a cheap distance proxy past ~100m. Turn it OFF for a model that is already cheap. Without a baked impostor the far tier is a BOX for a squat prop, so a 170-triangle rock spends the whole middle distance as a brown box — the proxy saves 150 triangles and costs you the rock. See the mesh component's own field.",
-                "$ref": "#/$defs/__schema146"
+                "$ref": "#/$defs/__schema153"
               }
             },
             "required": [
@@ -4841,7 +4999,7 @@
         "regions": {
           "default": [],
           "description": "The ZONES players and servers know by name — agent-drawn polygons with a story and a hub, borders on landmarks. Coarse (minutes to cross), not biomes, not the climate cells. Chat 'zone' lines and cluster placement read them; docs/world-editing/zones.md is the authoring procedure.",
-          "$ref": "#/$defs/__schema147"
+          "$ref": "#/$defs/__schema154"
         },
         "features": {
           "default": {},
@@ -4858,59 +5016,59 @@
                     "type": "string"
                   },
                   "points": {
-                    "$ref": "#/$defs/__schema156"
+                    "$ref": "#/$defs/__schema163"
                   },
                   "width": {
                     "default": 8,
                     "description": "Full channel width at the bed.",
-                    "$ref": "#/$defs/__schema158"
+                    "$ref": "#/$defs/__schema165"
                   },
                   "widths": {
                     "description": "Per-point channel width, same length as `points`, overriding `width` along the channel: a river that widens as tributaries join and swells around its bends. `width` must still be the WIDEST of them (it sizes the carve's reach and the bank). `worldgen rivers` writes both.",
-                    "$ref": "#/$defs/__schema159"
+                    "$ref": "#/$defs/__schema166"
                   },
                   "depth": {
                     "default": 3,
                     "description": "How far below the surrounding land the bed sits.",
-                    "$ref": "#/$defs/__schema160"
+                    "$ref": "#/$defs/__schema167"
                   },
                   "depths": {
                     "description": "Per-point channel depth, same length as `points`, overriding `depth` along the channel: a stream a metre deep at its head that is six metres deep where it meets the sea. The water surface sits 0.7 of the local depth over the bed. `depth` must still be the DEEPEST. `worldgen rivers` writes both.",
-                    "$ref": "#/$defs/__schema161"
+                    "$ref": "#/$defs/__schema168"
                   },
                   "bank": {
                     "default": 14,
                     "description": "Extra distance over which the banks ease back up to natural terrain, at the channel's WIDEST; where `widths` are given the local bank is min(bank, 0.7 × local width + 3).",
-                    "$ref": "#/$defs/__schema162"
+                    "$ref": "#/$defs/__schema169"
                   },
                   "bedY": {
                     "description": "Per-point bed height, same length as `points`. OMIT IT when writing a river by hand: the field solves a descending bed through the points from the ground they cross (a channel depth under it, capped at a lake's level from the first point under a lake, running-min from the head so a ridge in the way is cut, the mouth a hair under the sea or flush with the river it ends on), and the world carves, banks and waters it live. `worldgen rivers --trace` writes one; a hand-written doc never should.",
-                    "$ref": "#/$defs/__schema163"
+                    "$ref": "#/$defs/__schema170"
                   },
                   "maxGrade": {
                     "default": 0.05,
                     "description": "Steepest bed grade the SOLVED bed may carry (rise over run; 0.05 is 5 %), applied only when `bedY` is omitted. Where the ground drops faster — a coastal scarp, a lake's spill — the bed upstream is cut down to keep the grade, so the river reaches the sea through a gorge instead of sliding down the cliff as a tilted sheet. Not applied inside a lake: an outlet leaves flush with its lake and cascades from there. A water sheet reads as a river under about 2 %, as rapids to 5 %; 0 disables the limit.",
-                    "$ref": "#/$defs/__schema164"
+                    "$ref": "#/$defs/__schema171"
                   },
                   "water": {
                     "default": true,
                     "description": "Emit a water surface along the channel (a ribbon at bed + most of `depth`, in the recipe's `riverMaterial`). false is a dry gully: carved and painted, no sheet.",
-                    "$ref": "#/$defs/__schema165"
+                    "$ref": "#/$defs/__schema172"
                   },
                   "surface": {
                     "default": "sand",
                     "description": "Palette surface NAME painted on the bed and banks, so ground cover stops at the water: a channel cut through grassland is still grass to the splat otherwise, and the grass billboards grow in the river. Empty string leaves the biome's cover.",
-                    "$ref": "#/$defs/__schema166"
+                    "$ref": "#/$defs/__schema173"
                   },
                   "surfaceEdge": {
                     "default": 3,
                     "description": "World units over which the bed surface fades into the bank.",
-                    "$ref": "#/$defs/__schema167"
+                    "$ref": "#/$defs/__schema174"
                   },
                   "taper": {
                     "default": 0,
                     "description": "Metres over which the channel grows from a trickle to full width and depth at its HEAD. Without it a river begins at full size in the middle of a field, which is the single most obvious tell of a traced channel; with it the source reads as a stream forming.",
-                    "$ref": "#/$defs/__schema168"
+                    "$ref": "#/$defs/__schema175"
                   }
                 },
                 "required": [
@@ -4921,12 +5079,12 @@
             "canyons": {
               "default": [],
               "description": "Terraced gorges. Written by `worldgen canyons`.",
-              "$ref": "#/$defs/__schema169"
+              "$ref": "#/$defs/__schema176"
             },
             "ridges": {
               "default": [],
               "description": "Terrain raised along a polyline — barriers on the zone borders that had none. Written by `worldgen barriers` (ids `barrier-*`, rewritten on every run); hand-written ridges are kept.",
-              "$ref": "#/$defs/__schema175"
+              "$ref": "#/$defs/__schema182"
             },
             "roads": {
               "default": [],
@@ -4939,7 +5097,7 @@
                     "type": "string"
                   },
                   "points": {
-                    "$ref": "#/$defs/__schema156"
+                    "$ref": "#/$defs/__schema163"
                   },
                   "width": {
                     "default": 6,
@@ -4949,7 +5107,7 @@
                   "shoulder": {
                     "default": 8,
                     "description": "Distance over which the cut/fill eases back into natural terrain.",
-                    "$ref": "#/$defs/__schema181"
+                    "$ref": "#/$defs/__schema188"
                   },
                   "surfaceY": {
                     "type": "array",
@@ -4960,34 +5118,34 @@
                   "smooth": {
                     "default": 0,
                     "description": "Metres BEYOND the shoulder over which the ground is regraded into a smooth embankment: from the road edge out to `shoulder + smooth`, the natural terrain is replaced by a clean slope from the road surface to `leftY`/`rightY` and only fades back into the rough ground at the outer edge. Without it the shoulder merely blends the road height into whatever crinkle is there, and a road across noisy ground reads as a notch in jagged terrain. Needs `leftY`/`rightY`; `worldgen roads` writes all three.",
-                    "$ref": "#/$defs/__schema182"
+                    "$ref": "#/$defs/__schema189"
                   },
                   "leftY": {
                     "description": "Per-point ground height at the outer edge of the `smooth` band on the road's left (positive cross-product side).",
-                    "$ref": "#/$defs/__schema183"
+                    "$ref": "#/$defs/__schema190"
                   },
                   "rightY": {
                     "description": "Per-point ground height at the outer edge of the `smooth` band on the road's right.",
-                    "$ref": "#/$defs/__schema184"
+                    "$ref": "#/$defs/__schema191"
                   },
                   "flatten": {
                     "default": 1,
                     "description": "How completely the road height wins over natural terrain.",
-                    "$ref": "#/$defs/__schema185"
+                    "$ref": "#/$defs/__schema192"
                   },
                   "surface": {
                     "default": "dirt",
                     "description": "Palette surface NAME painted along the roadway, overriding whatever the biome would put there. A road that only flattens the ground is invisible from the air — grass graded flat still reads as grass. Set to an empty string to leave the biome's own cover in place (a paved street in a town, say).",
-                    "$ref": "#/$defs/__schema186"
+                    "$ref": "#/$defs/__schema193"
                   },
                   "surfaceEdge": {
                     "default": 2.5,
                     "description": "World units over which the painted surface fades into the surrounding ground. The verge.",
-                    "$ref": "#/$defs/__schema187"
+                    "$ref": "#/$defs/__schema194"
                   },
                   "surfaceByBiome": {
                     "description": "Palette surface NAME to paint instead of `surface` where a given biome (by id) holds the ground — `{ alpine: \"gravel\" }` makes a footpath gravel across the snow and dirt everywhere else. Blended by biome membership, so the swap fades across the biome boundary. `worldgen paths`/`trails` write gravel for every snow-dominant biome when the palette has gravel.",
-                    "$ref": "#/$defs/__schema188"
+                    "$ref": "#/$defs/__schema195"
                   }
                 },
                 "required": [
@@ -5004,6 +5162,10 @@
                   "id": {
                     "default": "town",
                     "type": "string"
+                  },
+                  "excludeScatter": {
+                    "description": "When omitted or true, exclude scatter and ground cover across the whole town pad. Set false for landscaped towns whose roads and building foundations provide local clearances.",
+                    "$ref": "#/$defs/__schema196"
                   },
                   "center": {
                     "type": "array",
@@ -5024,7 +5186,7 @@
                   "falloff": {
                     "default": 35,
                     "description": "Distance beyond `radius` over which the pad blends into natural terrain.",
-                    "$ref": "#/$defs/__schema189"
+                    "$ref": "#/$defs/__schema197"
                   },
                   "groundY": {
                     "type": "number"
@@ -5051,27 +5213,27 @@
             "lakes": {
               "default": [],
               "description": "Standing water at its own level, basin carved beneath. Written by `worldgen rivers`.",
-              "$ref": "#/$defs/__schema190"
+              "$ref": "#/$defs/__schema198"
             },
             "bridges": {
               "default": [],
               "description": "Road decks spanning rivers. Written by `worldgen roads`.",
-              "$ref": "#/$defs/__schema199"
+              "$ref": "#/$defs/__schema207"
             },
             "fills": {
               "default": [],
               "description": "Sediment-filled hollows on the river network. Written by `worldgen rivers`.",
-              "$ref": "#/$defs/__schema207"
+              "$ref": "#/$defs/__schema215"
             },
             "riverPaths": {
               "default": [],
               "description": "Hand- or agent-drawn river centrelines. AUTHORING input: `worldgen rivers` solves each into `rivers`.",
-              "$ref": "#/$defs/__schema210"
+              "$ref": "#/$defs/__schema218"
             },
             "tunnels": {
               "default": [],
               "description": "Carved cave passages. Written by `worldgen caves`.",
-              "$ref": "#/$defs/__schema213"
+              "$ref": "#/$defs/__schema221"
             },
             "blobs": {
               "default": [],
@@ -5117,11 +5279,11 @@
                   "height": {
                     "default": 0,
                     "description": "0 = a sphere. Above 0 the blob is a VERTICAL CAPSULE this tall, rising from `center` — which is what turns the escape hatch into a monolith: a desert pillar is one line of JSON rather than a stack of spheres, and it stays one line when you drag it somewhere else.",
-                    "$ref": "#/$defs/__schema217"
+                    "$ref": "#/$defs/__schema225"
                   },
                   "topRadius": {
                     "description": "Radius at the TOP of a capsule (needs `height`). Omit for a uniform column. A value below `radius` is what turns a pillar into a needle — a spire tapering as it rises reads as weathered stone, a cylinder reads as a prop.",
-                    "$ref": "#/$defs/__schema218"
+                    "$ref": "#/$defs/__schema226"
                   },
                   "scaleX": {
                     "default": 1,
@@ -5176,12 +5338,12 @@
                   },
                   "radius": {
                     "description": "Area of effect for kinds that have one — a waystation's sanctuary circle (metres).",
-                    "$ref": "#/$defs/__schema219"
+                    "$ref": "#/$defs/__schema227"
                   },
                   "tags": {
                     "default": [],
                     "description": "Free-form; \"safe\" marks a sanctuary (no player-on-player damage within `radius`), \"pass\" a zone-border pass.",
-                    "$ref": "#/$defs/__schema220"
+                    "$ref": "#/$defs/__schema228"
                   }
                 },
                 "required": [
@@ -5189,37 +5351,42 @@
                   "position"
                 ]
               }
+            },
+            "camps": {
+              "default": [],
+              "description": "Enemy camps — where monsters live. Written by `worldgen spawn`, which also patches the matching spawnArea entities into the scene (ids `camp-*`, rewritten on every run); hand-written camps are kept.",
+              "$ref": "#/$defs/__schema229"
             }
           }
         },
         "verticalRange": {
           "description": "The vertical band actually meshed per cell. A voxel world is not infinite in Y for free.",
           "default": {},
-          "$ref": "#/$defs/__schema221"
+          "$ref": "#/$defs/__schema246"
         },
         "textureFilter": {
           "default": "linear",
           "description": "Magnification filter for every terrain surface texture. Set 'nearest' for PIXEL ART so it stays chunky instead of being smeared smooth up close. Emitted onto the terrain material by `worldgen material`.",
-          "$ref": "#/$defs/__schema224"
+          "$ref": "#/$defs/__schema249"
         },
         "macroNoise": {
           "description": "Noise multiplied over the whole blended terrain to break up texture repetition, emitted onto the terrain material by `worldgen material`. It lives HERE and not only in the material because the material is derived data — anything written straight into it is lost the next time the palette changes and it gets re-emitted.",
-          "$ref": "#/$defs/__schema225"
+          "$ref": "#/$defs/__schema250"
         },
         "material": {
           "type": "string"
         },
         "waterMaterial": {
           "description": "Material asset id for river ribbons and lake sheets emitted into streamed cells. Without it rivers are carved but dry. `worldgen init` writes one beside the terrain material.",
-          "$ref": "#/$defs/__schema233"
+          "$ref": "#/$defs/__schema258"
         },
         "riverMaterial": {
           "description": "Material asset id for river ribbons specifically — a water material with `flowMode: \"channel\"`, so the water visibly runs downstream. Falls back to `waterMaterial` (standing water). `worldgen rivers` writes `<waterMaterial>-river` and sets this.",
-          "$ref": "#/$defs/__schema234"
+          "$ref": "#/$defs/__schema259"
         },
         "bridgeMaterial": {
           "description": "Material asset id for the placeholder decks emitted for `features.bridges`. `worldgen roads` writes a plain timber-coloured one when the recipe has none.",
-          "$ref": "#/$defs/__schema235"
+          "$ref": "#/$defs/__schema260"
         }
       },
       "required": [
@@ -6502,7 +6669,7 @@
               "$ref": "#/$defs/__schema118"
             },
             "materials": {
-              "description": "Only move materials whose NAME, or whose colour texture's name, contains this (case-insensitive) — `leaves` for a model whose leaf texture is called Leaves. The rest of the model stands still and the `canopy` height test is skipped, so the trunk stays put by NAME rather than by height. Name the texture or material in the DCC tool before export: Blockbench exports a pasted texture as literally 'pasted', which matches nothing, and an unmatched model gets no wind at all.",
+              "description": "Only move materials whose NAME, or whose colour texture's name, contains one of these (case-insensitive, COMMA-SEPARATED) — `leaves` for a model whose leaf texture is called Leaves, `leaves,bush` for one rule that covers a whole shelf of props whatever each model calls its own foliage sheet. The rest of the model stands still and the `canopy` height test is skipped, so the trunk stays put by NAME rather than by height. Name the texture or material in the DCC tool before export: Blockbench exports a pasted texture as literally 'pasted', which matches nothing, and an unmatched model gets no wind at all (`split-gltf.mjs --texnames` names them after the fact).",
               "$ref": "#/$defs/__schema119"
             }
           },
@@ -6536,23 +6703,93 @@
           }
         },
         "__schema122": {
-          "type": "number",
-          "minimum": 0
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
         },
         "__schema123": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 1
+          "type": "object",
+          "properties": {
+            "frequency": {
+              "default": 0.004,
+              "description": "Cycles per world unit — the size of one grove. 0.004 ~ 250 m stands, 0.02 ~ 50 m thickets.",
+              "$ref": "#/$defs/__schema124"
+            },
+            "octaves": {
+              "default": 3,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 6
+            },
+            "threshold": {
+              "default": 0,
+              "description": "Noise level (-1..1) at which the clump starts. Higher = rarer, smaller, further-apart clumps.",
+              "$ref": "#/$defs/__schema125"
+            },
+            "blend": {
+              "default": 0.35,
+              "description": "Noise range over which it fades in. Small = a hard treeline, large = a stand that thins out at its edge.",
+              "$ref": "#/$defs/__schema126"
+            },
+            "floor": {
+              "default": 0,
+              "description": "Fraction of the density that survives OUTSIDE the clumps. 0 = real clearings you can walk across; 0.15 = a thinned scatter between the stands, which is what most woodland actually looks like.",
+              "$ref": "#/$defs/__schema127"
+            },
+            "seed": {
+              "default": 0,
+              "description": "Added to the world seed, so two rules with identical settings clump in different places.",
+              "$ref": "#/$defs/__schema128"
+            }
+          }
         },
         "__schema124": {
           "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "__schema125": {
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1
+        },
+        "__schema126": {
+          "type": "number",
+          "minimum": 0
+        },
+        "__schema127": {
+          "type": "number",
           "minimum": 0,
           "maximum": 1
         },
-        "__schema125": {
+        "__schema128": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "__schema129": {
+          "type": "number",
+          "minimum": 0
+        },
+        "__schema130": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "__schema131": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "__schema132": {
           "type": "number"
         },
-        "__schema126": {
+        "__schema133": {
           "type": "object",
           "properties": {
             "stack": {
@@ -6561,71 +6798,71 @@
                 5
               ],
               "description": "How many props down one column, picked per lattice point. The stack stops early where the face does.",
-              "$ref": "#/$defs/__schema127"
+              "$ref": "#/$defs/__schema134"
             },
             "spacing": {
               "default": 5,
               "description": "Metres of drop between one prop and the next. Set it under the model's height so they overlap and read as one mass.",
-              "$ref": "#/$defs/__schema128"
+              "$ref": "#/$defs/__schema135"
             },
             "spacingJitter": {
               "default": 0.4,
               "description": "How much each step may vary, as a fraction of `spacing`.",
-              "$ref": "#/$defs/__schema129"
+              "$ref": "#/$defs/__schema136"
             },
             "embed": {
               "default": 1.6,
               "description": "Depth pushed INTO the face along its inward normal, in MODEL units — it is multiplied by the instance scale, like `yOffset`, so resizing a prop does not leave it hanging off the wall. This is the field that decides whether the prop looks bolted onto the cliff or part of it; roughly a third of the model's depth is a good start.",
-              "$ref": "#/$defs/__schema130"
+              "$ref": "#/$defs/__schema137"
             },
             "embedJitter": {
               "default": 0.8,
               "description": "Random variation on `embed`, in the same model units.",
-              "$ref": "#/$defs/__schema131"
+              "$ref": "#/$defs/__schema138"
             },
             "lateral": {
               "default": 2.5,
               "description": "Metres each prop may slide sideways along the face, so a column is not a plumb line of rocks.",
-              "$ref": "#/$defs/__schema132"
+              "$ref": "#/$defs/__schema139"
             },
             "faceOut": {
               "default": 1,
               "description": "How strongly each prop turns to face out of the cliff. 1 = square to the face, 0 = free yaw (the ordinary scatter behaviour).",
-              "$ref": "#/$defs/__schema133"
+              "$ref": "#/$defs/__schema140"
             },
             "yawSpread": {
               "default": 0.6,
               "description": "Radians of random yaw either side of the outward direction. This plus `tilt` is what stops a stack looking like one model copy-pasted.",
-              "$ref": "#/$defs/__schema134"
+              "$ref": "#/$defs/__schema141"
             },
             "tilt": {
               "default": 0.28,
               "description": "Radians of random tilt off vertical, about a random horizontal axis.",
-              "$ref": "#/$defs/__schema135"
+              "$ref": "#/$defs/__schema142"
             },
             "lean": {
               "default": 0.35,
               "description": "Radians the prop tips BACK into the face (negative tips it out). A cliff recedes as it rises, so an upright prop bedded at its base has its top hanging in open air — which is exactly what makes a face read as planted menhirs instead of rock. Roughly `atan(model height / (2 x embed))` cancels it. This is NOT `alignToNormal`: that one lays a prop ONTO a slope, which on a cliff leans it further out.",
-              "$ref": "#/$defs/__schema136"
+              "$ref": "#/$defs/__schema143"
             },
             "leanJitter": {
               "default": 0.15,
               "description": "Radians of random variation on `lean`.",
-              "$ref": "#/$defs/__schema137"
+              "$ref": "#/$defs/__schema144"
             },
             "minDrop": {
               "default": 6,
               "description": "The face must fall at least this far below the lattice point for the column to start at all. Guards against decorating every short steep bank in the world.",
-              "$ref": "#/$defs/__schema138"
+              "$ref": "#/$defs/__schema145"
             },
             "search": {
               "default": 12,
               "description": "Metres to march outward looking for the face at each step's height. Wider catches gentler faces, and it is the per-instance cost knob — but it is also how far a prop can end up from the lattice point that owns it, so keep it WELL under a quarter of `cellSize` or a cell starts emitting props that live in its neighbour and pop when it unloads.",
-              "$ref": "#/$defs/__schema139"
+              "$ref": "#/$defs/__schema146"
             }
           }
         },
-        "__schema127": {
+        "__schema134": {
           "type": "array",
           "prefixItems": [
             {
@@ -6640,45 +6877,17 @@
             }
           ]
         },
-        "__schema128": {
+        "__schema135": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema129": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 1
-        },
-        "__schema130": {
-          "type": "number"
-        },
-        "__schema131": {
-          "type": "number",
-          "minimum": 0
-        },
-        "__schema132": {
-          "type": "number",
-          "minimum": 0
-        },
-        "__schema133": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 1
-        },
-        "__schema134": {
-          "type": "number",
-          "minimum": 0
-        },
-        "__schema135": {
-          "type": "number",
-          "minimum": 0
-        },
         "__schema136": {
-          "type": "number"
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
         },
         "__schema137": {
-          "type": "number",
-          "minimum": 0
+          "type": "number"
         },
         "__schema138": {
           "type": "number",
@@ -6686,7 +6895,7 @@
         },
         "__schema139": {
           "type": "number",
-          "exclusiveMinimum": 0
+          "minimum": 0
         },
         "__schema140": {
           "type": "number",
@@ -6694,16 +6903,15 @@
           "maximum": 1
         },
         "__schema141": {
-          "type": "number"
+          "type": "number",
+          "minimum": 0
         },
         "__schema142": {
           "type": "number",
-          "minimum": 0,
-          "maximum": 1
+          "minimum": 0
         },
         "__schema143": {
-          "type": "number",
-          "minimum": 0
+          "type": "number"
         },
         "__schema144": {
           "type": "number",
@@ -6714,9 +6922,38 @@
           "minimum": 0
         },
         "__schema146": {
-          "type": "boolean"
+          "type": "number",
+          "exclusiveMinimum": 0
         },
         "__schema147": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "__schema148": {
+          "type": "number"
+        },
+        "__schema149": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "__schema150": {
+          "type": "number",
+          "minimum": 0
+        },
+        "__schema151": {
+          "type": "number",
+          "minimum": 0
+        },
+        "__schema152": {
+          "type": "number",
+          "minimum": 0
+        },
+        "__schema153": {
+          "type": "boolean"
+        },
+        "__schema154": {
           "type": "array",
           "items": {
             "type": "object",
@@ -6734,41 +6971,41 @@
               "story": {
                 "default": "",
                 "description": "Two to five sentences: what this place is, why anyone goes there, what is wrong with it. The seed the AI dungeon master grows consequences from; also the tooltip text on the map.",
-                "$ref": "#/$defs/__schema148"
+                "$ref": "#/$defs/__schema155"
               },
               "polygon": {
                 "minItems": 3,
                 "type": "array",
                 "items": {
-                  "$ref": "#/$defs/__schema149"
+                  "$ref": "#/$defs/__schema156"
                 },
                 "description": "Border in world metres [x, z], clockwise or counter-clockwise, no self-crossing. Follow LANDMARKS a player cannot see across — ridge lines, river centrelines, gorge rims, the coast — never a straight line over open ground: the border is where a server swap can happen, and a swap must not show two worlds."
               },
               "hub": {
                 "description": "Where an arriving player is placed and the map labels the region — normally a town centre inside the polygon.",
-                "$ref": "#/$defs/__schema150"
+                "$ref": "#/$defs/__schema157"
               },
               "landmarks": {
                 "default": [],
                 "description": "Feature ids inside or bounding the region (towns, rivers, canyons, peaks, pois) — what its borders were drawn on.",
-                "$ref": "#/$defs/__schema151"
+                "$ref": "#/$defs/__schema158"
               },
               "level": {
                 "description": "Intended character level band [min, max]; the spawn tables and the story pitch to it.",
-                "$ref": "#/$defs/__schema152"
+                "$ref": "#/$defs/__schema159"
               },
               "cap": {
                 "description": "Players per server copy of this region before another copy opens. Omit = the cluster default.",
-                "$ref": "#/$defs/__schema153"
+                "$ref": "#/$defs/__schema160"
               },
               "within": {
                 "description": "Id of the region this one is CUT OUT of: wherever this polygon lies inside its parent, this region wins (regionAt prefers the nested zone). How a town is a zone of its own inside the wilderness around it — a simple polygon cannot hold a hole, so the cut-out is declared, not drawn. Never overlaps otherwise.",
-                "$ref": "#/$defs/__schema154"
+                "$ref": "#/$defs/__schema161"
               },
               "tags": {
                 "default": [],
                 "description": "\"town\" marks a town zone (hub = the town centre, landmarks[0] = its town id); \"safe\" makes the whole zone a sanctuary; \"draft\" = placeholder from worldgen zones.",
-                "$ref": "#/$defs/__schema155"
+                "$ref": "#/$defs/__schema162"
               }
             },
             "required": [
@@ -6778,73 +7015,19 @@
             ]
           }
         },
-        "__schema148": {
-          "type": "string"
-        },
-        "__schema149": {
-          "type": "array",
-          "prefixItems": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "number"
-            }
-          ]
-        },
-        "__schema150": {
-          "type": "array",
-          "prefixItems": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "number"
-            }
-          ]
-        },
-        "__schema151": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "__schema152": {
-          "type": "array",
-          "prefixItems": [
-            {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 9007199254740991
-            },
-            {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 9007199254740991
-            }
-          ]
-        },
-        "__schema153": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 9007199254740991
-        },
-        "__schema154": {
-          "type": "string"
-        },
         "__schema155": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
+          "type": "string"
         },
         "__schema156": {
-          "minItems": 2,
           "type": "array",
-          "items": {
-            "$ref": "#/$defs/__schema157"
-          },
-          "description": "World-space XZ control points; the feature is the polyline through them."
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ]
         },
         "__schema157": {
           "type": "array",
@@ -6858,56 +7041,110 @@
           ]
         },
         "__schema158": {
-          "type": "number",
-          "exclusiveMinimum": 0
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "__schema159": {
           "type": "array",
-          "items": {
-            "type": "number",
-            "exclusiveMinimum": 0
-          }
+          "prefixItems": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          ]
         },
         "__schema160": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "__schema161": {
+          "type": "string"
+        },
+        "__schema162": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "__schema163": {
+          "minItems": 2,
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/__schema164"
+          },
+          "description": "World-space XZ control points; the feature is the polyline through them."
+        },
+        "__schema164": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ]
+        },
+        "__schema165": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema161": {
+        "__schema166": {
           "type": "array",
           "items": {
             "type": "number",
             "exclusiveMinimum": 0
           }
         },
-        "__schema162": {
+        "__schema167": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "__schema168": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          }
+        },
+        "__schema169": {
           "type": "number",
           "minimum": 0
         },
-        "__schema163": {
+        "__schema170": {
           "type": "array",
           "items": {
             "type": "number"
           }
         },
-        "__schema164": {
+        "__schema171": {
           "type": "number",
           "minimum": 0
         },
-        "__schema165": {
+        "__schema172": {
           "type": "boolean"
         },
-        "__schema166": {
+        "__schema173": {
           "type": "string"
         },
-        "__schema167": {
+        "__schema174": {
           "type": "number",
           "minimum": 0
         },
-        "__schema168": {
+        "__schema175": {
           "type": "number",
           "minimum": 0
         },
-        "__schema169": {
+        "__schema176": {
           "type": "array",
           "items": {
             "type": "object",
@@ -6917,32 +7154,32 @@
                 "type": "string"
               },
               "points": {
-                "$ref": "#/$defs/__schema156"
+                "$ref": "#/$defs/__schema163"
               },
               "width": {
                 "default": 70,
                 "description": "Width of the flat floor.",
-                "$ref": "#/$defs/__schema170"
+                "$ref": "#/$defs/__schema177"
               },
               "depth": {
                 "default": 45,
                 "description": "How far below the surrounding land the floor sits.",
-                "$ref": "#/$defs/__schema171"
+                "$ref": "#/$defs/__schema178"
               },
               "rim": {
                 "default": 60,
                 "description": "Horizontal distance the walls take to climb back to natural terrain.",
-                "$ref": "#/$defs/__schema172"
+                "$ref": "#/$defs/__schema179"
               },
               "steps": {
                 "default": 3,
                 "description": "Terraces in each wall. 1 is a smooth ramp; 3-4 reads as bedded rock.",
-                "$ref": "#/$defs/__schema173"
+                "$ref": "#/$defs/__schema180"
               },
               "stepSharpness": {
                 "default": 0.72,
                 "description": "0 = the terraces vanish into a straight slope, 1 = vertical risers and flat treads.",
-                "$ref": "#/$defs/__schema174"
+                "$ref": "#/$defs/__schema181"
               },
               "floorY": {
                 "type": "array",
@@ -6956,29 +7193,29 @@
             ]
           }
         },
-        "__schema170": {
+        "__schema177": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema171": {
+        "__schema178": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema172": {
+        "__schema179": {
           "type": "number",
           "minimum": 0
         },
-        "__schema173": {
+        "__schema180": {
           "type": "integer",
           "minimum": 1,
           "maximum": 8
         },
-        "__schema174": {
+        "__schema181": {
           "type": "number",
           "minimum": 0,
           "maximum": 1
         },
-        "__schema175": {
+        "__schema182": {
           "type": "array",
           "items": {
             "type": "object",
@@ -6988,31 +7225,31 @@
                 "type": "string"
               },
               "points": {
-                "$ref": "#/$defs/__schema156"
+                "$ref": "#/$defs/__schema163"
               },
               "height": {
                 "default": 35,
                 "description": "Metres the crest stands ABOVE the natural terrain.",
-                "$ref": "#/$defs/__schema176"
+                "$ref": "#/$defs/__schema183"
               },
               "width": {
                 "default": 24,
                 "description": "Crest width — the flat top.",
-                "$ref": "#/$defs/__schema177"
+                "$ref": "#/$defs/__schema184"
               },
               "falloff": {
                 "default": 60,
                 "description": "Horizontal distance the flanks take to meet natural ground on either side of the crest.",
-                "$ref": "#/$defs/__schema178"
+                "$ref": "#/$defs/__schema185"
               },
               "heights": {
                 "description": "Per-point crest heights (one per point), overriding `height`. The barriers stage sets each so the crest sits `height` above the HIGHER flank measured `falloff` out — a 35 m ridge on a 30 m slope is a step, not a wall, unless it is measured that way.",
-                "$ref": "#/$defs/__schema179"
+                "$ref": "#/$defs/__schema186"
               },
               "tags": {
                 "default": [],
                 "description": "\"barrier\" plus \"zone:<id>\" for each zone it separates, when written by `worldgen barriers`.",
-                "$ref": "#/$defs/__schema180"
+                "$ref": "#/$defs/__schema187"
               }
             },
             "required": [
@@ -7020,64 +7257,64 @@
             ]
           }
         },
-        "__schema176": {
+        "__schema183": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema177": {
+        "__schema184": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema178": {
+        "__schema185": {
           "type": "number",
           "minimum": 0
         },
-        "__schema179": {
+        "__schema186": {
           "type": "array",
           "items": {
             "type": "number",
             "minimum": 0
           }
         },
-        "__schema180": {
+        "__schema187": {
           "type": "array",
           "items": {
             "type": "string"
           }
         },
-        "__schema181": {
+        "__schema188": {
           "type": "number",
           "minimum": 0
         },
-        "__schema182": {
+        "__schema189": {
           "type": "number",
           "minimum": 0
         },
-        "__schema183": {
+        "__schema190": {
           "type": "array",
           "items": {
             "type": "number"
           }
         },
-        "__schema184": {
+        "__schema191": {
           "type": "array",
           "items": {
             "type": "number"
           }
         },
-        "__schema185": {
+        "__schema192": {
           "type": "number",
           "minimum": 0,
           "maximum": 1
         },
-        "__schema186": {
+        "__schema193": {
           "type": "string"
         },
-        "__schema187": {
+        "__schema194": {
           "type": "number",
           "minimum": 0
         },
-        "__schema188": {
+        "__schema195": {
           "type": "object",
           "propertyNames": {
             "type": "string"
@@ -7086,11 +7323,14 @@
             "type": "string"
           }
         },
-        "__schema189": {
+        "__schema196": {
+          "type": "boolean"
+        },
+        "__schema197": {
           "type": "number",
           "minimum": 0
         },
-        "__schema190": {
+        "__schema198": {
           "type": "array",
           "items": {
             "type": "object",
@@ -7112,7 +7352,7 @@
               },
               "polygon": {
                 "description": "World-space XZ outline of the shore. Omit for a disc of `radius` about `center`.",
-                "$ref": "#/$defs/__schema191"
+                "$ref": "#/$defs/__schema199"
               },
               "radius": {
                 "default": 60,
@@ -7126,31 +7366,31 @@
               "depth": {
                 "default": 6,
                 "description": "How far below the surface the deepest water is.",
-                "$ref": "#/$defs/__schema193"
+                "$ref": "#/$defs/__schema201"
               },
               "bank": {
                 "default": 18,
                 "description": "Distance over which the shore eases from the waterline back to natural terrain, and the bed from the shore down to `depth`.",
-                "$ref": "#/$defs/__schema194"
+                "$ref": "#/$defs/__schema202"
               },
               "carve": {
                 "default": true,
                 "description": "true (hand-placed lakes): dig the basin — everything inside the outline goes down to `depth`, and a `bank` outside it eases to the waterline, whatever the ground was. false (`worldgen rivers` writes this): the terrain already holds the basin the hydrology found, so only ground at or under the surface is deepened, blended over two banks, and ground standing over a metre above it — an island, or an outline that overshot onto a hillside — is left alone. Carving a traced outline dug craters with vertical walls where it strayed uphill.",
-                "$ref": "#/$defs/__schema195"
+                "$ref": "#/$defs/__schema203"
               },
               "material": {
                 "description": "Water material for THIS lake, overriding the recipe's `waterMaterial`. A swamp pool is still, murky and opaque; a tarn is clear — one water for both reads wrong in both.",
-                "$ref": "#/$defs/__schema196"
+                "$ref": "#/$defs/__schema204"
               },
               "surface": {
                 "default": "",
                 "description": "Palette surface NAME painted on the bed and a `shore` band around the outline — wet sand, gravel — so the ground under and beside the water is not the biome's grass. Empty leaves the biome's cover; an unknown name paints nothing.",
-                "$ref": "#/$defs/__schema197"
+                "$ref": "#/$defs/__schema205"
               },
               "shore": {
                 "default": 8,
                 "description": "Metres beyond the outline the `surface` fades out over.",
-                "$ref": "#/$defs/__schema198"
+                "$ref": "#/$defs/__schema206"
               },
               "tags": {
                 "default": [],
@@ -7166,14 +7406,14 @@
             ]
           }
         },
-        "__schema191": {
+        "__schema199": {
           "minItems": 3,
           "type": "array",
           "items": {
-            "$ref": "#/$defs/__schema192"
+            "$ref": "#/$defs/__schema200"
           }
         },
-        "__schema192": {
+        "__schema200": {
           "type": "array",
           "prefixItems": [
             {
@@ -7184,28 +7424,28 @@
             }
           ]
         },
-        "__schema193": {
+        "__schema201": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema194": {
+        "__schema202": {
           "type": "number",
           "minimum": 0
         },
-        "__schema195": {
+        "__schema203": {
           "type": "boolean"
         },
-        "__schema196": {
+        "__schema204": {
           "type": "string"
         },
-        "__schema197": {
+        "__schema205": {
           "type": "string"
         },
-        "__schema198": {
+        "__schema206": {
           "type": "number",
           "minimum": 0
         },
-        "__schema199": {
+        "__schema207": {
           "type": "array",
           "items": {
             "type": "object",
@@ -7218,10 +7458,10 @@
                 "type": "array",
                 "prefixItems": [
                   {
-                    "$ref": "#/$defs/__schema200"
+                    "$ref": "#/$defs/__schema208"
                   },
                   {
-                    "$ref": "#/$defs/__schema201"
+                    "$ref": "#/$defs/__schema209"
                   }
                 ],
                 "description": "World-space XZ of the two abutments: where the road stops on one bank and resumes on the other."
@@ -7229,7 +7469,7 @@
               "width": {
                 "default": 6,
                 "description": "Deck width — the road's.",
-                "$ref": "#/$defs/__schema202"
+                "$ref": "#/$defs/__schema210"
               },
               "deckY": {
                 "type": "number",
@@ -7238,20 +7478,20 @@
               "thickness": {
                 "default": 0.6,
                 "description": "Deck slab thickness, hanging below `deckY`.",
-                "$ref": "#/$defs/__schema203"
+                "$ref": "#/$defs/__schema211"
               },
               "river": {
                 "default": "",
                 "description": "Id of the river crossed.",
-                "$ref": "#/$defs/__schema204"
+                "$ref": "#/$defs/__schema212"
               },
               "waterY": {
                 "description": "Water surface under the span, for the WFC stage to size piers.",
-                "$ref": "#/$defs/__schema205"
+                "$ref": "#/$defs/__schema213"
               },
               "material": {
                 "description": "Material for the deck, overriding the recipe's `bridgeMaterial`.",
-                "$ref": "#/$defs/__schema206"
+                "$ref": "#/$defs/__schema214"
               },
               "tags": {
                 "default": [],
@@ -7267,7 +7507,7 @@
             ]
           }
         },
-        "__schema200": {
+        "__schema208": {
           "type": "array",
           "prefixItems": [
             {
@@ -7278,7 +7518,7 @@
             }
           ]
         },
-        "__schema201": {
+        "__schema209": {
           "type": "array",
           "prefixItems": [
             {
@@ -7289,24 +7529,24 @@
             }
           ]
         },
-        "__schema202": {
+        "__schema210": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema203": {
+        "__schema211": {
           "type": "number",
           "minimum": 0
         },
-        "__schema204": {
+        "__schema212": {
           "type": "string"
         },
-        "__schema205": {
+        "__schema213": {
           "type": "number"
         },
-        "__schema206": {
+        "__schema214": {
           "type": "string"
         },
-        "__schema207": {
+        "__schema215": {
           "type": "array",
           "items": {
             "type": "object",
@@ -7319,7 +7559,7 @@
                 "minItems": 3,
                 "type": "array",
                 "items": {
-                  "$ref": "#/$defs/__schema208"
+                  "$ref": "#/$defs/__schema216"
                 },
                 "description": "World-space XZ outline of the hollow."
               },
@@ -7330,7 +7570,7 @@
               "bank": {
                 "default": 12,
                 "description": "Distance beyond the outline over which the raise eases out.",
-                "$ref": "#/$defs/__schema209"
+                "$ref": "#/$defs/__schema217"
               },
               "tags": {
                 "default": [],
@@ -7346,7 +7586,7 @@
             ]
           }
         },
-        "__schema208": {
+        "__schema216": {
           "type": "array",
           "prefixItems": [
             {
@@ -7357,11 +7597,11 @@
             }
           ]
         },
-        "__schema209": {
+        "__schema217": {
           "type": "number",
           "minimum": 0
         },
-        "__schema210": {
+        "__schema218": {
           "type": "array",
           "items": {
             "type": "object",
@@ -7372,16 +7612,16 @@
               },
               "points": {
                 "description": "World-space XZ, head first, mouth last.",
-                "$ref": "#/$defs/__schema156"
+                "$ref": "#/$defs/__schema163"
               },
               "width": {
                 "default": 14,
                 "description": "Channel width at the mouth; the head is narrower unless `widths` are given.",
-                "$ref": "#/$defs/__schema211"
+                "$ref": "#/$defs/__schema219"
               },
               "widths": {
                 "description": "Per-point width, same length as `points`.",
-                "$ref": "#/$defs/__schema212"
+                "$ref": "#/$defs/__schema220"
               },
               "tags": {
                 "default": [],
@@ -7396,18 +7636,18 @@
             ]
           }
         },
-        "__schema211": {
+        "__schema219": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema212": {
+        "__schema220": {
           "type": "array",
           "items": {
             "type": "number",
             "exclusiveMinimum": 0
           }
         },
-        "__schema213": {
+        "__schema221": {
           "type": "array",
           "items": {
             "type": "object",
@@ -7420,18 +7660,18 @@
                 "minItems": 2,
                 "type": "array",
                 "items": {
-                  "$ref": "#/$defs/__schema214"
+                  "$ref": "#/$defs/__schema222"
                 },
                 "description": "World-space path in 3D — unlike rivers and roads, a cave goes up and down as well as along."
               },
               "radius": {
                 "default": 3,
                 "description": "Passage radius. Keep it comfortably ABOVE the world's voxel size (cellSize / resolution): marching cubes cannot represent a hole much narrower than one voxel, so a thinner tunnel is silently sealed in the mesh and in the collider cooked from it, however open the field says it is.",
-                "$ref": "#/$defs/__schema215"
+                "$ref": "#/$defs/__schema223"
               },
               "endRadius": {
                 "description": "Radius at the last point; omit for a uniform tube. Lets a passage open out into a chamber.",
-                "$ref": "#/$defs/__schema216"
+                "$ref": "#/$defs/__schema224"
               }
             },
             "required": [
@@ -7439,7 +7679,7 @@
             ]
           }
         },
-        "__schema214": {
+        "__schema222": {
           "type": "array",
           "prefixItems": [
             {
@@ -7453,74 +7693,228 @@
             }
           ]
         },
-        "__schema215": {
+        "__schema223": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema216": {
+        "__schema224": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema217": {
+        "__schema225": {
           "type": "number",
           "minimum": 0
         },
-        "__schema218": {
+        "__schema226": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema219": {
+        "__schema227": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema220": {
+        "__schema228": {
           "type": "array",
           "items": {
             "type": "string"
           }
         },
-        "__schema221": {
+        "__schema229": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "default": "camp",
+                "type": "string"
+              },
+              "center": {
+                "type": "array",
+                "prefixItems": [
+                  {
+                    "$ref": "#/$defs/__schema230"
+                  },
+                  {
+                    "$ref": "#/$defs/__schema231"
+                  }
+                ],
+                "description": "World-space XZ. Ground height is sampled from the field, so no Y is stored — the camp follows the terrain when it changes."
+              },
+              "zone": {
+                "default": "",
+                "description": "Region id this camp sits in (recipe `regions`), or empty in an unzoned world. What a difficulty tier, a faction or a story hook keys on.",
+                "$ref": "#/$defs/__schema232"
+              },
+              "area": {
+                "type": "object",
+                "properties": {
+                  "radius": {
+                    "$ref": "#/$defs/__schema233"
+                  },
+                  "sleepRadius": {
+                    "$ref": "#/$defs/__schema235"
+                  },
+                  "idleSeconds": {
+                    "$ref": "#/$defs/__schema237"
+                  },
+                  "spawns": {
+                    "$ref": "#/$defs/__schema239"
+                  },
+                  "leash": {
+                    "$ref": "#/$defs/__schema241"
+                  },
+                  "roam": {
+                    "$ref": "#/$defs/__schema243"
+                  }
+                },
+                "description": "The spawnArea component emitted onto the scene entity, verbatim."
+              },
+              "tags": {
+                "default": [],
+                "description": "Free-form. `worldgen spawn` writes a distance tier (\"near\", \"far\") off the zone hub.",
+                "$ref": "#/$defs/__schema245"
+              }
+            },
+            "required": [
+              "center",
+              "area"
+            ]
+          }
+        },
+        "__schema230": {
+          "type": "number"
+        },
+        "__schema231": {
+          "type": "number"
+        },
+        "__schema232": {
+          "type": "string"
+        },
+        "__schema233": {
+          "default": 80,
+          "description": "Metres from the area's origin within which a player wakes it: the packs spawn the first time, resume afterwards.",
+          "$ref": "#/$defs/__schema234"
+        },
+        "__schema234": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "__schema235": {
+          "default": 120,
+          "description": "Once awake, the area sleeps only when no player is within this (hysteresis — keep it larger than radius).",
+          "$ref": "#/$defs/__schema236"
+        },
+        "__schema236": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "__schema237": {
+          "default": 10,
+          "description": "Seconds with no player inside sleepRadius before the pack is paused in place. It does not despawn: a returning player finds it where it was.",
+          "$ref": "#/$defs/__schema238"
+        },
+        "__schema238": {
+          "type": "number",
+          "minimum": 0
+        },
+        "__schema239": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "template": {
+                "type": "string",
+                "minLength": 1,
+                "description": "NPC template: the id of an npc-tagged scene subtree, or a name registered on the server at runtime."
+              },
+              "count": {
+                "default": 1,
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "spread": {
+                "default": 6,
+                "description": "Metres around the origin the pack is scattered in (uniform disc).",
+                "$ref": "#/$defs/__schema240"
+              }
+            },
+            "required": [
+              "template"
+            ]
+          }
+        },
+        "__schema240": {
+          "type": "number",
+          "minimum": 0
+        },
+        "__schema241": {
+          "default": 25,
+          "description": "Metres from home an enemy may chase before it must turn back. Handed to each NPC's root script as the `leash` param (with `home`, `roam`, `spawnArea`); the server also fences at 1.5× as a backstop.",
+          "$ref": "#/$defs/__schema242"
+        },
+        "__schema242": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "__schema243": {
+          "default": 10,
+          "description": "Idle wander radius around home, passed as the `roam` param.",
+          "$ref": "#/$defs/__schema244"
+        },
+        "__schema244": {
+          "type": "number",
+          "minimum": 0
+        },
+        "__schema245": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "__schema246": {
           "type": "object",
           "properties": {
             "above": {
               "default": 14,
               "description": "World units of air polygonized above the highest ground in a cell — headroom for overhangs and arches.",
-              "$ref": "#/$defs/__schema222"
+              "$ref": "#/$defs/__schema247"
             },
             "below": {
               "default": 28,
               "description": "World units of rock polygonized below the lowest ground in a cell. This is what makes surface caves enterable, and it is THE vertical cost knob: it multiplies both the sampled volume AND the cave surface the mesher has to triangulate, so it hits twice. Deeper cave networks want vertical chunk sections, not a bigger band here.",
-              "$ref": "#/$defs/__schema223"
+              "$ref": "#/$defs/__schema248"
             }
           }
         },
-        "__schema222": {
+        "__schema247": {
           "type": "number",
           "minimum": 0
         },
-        "__schema223": {
+        "__schema248": {
           "type": "number",
           "minimum": 0
         },
-        "__schema224": {
+        "__schema249": {
           "type": "string",
           "enum": [
             "linear",
             "nearest"
           ]
         },
-        "__schema225": {
+        "__schema250": {
           "type": "object",
           "properties": {
             "scale": {
               "default": 90,
               "description": "World units per cycle of the broad band.",
-              "$ref": "#/$defs/__schema226"
+              "$ref": "#/$defs/__schema251"
             },
             "strength": {
               "default": 0.22,
               "description": "Brightness swing, plus and minus. 0 disables the whole overlay.",
-              "$ref": "#/$defs/__schema227"
+              "$ref": "#/$defs/__schema252"
             },
             "octaves": {
               "default": 3,
@@ -7530,7 +7924,7 @@
             },
             "detailScale": {
               "description": "Second band, near tile size (10-20). This is the one that hides the grid up close.",
-              "$ref": "#/$defs/__schema228"
+              "$ref": "#/$defs/__schema253"
             },
             "detailStrength": {
               "default": 0.1,
@@ -7547,11 +7941,11 @@
             "colorStrength": {
               "default": 0,
               "description": "How far the overlay shifts COLOUR, per channel, on top of the brightness swing. Brightness alone makes a large area read as one material under uneven light; letting the channels drift apart slightly — warmer here, greyer there — is what reads as the ground actually being different from place to place. 0.06-0.15 is a natural mottle; past ~0.25 the terrain goes tie-dye.",
-              "$ref": "#/$defs/__schema229"
+              "$ref": "#/$defs/__schema254"
             },
             "colorScale": {
               "description": "World units per cycle of the colour band. Defaults to `scale`. Set it larger for broad regional colour shifts that survive being seen from a distance.",
-              "$ref": "#/$defs/__schema230"
+              "$ref": "#/$defs/__schema255"
             },
             "colorOctaves": {
               "default": 3,
@@ -7562,53 +7956,448 @@
             "warp": {
               "default": 0,
               "description": "How far the texture PROJECTION is pushed around by noise before it is sampled, as a fraction of each layer's OWN tile, so one setting means the same thing to a 3.5m grass tile and a 9m cliff tile. This is the one that actually kills tiling: brightness noise can only shade OVER a grid, and the grid is still underneath it — on a big flat-lit face seen from a distance the eye finds it anyway. Warping the projection means neighbouring tiles no longer line up, so there is no grid left to find. 0.25-0.5 is usually enough; past about 0.6 the texture visibly smears.",
-              "$ref": "#/$defs/__schema231"
+              "$ref": "#/$defs/__schema256"
             },
             "warpScale": {
               "default": 18,
               "description": "World units per cycle of the warp. Measured: keep it near TWICE the tile size, not far above it. A warp much coarser than the tile slides whole tiles around and leaves the motif inside each one perfectly intact, so a strongly patterned texture still reads as a pattern; a warp at roughly tile scale distorts the motif itself, which is what stops a big rock face looking stamped.",
-              "$ref": "#/$defs/__schema232"
+              "$ref": "#/$defs/__schema257"
             }
           }
         },
-        "__schema226": {
+        "__schema251": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema227": {
+        "__schema252": {
           "type": "number",
           "minimum": 0,
           "maximum": 1
         },
-        "__schema228": {
+        "__schema253": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema229": {
+        "__schema254": {
           "type": "number",
           "minimum": 0,
           "maximum": 1
         },
-        "__schema230": {
+        "__schema255": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema231": {
+        "__schema256": {
           "type": "number",
           "minimum": 0
         },
-        "__schema232": {
+        "__schema257": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema233": {
+        "__schema258": {
           "type": "string"
         },
-        "__schema234": {
+        "__schema259": {
           "type": "string"
         },
-        "__schema235": {
+        "__schema260": {
           "type": "string"
+        }
+      }
+    },
+    "csg-volume": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "name": {
+          "default": "volume",
+          "type": "string"
+        },
+        "voxelSize": {
+          "default": 0.25,
+          "description": "Metres between lattice samples. A dungeon wants 0.2-0.3: fine enough that a 0.4 m step reads as a step, coarse enough to mesh in a second.",
+          "$ref": "#/$defs/__schema0"
+        },
+        "bounds": {
+          "description": "World-space extent to mesh. Omit and it is derived from the nodes, which is what you want unless a node is deliberately unbounded.",
+          "$ref": "#/$defs/__schema1"
+        },
+        "palette": {
+          "default": [
+            "stone"
+          ],
+          "description": "Surface names, index-for-index with the `terrain-splat` material's splat layers. Names are for humans; the indices are what the mesh carries.",
+          "$ref": "#/$defs/__schema3"
+        },
+        "surface": {
+          "description": "Default palette triple, used by any node that declares none.",
+          "default": {},
+          "$ref": "#/$defs/__schema5"
+        },
+        "nodes": {
+          "default": [],
+          "description": "Applied IN ORDER over empty space. Later nodes win.",
+          "$ref": "#/$defs/__schema9"
+        },
+        "paint": {
+          "default": [],
+          "description": "Persistent ordered texture strokes, evaluated after the CSG surface palette.",
+          "$ref": "#/$defs/__schema16"
+        }
+      },
+      "$defs": {
+        "__schema0": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "__schema1": {
+          "type": "object",
+          "properties": {
+            "min": {
+              "$ref": "#/$defs/__schema2"
+            },
+            "max": {
+              "$ref": "#/$defs/__schema2"
+            }
+          },
+          "required": [
+            "min",
+            "max"
+          ]
+        },
+        "__schema2": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ]
+        },
+        "__schema3": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/__schema4"
+          }
+        },
+        "__schema4": {
+          "type": "string"
+        },
+        "__schema5": {
+          "type": "object",
+          "properties": {
+            "floor": {
+              "default": 0,
+              "description": "Palette index for upward-facing surfaces.",
+              "$ref": "#/$defs/__schema6"
+            },
+            "wall": {
+              "default": 0,
+              "description": "Palette index for vertical surfaces.",
+              "$ref": "#/$defs/__schema7"
+            },
+            "ceiling": {
+              "default": 0,
+              "description": "Palette index for downward-facing surfaces.",
+              "$ref": "#/$defs/__schema8"
+            }
+          }
+        },
+        "__schema6": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "__schema7": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "__schema8": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "__schema9": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "default": "node",
+                "type": "string"
+              },
+              "op": {
+                "default": "add",
+                "description": "`add` unions this shape into the solid, `sub` carves it out as air, `intersect` clips the solid to it.",
+                "$ref": "#/$defs/__schema10"
+              },
+              "shape": {
+                "default": "box",
+                "type": "string",
+                "enum": [
+                  "box",
+                  "sphere",
+                  "ellipsoid",
+                  "cylinder",
+                  "capsule",
+                  "cone",
+                  "torus",
+                  "wedge",
+                  "prism"
+                ]
+              },
+              "polygon": {
+                "default": [
+                  [
+                    -0.5,
+                    -0.5
+                  ],
+                  [
+                    0.5,
+                    -0.5
+                  ],
+                  [
+                    0.5,
+                    0.5
+                  ],
+                  [
+                    -0.5,
+                    0.5
+                  ]
+                ],
+                "description": "Prism footprint in local X/Z metres, extruded by height along Y. Simple non-self-intersecting boundary, either winding; concave outlines allowed. Do not repeat the closing vertex.",
+                "$ref": "#/$defs/__schema11"
+              },
+              "position": {
+                "default": [
+                  0,
+                  0,
+                  0
+                ],
+                "$ref": "#/$defs/__schema2"
+              },
+              "rotation": {
+                "default": [
+                  0,
+                  0,
+                  0
+                ],
+                "$ref": "#/$defs/__schema2"
+              },
+              "size": {
+                "default": [
+                  1,
+                  1,
+                  1
+                ],
+                "$ref": "#/$defs/__schema2"
+              },
+              "radius": {
+                "default": 1,
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "height": {
+                "default": 1,
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "round": {
+                "default": 0,
+                "description": "Radius of a rounded edge on this primitive. 0 keeps the corner sharp, which is the whole reason to mesh a volume with dual contouring.",
+                "$ref": "#/$defs/__schema13"
+              },
+              "blend": {
+                "default": 0,
+                "description": "Smooth-min radius against everything before it. 0 is a hard boolean; raise it where cut rock should melt into a natural cave.",
+                "$ref": "#/$defs/__schema14"
+              },
+              "surface": {
+                "description": "Palette indices this node paints. Omit to inherit the document default.",
+                "$ref": "#/$defs/__schema5"
+              },
+              "noise": {
+                "description": "Bounded two-frequency displacement of this primitive in local metres. Use on cave cuts; leave masonry cuts unperturbed. Disables distance-based block rejection.",
+                "$ref": "#/$defs/__schema15"
+              }
+            }
+          }
+        },
+        "__schema10": {
+          "type": "string",
+          "enum": [
+            "add",
+            "sub",
+            "intersect"
+          ]
+        },
+        "__schema11": {
+          "minItems": 3,
+          "maxItems": 128,
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/__schema12"
+          }
+        },
+        "__schema12": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ]
+        },
+        "__schema13": {
+          "type": "number",
+          "minimum": 0
+        },
+        "__schema14": {
+          "type": "number",
+          "minimum": 0
+        },
+        "__schema15": {
+          "type": "object",
+          "properties": {
+            "amount": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 4
+            },
+            "scale": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "seed": {
+              "default": 1,
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "amount",
+            "scale"
+          ]
+        },
+        "__schema16": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/__schema17"
+              },
+              "center": {
+                "$ref": "#/$defs/__schema18"
+              },
+              "radius": {
+                "$ref": "#/$defs/__schema19"
+              },
+              "strength": {
+                "$ref": "#/$defs/__schema20"
+              },
+              "layer": {
+                "$ref": "#/$defs/__schema21"
+              },
+              "normal": {
+                "$ref": "#/$defs/__schema22"
+              },
+              "maxAngle": {
+                "$ref": "#/$defs/__schema24"
+              },
+              "fill": {
+                "$ref": "#/$defs/__schema26"
+              }
+            },
+            "required": [
+              "id",
+              "center",
+              "radius",
+              "strength",
+              "layer"
+            ],
+            "description": "Spherical texture stroke in volume-local metres. Smooth falloff; later strokes blend over earlier ones without changing density or collision."
+          }
+        },
+        "__schema17": {
+          "type": "string",
+          "minLength": 1
+        },
+        "__schema18": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ]
+        },
+        "__schema19": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 100
+        },
+        "__schema20": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "__schema21": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "__schema22": {
+          "description": "Optional local-space facing direction for an angle-limited area fill.",
+          "$ref": "#/$defs/__schema23"
+        },
+        "__schema23": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ]
+        },
+        "__schema24": {
+          "default": 180,
+          "description": "Maximum angle in degrees from the chosen normal. 180 paints all facing directions.",
+          "$ref": "#/$defs/__schema25"
+        },
+        "__schema25": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 180
+        },
+        "__schema26": {
+          "default": false,
+          "description": "Uniform coverage inside radius instead of brush falloff. This is a bounded facing-angle fill, not a connected-component flood fill.",
+          "$ref": "#/$defs/__schema27"
+        },
+        "__schema27": {
+          "type": "boolean"
         }
       }
     },
@@ -8964,13 +9753,18 @@
                   },
                   "strength": {
                     "default": 0.15,
-                    "description": "Metres of camera displacement at full strength.",
+                    "description": "Metres of camera displacement felt by a camera at the effect.",
                     "$ref": "#/$defs/__schema136"
                   },
                   "frequency": {
                     "default": 18,
                     "type": "number",
                     "exclusiveMinimum": 0
+                  },
+                  "range": {
+                    "default": 30,
+                    "description": "Metres over which the shake fades out. A camera at the effect feels the full `strength`, one at `range` or further feels nothing (quadratic falloff between). 0 disables the falloff — every camera in the world shakes, which is almost never what you want.",
+                    "$ref": "#/$defs/__schema137"
                   }
                 },
                 "required": [
@@ -10076,6 +10870,10 @@
           "type": "number"
         },
         "__schema136": {
+          "type": "number",
+          "minimum": 0
+        },
+        "__schema137": {
           "type": "number",
           "minimum": 0
         }
@@ -11713,13 +12511,18 @@
                       },
                       "strength": {
                         "default": 0.15,
-                        "description": "Metres of camera displacement at full strength.",
+                        "description": "Metres of camera displacement felt by a camera at the effect.",
                         "$ref": "#/$defs/__schema154"
                       },
                       "frequency": {
                         "default": 18,
                         "type": "number",
                         "exclusiveMinimum": 0
+                      },
+                      "range": {
+                        "default": 30,
+                        "description": "Metres over which the shake fades out. A camera at the effect feels the full `strength`, one at `range` or further feels nothing (quadratic falloff between). 0 disables the falloff — every camera in the world shakes, which is almost never what you want.",
+                        "$ref": "#/$defs/__schema155"
                       }
                     },
                     "required": [
@@ -12823,6 +13626,10 @@
         "__schema154": {
           "type": "number",
           "minimum": 0
+        },
+        "__schema155": {
+          "type": "number",
+          "minimum": 0
         }
       }
     },
@@ -13691,8 +14498,8 @@
     "hitreg.armor-atlas": {
       "version": 1,
       "id": "hitreg.armor-atlas",
-      "name": "Armor Atlas",
-      "description": "Register generated armor artwork against the character UV key, preserve cyan cutouts, and write a game-ready texture atlas.",
+      "name": "Armor / Weapon Atlas",
+      "description": "Register generated artwork against a UV key and write a game-ready atlas. Character armor uses a 256px sheet; longsword weapons use a 128px sheet with weapon-sized bleed by default.",
       "category": "Assets/Generate",
       "surfaces": [
         "assets",
@@ -13722,6 +14529,23 @@
           ],
           "maxBytes": 16777216
         },
+        "sheet": {
+          "label": "Sheet",
+          "description": "Which key this art was painted over. Character armor defaults to 256px output; longsword defaults to 128px output. Each sheet has its own slot table.",
+          "required": true,
+          "kind": "select",
+          "options": [
+            {
+              "value": "armor",
+              "label": "character armor"
+            },
+            {
+              "value": "longsword",
+              "label": "longsword"
+            }
+          ],
+          "default": "armor"
+        },
         "name": {
           "label": "Output name",
           "description": "Texture id below assets/textures; folders are allowed. The .png suffix is added automatically.",
@@ -13734,7 +14558,7 @@
         },
         "size": {
           "label": "Atlas size",
-          "description": "Square output size in pixels.",
+          "description": "Square output size in pixels. Presets are character armor 256px and longsword 128px; set this only when intentionally overriding the sheet preset.",
           "required": true,
           "kind": "number",
           "default": 256,
@@ -13745,7 +14569,7 @@
         },
         "bleed": {
           "label": "Bleed",
-          "description": "Padding texels dilated around UV islands.",
+          "description": "Padding texels dilated around UV islands. Presets are armor 8px and longsword 3px, keeping the same relative gutter after downsampling.",
           "required": true,
           "kind": "number",
           "default": 8,
@@ -13847,6 +14671,14 @@
               "name",
               "mediaType",
               "data"
+            ]
+          },
+          "sheet": {
+            "default": "armor",
+            "type": "string",
+            "enum": [
+              "armor",
+              "longsword"
             ]
           },
           "name": {

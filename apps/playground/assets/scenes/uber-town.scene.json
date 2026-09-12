@@ -1,0 +1,1058 @@
+{
+  "version": 1,
+  "name": "uber-town",
+  "entities": {
+    "sky": {
+      "name": "Sky",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "sky": {
+          "top": "#232a33",
+          "bottom": "#4a5360",
+          "light": 0.9
+        }
+      }
+    },
+    "sun": {
+      "name": "Sun",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            4,
+            8,
+            5
+          ]
+        },
+        "light": {
+          "kind": "directional",
+          "intensity": 2.1
+        }
+      }
+    },
+    "fill": {
+      "name": "Fill",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "light": {
+          "kind": "ambient",
+          "intensity": 0.8,
+          "color": "#9fb2c6"
+        }
+      }
+    },
+    "camera": {
+      "name": "Camera",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            1.6,
+            7
+          ]
+        },
+        "camera": {
+          "active": true,
+          "fov": 50,
+          "near": 0.01,
+          "far": 300
+        }
+      }
+    },
+    "w0": {
+      "name": "cinder-wraith 0",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -3.8249999999999997,
+            0,
+            0
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.013889,
+              0.018519,
+              0.222222
+            ],
+            "partMask": 102675
+          },
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "w1": {
+      "name": "elemental-longsword 1",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -2.975,
+            0,
+            0
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.263889,
+              0.018519,
+              0.222222
+            ],
+            "partMask": 18469
+          },
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "w2": {
+      "name": "frost-reliquary 2",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -2.125,
+            0,
+            0
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.513889,
+              0.018519,
+              0.222222
+            ],
+            "partMask": 9289
+          },
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "w3": {
+      "name": "gravebloom-longsword 3",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -1.275,
+            0,
+            0
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.763889,
+              0.018519,
+              0.222222
+            ],
+            "partMask": 103043
+          },
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "w4": {
+      "name": "moonlit-executioner 4",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.425,
+            0,
+            0
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.263889,
+              0.351852,
+              0.222222
+            ],
+            "partMask": 16661
+          },
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "w5": {
+      "name": "skullknight-longsword 5",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.425,
+            0,
+            0
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.513889,
+              0.351852,
+              0.222222
+            ],
+            "partMask": 10281
+          },
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "w6": {
+      "name": "stormglass-duelist 6",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            1.275,
+            0,
+            0
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.763889,
+              0.351852,
+              0.222222
+            ],
+            "partMask": 103491
+          },
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "w7": {
+      "name": "sunforged-falchion 7",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            2.125,
+            0,
+            0
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.013889,
+              0.685185,
+              0.222222
+            ],
+            "partMask": 17029
+          },
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "w8": {
+      "name": "verdigris-fang 8",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            2.975,
+            0,
+            0
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.263889,
+              0.685185,
+              0.222222
+            ],
+            "partMask": 8473
+          },
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "w9": {
+      "name": "cinder-wraith 9",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            3.8249999999999997,
+            0,
+            0
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.013889,
+              0.018519,
+              0.222222
+            ],
+            "partMask": 104483
+          },
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "w10": {
+      "name": "elemental-longsword 10",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -3.8249999999999997,
+            0,
+            1.1
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.263889,
+              0.018519,
+              0.222222
+            ],
+            "partMask": 17477
+          },
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "w11": {
+      "name": "frost-reliquary 11",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -2.975,
+            0,
+            1.1
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.513889,
+              0.018519,
+              0.222222
+            ],
+            "partMask": 8841
+          },
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "w12": {
+      "name": "gravebloom-longsword 12",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -2.125,
+            0,
+            1.1
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.763889,
+              0.018519,
+              0.222222
+            ],
+            "partMask": 102675
+          },
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "w13": {
+      "name": "moonlit-executioner 13",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -1.275,
+            0,
+            1.1
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.263889,
+              0.351852,
+              0.222222
+            ],
+            "partMask": 18469
+          },
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "w14": {
+      "name": "skullknight-longsword 14",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.425,
+            0,
+            1.1
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.513889,
+              0.351852,
+              0.222222
+            ],
+            "partMask": 9289
+          },
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "w15": {
+      "name": "stormglass-duelist 15",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.425,
+            0,
+            1.1
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.763889,
+              0.351852,
+              0.222222
+            ],
+            "partMask": 103043
+          },
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "w16": {
+      "name": "sunforged-falchion 16",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            1.275,
+            0,
+            1.1
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.013889,
+              0.685185,
+              0.222222
+            ],
+            "partMask": 16661
+          },
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "w17": {
+      "name": "verdigris-fang 17",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            2.125,
+            0,
+            1.1
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.263889,
+              0.685185,
+              0.222222
+            ],
+            "partMask": 10281
+          },
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "w18": {
+      "name": "cinder-wraith 18",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            2.975,
+            0,
+            1.1
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.013889,
+              0.018519,
+              0.222222
+            ],
+            "partMask": 103491
+          },
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "w19": {
+      "name": "elemental-longsword 19",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            3.8249999999999997,
+            0,
+            1.1
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.263889,
+              0.018519,
+              0.222222
+            ],
+            "partMask": 17029
+          },
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "w20": {
+      "name": "frost-reliquary 20",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -3.8249999999999997,
+            0,
+            2.2
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.513889,
+              0.018519,
+              0.222222
+            ],
+            "partMask": 8473
+          },
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "w21": {
+      "name": "gravebloom-longsword 21",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -2.975,
+            0,
+            2.2
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.763889,
+              0.018519,
+              0.222222
+            ],
+            "partMask": 104483
+          },
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "w22": {
+      "name": "moonlit-executioner 22",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -2.125,
+            0,
+            2.2
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.263889,
+              0.351852,
+              0.222222
+            ],
+            "partMask": 17477
+          },
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "w23": {
+      "name": "skullknight-longsword 23",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -1.275,
+            0,
+            2.2
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.513889,
+              0.351852,
+              0.222222
+            ],
+            "partMask": 8841
+          },
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "w24": {
+      "name": "stormglass-duelist 24",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.425,
+            0,
+            2.2
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.763889,
+              0.351852,
+              0.222222
+            ],
+            "partMask": 102675
+          },
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "w25": {
+      "name": "sunforged-falchion 25",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.425,
+            0,
+            2.2
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.013889,
+              0.685185,
+              0.222222
+            ],
+            "partMask": 18469
+          },
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "w26": {
+      "name": "verdigris-fang 26",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            1.275,
+            0,
+            2.2
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.263889,
+              0.685185,
+              0.222222
+            ],
+            "partMask": 9289
+          },
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "w27": {
+      "name": "cinder-wraith 27",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            2.125,
+            0,
+            2.2
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.013889,
+              0.018519,
+              0.222222
+            ],
+            "partMask": 103043
+          },
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "w28": {
+      "name": "elemental-longsword 28",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            2.975,
+            0,
+            2.2
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.263889,
+              0.018519,
+              0.222222
+            ],
+            "partMask": 16661
+          },
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "w29": {
+      "name": "frost-reliquary 29",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            3.8249999999999997,
+            0,
+            2.2
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.513889,
+              0.018519,
+              0.222222
+            ],
+            "partMask": 10281
+          },
+          "renderMode": "instanced"
+        }
+      }
+    }
+  }
+}

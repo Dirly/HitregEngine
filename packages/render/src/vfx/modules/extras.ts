@@ -18,7 +18,7 @@ export class ShakeLive extends LiveModule<ShakeModule> {
 
   protected onBegin(): void {
     const m = this.module;
-    this.host.addShake(m.strength, m.duration > 0 ? m.duration : 0.35, m.frequency);
+    this.host.addShake(m.strength, m.duration > 0 ? m.duration : 0.35, m.frequency, this.pose.position, m.range);
   }
 
   protected onUpdate(): void {}

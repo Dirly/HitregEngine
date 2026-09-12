@@ -91,6 +91,35 @@ export function crossQuadGeometry(width: number, height: number, quads: number):
 }
 
 const MAX_BLADES = 65000;
+/**
+ * How much wider the disc is PLACED than the radius it is faded out over.
+ *
+ * The fade is measured from the CAMERA; the disc is placed around a snapped,
+ * hysteretic CENTRE. Those are not the same point, and the gap between them
+ * is most of a recenter cell — so the field's edge on the trailing side sits
+ * well INSIDE the fade band, and the grass simply stops, in a hard arc, at
+ * around 0.58 of the radius. Running forward, that arc is the horizon of
+ * grass a few metres ahead of you, jumping outward on every recenter. It is
+ * the single most obvious thing wrong with cover in motion, and no amount of
+ * budget or scheduling touches it, because the blades were never placed.
+ *
+ * So the disc is placed wider than it is drawn. `radius` keeps its authored
+ * meaning — the distance at which cover has faded out — and the sampler
+ * covers a ring beyond it, which is exactly the ring the camera moves into
+ * between recenters.
+ */
+const PLACEMENT_PAD = 1.3;
+/** Where the fade starts, as a fraction of wherever it ends. */
+const FADE_BAND = 0.7;
+
+/** Keep the fade inside existing coverage; reveal a completed patch gradually. */
+export function advanceGrassReach(current: number, target: number, elapsedMs: number): number {
+  if (target <= current) return target;
+  // Clamp elapsed time so a stalled/background frame cannot reveal a ring at once.
+  const blend = 1 - Math.exp(-Math.max(0, Math.min(50, elapsedMs)) / 300);
+  return current + (target - current) * blend;
+}
+
 // re-center only after the camera crosses this fraction of the patch radius,
 // so terrain resampling is a rare event, not a per-frame cost — the
 // "sliding window" that keeps grass around the camera without regenerating
@@ -125,7 +154,55 @@ const RECENTER_FRACTION = 0.6;
 const RECENTER_HYSTERESIS = 0.2;
 
 /**
- * How much re-placement work one frame may do, in "sample units".
+ * How far AHEAD of the camera a recentring field is placed, as a fraction of
+ * how far the centre is jumping.
+ *
+ * Everything above conspires to make the field TRAIL a moving player. A
+ * re-place walks the whole disc, and on a generated world the ground query
+ * behind it costs microseconds each, so a placement is tens of milliseconds
+ * of sampling spent two at a time; the centre is deliberately not
+ * reconsidered while one is in flight; and the recenter grid only fires once
+ * the camera is 0.7 of a cell past the last one. Run forward through all
+ * three and the disc is always being built for ground you have already left,
+ * so the far edge in FRONT of you is bare while a crescent of grass sits
+ * behind your back. That is the lag you see while running, and no amount of
+ * budget fixes it: the work simply finishes after the player arrives.
+ *
+ * Centring the disc where the camera is GOING cancels it, and no velocity has
+ * to be tracked to know which way that is: a recenter only fires once the
+ * camera is most of a cell past the old centre, so the direction the CENTRE
+ * jumps is the direction the camera has been travelling.
+ *
+ * The one thing this must not do is reintroduce the swimming the hysteresis
+ * above exists to prevent, so it is applied ONLY on a recenter that was
+ * already going to happen. A camera orbiting a standing player inside the
+ * deadband never reaches this at all; a wider orbit that does cross it gets
+ * the same two centres every lap, because the jump direction only ever has
+ * the two values the ping-pong produces.
+ */
+const LEAD_GAIN = 0.5;
+/**
+ * Hard cap on the lead, as a fraction of the radius.
+ *
+ * This is not a taste number, it is the stability bound. The centre is
+ * snapped to the recenter grid, so it already sits up to half a cell off the
+ * point asked for; add a lead of `L` and the camera can end up `L + cell/2`
+ * from its own field. Let that exceed the deadband (`cell * 0.7`) and the
+ * placement that just finished immediately qualifies for another one — the
+ * field ping-pongs forward and back for as long as you walk, re-sampling the
+ * whole disc each way. So `L <= 0.2 * cell`, and `cell` is
+ * `RECENTER_FRACTION` of the radius:
+ *
+ *   0.2 * 0.6 = 0.12
+ *
+ * On the 42 m field this project authors that is 5 m of lead, which buys most
+ * of a second at running speed — comfortably more than a placement now takes.
+ */
+const LEAD_MAX_FRACTION = 0.12;
+
+/**
+ * How much re-placement work one frame may do — a MILLISECOND budget, checked
+ * against the clock.
  *
  * A full re-place walks every grid cell of the disc and asks the host for the
  * ground under each one. On a generated world that question is a procedural
@@ -135,15 +212,27 @@ const RECENTER_HYSTERESIS = 0.2;
  * many frames as it needs and swapped in when it is COMPLETE — the field
  * already on screen stays up meanwhile, which is why the seam never shows.
  *
- * The two costs are an order of magnitude apart, so they are charged
- * separately: an uncached ground sample is ~2us, and merely visiting a cell
- * that is already cached (hash, radius test, matrix compose) is ~10x cheaper.
- * A budget of 1000 is therefore about 1000 cold samples OR 10000 warm cells
- * per frame — roughly 2ms either way.
+ * THIS USED TO BE A COUNT of "sample units" — 1000, calibrated as "1000 cold
+ * samples at ~2us each, so roughly 2ms". That currency is not stable across
+ * worlds, and it broke exactly where it mattered: on a voxel world a "ground
+ * sample" is `WorldField.height`, which evaluates continents, lobes, domain
+ * warp, noise bands, rivers, canyons and barriers — tens of microseconds, not
+ * two. The same 1000 units then bought 22ms of work per frame (measured: 22.3
+ * self, p95 35.8 while moving), and the budget that was supposed to prevent
+ * the spikes was CAUSING a 50ms frame the whole time the player walked.
+ *
+ * A clock is the only currency that holds when the sampler's cost is the
+ * host's business and not ours. The cell cursor already resumes exactly where
+ * it stopped, so spending less per frame only means more frames to finish —
+ * never a seam, never repeated work.
  */
-const PLACEMENT_BUDGET = 1000;
-const MISS_COST = 1;
-const CELL_COST = 0.1;
+const PLACEMENT_BUDGET_MS = 2;
+/**
+ * Cells between clock reads. `performance.now()` is not free, so checking it
+ * per cell would itself show up; 256 cells is well under a millisecond of
+ * overshoot even when every one of them is a cold sample.
+ */
+const CLOCK_EVERY = 64;
 
 /**
  * Cached ground samples, keyed by grid cell.
@@ -209,6 +298,10 @@ class GrassPatch {
   private readonly material: THREE.MeshStandardNodeMaterial;
   private readonly count: number;
   private readonly heightFadeUniform;
+  /** Fade band, in metres from the camera — see the constructor. */
+  private readonly fadeStartUniform;
+  private readonly fadeEndUniform;
+  private lastFadeTime: number | null = null;
   private readonly spacing: number;
   /**
    * Per-instance (wind phase, tint) — an ATTRIBUTE, not `hash(instanceIndex)`.
@@ -257,6 +350,8 @@ class GrassPatch {
   private readonly tmpQuat = new THREE.Quaternion();
   private readonly tmpScale = new THREE.Vector3();
   private readonly tmpCamPos = new THREE.Vector3();
+  /** The disc actually SAMPLED — the authored radius padded, see PLACEMENT_PAD. */
+  private readonly placeRadius: number;
   private readonly Y_AXIS = new THREE.Vector3(0, 1, 0);
 
   constructor(
@@ -267,9 +362,10 @@ class GrassPatch {
     // 15% headroom: the jittered grid lands a variable number of points
     // inside the disc, and a buffer sized to the exact mean clips the field's
     // far edge on the rounds that come out heavy
+    this.placeRadius = data.radius * PLACEMENT_PAD;
     this.count = Math.min(
       MAX_BLADES,
-      Math.max(1, Math.ceil(Math.PI * data.radius * data.radius * data.density * 1.15)),
+      Math.max(1, Math.ceil(Math.PI * this.placeRadius * this.placeRadius * data.density * 1.15)),
     );
     this.spacing = 1 / Math.sqrt(Math.max(1e-4, data.density));
     // ~2.5 discs' worth of cells: enough that the disc before last is still
@@ -325,7 +421,10 @@ class GrassPatch {
     // which would blow the [0,1] fraction up to the blade's actual world
     // height and send both the wind sway and the color mix wildly out of range.
     this.instanceRandom = new THREE.InstancedBufferAttribute(new Float32Array(this.count * 2), 2);
-    this.instanceRandom.setUsage(THREE.DynamicDrawUsage);
+    // In Three's common renderer DynamicDrawUsage forces an upload on every
+    // use, even without a version change (including repeated shadow passes).
+    // Placement commits already mark these buffers dirty explicitly.
+    this.instanceRandom.name = "grass-random";
     geometry.setAttribute("instanceRandom", this.instanceRandom);
     const perInstance: N = attribute("instanceRandom", "vec2");
     const bend = positionGeometry.y.div(float(Math.max(0.001, data.bladeHeight)));
@@ -348,11 +447,19 @@ class GrassPatch {
     const tint = add(float(0.85), mul(perInstance.y, float(0.3)));
 
     this.heightFadeUniform = uniform(1, "float");
+    // The fade band is a UNIFORM, not a constant, because the disc's coverage
+    // from the camera is not fixed: the centre is snapped and hysteretic, so
+    // the camera sits anywhere within the deadband of it, and PLACEMENT_PAD
+    // buys headroom rather than a guarantee. Recomputing the band each frame
+    // from the coverage that actually exists means cover ALWAYS reaches zero
+    // opacity before it runs out of blades — the hard arc cannot come back,
+    // whatever the pad, the recenter fraction and the lead add up to. When
+    // there is headroom to spare the band sits at the authored radius and
+    // this costs nothing.
+    this.fadeStartUniform = uniform(data.radius * FADE_BAND, "float");
+    this.fadeEndUniform = uniform(data.radius, "float");
     const camDist = length(sub(cameraPosition, positionWorld));
-    const edgeFade = sub(
-      float(1),
-      smoothstep(float(data.radius * 0.7), float(data.radius), camDist),
-    );
+    const edgeFade = sub(float(1), smoothstep(float(this.fadeStartUniform), float(this.fadeEndUniform), camDist));
     const fade = mul(edgeFade, float(this.heightFadeUniform));
 
     if (textured) {
@@ -378,7 +485,7 @@ class GrassPatch {
     this.mesh.count = 0; // populated on the first recenter, once ground heights are known
     this.mesh.frustumCulled = false;
     this.mesh.matrixAutoUpdate = false; // world-space instances; see class doc
-    this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.mesh.instanceMatrix.name = "grass-matrices";
     this.mesh.receiveShadow = true;
     this.mesh.raycast = () => {}; // blades are never click-selectable
     group.add(this.mesh);
@@ -389,7 +496,7 @@ class GrassPatch {
    * changes until `stepPlacement` finishes the walk and commits.
    */
   private beginPlacement(centerX: number, centerZ: number): void {
-    const radius = this.data.radius;
+    const radius = this.placeRadius;
     const spacing = this.spacing;
     const gx0 = Math.floor((centerX - radius) / spacing);
     const gx1 = Math.ceil((centerX + radius) / spacing);
@@ -431,14 +538,21 @@ class GrassPatch {
    * null both for unloaded ground AND for ground that isn't the terrain's
    * grassy band — either way, no blade there.
    */
-  private stepPlacement(sampleGrassy: FoliageSampler, budget: number): number {
+  private stepPlacement(sampleGrassy: FoliageSampler, budgetMs: number): number {
     const p = this.pending;
     if (!p) return 0;
+    // A patch with nothing left of the shared frame budget does NOTHING, rather
+    // than one more batch of cells: otherwise every extra cover layer adds its
+    // own CLOCK_EVERY floor and a scene with grass and ferns costs double what
+    // one layer was tuned for.
+    if (budgetMs <= 0) return 0;
+    const started = performance.now();
+    let sinceClock = 0;
+    let elapsed = 0;
     const spacing = this.spacing;
-    const radiusSq = this.data.radius * this.data.radius;
+    const radiusSq = this.placeRadius * this.placeRadius;
     const matrices = this.scratchMatrix!;
     const random = this.scratchRandom!;
-    let spent = 0;
     while (p.n < p.rows && p.visible < this.count) {
       if (!p.rowActive) {
         const gz = p.gzMid + (p.n % 2 === 0 ? p.n / 2 : -((p.n + 1) / 2));
@@ -454,9 +568,12 @@ class GrassPatch {
       while (p.gx <= p.gx1 && p.visible < this.count) {
         // checked BEFORE the cell is consumed, so the cursor always points at
         // work not yet done and resuming next frame repeats nothing
-        if (spent >= budget) return spent;
+        if (++sinceClock >= CLOCK_EVERY) {
+          sinceClock = 0;
+          elapsed = performance.now() - started;
+          if (elapsed >= budgetMs) return elapsed;
+        }
         const gx = p.gx++;
-        spent += CELL_COST;
         const worldX = (gx + hashCell(gx, gz, 1)) * spacing;
         const worldZ = (gz + hashCell(gx, gz, 2)) * spacing;
         const dx = worldX - p.centerX;
@@ -465,7 +582,6 @@ class GrassPatch {
         const key = cellKey(gx, gz);
         let ground = this.samples.get(key);
         if (ground === undefined) {
-          spent += MISS_COST;
           const sampled = sampleGrassy(worldX, worldZ, this.data);
           ground = sampled == null ? NaN : sampled;
           this.remember(key, ground);
@@ -485,7 +601,7 @@ class GrassPatch {
       p.n++;
     }
     this.commit(p);
-    return spent;
+    return performance.now() - started;
   }
 
   /** Swap a finished placement onto the mesh — one memcpy, atomic to the eye. */
@@ -493,6 +609,12 @@ class GrassPatch {
     (this.mesh.instanceMatrix.array as Float32Array).set(this.scratchMatrix!.subarray(0, p.visible * 16));
     (this.instanceRandom.array as Float32Array).set(this.scratchRandom!.subarray(0, p.visible * 2));
     this.mesh.count = p.visible;
+    this.mesh.instanceMatrix.clearUpdateRanges();
+    this.instanceRandom.clearUpdateRanges();
+    if (p.visible > 0) {
+      this.mesh.instanceMatrix.addUpdateRange(0, p.visible * 16);
+      this.instanceRandom.addUpdateRange(0, p.visible * 2);
+    }
     this.mesh.instanceMatrix.needsUpdate = true;
     this.instanceRandom.needsUpdate = true;
     this.center.set(p.centerX, p.centerZ);
@@ -546,7 +668,7 @@ class GrassPatch {
     camera: THREE.Camera,
     sampleGround: GroundSampler,
     sampleGrassy: FoliageSampler,
-    budget = Number.POSITIVE_INFINITY,
+    budgetMs = Number.POSITIVE_INFINITY,
   ): number {
     this.group.updateWorldMatrix(true, false);
     this.mesh.matrix.copy(this.group.matrixWorld).invert();
@@ -555,26 +677,75 @@ class GrassPatch {
     // While a placement is in flight the centre is NOT reconsidered: letting a
     // moving camera restart the walk every few frames is how an amortised
     // build starves and the field stops following at all. Finish, commit,
-    // then re-decide — worst case the field is one build behind.
+    // then re-decide — worst case the field is one build behind, which is
+    // what the lead below is sized to cover.
     if (!this.pending) {
       const cell = Math.max(1, this.data.radius * RECENTER_FRACTION);
       const nextX = this.recenterAxis(this.tmpCamPos.x, this.center.x, cell);
       const nextZ = this.recenterAxis(this.tmpCamPos.z, this.center.y, cell);
-      if (nextX !== this.center.x || nextZ !== this.center.y) this.beginPlacement(nextX, nextZ);
-      else if (this.stale) this.beginPlacement(this.center.x, this.center.y);
+      if (nextX !== this.center.x || nextZ !== this.center.y) {
+        // A recenter is due, so lead it: the direction the CENTRE is jumping
+        // is the direction the camera has been travelling, and placing the
+        // disc a little further along it builds for ground the player is
+        // about to reach instead of ground they have left. See LEAD_GAIN.
+        //
+        // The lead is added AFTER the snap. Snapping a led-forward target
+        // rounds the lead straight back off — the grid step is a whole cell
+        // and the lead is at most a fifth of one, so most of the time the
+        // snapped centre lands exactly where it would have with no lead at
+        // all. The centre does not have to sit on the grid; the grid is there
+        // to make the DECISION stable, and that is `recenterAxis` above,
+        // which is unaffected.
+        //
+        // Taking the direction from the centre's own jump, rather than from
+        // tracked camera motion, is also what keeps an ORBIT harmless. A
+        // third-person orbit wide enough to cross the deadband ping-pongs the
+        // centre between two cells; a direction derived from where the camera
+        // happens to be on the circle would put each lap's centre somewhere
+        // new and re-sample the terrain under it forever. This one gives the
+        // same two centres every lap, so the ground cache answers all of it.
+        let leadX = 0;
+        let leadZ = 0;
+        const dx = nextX - this.center.x;
+        const dz = nextZ - this.center.y;
+        const jump = Math.hypot(dx, dz);
+        if (Number.isFinite(jump) && jump > 1e-3) {
+          const lead = Math.min(this.data.radius * LEAD_MAX_FRACTION, jump * LEAD_GAIN);
+          leadX = (dx / jump) * lead;
+          leadZ = (dz / jump) * lead;
+        }
+        this.beginPlacement(nextX + leadX, nextZ + leadZ);
+      } else if (this.stale) this.beginPlacement(this.center.x, this.center.y);
     }
-    let spent = 0;
+    let spentMs = 0;
     // The FIRST placement runs to completion regardless of the budget: there
     // is no field on screen to preserve, and an empty world for half a second
     // is worse than one hitch during the load everything else is hitching in.
-    if (this.pending) spent = this.stepPlacement(sampleGrassy, this.placed ? budget : Infinity);
+    if (this.pending) spentMs = this.stepPlacement(sampleGrassy, this.placed ? budgetMs : Infinity);
 
     const ground = sampleGround(this.tmpCamPos.x, this.tmpCamPos.z);
     const camHeight = ground == null ? this.data.heightFadeEnd : this.tmpCamPos.y - ground;
     const span = Math.max(0.001, this.data.heightFadeEnd - this.data.heightFadeStart);
     const t = Math.min(1, Math.max(0, (camHeight - this.data.heightFadeStart) / span));
     this.heightFadeUniform.value = 1 - t;
-    return spent;
+    // How far cover actually reaches from the camera, this frame: the sampled
+    // disc, less however far the camera has drifted from its centre. Capped at
+    // the authored radius, which is what it sits at whenever the pad has
+    // headroom. Nothing here can produce a visible edge — the band always ends
+    // on ground the placement covered.
+    const driftX = this.tmpCamPos.x - this.center.x;
+    const driftZ = this.tmpCamPos.z - this.center.y;
+    const reach = Number.isFinite(this.center.x)
+      ? Math.min(this.data.radius, Math.max(1, this.placeRadius - Math.hypot(driftX, driftZ)))
+      : this.data.radius;
+    const now = performance.now();
+    const fadedReach = this.lastFadeTime === null
+      ? reach
+      : advanceGrassReach(this.fadeEndUniform.value, reach, now - this.lastFadeTime);
+    this.lastFadeTime = now;
+    this.fadeEndUniform.value = fadedReach;
+    this.fadeStartUniform.value = fadedReach * FADE_BAND;
+    return spentMs;
   }
 
   /**
@@ -652,13 +823,19 @@ export class GrassSystem {
     this.order = [...this.patches.values()];
   }
 
-  update(camera: THREE.Camera, sampleGround: GroundSampler, sampleGrassy: FoliageSampler): void {
+  /** @param budgetMs total re-placement time this frame, shared by every layer. */
+  update(
+    camera: THREE.Camera,
+    sampleGround: GroundSampler,
+    sampleGrassy: FoliageSampler,
+    budgetMs = PLACEMENT_BUDGET_MS,
+  ): void {
     const patches = this.order;
     if (patches.length === 0) return;
     // ONE budget for the frame, shared: two layers re-placing at once must
     // cost what one does, or a scene with a grass and a fern layer spikes
     // exactly where a single layer was tuned not to
-    let left = PLACEMENT_BUDGET;
+    let left = budgetMs;
     this.turn = (this.turn + 1) % patches.length;
     for (let i = 0; i < patches.length; i++) {
       const patch = patches[(this.turn + i) % patches.length]!;

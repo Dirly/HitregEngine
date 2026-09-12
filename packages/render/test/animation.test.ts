@@ -202,3 +202,53 @@ describe("AnimationSystem layers", () => {
     expect(node(root, "spine_01").position.x).toBeCloseTo(10, 1);
   });
 });
+
+describe("AnimationSystem clip fitting", () => {
+  it("reports a clip's authored length, and null for one it does not have", () => {
+    const system = systemWith([clip("cast", 1.4)]);
+    expect(system.clipDuration("hero", "cast")).toBeCloseTo(1.4, 3);
+    expect(system.clipDuration("hero", "nope")).toBeNull();
+    expect(system.clipDuration("nobody", "cast")).toBeNull();
+  });
+
+  it("plays a layer at its own rate, and retunes it without restarting", () => {
+    const { system, root } = layered();
+    system.play("hero", "Run", 0);
+    // half rate: a two-second cast clip stretched over four seconds
+    system.playLayer("hero", "Cast", { fade: 0, loop: false, speed: 0.5 });
+    expect(system.layerSpeedOf("hero")).toBeCloseTo(0.5, 3);
+    for (let i = 0; i < 60; i++) system.update(1 / 60);
+    // still the cast on the masked bones, just paid out more slowly
+    expect(node(root, "upperarm_l").position.x).toBeCloseTo(10, 1);
+
+    // re-asserted (net replication does this every snapshot) with a new rate:
+    // the clip must slow down where it stands, not start over
+    system.playLayer("hero", "Cast", { fade: 0, loop: false, speed: 0.25 });
+    expect(system.layerSpeedOf("hero")).toBeCloseTo(0.25, 3);
+    expect(system.layerClip("hero")).toBe("Cast");
+  });
+
+  it("the base rate is reported back, so a host can replicate it", () => {
+    const system = systemWith([clip("run")]);
+    system.play("hero", "run", 0);
+    system.setSpeed("hero", 1.4);
+    expect(system.speedOf("hero")).toBeCloseTo(1.4, 3);
+  });
+
+  it("restart replays a one-shot that has already clamped on its last frame", () => {
+    const done: string[] = [];
+    const system = systemWith([clip("cast")]);
+    system.onClipFinished = (_id, name) => done.push(name);
+
+    system.play("hero", "cast", 0, false);
+    for (let i = 0; i < 70; i++) system.update(1 / 60);
+    expect(done).toEqual(["cast"]);
+
+    // the same clip again, with nothing else played in between: without
+    // restart it is already "current" and the character holds the last pose
+    system.play("hero", "cast", 0, false);
+    system.play("hero", "cast", 0, false, true);
+    for (let i = 0; i < 70; i++) system.update(1 / 60);
+    expect(done).toEqual(["cast", "cast"]);
+  });
+});

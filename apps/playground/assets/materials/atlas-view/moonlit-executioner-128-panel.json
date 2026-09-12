@@ -1,0 +1,7 @@
+{
+  "shader": "unlit",
+  "color": "#ffffff",
+  "map": "atlas-carousel-sheet-moonlit-executioner-128.png",
+  "filter": "nearest",
+  "side": "double"
+}

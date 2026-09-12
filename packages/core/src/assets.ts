@@ -11,6 +11,7 @@ import {
 import { materialSchema } from "./components/core.js";
 import { spritesheetSchema } from "./spritesheet.js";
 import { worldRecipeSchema } from "./voxel/recipe.js";
+import { volumeDocSchema } from "./voxel/csg.js";
 import { vfxEffectSchema } from "./vfx/modules.js";
 import { spellSchema } from "./vfx/spell.js";
 import { registerCharacterAssetTypes } from "./character/index.js";
@@ -35,6 +36,7 @@ export function registerCoreAssetTypes(assets: AssetLibrary): void {
   assets.defineDataType("terrain-heightfield", terrainHeightfieldSchema);
   assets.defineDataType("spritesheet", spritesheetSchema);
   assets.defineDataType("world-recipe", worldRecipeSchema);
+  assets.defineDataType("csg-volume", volumeDocSchema);
   // Composed effects and whole spells (assets/vfx/*.json, assets/spells/*.json):
   // the module vocabulary a generator draws from, and what it produced.
   assets.defineDataType("vfx", vfxEffectSchema);

@@ -1,5 +1,5 @@
 import { type AssetLibrary } from "@hitreg/core";
-import { loadWorldRecipes } from "./voxel-world.js";
+import { loadVolumes, loadWorldRecipes } from "./voxel-world.js";
 
 /**
  * assets/ is the project content folder. In dev everything is fetched FRESH
@@ -19,8 +19,29 @@ export async function loadAssets(
   >;
   const fileUrl = (kind: string, file: string) =>
     `/__hitreg/asset-file?file=${encodeURIComponent(`${kind}/${file}`)}`;
-  const readJson = (kind: string, file: string) =>
-    fetch(fileUrl(kind, file)).then((r) => r.json());
+  // A merged project library can contain thousands of prefabs. Starting all
+  // fetches together exhausts browser request resources and silently drops
+  // later kinds (including materials). Share one bounded queue across kinds.
+  let activeReads = 0;
+  const pendingReads: Array<() => void> = [];
+  const readJson = (kind: string, file: string): Promise<unknown> =>
+    new Promise((resolve, reject) => {
+      const run = () => {
+        activeReads++;
+        void fetch(fileUrl(kind, file))
+          .then((response) => {
+            if (!response.ok) throw new Error(`HTTP ${response.status}: ${kind}/${file}`);
+            return response.json() as Promise<unknown>;
+          })
+          .then(resolve, reject)
+          .finally(() => {
+            activeReads--;
+            pendingReads.shift()?.();
+          });
+      };
+      if (activeReads < 16) run();
+      else pendingReads.push(run);
+    });
 
   // Every JSON asset fetch is independent, so issue them all at once instead of
   // one blocking round-trip at a time — on a large project this is the
@@ -74,6 +95,7 @@ export async function loadAssets(
   // library: render, physics and placement each resolve a generated cell by
   // world id, the same way they resolve a glTF by asset id.
   await loadWorldRecipes(index, readJson);
+  await loadVolumes(index, readJson);
 
   // Every project's assets/ merges into ONE id namespace, so two projects that
   // both ship "textures/mmo/Grass.png" collide. That must not be fatal: the

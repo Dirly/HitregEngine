@@ -2,7 +2,7 @@
   "size": 256,
   "bleed": 8,
   "keyColor": "#00ffff",
-  "groundFringe": 3,
+  "groundFringe": 1,
   "fitSearch": 1.6,
   "slots": {
     "#11008a": {
@@ -43,15 +43,8 @@
       "name": "chest.back",
       "transparency": false
     },
-    "#ffa800": {
-      "name": "tasset.front",
-      "transparency": true,
-      "fit": "contain",
-      "anchor": "top",
-      "fitPadding": 0
-    },
-    "#bf7e00": {
-      "name": "tasset.back",
+    "#ff7d00": {
+      "name": "tasset",
       "transparency": true,
       "fit": "contain",
       "anchor": "top",
@@ -61,7 +54,8 @@
       "name": "ornament",
       "transparency": true,
       "fit": "contain",
-      "anchor": "center"
+      "anchor": "bottom",
+      "fitPadding": 0
     },
     "#f800ff": {
       "name": "arms.front",
@@ -97,15 +91,14 @@
       "anchor": "center"
     },
     "#e1c78b": {
+      "name": "head",
+      "transparency": false,
+      "symmetric": true
+    },
+    "#a78e55": {
       "name": "face",
       "transparency": false,
-      "fit": "contain",
-      "anchor": "center",
-      "fitPadding": 0
-    },
-    "#b5a070": {
-      "name": "head.side",
-      "transparency": false
+      "fitWith": "head"
     }
   },
   "pairs": [
@@ -128,14 +121,6 @@
     [
       "robe.front",
       "robe.back"
-    ],
-    [
-      "tasset.front",
-      "tasset.back"
-    ],
-    [
-      "face",
-      "head.side"
     ]
   ]
 }

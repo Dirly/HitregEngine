@@ -20,6 +20,16 @@
  */
 
 import type { EntityDoc, SceneDoc } from "@hitreg/core";
+import {
+  actionIsLayered,
+  GaitTracker,
+  groundFollowVy,
+  risingByGround,
+  gaitSpeed,
+  leavingGround,
+  playbackRate,
+  type GaitTuning,
+} from "@hitreg/scripting";
 import type { HeadlessWorld } from "./world.js";
 
 export const PLAYER_TAG = "player";
@@ -160,7 +170,19 @@ export interface PlayerRecord {
   committing: Promise<Record<string, number>> | null;
   /** Tick the client was told to go elsewhere, or null. Its bye then tears the body down at once. */
   transferring: number | null;
+  /** Gait state for the clip other clients see — created on first step. */
+  gait?: GaitTracker;
+  /** Measured distance from this body's origin to the ground under its feet. */
+  groundRest?: number;
+  /** The vertical velocity ground-following wrote for it last tick. */
+  stickVy?: number;
+  /** Sim seconds of its last jump (the grace ground-following stands clear of). */
+  jumpAt?: number;
 }
+
+/** How far below a body's origin the ground ray looks, and the slack on contact. */
+const PROBE_REACH = 4;
+const PROBE_SLACK = 0.3;
 
 export interface PlayerDriverOptions {
   /** Hard cap on requested planar speed before gait/params apply (trust boundary). Default 20. */
@@ -186,6 +208,13 @@ export class PlayerDriver {
   private readonly walkSpeed: number;
   private readonly jumpVelocity: number;
   private readonly clips: { idle: string; walk: string; run: string; sprint: string; air: string };
+  private readonly tuning: GaitTuning;
+  private readonly clipSpeeds: Record<string, number>;
+  private readonly syncClipSpeed: boolean;
+  private readonly gaitDwell: number;
+  private readonly fallSpeed: number;
+  private readonly slopeTolerance: number;
+  private readonly groundStick: number;
 
   constructor(
     world: HeadlessWorld,
@@ -212,6 +241,22 @@ export class PlayerDriver {
       sprint: str("sprintClip", "Sprint"),
       air: str("airClip", "Jump_Loop"),
     };
+    this.tuning = {
+      walkSpeed: this.walkSpeed,
+      runSpeed: this.runSpeed,
+      sprintSpeed: this.sprintSpeed,
+    };
+    // The same params the client's controller reads, so the body a peer sees
+    // plays the same clip at the same rate as the body its owner sees.
+    this.clipSpeeds =
+      controller["clipSpeeds"] && typeof controller["clipSpeeds"] === "object"
+        ? (controller["clipSpeeds"] as Record<string, number>)
+        : {};
+    this.syncClipSpeed = controller["syncClipSpeed"] !== false;
+    this.gaitDwell = num("gaitDwell", 0.18);
+    this.fallSpeed = num("fallSpeed", 2);
+    this.slopeTolerance = num("slopeTolerance", 0.8);
+    this.groundStick = num("groundStick", 0.5);
   }
 
   /**
@@ -223,28 +268,71 @@ export class PlayerDriver {
    * owns the whole body and one that rides on an upper-body LAYER over the
    * gait. Without that split here, a peer would see a caster standing still
    * casting while it slid along the ground.
+   *
+   * It also carries the playback RATE and, for a one-shot action, how much of
+   * its window is left: a clip name alone is half the state, and the half it
+   * leaves out is why a remote character's feet skate.
    */
   private gaitClip(
+    player: PlayerRecord,
     ud: { actionClip?: string; actionUntil?: number; actionFullBody?: boolean; frozen?: boolean },
     vx: number,
     vy: number,
     vz: number,
     simNow: number,
-  ): { clip: string; layer?: string } {
-    const moving = Math.hypot(vx, vz);
+  ): { clip: string; layer?: string; rate: number; action?: number } {
+    const planar = Math.hypot(vx, vz);
     const action = ud.actionClip && (ud.actionUntil ?? 0) > simNow ? ud.actionClip : null;
-    const layered =
-      action !== null &&
-      ud.actionFullBody !== true &&
-      moving > Math.max(0.2, this.walkSpeed * 0.5);
-    if (action && !layered) return { clip: action };
+    const layered = action !== null && actionIsLayered(planar, this.tuning, { fullBody: ud.actionFullBody });
+    // How long the action still has to run. The client fits the clip to it —
+    // it is the only side that knows how long the clip is — so a three-second
+    // cast is one slow cast there too, not the same second three times.
+    const window = action ? Math.max(0, (ud.actionUntil ?? simNow) - simNow) : undefined;
+    if (action && !layered) return { clip: action, rate: 1, action: window };
     const layer = layered ? { layer: action! } : {};
-    if (ud.frozen) return { clip: this.clips.idle, ...layer };
-    if (vy > 0.8 || vy < -2) return { clip: this.clips.air, ...layer };
-    if (moving < Math.max(0.15, this.walkSpeed * 0.35)) return { clip: this.clips.idle, ...layer };
-    if (moving < (this.walkSpeed + this.runSpeed) / 2) return { clip: this.clips.walk, ...layer };
-    if (moving < (this.runSpeed + this.sprintSpeed) / 2) return { clip: this.clips.run, ...layer };
-    return { clip: this.clips.sprint, ...layer };
+    const rest = { ...layer, ...(window !== undefined ? { action: window } : {}) };
+    if (ud.frozen) return { clip: this.clips.idle, rate: 1, ...rest };
+    // Airborne on the same slope-aware terms the controller uses: a body
+    // running downhill descends fast with its feet planted, and calling that a
+    // fall is how a remote player ends up gliding in a jump pose.
+    if (leavingGround(vy, planar, this.fallSpeed, this.slopeTolerance)) {
+      return { clip: this.clips.air, rate: 1, ...rest };
+    }
+    const tracker = (player.gait ??= new GaitTracker());
+    const gait = tracker.step(planar, this.tuning, simNow, this.gaitDwell);
+    if (gait === "idle") return { clip: this.clips.idle, rate: 1, ...rest };
+    const clip = gait === "walk" ? this.clips.walk : gait === "sprint" ? this.clips.sprint : this.clips.run;
+    // Rate off the distance actually covered (vertical included, capped), so a
+    // remote player's feet stay planted on a hillside as well as a local one's.
+    const travelled = Math.hypot(planar, Math.min(Math.abs(vy), planar * 1.2));
+    const authored = this.clipSpeeds[clip] ?? gaitSpeed(gait, this.tuning);
+    const rate = this.syncClipSpeed ? playbackRate(travelled, authored) : 1;
+    return { clip, rate, ...rest };
+  }
+
+  /**
+   * Cast one downward ray under a player body: how far the ground is, which
+   * way it faces, and whether the feet are on it.
+   *
+   * The resting distance is MEASURED rather than derived from the collider —
+   * a body's origin sits at a different height above its feet for every
+   * capsule and offset a project authors — so the first reading taken while
+   * the body is plainly settled records it, exactly as the client's controller
+   * does. One query per player per tick.
+   */
+  private probeGround(
+    player: PlayerRecord,
+    vy: number,
+  ): { grounded: boolean; dist: number; rest: number | null; normal: [number, number, number] | null } {
+    const sim = this.world.sim;
+    const p = this.world.positionOf(player.bodyId);
+    if (!sim.raycast || !p) return { grounded: Math.abs(vy) < 0.05, dist: Infinity, rest: null, normal: null };
+    const hit = sim.raycast(p, [0, -1, 0], PROBE_REACH, { exclude: [player.bodyId] });
+    const dist = hit ? hit.distance : Infinity;
+    if (hit && player.groundRest === undefined && Math.abs(vy) < 1) player.groundRest = hit.distance;
+    const rest = player.groundRest ?? null;
+    const grounded = rest !== null ? dist <= rest + PROBE_SLACK : Math.abs(vy) < 0.05;
+    return { grounded, dist, rest, normal: hit ? hit.normal : null };
   }
 
   /** The before-step hook. */
@@ -279,7 +367,6 @@ export class PlayerDriver {
           vx = (vx / requested) * cap;
           vz = (vz / requested) * cap;
         }
-        if (input!.jump && Math.abs(vy) < 0.05) vy = this.jumpVelocity;
         player.appliedSeq = input!.seq;
       }
       const driven = !!ud.impulseVel && (ud.impulseUntil ?? 0) > simNow;
@@ -287,10 +374,30 @@ export class PlayerDriver {
         vx = ud.impulseVel![0];
         vz = ud.impulseVel![1];
       }
+      // Where the ground is, and which way it faces. The client's controller
+      // asks the same question of its own copy of the body; if only one of the
+      // two follows the ground, every slope is a fight between prediction and
+      // authority that the authority wins by yanking the player back.
+      const ground = this.probeGround(player, vy);
+      if (fresh && input!.jump && ground.grounded) {
+        vy = this.jumpVelocity;
+        player.jumpAt = simNow;
+      }
+      if (ground.normal && ground.rest !== null && simNow - (player.jumpAt ?? -999) > 0.25) {
+        const follow = groundFollowVy(vx, vz, vy, ground.normal, ground.dist - ground.rest, {
+          stick: this.groundStick,
+          slopeTolerance: this.slopeTolerance,
+          dt: this.world.fixedDt,
+          ours: risingByGround(vy, player.stickVy ?? null),
+        });
+        player.stickVy = follow ?? undefined;
+        if (follow !== null) vy = follow;
+      } else player.stickVy = undefined;
       sim.setLinvel(player.bodyId, [vx, vy, vz]);
       if (object && fresh) object.rotation.set(0, input!.yaw, 0);
-      const anim = this.gaitClip(ud, vx, vel[1], vz, simNow);
+      const anim = this.gaitClip(player, ud, vx, vel[1], vz, simNow);
       this.world.anims.set(player.bodyId, anim.clip);
+      this.world.animRates.set(player.bodyId, anim.rate);
       if (anim.layer) this.world.animLayers.set(player.bodyId, anim.layer);
       else this.world.animLayers.delete(player.bodyId);
     }

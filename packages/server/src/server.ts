@@ -156,7 +156,18 @@ export class GameServer {
   private readonly tickCost: number[] = [];
   private readonly unsubs: Array<() => void> = [];
   private replicas: ReplicaEntry[] = [];
-  private replicaState = new Map<string, { p: [number, number, number]; q: [number, number, number, number]; anim?: string; animL?: string; syncTransform: boolean }>();
+  private replicaState = new Map<
+    string,
+    {
+      p: [number, number, number];
+      q: [number, number, number, number];
+      anim?: string;
+      animL?: string;
+      animR?: number;
+      animD?: number;
+      syncTransform: boolean;
+    }
+  >();
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastMs: number | null = null;
   private accumulator = 0;
@@ -647,7 +658,19 @@ export class GameServer {
   /** Which entities replicate: `netObject`, or the implicit script+rigidbody default. */
   private collectReplicas(): void {
     const replicas: ReplicaEntry[] = [];
-    const state = new Map<string, { p: [number, number, number]; q: [number, number, number, number]; anim?: string; animL?: string; syncTransform: boolean }>();
+    const simSeconds = this.world.timeMs / 1000;
+    const state = new Map<
+      string,
+      {
+        p: [number, number, number];
+        q: [number, number, number, number];
+        anim?: string;
+        animL?: string;
+        animR?: number;
+        animD?: number;
+        syncTransform: boolean;
+      }
+    >();
     for (const [id, e] of this.world.entities) {
       const netObj = e.components["netObject"] as NetObjectData | undefined;
       const implicit = e.components["script"] !== undefined && e.components["rigidbody"] !== undefined;
@@ -659,6 +682,16 @@ export class GameServer {
       const syncAnim = netObj?.sync.animation ?? true;
       const anim = syncAnim ? this.world.anims.get(id) : undefined;
       const animL = syncAnim ? this.world.animLayers.get(id) : undefined;
+      const animR = syncAnim ? this.world.animRates.get(id) : undefined;
+      // Seconds left of a one-shot action (a cast, a swing). The client fits
+      // the clip to it — only the client knows how long the clip is — so a
+      // long cast plays once, slowly, there as well.
+      const until = (this.world.objects.get(id)?.userData as { actionUntil?: number } | undefined)
+        ?.actionUntil;
+      const animD =
+        syncAnim && typeof until === "number" && until > simSeconds
+          ? r3(until - simSeconds)
+          : undefined;
       replicas.push({
         id,
         p,
@@ -671,6 +704,8 @@ export class GameServer {
         q: [r3(q[0]), r3(q[1]), r3(q[2]), r3(q[3])],
         ...(anim ? { anim } : {}),
         ...(animL ? { animL } : {}),
+        ...(animR !== undefined && animR !== 1 ? { animR: r3(animR) } : {}),
+        ...(animD !== undefined ? { animD } : {}),
         syncTransform: netObj?.sync.transform ?? true,
       });
     }
@@ -720,6 +755,8 @@ export class GameServer {
         q: s.q,
         ...(s.anim ? { anim: s.anim } : {}),
         ...(s.animL ? { animL: s.animL } : {}),
+        ...(s.animR !== undefined ? { animR: s.animR } : {}),
+        ...(s.animD !== undefined ? { animD: s.animD } : {}),
       };
     }
     state["entities"] = { managed: visible.map((r) => r.id), updates, removed: left };

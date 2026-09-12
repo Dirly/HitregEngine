@@ -181,6 +181,18 @@ function supercellFactor(base: number, far: boolean): number {
 const MAX_CONCURRENT_SUPERCELL_BAKES = 2;
 
 /**
+ * How many of an HLOD bake's member cells may be in flight at once.
+ *
+ * The bake used to `await` them one at a time — up to 64 sequential worker
+ * round-trips, measured at 3,576ms for one far block, with five of six
+ * workers idle throughout. They are independent, so ask for them together.
+ * The cap is not about the pool (its own priority queue bounds that); it is
+ * about not handing that queue several hundred low-priority jobs from a
+ * couple of concurrent bakes, since each one costs a linear scan to skip.
+ */
+const SUPERCELL_FETCH_CONCURRENCY = 8;
+
+/**
  * How many cells may be AWAITING their source document at once.
  *
  * This used to be 3, justified on the grounds that "a load is mostly
@@ -259,6 +271,21 @@ function isProxy(rep: ChunkRep): boolean {
 }
 
 /**
+ * How badly a cell is wanted — the provider's scheduling hint.
+ *
+ * - `inline`: the SIMULATION ring. Something is about to stand on it, so its
+ *   collider has to exist now rather than a few frames from now; a provider
+ *   that generates off-thread should generate this one on the calling thread
+ *   instead. A player spawning into a world whose ground has not arrived
+ *   falls through it, and no amount of streaming smoothness is worth that.
+ * - `near`: a render ring the player can see. Off-thread, but FIRST.
+ * - `bulk`: one of the up-to-64 member cells of an HLOD supercell bake. The
+ *   bake cannot publish until it has all of them, so no single one is urgent —
+ *   and there are enough of them to bury the near ring if they are not marked.
+ */
+export type ChunkUrgency = "inline" | "near" | "bulk";
+
+/**
  * Where a world's cells come from when they are not files on disk.
  *
  * A procedural (voxel) world plugs in here and gets the whole streaming stack
@@ -274,16 +301,34 @@ export interface ChunkProvider {
   /**
    * The cell's source document — generated, not read. May be async.
    *
-   * `urgent` marks a cell the SIMULATION ring wants: something is about to
-   * stand on it, so its collider has to exist now rather than a few frames
-   * from now. A provider that generates off-thread should generate an urgent
-   * cell inline instead — the player spawning into a world whose ground has
-   * not arrived yet falls through it, and no amount of streaming smoothness is
-   * worth that. Urgent cells are a handful near the focus; the bulk of the
-   * work (render-only rings, and HLOD bakes that read up to 16 cells at once)
-   * is not urgent and is where moving off-thread actually pays.
+   * See {@link ChunkUrgency} for what the hint means and why ignoring it
+   * costs the player ground under their feet.
    */
-  get(cx: number, cz: number, urgent?: boolean): ChunkDoc | null | Promise<ChunkDoc | null>;
+  get(cx: number, cz: number, urgency?: ChunkUrgency): ChunkDoc | null | Promise<ChunkDoc | null>;
+  /**
+   * Identity of the CELLS this provider produces — not of the provider object.
+   *
+   * A provider is rebuilt from scratch on every scene rebuild, and a scene
+   * rebuild happens on every non-reconcilable edit and every asset live-sync.
+   * Comparing the objects therefore said "new world" every time, and
+   * `setProvider` answered by unloading the whole streamed world: a profiler
+   * snapshot of the MMO caught the chunk counter going from 2,693 to 1 while
+   * the player was simply standing in a town, with the ground then taking
+   * minutes to come back at 4s a cell. The scene-doc content stayed (it is
+   * rebuilt, not streamed), so what it looks like from inside the game is the
+   * terrain vanishing from under the buildings.
+   *
+   * So providers say when they are equivalent instead. Any value compared with
+   * `Object.is` — for a generated world the object identity of the world FIELD
+   * plus its options, which is precisely "the same recipe would produce the
+   * same cells". Undefined means "assume different", the old behaviour.
+   *
+   * The trade-off this accepts: an edit to a MODEL or MATERIAL that streamed
+   * cells use no longer re-renders them, because the cells are kept. That is
+   * what `refreshChunks()` is for, and it is a far smaller surprise than
+   * losing the world.
+   */
+  readonly key?: unknown;
 }
 
 export interface ChunkLifecycle {
@@ -477,7 +522,18 @@ export class ChunkManager {
    */
   setProvider(provider: ChunkProvider | null): void {
     if (this.provider === provider) return;
+    // Same cells, new object: swap the provider (its worker pool is the live
+    // one now) and KEEP the streamed world. `configure()` re-parents the
+    // surviving groups into the rebuilt scene a moment later, exactly as it
+    // already does for an authored chunk world whose source did not change.
+    // See ChunkProvider.key for what this cost before.
+    const sameCells =
+      provider !== null &&
+      this.provider !== null &&
+      provider.key !== undefined &&
+      Object.is(provider.key, this.provider.key);
     this.provider = provider;
+    if (sameCells) return;
     this.unloadAll();
     this.lastFocus = null;
   }
@@ -489,6 +545,36 @@ export class ChunkManager {
       return coords !== null && this.provider.has(coords[0], coords[1]);
     }
     return this.available.has(key);
+  }
+
+  /** Local landing coverage, not queue emptiness (queued work is not ground). */
+  isLandingReady(x: number, z: number): boolean {
+    const s = this.streamer;
+    if (!s) return true;
+    const cx = Math.round(x / s.cellSize);
+    const cz = Math.round(z / s.cellSize);
+    for (let dz = -1; dz <= 1; dz++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const key = `${cx + dx}_${cz + dz}`;
+        // Small/legacy streamers may not request all nine neighbours.
+        // The centre always matters; elsewhere wait only on near-tier cells.
+        const rep = this.desiredCells.get(key);
+        if ((dx === 0 && dz === 0 || rep && !isProxy(rep)) && this.hasCell(key) && !this.loaded.has(key)) return false;
+      }
+    }
+    return true;
+  }
+
+  /** Arrival screens wait for visible coverage too, not just the landing pad. */
+  isViewReady(): boolean {
+    if (!this.streamer) return true;
+    if (!this.lastFocus) return false;
+    const covered = new Set(this.loaded.keys());
+    for (const sc of this.loadedSupercells.values()) for (const key of sc.cellKeys) covered.add(key);
+    for (const key of this.desiredCells.keys()) {
+      if (!this.suppressed.has(key) && this.hasCell(key) && !covered.has(key)) return false;
+    }
+    return true;
   }
 
   /**
@@ -631,12 +717,12 @@ export class ChunkManager {
         chunk.rep = rep; // detail label shifted but render/sim behavior is the same
       }
     }
-    // per-cell chunks that fell out of every ring, or now belong at a proxy
-    // ring instead, unload (the proxy pass below reloads the latter as part
-    // of a supercell)
+    // Out-of-range cells can leave immediately. Demotions remain render-only
+    // fallbacks until a published proxy actually covers them.
     for (const [key, chunk] of this.loaded) {
       const rep = target.get(key);
-      if (!rep || isProxy(rep)) this.unload(key, chunk);
+      if (!rep || (isProxy(rep) && this.hasProxyCoverage(key))) this.unload(key, chunk);
+      else if (isProxy(rep) && chunk.simulated) this.retier(chunk, "fullRender");
     }
     // `target` is the authority on what a queued load should become — and on
     // whether it is still wanted at all by the time its turn arrives
@@ -675,7 +761,7 @@ export class ChunkManager {
     // every cell along the hlod/far boundary.
     const hlodHeld = new Set<string>();
     for (const [scKey, sc] of this.loadedSupercells) {
-      if (isFarSupercellKey(scKey)) continue;
+      if (isFarSupercellKey(scKey) || !desired.has(scKey)) continue;
       for (const key of sc.cellKeys) hlodHeld.add(key);
     }
     for (const [scKey, members] of desired) {
@@ -694,11 +780,9 @@ export class ChunkManager {
     //   SHRANK, cells simply out of range -> KEEP IT. The extra cells are
     //        distant scenery that costs a little memory and draws in the same
     //        merged call. Rebuilding to remove them buys nothing you can see.
-    //   SHRANK, cells PROMOTED to a near ring -> must drop the parts holding
-    //        them. Those cells are about to load again at full detail as their
-    //        own chunks, and a proxy that still contains them draws the same
-    //        terrain and props twice, z-fighting. This is not an optimisation:
-    //        keeping them is a correctness bug (see below).
+    //   SHRANK, cells PROMOTED to a near ring -> replace the merged block,
+    //        preserving its neighbours until publication. Temporary overlap
+    //        is preferable to missing terrain while the replacement bakes.
     //
     // Flying forward shrinks every trailing supercell and grows the leading
     // ones. Treating both as "changed" meant re-baking most of the far ring on
@@ -722,16 +806,23 @@ export class ChunkManager {
     for (const [scKey, sc] of [...this.loadedSupercells]) {
       const members = desired.get(scKey);
       if (!members) {
-        this.unloadSupercell(scKey);
+        // An entire block can move between tiers at once. Intent is not
+        // coverage: keep it until every still-wanted cell has a successor.
+        if (this.canRetire(sc.cellKeys, target, scKey)) this.unloadSupercell(scKey);
         continue;
       }
-      // correctness first: a part holding a now-near cell has to go. Its other
-      // cells go with it (a part is one merged mesh) and come back on the
-      // growth pass below, in the same refresh, as a fresh part.
+      // Replace atomically. Removing a merged part for ONE promoted cell
+      // also removed its neighbours for the entire asynchronous bake.
       const promoted = [...sc.cellKeys].filter((key) => nearOwned.has(key));
-      if (promoted.length > 0) this.dropSupercellParts(scKey, sc, promoted);
-      if (!this.loadedSupercells.has(scKey)) continue; // dropped its last part
       if (this.inFlightSupercells.has(scKey)) continue; // a bake is already catching up
+      if (promoted.length > 0) {
+        const replacement = new Set(members);
+        for (const key of sc.cellKeys) {
+          if (target.has(key) && !nearOwned.has(key) && !this.hasProxyCoverage(key, scKey)) replacement.add(key);
+        }
+        this.queueSupercell(scKey, replacement, "replace", sc.far);
+        continue;
+      }
       // the far/hlod boundary moved through this far block: an hlod block now
       // holds some of its cells, so it draws them twice (coarser, underneath).
       // Re-bake it without them. A replace, not a drop: the old parts stay
@@ -769,34 +860,19 @@ export class ChunkManager {
     this.profiler?.end();
   }
 
-  /**
-   * Remove every part of a supercell that contains any of `keys`, freeing its
-   * GPU resources. Parts are merged meshes, so a part is all-or-nothing: cells
-   * that merely shared a part with a promoted one are dropped too and re-bake
-   * on the next growth pass, which is cheap and self-healing.
-   */
-  private dropSupercellParts(scKey: string, sc: LoadedSupercell, keys: readonly string[]): void {
-    const doomed = new Set(keys);
-    const kept: SupercellPart[] = [];
-    for (const part of sc.parts) {
-      let hit = false;
-      for (const key of part.cellKeys) {
-        if (doomed.has(key)) {
-          hit = true;
-          break;
-        }
-      }
-      if (!hit) {
-        kept.push(part);
-        continue;
-      }
-      this.disposeGroup(part.group);
-      sc.entityCount -= part.entityCount;
-      for (const key of part.cellKeys) sc.cellKeys.delete(key);
+  private hasProxyCoverage(key: string, except?: string): boolean {
+    for (const [scKey, sc] of this.loadedSupercells) {
+      if (scKey !== except && sc.cellKeys.has(key)) return true;
     }
-    sc.parts = kept;
-    sc.entityCount = Math.max(0, sc.entityCount);
-    if (kept.length === 0) this.unloadSupercell(scKey);
+    return false;
+  }
+
+  private canRetire(keys: ReadonlySet<string>, target: ReadonlyMap<string, ChunkRep>, except: string, replacement?: ReadonlySet<string>): boolean {
+    for (const key of keys) {
+      if (!target.has(key) || this.suppressed.has(key) || replacement?.has(key)) continue;
+      if (!this.loaded.has(key) && !this.hasProxyCoverage(key, except)) return false;
+    }
+    return true;
   }
 
   /** Live-sync: a chunk file changed on disk — hot-swap it if relevant. */
@@ -851,11 +927,11 @@ export class ChunkManager {
     cx: number,
     cz: number,
     rawContent?: string,
-    urgent = false,
+    urgency: ChunkUrgency = "near",
   ): Promise<ChunkDoc | null> {
     if (this.provider && rawContent === undefined) {
       try {
-        return await this.provider.get(cx, cz, urgent);
+        return await this.provider.get(cx, cz, urgency);
       } catch (error) {
         console.warn(`[chunks] provider failed for ${key}:`, error);
         return null;
@@ -903,7 +979,7 @@ export class ChunkManager {
     const endLoad = this.profiler?.span("chunk.load", `${key} (${rep})`);
     let arrived: ChunkDoc | null = null;
     try {
-      arrived = await this.readCell(key, coords[0], coords[1], rawContent, isSimulated(rep));
+      arrived = await this.readCell(key, coords[0], coords[1], rawContent, isSimulated(rep) ? "inline" : "near");
     } catch (error) {
       console.warn(`[chunks] failed to load cell ${key}:`, error);
     } finally {
@@ -1084,6 +1160,7 @@ export class ChunkManager {
       this.loaded.set(key, chunk);
       if (simulated) this.sim?.addEntities(expanded); // render-only rings never collide
       this.lifecycle.onLoaded?.(expanded, built.objects, simulated);
+      this.lastFocus = null; // retire covered proxies even when standing still
       endBuild?.();
     } catch (error) {
       console.warn(`[chunks] failed to integrate cell ${key}:`, error);
@@ -1222,17 +1299,37 @@ export class ChunkManager {
     const epoch = (this.supercellEpoch.get(scKey) ?? 0) + 1;
     this.supercellEpoch.set(scKey, epoch);
     try {
+      // Member cells CONCURRENTLY, at bulk priority.
+      //
+      // This used to `await` them one at a time. They are independent, so all
+      // that bought was 64 sequential worker round-trips on a pool of six:
+      // measured 3,576ms for one far block, with five workers idle throughout,
+      // and the near ring queued behind every one of those round-trips. The
+      // pool's priority queue is what makes running them together safe — see
+      // ChunkUrgency.
       const cells: ChunkCell[] = [];
-      for (const key of memberKeys) {
-        const cellCoords = parseChunkKey(key);
-        if (!cellCoords || !this.hasCell(key)) continue;
-        try {
-          const doc = await this.readCell(key, cellCoords[0], cellCoords[1]);
-          if (doc) cells.push({ cx: cellCoords[0], cz: cellCoords[1], doc });
-        } catch (error) {
-          console.warn(`[chunks] failed to load ${key}:`, error);
+      const keys = [...memberKeys].filter((key) => parseChunkKey(key) !== null && this.hasCell(key));
+      let cursor = 0;
+      const fetchWorker = async (): Promise<void> => {
+        for (;;) {
+          const at = cursor++;
+          if (at >= keys.length) return;
+          const key = keys[at]!;
+          const cellCoords = parseChunkKey(key)!;
+          try {
+            const doc = await this.readCell(key, cellCoords[0], cellCoords[1], undefined, "bulk");
+            if (doc) cells.push({ cx: cellCoords[0], cz: cellCoords[1], doc });
+          } catch (error) {
+            console.warn(`[chunks] failed to load ${key}:`, error);
+          }
         }
-      }
+      };
+      await Promise.all(
+        Array.from({ length: Math.min(SUPERCELL_FETCH_CONCURRENCY, keys.length) }, fetchWorker),
+      );
+      // order is now arrival order, and the bake's origin must not depend on
+      // it — sort back to the deterministic member order
+      cells.sort((a, b) => a.cx - b.cx || a.cz - b.cz);
       // streamer may have been reconfigured while we fetched, or this
       // supercell's desired membership may have already moved on
       if (this.streamer !== s || !this.scene || cells.length === 0) return;
@@ -1293,6 +1390,15 @@ export class ChunkManager {
       this.disposeGroup(part.group);
       return;
     }
+    const previous = this.loadedSupercells.get(scKey);
+    if (mode === "replace" && previous && !this.canRetire(previous.cellKeys, this.desiredCells, scKey, part.cellKeys)) {
+      // A fetch failed or residency changed during the bake. Never publish
+      // a partial replacement over the last good terrain coverage.
+      this.disposeGroup(part.group);
+      this.lastFocus = null;
+      return;
+    }
+    this.lastFocus = null; // retire full-detail fallbacks after publication
     // an hlod block landing on cells a far block still draws: residency runs
     // only on a cell crossing, so ask for one — it re-bakes that far block
     // without the overlap (see the far/hlod boundary note in refresh)

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Profiler } from "../src/profiler.js";
 
 /** Burn wall-clock time — the profiler measures performance.now(), not calls. */
@@ -16,6 +16,23 @@ function frame(p: Profiler, body: () => void): void {
 }
 
 describe("Profiler", () => {
+  it("retains a severe freeze through smaller hitches, then expires it with the frame window", () => {
+    let clock = 100;
+    const mock = vi.spyOn(performance, "now").mockImplementation(() => clock);
+    try {
+      const p = new Profiler({ historyFrames: 8, spikeHistory: 2, spikeMs: 20 });
+      p.enabled = true;
+      const tick = (ms: number) => frame(p, () => { clock += ms; });
+      tick(12000);
+      for (let i = 0; i < 5; i++) tick(35);
+      expect(p.summary().spikes).toHaveLength(2);
+      expect(p.summary().spikes.some((s) => s.totalMs === 12000)).toBe(true);
+      for (let i = 0; i < 10; i++) tick(1);
+      expect(p.summary().spikes).toHaveLength(0);
+    } finally {
+      mock.mockRestore();
+    }
+  });
   it("records nothing while disabled", () => {
     const p = new Profiler();
     frame(p, () => {

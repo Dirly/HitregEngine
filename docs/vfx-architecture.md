@@ -179,7 +179,12 @@ impact and vanishes recompiles every lit shader twice (light-budget.ts measured
 scene at zero intensity, and modules borrow them. Steals the dimmest when all
 are busy. **Camera shake** is applied inside the draw only
 (`applyShake`/`restoreShake` around `renderer.render`) so the rig never sees
-the offset.
+the offset, and it **falls off with distance**: `strength` is what a camera
+standing at the effect feels, `range` (default 30 m) is where it reaches
+nothing, quadratic in between and measured from the camera's position on the
+last `update`. A shake with `range: 0` is felt everywhere in the world — an
+NPC fight across the map jolts every player, so treat 0 as a deliberate
+world-event choice, not a default.
 
 `manual` lists phases the host fires itself with `handle.trigger(phase, at?)`
 — a real projectile decides when its impact happens, an authority decides when

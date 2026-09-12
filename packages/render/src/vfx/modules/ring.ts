@@ -2,7 +2,7 @@ import * as THREE from "three/webgpu";
 import { abs, float, mix, smoothstep, sub, texture as tslTexture, uv, vec2, vec3 } from "three/tsl";
 import type { VfxModuleOf } from "@hitreg/core";
 import { LiveModule, easeIn, easeOut, loadTexture, presentationOnly, unlitMaterial, type LiveModuleHost } from "../base.js";
-import { makeUniforms, noise01, posterize, quantize, ringBand, type N } from "../shaders.js";
+import { makeUniforms, ringEnergy, posterize, quantize, ringBand, type N } from "../shaders.js";
 
 type RingModule = VfxModuleOf<"ring">;
 
@@ -82,10 +82,7 @@ export class RingLive extends LiveModule<RingModule> {
     } else {
       // Noise breaks the band into energy; swirl turns it into a spiral. One
       // evaluation: the coordinates blend between flat and polar, not the results.
-      const spiralA: N = angle.add(r.mul(u.d).mul(6)).sub(u.time.mul(1.5));
-      const coord: N = mix(vec3(quv.mul(u.e), u.time.mul(0.6)), vec3(r.mul(u.e), spiralA.mul(1.6), u.time.mul(0.35)), u.d.min(1));
-      const n: N = noise01(coord, 1);
-      const broken: N = mix(float(1), n.mul(1.6), u.c);
+      const broken: N = ringEnergy(quv, r, angle, u.d, u.time, u.e, u.c);
       alpha = band.mul(broken).mul(inArc);
       color = mix(u.color, u.glow, band.mul(0.35).mul(u.c));
     }

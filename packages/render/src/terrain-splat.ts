@@ -87,6 +87,7 @@ export interface MacroNoiseData {
 }
 
 export interface SplatData {
+  dominantAxis?: boolean;
   source?: "height" | "vertex";
   layers: SplatLayerData[];
   slopeRock?: { color: string; roughness: number; start: number; end: number };
@@ -261,6 +262,7 @@ export function buildTerrainSplatMaterial(
   options?: TextureResolver,
 ): THREE.MeshStandardNodeMaterial {
   const material = new THREE.MeshStandardNodeMaterial({
+    flatShading: data.splat?.flatShading ?? false,
     transparent: data.transparent || data.opacity < 1,
     opacity: data.opacity,
     metalness: 0,
@@ -329,7 +331,7 @@ function wireSplat(
       // to a 3.5m grass tile and a 9m cliff tile. A fixed world-unit warp has
       // to be sized to the smallest tile in the palette and then does nothing
       // for the largest — which is the one you read from a distance.
-      basis = worldTriplanarBasis(float(scale), warpNoise ? warpNoise.mul(float(warpFraction * scale)) : null);
+      basis = worldTriplanarBasis(float(scale), warpNoise ? warpNoise.mul(float(warpFraction * scale)) : null, splat.dominantAxis);
       bases.set(index, basis);
     }
     return basis;

@@ -18,10 +18,23 @@ export interface LiveSkyOptions {
   };
   moon?: { direction?: [number, number, number]; color?: string; size?: number; intensity?: number };
   stars?: { intensity?: number; density?: number; size?: number; rotation?: { axis: [number, number, number]; angle: number } };
-  clouds?: { coverage?: number; light?: number; color?: string; shadow?: string; speed?: [number, number]; scale?: number; softness?: number };
+  /** `sun`/`sunAmount` are the DIRECTIONAL dawn/dusk glow: the dome resolves them per pixel against the sun's own azimuth, so only that side of the deck burns. */
+  clouds?: {
+    coverage?: number;
+    light?: number;
+    color?: string;
+    shadow?: string;
+    sun?: string;
+    sunAmount?: number;
+    speed?: [number, number];
+    scale?: number;
+    softness?: number;
+  };
   ambient?: { color?: string; intensity?: number };
   /** Applied on top of the day/night values: gloom 0..1 dims sun/fill/ambient/IBL, tint blends fog + horizon, wind scales foliage wind. */
   weather?: { gloom?: number; tint?: string; tintAmount?: number; wind?: number };
+  /** How much DAYLIGHT there is, 0..1 — a day/night script publishes it so the weather tint (a LIT colour) can be dimmed to the hour instead of lighting up midnight fog. Defaults to 1. */
+  daylight?: number;
   environmentIntensity?: number;
   refreshEnvironment?: boolean;
 }
@@ -40,6 +53,12 @@ export interface AnimationLayerOptions {
   additive?: boolean;
   /** Replay from frame 0 even if this clip is already the layer. */
   restart?: boolean;
+  /**
+   * Playback rate for the layer clip (1 = authored). The layer keeps its own
+   * rate — a cast stretched to fill its cast time is not also sped up by the
+   * sprint underneath it.
+   */
+  speed?: number;
 }
 
 /** What `ctx.biomeAt` reports: the voxel world's biome blend at a point. */
@@ -121,7 +140,20 @@ export interface ScriptContext {
    * `loop: false` plays it once and emits "animation.completed" at the end
    * (for one-shots like attack/emote); the default loops.
    */
-  setAnimation?(clip: string, fadeSeconds?: number, opts?: { loop?: boolean }): void;
+  setAnimation?(
+    clip: string,
+    fadeSeconds?: number,
+    opts?: {
+      loop?: boolean;
+      /**
+       * Play from the start even if this clip is already the current one — how
+       * a one-shot (a swing, a cast) plays a SECOND time. Without it the clip
+       * is already "current", clamped on its last frame, and the repeat is a
+       * no-op that reads as a frozen character.
+       */
+      restart?: boolean;
+    },
+  ): void;
   /**
    * Clip names this entity's model actually shipped with. Lets a behavior
    * degrade instead of stalling: a locomotion script can fall back from a
@@ -129,6 +161,13 @@ export interface ScriptContext {
    * isn't there and leaving the character frozen mid-stride.
    */
   animationClips?(): string[];
+  /**
+   * Authored length of one of this entity's clips, in seconds; null when the
+   * model has no such clip (or has not loaded yet). What a script needs to FIT
+   * a clip to a window — a three-second cast played once, slowly, rather than
+   * a one-second cast played three times.
+   */
+  animationDuration?(clip: string): number | null;
   /**
    * Scale this entity's animation playback (1 = the authored rate). The cure
    * for foot-skate on in-place locomotion clips — see AnimationSystem.setSpeed.
@@ -656,6 +695,21 @@ export abstract class Script {
   onCollision?(otherId: string): void;
   /** Play session ended (stop pressed) — clean up anything external (DOM, timers). */
   onDispose?(): void;
+  /**
+   * What this script is thinking right now, as plain JSON — for an admin
+   * endpoint, an editor inspector, or an AI agent asking why something is
+   * behaving the way it is.
+   *
+   * Optional and read-only: nothing in the engine calls it on a schedule, so
+   * it costs nothing until someone looks. It exists because the alternative is
+   * replicating debug state through netState, which puts a diagnostic on the
+   * wire for every client forever — and because "why is that thing chasing
+   * HIM" is otherwise unanswerable on a live server without a debugger.
+   *
+   * Keep it cheap and allocation-light: it may be called for every entity in a
+   * scene at once.
+   */
+  onDebug?(): unknown;
 }
 
 /** A gameplay event contract a script type owns (name, payload schema,

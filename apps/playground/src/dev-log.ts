@@ -13,5 +13,9 @@ export function clientLog(message: string): void {
   void fetch("/__hitreg/log", { method: "POST", body: message }).catch(() => undefined);
 }
 
-window.addEventListener("error", (e) => clientLog(`window.error: ${e.message} @ ${e.filename}:${e.lineno}`));
-window.addEventListener("unhandledrejection", (e) => clientLog(`unhandledrejection: ${String(e.reason)}`));
+window.addEventListener("error", (e) => clientLog(
+  `window.error: ${e.error?.stack ?? `${e.message} @ ${e.filename}:${e.lineno}`}`,
+));
+window.addEventListener("unhandledrejection", (e) => clientLog(
+  `unhandledrejection: ${e.reason instanceof Error ? e.reason.stack ?? e.reason.message : String(e.reason)}`,
+));

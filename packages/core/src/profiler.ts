@@ -361,6 +361,10 @@ export class Profiler implements ProfilerLike {
     const mem = (performance as { memory?: { usedJSHeapSize: number } }).memory;
     this.frameHeap[this.slot] = mem ? mem.usedJSHeapSize / 1048576 : 0;
     if (this.filled < this.historyFrames) this.filled++;
+    // Keep retained spikes within the same window as the aggregate timings.
+    while (this.spikeRing.length > 0 && this.spikeRing[0]!.frame <= this.frameSeq - this.historyFrames) {
+      this.spikeRing.shift();
+    }
     // Capture on EITHER a slow callback or a slow wall-clock interval. The
     // second case is the one that would otherwise get away: a 4ms frame that
     // took 90ms to arrive is the hitch people complain about, and a
@@ -674,8 +678,16 @@ export class Profiler implements ProfilerLike {
       markers,
       counters,
     });
-    const overflow = this.spikeRing.length - this.spikeHistory;
-    if (overflow > 0) this.spikeRing.splice(0, overflow);
+    // Preserve the worst frames, not just the most recent threshold crossings:
+    // ordinary 35ms frames must not erase a multi-second freeze before capture.
+    if (this.spikeRing.length > this.spikeHistory) {
+      let smallest = 0;
+      const severity = (s: SpikeFrame) => Math.max(s.totalMs, s.intervalMs);
+      for (let i = 1; i < this.spikeRing.length; i++) {
+        if (severity(this.spikeRing[i]!) < severity(this.spikeRing[smallest]!)) smallest = i;
+      }
+      this.spikeRing.splice(smallest, 1);
+    }
   }
 }
 

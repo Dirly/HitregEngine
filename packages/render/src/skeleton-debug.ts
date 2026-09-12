@@ -5,14 +5,24 @@ import * as THREE from "three/webgpu";
  * joint marker and a name label on every bone, so users can SEE the rig and
  * pick bone names (bone-socket etc.) instead of guessing.
  *
- * Everything is tagged userData["skeletonDebug"] — the host gates visibility
- * exactly like the physics-debug overlay. Idempotent: rigs already decorated
- * are skipped, so it is safe to call from every onModelLoaded (models arrive
- * async, one callback per model).
+ * Everything is tagged userData["skeletonDebug"]. Idempotent: rigs already
+ * decorated are skipped, so it is safe to call from every onModelLoaded
+ * (models arrive async, one callback per model).
+ *
+ * Hiding is NOT `visible = false`: three's per-frame matrix walk ignores
+ * visibility, and a joint + label per bone is ~165 objects per rig hanging
+ * off animated bones — eight characters at a spawn cost ~5 ms/frame of
+ * updateMatrixWorld while the overlay was off (docs/performance-lessons.md).
+ * So the host attaches lazily (only while the overlay is on) and
+ * `setSkeletonDebugAttached(scene, false)` takes the helpers OUT of the
+ * graph, remembering their parents so they can go back.
  */
 
 const JOINT_COLOR = 0x79c0ff;
 const ATTACHED_FLAG = "skeletonDebugAttached";
+/** Per decorated rig root: every helper node and the parent it hangs from. */
+const NODES_KEY = "skeletonDebugNodes";
+type HelperNode = { parent: THREE.Object3D; node: THREE.Object3D };
 
 // shared across all rigs — a tiny octahedron scaled per joint
 const jointGeometry = new THREE.OctahedronGeometry(1);
@@ -107,6 +117,8 @@ export function attachSkeletonDebug(objects: Map<string, THREE.Object3D>): void 
     const bones = uniqueBones(root);
     if (bones.length === 0) continue;
     root.userData[ATTACHED_FLAG] = true;
+    const nodes: HelperNode[] = [];
+    root.userData[NODES_KEY] = nodes;
 
     let sceneRoot: THREE.Object3D = root;
     while (sceneRoot.parent) sceneRoot = sceneRoot.parent;
@@ -117,6 +129,7 @@ export function attachSkeletonDebug(objects: Map<string, THREE.Object3D>): void 
     helper.frustumCulled = false; // its geometry re-poses every frame
     helper.userData["skeletonDebug"] = true;
     sceneRoot.add(helper);
+    nodes.push({ parent: sceneRoot, node: helper });
 
     // size everything relative to the rig so props and giants both read;
     // dense rigs (40+ bones) get smaller tags to stay legible
@@ -138,13 +151,49 @@ export function attachSkeletonDebug(objects: Map<string, THREE.Object3D>): void 
       joint.renderOrder = 1001;
       joint.userData["skeletonDebug"] = true;
       bone.add(joint);
+      nodes.push({ parent: bone, node: joint });
 
       if (bone.name) {
         const label = makeLabel(bone.name, labelHeight / s);
         label.renderOrder = 1002;
         label.userData["skeletonDebug"] = true;
         bone.add(label);
+        nodes.push({ parent: bone, node: label });
       }
     }
   }
+}
+
+/**
+ * Put every rig's helpers back into the graph (`attached: true`) or take
+ * them out (`false`). Detached helpers keep their parents in userData, so
+ * this is a cheap toggle — nothing is rebuilt. Rigs decorated later (a model
+ * that finished loading while the overlay was off) are simply not decorated
+ * until the host calls `attachSkeletonDebug` again.
+ */
+export function setSkeletonDebugAttached(scene: THREE.Object3D, attached: boolean): void {
+  const rigs: HelperNode[][] = [];
+  scene.traverse((node) => {
+    const nodes = node.userData[NODES_KEY] as HelperNode[] | undefined;
+    if (node.userData[ATTACHED_FLAG] && nodes) rigs.push(nodes);
+  });
+  for (const nodes of rigs) {
+    for (const { parent, node } of nodes) {
+      if (attached) {
+        if (node.parent !== parent) parent.add(node);
+        node.visible = true;
+      } else if (node.parent) {
+        node.parent.remove(node);
+      }
+    }
+  }
+}
+
+/** How many helper nodes are in the graph right now — for tests and probes. */
+export function countAttachedSkeletonDebug(scene: THREE.Object3D): number {
+  let n = 0;
+  scene.traverse((node) => {
+    if (node.userData["skeletonDebug"]) n++;
+  });
+  return n;
 }

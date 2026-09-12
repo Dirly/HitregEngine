@@ -478,8 +478,15 @@ export const slashModuleSchema = z.object({
 export const shakeModuleSchema = z.object({
   kind: z.literal("shake"),
   ...moduleBase,
-  strength: z.number().min(0).default(0.15).describe("Metres of camera displacement at full strength."),
+  strength: z.number().min(0).default(0.15).describe("Metres of camera displacement felt by a camera at the effect."),
   frequency: z.number().positive().default(18),
+  range: z
+    .number()
+    .min(0)
+    .default(30)
+    .describe(
+      "Metres over which the shake fades out. A camera at the effect feels the full `strength`, one at `range` or further feels nothing (quadratic falloff between). 0 disables the falloff — every camera in the world shakes, which is almost never what you want.",
+    ),
 });
 
 export const soundModuleSchema = z.object({

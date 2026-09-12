@@ -49,6 +49,31 @@ export {
   type VertexAttributeSpec,
 } from "./marching-cubes.js";
 
+export { dualContour, type DualContourOptions } from "./dual-contouring.js";
+
+export {
+  volumeDocSchema,
+  volumePaintSchema,
+  blendVolumePaint,
+  type VolumePaint,
+  csgNodeSchema,
+  csgSurfaceSchema,
+  createVolume,
+  buildVolumeMesh,
+  registerVolume,
+  getVolume,
+  volumeIds,
+  invalidateVolume,
+  clearVolumes,
+  isCsgSource,
+  csgMesh,
+  type VolumeDoc,
+  type CsgNode,
+  type CsgSurface,
+  type CsgMeshSource,
+  type Volume,
+} from "./csg.js";
+
 export {
   worldRecipeSchema,
   defaultWorldRecipe,
@@ -67,10 +92,13 @@ export {
   type BiomeDoc,
   type PatchDoc,
   type ScatterDoc,
+  type ScatterClumpDoc,
   type RiverDoc,
   type CanyonDoc,
   type RoadDoc,
   type TownDoc,
+  campSchema,
+  type CampDoc,
   type BlobDoc,
   type TunnelDoc,
   type PoiDoc,
@@ -145,6 +173,7 @@ export {
   isVoxelSource,
   type VoxelMesh,
   type VoxelMeshSource,
+  type VoxelMesher,
 } from "./mesh.js";
 
 export {

@@ -75,13 +75,15 @@ export function parseTileset(raw) {
       }
       sockets[direction] = socket;
     }
+    if (input.layers !== undefined && (!Array.isArray(input.layers) || input.layers.length === 0 || input.layers.some(y => !Number.isInteger(y) || y < 0) || new Set(input.layers).size !== input.layers.length)) fail(`tile "${input.id}" layers must be unique non-negative integers`);
     const alignUv = (input.alignUv ?? []).map((entry, i) => {
       if (!isRecord(entry) || typeof entry.child !== "string" || entry.child === "") {
         fail(`tile "${input.id}" alignUv[${i}] must be { child, factor? }`);
       }
       const factor = entry.factor ?? -1;
       if (factor !== 1 && factor !== -1) fail(`tile "${input.id}" alignUv[${i}].factor must be 1 or -1`);
-      return { child: entry.child, factor };
+      if (entry.rotation !== undefined && !ROTATIONS.has(entry.rotation)) fail(`tile "${input.id}" alignUv[${i}].rotation must be 0, 90, 180, or 270`);
+      return { child: entry.child, factor, ...(entry.rotation ? { rotation: entry.rotation } : {}) };
     });
     return {
       id: input.id,
@@ -89,6 +91,7 @@ export function parseTileset(raw) {
       weight,
       offset: [...offset],
       rotations: [...rotations],
+      ...(input.layers ? { layers: [...input.layers] } : {}),
       sockets,
       alignUv,
     };
@@ -148,7 +151,8 @@ export function parseTileset(raw) {
     outside = raw.outside;
   }
 
-  return { version: 1, name: raw.name, cellSize: [...cellSize], tiles, boundary, pins, adjacency, outside };
+  if (raw.connected !== undefined && typeof raw.connected !== "boolean") fail("connected must be a boolean");
+  return { version: 1, connected: raw.connected ?? false, name: raw.name, cellSize: [...cellSize], tiles, boundary, pins, adjacency, outside };
 }
 
 /**
@@ -211,6 +215,7 @@ function variantsFor(tileset) {
       tileId: tile.id,
       prefabId: tile.prefabId,
       alignUv: tile.alignUv,
+      layers: tile.layers,
       rotation,
       // Rotation variants split, rather than multiply, a tile's authored weight.
       weight: tile.weight / tile.rotations.length,
@@ -320,7 +325,7 @@ function attempt(tileset, variants, options, attemptIndex, compatible) {
 
   for (let index = 0; index < cells.length; index++) {
     const [x, y, z] = coordinates(index, width, depth);
-    let candidates = cells[index];
+    let candidates = cells[index].filter(v => !variants[v].layers || variants[v].layers.includes(y));
     for (const [direction, socket] of Object.entries(tileset.boundary)) {
       if (isBoundary(x, y, z, width, height, depth, direction)) {
         candidates = candidates.filter((variant) => variants[variant].sockets[direction] === socket);
@@ -373,6 +378,22 @@ function attempt(tileset, variants, options, attemptIndex, compatible) {
 }
 
 /** Deterministic weighted 3D simple-tiled WFC with exact socket matching. */
+// Structural connectivity of occupied cells, not a walkability/pathfinding test.
+export function occupiedConnected(cells) {
+  const occupied = new Set(cells.filter(c => c.prefabId).map(c => `${c.x},${c.y},${c.z}`));
+  if (!occupied.size) return false;
+  const todo = [occupied.values().next().value];
+  const seen = new Set(todo);
+  while (todo.length) {
+    const [x,y,z] = todo.pop().split(",").map(Number);
+    for (const [dx,dy,dz] of Object.values(DELTA)) {
+      const key = `${x+dx},${y+dy},${z+dz}`;
+      if (occupied.has(key) && !seen.has(key)) { seen.add(key); todo.push(key); }
+    }
+  }
+  return seen.size === occupied.size;
+}
+
 export function collapseTileset(rawTileset, rawOptions) {
   const tileset = parseTileset(rawTileset);
   const options = {
@@ -401,10 +422,11 @@ export function collapseTileset(rawTileset, rawOptions) {
       const [x, y, z] = coordinates(index, options.width, options.depth);
       return { x, y, z, ...variants[candidates[0]] };
     });
+    if (tileset.connected && !occupiedConnected(collapsed)) continue;
     return { tileset, variants, cells: collapsed, attempt: attemptIndex + 1, ...options };
   }
   throw new Error(
-    `WFC contradicted on all ${options.attempts} attempt(s); check socket coverage, boundaries, and pins`,
+    `WFC contradicted on all ${options.attempts} attempt(s); check socket coverage, boundaries, pins, and connectivity`,
   );
 }
 
@@ -452,7 +474,7 @@ export function collapsedPrefab(result, outputName, origin = "center") {
             ? {
                 overrides: cell.alignUv.map((align) => ({
                   path: `${align.child}/components/mesh/source/uvRotation`,
-                  value: uvCounterRotation(cell.rotation, align.factor),
+                  value: uvCounterRotation(cell.rotation + (align.rotation ?? 0), align.factor),
                 })),
               }
             : {}),

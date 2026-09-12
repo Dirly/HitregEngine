@@ -219,3 +219,34 @@ boundaries, an outside tile, and pins. It deliberately bakes a prefab rather
 than running at play time. Not yet: multi-cell "big tiles", global
 path/connectivity constraints (rooms of a target size, corridors that must
 connect), and an interactive socket painter.
+
+### Strict observed adjacency
+
+For roof assemblies and support-sensitive kits, pass `--adjacency observed`
+to `import` (API: `importKit({ adjacency: "observed", ... })`). This opt-in
+mode learns complete oriented cell pairs on all six faces instead of sharing
+partial edge profiles. It only emits the orientations present in the examples;
+include rotated examples when those orientations are wanted. Existing imports
+default to `profiles`, preserving their previous behavior.
+
+Observed mode prevents unseen combinations of known cell faces; it does not
+repair invalid examples, enforce global paths, or guarantee a nonempty solve.
+Use a pin to require a building. Keep showcase shelves of isolated roof pieces
+out of the learning examples: they teach roofs floating next to empty space.
+
+Observed imports also retain the example layer, relative to its lowest occupied
+cell. The solver accepts optional tile `layers: [0, 1, ...]` restrictions (unique
+nonnegative integers); absent means unrestricted. These prevent a ground tile
+from being reused as a floating upper-storey tile. Identical compositions on
+different example layers get separate identities in observed mode.
+
+A tileset may set `connected: true` to reject empty or disconnected occupied
+cell sets and retry deterministically within the existing attempt budget.
+Connectivity uses six face neighbors and prefab-bearing cells. This prevents
+separated bridge sections; it does not certify doors, stairs, navigation, or
+physical support. The default remains unrestricted for existing tilesets.
+
+`alignUv` entries may also carry the child's authored `rotation` (0/90/180/270).
+The importer writes this for partial floors; the emitted override compensates
+for child plus cell rotation. Standalone cell prefabs carry the base correction
+in `mesh.source.uvRotation`, keeping cropped floors aligned before solving too.

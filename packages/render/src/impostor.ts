@@ -237,8 +237,8 @@ export function impostorGeometry(bounds: THREE.Box3, count: number): THREE.Buffe
   geometry.setIndex([0, 1, 2, 0, 2, 3]);
   const rotation = new THREE.InstancedBufferAttribute(new Float32Array(Math.max(count, 1) * 4), 4);
   const scale = new THREE.InstancedBufferAttribute(new Float32Array(Math.max(count, 1)), 1);
-  rotation.setUsage(THREE.DynamicDrawUsage);
-  scale.setUsage(THREE.DynamicDrawUsage);
+  rotation.name = "impostor-rotation";
+  scale.name = "impostor-scale";
   geometry.setAttribute("impostorRotation", rotation);
   geometry.setAttribute("impostorScale", scale);
   geometry.boundingSphere = new THREE.Sphere(center, radius);
@@ -294,7 +294,9 @@ export function impostorPageGeometry(count: number): THREE.BufferGeometry {
   const n = Math.max(count, 1);
   const add = (name: string, size: number): void => {
     const attr = new THREE.InstancedBufferAttribute(new Float32Array(n * size), size);
-    attr.setUsage(THREE.DynamicDrawUsage);
+    // writeImpostorSlot marks changes; a camera-facing shader needs no CPU
+    // re-upload when only the camera or the wind moves.
+    attr.name = name;
     geometry.setAttribute(name, attr);
   };
   add("impostorRotation", 4);

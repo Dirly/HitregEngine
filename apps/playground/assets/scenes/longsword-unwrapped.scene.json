@@ -1,0 +1,1103 @@
+{
+  "version": 1,
+  "name": "longsword-unwrapped",
+  "entities": {
+    "sky": {
+      "name": "Sky",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "sky": {
+          "top": "#232a33",
+          "bottom": "#4a5360",
+          "light": 0.9
+        }
+      }
+    },
+    "sun": {
+      "name": "Sun",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            4,
+            8,
+            5
+          ]
+        },
+        "light": {
+          "kind": "directional",
+          "intensity": 2.1,
+          "color": "#fff3e2",
+          "castShadow": true
+        }
+      }
+    },
+    "fill": {
+      "name": "Fill",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "light": {
+          "kind": "ambient",
+          "intensity": 0.85,
+          "color": "#9fb2c6"
+        }
+      }
+    },
+    "floor": {
+      "name": "Floor",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            -0.03,
+            0
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              54.52748247978436,
+              0.05,
+              31.807698113207543
+            ]
+          },
+          "material": "atlas-view/floor",
+          "receiveShadow": true
+        }
+      }
+    },
+    "stand-frost-reliquary": {
+      "name": "frost-reliquary",
+      "parent": null,
+      "tags": [
+        "atlas-carousel-item"
+      ],
+      "components": {
+        "visibility": {
+          "visible": true
+        },
+        "transform": {
+          "position": [
+            0,
+            0,
+            0
+          ]
+        },
+        "script": {
+          "name": "spinner",
+          "params": {
+            "speed": 0.5
+          }
+        }
+      }
+    },
+    "build-frost-reliquary-Blade1": {
+      "name": "frost-reliquary Blade1",
+      "parent": "stand-frost-reliquary",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.018519,
+              0.027778,
+              0.296296
+            ],
+            "partMask": 102675
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-frost-reliquary-Blade2": {
+      "name": "frost-reliquary Blade2",
+      "parent": "stand-frost-reliquary",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.018519,
+              0.027778,
+              0.296296
+            ],
+            "partMask": 102691
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-frost-reliquary-Blade3": {
+      "name": "frost-reliquary Blade3",
+      "parent": "stand-frost-reliquary",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.018519,
+              0.027778,
+              0.296296
+            ],
+            "partMask": 102723
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-frost-reliquary-Blade4": {
+      "name": "frost-reliquary Blade4",
+      "parent": "stand-frost-reliquary",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.018519,
+              0.027778,
+              0.296296
+            ],
+            "partMask": 102787
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "stand-cinder-wraith": {
+      "name": "cinder-wraith",
+      "parent": null,
+      "tags": [
+        "atlas-carousel-item"
+      ],
+      "components": {
+        "visibility": {
+          "visible": false
+        },
+        "transform": {
+          "position": [
+            0,
+            0,
+            0
+          ]
+        },
+        "script": {
+          "name": "spinner",
+          "params": {
+            "speed": 0.5
+          }
+        }
+      }
+    },
+    "build-cinder-wraith-Blade1": {
+      "name": "cinder-wraith Blade1",
+      "parent": "stand-cinder-wraith",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.351852,
+              0.027778,
+              0.296296
+            ],
+            "partMask": 102675
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-cinder-wraith-Blade2": {
+      "name": "cinder-wraith Blade2",
+      "parent": "stand-cinder-wraith",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.351852,
+              0.027778,
+              0.296296
+            ],
+            "partMask": 102691
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-cinder-wraith-Blade3": {
+      "name": "cinder-wraith Blade3",
+      "parent": "stand-cinder-wraith",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.351852,
+              0.027778,
+              0.296296
+            ],
+            "partMask": 102723
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-cinder-wraith-Blade4": {
+      "name": "cinder-wraith Blade4",
+      "parent": "stand-cinder-wraith",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.351852,
+              0.027778,
+              0.296296
+            ],
+            "partMask": 102787
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "stand-verdigris-fang": {
+      "name": "verdigris-fang",
+      "parent": null,
+      "tags": [
+        "atlas-carousel-item"
+      ],
+      "components": {
+        "visibility": {
+          "visible": false
+        },
+        "transform": {
+          "position": [
+            0,
+            0,
+            0
+          ]
+        },
+        "script": {
+          "name": "spinner",
+          "params": {
+            "speed": 0.5
+          }
+        }
+      }
+    },
+    "build-verdigris-fang-Blade1": {
+      "name": "verdigris-fang Blade1",
+      "parent": "stand-verdigris-fang",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.685185,
+              0.027778,
+              0.296296
+            ],
+            "partMask": 102675
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-verdigris-fang-Blade2": {
+      "name": "verdigris-fang Blade2",
+      "parent": "stand-verdigris-fang",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.685185,
+              0.027778,
+              0.296296
+            ],
+            "partMask": 102691
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-verdigris-fang-Blade3": {
+      "name": "verdigris-fang Blade3",
+      "parent": "stand-verdigris-fang",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.685185,
+              0.027778,
+              0.296296
+            ],
+            "partMask": 102723
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-verdigris-fang-Blade4": {
+      "name": "verdigris-fang Blade4",
+      "parent": "stand-verdigris-fang",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.685185,
+              0.027778,
+              0.296296
+            ],
+            "partMask": 102787
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "stand-gravebloom-longsword": {
+      "name": "gravebloom-longsword",
+      "parent": null,
+      "tags": [
+        "atlas-carousel-item"
+      ],
+      "components": {
+        "visibility": {
+          "visible": false
+        },
+        "transform": {
+          "position": [
+            0,
+            0,
+            0
+          ]
+        },
+        "script": {
+          "name": "spinner",
+          "params": {
+            "speed": 0.5
+          }
+        }
+      }
+    },
+    "build-gravebloom-longsword-Blade1": {
+      "name": "gravebloom-longsword Blade1",
+      "parent": "stand-gravebloom-longsword",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.018519,
+              0.527778,
+              0.296296
+            ],
+            "partMask": 102675
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-gravebloom-longsword-Blade2": {
+      "name": "gravebloom-longsword Blade2",
+      "parent": "stand-gravebloom-longsword",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.018519,
+              0.527778,
+              0.296296
+            ],
+            "partMask": 102691
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-gravebloom-longsword-Blade3": {
+      "name": "gravebloom-longsword Blade3",
+      "parent": "stand-gravebloom-longsword",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.018519,
+              0.527778,
+              0.296296
+            ],
+            "partMask": 102723
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-gravebloom-longsword-Blade4": {
+      "name": "gravebloom-longsword Blade4",
+      "parent": "stand-gravebloom-longsword",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.018519,
+              0.527778,
+              0.296296
+            ],
+            "partMask": 102787
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "stand-skullknight-longsword": {
+      "name": "skullknight-longsword",
+      "parent": null,
+      "tags": [
+        "atlas-carousel-item"
+      ],
+      "components": {
+        "visibility": {
+          "visible": false
+        },
+        "transform": {
+          "position": [
+            0,
+            0,
+            0
+          ]
+        },
+        "script": {
+          "name": "spinner",
+          "params": {
+            "speed": 0.5
+          }
+        }
+      }
+    },
+    "build-skullknight-longsword-Blade1": {
+      "name": "skullknight-longsword Blade1",
+      "parent": "stand-skullknight-longsword",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.351852,
+              0.527778,
+              0.296296
+            ],
+            "partMask": 102675
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-skullknight-longsword-Blade2": {
+      "name": "skullknight-longsword Blade2",
+      "parent": "stand-skullknight-longsword",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.351852,
+              0.527778,
+              0.296296
+            ],
+            "partMask": 102691
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-skullknight-longsword-Blade3": {
+      "name": "skullknight-longsword Blade3",
+      "parent": "stand-skullknight-longsword",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.351852,
+              0.527778,
+              0.296296
+            ],
+            "partMask": 102723
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-skullknight-longsword-Blade4": {
+      "name": "skullknight-longsword Blade4",
+      "parent": "stand-skullknight-longsword",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.351852,
+              0.527778,
+              0.296296
+            ],
+            "partMask": 102787
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "stand-elemental-longsword": {
+      "name": "elemental-longsword",
+      "parent": null,
+      "tags": [
+        "atlas-carousel-item"
+      ],
+      "components": {
+        "visibility": {
+          "visible": false
+        },
+        "transform": {
+          "position": [
+            0,
+            0,
+            0
+          ]
+        },
+        "script": {
+          "name": "spinner",
+          "params": {
+            "speed": 0.5
+          }
+        }
+      }
+    },
+    "build-elemental-longsword-Blade1": {
+      "name": "elemental-longsword Blade1",
+      "parent": "stand-elemental-longsword",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.685185,
+              0.527778,
+              0.296296
+            ],
+            "partMask": 102675
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-elemental-longsword-Blade2": {
+      "name": "elemental-longsword Blade2",
+      "parent": "stand-elemental-longsword",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.685185,
+              0.527778,
+              0.296296
+            ],
+            "partMask": 102691
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-elemental-longsword-Blade3": {
+      "name": "elemental-longsword Blade3",
+      "parent": "stand-elemental-longsword",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.685185,
+              0.527778,
+              0.296296
+            ],
+            "partMask": 102723
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-elemental-longsword-Blade4": {
+      "name": "elemental-longsword Blade4",
+      "parent": "stand-elemental-longsword",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.685185,
+              0.527778,
+              0.296296
+            ],
+            "partMask": 102787
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "atlas-carousel": {
+      "name": "Atlas Carousel",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "script": {
+          "name": "atlas-carousel"
+        }
+      }
+    },
+    "camera": {
+      "name": "Camera",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            1.488,
+            4.711051212938005
+          ],
+          "rotation": [
+            -0.04318122933752329,
+            0,
+            0,
+            0.9990672557104953
+          ]
+        },
+        "camera": {
+          "active": true,
+          "fov": 38,
+          "near": 0.01,
+          "far": 400
+        }
+      }
+    }
+  }
+}

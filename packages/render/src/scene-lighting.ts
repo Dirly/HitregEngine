@@ -53,7 +53,9 @@ export interface SkyData extends SkyEnvironmentSource {
   sun?: { direction: [number, number, number]; color: string; size: number; intensity: number } | undefined;
   moon?: { direction: [number, number, number]; color: string; size: number; intensity: number } | undefined;
   stars?: { intensity: number; density: number; size: number } | undefined;
-  clouds?: { coverage: number; scale: number; speed: [number, number]; softness: number; color: string; shadow: string } | undefined;
+  clouds?:
+    | { coverage: number; scale: number; speed: [number, number]; softness: number; color: string; shadow: string; sun?: string; sunAmount?: number }
+    | undefined;
 }
 
 /** `userData` key under which the gradient dome carries its uniforms. */
@@ -82,6 +84,8 @@ export interface SkyDomeUniforms {
   cloudSoftness: { value: number };
   cloudColor: { value: THREE.Color };
   cloudShadow: { value: THREE.Color };
+  cloudSun: { value: THREE.Color };
+  cloudSunAmount: { value: number };
   cloudLight: { value: number };
 }
 
@@ -112,8 +116,23 @@ export interface LiveSkyOptions {
   moon?: { direction?: [number, number, number]; color?: string; size?: number; intensity?: number };
   /** The dome's star field: brightness (0 hides it), density, dot size, and its rotation as an axis + angle (radians). */
   stars?: { intensity?: number; density?: number; size?: number; rotation?: { axis: [number, number, number]; angle: number } };
-  /** The dome's cloud layer: coverage 0..1, how lit it is (1 = day), its lit and shadow colours, and the wind. */
-  clouds?: { coverage?: number; light?: number; color?: string; shadow?: string; speed?: [number, number]; scale?: number; softness?: number };
+  /**
+   * The dome's cloud layer: coverage 0..1, how lit it is (1 = day), its lit
+   * and shadow colours, the DIRECTIONAL dawn/dusk glow (`sun` colour, opened
+   * by `sunAmount` 0..1 — the warm side faces the sun, the far sky stays
+   * cold), and the wind.
+   */
+  clouds?: {
+    coverage?: number;
+    light?: number;
+    color?: string;
+    shadow?: string;
+    sun?: string;
+    sunAmount?: number;
+    speed?: [number, number];
+    scale?: number;
+    softness?: number;
+  };
   ambient?: { color?: string; intensity?: number };
   /**
    * Weather, applied ON TOP of whatever the day/night values are, so a weather
@@ -123,6 +142,16 @@ export interface LiveSkyOptions {
    * ochre, snow grey); `wind` scales every foliage wind (1 = authored).
    */
   weather?: { gloom?: number; tint?: string; tintAmount?: number; wind?: number };
+  /**
+   * How much DAYLIGHT there is here, 0..1 — what a day/night script already
+   * computes from the sun elevation, published so the weather layer can be
+   * combined with it honestly. A weather `tint` is the colour of falling
+   * rain, sand or snow LIT; at midnight there is nothing lighting it, and
+   * blending fog toward a daytime grey at full strength is what made night
+   * fog read pale. Defaults to 1, so a scene with no day/night script keeps
+   * exactly the behaviour it had.
+   */
+  daylight?: number;
   /** Scales image-based lighting scene-wide (materials' own envMapIntensity stays authored). */
   environmentIntensity?: number;
   refreshEnvironment?: boolean;
@@ -215,9 +244,21 @@ export class SceneLighting {
     cloudLight: null as number | null,
     fogColor: null as THREE.Color | null,
     bottom: null as THREE.Color | null,
+    /**
+     * How much DAYLIGHT there is, 0..1, as the day/night script sees it.
+     *
+     * Weather owns a tint; only the day/night script knows the hour. Without
+     * this the two cannot be combined honestly: a weather tint is the colour
+     * of falling rain/sand/snow LIT, and lerping the fog toward it at full
+     * strength lit up midnight fog to a daytime grey. 1 when nothing drives
+     * it, so a scene with no day/night script is unchanged.
+     */
+    daylight: 1,
   };
   private readonly weather = { gloom: 0, tint: new THREE.Color("#808080"), tintAmount: 0 };
   private readonly tintScratch = new THREE.Color();
+  /** The weather tint dimmed to the hour — see applyEffective. */
+  private readonly litTint = new THREE.Color();
   private readonly aimQuaternion = new THREE.Quaternion();
   private readonly aimVector = new THREE.Vector3();
 
@@ -376,6 +417,8 @@ export class SceneLighting {
       if (c.light !== undefined) req.cloudLight = Math.max(0, c.light);
       if (c.color !== undefined) dome.cloudColor.value.set(c.color);
       if (c.shadow !== undefined) dome.cloudShadow.value.set(c.shadow);
+      if (c.sun !== undefined) dome.cloudSun.value.set(c.sun);
+      if (c.sunAmount !== undefined) dome.cloudSunAmount.value = Math.min(1, Math.max(0, c.sunAmount));
       if (c.speed) dome.cloudSpeed.value.set(c.speed[0], c.speed[1]);
       if (c.scale !== undefined) dome.cloudScale.value = Math.max(0.05, c.scale);
       if (c.softness !== undefined) dome.cloudSoftness.value = Math.min(1, Math.max(0.01, c.softness));
@@ -394,6 +437,7 @@ export class SceneLighting {
       if (w.tintAmount !== undefined) this.weather.tintAmount = Math.min(1, Math.max(0, w.tintAmount));
       if (w.wind !== undefined) setFoliageWindScale(w.wind);
     }
+    if (live.daylight !== undefined) this.req.daylight = Math.min(1, Math.max(0, live.daylight));
     this.applyEffective();
     if (live.refreshEnvironment && this.baseSky) {
       const texture = this.environment.current.texture;
@@ -426,15 +470,25 @@ export class SceneLighting {
       this.scene.environmentIntensity = effective;
       if (materialEnvironmentOwner === this) setEnvironmentScale(this.environmentScale);
     }
-    const amount = this.weather.tintAmount;
+    // A weather tint is the colour of falling rain, sand or snow AS LIT, so
+    // it has to follow the light — at midnight nothing is lighting it, and
+    // applied at full strength it lit the fog back up to a daytime grey while
+    // the sky above went dark. One factor, applied twice, because both halves
+    // fall together after dark: the weather is DIMMER, and you see LESS of it
+    // (visibility collapses at night, so less of the view is weather). The
+    // 0.15 floor rather than a hard 0 keeps a night sandstorm reading as brown
+    // air instead of vanishing into clear night.
+    const lit = 0.15 + 0.85 * req.daylight;
+    const amount = this.weather.tintAmount * lit;
+    this.litTint.copy(this.weather.tint).multiplyScalar(lit);
     if (req.bottom) {
-      this.tintScratch.copy(req.bottom).lerp(this.weather.tint, amount);
+      this.tintScratch.copy(req.bottom).lerp(this.litTint, amount);
       dome?.bottom.value.copy(this.tintScratch);
       this.hemisphere?.groundColor.copy(this.tintScratch);
       if (this.scene.background instanceof THREE.Color) this.scene.background.copy(this.tintScratch);
     }
     if (req.fogColor) {
-      this.tintScratch.copy(req.fogColor).lerp(this.weather.tint, amount);
+      this.tintScratch.copy(req.fogColor).lerp(this.litTint, amount);
       this.fog.retune(this.scene, { color: "#" + this.tintScratch.getHexString() });
     }
   }

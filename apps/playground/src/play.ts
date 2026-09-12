@@ -23,6 +23,7 @@ import {
   AssetLibrary,
   registerCoreAssetTypes,
   expandScene,
+  cameraSchema,
   sceneDocSchema,
   FixedTimestepLoop,
   parseManifest,
@@ -36,16 +37,20 @@ import {
   type ChunkStreamerData,
   type SpritesheetDoc,
 } from "@hitreg/core";
-import { EngineRenderer, buildScene, type PostFxData, makeMeshGeometryProvider, AnimationSystem, ParticleSystem, BillboardSystem, LightBudgetSystem, FoliageLodSystem, ClusterLodSystem, GrassSystem, PortraitView, type BuildOptions } from "@hitreg/render";
+import { EngineRenderer, buildScene, type PostFxData, makeMeshGeometryProvider, AnimationSystem, ParticleSystem, BillboardSystem, LightBudgetSystem, FoliageLodSystem, ClusterLodSystem, GrassSystem, PortraitView, ThirdPersonCameraRig, type BuildOptions, type RigVec3 } from "@hitreg/render";
 import { createVfx, makeVfxHost, warmVfx } from "./vfx-host.js";
+
+/** The `camera` component, straight off the schema. */
+type CameraComponentData = ReturnType<typeof cameraSchema.parse>;
 import { ScriptRegistry, registerBuiltinScripts, ScriptRuntime, InputService, EventBus } from "@hitreg/scripting";
-import { PhysicsSim, initPhysics } from "@hitreg/physics";
+import { Layers, PhysicsSim, initPhysics } from "@hitreg/physics";
 import { applyBodyState } from "./physics-sync.js";
 import { initProjectScripts } from "./project-scripts.js";
 import { ChunkManager } from "./chunk-manager.js";
 import { bakeImpostorAtlas } from "./impostor-bake.js";
 import { voxelGroundProbes } from "./voxel-ground.js";
 import {
+  loadVolumes,
   loadWorldRecipes,
   resolveVoxelWorld,
   voxelChunkProvider,
@@ -90,6 +95,7 @@ async function loadBundleAssets(assets: AssetLibrary, entryScene: string): Promi
   // `voxelWorld` component names its recipe by id, and resolveVoxelWorld
   // returns null (world silently empty) for an id nothing has registered.
   await loadWorldRecipes(index, readJson);
+  await loadVolumes(index, readJson);
 
   for (const file of index["models"] ?? []) if (/\.(glb|gltf)$/.test(file)) assets.addModel({ id: file, name: file.split("/").pop()!, url: fileUrl("models", file) });
   for (const file of index["textures"] ?? []) if (/\.(png|jpe?g|webp)$/i.test(file)) assets.addTexture({ id: file, name: file.split("/").pop()!, url: fileUrl("textures", file) });
@@ -247,10 +253,12 @@ async function main(): Promise<void> {
       return () => view.dispose();
     },
     netState,
-    setAnimation: (id, clip, fade, opts) => animations.play(id, clip, fade ?? 0.3, opts?.loop ?? true),
+    setAnimation: (id, clip, fade, opts) =>
+      animations.play(id, clip, fade ?? 0.3, opts?.loop ?? true, opts?.restart ?? false),
     setAnimationLayer: (id, clip, opts) => animations.playLayer(id, clip, opts),
     clearAnimationLayer: (id, fade) => animations.clearLayer(id, fade ?? 0.2),
     animationClips: (id) => animations.clipNames(id),
+    animationDuration: (id, clip) => animations.clipDuration(id, clip),
     setAnimationSpeed: (id, multiplier) => animations.setSpeed(id, multiplier),
     setBillboard: (id, opts) => billboards.setValue(id, opts),
     setParticles: (id, opts) => particles.setValue(id, opts),
@@ -343,22 +351,22 @@ async function main(): Promise<void> {
   // camera rig config (data-driven from the active camera's rig)
   let followId: string | null = null;
   let rigMode: "follow" | "chase" | null = null;
-  let rigDist = 8;
-  let rigHeight = 1;
-  /** Never end up inside the character's own head. */
-  const PLAY_CAM_MIN = 1.6;
+  let rigCollision = true;
+  /**
+   * The third-person camera, shared with the editor's play mode — one
+   * implementation, so a fix to how the boom behaves in a town lands in the
+   * published build too. It owns `camera` whenever there is a follow target;
+   * camera-controls is left for the rigless case (a scene with no character).
+   */
+  const cameraRig = new ThirdPersonCameraRig();
+  const PLAY_CAM_MIN = 0.25;
   const PLAY_CAM_MAX = 14;
-  /** Probe sphere radius — the camera's near plane has width, a ray doesn't. */
-  const CAM_PROBE_RADIUS = 0.3;
-  /** Stop this far short of whatever the probe hit. */
-  const CAM_SKIN = 0.25;
   for (const entity of Object.values(expanded.entities)) {
-    const cam = entity.components["camera"] as { active?: boolean; fov?: number; near?: number; far?: number; rig?: { mode: string; targetTag: string; distance?: number; height?: number } } | undefined;
+    const cam = entity.components["camera"] as CameraComponentData | undefined;
     if (cam?.active && (cam.rig?.mode === "follow" || cam.rig?.mode === "chase")) {
       followId = Object.entries(expanded.entities).find(([, e]) => e.tags.includes(cam.rig!.targetTag))?.[0] ?? null;
       rigMode = cam.rig.mode as "follow" | "chase";
-      rigDist = cam.rig.distance ?? 8;
-      rigHeight = cam.rig.height ?? 1;
+      rigCollision = cam.rig.collision !== false;
       // A rigged camera is DRIVEN, so its own scene object is never what
       // renders — the rig moves this one instead. Its lens settings still
       // belong to the author though, and in a streamed world the far plane is
@@ -368,60 +376,33 @@ async function main(): Promise<void> {
       if (cam.near !== undefined) camera.near = cam.near;
       if (cam.far !== undefined) camera.far = cam.far;
       camera.updateProjectionMatrix();
-      // "follow" only steers the orbit TARGET, so the boom length is whatever
-      // the camera happened to start at unless the rig's distance is applied.
-      if (rigMode === "follow") {
-        rigDist = Math.min(PLAY_CAM_MAX, Math.max(PLAY_CAM_MIN, rigDist));
-        controls.minDistance = PLAY_CAM_MIN; // collision may squeeze in this far
-        controls.maxDistance = PLAY_CAM_MAX;
-        void controls.dollyTo(rigDist, false);
-      }
+      cameraRig.applyAuthored({
+        ...cam.rig,
+        minDistance: cam.rig.minDistance ?? PLAY_CAM_MIN,
+        maxDistance: cam.rig.maxDistance ?? PLAY_CAM_MAX,
+      });
+      cameraRig.reset();
       break;
     }
   }
 
   /**
-   * Third-person camera collision, run against the PHYSICS colliders rather
-   * than camera-controls' own dolly-collision.
-   *
-   * It has to be physics, not meshes: the mesh path can only see the scene
-   * document's own entities, so streamed chunk content — all the voxel
-   * terrain, every scattered tree — was never in `colliderMeshes` at all and
-   * the camera swung straight through hillsides and trunks, which in a
-   * generated world means most of the time the view is buried in dirt. One
-   * spherecast also reuses the broadphase instead of brute-force raycasting
-   * every triangle of every listed mesh each frame.
-   *
-   * A SPHERE, not a ray: the camera's near plane has width, so a ray grazing a
-   * trunk still leaves the corner of the view inside it.
+   * The rig's collision query: masked to the static world, never to actors, so
+   * an NPC walking behind the player cannot shove the camera into their head.
+   * Physics rather than meshes because a mesh list cannot see streamed chunk
+   * terrain or scattered trees at all, and costs a full triangle raycast per
+   * listed mesh per frame where this costs one broadphase sweep.
    */
-  const camPivot = new THREE.Vector3();
-  const camDir = new THREE.Vector3();
-  function updateFollowCamDistance(px: number, py: number, pz: number, dt: number): void {
-    camPivot.set(px, py, pz);
-    camDir.copy(camera.position).sub(camPivot);
-    if (camDir.lengthSq() < 1e-6) return;
-    camDir.normalize();
-    let allowed = rigDist;
-    if (followId) {
-      // exclude the target: the sweep starts inside its own capsule, and a
-      // shape stopped by itself reports distance 0 and jams the camera in the
-      // character's head every frame
-      const hit = sim.spherecast(
-        CAM_PROBE_RADIUS,
-        [px, py, pz],
-        [px + camDir.x * rigDist, py + camDir.y * rigDist, pz + camDir.z * rigDist],
-        { exclude: [followId] },
-      );
-      if (hit) allowed = Math.max(PLAY_CAM_MIN, hit.distance - CAM_SKIN);
-    }
-    // Snap IN immediately, ease OUT. A single frame with the camera inside a
-    // wall shows the player through the world, so intrusion cannot be eased;
-    // easing the recovery stops the camera flinging outward every time it
-    // clears a tree trunk.
-    const current = controls.distance;
-    const next = allowed < current ? allowed : current + (allowed - current) * Math.min(1, dt * 6);
-    void controls.dollyTo(next, false);
+  const CAMERA_BOOM_LAYERS = Layers.WORLD | Layers.TERRAIN | Layers.CAMERA_BLOCKER;
+  function cameraBoomSweep(radius: number, from: RigVec3, to: RigVec3): number | null {
+    if (!followId) return null;
+    // exclude the target: a sweep that starts inside its own capsule is
+    // stopped by itself at distance 0, which jams the camera in the head
+    const hit = sim.spherecast(radius, from, to, {
+      exclude: [followId],
+      layers: CAMERA_BOOM_LAYERS,
+    });
+    return hit ? hit.distance : null;
   }
 
   // pointer-lock mouse look
@@ -430,8 +411,19 @@ async function main(): Promise<void> {
   document.addEventListener("mousemove", (e) => {
     if (document.pointerLockElement !== canvas) return;
     if (rigMode === "chase") { input.addMouseDelta(e.movementX, e.movementY); return; }
+    if (followId) { cameraRig.addLook(e.movementX, e.movementY); return; }
     void controls.rotate(-e.movementX * LOOK, -e.movementY * LOOK, false);
   });
+  // wheel zoom: the framing the player wants, which collision may still shorten
+  canvas.addEventListener(
+    "wheel",
+    (e) => {
+      if (rigMode !== "follow") return;
+      e.preventDefault();
+      cameraRig.addZoom(e.deltaMode === 0 ? e.deltaY * 0.006 : e.deltaY * 0.25);
+    },
+    { passive: false },
+  );
   canvas.addEventListener("mousedown", () => { if (document.pointerLockElement !== canvas) void canvas.requestPointerLock()?.catch(() => undefined); });
 
   // 9. the loop
@@ -439,11 +431,8 @@ async function main(): Promise<void> {
   const curr = new Map<string, THREE.Vector3>();
   const lerp = new THREE.Vector3();
   const followPos = new THREE.Vector3();
-  const chaseFwd = new THREE.Vector3();
-  const up = new THREE.Vector3(0, 1, 0);
-  const yawQ = new THREE.Quaternion();
-  const eye = new THREE.Vector3();
-  const off = new THREE.Vector3();
+  /** Scratch: the followed body's world rotation, which a chase rig sits behind. */
+  const rigTargetQuat = new THREE.Quaternion();
   const streamFocus = new THREE.Vector3();
   const camWorldPos = new THREE.Vector3();
 
@@ -513,17 +502,12 @@ async function main(): Promise<void> {
       if (followId) {
         const target = built.objects.get(followId);
         if (target) {
-          const p = target.getWorldPosition(followPos);
-          if (rigMode === "chase") {
-            chaseFwd.set(0, 0, -1).applyQuaternion(target.quaternion);
-            yawQ.setFromAxisAngle(up, Math.atan2(-chaseFwd.x, -chaseFwd.z));
-            off.set(0, rigHeight, rigDist).applyQuaternion(yawQ);
-            eye.copy(p).add(off);
-            void controls.setLookAt(eye.x, eye.y, eye.z, p.x, p.y + 1, p.z, false);
-          } else {
-            void controls.moveTo(p.x, p.y + 1, p.z, true);
-            updateFollowCamDistance(p.x, p.y + 1, p.z, dt);
-          }
+          target.getWorldPosition(followPos);
+          target.getWorldQuaternion(rigTargetQuat);
+          cameraRig.update(dt, followPos, camera, rigCollision ? cameraBoomSweep : null, rigTargetQuat);
+          // the boom is inside the body: take it out of the shot rather than
+          // rendering the inside of its own head
+          target.visible = !cameraRig.targetObscured;
         }
       }
       // Chunk streaming follows the PLAYER, not the camera: the camera orbits
@@ -537,7 +521,7 @@ async function main(): Promise<void> {
           : streamFocus.copy(camera.position);
         chunkManager.update(p.x, p.z);
       }
-      controls.update(dt);
+      if (!followId) controls.update(dt); // the rig owns the camera when there is one
       animations.update(dt);
       // Camera priority: a script-switched camera wins, then a RIGLESS active
       // scene camera, then the rig camera. The `rigless` half matters: a

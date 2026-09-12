@@ -46,8 +46,8 @@ export class TrailLive extends LiveModule<TrailModule> {
 
   constructor(host: LiveModuleHost) {
     super(host);
-    this.posAttr = new THREE.BufferAttribute(this.positions, 3).setUsage(THREE.DynamicDrawUsage);
-    this.fadeAttr = new THREE.BufferAttribute(this.fades, 1).setUsage(THREE.DynamicDrawUsage);
+    this.posAttr = new THREE.BufferAttribute(this.positions, 3).setUsage(THREE.StreamDrawUsage);
+    this.fadeAttr = new THREE.BufferAttribute(this.fades, 1).setUsage(THREE.StreamDrawUsage);
     const idx = new Uint16Array((MAX - 1) * 6);
     for (let i = 0; i < MAX - 1; i++) {
       const a = i * 2;

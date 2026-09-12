@@ -265,7 +265,6 @@ export class MeshEditTool {
 
   /** Call after every scene rebuild (the gizmo helper + overlay belong to the old scene). */
   onSceneRebuilt(): void {
-    this.opts.getScene().add(this.controls.getHelper());
     this.sync();
   }
 
@@ -553,9 +552,13 @@ export class MeshEditTool {
     const verts = this.mesh ? selectionVertices(this.mesh, sel) : [];
     if (!this.isEditing || !this.mesh || !group || verts.length === 0) {
       this.controls.detach();
+      this.controls.getHelper().removeFromParent();
       this.proxy.removeFromParent();
       return;
     }
+    const helper = this.controls.getHelper();
+    const scene = this.opts.getScene();
+    if (helper.parent !== scene) scene.add(helper);
     group.updateWorldMatrix(true, false);
     const centerLocal = selectionCentroid(this.mesh, sel);
     const world = new THREE.Vector3(...centerLocal).applyMatrix4(group.matrixWorld);

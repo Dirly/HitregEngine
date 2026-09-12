@@ -1,0 +1,728 @@
+{
+  "version": 1,
+  "name": "dc-many-auto",
+  "entities": {
+    "sky": {
+      "name": "Sky",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "sky": {
+          "top": "#232a33",
+          "bottom": "#4a5360",
+          "light": 0.9
+        }
+      }
+    },
+    "sun": {
+      "name": "Sun",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            4,
+            8,
+            5
+          ]
+        },
+        "light": {
+          "kind": "directional",
+          "intensity": 2
+        }
+      }
+    },
+    "camera": {
+      "name": "Camera",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            3,
+            14
+          ]
+        },
+        "camera": {
+          "active": true,
+          "fov": 50,
+          "near": 0.01,
+          "far": 300
+        }
+      }
+    },
+    "s0": {
+      "name": "sword0",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -4,
+            0,
+            0
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-combo.glb",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "auto"
+        }
+      }
+    },
+    "s1": {
+      "name": "sword1",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -2.4000000000000004,
+            0,
+            0
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-combo.glb",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "auto"
+        }
+      }
+    },
+    "s2": {
+      "name": "sword2",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.8,
+            0,
+            0
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-combo.glb",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "auto"
+        }
+      }
+    },
+    "s3": {
+      "name": "sword3",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.8,
+            0,
+            0
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-combo.glb",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "auto"
+        }
+      }
+    },
+    "s4": {
+      "name": "sword4",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            2.4000000000000004,
+            0,
+            0
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-combo.glb",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "auto"
+        }
+      }
+    },
+    "s5": {
+      "name": "sword5",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            4,
+            0,
+            0
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-combo.glb",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "auto"
+        }
+      }
+    },
+    "s6": {
+      "name": "sword6",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -4,
+            0,
+            1.6
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-combo.glb",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "auto"
+        }
+      }
+    },
+    "s7": {
+      "name": "sword7",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -2.4000000000000004,
+            0,
+            1.6
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-combo.glb",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "auto"
+        }
+      }
+    },
+    "s8": {
+      "name": "sword8",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.8,
+            0,
+            1.6
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-combo.glb",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "auto"
+        }
+      }
+    },
+    "s9": {
+      "name": "sword9",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.8,
+            0,
+            1.6
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-combo.glb",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "auto"
+        }
+      }
+    },
+    "s10": {
+      "name": "sword10",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            2.4000000000000004,
+            0,
+            1.6
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-combo.glb",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "auto"
+        }
+      }
+    },
+    "s11": {
+      "name": "sword11",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            4,
+            0,
+            1.6
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-combo.glb",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "auto"
+        }
+      }
+    },
+    "s12": {
+      "name": "sword12",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -4,
+            0,
+            3.2
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-combo.glb",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "auto"
+        }
+      }
+    },
+    "s13": {
+      "name": "sword13",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -2.4000000000000004,
+            0,
+            3.2
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-combo.glb",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "auto"
+        }
+      }
+    },
+    "s14": {
+      "name": "sword14",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.8,
+            0,
+            3.2
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-combo.glb",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "auto"
+        }
+      }
+    },
+    "s15": {
+      "name": "sword15",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.8,
+            0,
+            3.2
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-combo.glb",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "auto"
+        }
+      }
+    },
+    "s16": {
+      "name": "sword16",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            2.4000000000000004,
+            0,
+            3.2
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-combo.glb",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "auto"
+        }
+      }
+    },
+    "s17": {
+      "name": "sword17",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            4,
+            0,
+            3.2
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-combo.glb",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "auto"
+        }
+      }
+    },
+    "s18": {
+      "name": "sword18",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -4,
+            0,
+            4.800000000000001
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-combo.glb",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "auto"
+        }
+      }
+    },
+    "s19": {
+      "name": "sword19",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -2.4000000000000004,
+            0,
+            4.800000000000001
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-combo.glb",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "auto"
+        }
+      }
+    },
+    "s20": {
+      "name": "sword20",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.8,
+            0,
+            4.800000000000001
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-combo.glb",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "auto"
+        }
+      }
+    },
+    "s21": {
+      "name": "sword21",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.8,
+            0,
+            4.800000000000001
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-combo.glb",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "auto"
+        }
+      }
+    },
+    "s22": {
+      "name": "sword22",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            2.4000000000000004,
+            0,
+            4.800000000000001
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-combo.glb",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "auto"
+        }
+      }
+    },
+    "s23": {
+      "name": "sword23",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            4,
+            0,
+            4.800000000000001
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-combo.glb",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "auto"
+        }
+      }
+    }
+  }
+}

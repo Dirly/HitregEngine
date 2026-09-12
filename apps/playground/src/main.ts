@@ -1,3 +1,5 @@
+import { mountVolumePaint } from './volume-paint.js';
+import { startFramePump } from "./frame-pump.js";
 import { createWorldMapOverlay } from "./world-map.js";
 import CameraControls from "camera-controls";
 import * as THREE from "three/webgpu";
@@ -23,6 +25,7 @@ import {
   registerCoreAssetTypes,
   registerCoreComponents,
   registerCoreEvents,
+  cameraSchema,
   sceneDocSchema,
   SceneStore,
   validatePrefab,
@@ -50,6 +53,7 @@ import {
   type IslandReport,
   attachPhysicsDebug,
   attachSkeletonDebug,
+  setSkeletonDebugAttached,
   attachLightDebug,
   detachPhysicsDebug,
   detachLightDebug,
@@ -82,12 +86,19 @@ import {
   type MaterialData,
   type PathMeshSource,
   PortraitView,
+  ThirdPersonCameraRig,
+  type RigVec3,
 } from "@hitreg/render";
+
+/** The `camera` component and its authored rig block, straight off the schema. */
+type CameraComponentData = ReturnType<typeof cameraSchema.parse>;
+type CameraRigData = NonNullable<CameraComponentData["rig"]>;
 import { AudioSystem, type AudioComponentData } from "./audio-system.js";
 import { createVfx, makeVfxHost, warmVfx } from "./vfx-host.js";
-import { initPhysics, PhysicsSim } from "@hitreg/physics";
+import { initPhysics, Layers, PhysicsSim } from "@hitreg/physics";
 import {
   EventBus,
+  fitAction,
   InputService,
   registerBuiltinScripts,
   ScriptRegistry,
@@ -372,6 +383,11 @@ async function main(): Promise<void> {
   let loadedSceneContent = "";
   try {
     const preferredScene = (() => {
+      // A shareable authoring URL opens a specific scene without mutating the
+      // last-scene preference through browser internals. loadAssets resolves
+      // only exact ids present in the asset index; this is not a file path.
+      const requestedScene = new URLSearchParams(location.search).get("scene");
+      if (requestedScene) return requestedScene;
       try {
         return localStorage.getItem(LAST_SCENE_KEY);
       } catch {
@@ -802,6 +818,9 @@ async function main(): Promise<void> {
       return;
     }
     if (name === store.doc.name) return;
+    travelHold = null;
+    travelView = null;
+    travelLoadingEl.style.display = "none";
     persistScene(); // save where we were
     showSceneLoading(name);
     try {
@@ -975,8 +994,106 @@ async function main(): Promise<void> {
   // excludes ground that still reads visually as tan/sand or brown/moss, but
   // without shrinking to just the sliver right at the band's exact peak
   const GRASS_BLEND_THRESHOLD = 0.5;
-  /** Splat scratch for the voxel foliage gate — one buffer, not one per query. */
-  let foliageSplat = new Float32Array(0);
+  /**
+   * Terrain properties for the cover gate, on a COARSE lattice.
+   *
+   * The gate below asks the world field three questions per blade: `slope`,
+   * `height` and `splatAt`. Measured on this project's world, that is 25.4us
+   * per blade, and `slope` alone is 18 of them because it is FOUR height
+   * evaluations around the point. A grass layer at density 2.8 over a 42 m
+   * disc is ~20,000 of those, so one full re-place was 386ms of sampling
+   * amortised at 2ms a frame: over three seconds to place a field, and half a
+   * second for a mere recenter. That is the "the grass follows me a moment
+   * late" everybody sees while running.
+   *
+   * Height stays exact — a blade an interpolated hand's breadth off the
+   * ground is the one artefact nobody misses. But SLOPE and the SURFACE MIX
+   * are low-frequency by construction: they come from noise bands and patch
+   * blotches tens of metres across, and the terrain itself is a 2 m voxel
+   * isosurface, so there is nothing under 2 m for them to resolve. Sampling
+   * them on a 2 m lattice and bilinearly interpolating gives the same answer
+   * a hundred times cheaper — bilinear rather than nearest so the gate's edge
+   * around a dirt patch is still a curve, not a 2 m staircase.
+   *
+   * Net: 25.4us -> ~7us per blade, and the placement that was three seconds
+   * is well under one.
+   */
+  const FOLIAGE_PROBE = 2;
+  /**
+   * Fixed-size probe cache: ~9 discs' worth at the radii cover is authored
+   * with, in ONE flat buffer rather than a Float32Array per probe. Small
+   * allocations at this rate are what shows up in a profile as `off-loop`
+   * time, which is exactly the instrument that would not explain why.
+   */
+  const FOLIAGE_PROBE_LIMIT = 16384;
+  /** Probe slot per lattice cell, and the key each slot currently holds. */
+  const foliageProbeSlot = new Map<number, number>();
+  const foliageProbeKey = new Float64Array(FOLIAGE_PROBE_LIMIT).fill(NaN);
+  /** slope per slot, and the splat mix per slot (stride = the field's surface count). */
+  const foliageProbeSlope = new Float32Array(FOLIAGE_PROBE_LIMIT);
+  /** 1 when the ground at that probe is above water and its splat mix is meaningful. */
+  const foliageProbeDry = new Uint8Array(FOLIAGE_PROBE_LIMIT);
+  let foliageProbeSplat = new Float32Array(0);
+  let foliageProbeStride = 0;
+  let foliageProbeNext = 0;
+  /** Surface names resolved to palette indices ONCE per layer, not per blade. */
+  const foliageSurfaceIndex = new WeakMap<GrassData, Int32Array>();
+
+  /** Drop every cached probe — the ground under them is not the ground any more. */
+  function invalidateFoliageProbes(): void {
+    foliageProbeSlot.clear();
+    foliageProbeKey.fill(NaN);
+    foliageProbeNext = 0;
+  }
+
+  /** Slot holding the probe at lattice point (gx, gz), sampling it if absent. */
+  function foliageProbeAt(field: NonNullable<ReturnType<typeof getVoxelWorld>>, gx: number, gz: number): number {
+    // same exact-in-float64 packing of two int32s the cover cache uses
+    // stride FIRST: a cached slot indexes a buffer laid out for the palette
+    // it was sampled with, so a world with a different one invalidates it
+    if (foliageProbeStride !== field.surfaceCount) {
+      foliageProbeStride = field.surfaceCount;
+      foliageProbeSplat = new Float32Array(FOLIAGE_PROBE_LIMIT * foliageProbeStride);
+      invalidateFoliageProbes();
+    }
+    const key = gx * 4294967296 + (gz >>> 0);
+    const found = foliageProbeSlot.get(key);
+    if (found !== undefined) return found;
+    // FIFO over the slots: the working set is the disc around the camera, so
+    // the oldest slot is the ground furthest behind it, and a miss only costs
+    // a resample
+    const slot = foliageProbeNext;
+    foliageProbeNext = (foliageProbeNext + 1) % FOLIAGE_PROBE_LIMIT;
+    const evicted = foliageProbeKey[slot]!;
+    if (!Number.isNaN(evicted)) foliageProbeSlot.delete(evicted);
+    const x = gx * FOLIAGE_PROBE;
+    const z = gz * FOLIAGE_PROBE;
+    const steep = field.slope(x, z);
+    const y = field.height(x, z);
+    foliageProbeSlope[slot] = steep;
+    const dry = y > field.recipe.seaLevel;
+    foliageProbeDry[slot] = dry ? 1 : 0;
+    if (dry) {
+      // the vertex path's own normal convention, so the gate sees exactly the
+      // weights the terrain shader is blending at that point
+      field.splatAt(x, y, z, Math.sqrt(Math.max(0, 1 - steep * steep)), foliageProbeSplat, slot * foliageProbeStride);
+    }
+    foliageProbeKey[slot] = key;
+    foliageProbeSlot.set(key, slot);
+    return slot;
+  }
+
+  /** How much of one layer's named surfaces this probe's ground is, in [0, 1]. */
+  function foliageProbeWeight(slot: number, index: Int32Array): number {
+    if (foliageProbeDry[slot] === 0) return 0; // under water: no cover, and the mix means nothing
+    const base = slot * foliageProbeStride;
+    let weight = 0;
+    for (let i = 0; i < index.length; i++) {
+      const s = index[i]!;
+      if (s >= 0) weight += foliageProbeSplat[base + s] ?? 0;
+    }
+    return weight;
+  }
   /**
    * How far to sink a cover instance below the ground height at its centre.
    *
@@ -1032,20 +1149,46 @@ async function main(): Promise<void> {
     if (!activeVoxelWorld) return null;
     const field = getVoxelWorld(activeVoxelWorld);
     if (!field) return null;
-    const steep = field.slope(x, z);
+    // slope and the surface mix off the coarse probe lattice, bilinear; the
+    // ground height itself still exact — see FOLIAGE_PROBE
+    const px = x / FOLIAGE_PROBE;
+    const pz = z / FOLIAGE_PROBE;
+    const gx = Math.floor(px);
+    const gz = Math.floor(pz);
+    const fx = px - gx;
+    const fz = pz - gz;
+    const s00 = foliageProbeAt(field, gx, gz);
+    const s10 = foliageProbeAt(field, gx + 1, gz);
+    const s01 = foliageProbeAt(field, gx, gz + 1);
+    const s11 = foliageProbeAt(field, gx + 1, gz + 1);
+    const w00 = (1 - fx) * (1 - fz);
+    const w10 = fx * (1 - fz);
+    const w01 = (1 - fx) * fz;
+    const w11 = fx * fz;
+    const steep =
+      foliageProbeSlope[s00]! * w00 +
+      foliageProbeSlope[s10]! * w10 +
+      foliageProbeSlope[s01]! * w01 +
+      foliageProbeSlope[s11]! * w11;
     if (steep > data.slopeMax) return null;
     const ground = field.height(x, z) - foliageSink(data, steep);
     if (ground <= field.recipe.seaLevel) return null; // nothing grows in the sea
+    // Cover must respect the same town/road clearance as chunk scatter.
+    // Include the widest randomized card so its edge cannot enter a foundation.
+    if (field.featureClearance(x, z) < Math.max(0.5, data.bladeWidth * 0.65)) return null;
     if (data.surfaces.length === 0) return ground;
-    if (foliageSplat.length < field.surfaceCount) foliageSplat = new Float32Array(field.surfaceCount);
-    // the vertex path's own normal convention, so the gate sees exactly the
-    // weights the terrain shader is blending at that point
-    field.splatAt(x, ground, z, Math.sqrt(Math.max(0, 1 - steep * steep)), foliageSplat, 0);
-    let weight = 0;
-    for (const name of data.surfaces) {
-      const index = field.recipe.surfaces.findIndex((s) => s.name.toLowerCase() === name.toLowerCase());
-      if (index >= 0) weight += foliageSplat[index] ?? 0;
+    let index = foliageSurfaceIndex.get(data);
+    if (!index || index.length !== data.surfaces.length) {
+      index = Int32Array.from(data.surfaces, (name) =>
+        field.recipe.surfaces.findIndex((s) => s.name.toLowerCase() === name.toLowerCase()),
+      );
+      foliageSurfaceIndex.set(data, index);
     }
+    const weight =
+      foliageProbeWeight(s00, index) * w00 +
+      foliageProbeWeight(s10, index) * w10 +
+      foliageProbeWeight(s01, index) * w01 +
+      foliageProbeWeight(s11, index) * w11;
     return weight >= data.minSurface ? ground : null;
   }
   // doc-change telemetry for the context bridge: in-place patches vs full rebuilds
@@ -1215,12 +1358,15 @@ async function main(): Promise<void> {
       if (node.userData["physicsDebug"]) node.visible = visible;
     });
   }
+  // Skeleton helpers are a joint + label per bone, parented to ANIMATED
+  // bones — hidden-but-present they still cost the per-frame matrix walk
+  // (~5 ms for eight rigs at the mmo spawn), so off means out of the graph,
+  // and rigs are only decorated while the overlay is on.
   function refreshSkeletonDebugVisibility(): void {
     if (!built) return;
     const visible = gizmosOn() && settings.get().showSkeletons;
-    built.scene.traverse((node) => {
-      if (node.userData["skeletonDebug"]) node.visible = visible;
-    });
+    if (visible) attachSkeletonDebug(built.objects); // idempotent; decorates rigs loaded while off
+    setSkeletonDebugAttached(built.scene, visible);
   }
   function refreshLightDebugVisibility(): void {
     if (!built) return;
@@ -1391,10 +1537,7 @@ async function main(): Promise<void> {
       const bones = collectBones(root);
       if (bones.length > 0) {
         modelBones.set({ ...modelBones.get(), [entityId]: bones });
-        if (built) {
-          attachSkeletonDebug(built.objects); // idempotent — one call per async load
-          refreshSkeletonDebugVisibility();
-        }
+        if (built) refreshSkeletonDebugVisibility(); // decorates this rig only if the overlay is on
       }
       // late-loading static models (rocks, trees) must block the camera too
       if (playMode.get() !== "edit") refreshCameraColliders();
@@ -1407,8 +1550,18 @@ async function main(): Promise<void> {
     particles.clear();
     billboards.clear();
     grass.clear();
-    built = buildScene(lastExpanded, sceneBuildOptions);
-    rebuildStaticBatch();
+    const endBuild = profiler.span("scene.build", `${Object.keys(lastExpanded.entities).length} entities`);
+    try {
+      built = buildScene(lastExpanded, sceneBuildOptions);
+    } finally {
+      endBuild();
+    }
+    const endBatch = profiler.span("scene.batch", "static meshes");
+    try {
+      rebuildStaticBatch();
+    } finally {
+      endBatch();
+    }
     skyDomeMesh = null;
     built.scene.traverse((node) => {
       if (!skyDomeMesh && node.userData["skyDome"] === true) skyDomeMesh = node;
@@ -1467,6 +1620,7 @@ async function main(): Promise<void> {
     // move the grass on it instead of leaving it floating.
     terrainTiles = [];
     grass.invalidateGround();
+    invalidateFoliageProbes();
     for (const [id, entity] of Object.entries(expanded.entities)) {
       const sub = entity.components["subscene"] as SubsceneData | undefined;
       if (sub) subscenes.push({ id, world: worlds.get(id)!, data: sub });
@@ -1640,6 +1794,7 @@ async function main(): Promise<void> {
   const pathThickness = observable(0);
   const pathRadius = observable(0.15);
   const thumbnails = observable<Record<string, string>>({});
+  const thumbnailRequests = observable<string[]>([]);
   const dockSizes = createDockSizes();
   const assetsVersion = observable(0);
   const editorTools = observable<ToolDefinition[]>([]);
@@ -1812,6 +1967,8 @@ async function main(): Promise<void> {
     },
   });
 
+  mountVolumePaint({canvas,camera,doc:()=>store.doc,objects:()=>built?.objects??new Map(),editing:()=>playMode.get()==='edit'});
+
   new TerrainTool({
     canvas,
     camera,
@@ -1901,6 +2058,7 @@ async function main(): Promise<void> {
     pathThickness,
     pathRadius,
     thumbnails,
+    thumbnailRequests,
     dockSizes,
     assetsVersion,
     modelBones,
@@ -2266,6 +2424,14 @@ async function main(): Promise<void> {
         // the layer rides along with the base clip: without it a peer sees the
         // gait but never the cast that is playing over it
         const animL = syncAnim ? (animations.layerClip(id) ?? undefined) : undefined;
+        const animR = syncAnim ? animations.speedOf(id) : undefined;
+        // seconds left of a one-shot action, so a peer can fit the clip to it
+        const until = (object.userData as { actionUntil?: number }).actionUntil;
+        const nowSeconds = (scripts?.now() ?? 0) / 1000;
+        const animD =
+          syncAnim && typeof until === "number" && until > nowSeconds
+            ? r3(until - nowSeconds)
+            : undefined;
         out.push({
           id,
           p: [r3(netEntityPos.x), r3(netEntityPos.y), r3(netEntityPos.z)],
@@ -2277,6 +2443,8 @@ async function main(): Promise<void> {
           ],
           ...(anim ? { anim } : {}),
           ...(animL ? { animL } : {}),
+          ...(animR !== undefined ? { animR } : {}),
+          ...(animD !== undefined ? { animD } : {}),
           relevancy: netObj?.relevancy ?? "always",
           radius: netObj?.radius ?? 50,
           sendEvery: netObj?.sendEvery ?? 1,
@@ -2535,9 +2703,27 @@ async function main(): Promise<void> {
    * until the ground under it has a collider (the destination cell is
    * streamed on demand, and a dynamic body dropped into a cell with no
    * collider yet falls straight through the world — the same trap as a
-   * buried spawn, see docs/voxel-worlds.md), or until `until` passes.
+   * buried spawn, see docs/voxel-worlds.md). A timeout must never release a
+   * player into missing ground.
    */
-  let travelHold: { id: string; pos: [number, number, number]; until: number } | null = null;
+  let travelHold: { id: string; pos: [number, number, number] } | null = null;
+  let travelView: { x: number; z: number; started: number } | null = null;
+  const travelLoadingEl = document.createElement("div");
+  travelLoadingEl.setAttribute("role", "status");
+  travelLoadingEl.style.cssText = "position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:#0b0e14;color:#e6edf3;font:600 15px ui-monospace,monospace;z-index:999;pointer-events:none";
+  document.body.append(travelLoadingEl);
+  playMode.subscribe(() => {
+    if (playMode.get() === "edit") {
+      travelHold = null;
+      travelView = null;
+    }
+    travelLoadingEl.style.display = playMode.get() === "playing" && travelView ? "flex" : "none";
+  });
+  function beginTravelView(x: number, z: number, label = "Loading destination terrain…"): void {
+    travelView = { x, z, started: performance.now() };
+    travelLoadingEl.textContent = label;
+    travelLoadingEl.style.display = "flex";
+  }
   const worldMap = createWorldMapOverlay({
     world: () => resolveVoxelWorld(lastExpanded)?.data.world ?? null,
     position: () => {
@@ -2565,13 +2751,15 @@ async function main(): Promise<void> {
         // landing from a short drop beats spawning intersected with the ground
         const pos: [number, number, number] = [x, y + 2.5, z];
         sim.setPosition(playerId, pos);
-        travelHold = { id: playerId, pos, until: performance.now() + 8000 };
+        travelHold = { id: playerId, pos };
+        beginTravelView(x, z);
         clientLog(`travel: ${playerId} -> ${x.toFixed(0)}, ${y.toFixed(0)}, ${z.toFixed(0)}`);
         return;
       }
       // editor / paused: look at the spot from a little above and to one side;
       // streaming follows the orbit target, so the world fills in around it
       void controls.setLookAt(x + 40, y + 35, z + 40, x, y + 1, z, false);
+      beginTravelView(x, z);
       clientLog(`travel: camera -> ${x.toFixed(0)}, ${y.toFixed(0)}, ${z.toFixed(0)}`);
     },
   });
@@ -2695,23 +2883,84 @@ async function main(): Promise<void> {
   let eventBus: EventBus | null = null;
   let followTargetId: string | null = null;
   let followRigMode: "follow" | "chase" | null = null;
-  let followRigDistance = 8;
-  let followRigHeight = 1;
+  /** The authored rig, as read off the active camera's `camera.rig`. */
+  let followRigData: CameraRigData | null = null;
   /**
-   * Third-person camera distance the PLAYER asked for with the wheel. Seeded
-   * from the active camera's `rig.distance` on entering play (which the follow
-   * rig otherwise ignored entirely) and only ever SHORTENED by collision —
-   * clearing an obstruction returns to exactly this, so the zoom level a
-   * player picks survives squeezing past a tree.
+   * The play-mode third-person camera. It owns `camera` outright while play is
+   * running — pivot, orbit, boom, collision — and camera-controls stands down
+   * (`rigDrivesCamera`). That single ownership IS the fix for the town: the
+   * previous arrangement had camera-controls smooth-damping the orbit target
+   * while this file measured clearance from the player's true position, two
+   * origins up to two metres apart at a sprint, so a boom the sweep had proved
+   * clear was applied about a pivot that far behind — straight through the
+   * housefront. See ThirdPersonCameraRig's header. The published runtime
+   * (play.ts) drives the same class with the same sweep.
    */
-  let playCamDistance = 8;
-  /** Never end up inside the character's own head. */
-  const PLAY_CAM_MIN = 1.6;
+  const cameraRig = new ThirdPersonCameraRig();
+  let rigDrivesCamera = false;
+  /**
+   * The rig block last pushed into the rig, as JSON.
+   *
+   * `applyAuthored` reseeds the framing distance and the pitch, which is right
+   * when the scene's camera changes and wrong at any other time:
+   * `resolveFollowTarget` also runs mid-session (a server spawning your body),
+   * and re-applying there yanked the camera back to the authored angle and
+   * threw away the zoom the player had chosen.
+   */
+  let appliedRigKey: string | null = null;
+  /** Body hidden because the boom is inside it; restored when it backs off. */
+  let rigHiddenTarget: THREE.Object3D | null = null;
+  const PLAY_CAM_MIN = 0.25;
   const PLAY_CAM_MAX = 14;
-  /** Probe sphere radius — the camera's near plane has width, a ray doesn't. */
-  const CAM_PROBE_RADIUS = 0.3;
-  /** Stop this far short of whatever the probe hit. */
-  const CAM_SKIN = 0.25;
+  /**
+   * What a camera boom is allowed to be stopped by: the static world and
+   * anything a scene has deliberately marked as a blocker. NOT actors, and not
+   * dynamic props — the old sweep ran against `Layers.ALL`, so a townsfolk NPC
+   * wandering behind the player slammed the camera into the back of their head
+   * once per passer-by, and a dropped barrel did the same.
+   */
+  const CAMERA_BOOM_LAYERS = Layers.WORLD | Layers.TERRAIN | Layers.CAMERA_BLOCKER;
+  /**
+   * The rig's collision query. Physics rather than meshes for two reasons that
+   * both still hold: a mesh list only ever sees the scene doc, so streamed
+   * chunk terrain and every scattered tree were invisible to it; and it
+   * brute-force raycasts every triangle of every listed mesh per frame, which
+   * profiling once pinned at 70% of frame time. One broadphase sweep sees
+   * exactly what the player can collide with.
+   */
+  function cameraBoomSweep(radius: number, from: RigVec3, to: RigVec3): number | null {
+    if (!sim || !followTargetId) return null;
+    // exclude the target: the sweep starts inside its own capsule, and a shape
+    // stopped by itself reports distance 0 — the camera jams in the head
+    const hit = sim.spherecast(radius, from, to, {
+      exclude: [followTargetId],
+      layers: CAMERA_BOOM_LAYERS,
+    });
+    return hit ? hit.distance : null;
+  }
+  /** Push an authored rig in, but only when it is actually new. */
+  function applyRigIfChanged(rig: CameraRigData): void {
+    const key = JSON.stringify(rig);
+    if (key === appliedRigKey) return;
+    appliedRigKey = key;
+    cameraRig.applyAuthored(rig);
+  }
+  /**
+   * Hide the followed body when the boom is inside it. Squeezing into a
+   * doorway used to render the inside of the character's head; the rig stops
+   * at `minDistance` and the host takes the model out of the shot.
+   */
+  function syncRigTargetVisibility(): void {
+    const wanted =
+      rigDrivesCamera && cameraRig.targetObscured && followTargetId
+        ? (built.objects.get(followTargetId) ?? null)
+        : null;
+    if (rigHiddenTarget && rigHiddenTarget !== wanted) rigHiddenTarget.visible = true;
+    rigHiddenTarget = wanted;
+    // set every frame, not just on change: a scene rebuild restores `visible`
+    // from the entity doc and would put the head back in front of the lens
+    if (wanted) wanted.visible = false;
+  }
   function startPlaySession(): void {
     sim?.free();
     scripts?.dispose();
@@ -2750,8 +2999,9 @@ async function main(): Promise<void> {
       viewForward,
       localPlayer: () => localPlayerId(),
       setAnimation: (entityId, clip, fade, opts) =>
-        animations.play(entityId, clip, fade ?? 0.3, opts?.loop ?? true),
+        animations.play(entityId, clip, fade ?? 0.3, opts?.loop ?? true, opts?.restart ?? false),
       animationClips: (entityId) => animations.clipNames(entityId),
+      animationDuration: (entityId, clip) => animations.clipDuration(entityId, clip),
       setAnimationSpeed: (entityId, multiplier) => animations.setSpeed(entityId, multiplier),
       setAnimationLayer: (entityId, clip, opts) => animations.playLayer(entityId, clip, opts),
       clearAnimationLayer: (entityId, fade) => animations.clearLayer(entityId, fade ?? 0.2),
@@ -2814,12 +3064,7 @@ async function main(): Promise<void> {
     followTargetId = null;
     followRigMode = null;
     for (const entity of Object.values(lastExpanded.entities)) {
-      const cam = entity.components["camera"] as
-        | {
-            active?: boolean;
-            rig?: { mode: string; targetTag: string; distance?: number; height?: number };
-          }
-        | undefined;
+      const cam = entity.components["camera"] as CameraComponentData | undefined;
       if (cam?.active && (cam.rig?.mode === "follow" || cam.rig?.mode === "chase")) {
         const tag = cam.rig.targetTag;
         const self = netSelfId ? netRuntimeDocs.get(netSelfId) : undefined;
@@ -2829,8 +3074,8 @@ async function main(): Promise<void> {
           [...netRuntimeDocs].find(([, e]) => e.tags.includes(tag))?.[0] ??
           null;
         followRigMode = cam.rig.mode as "follow" | "chase";
-        followRigDistance = cam.rig.distance ?? 8;
-        followRigHeight = cam.rig.height ?? 1;
+        followRigData = cam.rig;
+        applyRigIfChanged(cam.rig);
         break;
       }
     }
@@ -2939,6 +3184,38 @@ async function main(): Promise<void> {
   store.subscribe(() => {
     if (sim) startPlaySession(); // edits during play restart the session on the new doc
   });
+  /**
+   * Entering play is a TELEPORT to wherever the player entity stands.
+   *
+   * Streaming is focus-driven, and until the first frame of play the focus was
+   * the editor's orbit target — which is usually not where the player body is,
+   * and in a fresh session is nowhere at all. So pressing play dropped the
+   * body into a world whose ground was still being generated: you fell, or you
+   * stood in a hole watching cells pop in around you for several seconds.
+   * Fast travel already solved exactly this — pin the body, hold the view, and
+   * wait for `isLandingReady` + `isViewReady` — so play uses the same
+   * mechanism rather than a second one that would have to be debugged
+   * separately.
+   *
+   * Deliberately not gated on `netServerUrl`: a dedicated server owns the body
+   * and will place it, but the local client still has to have the terrain
+   * before it can draw anything, and the view hold costs nothing if the ground
+   * is already resident (the checks pass on the first frame and it clears).
+   */
+  function holdForPlayLanding(): void {
+    const playerId = localPlayerId();
+    const object = playerId ? built.objects.get(playerId) : null;
+    if (!object) return;
+    const p = object.getWorldPosition(new THREE.Vector3());
+    beginTravelView(p.x, p.z, "Loading terrain around the player…");
+    // Pin the body only where we own it. Under a dedicated server the position
+    // is the server's to set, and freezing it locally would fight the very
+    // updates being waited for.
+    if (sim && playerId && !netServerUrl) travelHold = { id: playerId, pos: [p.x, p.y, p.z] };
+    // stream around the player NOW rather than a frame later at the old focus
+    chunkManager.update(p.x, p.z);
+  }
+
   // stop restores the scene from the document — sim/script state is runtime-only
   playMode.subscribe(refreshPhysicsDebugVisibility);
   playMode.subscribe(refreshSkeletonDebugVisibility);
@@ -2952,13 +3229,13 @@ async function main(): Promise<void> {
     } else if (mode === "playing" && !sim) {
       startPlaySession();
     }
+    if (mode === "playing") holdForPlayLanding();
   });
 
   // Fortnite-style mouse look: play mode captures the pointer, so moving the
   // mouse IS the camera. Esc (browser-enforced) or leaving play releases it;
   // clicking the game recaptures. camera-controls' own pointer handling is
   // parked while locked so drags don't double-apply.
-  const editorMaxPolar = controls.maxPolarAngle;
   const MOUSE_LOOK_SPEED = 0.0025; // rad per px
   function syncPointerLockState(): void {
     const locked = document.pointerLockElement === canvas;
@@ -2993,7 +3270,20 @@ async function main(): Promise<void> {
       input.addMouseDelta(e.movementX, e.movementY);
       return;
     }
+    if (rigDrivesCamera) {
+      cameraRig.addLook(e.movementX, e.movementY);
+      return;
+    }
     void controls.rotate(-e.movementX * MOUSE_LOOK_SPEED, -e.movementY * MOUSE_LOOK_SPEED, false);
+  });
+  // Paused play keeps the rig on the camera but releases the pointer, so
+  // left-drag has to orbit the way camera-controls used to — otherwise
+  // pausing to look at something leaves the view frozen behind the character.
+  // Suppressed mid-gizmo, exactly as camera-controls was.
+  canvas.addEventListener("pointermove", (e) => {
+    if (!rigDrivesCamera || document.pointerLockElement === canvas) return;
+    if (gizmoDragging || flyLookMode || (e.buttons & 1) === 0) return;
+    cameraRig.addLook(e.movementX, e.movementY);
   });
   canvas.addEventListener("mousedown", () => {
     if (playMode.get() === "playing" && document.pointerLockElement !== canvas) {
@@ -3019,45 +3309,63 @@ async function main(): Promise<void> {
       // Sized so a notch is a nudge (~0.7m) and crossing the whole band takes a
       // deliberate scroll, not two clicks.
       const step = e.deltaMode === 0 ? e.deltaY * 0.006 : e.deltaY * 0.25;
-      playCamDistance = Math.min(PLAY_CAM_MAX, Math.max(PLAY_CAM_MIN, playCamDistance + step));
+      cameraRig.addZoom(step);
     },
     { passive: false },
   );
-  const editorMinDistance = controls.minDistance;
-  const editorMaxDistance = controls.maxDistance;
   playMode.subscribe(() => {
     if (playMode.get() === "playing") {
-      // How far the camera may swing BELOW the pivot, i.e. how far up the
-      // player can look. 1.45 rad (7° above level) made the sky unreachable;
-      // the ground is no reason to cap it, because the follow rig resolves the
-      // camera against the physics colliders every frame
-      // (updateFollowCamDistance) and simply pulls in when terrain is in the
-      // way. 2.4 rad lets the player look ~45° up.
-      controls.maxPolarAngle = 2.4;
-      controls.minDistance = PLAY_CAM_MIN; // collision may squeeze in this far
-      controls.maxDistance = PLAY_CAM_MAX;
-      // the rig's authored `distance` is the game's framing; the wheel moves
-      // it from there. (Before this it was a hardcoded 8 and rig.distance was
-      // silently ignored for the follow rig.)
-      playCamDistance = Math.min(PLAY_CAM_MAX, Math.max(PLAY_CAM_MIN, followRigDistance));
-      void controls.dollyTo(playCamDistance, true);
+      // The rig takes the camera from here: the authored `camera.rig` is its
+      // framing, and it adopts the orbit the editor camera was already sitting
+      // at so pressing play does not cut. Its own pitch band replaces
+      // camera-controls' polar limits — the boom is resolved against the
+      // physics world every frame, so pointing at the ground needs no cap.
+      if (followRigData) {
+        // yaw first, from wherever the editor camera was looking, so play does
+        // not start with a spin; then the authored rig, whose pitch is the
+        // game's framing and must win over whatever the editor was pointing at
+        const target = followTargetId ? built.objects.get(followTargetId) : null;
+        if (target && followRigData.mode !== "chase") {
+          const p = target.getWorldPosition(followPos);
+          cameraRig.alignFromCamera(camera, {
+            x: p.x,
+            y: p.y + (followRigData.pivotHeight ?? 1.6),
+            z: p.z,
+          });
+        }
+        appliedRigKey = JSON.stringify(followRigData);
+        cameraRig.applyAuthored(followRigData);
+        cameraRig.reset();
+      }
       // the play-button click is our user gesture, but this fires from a
       // store subscription (async relative to that click), so the browser
       // can still see it as "document not focused" and reject — best-effort,
       // the mousedown handler above retries on the player's next click
       void canvas.requestPointerLock()?.catch(() => undefined);
     } else {
-      controls.maxPolarAngle = editorMaxPolar;
-      controls.minDistance = editorMinDistance;
-      controls.maxDistance = editorMaxDistance;
+      // hand the pose back: camera-controls has been parked all session and
+      // still holds the orbit from before play, which would snap the editor
+      // camera across the world on the first drag
+      if (rigDrivesCamera) {
+        const pivot = cameraRig.getPivot(followPos);
+        const eye = camera.position;
+        void controls.setLookAt(eye.x, eye.y, eye.z, pivot.x, pivot.y, pivot.z, false);
+        rigDrivesCamera = false;
+        syncRigTargetVisibility();
+      }
       if (document.pointerLockElement === canvas) document.exitPointerLock();
     }
     refreshCameraColliders();
   });
   rebuild();
 
-  void renderThumbnails({ assets, registry, renderer, backend, thumbnails });
-  assetsVersion.subscribe(() => void renderThumbnails({ assets, registry, renderer, backend, thumbnails }));
+  const refreshThumbnails = () => void renderThumbnails({
+    assets, registry, renderer, backend, thumbnails, thumbnailRequests,
+    span: (name, detail) => profiler.span(name, detail),
+  });
+  refreshThumbnails();
+  thumbnailRequests.subscribe(refreshThumbnails);
+  assetsVersion.subscribe(refreshThumbnails);
 
   // A live material-file edit: patch the already-built material instance in
   // place when the change is a plain property tweak (color/PBR scalars on a
@@ -3070,7 +3378,7 @@ async function main(): Promise<void> {
     const material = built.materials.get(id);
     if (!material) return false;
     if (!patchMaterial(material, data as MaterialData)) return false;
-    void renderThumbnails({ assets, registry, renderer, backend, thumbnails });
+    refreshThumbnails();
     return true;
   }
 
@@ -3306,6 +3614,17 @@ async function main(): Promise<void> {
         .slice(-14)
         .map((m) => `${m.label}${m.ms > 0 ? ` ${m.ms.toFixed(0)}ms` : ""}${m.detail ? ` (${m.detail})` : ""}`),
       gpuTiming: renderer.gpuTimingActive,
+      uploads: renderer.uploadProbe?.snapshot() ?? null,
+      uniformUploads: renderer.uniformUploadStats,
+      // Keep benchmark conditions with the timings: different backends,
+      // hidden tabs and drawing resolutions are not comparable FPS samples.
+      environment: {
+        userAgent: navigator.userAgent,
+        visibility: document.visibilityState,
+        backend,
+        canvas: { width: canvas.width, height: canvas.height },
+        devicePixelRatio: window.devicePixelRatio,
+      },
     };
   }
 
@@ -3325,6 +3644,11 @@ async function main(): Promise<void> {
     profiler.setCounter("triangles", info.render.triangles);
     profiler.setCounter("geometries", info.memory.geometries);
     profiler.setCounter("textures", info.memory.textures);
+    const uploads = renderer.uploadProbe?.lastFrame;
+    if (uploads) {
+      profiler.setCounter("gpuUploadCalls", uploads.calls);
+      profiler.setCounter("gpuUploadBytes", uploads.bytes);
+    }
     // program count is not on the WebGPU Info type but is present at runtime;
     // a climbing count during play means shaders are still compiling, which is
     // the classic "first lap through a level stutters" cause
@@ -3369,6 +3693,9 @@ async function main(): Promise<void> {
       // driving it along a path is a repeatable streaming benchmark
       controls,
       camera,
+      // the play-mode third-person rig: a headless session can read the
+      // resolved boom and drive mouse-look without a pointer lock
+      cameraRig,
       // live, not captured: the sim is created on play and replaced on scene load
       get sim() {
         return sim;
@@ -3381,6 +3708,10 @@ async function main(): Promise<void> {
       anim: (id: string) => ({
         clip: animations.currentClip(id),
         layer: animations.layerClip(id),
+        // the rates matter as much as the names: a character sliding along the
+        // ground is a wrong RATE, and reading the clip alone cannot see it
+        rate: animations.speedOf(id),
+        layerRate: animations.layerSpeedOf(id),
         clips: animations.clipNames(id),
       }),
       cloth: (id: string) => cloth.swayOf(id)?.toArray() ?? null,
@@ -3440,59 +3771,6 @@ async function main(): Promise<void> {
   }
 
   const followPos = new THREE.Vector3();
-  const camPivot = new THREE.Vector3();
-  const camDir = new THREE.Vector3();
-  /**
-   * Third-person camera collision, run against the PHYSICS colliders rather
-   * than camera-controls' own dolly-collision.
-   *
-   * Two reasons it has to be physics and not meshes. Correctness: the mesh
-   * path walks `lastExpanded` — the SCENE doc — so streamed chunk entities
-   * (all the voxel terrain, every scattered tree) were never in
-   * `colliderMeshes` at all, and the camera swung straight through hillsides
-   * and trunks. Cost: that path brute-force raycasts every triangle of every
-   * mesh in the list each frame with no acceleration structure, which
-   * profiling had already pinned as the dominant per-frame cost once terrain
-   * got large. One spherecast reuses Rapier's broadphase and sees exactly the
-   * geometry the player can actually collide with.
-   *
-   * A SPHERE, not a ray: the camera has a near plane with width, so a ray
-   * grazing a trunk still leaves the corner of the view inside it.
-   */
-  function updateFollowCamDistance(px: number, py: number, pz: number, dt: number): void {
-    camPivot.set(px, py, pz);
-    // pivot -> camera is wherever mouse-look has orbited to this frame
-    camDir.copy(camera.position).sub(camPivot);
-    if (camDir.lengthSq() < 1e-6) return;
-    camDir.normalize();
-
-    let allowed = playCamDistance;
-    if (sim && followTargetId) {
-      // exclude the target: the sweep starts inside its own capsule, and a
-      // shape stopped by itself reports distance 0 and jams the camera in the
-      // character's head every frame
-      const hit = sim.spherecast(
-        CAM_PROBE_RADIUS,
-        [px, py, pz],
-        [
-          px + camDir.x * playCamDistance,
-          py + camDir.y * playCamDistance,
-          pz + camDir.z * playCamDistance,
-        ],
-        { exclude: [followTargetId] },
-      );
-      if (hit) allowed = Math.max(PLAY_CAM_MIN, hit.distance - CAM_SKIN);
-    }
-
-    // Snap IN immediately, ease OUT. A single frame with the camera inside a
-    // wall shows the player through the world, so intrusion cannot be eased;
-    // but easing the recovery stops the camera flinging outward every time it
-    // clears a tree trunk.
-    const current = controls.distance;
-    const next =
-      allowed < current ? allowed : current + (allowed - current) * Math.min(1, dt * 6);
-    void controls.dollyTo(next, false);
-  }
   // camera colliders are now distance-limited (see refreshCameraColliders) —
   // must stay synced with camera movement, not just scene/model-load events;
   // throttled by distance (like chunkManager's cell-boundary check) since the
@@ -3501,11 +3779,8 @@ async function main(): Promise<void> {
   let lastColliderRefreshPos: THREE.Vector3 | null = null;
   const COLLIDER_REFRESH_DIST_SQ = 20 * 20;
   const foliageLodCameraPos = new THREE.Vector3();
-  const chaseForward = new THREE.Vector3();
-  const chaseUpAxis = new THREE.Vector3(0, 1, 0);
-  const chaseOffset = new THREE.Vector3();
-  const chaseEye = new THREE.Vector3();
-  const chaseYawQuat = new THREE.Quaternion();
+  /** Scratch: the followed body's world rotation, which a chase rig sits behind. */
+  const rigTargetQuat = new THREE.Quaternion();
   // render-side smoothing: bodies step at the fixed rate, frames don't — draw
   // them interpolated between the last two sim states (scripts still read the
   // exact stepped state inside fixedUpdate)
@@ -3649,28 +3924,27 @@ async function main(): Promise<void> {
       }
       profiler.end(); // interpolate
       profiler.begin("follow-cam");
-      // follow cam: keep the orbit center on the target; the pointer-lock
-      // mouse look (play) or drag-orbit (paused) supplies the rotation.
-      // chase cam: rigid third-person — camera sits behind the target's own
-      // current YAW (roll/pitch ignored so it never tips with the vehicle) at
-      // rig.distance/height; the mouse is free for a script to steer instead.
-      if (playMode.get() !== "edit" && followTargetId) {
-        const target = built.objects.get(followTargetId);
-        if (target) {
-          const p = target.getWorldPosition(followPos);
-          if (followRigMode === "chase") {
-            chaseForward.set(0, 0, -1).applyQuaternion(target.quaternion);
-            const yaw = Math.atan2(-chaseForward.x, -chaseForward.z);
-            chaseYawQuat.setFromAxisAngle(chaseUpAxis, yaw);
-            chaseOffset.set(0, followRigHeight, followRigDistance).applyQuaternion(chaseYawQuat);
-            chaseEye.copy(p).add(chaseOffset);
-            void controls.setLookAt(chaseEye.x, chaseEye.y, chaseEye.z, p.x, p.y + 1, p.z, false);
-          } else {
-            void controls.moveTo(p.x, p.y + 1, p.z, true);
-            updateFollowCamDistance(p.x, p.y + 1, p.z, dt);
-          }
-        }
+      // One rig for both modes. It writes `camera` directly — pivot, orbit,
+      // boom and collision resolved together against a single origin — and
+      // camera-controls is parked for as long as it is driving (see
+      // rigDrivesCamera, and controls.update below).
+      const rigTarget =
+        playMode.get() !== "edit" && followTargetId ? built.objects.get(followTargetId) : null;
+      rigDrivesCamera = rigTarget !== null;
+      if (rigTarget) {
+        rigTarget.getWorldPosition(followPos);
+        // A hidden body still reports its transform, so the rig keeps
+        // following the character it is standing inside of.
+        rigTarget.getWorldQuaternion(rigTargetQuat);
+        cameraRig.update(
+          dt,
+          followPos,
+          camera,
+          followRigData?.collision === false ? null : cameraBoomSweep,
+          rigTargetQuat,
+        );
       }
+      syncRigTargetVisibility();
       // Foliage that blocks the shot dissolves (mesh source `cameraFade`).
       // Hooked here because this is where "who the camera is following" is
       // already resolved, and it is OFF in edit mode on purpose: dissolving
@@ -3697,15 +3971,18 @@ async function main(): Promise<void> {
       // a fast-travel in flight: pin the body until the ground has arrived
       if (travelHold) {
         const hold = travelHold;
-        if (!sim || playMode.get() !== "playing" || performance.now() > hold.until) {
+        if (!sim || playMode.get() === "edit") {
           travelHold = null;
         } else {
           // cast beside the body, not through it, so its own capsule cannot
           // answer for the ground; a hit anywhere below means the cell's
           // collider is in and the body may fall the last metre on its own
           const ground = sim.raycast([hold.pos[0] + 1.5, hold.pos[1] + 20, hold.pos[2]], [0, -1, 0], 60, { exclude: [hold.id] });
-          if (ground) travelHold = null;
-          else sim.setPosition(hold.id, hold.pos);
+          if (ground && chunkManager.isLandingReady(hold.pos[0], hold.pos[2]) && chunkManager.isViewReady()) travelHold = null;
+          else {
+            sim.setPosition(hold.id, hold.pos);
+            sim.setLinvel(hold.id, [0, 0, 0]);
+          }
         }
       }
       // chunk streaming follows the player in play mode, the fly-cam in edit
@@ -3739,6 +4016,15 @@ async function main(): Promise<void> {
         }
         profiler.end();
       }
+      if (travelView) {
+        const elapsed = performance.now() - travelView.started;
+        if (elapsed > 300 && !travelHold && chunkManager.isLandingReady(travelView.x, travelView.z) && chunkManager.isViewReady()) {
+          travelView = null;
+          travelLoadingEl.style.display = "none";
+        } else if (elapsed > 15000) {
+          travelLoadingEl.textContent = "Still loading terrain — use M to choose another destination, or stop play.";
+        }
+      }
       if (
         playMode.get() !== "edit" &&
         (!lastColliderRefreshPos || lastColliderRefreshPos.distanceToSquared(camera.position) > COLLIDER_REFRESH_DIST_SQ)
@@ -3751,8 +4037,9 @@ async function main(): Promise<void> {
       profiler.begin("camera");
       updateFlyCam(dt);
       // while flying, the fly-cam owns the camera — camera-controls' update
-      // would overwrite our position/rotation from its own internal state
-      if (!flyLookMode) controls.update(dt);
+      // would overwrite our position/rotation from its own internal state, and
+      // the same is true frame-for-frame of the play rig
+      if (!flyLookMode && !rigDrivesCamera) controls.update(dt);
       // camera priority in play mode: script-switched cam > rigless active scene
       // cam > editor/follow camera. Edit mode always uses the editor camera.
       let renderCamera: THREE.Camera = camera;
@@ -3786,6 +4073,7 @@ async function main(): Promise<void> {
       if (field !== foliageField) {
         foliageField = field;
         grass.invalidateGround();
+        invalidateFoliageProbes();
       }
       grass.update(renderCamera, sampleTerrainHeight, sampleFoliageGround);
       profiler.end();
@@ -3828,6 +4116,12 @@ async function main(): Promise<void> {
   });
 
   setInterval(() => {
+    // Scene loading must finish even when the optional stats HUD is hidden.
+    if (sceneSwitchPending) {
+      const elapsed = performance.now() - sceneSwitchStartedAt;
+      const pending = chunkManager.stats.loading + subsceneManager.stats.loading + gltfLoadingCount();
+      if ((elapsed > 300 && pending === 0) || elapsed > SCENE_SWITCH_TIMEOUT_MS) hideSceneLoading();
+    }
     // stats HUD is a view-only overlay toggled from the toolbar / H key
     const statsOn = settings.get().showStats;
     hud.style.display = statsOn ? "" : "none";
@@ -3861,14 +4155,6 @@ async function main(): Promise<void> {
     // for a while; surface all three as one number, impossible to miss.
     const loadingCount = chunkStats.loading + subStats.loading + gltfLoadingCount();
     hud.style.color = loadingCount > 0 ? "#ffd633" : "";
-    if (sceneSwitchPending) {
-      const elapsed = performance.now() - sceneSwitchStartedAt;
-      // a brief grace period before "loadingCount === 0" counts as "done" —
-      // chunk/model loads kicked off by the rebuild take a beat (an
-      // animation frame or two) to actually register as in-flight; checking
-      // too early would read as "nothing loading" before anything's started
-      if ((elapsed > 300 && loadingCount === 0) || elapsed > SCENE_SWITCH_TIMEOUT_MS) hideSceneLoading();
-    }
     hud.textContent =
       (loadingCount > 0 ? `⏳ loading: ${loadingCount}\n` : "") +
       `backend: ${backend}\n` +
@@ -3898,7 +4184,16 @@ async function main(): Promise<void> {
       // p95, not the mean: the HUD's job is to make a hitch visible, and a
       // mean is a machine for hiding one. The three worst scopes are named
       // inline so the common case never needs the profiler window at all.
-      `fps ${perf.fps.toFixed(0)}  ·  frame p50 ${perf.intervalMs.p50.toFixed(1)} / ` +
+      // TWO fps numbers, because one of them alone always reads as wrong.
+      // `avg` is wall-clock frames over the profiler's ~600-frame window
+      // (~8s), which is the honest throughput and the one a hitch drags down;
+      // `p50` is 1000/median, which is what the frame in front of you feels
+      // like. They agree on a steady scene and diverge hard while chunks
+      // stream — measured 52 avg against 70 p50 with 4% of frames janky — so
+      // the GAP between them is the stutter signal, and printing only the
+      // mean beside a MEDIAN frame time is what made the counter look broken.
+      `fps ${perf.fps.toFixed(0)} avg · ${(perf.intervalMs.p50 > 0 ? 1000 / perf.intervalMs.p50 : 0).toFixed(0)} p50` +
+      `  ·  frame p50 ${perf.intervalMs.p50.toFixed(1)} / ` +
       `p95 ${perf.intervalMs.p95.toFixed(1)} / max ${perf.intervalMs.max.toFixed(1)}ms\n` +
       `  js ${perf.frameMs.avg.toFixed(1)}  ·  ` +
       (perf.gpuMs ? `gpu ${perf.gpuMs.avg.toFixed(1)}  ·  ` : "") +
@@ -3907,13 +4202,7 @@ async function main(): Promise<void> {
       `mode: ${mode}  ·  ${hint}  ·  Shift+P profiler`;
   }, 500);
 
-  function frame(t: number): void {
-    profiler.beginFrame();
-    loop.tick(t);
-    profiler.endFrame();
-    requestAnimationFrame(frame);
-  }
-  requestAnimationFrame(frame);
+  startFramePump((callback) => requestAnimationFrame(callback), (t) => loop.tick(t), profiler);
 
   // The authoritative sim must NOT pause when this window is hidden or fully
   // occluded — browsers stop rAF there, which froze the whole world for every

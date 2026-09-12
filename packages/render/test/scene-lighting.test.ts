@@ -306,3 +306,48 @@ describe("post plan with volumetrics", () => {
     expect(plan).not.toContain("volumetrics");
   });
 });
+
+describe("weather tint follows the daylight", () => {
+  /** The fog colour after a day/night write at `daylight` plus a weather tint. */
+  function fogAfter(daylight: number, fogColor: string, tint: string, tintAmount: number): string {
+    const built = buildScene(
+      doc({ sky: skyEntity({ fog: { color: fogColor, near: 40, far: 180 } }) }),
+      new THREE.Scene(),
+    );
+    const lighting = sceneLighting(built.scene)!;
+    lighting.setSkyLive({ fog: { color: fogColor }, daylight });
+    lighting.setSkyLive({ weather: { tint, tintAmount } });
+    return "#" + (built.scene.fog as THREE.Fog).color.getHexString();
+  }
+
+  // A weather tint is the colour of falling rain/sand/snow LIT. Applied at
+  // full strength it lit MIDNIGHT fog up to a daytime grey — the night sky
+  // went dark and the fog in front of it did not.
+  it("dims a snow tint at night instead of lighting the fog back up", () => {
+    const night = "#121828";
+    const day = fogAfter(1, night, "#cfd6e2", 0.5);
+    const dark = fogAfter(0, night, "#cfd6e2", 0.5);
+    const lum = (hex: string): number => {
+      const c = new THREE.Color(hex);
+      return c.r + c.g + c.b;
+    };
+    expect(lum(day)).toBeGreaterThan(lum(dark));
+    // and the night result stays near the authored night fog, not halfway to grey
+    expect(lum(dark)).toBeLessThan(lum(night) * 1.6);
+  });
+
+  it("is unchanged at full daylight, and for a scene that never publishes daylight", () => {
+    const tinted = fogAfter(1, "#7a705f", "#b8895a", 0.7);
+    const noDaylight = (() => {
+      const built = buildScene(
+        doc({ sky: skyEntity({ fog: { color: "#7a705f", near: 40, far: 180 } }) }),
+        new THREE.Scene(),
+      );
+      const lighting = sceneLighting(built.scene)!;
+      lighting.setSkyLive({ fog: { color: "#7a705f" } });
+      lighting.setSkyLive({ weather: { tint: "#b8895a", tintAmount: 0.7 } });
+      return "#" + (built.scene.fog as THREE.Fog).color.getHexString();
+    })();
+    expect(noDaylight).toBe(tinted);
+  });
+});

@@ -13,7 +13,8 @@
  * the renderer and the physics cooker within a frame of each other.
  */
 
-import { marchingCubes, type MarchResult } from "./marching-cubes.js";
+import { marchingCubes, type MarchResult, type SampledBlock } from "./marching-cubes.js";
+import { dualContour, type DualContourOptions } from "./dual-contouring.js";
 import { createWorldField, type WorldField } from "./field.js";
 import { worldRecipeSchema, type WorldRecipe } from "./recipe.js";
 
@@ -28,7 +29,24 @@ export interface VoxelMeshSource {
   lodStep?: number;
   /** Explicit vertical band to mesh. Omit and it is derived from the terrain in this cell. */
   yRange?: [number, number];
+  /**
+   * Which mesher turns the sampled field into triangles. Omit for `"mc"`.
+   *
+   * `"dc"` and `"nets"` are the EXPERIMENT (`./dual-contouring.ts`) — the same
+   * field, contoured dually so a comparison is one field flip on one scene
+   * rather than a branch. They have no skirts, so an LOD transition cracks;
+   * keep a scene using them inside its `fullRender` ring.
+   */
+  mesher?: VoxelMesher;
 }
+
+/**
+ * `"mc"` — marching cubes, the shipping mesher.
+ * `"dc"` — dual contouring: a QEF vertex per cell, so sharp features survive.
+ * `"nets"` — surface nets: the same dual topology with the mass point instead
+ * of the QEF, i.e. DC's cheap half, smooth rather than sharp.
+ */
+export type VoxelMesher = "mc" | "dc" | "nets";
 
 export interface VoxelMesh {
   positions: Float32Array;
@@ -133,7 +151,8 @@ function meshBytes(mesh: VoxelMesh): number {
 
 function cacheKey(source: VoxelMeshSource): string {
   const y = source.yRange ? `:${source.yRange[0]},${source.yRange[1]}` : "";
-  return `${source.world}:${source.cell[0]}_${source.cell[1]}:${source.lodStep ?? 1}${y}`;
+  const m = source.mesher && source.mesher !== "mc" ? `:${source.mesher}` : "";
+  return `${source.world}:${source.cell[0]}_${source.cell[1]}:${source.lodStep ?? 1}${y}${m}`;
 }
 
 function dropCached(key: string): void {
@@ -239,20 +258,28 @@ export function buildVoxelMesh(field: WorldField, source: VoxelMeshSource): Voxe
   const { yMin, cellsY } = verticalBand(field, source, x0, z0, step);
   if (cellsY < 1) return EMPTY_MESH;
 
-  // one padding sample on every side: the mesher needs it for central-difference
-  // normals, and it is what makes normals match ACROSS a chunk seam without the
-  // two chunks ever exchanging geometry
-  const nx = cells + 3;
-  const ny = cellsY + 3;
-  const nz = cells + 3;
-  const origin: [number, number, number] = [x0 - step, yMin - step, z0 - step];
+  // One padding sample on every side: marching cubes needs it for
+  // central-difference normals, and it is what makes normals match ACROSS a
+  // chunk seam without the two chunks ever exchanging geometry. The dual
+  // meshers need TWO, because a dual face spans four cells and so reaches one
+  // cell into the neighbour — and that cell's own vertex has to be solved from
+  // true central differences, or the two chunks place it differently.
+  const mesher = source.mesher ?? "mc";
+  const pad = mesher === "mc" ? 1 : 2;
+  const nx = cells + 2 * pad + 1;
+  const ny = cellsY + 2 * pad + 1;
+  const nz = cells + 2 * pad + 1;
+  const origin: [number, number, number] = [x0 - pad * step, yMin - pad * step, z0 - pad * step];
 
   const values = field.sampleBlock({ origin, nx, ny, nz, step });
   sealVertically(values, nx, ny, nz);
 
-  const result: MarchResult = marchingCubes(
+  const contour: (block: SampledBlock, options: DualContourOptions) => MarchResult =
+    mesher === "mc" ? marchingCubes : dualContour;
+  const result: MarchResult = contour(
     { values, nx, ny, nz, origin, step },
     {
+      ...(mesher === "mc" ? {} : { pad, sharpness: mesher === "nets" ? 0 : 1 }),
       // ONE interleaved stream, split below. Splat weights and biome tint come
       // from the SAME biome evaluation, so asking for them as two attributes
       // resolved the climate noise and every rule's membership twice per
@@ -283,7 +310,17 @@ export function buildVoxelMesh(field: WorldField, source: VoxelMeshSource): Voxe
   // world -> cell-local: the chunk root already sits at [cx*cellSize, 0, cz*cellSize]
   // Skirts hang from every boundary edge, so a neighbour meshed at a
   // different lattice step (the HLOD ring) cannot open a crack at the join.
-  const skirted = addSkirts(result, splat, tint, surfaceCount, x0, z0, recipe.cellSize, step * SKIRT_STEPS);
+  //
+  // They are MARCHING-CUBES ONLY, and not by choice: `addSkirts` finds the
+  // boundary by testing which vertices lie exactly on the cell plane, which is
+  // true of an MC vertex (it sits on a lattice edge) and never true of a dual
+  // one (it sits in a cell interior). Equal-LOD dual neighbours agree exactly
+  // and need no skirt; across an LOD step they crack, which is the honest
+  // limit of the experiment.
+  const skirted =
+    mesher === "mc"
+      ? addSkirts(result, splat, tint, surfaceCount, x0, z0, recipe.cellSize, step * SKIRT_STEPS)
+      : { ...result, splat, tint };
   const positions = skirted.positions;
   let minX = Infinity;
   let minY2 = Infinity;

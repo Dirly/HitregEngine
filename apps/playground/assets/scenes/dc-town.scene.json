@@ -1,0 +1,3516 @@
+{
+  "version": 1,
+  "name": "dc-town",
+  "entities": {
+    "sky": {
+      "name": "Sky",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "sky": {
+          "top": "#232a33",
+          "bottom": "#4a5360",
+          "light": 0.9
+        }
+      }
+    },
+    "sun": {
+      "name": "Sun",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            4,
+            8,
+            5
+          ]
+        },
+        "light": {
+          "kind": "directional",
+          "intensity": 2
+        }
+      }
+    },
+    "camera": {
+      "name": "Camera",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            3,
+            16
+          ]
+        },
+        "camera": {
+          "active": true,
+          "fov": 55,
+          "near": 0.01,
+          "far": 300
+        }
+      }
+    },
+    "r0": {
+      "name": "sword0",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -6.75,
+            0,
+            0
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        }
+      }
+    },
+    "r0-Handle": {
+      "name": "Handle",
+      "parent": "r0",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Handle",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r0-Blade1": {
+      "name": "Blade1",
+      "parent": "r0",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Blade1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r0-CrossGuard1": {
+      "name": "CrossGuard1",
+      "parent": "r0",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossGuard1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r0-CrossFlavor1": {
+      "name": "CrossFlavor1",
+      "parent": "r0",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossFlavor1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r0-Pummel1": {
+      "name": "Pummel1",
+      "parent": "r0",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Pummel1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r0-Ornate": {
+      "name": "Ornate",
+      "parent": "r0",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Ornate",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r0-OrnateBottom": {
+      "name": "OrnateBottom",
+      "parent": "r0",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "OrnateBottom",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r1": {
+      "name": "sword1",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -5.25,
+            0,
+            0
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        }
+      }
+    },
+    "r1-Handle": {
+      "name": "Handle",
+      "parent": "r1",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Handle",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r1-Blade2": {
+      "name": "Blade2",
+      "parent": "r1",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Blade2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r1-CrossGuard4": {
+      "name": "CrossGuard4",
+      "parent": "r1",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossGuard4",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r1-CrossFlavor3": {
+      "name": "CrossFlavor3",
+      "parent": "r1",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossFlavor3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r1-Pummel2": {
+      "name": "Pummel2",
+      "parent": "r1",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Pummel2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r2": {
+      "name": "sword2",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -3.75,
+            0,
+            0
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        }
+      }
+    },
+    "r2-Handle": {
+      "name": "Handle",
+      "parent": "r2",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Handle",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r2-Blade3": {
+      "name": "Blade3",
+      "parent": "r2",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Blade3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r2-CrossGuard3": {
+      "name": "CrossGuard3",
+      "parent": "r2",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossGuard3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r2-CrossFlavor2": {
+      "name": "CrossFlavor2",
+      "parent": "r2",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossFlavor2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r2-Pummel3": {
+      "name": "Pummel3",
+      "parent": "r2",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Pummel3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r3": {
+      "name": "sword3",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -2.25,
+            0,
+            0
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        }
+      }
+    },
+    "r3-Handle": {
+      "name": "Handle",
+      "parent": "r3",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Handle",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r3-Blade4": {
+      "name": "Blade4",
+      "parent": "r3",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Blade4",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r3-CrossGuard2": {
+      "name": "CrossGuard2",
+      "parent": "r3",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossGuard2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r3-CrossFlavor1": {
+      "name": "CrossFlavor1",
+      "parent": "r3",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossFlavor1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r3-Pummel1": {
+      "name": "Pummel1",
+      "parent": "r3",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Pummel1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r3-Ornate": {
+      "name": "Ornate",
+      "parent": "r3",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Ornate",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r3-OrnateBottom": {
+      "name": "OrnateBottom",
+      "parent": "r3",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "OrnateBottom",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r4": {
+      "name": "sword4",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.75,
+            0,
+            0
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        }
+      }
+    },
+    "r4-Handle": {
+      "name": "Handle",
+      "parent": "r4",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Handle",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r4-Blade1": {
+      "name": "Blade1",
+      "parent": "r4",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Blade1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r4-CrossGuard1": {
+      "name": "CrossGuard1",
+      "parent": "r4",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossGuard1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r4-CrossFlavor3": {
+      "name": "CrossFlavor3",
+      "parent": "r4",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossFlavor3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r4-Pummel2": {
+      "name": "Pummel2",
+      "parent": "r4",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Pummel2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r5": {
+      "name": "sword5",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.75,
+            0,
+            0
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        }
+      }
+    },
+    "r5-Handle": {
+      "name": "Handle",
+      "parent": "r5",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Handle",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r5-Blade2": {
+      "name": "Blade2",
+      "parent": "r5",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Blade2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r5-CrossGuard4": {
+      "name": "CrossGuard4",
+      "parent": "r5",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossGuard4",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r5-CrossFlavor2": {
+      "name": "CrossFlavor2",
+      "parent": "r5",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossFlavor2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r5-Pummel3": {
+      "name": "Pummel3",
+      "parent": "r5",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Pummel3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r6": {
+      "name": "sword6",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            2.25,
+            0,
+            0
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        }
+      }
+    },
+    "r6-Handle": {
+      "name": "Handle",
+      "parent": "r6",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Handle",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r6-Blade3": {
+      "name": "Blade3",
+      "parent": "r6",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Blade3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r6-CrossGuard3": {
+      "name": "CrossGuard3",
+      "parent": "r6",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossGuard3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r6-CrossFlavor1": {
+      "name": "CrossFlavor1",
+      "parent": "r6",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossFlavor1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r6-Pummel1": {
+      "name": "Pummel1",
+      "parent": "r6",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Pummel1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r6-Ornate": {
+      "name": "Ornate",
+      "parent": "r6",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Ornate",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r6-OrnateBottom": {
+      "name": "OrnateBottom",
+      "parent": "r6",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "OrnateBottom",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r7": {
+      "name": "sword7",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            3.75,
+            0,
+            0
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        }
+      }
+    },
+    "r7-Handle": {
+      "name": "Handle",
+      "parent": "r7",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Handle",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r7-Blade4": {
+      "name": "Blade4",
+      "parent": "r7",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Blade4",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r7-CrossGuard2": {
+      "name": "CrossGuard2",
+      "parent": "r7",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossGuard2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r7-CrossFlavor3": {
+      "name": "CrossFlavor3",
+      "parent": "r7",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossFlavor3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r7-Pummel2": {
+      "name": "Pummel2",
+      "parent": "r7",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Pummel2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r8": {
+      "name": "sword8",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            5.25,
+            0,
+            0
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        }
+      }
+    },
+    "r8-Handle": {
+      "name": "Handle",
+      "parent": "r8",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Handle",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r8-Blade1": {
+      "name": "Blade1",
+      "parent": "r8",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Blade1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r8-CrossGuard1": {
+      "name": "CrossGuard1",
+      "parent": "r8",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossGuard1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r8-CrossFlavor2": {
+      "name": "CrossFlavor2",
+      "parent": "r8",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossFlavor2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r8-Pummel3": {
+      "name": "Pummel3",
+      "parent": "r8",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Pummel3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r9": {
+      "name": "sword9",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            6.75,
+            0,
+            0
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        }
+      }
+    },
+    "r9-Handle": {
+      "name": "Handle",
+      "parent": "r9",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Handle",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r9-Blade2": {
+      "name": "Blade2",
+      "parent": "r9",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Blade2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r9-CrossGuard4": {
+      "name": "CrossGuard4",
+      "parent": "r9",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossGuard4",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r9-CrossFlavor1": {
+      "name": "CrossFlavor1",
+      "parent": "r9",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossFlavor1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r9-Pummel1": {
+      "name": "Pummel1",
+      "parent": "r9",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Pummel1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r9-Ornate": {
+      "name": "Ornate",
+      "parent": "r9",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Ornate",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r9-OrnateBottom": {
+      "name": "OrnateBottom",
+      "parent": "r9",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "OrnateBottom",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r10": {
+      "name": "sword10",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -6.75,
+            0,
+            1.6
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        }
+      }
+    },
+    "r10-Handle": {
+      "name": "Handle",
+      "parent": "r10",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Handle",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r10-Blade3": {
+      "name": "Blade3",
+      "parent": "r10",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Blade3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r10-CrossGuard3": {
+      "name": "CrossGuard3",
+      "parent": "r10",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossGuard3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r10-CrossFlavor3": {
+      "name": "CrossFlavor3",
+      "parent": "r10",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossFlavor3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r10-Pummel2": {
+      "name": "Pummel2",
+      "parent": "r10",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Pummel2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r11": {
+      "name": "sword11",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -5.25,
+            0,
+            1.6
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        }
+      }
+    },
+    "r11-Handle": {
+      "name": "Handle",
+      "parent": "r11",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Handle",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r11-Blade4": {
+      "name": "Blade4",
+      "parent": "r11",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Blade4",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r11-CrossGuard2": {
+      "name": "CrossGuard2",
+      "parent": "r11",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossGuard2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r11-CrossFlavor2": {
+      "name": "CrossFlavor2",
+      "parent": "r11",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossFlavor2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r11-Pummel3": {
+      "name": "Pummel3",
+      "parent": "r11",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Pummel3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r12": {
+      "name": "sword12",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -3.75,
+            0,
+            1.6
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        }
+      }
+    },
+    "r12-Handle": {
+      "name": "Handle",
+      "parent": "r12",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Handle",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r12-Blade1": {
+      "name": "Blade1",
+      "parent": "r12",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Blade1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r12-CrossGuard1": {
+      "name": "CrossGuard1",
+      "parent": "r12",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossGuard1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r12-CrossFlavor1": {
+      "name": "CrossFlavor1",
+      "parent": "r12",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossFlavor1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r12-Pummel1": {
+      "name": "Pummel1",
+      "parent": "r12",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Pummel1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r12-Ornate": {
+      "name": "Ornate",
+      "parent": "r12",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Ornate",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r12-OrnateBottom": {
+      "name": "OrnateBottom",
+      "parent": "r12",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "OrnateBottom",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r13": {
+      "name": "sword13",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -2.25,
+            0,
+            1.6
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        }
+      }
+    },
+    "r13-Handle": {
+      "name": "Handle",
+      "parent": "r13",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Handle",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r13-Blade2": {
+      "name": "Blade2",
+      "parent": "r13",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Blade2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r13-CrossGuard4": {
+      "name": "CrossGuard4",
+      "parent": "r13",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossGuard4",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r13-CrossFlavor3": {
+      "name": "CrossFlavor3",
+      "parent": "r13",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossFlavor3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r13-Pummel2": {
+      "name": "Pummel2",
+      "parent": "r13",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Pummel2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r14": {
+      "name": "sword14",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.75,
+            0,
+            1.6
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        }
+      }
+    },
+    "r14-Handle": {
+      "name": "Handle",
+      "parent": "r14",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Handle",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r14-Blade3": {
+      "name": "Blade3",
+      "parent": "r14",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Blade3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r14-CrossGuard3": {
+      "name": "CrossGuard3",
+      "parent": "r14",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossGuard3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r14-CrossFlavor2": {
+      "name": "CrossFlavor2",
+      "parent": "r14",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossFlavor2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r14-Pummel3": {
+      "name": "Pummel3",
+      "parent": "r14",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Pummel3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r15": {
+      "name": "sword15",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.75,
+            0,
+            1.6
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        }
+      }
+    },
+    "r15-Handle": {
+      "name": "Handle",
+      "parent": "r15",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Handle",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r15-Blade4": {
+      "name": "Blade4",
+      "parent": "r15",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Blade4",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r15-CrossGuard2": {
+      "name": "CrossGuard2",
+      "parent": "r15",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossGuard2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r15-CrossFlavor1": {
+      "name": "CrossFlavor1",
+      "parent": "r15",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossFlavor1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r15-Pummel1": {
+      "name": "Pummel1",
+      "parent": "r15",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Pummel1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r15-Ornate": {
+      "name": "Ornate",
+      "parent": "r15",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Ornate",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r15-OrnateBottom": {
+      "name": "OrnateBottom",
+      "parent": "r15",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "OrnateBottom",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r16": {
+      "name": "sword16",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            2.25,
+            0,
+            1.6
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        }
+      }
+    },
+    "r16-Handle": {
+      "name": "Handle",
+      "parent": "r16",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Handle",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r16-Blade1": {
+      "name": "Blade1",
+      "parent": "r16",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Blade1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r16-CrossGuard1": {
+      "name": "CrossGuard1",
+      "parent": "r16",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossGuard1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r16-CrossFlavor3": {
+      "name": "CrossFlavor3",
+      "parent": "r16",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossFlavor3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r16-Pummel2": {
+      "name": "Pummel2",
+      "parent": "r16",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Pummel2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r17": {
+      "name": "sword17",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            3.75,
+            0,
+            1.6
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        }
+      }
+    },
+    "r17-Handle": {
+      "name": "Handle",
+      "parent": "r17",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Handle",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r17-Blade2": {
+      "name": "Blade2",
+      "parent": "r17",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Blade2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r17-CrossGuard4": {
+      "name": "CrossGuard4",
+      "parent": "r17",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossGuard4",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r17-CrossFlavor2": {
+      "name": "CrossFlavor2",
+      "parent": "r17",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossFlavor2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r17-Pummel3": {
+      "name": "Pummel3",
+      "parent": "r17",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Pummel3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r18": {
+      "name": "sword18",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            5.25,
+            0,
+            1.6
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        }
+      }
+    },
+    "r18-Handle": {
+      "name": "Handle",
+      "parent": "r18",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Handle",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r18-Blade3": {
+      "name": "Blade3",
+      "parent": "r18",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Blade3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r18-CrossGuard3": {
+      "name": "CrossGuard3",
+      "parent": "r18",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossGuard3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r18-CrossFlavor1": {
+      "name": "CrossFlavor1",
+      "parent": "r18",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossFlavor1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r18-Pummel1": {
+      "name": "Pummel1",
+      "parent": "r18",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Pummel1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r18-Ornate": {
+      "name": "Ornate",
+      "parent": "r18",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Ornate",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r18-OrnateBottom": {
+      "name": "OrnateBottom",
+      "parent": "r18",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "OrnateBottom",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r19": {
+      "name": "sword19",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            6.75,
+            0,
+            1.6
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        }
+      }
+    },
+    "r19-Handle": {
+      "name": "Handle",
+      "parent": "r19",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Handle",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r19-Blade4": {
+      "name": "Blade4",
+      "parent": "r19",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Blade4",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r19-CrossGuard2": {
+      "name": "CrossGuard2",
+      "parent": "r19",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossGuard2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r19-CrossFlavor3": {
+      "name": "CrossFlavor3",
+      "parent": "r19",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossFlavor3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r19-Pummel2": {
+      "name": "Pummel2",
+      "parent": "r19",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Pummel2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r20": {
+      "name": "sword20",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -6.75,
+            0,
+            3.2
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        }
+      }
+    },
+    "r20-Handle": {
+      "name": "Handle",
+      "parent": "r20",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Handle",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r20-Blade1": {
+      "name": "Blade1",
+      "parent": "r20",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Blade1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r20-CrossGuard1": {
+      "name": "CrossGuard1",
+      "parent": "r20",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossGuard1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r20-CrossFlavor2": {
+      "name": "CrossFlavor2",
+      "parent": "r20",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossFlavor2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r20-Pummel3": {
+      "name": "Pummel3",
+      "parent": "r20",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Pummel3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r21": {
+      "name": "sword21",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -5.25,
+            0,
+            3.2
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        }
+      }
+    },
+    "r21-Handle": {
+      "name": "Handle",
+      "parent": "r21",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Handle",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r21-Blade2": {
+      "name": "Blade2",
+      "parent": "r21",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Blade2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r21-CrossGuard4": {
+      "name": "CrossGuard4",
+      "parent": "r21",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossGuard4",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r21-CrossFlavor1": {
+      "name": "CrossFlavor1",
+      "parent": "r21",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossFlavor1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r21-Pummel1": {
+      "name": "Pummel1",
+      "parent": "r21",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Pummel1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r21-Ornate": {
+      "name": "Ornate",
+      "parent": "r21",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Ornate",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r21-OrnateBottom": {
+      "name": "OrnateBottom",
+      "parent": "r21",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "OrnateBottom",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r22": {
+      "name": "sword22",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -3.75,
+            0,
+            3.2
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        }
+      }
+    },
+    "r22-Handle": {
+      "name": "Handle",
+      "parent": "r22",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Handle",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r22-Blade3": {
+      "name": "Blade3",
+      "parent": "r22",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Blade3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r22-CrossGuard3": {
+      "name": "CrossGuard3",
+      "parent": "r22",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossGuard3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r22-CrossFlavor3": {
+      "name": "CrossFlavor3",
+      "parent": "r22",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossFlavor3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r22-Pummel2": {
+      "name": "Pummel2",
+      "parent": "r22",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Pummel2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r23": {
+      "name": "sword23",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -2.25,
+            0,
+            3.2
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        }
+      }
+    },
+    "r23-Handle": {
+      "name": "Handle",
+      "parent": "r23",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Handle",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r23-Blade4": {
+      "name": "Blade4",
+      "parent": "r23",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Blade4",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r23-CrossGuard2": {
+      "name": "CrossGuard2",
+      "parent": "r23",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossGuard2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r23-CrossFlavor2": {
+      "name": "CrossFlavor2",
+      "parent": "r23",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossFlavor2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r23-Pummel3": {
+      "name": "Pummel3",
+      "parent": "r23",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Pummel3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r24": {
+      "name": "sword24",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.75,
+            0,
+            3.2
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        }
+      }
+    },
+    "r24-Handle": {
+      "name": "Handle",
+      "parent": "r24",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Handle",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r24-Blade1": {
+      "name": "Blade1",
+      "parent": "r24",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Blade1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r24-CrossGuard1": {
+      "name": "CrossGuard1",
+      "parent": "r24",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossGuard1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r24-CrossFlavor1": {
+      "name": "CrossFlavor1",
+      "parent": "r24",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossFlavor1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r24-Pummel1": {
+      "name": "Pummel1",
+      "parent": "r24",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Pummel1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r24-Ornate": {
+      "name": "Ornate",
+      "parent": "r24",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Ornate",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r24-OrnateBottom": {
+      "name": "OrnateBottom",
+      "parent": "r24",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "OrnateBottom",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r25": {
+      "name": "sword25",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.75,
+            0,
+            3.2
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        }
+      }
+    },
+    "r25-Handle": {
+      "name": "Handle",
+      "parent": "r25",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Handle",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r25-Blade2": {
+      "name": "Blade2",
+      "parent": "r25",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Blade2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r25-CrossGuard4": {
+      "name": "CrossGuard4",
+      "parent": "r25",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossGuard4",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r25-CrossFlavor3": {
+      "name": "CrossFlavor3",
+      "parent": "r25",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossFlavor3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r25-Pummel2": {
+      "name": "Pummel2",
+      "parent": "r25",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Pummel2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r26": {
+      "name": "sword26",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            2.25,
+            0,
+            3.2
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        }
+      }
+    },
+    "r26-Handle": {
+      "name": "Handle",
+      "parent": "r26",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Handle",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r26-Blade3": {
+      "name": "Blade3",
+      "parent": "r26",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Blade3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r26-CrossGuard3": {
+      "name": "CrossGuard3",
+      "parent": "r26",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossGuard3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r26-CrossFlavor2": {
+      "name": "CrossFlavor2",
+      "parent": "r26",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossFlavor2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r26-Pummel3": {
+      "name": "Pummel3",
+      "parent": "r26",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Pummel3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r27": {
+      "name": "sword27",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            3.75,
+            0,
+            3.2
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        }
+      }
+    },
+    "r27-Handle": {
+      "name": "Handle",
+      "parent": "r27",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Handle",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r27-Blade4": {
+      "name": "Blade4",
+      "parent": "r27",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Blade4",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r27-CrossGuard2": {
+      "name": "CrossGuard2",
+      "parent": "r27",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossGuard2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r27-CrossFlavor1": {
+      "name": "CrossFlavor1",
+      "parent": "r27",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossFlavor1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r27-Pummel1": {
+      "name": "Pummel1",
+      "parent": "r27",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Pummel1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r27-Ornate": {
+      "name": "Ornate",
+      "parent": "r27",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Ornate",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r27-OrnateBottom": {
+      "name": "OrnateBottom",
+      "parent": "r27",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "OrnateBottom",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r28": {
+      "name": "sword28",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            5.25,
+            0,
+            3.2
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        }
+      }
+    },
+    "r28-Handle": {
+      "name": "Handle",
+      "parent": "r28",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Handle",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r28-Blade1": {
+      "name": "Blade1",
+      "parent": "r28",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Blade1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r28-CrossGuard1": {
+      "name": "CrossGuard1",
+      "parent": "r28",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossGuard1",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r28-CrossFlavor3": {
+      "name": "CrossFlavor3",
+      "parent": "r28",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossFlavor3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r28-Pummel2": {
+      "name": "Pummel2",
+      "parent": "r28",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Pummel2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r29": {
+      "name": "sword29",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            6.75,
+            0,
+            3.2
+          ],
+          "scale": [
+            0.0414,
+            0.0414,
+            0.0414
+          ]
+        }
+      }
+    },
+    "r29-Handle": {
+      "name": "Handle",
+      "parent": "r29",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Handle",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r29-Blade2": {
+      "name": "Blade2",
+      "parent": "r29",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Blade2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r29-CrossGuard4": {
+      "name": "CrossGuard4",
+      "parent": "r29",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossGuard4",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r29-CrossFlavor2": {
+      "name": "CrossFlavor2",
+      "parent": "r29",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "CrossFlavor2",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    },
+    "r29-Pummel3": {
+      "name": "Pummel3",
+      "parent": "r29",
+      "tags": [],
+      "components": {
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-unwrapped.glb",
+            "node": "Pummel3",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid",
+          "renderMode": "instanced"
+        }
+      }
+    }
+  }
+}

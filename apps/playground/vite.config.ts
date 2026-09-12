@@ -168,6 +168,7 @@ function hitregBridge(): Plugin {
         "audio",
         "chunks",
         "worlds",
+        "volumes",
       ] as const;
 
       // A virtual path like "materials/heli-island/beacon-glow.json" may live

@@ -88,6 +88,14 @@ describe.skipIf(!handle)("spawn areas", () => {
     expect(brain.params["home"]).toEqual(origin);
     expect(brain.params["leash"]).toBe(20);
     expect(brain.params["spawnArea"]).toBe("camp");
+    // ...and so does every OTHER scripted entity in the subtree. An entity
+    // carries one script, so a real brain lives on a child of the body — if
+    // the spawner only reached the root, a pack would silently ignore the
+    // leash its area authored and wander until the fence teleported it back.
+    const child = h.world.entities.get(`${n1}/brain`)!.components["script"] as { params: Record<string, unknown> };
+    expect(child.params["home"]).toEqual(origin);
+    expect(child.params["leash"]).toBe(20);
+    expect(child.params["spawnArea"]).toBe("camp");
     await until(() => a.world.some((m) => m.t === "spawn" && n1 in (m as { entities: Record<string, unknown> }).entities));
     expect(h.world.sim.getLinvel(n1)).not.toBeNull();
     // within sight of an awake pack: not a moment to swap layers

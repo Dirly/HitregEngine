@@ -276,7 +276,8 @@ class Emitter {
     this.landAge = new Float32Array(this.capacity);
     this.shaderData = new Float32Array(this.capacity * 4);
     this.shaderAttr = new THREE.InstancedBufferAttribute(this.shaderData, 4);
-    this.shaderAttr.setUsage(THREE.DynamicDrawUsage);
+    this.shaderAttr.setUsage(THREE.StreamDrawUsage);
+    this.shaderAttr.name = "particle-shader";
     this.subFrames = data.subUV ? Math.max(1, data.subUV.cols * data.subUV.rows) : 1;
     this.gradient =
       data.colorGradient && data.colorGradient.length > 0
@@ -324,12 +325,14 @@ class Emitter {
     this.mesh = new InstancedProps(sharedQuad, this.material, this.capacity);
     this.mesh.geometry.setAttribute("aParticle", this.shaderAttr);
     this.colorAttr = new THREE.InstancedBufferAttribute(new Float32Array(this.capacity * 3), 3);
-    this.colorAttr.setUsage(THREE.DynamicDrawUsage);
+    this.colorAttr.setUsage(THREE.StreamDrawUsage);
+    this.colorAttr.name = "particle-colors";
     this.mesh.geometry.setAttribute("aColor", this.colorAttr);
     this.mesh.instanceCount = 0;
     this.mesh.frustumCulled = false;
     this.mesh.matrixAutoUpdate = false; // we write mesh.matrix by hand
-    this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.mesh.instanceMatrix.setUsage(THREE.StreamDrawUsage);
+    Object.assign(this.mesh.instanceMatrix, { name: "particle-matrices" });
     this.mesh.raycast = () => {}; // particles are never click-selectable
     this.buildShader();
     applyInstancedProps(this.material);

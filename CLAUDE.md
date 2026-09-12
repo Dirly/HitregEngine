@@ -162,7 +162,16 @@ The primary AI channel is **direct file editing** — no MCP required:
   each pass and town gate; idempotent, rewrites its own `barrier-*`/`pass-*`;
   docs/world-editing/barriers.md), `trails` (footpaths from that
   network up the peaks, a capped scramble for the last leg, stopping below
-  a summit no scramble reaches), `pois` each compute from the CURRENT terrain and
+  a summit no scramble reaches), `pois`, `spawn` (ENEMY CAMPS in the
+  wilderness — off the towns and sanctuaries, beside the paths but never on
+  them, and clear of every zone border by the camp's whole reach so a layer
+  swap never happens in sight of a pack; `--scene <name>` also patches the
+  `spawnArea` entities in, with a placeholder capsule mob carrying `mob-brain`
+  if the scene has no `--template` subtree yet — docs/mob-ai.md), `spawn-paint`
+  (camps BY HAND from a stroke drawn with the editor path tool, typed points or
+  one spot; refused with a reason if it breaks the same rules, ids `spawn-*`
+  which `spawn` never rewrites, so generated and hand-placed camps coexist) each compute
+  from the CURRENT terrain and
   write a few lines back into the recipe's `features`, so every stage stays
   readable and hand-editable. **Rivers are AUTHORED — by you or an agent —
   not generated**: write `{ id, points, width, widths?, depth, bank, water:
@@ -184,6 +193,11 @@ The primary AI channel is **direct file editing** — no MCP required:
   `map` renders a PNG overview (`--plain` for water only, at real river
   widths — this is how you or an agent check the result without opening the
   browser); `stats` reports tris and ms per cell against the frame budget;
+  `scatter` checks every scatter rule against its MODEL on disk — a base not
+  at the origin (the collider rises from the ENTITY origin, so it floats by
+  that much), a collider bigger than the prop, a wind filter matching none of
+  the model's texture names, and props/km² per rule (exit 1 on findings; run
+  it after any prop or scatter change);
   `river-path` records a path-tool entity or typed points as
   `features.riverPaths` for the stage to solve (the older route); `audit`
   checks every river ends somewhere, beds descend, nothing is under water,
@@ -197,6 +211,17 @@ The primary AI channel is **direct file editing** — no MCP required:
   1) and draws RED on `map`; a world is ready to host when there is none. **Procedure for altering a live world by hand — rivers
   first, ~4 per world, more feature kinds to come: docs/world-editing/.**
   Judgment + the invariants that will break silently: docs/voxel-worlds.md.
+- **Third-person camera** (`ThirdPersonCameraRig` in `@hitreg/render`): ONE
+  rig drives play mode in the editor and the published runtime — pivot, orbit,
+  boom, collision and the final pose, with camera-controls parked for as long
+  as a follow target exists. A scene authors it as the `camera` component's
+  `rig` block. The boom sweeps the PHYSICS world masked to
+  `WORLD|TERRAIN|CAMERA_BLOCKER` (never actors — an NPC walking behind you is
+  not a wall), lifts OVER an obstruction before shortening into it, and hides
+  the body rather than render the inside of its head. Judgment + the traps
+  (collision and framing must share ONE origin or a running player puts the
+  camera through the housefront; `height` is a PITCH, not a translation):
+  **docs/camera.md**.
 - **Placement toolbox** (settle props instead of eyeballing coordinates): give
   props a `placement` component (spec has the fields) and run
   `pnpm -F playground place snap <scene.json>` — every opted-in entity settles
@@ -228,6 +253,23 @@ The primary AI channel is **direct file editing** — no MCP required:
   centre from the part's second UV set) — so floor islands must be square and
   no face may rely on UV wrap. **tools/wfc-3d/README.md** before touching it;
   the modeller-facing rules are **docs/wfc-kit-authoring.md**.
+- **Weapon atlases** (a modular weapon, textured by a generator): a weapon is an
+  UBERMESH — every variant of every part modelled in place, `Blade1..4`,
+  `CrossGuard1..4`, a grip, cut-out ornaments — and a weapon instance is one
+  choice out of each family. `pnpm -F playground unwrap-weapon --recipe <name>`
+  unwraps it and writes the colour KEY the generator paints over, the slot
+  manifest `import-atlas.mjs` registers against, and the mesh with UVs (a MERGED
+  obj to re-import, a per-part one to look at, a GLB for the engine);
+  `atlas-view --atlas <a.png> <b.png>` stands one finished weapon per atlas in
+  the playground so two generated sets can be compared. The unwrap and the key
+  MUST come out of one program: a Blockbench export has no usable UVs at all
+  (every face on one texel), so a hand-drawn key puts the artwork next to the
+  geometry rather than on it. One slot per part, never shared. Judgment + the
+  traps that cost a round trip each (Blockbench OBJ is 1/100 of its FBX; the
+  engine flips textures and glTF does not; near-white artwork is eaten as
+  background; `bleed` and the gutter are in ATLAS texels, so they change meaning
+  between a 128 and a 256 sheet): **docs/weapon-atlas.md**, wrapped for Claude
+  sessions by the `weapon-unwrap` skill.
 - **Animated characters** (an FBX animation library onto a differently-rigged
   character): `pnpm -F playground retarget --mesh Char.fbx --anim Lib.fbx --out
   <name>.glb` bakes one self-contained GLB — skeleton maps are data in
@@ -244,7 +286,17 @@ The primary AI channel is **direct file editing** — no MCP required:
   the ratio; `retarget` measures and prints them. Free-hanging cloth is the
   `clothSway` component: a vertex-shader lag whose panels are found by SHAPE,
   because auto-riggers bind skirts to the thigh bones and skin weights cannot
-  tell a tabard from a trouser leg.
+  tell a tabard from a trouser leg. An UNRIGGED mesh (a modelled creature, no
+  skeleton at all — nothing for `retarget` to bake onto) instead borrows a
+  donor rig whole: `pnpm -F playground autorig --rig Dog.glb --mesh Wolf.obj
+  --forward +x --render check.png` warps the donor's skeleton into the mesh's
+  proportions by anatomical landmarks and skins to it, and the donor's clips
+  are then copied UNCHANGED — sound only because bone ROTATIONS stay the
+  donor's and only OFFSETS move. Its judgment call is the REFERENCE POSE it
+  fits in (default `avg:<walk>`, because a rig's bind pose is often not the
+  pose its clips animate around — this dog binds with the tail straight out
+  and hangs it in every clip); `--render` writes a textured strip through a
+  software rasteriser, so the result can be LOOKED at with no browser.
   **docs/character-animation.md** before touching character rigs, gaits or cloth.
 - **Spells and VFX** (generated, not authored): a `spell` data asset
   (`assets/spells/<id>.json`) is an element + an archetype (kind / shape /
@@ -272,6 +324,20 @@ The primary AI channel is **direct file editing** — no MCP required:
   (`character.xp`, `inventory.give`) are authority-internal. Field lists: the
   spec; judgment + the silent traps (`.prefault({})`, pass `events` to
   `registerBuiltinScripts`): **docs/character-progression.md**.
+- **Mob AI** (enemies that chase you and give up): a `mob-brain` builtin
+  (idle/roam/chase/attack/leash/dead) steering through `TerrainSteering` —
+  no navmesh, no bake; it probes the live physics world, so it survives
+  terrain that streams in or gets terraformed. A mob is TWO entities (body
+  with `third-person-controller`, a child with the brain, because an entity
+  carries one script), populations come from `spawnArea` components, and the
+  brain never decides what a swing DOES — it emits `mob.attack` for the
+  game combat layer to bridge. Targeting is a `ThreatTable` (in core, pure)
+  fed by the game through `mob.threat` (damage/heal/taunt), so a tank is a
+  role; factions are one rule (a DIFFERENT published `combat/<id>.faction` is
+  an enemy, the same one never is) and a pull shouts `mob.alert` to the same
+  faction within `alertRadius`. Params: the spec; judgment + the traps
+  (terrain is judged by HEIGHT and furniture by a RAY, `groundHeightAt` null
+  is not zero, the leash is a zone contract): **docs/mob-ai.md**.
 - **Dedicated server** (`@hitreg/server`): `pnpm -F @hitreg/server serve --scene <name>`
   hosts any project scene headless — same sim, no renderer — and every tab
   opened with `?server=ws://host:port` becomes its client. The engine keeps

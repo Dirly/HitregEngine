@@ -1,0 +1,2753 @@
+{
+  "version": 1,
+  "name": "atlas-carousel",
+  "entities": {
+    "sky": {
+      "name": "Sky",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "sky": {
+          "top": "#232a33",
+          "bottom": "#4a5360",
+          "light": 0.9
+        }
+      }
+    },
+    "sun": {
+      "name": "Sun",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            4,
+            8,
+            5
+          ]
+        },
+        "light": {
+          "kind": "directional",
+          "intensity": 2.1,
+          "color": "#fff3e2",
+          "castShadow": true
+        }
+      }
+    },
+    "fill": {
+      "name": "Fill",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "light": {
+          "kind": "ambient",
+          "intensity": 0.85,
+          "color": "#9fb2c6"
+        }
+      }
+    },
+    "floor": {
+      "name": "Floor",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            -0.03,
+            0
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "primitive",
+            "shape": "box",
+            "size": [
+              145.40661994609164,
+              0.05,
+              84.82052830188678
+            ]
+          },
+          "material": "atlas-view/floor",
+          "receiveShadow": true
+        }
+      }
+    },
+    "stand-cinder-wraith": {
+      "name": "cinder-wraith",
+      "parent": null,
+      "tags": [
+        "atlas-carousel-item"
+      ],
+      "components": {
+        "visibility": {
+          "visible": true
+        },
+        "transform": {
+          "position": [
+            0,
+            0,
+            0
+          ]
+        },
+        "script": {
+          "name": "spinner",
+          "params": {
+            "speed": 0.5
+          }
+        }
+      }
+    },
+    "build-cinder-wraith-v1": {
+      "name": "cinder-wraith v1",
+      "parent": "stand-cinder-wraith",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.013889,
+              0.013889,
+              0.222222
+            ],
+            "partMask": 102675
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-cinder-wraith-v2": {
+      "name": "cinder-wraith v2",
+      "parent": "stand-cinder-wraith",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.013889,
+              0.013889,
+              0.222222
+            ],
+            "partMask": 107045
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-cinder-wraith-v3": {
+      "name": "cinder-wraith v3",
+      "parent": "stand-cinder-wraith",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.013889,
+              0.013889,
+              0.222222
+            ],
+            "partMask": 115785
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-cinder-wraith-v4": {
+      "name": "cinder-wraith v4",
+      "parent": "stand-cinder-wraith",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.013889,
+              0.013889,
+              0.222222
+            ],
+            "partMask": 104579
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "stand-cinder-wraith-128": {
+      "name": "cinder-wraith-128",
+      "parent": null,
+      "tags": [
+        "atlas-carousel-item"
+      ],
+      "components": {
+        "visibility": {
+          "visible": false
+        },
+        "transform": {
+          "position": [
+            0,
+            0,
+            0
+          ]
+        },
+        "script": {
+          "name": "spinner",
+          "params": {
+            "speed": 0.5
+          }
+        }
+      }
+    },
+    "build-cinder-wraith-128-v1": {
+      "name": "cinder-wraith-128 v1",
+      "parent": "stand-cinder-wraith-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.263889,
+              0.013889,
+              0.222222
+            ],
+            "partMask": 102675
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-cinder-wraith-128-v2": {
+      "name": "cinder-wraith-128 v2",
+      "parent": "stand-cinder-wraith-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.263889,
+              0.013889,
+              0.222222
+            ],
+            "partMask": 107045
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-cinder-wraith-128-v3": {
+      "name": "cinder-wraith-128 v3",
+      "parent": "stand-cinder-wraith-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.263889,
+              0.013889,
+              0.222222
+            ],
+            "partMask": 115785
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-cinder-wraith-128-v4": {
+      "name": "cinder-wraith-128 v4",
+      "parent": "stand-cinder-wraith-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.263889,
+              0.013889,
+              0.222222
+            ],
+            "partMask": 104579
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "stand-elemental-longsword": {
+      "name": "elemental-longsword",
+      "parent": null,
+      "tags": [
+        "atlas-carousel-item"
+      ],
+      "components": {
+        "visibility": {
+          "visible": false
+        },
+        "transform": {
+          "position": [
+            0,
+            0,
+            0
+          ]
+        },
+        "script": {
+          "name": "spinner",
+          "params": {
+            "speed": 0.5
+          }
+        }
+      }
+    },
+    "build-elemental-longsword-v1": {
+      "name": "elemental-longsword v1",
+      "parent": "stand-elemental-longsword",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.513889,
+              0.013889,
+              0.222222
+            ],
+            "partMask": 102675
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-elemental-longsword-v2": {
+      "name": "elemental-longsword v2",
+      "parent": "stand-elemental-longsword",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.513889,
+              0.013889,
+              0.222222
+            ],
+            "partMask": 107045
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-elemental-longsword-v3": {
+      "name": "elemental-longsword v3",
+      "parent": "stand-elemental-longsword",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.513889,
+              0.013889,
+              0.222222
+            ],
+            "partMask": 115785
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-elemental-longsword-v4": {
+      "name": "elemental-longsword v4",
+      "parent": "stand-elemental-longsword",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.513889,
+              0.013889,
+              0.222222
+            ],
+            "partMask": 104579
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "stand-elemental-longsword-128": {
+      "name": "elemental-longsword-128",
+      "parent": null,
+      "tags": [
+        "atlas-carousel-item"
+      ],
+      "components": {
+        "visibility": {
+          "visible": false
+        },
+        "transform": {
+          "position": [
+            0,
+            0,
+            0
+          ]
+        },
+        "script": {
+          "name": "spinner",
+          "params": {
+            "speed": 0.5
+          }
+        }
+      }
+    },
+    "build-elemental-longsword-128-v1": {
+      "name": "elemental-longsword-128 v1",
+      "parent": "stand-elemental-longsword-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.763889,
+              0.013889,
+              0.222222
+            ],
+            "partMask": 102675
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-elemental-longsword-128-v2": {
+      "name": "elemental-longsword-128 v2",
+      "parent": "stand-elemental-longsword-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.763889,
+              0.013889,
+              0.222222
+            ],
+            "partMask": 107045
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-elemental-longsword-128-v3": {
+      "name": "elemental-longsword-128 v3",
+      "parent": "stand-elemental-longsword-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.763889,
+              0.013889,
+              0.222222
+            ],
+            "partMask": 115785
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-elemental-longsword-128-v4": {
+      "name": "elemental-longsword-128 v4",
+      "parent": "stand-elemental-longsword-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.763889,
+              0.013889,
+              0.222222
+            ],
+            "partMask": 104579
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "stand-frost-reliquary": {
+      "name": "frost-reliquary",
+      "parent": null,
+      "tags": [
+        "atlas-carousel-item"
+      ],
+      "components": {
+        "visibility": {
+          "visible": false
+        },
+        "transform": {
+          "position": [
+            0,
+            0,
+            0
+          ]
+        },
+        "script": {
+          "name": "spinner",
+          "params": {
+            "speed": 0.5
+          }
+        }
+      }
+    },
+    "build-frost-reliquary-v1": {
+      "name": "frost-reliquary v1",
+      "parent": "stand-frost-reliquary",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.013889,
+              0.263889,
+              0.222222
+            ],
+            "partMask": 102675
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-frost-reliquary-v2": {
+      "name": "frost-reliquary v2",
+      "parent": "stand-frost-reliquary",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.013889,
+              0.263889,
+              0.222222
+            ],
+            "partMask": 107045
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-frost-reliquary-v3": {
+      "name": "frost-reliquary v3",
+      "parent": "stand-frost-reliquary",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.013889,
+              0.263889,
+              0.222222
+            ],
+            "partMask": 115785
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-frost-reliquary-v4": {
+      "name": "frost-reliquary v4",
+      "parent": "stand-frost-reliquary",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.013889,
+              0.263889,
+              0.222222
+            ],
+            "partMask": 104579
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "stand-frost-reliquary-128": {
+      "name": "frost-reliquary-128",
+      "parent": null,
+      "tags": [
+        "atlas-carousel-item"
+      ],
+      "components": {
+        "visibility": {
+          "visible": false
+        },
+        "transform": {
+          "position": [
+            0,
+            0,
+            0
+          ]
+        },
+        "script": {
+          "name": "spinner",
+          "params": {
+            "speed": 0.5
+          }
+        }
+      }
+    },
+    "build-frost-reliquary-128-v1": {
+      "name": "frost-reliquary-128 v1",
+      "parent": "stand-frost-reliquary-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.263889,
+              0.263889,
+              0.222222
+            ],
+            "partMask": 102675
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-frost-reliquary-128-v2": {
+      "name": "frost-reliquary-128 v2",
+      "parent": "stand-frost-reliquary-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.263889,
+              0.263889,
+              0.222222
+            ],
+            "partMask": 107045
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-frost-reliquary-128-v3": {
+      "name": "frost-reliquary-128 v3",
+      "parent": "stand-frost-reliquary-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.263889,
+              0.263889,
+              0.222222
+            ],
+            "partMask": 115785
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-frost-reliquary-128-v4": {
+      "name": "frost-reliquary-128 v4",
+      "parent": "stand-frost-reliquary-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.263889,
+              0.263889,
+              0.222222
+            ],
+            "partMask": 104579
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "stand-gravebloom-longsword": {
+      "name": "gravebloom-longsword",
+      "parent": null,
+      "tags": [
+        "atlas-carousel-item"
+      ],
+      "components": {
+        "visibility": {
+          "visible": false
+        },
+        "transform": {
+          "position": [
+            0,
+            0,
+            0
+          ]
+        },
+        "script": {
+          "name": "spinner",
+          "params": {
+            "speed": 0.5
+          }
+        }
+      }
+    },
+    "build-gravebloom-longsword-v1": {
+      "name": "gravebloom-longsword v1",
+      "parent": "stand-gravebloom-longsword",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.513889,
+              0.263889,
+              0.222222
+            ],
+            "partMask": 102675
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-gravebloom-longsword-v2": {
+      "name": "gravebloom-longsword v2",
+      "parent": "stand-gravebloom-longsword",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.513889,
+              0.263889,
+              0.222222
+            ],
+            "partMask": 107045
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-gravebloom-longsword-v3": {
+      "name": "gravebloom-longsword v3",
+      "parent": "stand-gravebloom-longsword",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.513889,
+              0.263889,
+              0.222222
+            ],
+            "partMask": 115785
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-gravebloom-longsword-v4": {
+      "name": "gravebloom-longsword v4",
+      "parent": "stand-gravebloom-longsword",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.513889,
+              0.263889,
+              0.222222
+            ],
+            "partMask": 104579
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "stand-gravebloom-longsword-128": {
+      "name": "gravebloom-longsword-128",
+      "parent": null,
+      "tags": [
+        "atlas-carousel-item"
+      ],
+      "components": {
+        "visibility": {
+          "visible": false
+        },
+        "transform": {
+          "position": [
+            0,
+            0,
+            0
+          ]
+        },
+        "script": {
+          "name": "spinner",
+          "params": {
+            "speed": 0.5
+          }
+        }
+      }
+    },
+    "build-gravebloom-longsword-128-v1": {
+      "name": "gravebloom-longsword-128 v1",
+      "parent": "stand-gravebloom-longsword-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.763889,
+              0.263889,
+              0.222222
+            ],
+            "partMask": 102675
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-gravebloom-longsword-128-v2": {
+      "name": "gravebloom-longsword-128 v2",
+      "parent": "stand-gravebloom-longsword-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.763889,
+              0.263889,
+              0.222222
+            ],
+            "partMask": 107045
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-gravebloom-longsword-128-v3": {
+      "name": "gravebloom-longsword-128 v3",
+      "parent": "stand-gravebloom-longsword-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.763889,
+              0.263889,
+              0.222222
+            ],
+            "partMask": 115785
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-gravebloom-longsword-128-v4": {
+      "name": "gravebloom-longsword-128 v4",
+      "parent": "stand-gravebloom-longsword-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.763889,
+              0.263889,
+              0.222222
+            ],
+            "partMask": 104579
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "stand-keycheck": {
+      "name": "keycheck",
+      "parent": null,
+      "tags": [
+        "atlas-carousel-item"
+      ],
+      "components": {
+        "visibility": {
+          "visible": false
+        },
+        "transform": {
+          "position": [
+            0,
+            0,
+            0
+          ]
+        },
+        "script": {
+          "name": "spinner",
+          "params": {
+            "speed": 0.5
+          }
+        }
+      }
+    },
+    "build-keycheck-v1": {
+      "name": "keycheck v1",
+      "parent": "stand-keycheck",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.013889,
+              0.513889,
+              0.222222
+            ],
+            "partMask": 102675
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-keycheck-v2": {
+      "name": "keycheck v2",
+      "parent": "stand-keycheck",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.013889,
+              0.513889,
+              0.222222
+            ],
+            "partMask": 107045
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-keycheck-v3": {
+      "name": "keycheck v3",
+      "parent": "stand-keycheck",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.013889,
+              0.513889,
+              0.222222
+            ],
+            "partMask": 115785
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-keycheck-v4": {
+      "name": "keycheck v4",
+      "parent": "stand-keycheck",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.013889,
+              0.513889,
+              0.222222
+            ],
+            "partMask": 104579
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "stand-moonlit-executioner-128": {
+      "name": "moonlit-executioner-128",
+      "parent": null,
+      "tags": [
+        "atlas-carousel-item"
+      ],
+      "components": {
+        "visibility": {
+          "visible": false
+        },
+        "transform": {
+          "position": [
+            0,
+            0,
+            0
+          ]
+        },
+        "script": {
+          "name": "spinner",
+          "params": {
+            "speed": 0.5
+          }
+        }
+      }
+    },
+    "build-moonlit-executioner-128-v1": {
+      "name": "moonlit-executioner-128 v1",
+      "parent": "stand-moonlit-executioner-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.263889,
+              0.513889,
+              0.222222
+            ],
+            "partMask": 102675
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-moonlit-executioner-128-v2": {
+      "name": "moonlit-executioner-128 v2",
+      "parent": "stand-moonlit-executioner-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.263889,
+              0.513889,
+              0.222222
+            ],
+            "partMask": 107045
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-moonlit-executioner-128-v3": {
+      "name": "moonlit-executioner-128 v3",
+      "parent": "stand-moonlit-executioner-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.263889,
+              0.513889,
+              0.222222
+            ],
+            "partMask": 115785
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-moonlit-executioner-128-v4": {
+      "name": "moonlit-executioner-128 v4",
+      "parent": "stand-moonlit-executioner-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.263889,
+              0.513889,
+              0.222222
+            ],
+            "partMask": 104579
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "stand-skullknight-longsword": {
+      "name": "skullknight-longsword",
+      "parent": null,
+      "tags": [
+        "atlas-carousel-item"
+      ],
+      "components": {
+        "visibility": {
+          "visible": false
+        },
+        "transform": {
+          "position": [
+            0,
+            0,
+            0
+          ]
+        },
+        "script": {
+          "name": "spinner",
+          "params": {
+            "speed": 0.5
+          }
+        }
+      }
+    },
+    "build-skullknight-longsword-v1": {
+      "name": "skullknight-longsword v1",
+      "parent": "stand-skullknight-longsword",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.513889,
+              0.513889,
+              0.222222
+            ],
+            "partMask": 102675
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-skullknight-longsword-v2": {
+      "name": "skullknight-longsword v2",
+      "parent": "stand-skullknight-longsword",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.513889,
+              0.513889,
+              0.222222
+            ],
+            "partMask": 107045
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-skullknight-longsword-v3": {
+      "name": "skullknight-longsword v3",
+      "parent": "stand-skullknight-longsword",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.513889,
+              0.513889,
+              0.222222
+            ],
+            "partMask": 115785
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-skullknight-longsword-v4": {
+      "name": "skullknight-longsword v4",
+      "parent": "stand-skullknight-longsword",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.513889,
+              0.513889,
+              0.222222
+            ],
+            "partMask": 104579
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "stand-skullknight-longsword-128": {
+      "name": "skullknight-longsword-128",
+      "parent": null,
+      "tags": [
+        "atlas-carousel-item"
+      ],
+      "components": {
+        "visibility": {
+          "visible": false
+        },
+        "transform": {
+          "position": [
+            0,
+            0,
+            0
+          ]
+        },
+        "script": {
+          "name": "spinner",
+          "params": {
+            "speed": 0.5
+          }
+        }
+      }
+    },
+    "build-skullknight-longsword-128-v1": {
+      "name": "skullknight-longsword-128 v1",
+      "parent": "stand-skullknight-longsword-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.763889,
+              0.513889,
+              0.222222
+            ],
+            "partMask": 102675
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-skullknight-longsword-128-v2": {
+      "name": "skullknight-longsword-128 v2",
+      "parent": "stand-skullknight-longsword-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.763889,
+              0.513889,
+              0.222222
+            ],
+            "partMask": 107045
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-skullknight-longsword-128-v3": {
+      "name": "skullknight-longsword-128 v3",
+      "parent": "stand-skullknight-longsword-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.763889,
+              0.513889,
+              0.222222
+            ],
+            "partMask": 115785
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-skullknight-longsword-128-v4": {
+      "name": "skullknight-longsword-128 v4",
+      "parent": "stand-skullknight-longsword-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.763889,
+              0.513889,
+              0.222222
+            ],
+            "partMask": 104579
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "stand-stormglass-duelist-128": {
+      "name": "stormglass-duelist-128",
+      "parent": null,
+      "tags": [
+        "atlas-carousel-item"
+      ],
+      "components": {
+        "visibility": {
+          "visible": false
+        },
+        "transform": {
+          "position": [
+            0,
+            0,
+            0
+          ]
+        },
+        "script": {
+          "name": "spinner",
+          "params": {
+            "speed": 0.5
+          }
+        }
+      }
+    },
+    "build-stormglass-duelist-128-v1": {
+      "name": "stormglass-duelist-128 v1",
+      "parent": "stand-stormglass-duelist-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.013889,
+              0.763889,
+              0.222222
+            ],
+            "partMask": 102675
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-stormglass-duelist-128-v2": {
+      "name": "stormglass-duelist-128 v2",
+      "parent": "stand-stormglass-duelist-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.013889,
+              0.763889,
+              0.222222
+            ],
+            "partMask": 107045
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-stormglass-duelist-128-v3": {
+      "name": "stormglass-duelist-128 v3",
+      "parent": "stand-stormglass-duelist-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.013889,
+              0.763889,
+              0.222222
+            ],
+            "partMask": 115785
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-stormglass-duelist-128-v4": {
+      "name": "stormglass-duelist-128 v4",
+      "parent": "stand-stormglass-duelist-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.013889,
+              0.763889,
+              0.222222
+            ],
+            "partMask": 104579
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "stand-sunforged-falchion-128": {
+      "name": "sunforged-falchion-128",
+      "parent": null,
+      "tags": [
+        "atlas-carousel-item"
+      ],
+      "components": {
+        "visibility": {
+          "visible": false
+        },
+        "transform": {
+          "position": [
+            0,
+            0,
+            0
+          ]
+        },
+        "script": {
+          "name": "spinner",
+          "params": {
+            "speed": 0.5
+          }
+        }
+      }
+    },
+    "build-sunforged-falchion-128-v1": {
+      "name": "sunforged-falchion-128 v1",
+      "parent": "stand-sunforged-falchion-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.263889,
+              0.763889,
+              0.222222
+            ],
+            "partMask": 102675
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-sunforged-falchion-128-v2": {
+      "name": "sunforged-falchion-128 v2",
+      "parent": "stand-sunforged-falchion-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.263889,
+              0.763889,
+              0.222222
+            ],
+            "partMask": 107045
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-sunforged-falchion-128-v3": {
+      "name": "sunforged-falchion-128 v3",
+      "parent": "stand-sunforged-falchion-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.263889,
+              0.763889,
+              0.222222
+            ],
+            "partMask": 115785
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-sunforged-falchion-128-v4": {
+      "name": "sunforged-falchion-128 v4",
+      "parent": "stand-sunforged-falchion-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.263889,
+              0.763889,
+              0.222222
+            ],
+            "partMask": 104579
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "stand-verdigris-fang": {
+      "name": "verdigris-fang",
+      "parent": null,
+      "tags": [
+        "atlas-carousel-item"
+      ],
+      "components": {
+        "visibility": {
+          "visible": false
+        },
+        "transform": {
+          "position": [
+            0,
+            0,
+            0
+          ]
+        },
+        "script": {
+          "name": "spinner",
+          "params": {
+            "speed": 0.5
+          }
+        }
+      }
+    },
+    "build-verdigris-fang-v1": {
+      "name": "verdigris-fang v1",
+      "parent": "stand-verdigris-fang",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.513889,
+              0.763889,
+              0.222222
+            ],
+            "partMask": 102675
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-verdigris-fang-v2": {
+      "name": "verdigris-fang v2",
+      "parent": "stand-verdigris-fang",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.513889,
+              0.763889,
+              0.222222
+            ],
+            "partMask": 107045
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-verdigris-fang-v3": {
+      "name": "verdigris-fang v3",
+      "parent": "stand-verdigris-fang",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.513889,
+              0.763889,
+              0.222222
+            ],
+            "partMask": 115785
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-verdigris-fang-v4": {
+      "name": "verdigris-fang v4",
+      "parent": "stand-verdigris-fang",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.513889,
+              0.763889,
+              0.222222
+            ],
+            "partMask": 104579
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "stand-verdigris-fang-128": {
+      "name": "verdigris-fang-128",
+      "parent": null,
+      "tags": [
+        "atlas-carousel-item"
+      ],
+      "components": {
+        "visibility": {
+          "visible": false
+        },
+        "transform": {
+          "position": [
+            0,
+            0,
+            0
+          ]
+        },
+        "script": {
+          "name": "spinner",
+          "params": {
+            "speed": 0.5
+          }
+        }
+      }
+    },
+    "build-verdigris-fang-128-v1": {
+      "name": "verdigris-fang-128 v1",
+      "parent": "stand-verdigris-fang-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.763889,
+              0.763889,
+              0.222222
+            ],
+            "partMask": 102675
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-verdigris-fang-128-v2": {
+      "name": "verdigris-fang-128 v2",
+      "parent": "stand-verdigris-fang-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            -0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.763889,
+              0.763889,
+              0.222222
+            ],
+            "partMask": 107045
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-verdigris-fang-128-v3": {
+      "name": "verdigris-fang-128 v3",
+      "parent": "stand-verdigris-fang-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.2911051212938005,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.763889,
+              0.763889,
+              0.222222
+            ],
+            "partMask": 115785
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "build-verdigris-fang-128-v4": {
+      "name": "verdigris-fang-128 v4",
+      "parent": "stand-verdigris-fang-128",
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0.8733153638814015,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "atlas-carousel-uber.glb",
+            "textureFilter": "nearest",
+            "atlasTile": [
+              0.763889,
+              0.763889,
+              0.222222
+            ],
+            "partMask": 104579
+          },
+          "renderMode": "instanced",
+          "castShadow": true,
+          "receiveShadow": true
+        }
+      }
+    },
+    "atlas-carousel": {
+      "name": "Atlas Carousel",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "script": {
+          "name": "atlas-carousel"
+        }
+      }
+    },
+    "camera": {
+      "name": "Camera",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            1.488,
+            4.711051212938005
+          ],
+          "rotation": [
+            -0.04318122933752329,
+            0,
+            0,
+            0.9990672557104953
+          ]
+        },
+        "camera": {
+          "active": true,
+          "fov": 38,
+          "near": 0.01,
+          "far": 400
+        }
+      }
+    }
+  }
+}

@@ -8,7 +8,8 @@
  *
  *   GET  /health
  *   GET  /admin/status          players, entity counts, terrain cells
- *   GET  /admin/npcs            every managed NPC with position / hp / dead
+ *   GET  /admin/npcs            every managed NPC with position / hp / dead / ai (what each
+ *                               brain is thinking: state, target, threat table)
  *   GET  /admin/templates       spawnable template names
  *   GET  /admin/netstate        the whole replicated session state
  *   GET  /admin/events          the event bus trace ring (last 64 delivered events)

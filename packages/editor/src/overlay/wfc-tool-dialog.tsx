@@ -36,9 +36,11 @@ interface TileDraft {
   sockets: Record<Direction, string>;
   /** Learned tilesets (tools/wfc-3d/kit.mjs): children whose texture counter-rotates; passed through untouched. */
   alignUv?: unknown;
+  layers?: unknown;
 }
 
 interface TilesetDraft {
+  connected?: boolean;
   version: 1;
   name: string;
   cellSize: Vec3;
@@ -145,6 +147,7 @@ function normalizeImported(raw: unknown): TilesetDraft {
         DIRECTIONS.map(({ id }) => [id, typeof sockets[id] === "string" ? sockets[id] : "open"]),
       ) as Record<Direction, string>,
       ...(tile.alignUv !== undefined ? { alignUv: tile.alignUv } : {}),
+      ...(tile.layers !== undefined ? { layers: tile.layers } : {}),
     };
   });
   const boundaryRaw = value.boundary && typeof value.boundary === "object" && !Array.isArray(value.boundary)
@@ -163,6 +166,7 @@ function normalizeImported(raw: unknown): TilesetDraft {
     boundary,
     tiles,
     pins,
+    ...(typeof value.connected === "boolean" ? { connected: value.connected } : {}),
     ...(value.adjacency !== undefined ? { adjacency: value.adjacency } : {}),
     ...(typeof value.outside === "string" ? { outside: value.outside } : {}),
   };

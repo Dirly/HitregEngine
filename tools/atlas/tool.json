@@ -1,26 +1,51 @@
 {
   "version": 1,
   "id": "hitreg.armor-atlas",
-  "name": "Armor Atlas",
-  "description": "Register generated armor artwork against the character UV key, preserve cyan cutouts, and write a game-ready texture atlas.",
+  "name": "Armor / Weapon Atlas",
+  "description": "Register generated artwork against a UV key and write a game-ready atlas. Character armor uses a 256px sheet; longsword weapons use a 128px sheet with weapon-sized bleed by default.",
   "category": "Assets/Generate",
-  "surfaces": ["assets", "tools"],
-  "permissions": ["assets.write:textures"],
+  "surfaces": [
+    "assets",
+    "tools"
+  ],
+  "permissions": [
+    "assets.write:textures"
+  ],
   "entry": "./run.mjs",
   "inputs": {
     "key": {
       "kind": "file",
       "label": "UV key",
       "description": "The flat PNG color-key sheet supplied to the image generator.",
-      "accept": ["image/png"],
+      "accept": [
+        "image/png"
+      ],
       "maxBytes": 16777216
     },
     "art": {
       "kind": "file",
       "label": "Generated art",
       "description": "The generated PNG painted over the key layout. It must have exactly the same dimensions as the UV key.",
-      "accept": ["image/png"],
+      "accept": [
+        "image/png"
+      ],
       "maxBytes": 16777216
+    },
+    "sheet": {
+      "kind": "select",
+      "label": "Sheet",
+      "description": "Which key this art was painted over. Character armor defaults to 256px output; longsword defaults to 128px output. Each sheet has its own slot table.",
+      "default": "armor",
+      "options": [
+        {
+          "value": "armor",
+          "label": "character armor"
+        },
+        {
+          "value": "longsword",
+          "label": "longsword"
+        }
+      ]
     },
     "name": {
       "kind": "string",
@@ -34,7 +59,7 @@
     "size": {
       "kind": "number",
       "label": "Atlas size",
-      "description": "Square output size in pixels.",
+      "description": "Square output size in pixels. Presets are character armor 256px and longsword 128px; set this only when intentionally overriding the sheet preset.",
       "default": 256,
       "integer": true,
       "min": 64,
@@ -44,7 +69,7 @@
     "bleed": {
       "kind": "number",
       "label": "Bleed",
-      "description": "Padding texels dilated around UV islands.",
+      "description": "Padding texels dilated around UV islands. Presets are armor 8px and longsword 3px, keeping the same relative gutter after downsampling.",
       "default": 8,
       "integer": true,
       "min": 0,
@@ -57,8 +82,14 @@
       "description": "Box filtering is the normal downsampling path; nearest preserves hard source pixels.",
       "default": "box",
       "options": [
-        { "value": "box", "label": "box" },
-        { "value": "nearest", "label": "nearest" }
+        {
+          "value": "box",
+          "label": "box"
+        },
+        {
+          "value": "nearest",
+          "label": "nearest"
+        }
       ]
     },
     "slices": {

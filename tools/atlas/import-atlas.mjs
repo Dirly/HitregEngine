@@ -151,7 +151,9 @@ const keyContaminants = [];
     for (let c = 0; c < components.length; c++) {
       const component = components[c];
       if (c === 0 || component.length / originalArea >= minFraction) {
-        kept.push(...component);
+        // not kept.push(...component): a large island (the head band is ~126k
+        // texels) exceeds V8's argument limit and throws a stack overflow.
+        for (const i of component) kept.push(i);
       } else {
         removed += component.length;
         for (const i of component) islandOf[i] = -1;
@@ -292,6 +294,37 @@ for (let i = 0; i < N; i++) {
 }
 for (let i = 0; i < N; i++) painted[i] = bg[i] ? 0 : 1;
 
+// A CLOSED ring's hole. `bg` is a flood fill from the image border, so bright
+// ground fully surrounded by artwork is deliberately NOT ground — that is what
+// keeps a specular highlight in the middle of a breastplate from being punched
+// out. But an ornament is mostly empty by design, and generators draw closed
+// rings constantly; the hole in one can never reach the border, so it can never
+// be cut. Slots that opt in with `openEnclosed` also treat a large enclosed
+// bright region as a hole. Asking the generator for the key colour there does
+// not work — measured across four sheets, it has produced zero cyan pixels.
+const enclosed = new Uint8Array(N);
+{
+  const MIN_AREA = Math.max(16, Math.round((4 * scale) ** 2));
+  const seen = new Uint8Array(N);
+  for (let start = 0; start < N; start++) {
+    if (seen[start] || !bgCandidate[start] || bg[start]) continue;
+    const stack = [start];
+    const comp = [];
+    seen[start] = 1;
+    while (stack.length) {
+      const i = stack.pop();
+      comp.push(i);
+      const x = i % W;
+      const y = (i / W) | 0;
+      if (x > 0 && !seen[i - 1] && bgCandidate[i - 1] && !bg[i - 1]) { seen[i - 1] = 1; stack.push(i - 1); }
+      if (x < W - 1 && !seen[i + 1] && bgCandidate[i + 1] && !bg[i + 1]) { seen[i + 1] = 1; stack.push(i + 1); }
+      if (y > 0 && !seen[i - W] && bgCandidate[i - W] && !bg[i - W]) { seen[i - W] = 1; stack.push(i - W); }
+      if (y < H - 1 && !seen[i + W] && bgCandidate[i + W] && !bg[i + W]) { seen[i + W] = 1; stack.push(i + W); }
+    }
+    if (comp.length >= MIN_AREA) for (const i of comp) enclosed[i] = 1;
+  }
+}
+
 const cyan = new Uint8Array(N);
 {
   const stack = [];
@@ -431,8 +464,16 @@ const MAX_SHIFT = Math.round(SEARCH * W);
  * margin, and on a transparency island the key-colour field is legitimately
  * larger than the island itself. Regularisers keep the nudge minimal so the fit
  * cannot cheat by shrinking the island onto a dark blob.
+ *
+ * `cut` marks a transparency island, where bare ground inside the island is
+ * DELIBERATE empty space, not missing artwork. Generators never produce the key
+ * colour — measured over a full sheet, zero cyan pixels out of 1.57M — they
+ * leave white. The alpha pass has always honoured that (`cyan[j] || bg[j]`),
+ * but this cost did not, so a piece drawn correctly with an open silhouette
+ * read as ~97% uncovered and the fit dragged it around trying to cover ground
+ * that was never meant to be covered.
  */
-function uncovered(sample, cx, cy, dx, dy, sx, sy) {
+function uncovered(sample, cx, cy, dx, dy, sx, sy, cut = false) {
   let miss = 0;
   for (const p of sample) {
     const px = p % W;
@@ -441,26 +482,44 @@ function uncovered(sample, cx, cy, dx, dy, sx, sy) {
     const ay = cy + (py - cy) / sy - dy;
     const ix = Math.round(ax);
     const iy = Math.round(ay);
-    if (ix < 0 || iy < 0 || ix >= W || iy >= H || !paintedCore[iy * W + ix]) miss++;
+    if (ix < 0 || iy < 0 || ix >= W || iy >= H) {
+      miss++;
+      continue;
+    }
+    const j = iy * W + ix;
+    if (paintedCore[j]) continue;
+    if (cut && bg[j]) continue; // deliberate cut, not a gap
+    miss++;
   }
   return miss / sample.length;
 }
 
-function cost(sample, cx, cy, dx, dy, sx, sy) {
+// Ignoring bare ground on a cut island flattens much of the cost surface, so a
+// piece with a lot of deliberate white (the tasset banners) can slide far for a
+// negligible gain. Without coverage signal the right prior is the GLOBAL
+// pre-align, which is fitted across every island at once, so cut islands are
+// held near it much more firmly.
+// 0.25 from a sweep: at 0.02 the tasset slid 38px and the shoe 32px for a
+// fraction of a percent; at 0.50 the head could no longer correct at all.
+const CUT_SHIFT_PEN = Number(args['cut-shift-pen'] ?? manifest.cutShiftPen ?? 0.25);
+const CUT_SCALE_PEN = Number(args['cut-scale-pen'] ?? manifest.cutScalePen ?? 0.04);
+function cost(sample, cx, cy, dx, dy, sx, sy, cut = false) {
   const scalePen = (Math.abs(Math.log(sx)) + Math.abs(Math.log(sy))) / Math.log(1.12);
   const shiftPen = (Math.abs(dx) + Math.abs(dy)) / MAX_SHIFT;
-  return uncovered(sample, cx, cy, dx, dy, sx, sy) + 0.04 * scalePen + 0.02 * shiftPen;
+  const sw = cut ? CUT_SHIFT_PEN : 0.02;
+  const cw = cut ? CUT_SCALE_PEN : 0.04;
+  return uncovered(sample, cx, cy, dx, dy, sx, sy, cut) + cw * scalePen + sw * shiftPen;
 }
 
-function search(sample, cx, cy, init, stages) {
-  let best = { ...init, cost: cost(sample, cx, cy, init.dx, init.dy, init.sx, init.sy) };
+function search(sample, cx, cy, init, stages, cut = false) {
+  let best = { ...init, cost: cost(sample, cx, cy, init.dx, init.dy, init.sx, init.sy, cut) };
   for (const st of stages) {
     const b = { ...best };
     for (let dx = b.dx - st.t; dx <= b.dx + st.t + 1e-9; dx += st.ts)
       for (let dy = b.dy - st.t; dy <= b.dy + st.t + 1e-9; dy += st.ts)
         for (let sx = b.sx - st.s; sx <= b.sx + st.s + 1e-9; sx += st.ss)
           for (let sy = b.sy - st.s; sy <= b.sy + st.s + 1e-9; sy += st.ss) {
-            const c = cost(sample, cx, cy, dx, dy, sx, sy);
+            const c = cost(sample, cx, cy, dx, dy, sx, sy, cut);
             if (c < best.cost) best = { dx, dy, sx, sy, cost: c };
           }
   }
@@ -490,7 +549,19 @@ let global = { dx: 0, dy: 0, sx: 1, sy: 1 };
 for (const isl of islands) {
   const sample = samplePixels(isl.px, 3000);
   isl.sample = sample;
-  isl.baseUncovered = uncovered(sample, isl.cx, isl.cy, 0, 0, 1, 1);
+  const cut = !!isl.transparency;
+  isl.baseUncovered = uncovered(sample, isl.cx, isl.cy, 0, 0, 1, 1, cut);
+  // A cut-capable island can be mostly empty by design — the iron ornament is
+  // meant to come back 60-80% bare. There is then almost no artwork to register
+  // against, and any fit the search finds is noise, so keep the identity.
+  const paintFrac =
+    sample.reduce((n, p) => n + (paintedCore[p] ? 1 : 0), 0) / sample.length;
+  if (cut && paintFrac < 0.25) {
+    isl.fit = { dx: 0, dy: 0, sx: 1, sy: 1 };
+    isl.lowSignal = true;
+    isl.uncovered = uncovered(sample, isl.cx, isl.cy, 0, 0, 1, 1, cut);
+    continue;
+  }
   const seed = {
     dx: global.dx + ((global.sx - 1) * (isl.cx - gcx)) / global.sx,
     dy: global.dy + ((global.sy - 1) * (isl.cy - gcy)) / global.sy,
@@ -503,8 +574,8 @@ for (const isl of islands) {
     { t: 18, ts: 6, s: 0.04, ss: 0.02 },
     { t: 6, ts: 2, s: 0.02, ss: 0.01 },
     { t: 2, ts: 1, s: 0.01, ss: 0.005 },
-  ]);
-  isl.uncovered = uncovered(sample, isl.cx, isl.cy, isl.fit.dx, isl.fit.dy, isl.fit.sx, isl.fit.sy);
+  ], cut);
+  isl.uncovered = uncovered(sample, isl.cx, isl.cy, isl.fit.dx, isl.fit.dy, isl.fit.sx, isl.fit.sy, cut);
 }
 
 // ---------------------------------------------------------------------------
@@ -717,7 +788,7 @@ const containIslands = islands.filter((i) => manifest.slots[i.hex]?.fit?.startsW
       insetX: +(insetX / scale).toFixed(1),
       insetY: +(insetY / scale).toFixed(1),
     };
-    isl.uncovered = uncovered(isl.sample, isl.cx, isl.cy, isl.fit.dx, isl.fit.dy, isl.fit.sx, isl.fit.sy);
+    isl.uncovered = uncovered(isl.sample, isl.cx, isl.cy, isl.fit.dx, isl.fit.dy, isl.fit.sx, isl.fit.sy, !!isl.transparency);
   }
 }
 
@@ -824,7 +895,7 @@ for (const isl of islands) {
 
   if (moved) {
     isl.anchored = anchor;
-    isl.uncovered = uncovered(isl.sample, isl.cx, isl.cy, isl.fit.dx, isl.fit.dy, isl.fit.sx, isl.fit.sy);
+    isl.uncovered = uncovered(isl.sample, isl.cx, isl.cy, isl.fit.dx, isl.fit.dy, isl.fit.sx, isl.fit.sy, !!isl.transparency);
   }
 }
 
@@ -970,6 +1041,94 @@ const grownOf = Int16Array.from(islandOf);
 }
 
 const srcRGB = new Uint8Array(N * 3);
+// A face is symmetric, but a generator never centres it exactly — measured 12px
+// off on one sheet, 2 and 4 on others. Rather than hope, FIND the axis the
+// artwork actually used: slide the fit horizontally and keep the offset whose
+// mirror-image difference is smallest. That axis is then the island's centre,
+// which for the head band is the centre line of the face by construction.
+for (const isl of islands) {
+  if (manifest.slots[isl.hex]?.symmetric !== true) continue;
+  const xs = isl.px.map((p) => p % W);
+  const ys = isl.px.map((p) => (p / W) | 0);
+  const ix0 = Math.min(...xs), ix1 = Math.max(...xs);
+  const iy0 = Math.min(...ys), iy1 = Math.max(...ys);
+  const mid = (ix0 + ix1) / 2;
+  const span = Math.round((ix1 - ix0) * 0.06);
+  const lumAt = (ax, ay) => {
+    const x = Math.round(ax), y = Math.round(ay);
+    if (x < 0 || y < 0 || x >= W || y >= H) return -1;
+    const i = (y * W + x) * 4;
+    return 0.2126 * artImg.data[i] + 0.7152 * artImg.data[i + 1] + 0.0722 * artImg.data[i + 2];
+  };
+  let best = null;
+  for (let off = -span; off <= span; off++) {
+    const dx = isl.fit.dx + off;
+    let sum = 0, n = 0;
+    for (let y = iy0 + 2; y <= iy1 - 2; y += 2)
+      for (let d = 2; d < (ix1 - ix0) / 2; d += 2) {
+        const pl = mid - d, pr = mid + d;
+        if (islandOf[y * W + Math.round(pl)] !== isl.id) continue;
+        if (islandOf[y * W + Math.round(pr)] !== isl.id) continue;
+        const map = (px) => [
+          isl.cx + (px - isl.cx) / isl.fit.sx - dx,
+          isl.cy + (y - isl.cy) / isl.fit.sy - isl.fit.dy,
+        ];
+        const a = lumAt(...map(pl)), b = lumAt(...map(pr));
+        if (a < 0 || b < 0) continue;
+        sum += Math.abs(a - b); n++;
+      }
+    if (n < 200) continue;
+    const score = sum / n;
+    if (!best || score < best.score) best = { off, score, n };
+  }
+  if (!best || best.off === 0) continue;
+  isl.fit = { ...isl.fit, dx: isl.fit.dx + best.off };
+  isl.symmetryShift = best.off;
+  isl.uncovered = uncovered(isl.sample, isl.cx, isl.cy, isl.fit.dx, isl.fit.dy, isl.fit.sx, isl.fit.sy, !!isl.transparency);
+}
+
+// Islands that are one continuous surface cut into two key colours (the head
+// band and the face panel inside it) must share ONE transform. Fitted apart
+// they drift — measured 8 texels of vertical disagreement — and that is a seam
+// straight down the ear line. `fitWith` makes an island adopt another's fit.
+for (const isl of islands) {
+  const follow = manifest.slots[isl.hex]?.fitWith;
+  if (!follow) continue;
+  const lead = islands.find((o) => o.name === follow);
+  if (!lead) {
+    console.warn(`! ${isl.name}: fitWith "${follow}" is not an island on this key`);
+    continue;
+  }
+  isl.fit = { ...lead.fit };
+  isl.uncovered = uncovered(
+    isl.sample, isl.cx, isl.cy, isl.fit.dx, isl.fit.dy, isl.fit.sx, isl.fit.sy,
+    !!isl.transparency,
+  );
+}
+
+/**
+ * Does the empty run containing source texel `j` escape downward off the
+ * bottom of this island? A frayed hem does; a patch the generator simply did
+ * not reach in the middle or at the sides does not. Walks straight down in
+ * source space, which is enough for a hem and cheap enough to run per texel.
+ */
+const bottomReach = new Map();
+function reachesIslandBottom(isl, j) {
+  const cached = bottomReach.get(j);
+  if (cached !== undefined) return cached;
+  const x = j % W;
+  let y = (j / W) | 0;
+  let out = false;
+  for (; y < H; y++) {
+    const k = y * W + x;
+    if (islandOf[k] === isl.id && !(cyan[k] || bg[k])) { out = false; break; }
+    if (islandOf[k] !== isl.id && islandOf[k] >= 0) { out = false; break; }
+    if (y === H - 1 || (islandOf[k] < 0 && y > (j / W | 0))) { out = true; break; }
+  }
+  bottomReach.set(j, out);
+  return out;
+}
+
 const srcAlpha = new Uint8Array(N);
 const srcColorOk = new Uint8Array(N); // usable colour — kept as authored art
 const srcColorClean = new Uint8Array(N); // uncontaminated — may seed the padding
@@ -1006,12 +1165,17 @@ for (let i = 0; i < N; i++) {
   if (ix < 0 || iy < 0 || ix >= W || iy >= H) continue;
   const s = iy * W + ix;
 
+  const cutPolicy = manifest.slots[isl.hex]?.cut ?? true;
   const clip = isl.artClip;
   if (clip && (ax < clip.x0 || ax > clip.x1 || ay < clip.y0 || ay > clip.y1)) {
-    srcAlpha[i] = isl.transparency ? 0 : 255;
+    // Outside a contain fit's source box. That is still governed by the cut
+    // policy: an island told not to open must not open here either, or a
+    // `contain` slot quietly keeps cutting after cut:false was set.
+    const clipCuts = isl.transparency && cutPolicy !== false;
+    srcAlpha[i] = clipCuts ? 0 : 255;
     srcColorOk[i] = 0;
     srcColorClean[i] = 0;
-    if (islandOf[i] >= 0 && isl.transparency) isl.cyanHits++;
+    if (islandOf[i] >= 0 && clipCuts) isl.cyanHits++;
     continue;
   }
 
@@ -1019,7 +1183,21 @@ for (let i = 0; i < N; i++) {
   // whether the generator marked it with the key colour or simply left it as
   // bare ground. Generators routinely key the outside of a piece and forget
   // the gaps between the fray teeth; this makes those cut anyway.
-  const hole = (j) => (isl.transparency && (cyan[j] || bg[j]) ? 1 : 0);
+  // Per-slot cut policy. A generator routinely paints a piece SMALLER than its
+  // island — the sewer set left the bottom fifth of the arm island bare — and
+  // with an unconditional rule that under-fill becomes a hole in the mesh, not
+  // a deliberate cutout. `cut` says where an island is allowed to open:
+  //   true    (default) anywhere, the historical behaviour
+  //   false   nowhere; unpainted area is filled by the bleed instead
+  //   "bottom" only where the empty run reaches the island's BOTTOM edge, which
+  //           is a frayed hem and nothing else
+  const hole = (j) => {
+    if (!isl.transparency || cutPolicy === false) return 0;
+    const openEnclosed = manifest.slots[isl.hex]?.openEnclosed === true;
+    if (!(cyan[j] || bg[j] || (openEnclosed && enclosed[j]))) return 0;
+    if (cutPolicy === "bottom" && !reachesIslandBottom(isl, j)) return 0;
+    return 1;
+  };
 
   // When a contain fit shrinks the artwork, one source sample per destination
   // pixel throws away most of it and the alpha mask aliases — a frayed hem
@@ -1216,7 +1394,21 @@ for (let d = 0; d < SN; d++) {
 // pointless, and keeping them out of the gutter means their neighbours cannot
 // reach them either.
 
-const PAD_TRANSPARENT = Math.min(2, BLEED);
+// How far an island may pad into the gutter. Historically transparency islands
+// were capped at 2 while everything else was unlimited — fine when only the
+// cut-capable gear was transparency, but manifest-layered marks EVERY island
+// transparency, so the cap silently became the sheet-wide bleed and left raw
+// black between the pieces. Unlimited is the behaviour that has always looked
+// right, and it cannot mix two islands: gutter ownership below is a
+// level-synchronous BFS from every island at once, so each gutter texel already
+// belongs to its NEAREST island and a real island is never overwritten.
+// Cuts are unaffected — a hem or a bare-skin gap is alpha authored INSIDE an
+// island, and this only fills gutter outside them.
+// Per-slot `padLimit` still overrides (belt.buckle pins itself to 2), and
+// `padTransparent` can re-impose a global cap if one is ever wanted.
+const PAD_TRANSPARENT = Number(
+  args["pad-transparent"] ?? manifest.padTransparent ?? Infinity,
+);
 
 /** Nearest-island ownership of the gutter, by level-synchronous BFS. */
 const owner = new Int16Array(SN).fill(-1);
@@ -1273,7 +1465,7 @@ const minGap = new Map(); // "a|b" -> smallest observed gap in texels
  * Copy `values` outward from seed texels to every texel its owner island
  * reaches, nearest source first.
  */
-function padNearest(values, stride, authored, seedOf) {
+function padNearest(values, stride, authored, seedOf, { gutterOnly = false } = {}) {
   const src = new Int32Array(SN).fill(-1);
   let frontier = [];
   for (let d = 0; d < SN; d++) {
@@ -1299,6 +1491,7 @@ function padNearest(values, stride, authored, seedOf) {
           // Traverse THROUGH authored texels (they are not overwritten below) —
           // otherwise the clean core of an island cannot reach past its own
           // authored edge ring to pad the gutter.
+          if (gutterOnly && island256[nd] >= 0) continue;
           if (src[nd] >= 0) continue;
           if (owner[nd] !== island) continue; // never cross into another island
           src[nd] = src[d];
@@ -1332,12 +1525,12 @@ for (const isl of islands) {
   if (seeds > 0) continue;
   for (let d = 0; d < SN; d++) if (island256[d] === isl.id && colorAuthored[d]) colorSeed[d] = 1;
 }
-const colorFilled = padNearest(rgb, 3, colorAuthored, (d) => colorSeed[d] === 1);
+const colorFilled = padNearest(rgb, 3, colorAuthored, (d) => colorSeed[d] === 1, { gutterOnly: true });
 
 // alpha: authored inside the island, derived outward from there
 const alphaAuthored = new Uint8Array(SN);
 for (let d = 0; d < SN; d++) alphaAuthored[d] = island256[d] >= 0 && alphaOk[d] ? 1 : 0;
-const alphaFilled = padNearest(alpha, 1, alphaAuthored, (d) => alphaAuthored[d] === 1);
+const alphaFilled = padNearest(alpha, 1, alphaAuthored, (d) => alphaAuthored[d] === 1, { gutterOnly: true });
 
 // anything no island reached (far background) is never sampled by a UV, but
 // leave it a flat neutral rather than white so a stray sample is obvious

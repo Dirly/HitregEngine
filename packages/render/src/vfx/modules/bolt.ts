@@ -33,10 +33,10 @@ class Ribbon {
   constructor(root: THREE.Object3D, maxPoints: number) {
     this.positions = new Float32Array(maxPoints * 2 * 3);
     this.fades = new Float32Array(maxPoints * 2);
-    this.posAttr = new THREE.BufferAttribute(this.positions, 3).setUsage(THREE.DynamicDrawUsage);
-    this.fadeAttr = new THREE.BufferAttribute(this.fades, 1).setUsage(THREE.DynamicDrawUsage);
+    this.posAttr = new THREE.BufferAttribute(this.positions, 3).setUsage(THREE.StreamDrawUsage);
+    this.fadeAttr = new THREE.BufferAttribute(this.fades, 1).setUsage(THREE.StreamDrawUsage);
     const idx = new Uint16Array((maxPoints - 1) * 6);
-    this.index = new THREE.BufferAttribute(idx, 1).setUsage(THREE.DynamicDrawUsage);
+    this.index = new THREE.BufferAttribute(idx, 1).setUsage(THREE.StreamDrawUsage);
     this.geometry.setAttribute("position", this.posAttr);
     this.geometry.setAttribute("aFade", this.fadeAttr);
     this.geometry.setIndex(this.index);

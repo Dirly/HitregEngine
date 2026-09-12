@@ -1,6 +1,7 @@
 import * as THREE from "three/webgpu";
+import { buildPortalMaterial } from "./portal-material.js";
 import { STATIC_BATCH_FLAG } from "./static-batch.js";
-import { InstancedProps, applyInstanceUvRotation, applyInstancedProps } from "./instancing.js";
+import { InstancedProps, applyInstanceUber, applyInstanceUvRotation, applyInstancedProps } from "./instancing.js";
 import { applyWorldUv } from "./primitive-uv.js";
 import {
   positionWorld,
@@ -62,6 +63,7 @@ import {
   type PolyMeshSource,
   type SceneDoc,
   type VoxelMesh,
+  type CsgMeshSource,
   type VoxelMeshSource,
 } from "@hitreg/core";
 import { simplifierReady, simplifyGeometry } from "./mesh-simplify.js";
@@ -79,9 +81,9 @@ import { clusterDagReady, type ClusterDag } from "./cluster-dag.js";
 import { ClusteredMesh, clusterDagFromGeometry } from "./clustered-mesh.js";
 import { polyMeshGeometry } from "./poly-mesh-geometry.js";
 import { horizonTint } from "./atmosphere.js";
-import { buildTerrainSplatMaterial, type MacroNoiseData } from "./terrain-splat.js";
+import { buildTerrainSplatMaterial, SPLAT_ATTRIBUTES, type MacroNoiseData } from "./terrain-splat.js";
 import { mergeModelSubmeshes } from "./static-batch.js";
-import { voxelGeometry, voxelColliderProxyGeometry } from "./voxel-geometry.js";
+import { voxelGeometry, csgGeometry, voxelColliderProxyGeometry } from "./voxel-geometry.js";
 import type { ParticlesData } from "./particles.js";
 import type { BillboardData } from "./billboards.js";
 import type { GrassData } from "./grass.js";
@@ -124,6 +126,16 @@ export function loadGltf(url: string): Promise<GLTF> {
     pending = (gltfLoader ??= new GLTFLoader())
       .loadAsync(url)
       .then((gltf) => {
+        // glTF custom semantics must start with '_'; GLTFLoader lowercases
+        // them. Restore the renderer's vertex-paint attribute names.
+        gltf.scene.traverse((node) => {
+          const mesh = node as THREE.Mesh;
+          if (!mesh.isMesh) return;
+          for (let i = 0; i < SPLAT_ATTRIBUTES.length; i++) {
+            const weights = mesh.geometry.getAttribute(`_${SPLAT_ATTRIBUTES[i]!.toLowerCase()}`);
+            if (weights) mesh.geometry.setAttribute(SPLAT_ATTRIBUTES[i]!, weights);
+          }
+        });
         shareNamedTextures(gltf.scene);
         return gltf;
       })
@@ -296,7 +308,8 @@ export interface SplatLayerData {
 }
 
 export interface MaterialData {
-  shader: "standard" | "unlit" | "toon" | "wireframe" | "terrain-splat" | "water";
+  shader: "standard" | "unlit" | "toon" | "wireframe" | "terrain-splat" | "water" | "portal";
+  portal?: {aperture?: 'disc' | 'opening'};
   color: string;
   map?: string;
   repeat: [number, number];
@@ -332,11 +345,15 @@ export interface MaterialData {
   opacity: number;
   transparent: boolean;
   splat?: {
+    flatShading?: boolean;
+    dominantAxis?: boolean;
     layers: SplatLayerData[];
     slopeRock?: { color: string; roughness: number; start: number; end: number };
     macroNoise?: MacroNoiseData;
   };
   water?: {
+    lighting?: boolean;
+    textureTint?: string;
     shallowColor: string;
     midColor: string;
     deepColor: string;
@@ -393,6 +410,8 @@ interface MeshData {
         wind?: FoliageWindOptions;
         cameraFade?: boolean;
         uvRotation?: number;
+        atlasTile?: [number, number, number];
+        partMask?: number;
       }
     | {
         kind: "polygon";
@@ -402,6 +421,7 @@ interface MeshData {
       }
     | ({ kind: "heightmap" } & HeightmapParams)
     | VoxelMeshSource
+    | CsgMeshSource
     | ({ kind: "path" } & PathMeshSource)
     | PolyMeshSource;
   material?: string;
@@ -560,7 +580,16 @@ function buildSkyDome(
   sun?: { direction: [number, number, number]; color: string; size: number; intensity: number },
   moon?: { direction: [number, number, number]; color: string; size: number; intensity: number },
   stars?: { intensity: number; density: number; size: number },
-  clouds?: { coverage: number; scale: number; speed: [number, number]; softness: number; color: string; shadow: string },
+  clouds?: {
+    coverage: number;
+    scale: number;
+    speed: [number, number];
+    softness: number;
+    color: string;
+    shadow: string;
+    sun?: string;
+    sunAmount?: number;
+  },
 ): THREE.Mesh {
   // defensive: production sky data is always zod-validated (top/bottom always
   // real hex strings) before it reaches here, but TSL's color() warns loudly
@@ -607,6 +636,8 @@ function buildSkyDome(
     cloudSoftness: uniform(clouds?.softness ?? 0.35),
     cloudColor: uniform(new THREE.Color(clouds?.color ?? "#ffffff")),
     cloudShadow: uniform(new THREE.Color(clouds?.shadow ?? "#8a94a8")),
+    cloudSun: uniform(new THREE.Color(clouds?.sun ?? "#ffb27a")),
+    cloudSunAmount: uniform(clouds?.sunAmount ?? 0),
     cloudLight: uniform(1),
   };
   // TSL's generics cannot follow uniform-typed colours through mix/pow/add;
@@ -674,7 +705,21 @@ function buildSkyDome(
     smoothstep(float(0.0), float(0.14), dir.y),
   );
   const thickness: any = smoothstep(threshold, float(1), density);
-  const cloudColor: any = mul(mix(u.cloudColor, u.cloudShadow, mul(thickness, float(0.75))), u.cloudLight);
+  let cloudColor: any = mix(u.cloudColor, u.cloudShadow, mul(thickness, float(0.75)));
+  // Dawn and dusk are DIRECTIONAL: a low sun lights the deck from the side,
+  // so the cloud near its azimuth burns and the far side of the sky stays
+  // cold blue. A single day/night `color` tints the whole dome at once and
+  // gives the flat "everything is orange" sunset instead. `sunAmount` is what
+  // the day/night script opens at the horizon and closes by mid-morning; the
+  // dot is against the same `sunDirection` the sun disc uses, so the glow is
+  // always where the sun actually is. Weighted UP by thickness: at a low sun
+  // it is the piled parts that catch the light, which is what turns a flat
+  // grey deck into lit tops over shadowed bases.
+  const cloudWarm: any = mul(
+    mul(pow(clamp(dot(dir, normalize(u.sunDirection)), 0, 1), float(2.5)), u.cloudSunAmount),
+    add(float(0.45), mul(thickness, float(0.55))),
+  );
+  cloudColor = mul(mix(cloudColor, u.cloudSun, clamp(cloudWarm, 0, 1)), u.cloudLight);
   colorNode = mix(colorNode, cloudColor, mul(cloudAlpha, float(0.96)));
   /* eslint-enable @typescript-eslint/no-explicit-any */
   material.colorNode = colorNode;
@@ -909,8 +954,8 @@ function buildPrimitive(
  * surface staying flat-shaded. `flowMode: "channel"` swaps the world axes
  * for the ribbon's metre uv and its `flow` attribute: moving water.
  */
-function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THREE.MeshStandardNodeMaterial {
-  const w = data.water ?? {
+function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THREE.MeshStandardNodeMaterial | THREE.MeshBasicNodeMaterial {
+  const w: NonNullable<MaterialData['water']> = data.water ?? {
     shallowColor: "#3fa8c9",
     midColor: "#1f6f96",
     deepColor: "#0b3150",
@@ -930,7 +975,7 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
     foamSteps: 3,
     flow: [0.012, 0.008] as [number, number],
   };
-  const material = new THREE.MeshStandardNodeMaterial({
+  const material = w.lighting === false ? new THREE.MeshBasicNodeMaterial({transparent: true, opacity: data.opacity}) : new THREE.MeshStandardNodeMaterial({
     transparent: true,
     opacity: data.opacity,
     metalness: 0,
@@ -1064,7 +1109,10 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
     // with the texture reads as "off" even when the brightness is fine. So the
     // texture's own colour is left alone and only its level moves: lifted in
     // the shallows, very slightly down in deep water.
-    const litByDepth = mul(detail, mix(float(1.35), float(1.05), t2));
+    const surfaceDetail = w.textureTint
+      ? mul(tslColor(w.textureTint) as unknown as THREE.Node<'vec3'>, detail.dot(vec3(0.2126, 0.7152, 0.0722)))
+      : detail;
+    const litByDepth = mul(surfaceDetail, mix(float(1.35), float(1.05), t2));
     base = mix(base as THREE.Node<"vec3">, litByDepth, float(w.textureStrength ?? 0.35));
     // A SNAPPED sample for the foam edge. Sampling the same continuous tile
     // gives a smoothly wandering border — organic, but not pixelated. Snapping
@@ -1127,7 +1175,7 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
   const camDist = length(sub(cameraPosition, positionWorld));
   const edgeFade = sub(float(1), smoothstep(float(w.edgeFadeStart), float(w.edgeFadeEnd), camDist));
   material.opacityNode = mul(float(data.opacity), edgeFade);
-  material.roughnessNode = float(0.35);
+  if (material instanceof THREE.MeshStandardNodeMaterial) material.roughnessNode = float(0.35);
   return material;
 }
 
@@ -1230,6 +1278,8 @@ export function makeMaterial(data: MaterialData, options?: TextureResolver): THR
       // the only shader that resolves its OWN textures (one triplanar set per
       // splat layer), so it needs the resolver the generic map pass gets
       return buildTerrainSplatMaterial(data, options);
+    case "portal":
+      return buildPortalMaterial(data, options);
     case "water":
       return buildWaterMaterial(data, options);
     case "standard":
@@ -1285,7 +1335,7 @@ export function patchMaterial(existing: THREE.Material, data: MaterialData): boo
   const shader = data.shader ?? "standard";
   // procedural shaders bake their colours/bands into the node graph as
   // constants — there are no uniforms to write, so they always decline
-  if (shader === "terrain-splat" || shader === "water") return false;
+  if (shader === "terrain-splat" || shader === "water" || shader === "portal") return false;
 
   const uniforms = materialUniformsOf(existing);
   const builtKey = materialMapKeyOf(existing);
@@ -1433,6 +1483,12 @@ interface PendingInstance {
   cameraFade?: boolean;
   /** `mesh.source.uvRotation`, degrees — see INSTANCE_UV_ROTATION_ATTRIBUTE. */
   uvRotation?: number;
+  /** `mesh.material` — an engine material asset that replaces the model's own. */
+  material?: string;
+  /** `mesh.source.atlasTile` — [uOffset, vOffset, scale] into a packed sheet. */
+  atlasTile?: [number, number, number];
+  /** `mesh.source.partMask` — which parts of an ubermesh this instance shows. */
+  partMask?: number;
   castShadow: boolean;
   receiveShadow: boolean;
   lod: boolean;
@@ -1663,6 +1719,21 @@ function populateEntityGroup(
       }
     }
 
+    if (meshData && meshData.source.kind === "csg") {
+      // A dual-contoured CSG volume — the same mesh physics cooks and
+      // placement snaps against, exactly as the voxel branch above.
+      const geometry = csgGeometry(meshData.source);
+      if (geometry) {
+        const mesh = new THREE.Mesh(geometry, resolveMaterialFor(meshData, options, materialCache));
+        mesh.castShadow = meshData.castShadow;
+        mesh.receiveShadow = meshData.receiveShadow;
+        mesh.userData["entityId"] = id;
+        mesh.userData[STATIC_BATCH_FLAG] = meshData.static === true;
+        mesh.userData["csgSource"] = meshData.source;
+        group.add(mesh);
+      }
+    }
+
     if (meshData && meshData.source.kind === "heightmap") {
       // the SAME grid the physics trimesh is cooked from (core/terrain.ts)
       const grid = heightmapMesh(meshData.source);
@@ -1711,6 +1782,9 @@ function populateEntityGroup(
         wind: meshData.source.wind,
         cameraFade: meshData.source.cameraFade,
         uvRotation: meshData.source.uvRotation,
+        material: meshData.material,
+        atlasTile: meshData.source.atlasTile,
+        partMask: meshData.source.partMask,
         castShadow: meshData.castShadow,
         receiveShadow: meshData.receiveShadow,
         lod: meshData.lod ?? true,
@@ -1773,6 +1847,12 @@ function populateEntityGroup(
             if (lift !== undefined) applyModelBrightness(instance, lift);
             const textureFilter = meshData.source.kind === "asset" ? meshData.source.textureFilter : undefined;
             if (textureFilter) applyModelTextureFilter(instance, textureFilter);
+            if (meshData.material) {
+              const override = resolveMaterialFor(meshData, options, materialCache);
+              instance.traverse((node) => {
+                if ((node as THREE.Mesh).isMesh) (node as THREE.Mesh).material = override;
+              });
+            }
             const wind = meshData.source.kind === "asset" ? meshData.source.wind : undefined;
             if (wind) applyFoliageWind(instance, wind);
             if (meshData.source.kind === "asset" && meshData.source.cameraFade) applyFoliageFade(instance);
@@ -2280,7 +2360,7 @@ export function cachedMergedMaterial(
 export function cachedInstancedMaterial(
   cacheKey: string,
   source: THREE.Material | THREE.Material[],
-  options: { uvRotation?: boolean } = {},
+  options: { uvRotation?: boolean; uber?: boolean } = {},
 ): THREE.Material | THREE.Material[] {
   const cached = instancedMaterialCache.get(cacheKey);
   if (cached) return cached;
@@ -2294,6 +2374,9 @@ export function cachedInstancedMaterial(
     // a material that binds the uv-rotation attribute is only ever handed to
     // batches that allocate it, hence its own cache key (see instanceGltfInto)
     if (options.uvRotation) applyInstanceUvRotation(clone);
+    // Same contract as the rotation attribute: a material that binds the
+    // ubermesh attribute is only ever handed to batches that allocate it.
+    if (options.uber) applyInstanceUber(clone);
     return clone;
   };
   const cloned = Array.isArray(source) ? source.map(instancedClone) : instancedClone(source);
@@ -2554,6 +2637,18 @@ function instanceGltfInto(
   }
 
   const first = entries[0]!;
+  // `mesh.material` used to be dropped on the floor here — the batch always
+  // drew the model's own materials, so setting one on an instanced mesh did
+  // nothing and said nothing. One material for the whole batch is the only
+  // shape that makes sense (a batch IS one draw), so the FIRST entry's wins
+  // and a mismatch is called out rather than silently half-applied.
+  const materialId = first.material;
+  if (materialId && entries.some((e) => e.material !== materialId)) {
+    console.warn(
+      `[render] instanced batch for "${assetId}" mixes materials (${materialId} and others); the first is used`,
+    );
+  }
+  const override = materialId ? materialForId(materialId, options, sharedAssetMaterialCache) : null;
   // the anchor captured when this entry was queued (buildScene's own `scene`
   // container, or the rebuilding entity's own group) — NOT a live `.parent`
   // walk, which by now would climb past it to wherever the caller has since
@@ -2568,7 +2663,7 @@ function instanceGltfInto(
   // apart from the plain clone so batches of the same asset without it keep
   // their plain shader and never bind an attribute they did not allocate.
   const rotated = entries.some((entry) => entry.uvRotation !== undefined);
-  const materialKeySuffix = rotated ? "#uvrot" : "";
+  const materialKeySuffix = `${rotated ? "#uvrot" : ""}${entries.some((e) => e.atlasTile !== undefined || e.partMask !== undefined) ? "#uber" : ""}`;
   const uvRotations = rotated
     ? Float32Array.from(entries, (entry) => THREE.MathUtils.degToRad(entry.uvRotation ?? 0))
     : undefined;
@@ -2578,12 +2673,30 @@ function instanceGltfInto(
     for (let i = 0; i < uvRotations.length; i++) instanced.setUvRotationAt(i, uvRotations[i]!);
   };
 
+  // Per-instance atlas tile and part mask (modular weapons). Same contract as
+  // the rotation above: a batch where ANY entry sets either draws with a
+  // material variant that binds the attribute, keyed apart so plain batches of
+  // the same asset never bind one they did not allocate.
+  const ubered = entries.some((entry) => entry.atlasTile !== undefined || entry.partMask !== undefined);
+  const applyUber = (instanced: InstancedProps): void => {
+    if (!ubered) return;
+    instanced.enableUber();
+    for (const [i, entry] of entries.entries()) {
+      const [u, v, scale] = entry.atlasTile ?? [0, 0, 1];
+      instanced.setUberAt(i, u, v, scale, entry.partMask ?? 0xffffff);
+    }
+  };
+
   const nearMeshes: InstancedProps[] = [];
   for (let index = 0; index < submeshes.length; index++) {
     const sub = submeshes[index]!;
     const instanced = new InstancedProps(
       sub.geometry,
-      cachedInstancedMaterial(`${assetId}#${node ?? ""}#${index}${materialKeySuffix}`, sub.material, { uvRotation: rotated }),
+      cachedInstancedMaterial(
+        `${assetId}#${node ?? ""}#${index}#${materialId ?? ""}${materialKeySuffix}`,
+        override ?? sub.material,
+        { uvRotation: rotated, uber: ubered },
+      ),
       entries.length,
     );
     instanced.castShadow = first.castShadow;
@@ -2594,6 +2707,7 @@ function instanceGltfInto(
       instanced.setMatrixAt(i, instanceMatrixScratch);
     }
     applyUvRotations(instanced);
+    applyUber(instanced);
     instanced.instanceMatrix.needsUpdate = true;
     // InstancedMesh's bounding sphere defaults to null (unlike a plain Mesh's
     // geometry bounds) — frustum culling silently does nothing without this,
@@ -2643,6 +2757,8 @@ function instanceGltfInto(
           instanced.setMatrixAt(i, instanceMatrixScratch);
         }
         applyUvRotations(instanced);
+        applyUber(instanced);
+    applyUber(instanced);
         instanced.instanceMatrix.needsUpdate = true;
         instanced.computeBoundingSphere();
         root.add(instanced);

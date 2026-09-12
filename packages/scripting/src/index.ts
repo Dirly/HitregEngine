@@ -34,6 +34,45 @@ export { InputService } from "./input.js";
 export { ScriptRuntime, type RuntimeOptions, type RuntimeVfxFrame, type RuntimeVfxHost, type ScriptChatHost } from "./runtime.js";
 export { registerBuiltinScripts } from "./builtin.js";
 export {
+  actionIsLayered,
+  damp,
+  fallThreshold,
+  fitAction,
+  gaitFor,
+  gaitSpeed,
+  GaitTracker,
+  gaitTier,
+  groundFollowVy,
+  risingByGround,
+  idleThreshold,
+  leavingGround,
+  playbackRate,
+  ACTION_RATE_MAX,
+  ACTION_RATE_MIN,
+  GAIT_HYSTERESIS,
+  RATE_MAX,
+  RATE_MIN,
+  type ActionFit,
+  type Gait,
+  type GaitTuning,
+} from "./locomotion.js";
+export { MobBrain } from "./mob-brain.js";
+export {
+  TerrainSteering,
+  groundHeightAt,
+  DEFAULT_STEERING,
+  GROUND_LAYERS,
+  OBSTACLE_LAYERS,
+  LAYER_WORLD,
+  LAYER_TERRAIN,
+  LAYER_PROP,
+  type GroundProbeOptions,
+  type SteerRequest,
+  type SteerResult,
+  type SteeringOptions,
+  type SteeringSim,
+} from "./steering.js";
+export {
   Easings,
   easingByName,
   loopProgress,

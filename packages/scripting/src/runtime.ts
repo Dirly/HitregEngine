@@ -27,9 +27,16 @@ export interface RuntimeOptions {
   /** This tab's own player entity id (see ScriptContext.localPlayer). */
   localPlayer?: () => string | null;
   /** Host animation hook: crossfade an entity's animator to a clip (loop:false = one-shot). */
-  setAnimation?: (entityId: string, clip: string, fadeSeconds?: number, opts?: { loop?: boolean }) => void;
+  setAnimation?: (
+    entityId: string,
+    clip: string,
+    fadeSeconds?: number,
+    opts?: { loop?: boolean; restart?: boolean },
+  ) => void;
   /** Host animation hook: which clips this entity's model loaded with. */
   animationClips?: (entityId: string) => string[];
+  /** Authored seconds of one clip on an entity's model (null when absent). */
+  animationDuration?: (entityId: string, clip: string) => number | null;
   /** Host animation hook: scale playback rate (1 = authored). */
   setAnimationSpeed?: (entityId: string, multiplier: number) => void;
   /** Host animation hook: play a clip on a masked layer over the base clip. */
@@ -248,6 +255,34 @@ export class ScriptRuntime {
     }
   }
 
+  /**
+   * What the script on this entity is thinking, or undefined when it has none,
+   * is suspended, or does not report. See `Script.onDebug`.
+   *
+   * A throwing debug hook must never take down the caller: an admin endpoint
+   * asking a hundred entities what they are doing would otherwise 500 because
+   * one script had a bad tick.
+   */
+  debugOf(entityId: string): unknown {
+    const script = this.instances.get(entityId);
+    if (!script?.onDebug) return undefined;
+    try {
+      return script.onDebug();
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /** Every reporting script under these ids, keyed by entity — a subtree's worth of "what are you doing". */
+  debugTree(ids: Iterable<string>): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    for (const id of ids) {
+      const value = this.debugOf(id);
+      if (value !== undefined) out[id] = value;
+    }
+    return out;
+  }
+
   /** Ids of entities carrying a tag — the same lookup scripts get via ctx. */
   findByTag(tag: string): string[] {
     return [...this.entities].filter(([, e]) => e.tags.includes(tag)).map(([eid]) => eid);
@@ -329,11 +364,14 @@ export class ScriptRuntime {
         },
         ...(this.opts.setAnimation
           ? {
-              setAnimation: (clip: string, fade?: number, opts?: { loop?: boolean }) =>
+              setAnimation: (clip: string, fade?: number, opts?: { loop?: boolean; restart?: boolean }) =>
                 this.opts.setAnimation!(id, clip, fade, opts),
             }
           : {}),
         ...(this.opts.animationClips ? { animationClips: () => this.opts.animationClips!(id) } : {}),
+        ...(this.opts.animationDuration
+          ? { animationDuration: (clip: string) => this.opts.animationDuration!(id, clip) }
+          : {}),
         ...(this.opts.setAnimationSpeed
           ? { setAnimationSpeed: (multiplier: number) => this.opts.setAnimationSpeed!(id, multiplier) }
           : {}),
@@ -635,6 +673,16 @@ export class ScriptRuntime {
       // reschedule strictly past now: on-cadence normally, once/tick if sub-tick
       timer.dueAtMs = Math.max(timer.dueAtMs + timer.intervalMs, this.timeMs + minIncMs);
     }
+  }
+
+  /**
+   * Simulated milliseconds since the runtime started — the same clock scripts
+   * read as `ctx.now()`, and the one any deadline they wrote (an action
+   * window, a dash) is measured against. Fixed-step accumulated, so it is
+   * replay-safe; never wall-clock.
+   */
+  now(): number {
+    return this.timeMs;
   }
 
   fixedUpdate(dt: number): void {

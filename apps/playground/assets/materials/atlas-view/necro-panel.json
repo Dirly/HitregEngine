@@ -1,0 +1,7 @@
+{
+  "shader": "unlit",
+  "color": "#ffffff",
+  "map": "atlas-carousel-sheet-necro.png",
+  "filter": "nearest",
+  "side": "double"
+}

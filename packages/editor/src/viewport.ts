@@ -287,7 +287,6 @@ export class ViewportTools {
 
   /** Call after every scene rebuild: re-adds gizmo helper + grid, reattaches selection. */
   onSceneRebuilt(): void {
-    this.opts.getScene().add(this.controls.getHelper());
     this.grid = null; // belonged to the old scene
     this.refreshGrid();
     this.syncAttachment();
@@ -370,8 +369,14 @@ export class ViewportTools {
     const ids = enabled ? this.selectedIds().filter((id) => !!this.opts.getObject(id) && !this.isLocked(id)) : [];
     if (ids.length === 0) {
       this.controls.detach();
+      // Invisible helpers still run their matrix walk (78 objects per
+      // TransformControls). Keep inactive editor geometry out of the game.
+      this.controls.getHelper().removeFromParent();
       return;
     }
+    const helper = this.controls.getHelper();
+    const scene = this.opts.getScene();
+    if (helper.parent !== scene) scene.add(helper);
     if (ids.length === 1) {
       this.controls.attach(this.opts.getObject(ids[0]!)!);
       return;

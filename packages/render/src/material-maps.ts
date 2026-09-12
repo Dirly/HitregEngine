@@ -106,7 +106,7 @@ export function mapColorSpace(field: MaterialMapField): "srgb" | "linear" {
  */
 export function materialMapPlan(data: MaterialData): MaterialMapField[] {
   const shader = data.shader ?? "standard";
-  if (shader === "wireframe" || shader === "terrain-splat" || shader === "water") return [];
+  if (shader === "wireframe" || shader === "terrain-splat" || shader === "water" || shader === "portal") return [];
 
   const lit = shader === "standard" || shader === "toon";
   const pbr = shader === "standard";
@@ -603,6 +603,22 @@ export interface TriplanarBasis {
 }
 
 /**
+ * Select one projection, with X/Y/Z priority inside a narrow near-tie band.
+ * Flat fragment normals still contain derivative/transform roundoff: exact
+ * comparisons alternate projections across a mathematically 45-degree face.
+ * Compare normalized normal components before sharpening the blend weights.
+ */
+export function stableDominantTriplanarWeights(normal: N): N {
+  const a: N = abs(normal);
+  // 0.001 in normalized-component space is ~0.04 degrees around an X/Z tie.
+  // The smaller 0.0001 band still flickered on translated flat GPU fixtures.
+  const threshold: N = max(max(a.x, a.y), a.z).sub(float(1e-3));
+  const x: N = a.x.greaterThanEqual(threshold).select(1, 0);
+  const y: N = a.y.greaterThanEqual(threshold).select(1, 0).mul(float(1).sub(x));
+  return vec3(x, y, float(1).sub(x).sub(y));
+}
+
+/**
  * A triplanar basis for an arbitrary world-units-per-tile scale, independent
  * of any material's uniforms.
  *
@@ -610,7 +626,7 @@ export interface TriplanarBasis {
  * grass tile and a cliff tile want very different real-world scales) rather
  * than the single per-material basis {@link triplanarBasis} builds.
  */
-export function worldTriplanarBasis(scale: N, warp?: N | null): TriplanarBasis {
+export function worldTriplanarBasis(scale: N, warp?: N | null, dominantAxis = false): TriplanarBasis {
   // The warp displaces the SAMPLING POSITION only. The blend weights below
   // still come from the true geometric normal, so a warped projection cannot
   // change which of the three planes a fragment reads from — only where in
@@ -620,7 +636,11 @@ export function worldTriplanarBasis(scale: N, warp?: N | null): TriplanarBasis {
   const p: N = world.div(scale);
   const n: N = normalWorldGeometry;
   const weights: N = pow(abs(n), float(TRIPLANAR_SHARPNESS));
-  const blend: N = weights.div(max(weights.dot(vec3(1, 1, 1)), float(1e-4)));
+  let blend: N = weights.div(max(weights.dot(vec3(1, 1, 1)), float(1e-4)));
+  if (dominantAxis) {
+    // Keep crisp mortar without letting numerical noise choose the UV plane.
+    blend = stableDominantTriplanarWeights(n);
+  }
   const s: N = sign(n);
   return {
     blend,

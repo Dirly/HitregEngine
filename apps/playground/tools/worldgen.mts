@@ -30,6 +30,7 @@
  *   pnpm -F playground worldgen zones  <world> [--count N] [--force] [--towns-only]   (draft the named zones + a zone per town; after towns)
  *   pnpm -F playground worldgen barriers <world> [--dry]  (ridges over open zone borders, passes where paths cross; after paths)
  *   pnpm -F playground worldgen regions <world>        (audit the zones and measure every border — docs/world-editing/zones.md)
+ *   pnpm -F playground worldgen scatter <world>       (audit every rule against its model + the REALIZED density per biome)
  *   pnpm -F playground worldgen stats  <world> [--cells 9]
  *   pnpm -F playground worldgen all    <world> [--project <name>]
  */
@@ -46,6 +47,8 @@ import {
   scatterCell,
   MAX_SURFACES,
   mulberry32,
+  fbm2,
+  smoothstep,
   auditRegions,
   BORDER_CLASSES,
   type RegionDoc,
@@ -55,6 +58,7 @@ import {
   type CanyonDoc,
   type RoadDoc,
   type TownDoc,
+  type CampDoc,
   type PoiDoc,
   type LakeDoc,
   type FillDoc,
@@ -64,6 +68,7 @@ import {
 import { basinFootprint, computeHydrology, extractBasins, extractChannels, simplifyLoop, type Channel, type HydroGrid } from "./worldgen-hydrology.mts";
 import { nearestRouteCell, routeBetween, smoothRoute, solveProfile, type RouteGrid, type RouteOptions } from "./worldgen-routing.mts";
 import { auditWorld } from "./worldgen-audit.mts";
+import { modelBounds } from "./_gltf-bounds.mjs";
 import { borderClassifier, borderReport, planBarriers, snowLineOf, stripBarrierFeatures, type BorderPairReport } from "./worldgen-borders.mts";
 
 // ---------------------------------------------------------------- cli plumbing
@@ -183,6 +188,24 @@ const HELP = `worldgen — procedural world pipeline
   map    <world>   PNG overview: zones/surfaces, water at every level, rivers, paths, towns, the
                    world limit; --zones colours by zone, --cx/--cz/--extent to zoom
   stats  <world>   zone & biome mix, tris/cell, ms/cell against the frame budget
+  spawn  <world>   place ENEMY CAMPS in the wilderness: off the towns, off the sanctuaries, beside
+                   the paths but never on them, and clear of every zone border by the camp's whole
+                   reach (spread+leash+roam+band) so a layer swap never happens in sight of a pack.
+                   Writes features.camps (ids camp-*, rewritten each run; hand-written kept);
+                   --scene <name> also patches the spawnArea entities in, with a placeholder
+                   capsule mob if the scene has no --template subtree yet
+                   (--per-km2 0.8 --count N --radius 70 --leash 26 --roam 8 --pack-min 2 --pack-max 4
+                    --template mob --band 60 --town-clearance 70 --path-clearance 14)
+  spawn-paint <world>  camps placed BY HAND, from a stroke drawn with the editor path tool
+                   (--from-scene <scene> --entity <id>), typed --points "x,z;x,z" or a single --at "x,z".
+                   One camp every --spacing 120 m along the line; each spot is checked against the same
+                   rules the generator obeys (no towns, no sanctuaries, no water, clear of zone borders)
+                   and REFUSED with a reason rather than silently placed. Ids are spawn-*, which
+                   "worldgen spawn" never rewrites — so generated and hand-placed camps coexist.
+                   (--list, --remove <id|all>, --template, --pack, --radius, --leash, --scene <name>)
+  scatter <world>  check every scatter rule against its MODEL: collider vs the real bounds (an origin the
+                   collider misses, a collider bigger than the prop, one too short to stand on), the wind
+                   filter against the model's texture names, and props/km² per rule (exit 1 on findings)
   river-path <world> add a DRAWN river centreline the rivers stage will solve (--id r1 --points "x,z;x,z;…"
                    --width 18, or --from-scene <scene> --entity <id> to import a path-tool entity; --remove <id>)
   audit  <world>   water & paths: every river ends somewhere, every lake has a river, beds descend,
@@ -2388,6 +2411,512 @@ function commandTowns(): void {
 }
 
 /** Flood-fill land (8-connected, above sea level) into components. 0 = water. */
+// ---------------------------------------------------------------- spawn (enemy camps)
+
+/**
+ * Where the monsters live.
+ *
+ * Populations are the last thing a generated world is missing: the engine has
+ * had `spawnArea` components and a manager that wakes, sleeps and leashes them
+ * for a while, but nothing that decided WHERE. Hand-writing a hundred camps
+ * into a scene is not authoring, it is data entry.
+ *
+ * The rules are all "so the rest of the system stays true", not taste:
+ *
+ *   - **Clear of every zone border by the camp's whole REACH** (spread + leash
+ *     + roam + the transfer band). This is the same measurement
+ *     `SpawnAreaManager.borderWarnings` audits, so a generated world passes it
+ *     by construction. A camp that fails it puts a pack in the band, and the
+ *     cluster then refuses to move players across that border while it is
+ *     awake — a layer swap must never happen in sight of monsters.
+ *   - **Never inside a town pad or a sanctuary.** Those are the places the
+ *     game promises are safe, and a spawner does not get to break that.
+ *   - **Beside the paths, never on them.** A camp on a footpath is a wall
+ *     across the only route between two towns; a camp eighty metres off it is
+ *     an encounter. So paths repel at close range and attract at long range.
+ *   - **On ground a pack can actually stand and walk on** — above water, off
+ *     the bog, under the slope the brain will refuse to climb anyway.
+ *
+ * Idempotent: it rewrites its own `camp-*` and keeps anything hand-written,
+ * exactly like `barriers` and its ridges.
+ */
+function commandSpawn(): void {
+  const { recipe, file } = loadRecipe();
+  const field = createWorldField(recipe);
+  const extent = extentFor(recipe);
+  const grid = sampleWorldGrid(field, extent, option("step", 24));
+  const n = grid.n;
+
+  const template = stringOption("template", "mob");
+  const radius = option("radius", 70);
+  const sleepRadius = option("sleep-radius", radius * 1.5);
+  const leash = option("leash", 26);
+  const roam = option("roam", 8);
+  const spread = option("spread", 6);
+  const packMin = Math.max(1, Math.round(option("pack-min", 2)));
+  const packMax = Math.max(packMin, Math.round(option("pack-max", 4)));
+  const band = option("band", 60);
+  const townClear = option("town-clearance", 70);
+  const pathClear = option("path-clearance", 14);
+  const pathReach = option("path-reach", 500);
+  const maxSlope = option("max-slope", 0.5);
+
+  // What the border audit measures a camp by. Everything downstream of this
+  // number is a guarantee, so it is computed once and used as the clearance.
+  const reach = spread + leash + roam + band;
+
+  let landCells = 0;
+  for (let i = 0; i < n * n; i++) if (grid.height[i]! >= recipe.seaLevel) landCells++;
+  const landKm2 = (landCells * grid.step * grid.step) / 1e6;
+  const count = Math.round(option("count", Math.max(4, landKm2 * option("per-km2", 0.8))));
+  const separation = option("separation", Math.max(radius * 2.2, 120));
+  console.log(`  ${landKm2.toFixed(1)} km² of land -> ${count} camps (reach ${round(reach)} m, separation ${round(separation)} m)`);
+
+  const pathPts: Array<[number, number]> = [];
+  for (const road of recipe.features.roads) {
+    for (let i = 0; i < road.points.length; i += 2) pathPts.push([road.points[i]![0], road.points[i]![1]]);
+  }
+  const sanctuaries = recipe.features.pois.filter((p) => p.tags.includes("safe"));
+
+  interface Site {
+    x: number;
+    z: number;
+    zone: string;
+    ground: number;
+    score: number;
+  }
+  const scored: Site[] = [];
+  let rejectedBorder = 0;
+  for (let iz = 1; iz < n - 1; iz++) {
+    for (let ix = 1; ix < n - 1; ix++) {
+      const i = ix + iz * n;
+      const h = grid.height[i]!;
+      if (h < recipe.seaLevel + 2) continue;
+      if (grid.swamp[i]! > 0.7) continue;
+      const gx = (grid.height[i + 1]! - grid.height[i - 1]!) / (2 * grid.step);
+      const gz = (grid.height[i + n]! - grid.height[i - n]!) / (2 * grid.step);
+      const slope = Math.hypot(gx, gz);
+      if (slope > maxSlope) continue;
+      const x = grid.worldX(ix);
+      const z = grid.worldZ(iz);
+      if (field.waterY(x, z) !== null) continue;
+
+      let blocked = false;
+      for (const t of recipe.features.towns) {
+        if (Math.hypot(t.center[0] - x, t.center[1] - z) < t.radius + t.falloff + townClear) {
+          blocked = true;
+          break;
+        }
+      }
+      if (blocked) continue;
+      for (const p of sanctuaries) {
+        if (Math.hypot(p.position[0] - x, p.position[2] - z) < (p.radius ?? 30) + 40) {
+          blocked = true;
+          break;
+        }
+      }
+      if (blocked) continue;
+
+      let zone = "";
+      if (recipe.regions.length > 0) {
+        const region = recipe.regions.find((r) => pointInPolygon(r.polygon, x, z));
+        if (!region) continue; // unclaimed ground: no zone owns what happens here
+        if (polygonDistance(region.polygon, x, z) < reach) {
+          rejectedBorder++;
+          continue;
+        }
+        zone = region.id;
+      }
+
+      // Last, because it is the expensive one: only sites that already passed
+      // everything else pay for the path scan.
+      let toPath = Infinity;
+      for (const p of pathPts) {
+        const d = Math.hypot(p[0] - x, p[1] - z);
+        if (d < toPath) toPath = d;
+      }
+      if (toPath < pathClear) continue;
+      const nearPath = pathPts.length === 0 ? 0.5 : Math.max(0, 1 - Math.max(0, toPath - pathClear) / pathReach);
+      const flat = 1 - Math.min(1, slope / maxSlope);
+      scored.push({ x, z, zone, ground: h, score: flat + nearPath * 1.4 });
+    }
+  }
+  if (scored.length === 0) {
+    fail(
+      "no ground left for a camp — every candidate was water, bog, cliff, town, sanctuary, path or too close to a " +
+        "zone border. Loosen --town-clearance / --band, or check the world has any wilderness at all.",
+    );
+  }
+  scored.sort((a, b) => b.score - a.score);
+
+  const kept = recipe.features.camps.filter((c) => !c.id.startsWith("camp-"));
+  const placed: Site[] = [];
+  const clearOf = (s: Site): boolean =>
+    placed.every((p) => Math.hypot(p.x - s.x, p.z - s.z) > separation) &&
+    kept.every((c) => Math.hypot(c.center[0] - s.x, c.center[1] - s.z) > separation);
+
+  // Every zone gets one before the best sites anywhere are filled in — a zone
+  // with no monsters in it is a zone with nothing to do.
+  for (const region of recipe.regions) {
+    if (placed.length >= count) break;
+    if (region.within !== undefined) continue; // a town zone is a safe cut-out, not somewhere monsters live
+    const best = scored.find((s) => s.zone === region.id && clearOf(s));
+    if (best) placed.push(best);
+  }
+  for (const site of scored) {
+    if (placed.length >= count) break;
+    if (clearOf(site)) placed.push(site);
+  }
+
+  const camps: CampDoc[] = placed.map((s, index) => {
+    // Deterministic pack sizes: the same world regenerates the same camps, so
+    // a diff of the recipe shows what actually moved.
+    const roll = hashUnit(`${recipe.seed}:camp:${index}:${Math.round(s.x)}:${Math.round(s.z)}`);
+    const pack = packMin + Math.floor(roll * (packMax - packMin + 1));
+    const region = recipe.regions.find((r) => r.id === s.zone);
+    const fromHub = region ? Math.hypot(region.hub[0] - s.x, region.hub[1] - s.z) : Infinity;
+    return {
+      id: `camp-${index + 1}`,
+      center: [round(s.x), round(s.z)],
+      zone: s.zone,
+      tags: [fromHub < 600 ? "near" : "far"],
+      area: {
+        radius,
+        sleepRadius: Math.max(sleepRadius, radius + 20),
+        idleSeconds: 10,
+        spawns: [{ template, count: pack, spread }],
+        leash,
+        roam,
+      },
+    };
+  });
+
+  recipe.features.camps = [...kept, ...camps];
+  writeRecipe(recipe, file);
+
+  const byZone = new Map<string, number>();
+  for (const c of camps) byZone.set(c.zone || "(unzoned)", (byZone.get(c.zone || "(unzoned)") ?? 0) + 1);
+  const zoneReport = [...byZone.entries()].map(([id, k]) => `${id} ${k}`).join(", ");
+  console.log(
+    `placed ${camps.length} camps${kept.length > 0 ? ` (kept ${kept.length} hand-written)` : ""}` +
+      `${zoneReport ? ` — ${zoneReport}` : ""}`,
+  );
+  if (rejectedBorder > 0) console.log(`  ${rejectedBorder} sites refused for sitting inside ${round(reach)} m of a zone border`);
+  const empty = recipe.regions.filter((r) => r.within === undefined && !camps.some((c) => c.zone === r.id));
+  if (empty.length > 0) {
+    console.warn(`  no camp fits in: ${empty.map((r) => r.id).join(", ")} — the zone may be smaller than 2x the reach`);
+  }
+
+  const scene = stringOption("scene", "");
+  if (scene) patchSceneCamps(recipe, field, camps, scene, template);
+  else console.log(`  --scene <name> to write these into a scene as spawnArea entities`);
+}
+
+/**
+ * Put the camps into a scene as `spawnArea` entities, and make sure there is
+ * something for them to spawn.
+ *
+ * Surgical rather than regenerating: it deletes only the `camp-*` entities it
+ * owns and leaves every other entity — the terrain, the lights, whatever a
+ * human has built — exactly where it was. Re-running the stage after moving a
+ * river is therefore safe.
+ */
+function patchSceneCamps(
+  recipe: WorldRecipe,
+  field: ReturnType<typeof createWorldField>,
+  camps: readonly CampDoc[],
+  scene: string,
+  template: string,
+  prefix = "camp-",
+): void {
+  const file = path.join(assetsRoot(), "scenes", `${scene}.scene.json`);
+  if (!fs.existsSync(file)) {
+    console.warn(`  no scene ${path.relative(process.cwd(), file)} — camps written to the recipe only`);
+    return;
+  }
+  const doc = JSON.parse(fs.readFileSync(file, "utf8")) as {
+    entities: Record<string, Record<string, unknown>>;
+  };
+  // Only the ids THIS caller owns: a generated sweep must not delete the
+  // camps a human painted, and vice versa.
+  for (const id of Object.keys(doc.entities)) {
+    if (id.startsWith(prefix)) delete doc.entities[id];
+  }
+  for (const camp of camps) {
+    const [x, z] = camp.center;
+    const y = field.surfaceCast(x, z) ?? field.height(x, z);
+    doc.entities[camp.id] = {
+      name: camp.id,
+      parent: null,
+      tags: ["camp", ...(camp.zone ? [`zone:${camp.zone}`] : [])],
+      components: {
+        transform: { position: [x, round(y), z] },
+        spawnArea: camp.area,
+      },
+    };
+  }
+
+  const wroteTemplate = ensureMobTemplate(doc, recipe, field, camps, template);
+  fs.writeFileSync(file, `${JSON.stringify(doc, null, 2)}\n`);
+  console.log(`  patched ${camps.length} spawnArea entities into ${path.relative(process.cwd(), file)}`);
+  if (wroteTemplate) {
+    console.log(`  wrote a placeholder "${template}" — a capsule with mob-brain, so the camps have something to spawn`);
+  }
+}
+
+/**
+ * A monster to spawn, if the scene has none.
+ *
+ * A generated world with camps pointing at a template that does not exist is a
+ * world where every camp logs "unknown template" and nothing happens, so the
+ * stage ships a placeholder: a capsule body with the standard controller and a
+ * `mob-brain` child. No art, no project assets, walks and chases and leashes
+ * exactly like the real thing will.
+ *
+ * It stands at the first camp, because `NpcManager` adopts every npc-tagged
+ * scene subtree as BOTH a template and a live NPC — so the template is a real
+ * monster somewhere whether we like it or not, and a camp is the one place it
+ * belongs. Point `--template` at your own subtree and none of this happens.
+ */
+function ensureMobTemplate(
+  doc: { entities: Record<string, Record<string, unknown>> },
+  recipe: WorldRecipe,
+  field: ReturnType<typeof createWorldField>,
+  camps: readonly CampDoc[],
+  template: string,
+): boolean {
+  if (doc.entities[template] || camps.length === 0) return false;
+  const material = `terrain/${recipe.name}-mob`;
+  writeFlatMaterial(material, "#8d5a3b");
+  const [x, z] = camps[0]!.center;
+  const y = (field.surfaceCast(x, z) ?? field.height(x, z)) + 1.2;
+  doc.entities[template] = {
+    name: template,
+    parent: null,
+    tags: ["npc"],
+    components: {
+      transform: { position: [x, round(y), z] },
+      mesh: {
+        source: { kind: "primitive", shape: "capsule", size: [0.9, 1.7, 0.9], segments: [10, 5] },
+        material,
+        castShadow: true,
+      },
+      rigidbody: { kind: "dynamic", lockRotations: true, mass: 70 },
+      collider: { shape: "capsule", size: [0.9, 1.7, 0.9], friction: 0.4 },
+      script: { name: "third-person-controller", params: { speed: 4.2, face: "movement" } },
+    },
+  };
+  doc.entities[`${template}-brain`] = {
+    name: `${template}-brain`,
+    parent: template,
+    tags: [],
+    components: {
+      transform: {},
+      // The body carries the controller, so the brain lives on a child and
+      // names it — an entity carries exactly one script.
+      script: { name: "mob-brain", params: { actor: template, faction: "monster", targetTags: "player" } },
+    },
+  };
+  return true;
+}
+
+/** Stable 0..1 from a string — deterministic worlds need deterministic dice. */
+function hashUnit(seed: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return ((h >>> 0) % 100000) / 100000;
+}
+
+/**
+ * Is this a legal place for a camp, and which zone does it belong to?
+ *
+ * The rules that must hold WHEREVER a camp came from — the generator sweeping a
+ * grid, or a human painting a stroke in the editor. Keeping them in one
+ * function is the point: a hand-placed camp that quietly ignored the zone-border
+ * clearance would fail `SpawnAreaManager.borderWarnings` at boot and block
+ * layer transfers, and the human who drew it would have no idea why.
+ *
+ * Returns the zone id (empty in an unzoned world) or a REASON it was refused,
+ * so the paint command can say what is wrong with the spot instead of silently
+ * dropping it.
+ */
+function campSiteCheck(
+  recipe: WorldRecipe,
+  field: ReturnType<typeof createWorldField>,
+  x: number,
+  z: number,
+  reach: number,
+  clearances: { town: number; sanctuary: number } = { town: 70, sanctuary: 40 },
+): { zone: string } | { refused: string } {
+  if (field.height(x, z) < recipe.seaLevel + 2) return { refused: "under water, or on the tideline" };
+  if (field.waterY(x, z) !== null) return { refused: "inside a lake or a river" };
+  for (const t of recipe.features.towns) {
+    const d = Math.hypot(t.center[0] - x, t.center[1] - z);
+    if (d < t.radius + t.falloff + clearances.town) {
+      return { refused: `${Math.round(d)} m from ${t.id} — towns are safe ground` };
+    }
+  }
+  for (const p of recipe.features.pois) {
+    if (!p.tags.includes("safe")) continue;
+    const d = Math.hypot(p.position[0] - x, p.position[2] - z);
+    if (d < (p.radius ?? 30) + clearances.sanctuary) {
+      return { refused: `${Math.round(d)} m from the sanctuary ${p.id}` };
+    }
+  }
+  if (recipe.regions.length === 0) return { zone: "" };
+  const region = recipe.regions.find((r) => pointInPolygon(r.polygon, x, z));
+  if (!region) return { refused: "outside every zone — no zone owns what happens here" };
+  const edge = polygonDistance(region.polygon, x, z);
+  if (edge < reach) {
+    return {
+      refused:
+        `${Math.round(edge)} m from the ${region.id} border, inside the camp's ${Math.round(reach)} m reach — ` +
+        "a pack there stands in the transfer band and blocks players crossing",
+    };
+  }
+  return { zone: region.id };
+}
+
+/**
+ * Camps painted by hand, from a stroke drawn with the editor's PATH TOOL.
+ *
+ * The same authoring route as `river-path`: draw the line where you want them
+ * in the editor, then name the entity here. Nothing new to learn, and the
+ * drawing lives in the scene where you can move it.
+ *
+ * These get ids the generator will not touch (`spawn-*` rather than `camp-*`),
+ * so `worldgen spawn` can be re-run all it likes without erasing hand-placed
+ * camps — that separation is the whole reason this is a separate command.
+ */
+function commandSpawnPaint(): void {
+  const { recipe, file } = loadRecipe();
+
+  const remove = stringOption("remove", "");
+  if (remove) {
+    const before = recipe.features.camps.length;
+    recipe.features.camps = recipe.features.camps.filter((c) => c.id !== remove && !(remove === "all" && !c.id.startsWith("camp-")));
+    writeRecipe(recipe, file);
+    console.log(`removed ${before - recipe.features.camps.length} painted camp(s)`);
+    return;
+  }
+  if (flag("list")) {
+    const painted = recipe.features.camps.filter((c) => !c.id.startsWith("camp-"));
+    for (const c of painted) console.log(`  ${c.id}: [${c.center}] zone ${c.zone || "-"} ${c.area.spawns.map((s) => `${s.count}x ${s.template}`).join(", ")}`);
+    if (painted.length === 0) console.log("  (no painted camps — the rest are generated `camp-*`)");
+    return;
+  }
+
+  const field = createWorldField(recipe);
+  const template = stringOption("template", "mob");
+  const radius = option("radius", 70);
+  const leash = option("leash", 26);
+  const roam = option("roam", 8);
+  const spread = option("spread", 6);
+  const pack = Math.max(1, Math.round(option("pack", 3)));
+  const band = option("band", 60);
+  const spacing = option("spacing", 120);
+  const reach = spread + leash + roam + band;
+  const prefix = stringOption("id", "spawn");
+
+  // Where: a painted stroke, typed points, or one spot.
+  let points: [number, number][] = [];
+  const fromScene = stringOption("from-scene", "");
+  const entityId = stringOption("entity", "");
+  if (fromScene) {
+    const sceneFile = path.join(assetsRoot(), "scenes", `${fromScene}.scene.json`);
+    if (!fs.existsSync(sceneFile)) fail(`no scene ${sceneFile}`);
+    const scene = JSON.parse(fs.readFileSync(sceneFile, "utf8")) as { entities: Record<string, { components?: Record<string, unknown> }> };
+    const entity = scene.entities[entityId];
+    if (!entity) fail(`no entity "${entityId}" in ${fromScene} (--entity <id>)`);
+    const mesh = entity.components?.["mesh"] as { source?: { kind?: string; points?: [number, number, number][] } } | undefined;
+    if (mesh?.source?.kind !== "path" || !mesh.source.points) fail(`entity "${entityId}" is not a path mesh — draw one with the editor's path tool`);
+    const transform = entity.components?.["transform"] as { position?: [number, number, number] } | undefined;
+    const pos = transform?.position ?? [0, 0, 0];
+    points = mesh.source.points.map((p) => [round(p[0] + pos[0]), round(p[2] + pos[2])] as [number, number]);
+  } else {
+    const raw = stringOption("points", "") || stringOption("at", "");
+    if (!raw) {
+      fail(
+        'give --at "x,z" for one camp, --points "x,z;x,z;…" for several, or --from-scene <scene> --entity <id> ' +
+          "to use a stroke drawn with the editor's path tool",
+      );
+    }
+    points = raw.split(";").map((pair) => {
+      const [x, z] = pair.split(",").map(Number);
+      if (!Number.isFinite(x) || !Number.isFinite(z)) fail(`bad point "${pair}"`);
+      return [round(x!), round(z!)] as [number, number];
+    });
+  }
+
+  // A stroke is a LINE, not a list of camps: walk it and drop one every
+  // `spacing` metres, so a drawn squiggle becomes an evenly populated valley
+  // rather than a knot of overlapping wake radii at every control point.
+  const sites: [number, number][] = [];
+  if (points.length === 1 || spacing <= 0) {
+    sites.push(...points);
+  } else {
+    let carry = 0;
+    sites.push(points[0]!);
+    for (let i = 1; i < points.length; i++) {
+      const [ax, az] = points[i - 1]!;
+      const [bx, bz] = points[i]!;
+      const seg = Math.hypot(bx - ax, bz - az);
+      let t = spacing - carry;
+      while (t <= seg) {
+        sites.push([round(ax + ((bx - ax) * t) / seg), round(az + ((bz - az) * t) / seg)]);
+        t += spacing;
+      }
+      carry = (carry + seg) % spacing;
+    }
+  }
+
+  const kept = recipe.features.camps.filter((c) => !c.id.startsWith(`${prefix}-`));
+  const painted: CampDoc[] = [];
+  let refused = 0;
+  for (const [x, z] of sites) {
+    const check = campSiteCheck(recipe, field, x, z, reach);
+    if ("refused" in check) {
+      refused++;
+      console.warn(`  skipped [${x}, ${z}]: ${check.refused}`);
+      continue;
+    }
+    const tooClose = [...kept, ...painted].some((c) => Math.hypot(c.center[0] - x, c.center[1] - z) < spacing * 0.5);
+    if (tooClose) {
+      refused++;
+      console.warn(`  skipped [${x}, ${z}]: within half a spacing of another camp`);
+      continue;
+    }
+    painted.push({
+      id: `${prefix}-${painted.length + 1}`,
+      center: [x, z],
+      zone: check.zone,
+      tags: ["painted"],
+      area: {
+        radius,
+        sleepRadius: radius + 40,
+        idleSeconds: 10,
+        spawns: [{ template, count: pack, spread }],
+        leash,
+        roam,
+      },
+    });
+  }
+
+  recipe.features.camps = [...kept, ...painted];
+  writeRecipe(recipe, file);
+  console.log(
+    `painted ${painted.length} camp(s) as ${prefix}-*${refused > 0 ? `, ${refused} refused` : ""} — ` +
+      `\`worldgen spawn\` will not touch these`,
+  );
+
+  const scene = stringOption("scene", "");
+  if (scene) patchSceneCamps(recipe, field, painted, scene, template, `${prefix}-`);
+  else console.log("  --scene <name> to write them into a scene as spawnArea entities");
+}
+
 // ---------------------------------------------------------------- zones
 
 /**
@@ -5321,6 +5850,290 @@ function commandStats(): void {
   }
 }
 
+/**
+ * `worldgen scatter`: check every scatter rule against the MODEL it names.
+ *
+ * A scatter rule is three numbers away from a world that looks wrong, and
+ * none of the three fail loudly:
+ *
+ *  - the COLLIDER is authored blind. The emitted collider rises from the
+ *    entity origin (`offset: [0, size.y / 2, 0]` in chunk.ts), so it is only
+ *    ever in the right place if the MODEL's base sits at its own origin too —
+ *    and a prop modelled about its middle (a hoodoo, a tree with buttress
+ *    roots) is metres off, invisibly, because nothing draws a collider.
+ *    `split-gltf.mjs --reorigin` is the fix at import time; this is the check.
+ *  - a collider BIGGER than the prop is an invisible wall, which is the one
+ *    collision bug players feel and no screenshot shows.
+ *  - the WIND filter matches by texture name. Blockbench exports every
+ *    unnamed texture as "pasted", so a filter that matches nothing is a
+ *    silently unmoving forest.
+ *
+ * Plus the clutter number: instances per km² per rule, which is the only
+ * honest way to answer "why is this world covered in rocks" — density alone
+ * hides how much ground a rule actually claims.
+ */
+/**
+ * What the world ACTUALLY gets, per biome, by solving real cells.
+ *
+ * `density` is a lattice spacing, not an outcome. Every candidate then has to
+ * survive slope, height, water, clearance, the clump mask, the per-biome
+ * grade — and, above all, the SPACING test, which is what makes the printed
+ * number a fiction: a rule whose footprint x max scale exceeds half its
+ * lattice spacing is packing-limited, so raising its density changes nothing
+ * at all. Measured on this world: three tree rules authored at 13000, 14000
+ * and 18000/km² all landed within a few percent of 5000, because all three
+ * were footprint-limited and none of them said so.
+ *
+ * So this samples. It picks cells at random over the land, solves each one
+ * properly, and reports instances per km² of the biome it actually landed in
+ * — the honest answer to "why is this world covered in trees", and the only
+ * number worth tuning against.
+ */
+function sampleRealizedScatter(field: WorldField, cells: number): {
+  byBiome: Map<string, { area: number; rules: Map<string, number> }>;
+  sampled: number;
+} {
+  const cellSize = field.recipe.cellSize;
+  const limit = field.worldLimit === Infinity ? 3000 : field.worldLimit;
+  const rng = mulberry32(field.recipe.seed ^ 0x5ca77e2);
+  const byBiome = new Map<string, { area: number; rules: Map<string, number> }>();
+  // area is credited per SAMPLE POINT, not per cell: one cell can straddle
+  // three biomes, and crediting all of it to the majority one would report a
+  // forest rule's density against the meadow half of its own cell
+  const probe = 6; // probe x probe biome samples per cell
+  const pointArea = (cellSize / probe) ** 2;
+  let sampled = 0;
+  for (let tries = 0; tries < cells * 40 && sampled < cells; tries++) {
+    const cx = Math.floor(((rng() * 2 - 1) * limit) / cellSize);
+    const cz = Math.floor(((rng() * 2 - 1) * limit) / cellSize);
+    const x0 = cx * cellSize;
+    const z0 = cz * cellSize;
+    if (Math.hypot(x0 + cellSize / 2, z0 + cellSize / 2) > limit) continue;
+    // which biome owns each part of this cell (and how much of it is water)
+    const share = new Map<string, number>();
+    let land = 0;
+    for (let i = 0; i < probe; i++) {
+      for (let j = 0; j < probe; j++) {
+        const px = x0 + ((i + 0.5) * cellSize) / probe;
+        const pz = z0 + ((j + 0.5) * cellSize) / probe;
+        const y = field.height(px, pz);
+        const water = field.waterY(px, pz);
+        if (water !== null && y < water + 0.35) continue;
+        land++;
+        const id = field.biome(px, pz, y, field.slope(px, pz)).id;
+        share.set(id, (share.get(id) ?? 0) + 1);
+      }
+    }
+    if (land === 0) continue; // all sea: no scatter to measure
+    sampled++;
+    for (const [id, n] of share) {
+      let entry = byBiome.get(id);
+      if (!entry) byBiome.set(id, (entry = { area: 0, rules: new Map() }));
+      entry.area += n * pointArea;
+    }
+    // the instances themselves carry the biome they resolved to, so they are
+    // credited to the right one even in a cell that straddles a border
+    for (const instance of scatterCell(field, cx, cz, { fastGround: true })) {
+      const entry = byBiome.get(instance.biome);
+      if (!entry) continue; // a biome the probe grid missed: too small to report
+      entry.rules.set(instance.rule, (entry.rules.get(instance.rule) ?? 0) + 1);
+    }
+  }
+  return { byBiome, sampled };
+}
+
+/** Print the sampled table, densest biome first. */
+function reportRealizedScatter(field: WorldField, cells: number): void {
+  const t0 = Date.now();
+  const { byBiome, sampled } = sampleRealizedScatter(field, cells);
+  const rows = [...byBiome]
+    .filter(([, e]) => e.area > 0 && e.rules.size > 0)
+    .map(([id, e]) => {
+      const total = [...e.rules.values()].reduce((a, b) => a + b, 0);
+      return { id, area: e.area, total, perKm2: (total / e.area) * 1e6, rules: e.rules };
+    })
+    .sort((a, b) => b.perKm2 - a.perKm2);
+  console.log(`\n  realized (${sampled} cells solved, ${((Date.now() - t0) / 1000).toFixed(1)}s) — props/km² of each biome's own ground:`);
+  if (rows.length === 0) {
+    console.log("    nothing placed anywhere — every rule is gated out (biome? height? slope?)");
+    return;
+  }
+  for (const row of rows) {
+    const detail = [...row.rules]
+      .sort((a, b) => b[1] - a[1])
+      .map(([rule, n]) => `${rule} ${Math.round((n / row.area) * 1e6)}`)
+      .join(", ");
+    console.log(
+      `    ${row.id.padEnd(11)} ${Math.round(row.perKm2).toString().padStart(6)}/km² ` +
+        `over ${(row.area / 1e6).toFixed(2)} km² sampled   ${detail}`,
+    );
+  }
+  console.log("    (nominal density is a lattice, not an outcome — the spacing test is usually what caps a rule)");
+}
+
+
+/**
+ * What fraction of its lattice each clumped rule actually keeps.
+ *
+ * A `clump` threshold is authored against fBm output, and fBm does NOT fill
+ * its nominal -1..1: it piles up around zero, so a threshold that reads like
+ * "the top 40%" is often the top 5%, and the rule quietly loses 90% of its
+ * density with nothing in the recipe to show for it. (The same trap the
+ * biome climate bands hit, and for the same reason.) This measures it
+ * instead: sample the mask over the ground the rule is actually allowed on,
+ * and print the mean keep beside the coverage — the share of that ground
+ * standing inside a clump at all, which is the difference between "a thinner
+ * forest" and "groves with real clearings".
+ */
+function reportClumpMasks(field: WorldField, samples: number): void {
+  const rules = field.recipe.scatter.filter((r) => r.clump);
+  if (rules.length === 0) return;
+  const limit = field.worldLimit === Infinity ? 3000 : field.worldLimit;
+  const rng = mulberry32(field.recipe.seed ^ 0x0c13b);
+  const stats = rules.map((rule) => ({ rule, keep: 0, inside: 0, n: 0 }));
+  for (let tries = 0; tries < samples * 30; tries++) {
+    if (stats.every((s) => s.n >= samples)) break;
+    const x = (rng() * 2 - 1) * limit;
+    const z = (rng() * 2 - 1) * limit;
+    if (Math.hypot(x, z) > limit) continue;
+    const y = field.height(x, z);
+    const water = field.waterY(x, z);
+    if (water !== null && y < water + 0.35) continue;
+    const steep = field.slope(x, z);
+    const biome = field.biome(x, z, y, steep).id;
+    for (const s of stats) {
+      if (s.n >= samples) continue;
+      if (s.rule.biomes.length > 0 && !s.rule.biomes.includes(biome)) continue;
+      const c = s.rule.clump!;
+      const mask = smoothstep(
+        c.threshold,
+        c.threshold + Math.max(1e-4, c.blend),
+        fbm2({ frequency: c.frequency, amplitude: 1, octaves: c.octaves, lacunarity: 2, gain: 0.5, ridged: false, seed: c.seed }, x, z, field.recipe.seed),
+      );
+      s.keep += c.floor + (1 - c.floor) * mask;
+      if (mask > 0.5) s.inside++;
+      s.n++;
+    }
+  }
+  console.log("\n  clump masks — of the lattice a rule is allowed to use, how much survives:");
+  for (const s of stats) {
+    if (s.n === 0) {
+      console.log(`    ${s.rule.id.padEnd(18)} never sampled — no ground in its biomes?`);
+      continue;
+    }
+    const keep = s.keep / s.n;
+    const inside = s.inside / s.n;
+    const note = keep < 0.12 ? "  ! almost nothing survives — lower `threshold`" : "";
+    console.log(
+      `    ${s.rule.id.padEnd(18)} keeps ${(keep * 100).toFixed(0).padStart(3)}%   ` +
+        `${(inside * 100).toFixed(0).padStart(3)}% of that ground is inside a clump   ` +
+        `~${Math.round(2 / s.rule.clump!.frequency)}m across${note}`,
+    );
+  }
+}
+
+
+function commandScatter(): void {
+  const { recipe } = loadRecipe();
+  const modelsRoot = path.join(assetsRoot(), "models");
+  const findings: string[] = [];
+  const rows: string[] = [];
+  let totalPerKm2 = 0;
+  console.log(`scatter: ${recipe.scatter.length} rules in ${recipe.name}`);
+  for (const rule of recipe.scatter) {
+    const perKm2 = rule.density * 1e6;
+    totalPerKm2 += perKm2;
+    const where = rule.biomes.length ? `${rule.biomes.length} biomes` : "EVERY biome";
+    if (!rule.model) {
+      rows.push(`  ${rule.id.padEnd(20)} prefab:${rule.prefab}  ${Math.round(perKm2)}/km²  ${where}`);
+      continue;
+    }
+    const file = path.join(modelsRoot, rule.model);
+    if (!fs.existsSync(file)) {
+      findings.push(`${rule.id}: model ${rule.model} does not exist under ${path.relative(PLAYGROUND, modelsRoot)}`);
+      continue;
+    }
+    let box;
+    try {
+      box = modelBounds(file);
+    } catch (error) {
+      findings.push(`${rule.id}: ${rule.model} could not be read (${(error as Error).message})`);
+      continue;
+    }
+    const mid = (rule.scale[0] + rule.scale[1]) / 2;
+    const size = box.size.map((v) => v * mid) as [number, number, number];
+    rows.push(
+      `  ${rule.id.padEnd(20)} ${rule.model.padEnd(30)} ${box.size.map((v) => v.toFixed(1)).join("x").padEnd(16)} ` +
+        `${String(box.triangles).padStart(4)}t  ${Math.round(perKm2).toString().padStart(5)}/km²  ` +
+        `${rule.collider}${rule.collider === "none" ? "" : `[${rule.colliderSize.join(",")}]`}  ${where}`,
+    );
+
+    // 1. does the model stand on its own origin? (the collider assumes it)
+    if (rule.collider !== "none" && Math.abs(box.min[1]) > Math.max(0.05, box.size[1] * 0.04)) {
+      findings.push(
+        `${rule.id}: ${rule.model} has its base at y=${box.min[1].toFixed(2)}, not 0 — the collider rises from the ` +
+          `ENTITY origin, so it sits ${Math.abs(box.min[1] * mid).toFixed(1)}m ${box.min[1] < 0 ? "above" : "below"} the model. ` +
+          `Re-import it with \`split-gltf.mjs --reorigin\`.`,
+      );
+    }
+    // 2. a collider bigger than the prop is an invisible wall
+    if (rule.collider !== "none") {
+      const declared: [number, number, number] =
+        rule.collider === "box"
+          ? [rule.colliderSize[0] * mid, rule.colliderSize[1] * mid, rule.colliderSize[2] * mid]
+          : // capsule/cylinder read x as the DIAMETER and y as the height
+            [rule.colliderSize[0] * mid, rule.colliderSize[1] * mid, rule.colliderSize[0] * mid];
+      const axes = ["x", "y", "z"] as const;
+      for (let i = 0; i < 3; i++) {
+        if (declared[i]! > size[i]! * 1.05 + 0.05) {
+          findings.push(
+            `${rule.id}: collider ${axes[i]} is ${declared[i]!.toFixed(1)}m but the model is only ${size[i]!.toFixed(1)}m ` +
+              `(at the mid scale ${mid.toFixed(2)}) — an invisible wall around the prop.`,
+          );
+        }
+      }
+      // a BOX is meant to be the prop's body; a cylinder may legitimately be a
+      // narrow trunk inside a wide canopy, so only its height is checked
+      if (declared[1]! < size[1]! * 0.4) {
+        findings.push(
+          `${rule.id}: collider is ${declared[1]!.toFixed(1)}m tall against a ${size[1]!.toFixed(1)}m model — ` +
+            `players walk through the top ${(size[1]! - declared[1]!).toFixed(1)}m of it.`,
+        );
+      }
+      if (rule.collider === "box" && (declared[0]! < size[0]! * 0.35 || declared[2]! < size[2]! * 0.35)) {
+        findings.push(
+          `${rule.id}: box collider ${declared[0]!.toFixed(1)}x${declared[2]!.toFixed(1)} against a ` +
+            `${size[0]!.toFixed(1)}x${size[2]!.toFixed(1)} model — most of the prop has nothing behind it.`,
+        );
+      }
+    }
+    // 3. the wind filter has to match a real texture name
+    const names = box.textures.map((t) => t.toLowerCase());
+    if (rule.wind?.materials) {
+      const needles = rule.wind.materials.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+      if (!needles.some((needle) => names.some((name) => name.includes(needle)))) {
+        findings.push(
+          `${rule.id}: wind.materials "${rule.wind.materials}" matches none of ${rule.model}'s textures ` +
+            `[${box.textures.join(", ")}] — the model gets NO wind. (An unnamed Blockbench texture is "pasted".)`,
+        );
+      }
+    } else if (!rule.wind && names.some((name) => name.includes("leaves") || name.includes("bush"))) {
+      findings.push(`${rule.id}: ${rule.model} carries foliage [${box.textures.join(", ")}] but the rule has no wind.`);
+    }
+  }
+  console.log(rows.join("\n"));
+  console.log(`  total ${Math.round(totalPerKm2)} props/km² across every rule (each still gated by biome, slope and height)`);
+  const cells = option("sample", 48);
+  if (cells > 0) {
+    const field = createWorldField(recipe);
+    reportClumpMasks(field, 4000);
+    reportRealizedScatter(field, cells);
+  }
+  for (const finding of findings) console.log(`  ! ${finding}`);
+  console.log(findings.length === 0 ? "  no findings" : `  ${findings.length} finding${findings.length === 1 ? "" : "s"}`);
+  if (findings.length > 0) process.exit(1);
+}
+
 // ---------------------------------------------------------------- entry
 
 switch (command) {
@@ -5382,6 +6195,15 @@ switch (command) {
     break;
   case "descend":
     commandDescend();
+    break;
+  case "spawn":
+    commandSpawn();
+    break;
+  case "spawn-paint":
+    commandSpawnPaint();
+    break;
+  case "scatter":
+    commandScatter();
     break;
   case "stats":
     commandStats();

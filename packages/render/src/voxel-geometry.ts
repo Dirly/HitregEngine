@@ -1,5 +1,5 @@
 import * as THREE from "three/webgpu";
-import { voxelMesh, type VoxelMesh, type VoxelMeshSource } from "@hitreg/core";
+import { csgMesh, voxelMesh, type CsgMeshSource, type VoxelMesh, type VoxelMeshSource } from "@hitreg/core";
 import { SPLAT_ATTRIBUTES } from "./terrain-splat.js";
 
 /**
@@ -28,6 +28,20 @@ import { SPLAT_ATTRIBUTES } from "./terrain-splat.js";
  */
 export function voxelGeometry(source: VoxelMeshSource): THREE.BufferGeometry | null {
   const mesh = voxelMesh(source);
+  if (mesh.triangleCount === 0) return null;
+  return geometryFrom(mesh);
+}
+
+/**
+ * The same geometry for a CSG VOLUME — a dual-contoured solid rather than a
+ * marching-cubes world cell. It shares this function rather than getting one
+ * of its own because it produces the identical `VoxelMesh`: same splat
+ * palette, same tint, so the identical `terrain-splat` material lights a
+ * dungeon wall and a hillside, and the triplanar projection means a volume
+ * needs no UVs.
+ */
+export function csgGeometry(source: CsgMeshSource): THREE.BufferGeometry | null {
+  const mesh = csgMesh(source);
   if (mesh.triangleCount === 0) return null;
   return geometryFrom(mesh);
 }

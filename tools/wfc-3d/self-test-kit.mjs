@@ -10,12 +10,34 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { readGltf, accessorFloats } from "./gltf.mjs";
-import { importKit, solveKit, packProps, fitFloorUv, rotateDirection, stripCopySuffix } from "./kit.mjs";
+import { importKit, solveKit, packProps, fitFloorUv, rotateDirection, stripCopySuffix, learnFromExamples, quarterTurnSymmetric } from "./kit.mjs";
 import { writeSyntheticKit, partDoc, boxGeometry, stripesPng } from "./synthetic-kit.mjs";
 import { faceCompatibility, parseTileset, uvCounterRotation } from "./wfc.mjs";
 import { run } from "./run.mjs";
 
 import { CELL } from "./synthetic-kit.mjs";
+
+// Complete-cell adjacency must not generalize roof edges into floor edges.
+{
+  const parts = ["floor", "roof", "support"].map(name => ({name, role: "fill", slot: "fill", symmetric: false}));
+  const ex = [{file: "structure.glb", placements: [
+    {part: "floor", cell: [0,0,0], rotation: 0},
+    {part: "support", cell: [1,0,0], rotation: 0},
+    {part: "roof", cell: [0,1,0], rotation: 0},
+    {part: "roof", cell: [1,1,0], rotation: 0},
+  ]}];
+  const strict = learnFromExamples(ex, parts, () => {}, "observed");
+  assert.ok(strict.tiles.every(t => JSON.stringify(t.rotations) === "[0]"));
+  assert.ok(strict.vertical.some(pair => pair[0].includes("floor@") && pair[1].includes("roof@")));
+  assert.ok(!strict.horizontal.some(pair => pair[0].includes("floor@") && pair[1].includes("roof@")));
+  assert.ok(!strict.vertical.some(pair => pair[0].includes("roof@") && pair[1].includes("floor@")));
+  assert.throws(() => learnFromExamples(ex, parts, () => {}, "typo"), /unknown adjacency mode/);
+  assert.deepEqual(learnFromExamples(ex, parts, () => {}), learnFromExamples(ex, parts, () => {}, "profiles"));
+}
+
+assert.equal(quarterTurnSymmetric([[-2,0,-2],[2,0,-2],[2,0,2],[-2,0,2]]), true);
+assert.equal(quarterTurnSymmetric([[-2,0,-2],[2,0,-2],[2,0,0],[0,0,2],[-2,0,2]]), false);
+assert.equal(quarterTurnSymmetric([[-2,0,-2],[2,1,-2],[2,1,2],[-2,0,2]]), false);
 
 // --- unit checks ------------------------------------------------------------
 

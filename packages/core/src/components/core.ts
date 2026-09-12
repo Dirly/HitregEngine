@@ -76,11 +76,13 @@ export const meshWindSchema = z.object({
     .string()
     .optional()
     .describe(
-      "Only move materials whose NAME, or whose colour texture's name, contains this (case-insensitive) — " +
-        "`leaves` for a model whose leaf texture is called Leaves. The rest of the model stands still and the " +
-        "`canopy` height test is skipped, so the trunk stays put by NAME rather than by height. Name the texture " +
-        "or material in the DCC tool before export: Blockbench exports a pasted texture as literally 'pasted', " +
-        "which matches nothing, and an unmatched model gets no wind at all.",
+      "Only move materials whose NAME, or whose colour texture's name, contains one of these " +
+        "(case-insensitive, COMMA-SEPARATED) — `leaves` for a model whose leaf texture is called Leaves, " +
+        "`leaves,bush` for one rule that covers a whole shelf of props whatever each model calls its own " +
+        "foliage sheet. The rest of the model stands still and the `canopy` height test is skipped, so the " +
+        "trunk stays put by NAME rather than by height. Name the texture or material in the DCC tool before " +
+        "export: Blockbench exports a pasted texture as literally 'pasted', which matches nothing, and an " +
+        "unmatched model gets no wind at all (`split-gltf.mjs --texnames` names them after the fact).",
     ),
 });
 
@@ -236,6 +238,31 @@ export const meshSchema = z.object({
             "the model. Only honoured for `renderMode: \"instanced\"` asset meshes — other render modes ignore it " +
             "with one console warning per asset.",
         ),
+      atlasTile: z
+        .tuple([z.number(), z.number(), z.number()])
+        .optional()
+        .describe(
+          "Which tile of a PACKED atlas this instance wears, as [uOffset, vOffset, scale] — the model's UVs are " +
+            "mapped `uv * scale + offset`. Exists so one MODEL can wear any of many looks while every user of it " +
+            "stays ONE draw call: a material boundary is a draw-call boundary, so the choice of sheet has to be " +
+            "per-INSTANCE rather than a material per theme. `atlas-pack` writes the tile rectangles beside the " +
+            "packed sheet. Only honoured for `renderMode: \"instanced\"` asset meshes.",
+        ),
+      partMask: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .describe(
+          "Which parts of an UBERMESH this instance is made of: bit i shows the part whose index is i, and the " +
+            "index of each vertex is carried in the model's SECOND UV set (glTF TEXCOORD_1, written by " +
+            "unwrap-weapon). Parts whose bit is clear collapse to a degenerate triangle in the VERTEX stage, so " +
+            "they cost no fragments — hiding them with alpha instead would rasterise every hidden part only to " +
+            "discard it. This is what makes a modular weapon one mesh and one material: thirty different swords " +
+            "in a town draw as one instanced batch. Pairs with `atlasTile`; only honoured for `renderMode: " +
+            "\"instanced\"` asset meshes. NOTE that `uvRotation` also claims TEXCOORD_1 — a model may carry a " +
+            "rotation pivot or a part index there, never both.",
+        ),
       textureFilter: z
         .enum(["linear", "nearest"])
         .optional()
@@ -319,6 +346,31 @@ export const meshSchema = z.object({
         .tuple([z.number(), z.number()])
         .optional()
         .describe("Explicit vertical band to mesh. Omit and it is derived from this cell's own terrain plus the recipe's verticalRange."),
+      mesher: z
+        .enum(["mc", "dc", "nets"])
+        .optional()
+        .describe("EXPERIMENT: which mesher builds this cell. Omit for marching cubes; 'dc'/'nets' contour the same field dually. Written by the voxel streamer from the scene's voxelWorld component."),
+    }),
+    z.object({
+      /**
+       * A solid authored as CSG and meshed by DUAL CONTOURING — built things,
+       * where an edge has to stay an edge: halls, stairs, a tower shaft, a
+       * doorway cut through a wall. The document
+       * (assets/volumes/<id>.json) is the truth and the mesh is derived, so a
+       * dungeon is a few kilobytes of ordered operations rather than stored
+       * voxels. Pair with a "trimesh" collider; geometry is emitted in the
+       * volume's own world coordinates, so the entity transform is normally
+       * identity.
+       */
+      kind: z.literal("csg"),
+      volume: z.string().min(1).describe("Volume asset id (assets/volumes/<id>, sans extension)."),
+      lodStep: z
+        .number()
+        .int()
+        .min(1)
+        .max(8)
+        .optional()
+        .describe("Coarsen the lattice by this factor. Omit for full detail."),
     }),
     z.object({
       /** Curve-following geometry: roads, rivers, fences (ribbon) or
@@ -574,8 +626,67 @@ export const cameraSchema = z.object({
       mode: z.enum(["follow", "chase"]),
       targetTag: z.string().default("player"),
       distance: z.number().positive().default(7),
-      height: z.number().default(3.5),
-      damping: z.number().positive().default(5),
+      height: z
+        .number()
+        .default(3.5)
+        .describe(
+          "Eye elevation above the target's origin. In chase it is literal. In follow it is the FRAMING the " +
+            "rig starts at — the camera orbits `pivotHeight` and this sets how far above that it begins, so " +
+            "a height above pivotHeight starts looking down at the character. The player's mouse owns it after that.",
+        ),
+      pivotHeight: z
+        .number()
+        .default(1.6)
+        .describe(
+          "Height above the target's origin of the point the camera orbits and looks at, and the origin every " +
+            "collision sweep starts from. Chest height, not the feet: orbiting the feet swings the character " +
+            "around the screen, and a sweep starting at ground level is stopped by the ground.",
+        ),
+      shoulder: z
+        .number()
+        .default(0)
+        .describe("Lateral pivot offset in metres, +right. Over-the-shoulder framing; 0 is centred."),
+      minDistance: z
+        .number()
+        .positive()
+        .default(0.25)
+        .describe(
+          "Floor for the boom when collision squeezes it. Small on purpose: backed into a corner the camera " +
+            "goes effectively FIRST PERSON, which shows the player their surroundings, where a boom floored a " +
+            "metre out just fills the screen with the wall it is inside. The body is hidden on the way down.",
+        ),
+      maxDistance: z.number().positive().default(14).describe("Ceiling for the player's wheel zoom."),
+      collision: z
+        .boolean()
+        .default(true)
+        .describe(
+          "Resolve the boom against the physics world (terrain, buildings, props — never actors, so an NPC " +
+            "walking behind the player cannot shove the camera). Off gives a rigid boom that clips through walls.",
+        ),
+      lookUp: z
+        .number()
+        .min(0)
+        .max(89)
+        .default(32)
+        .describe(
+          "How far the player may angle the view UP, in degrees. Shallow on purpose: past the angle where the "  +
+            "eye would sit under the ground (roughly asin(pivotHeight / distance)), collision crushes the boom to "  +
+            "first person for as long as the angle is held, which reads as the camera being stuck rather than as a limit.",
+        ),
+      lookDown: z
+        .number()
+        .min(0)
+        .max(89)
+        .default(66)
+        .describe("How far the player may angle the view DOWN, in degrees — i.e. how far the camera may rise above the pivot."),
+      damping: z
+        .number()
+        .positive()
+        .default(14)
+        .describe(
+          "How tightly the orbit pivot tracks the target, per second. Higher is tighter. Loose damping reads " +
+            "as cinematic in open country and as the camera falling behind into walls in a town.",
+        ),
     })
     .optional(),
 });
@@ -613,12 +724,12 @@ const splatLayerSchema = z.object({
 /** PBR material — a data asset referenced by mesh.material GUID. */
 export const materialSchema = z.object({
   shader: z
-    .enum(["standard", "unlit", "toon", "wireframe", "terrain-splat", "water"])
+    .enum(["standard", "unlit", "toon", "wireframe", "terrain-splat", "water", "portal"])
     .default("standard")
     .describe(
       "Built-in shader. unlit = flat/PS1-style, ignores lights; toon = banded; standard = PBR; " +
         "terrain-splat = blends `splat.layers` by height/slope (seamless heightmap terrain, no per-tile hard edges); " +
-        "water = animated fresnel/ripple shader driven by `water` (bounded brightness — safe under bloom).",
+        "portal = persistent unlit FX Lab procedural gate using color/opacity and optional map luminance as rotating paint detail on local 0..1 UVs; visual only, no zone transfer. water = animated fresnel/ripple shader driven by `water` (bounded brightness — safe under bloom).",
     ),
   color: hexColor.default("#9aa0a8"),
   map: z.string().optional().describe("Texture asset id (assets/textures/) used as the color map."),
@@ -805,6 +916,8 @@ export const materialSchema = z.object({
     .describe("Enable alpha blending. Auto-on when opacity < 1; set true for textures with alpha."),
   splat: z
     .object({
+      dominantAxis: z.boolean().default(false).describe("Select one triplanar projection per face instead of blending axes. Pair with flatShading for masonry to prevent doubled mortar on bevels; leaves geometry and colliders unchanged. Organic terrain defaults to blended projection."),
+      flatShading: z.boolean().default(false).describe("Use triangle face normals for lighting and triplanar texture projection. Useful for DC masonry: smooth corner normals can bend straight mortar courses. Does not move vertices or change colliders; curved surfaces become faceted. Leave false for organic terrain."),
       source: z
         .enum(["height", "vertex"])
         .default("height")
@@ -920,8 +1033,13 @@ export const materialSchema = z.object({
     })
     .optional()
     .describe("Only read when shader is 'terrain-splat'."),
+  portal: z.object({
+    aperture: z.enum(['disc','opening']).default('disc').describe('Disc feathers to an oval; opening fills the full local-UV quad with a narrow edge fade for a framed doorway. Place sealed architecture several metres behind it; this shader does not implement travel or collision.'),
+  }).optional().describe("Only read by shader 'portal'. Uses optional map as rotating luminance paint detail while retaining color as its single hue."),
   water: z
     .object({
+      lighting: z.boolean().default(true).describe("False keeps animated water color, waves, foam and fog but removes scene-light shading and specular highlights. Useful for graphic sewer water. True preserves the standard lit ocean appearance."),
+      textureTint: hexColor.optional().describe("When set, recolor the scrolling texture by its luminance before blending, preserving visible moving detail without importing its original hue. Omit to retain the original texture colors. Combine with textureStrength to control moving detail."),
       shallowColor: hexColor.default("#3fa8c9"),
       /** Toon-ramp middle stop, between shallowColor and deepColor. */
       midColor: hexColor.default("#1f6f96"),
@@ -1245,6 +1363,24 @@ export const skySchema = z.object({
       softness: z.number().min(0.01).max(1).default(0.35).describe("Edge softness; low = crisp cumulus edges, high = haze."),
       color: hexColor.default("#ffffff").describe("Lit colour."),
       shadow: hexColor.default("#8a94a8").describe("Colour of the thick, shadowed parts."),
+      sun: hexColor
+        .default("#ffb27a")
+        .describe(
+          "Colour the cloud takes on the SUN'S SIDE of the sky, mixed in by `sunAmount`. This is what makes a " +
+            "sunset read as one: a low sun lights the deck from the side, so the cloud near its azimuth burns " +
+            "while the far sky stays cold. Tinting the whole layer at once instead (one `color` for the dome) " +
+            "gives the flat everything-is-orange sunset.",
+        ),
+      sunAmount: z
+        .number()
+        .min(0)
+        .max(1)
+        .default(0)
+        .describe(
+          "How far the sun-facing cloud goes toward `sun`. 0 = no directional glow (the authored default; the " +
+            "layer is lit by `color`/`shadow` alone). The `day-night` script drives this: open at the horizon, " +
+            "shut by mid-morning.",
+        ),
     })
     .optional(),
 });

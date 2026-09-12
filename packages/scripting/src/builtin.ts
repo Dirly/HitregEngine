@@ -1,9 +1,30 @@
 import type * as THREE from "three";
 import type { EventRegistry } from "@hitreg/core";
-import { Script, type BiomeAt, type LiveSkyBase, type ScriptClass } from "./script.js";
+import {
+  Script,
+  type BiomeAt,
+  type LiveSkyBase,
+  type ScriptClass,
+  type SimLike,
+} from "./script.js";
 import type { DataTypeSink, ScriptRegistry } from "./registry.js";
 import { CharacterSheetScript } from "./character-sheet.js";
 import { CharacterUi } from "./character-ui.js";
+import { MobBrain } from "./mob-brain.js";
+import {
+  damp,
+  fitAction,
+  gaitFor,
+  gaitSpeed as speedForGait,
+  GaitTracker,
+  groundFollowVy,
+  risingByGround,
+  leavingGround,
+  playbackRate,
+  type ActionFit,
+  type Gait,
+  type GaitTuning,
+} from "./locomotion.js";
 import {
   approach,
   approachAngle,
@@ -409,7 +430,10 @@ class Damageable extends Script {
  * LAYER while the character is moving, so a cast or a swing does not stop the
  * legs, and full-body when standing still or when actionFullBody is set),
  * impulseVel/impulseUntil (an external horizontal drive — dash, knockback —
- * that input cannot cancel while it lasts).
+ * that input cannot cancel while it lasts), faceYaw/faceUntil (an external
+ * FACING — an AI swinging at a target it has stopped to fight, a cutscene —
+ * a separate channel because the controller otherwise only turns a body that
+ * is moving).
  *
  * The gait is chosen from MEASURED planar velocity, not from which key is
  * held, so a character slowed by a swamp or driven by AI rather than input
@@ -420,6 +444,17 @@ class Damageable extends Script {
  * doesn't exist and freezing mid-stride, so this stays a drop-in for models
  * with two clips and for models with twenty.
  */
+/** How far below the body's origin the ground ray looks. */
+const PROBE_REACH = 4;
+/** Slack on the measured resting distance before the feet count as off it. */
+const PROBE_SLACK = 0.3;
+/** Rate the slope lean chases the ground normal (1/s). */
+const LEAN_DAMP = 10;
+
+function clampAbs(value: number, limit: number): number {
+  return Math.max(-limit, Math.min(limit, value));
+}
+
 class ThirdPersonController extends Script {
   static override scriptName = "third-person-controller";
   static override params = {
@@ -432,6 +467,39 @@ class ThirdPersonController extends Script {
     runClip: { default: "Run" },
     sprintClip: { default: "Sprint", description: "optional — falls back to the run clip" },
     airClip: { default: "Jump_Loop", description: "optional — played while off the ground" },
+    jumpClip: {
+      default: "Jump_Start",
+      description:
+        "optional — the push-off, played once as the character leaves the ground before the air " +
+        "clip loops. A jump that opens on its airborne pose has no weight to it.",
+    },
+    landClip: {
+      default: "Jump_Land",
+      description:
+        "optional — the touchdown, played once after a real drop (see landDrop). Skipped at speed: " +
+        "a character landing mid-run should flow back into the run, not stop to absorb it.",
+    },
+    landDrop: {
+      default: 0.35,
+      min: 0,
+      max: 3,
+      description:
+        "Seconds airborne before a landing is worth animating. Below it the character simply " +
+        "carries on — hopping over a rock is not an event.",
+    },
+    turnLeftClip: {
+      default: "Turn_L",
+      description:
+        "optional — turning on the spot, left. In camera-facing mode the character pivots whenever " +
+        "the camera does, and an idle clip played through that pivot is a statue on a turntable.",
+    },
+    turnRightClip: { default: "Turn_R", description: "optional — turning on the spot, right" },
+    turnClipSpeed: {
+      default: 1.2,
+      min: 0.1,
+      max: 10,
+      description: "Radians per second of pivot before the turn-in-place clips take over from idle.",
+    },
     backClip: { default: "Run_Bwd", description: "optional — played while backing up" },
     leftClip: { default: "Run_Left", description: "optional — played while strafing left" },
     rightClip: { default: "Run_Right", description: "optional — played while strafing right" },
@@ -446,9 +514,74 @@ class ThirdPersonController extends Script {
       min: 0.2,
       max: 20,
       description:
-        "Downward speed that counts as FALLING rather than settling onto the ground. Too low and a " +
-        "character walking down a slope plays the falling clip; too high and a real drop reads as " +
-        "grounded until it is well underway.",
+        "Downward speed that counts as FALLING rather than settling onto the ground, BEFORE the " +
+        "slope allowance below. Too low and a character walking down a slope plays the falling clip; " +
+        "too high and a real drop reads as grounded until it is well underway.",
+    },
+    slopeTolerance: {
+      default: 0.8,
+      min: 0,
+      max: 3,
+      description:
+        "Steepest descent still counted as following the ground, as a ratio of forward speed " +
+        "(0.8 ≈ 39°, about as steep as a body walks). The fall threshold grows with how fast the body is travelling, because a slope " +
+        "can only take you down as fast as you are going along it: without this a character running " +
+        "downhill trips the falling clip and glides in a jump pose, which is the most common " +
+        "\"animation is broken on slopes\" report there is.",
+    },
+    groundProbe: {
+      default: 0.05,
+      min: 0,
+      max: 1,
+      description:
+        "Seconds between downward ground rays. The ray settles both questions velocity only " +
+        "guesses at — whether the feet are on something, and which way that something faces — so " +
+        "it is what makes slopes read correctly. 0 turns it off and falls back to the velocity " +
+        "heuristic alone (one query per character per interval, so raise it for a crowd).",
+    },
+    groundStick: {
+      default: 0.5,
+      min: 0,
+      max: 2,
+      description:
+        "Metres of gap the body will close to stay ON the ground it is running over (needs " +
+        "groundProbe; 0 turns it off). A body driven by velocity alone leaves the surface at every " +
+        "convex break — the crest of a hill throws it into a ballistic arc for a third of a second, " +
+        "and on rolling terrain that is a character permanently half-airborne. Inside this gap it " +
+        "follows the surface instead, which is what every character controller does and what stops " +
+        "a run downhill reading as a glide. A real drop is unaffected: past the gap, gravity has it.",
+    },
+    slopeAlign: {
+      default: 0.5,
+      min: 0,
+      max: 1,
+      description:
+        "How much of the ground's tilt the body takes on, 0..1 (needs groundProbe). A character " +
+        "standing bolt upright on a hillside is the other half of what reads as wrong on slopes; " +
+        "full alignment reads as a toy on a ramp, so the default leans part of the way.",
+    },
+    slopeAlignMax: {
+      default: 25,
+      min: 0,
+      max: 60,
+      description: "Ceiling on the slope lean, in degrees, however steep the ground is.",
+    },
+    gaitDwell: {
+      default: 0.18,
+      min: 0,
+      max: 1,
+      description:
+        "Seconds a gait holds before it may change BACK. Speeding up is instant; reversing is not, " +
+        "which is what stops a character hovering near a threshold from crossfading several times a " +
+        "second. Works with the hysteresis band the thresholds already carry.",
+    },
+    fitActionClip: {
+      default: true,
+      description:
+        "Stretch or compress a one-shot action clip (userData.actionClip) to the window its owner " +
+        "asked for, instead of looping it. A three-second cast then plays as one slow cast rather " +
+        "than the same second three times. Windows too long for even the slowest playback still " +
+        "loop — and so do clips whose length nobody can report (a model still loading).",
     },
     coyoteTime: {
       default: 0.12,
@@ -503,6 +636,8 @@ class ThirdPersonController extends Script {
 
   private yaw = 0;
   private airTime = 0;
+  /** How long the last stretch off the ground lasted (the landing reads it). */
+  private airFor = 0;
   private lastJump = -999;
   private autoRun = false;
   private autoRunHeld = false;
@@ -512,11 +647,33 @@ class ThirdPersonController extends Script {
   /** The action clip currently owning (part of) the body, and how. */
   private action: string | null = null;
   private actionLayered = false;
+  /** How the running action was fitted to its window (rate, and whether it loops). */
+  private actionFit: ActionFit = { rate: 1, loop: true };
+  /** Gait tier currently playing, with its dwell state — see gaitDwell. */
+  private readonly gait = new GaitTracker();
+  /** Deadlines for the two one-shots that bracket a jump. */
+  private jumpUntil = 0;
+  private landUntil = 0;
+  private wasAirborne = false;
+  /** Turning on the spot: which way, and the yaw it was measured from. */
+  private turning: "left" | "right" | null = null;
+  private lastYaw = 0;
+  /** Ground ray: when it last ran, what it found, and the resting distance. */
+  private probeAt = -999;
+  private groundNormal: [number, number, number] | null = null;
+  private groundDist = Infinity;
+  private groundRest: number | null = null;
+  /** The vertical velocity ground-following wrote last tick, if it did. */
+  private stickVy: number | null = null;
+  /** Slope lean, smoothed — the ray is a step function and the body is not. */
+  private pitch = 0;
+  private roll = 0;
+  private scratch: THREE.Vector3 | null = null;
 
-  private play(clip: string, fade: number): void {
-    if (this.lastClip === clip) return;
+  private play(clip: string, fade: number, loop = true, restart = false): void {
+    if (this.lastClip === clip && !restart) return;
     this.lastClip = clip;
-    this.ctx.setAnimation?.(clip, fade);
+    this.ctx.setAnimation?.(clip, fade, { loop, ...(restart ? { restart: true } : {}) });
   }
 
   /**
@@ -543,30 +700,47 @@ class ThirdPersonController extends Script {
    * — but it is a safety net, not the fix. Declare `clipSpeeds` and the rate
    * lands near 1 on its own.
    */
-  private setRate(moving: number, clip: string, gaitSpeed: number): void {
+  private setRate(moving: number, clip: string, tuned: number): void {
     if (!this.param<boolean>("syncClipSpeed")) {
       this.setRateRaw(1);
       return;
     }
     const declared = (this.param<Record<string, number>>("clipSpeeds") ?? {})[clip];
-    const nominal = declared && declared > 0 ? declared : gaitSpeed;
-    this.setRateRaw(nominal > 0 ? moving / nominal : 1);
+    const authored = declared && declared > 0 ? declared : tuned;
+    this.setRateRaw(playbackRate(moving, authored));
   }
 
+  /** Push a playback rate through, unclamped — callers clamp for their case. */
   private setRateRaw(rate: number): void {
-    const clamped = Math.max(0.6, Math.min(1.75, rate));
-    if (Math.abs(clamped - this.lastRate) < 0.02) return;
-    this.lastRate = clamped;
-    this.ctx.setAnimationSpeed?.(clamped);
+    if (Math.abs(rate - this.lastRate) < 0.02) return;
+    this.lastRate = rate;
+    this.ctx.setAnimationSpeed?.(rate);
   }
 
   override onStart(): void {
     this.yaw = this.object.rotation.y;
     this.airTime = 0;
+    this.airFor = 0;
     this.autoRun = false;
     this.clips = null; // the model may still be loading; resolve on first use
     this.action = null;
     this.actionLayered = false;
+    this.actionFit = { rate: 1, loop: true };
+    this.gait.reset();
+    // the body may have been moved (a respawn, a transfer): measure the ground
+    // again rather than trusting a resting distance from wherever it was
+    this.probeAt = -999;
+    this.groundNormal = null;
+    this.groundDist = Infinity;
+    this.groundRest = null;
+    this.stickVy = null;
+    this.pitch = 0;
+    this.roll = 0;
+    this.jumpUntil = 0;
+    this.landUntil = 0;
+    this.wasAirborne = false;
+    this.turning = null;
+    this.lastYaw = this.yaw;
     this.ctx.clearAnimationLayer?.(0);
     this.play(this.param<string>("idleClip"), 0.2);
   }
@@ -592,6 +766,8 @@ class ThirdPersonController extends Script {
       actionFullBody?: boolean;
       impulseVel?: [number, number];
       impulseUntil?: number;
+      faceYaw?: number;
+      faceUntil?: number;
     };
     if (ud.frozen) {
       sim.setLinvel(this.entityId, [0, vel[1], 0]);
@@ -599,14 +775,23 @@ class ThirdPersonController extends Script {
       // legs; it does not cancel an animation somebody asked for — and a
       // script that sets actionClip and frozen together (dying is the usual
       // pair) otherwise watches its death clip get replaced by idle.
-      const held =
-        ud.actionClip && (ud.actionUntil ?? 0) > this.ctx.now() / 1000 ? ud.actionClip : null;
+      const frozenNow = this.ctx.now() / 1000;
+      const held = ud.actionClip && (ud.actionUntil ?? 0) > frozenNow ? ud.actionClip : null;
       if (this.actionLayered) {
         this.ctx.clearAnimationLayer?.(0.15); // no gait left for it to sit on
         this.actionLayered = false;
       }
+      const starting = held !== this.action;
       this.action = held;
-      this.play(held ?? this.param<string>("idleClip"), 0.25);
+      if (held && starting) {
+        // fitted like any other action — a death clip that reaches its end and
+        // starts again is the single most obvious animation bug there is
+        this.actionFit = this.param<boolean>("fitActionClip")
+          ? fitAction(this.clipLength(held), (ud.actionUntil ?? frozenNow) - frozenNow)
+          : { rate: 1, loop: true };
+      }
+      this.setRateRaw(held ? this.actionFit.rate : 1);
+      this.play(held ?? this.param<string>("idleClip"), 0.25, !held || this.actionFit.loop, starting && held !== null);
       return;
     }
 
@@ -691,19 +876,51 @@ class ThirdPersonController extends Script {
     // falling pose permanently: legs tucked, feet still, sliding over the
     // ground. Which is exactly what "gliding in a jump pose" looks like.
     //
-    // So require SUSTAINED evidence of leaving the ground, and give it a coyote
-    // window. A downward raycast would be firmer, but it costs a query per
-    // character per tick and this needs none.
+    // A slope is the same bug wearing a hat: running downhill at 6 m/s the body
+    // descends several metres a second with its feet planted the whole way, and
+    // any fixed threshold low enough to catch a real drop is well below that.
+    // So the allowance GROWS with travel speed (slopeTolerance), and where the
+    // sim can answer properly a ground ray settles it outright — which is also
+    // where the surface normal comes from, so slopes are one problem and not
+    // two. Everything still runs through the same SUSTAINED-evidence counter,
+    // whose window doubles as the coyote grace on a jump.
     const now = this.ctx.now() / 1000;
-    const leaving = vy > 0.8 || vy < -this.param<number>("fallSpeed");
-    this.airTime = leaving ? this.airTime + dt : 0;
+    const planar = Math.hypot(vel[0], vel[2]);
+    const probed = this.probeGround(sim, now, vy, planar);
+    const leaving =
+      probed !== null
+        ? probed
+        : leavingGround(vy, planar, this.param<number>("fallSpeed"), this.param<number>("slopeTolerance"));
+    // airTime resets the moment the ground answers again, so the LAST length
+    // of it is remembered separately: the landing needs to know how far the
+    // character fell, and by then airTime is already zero.
+    if (leaving) this.airTime += dt;
+    else {
+      this.airFor = this.airTime;
+      this.airTime = 0;
+    }
     const airborne =
       this.airTime > this.param<number>("coyoteTime") || now - this.lastJump < 0.25;
     const grounded = !airborne;
+    // Landing is an EDGE — the one tick where "was airborne" and "is grounded"
+    // are both true — so it is read here, before any early return can skip it.
+    if (this.wasAirborne && grounded) {
+      // Skipped at speed on purpose: a character landing mid-run flows back
+      // into the run, and stopping to absorb the landing reads as a stumble.
+      if (this.airFor >= this.param<number>("landDrop") && planar < this.param<number>("speed") * 0.6) {
+        this.landUntil = now + (this.clipLength(this.param<string>("landClip")) ?? 0.3);
+      }
+    }
+    this.wasAirborne = !grounded;
     if (input.isDown("Space") && grounded) {
       vy = this.param<number>("jump");
       this.lastJump = now; // and no re-jump inside the coyote window
+      // the push-off owns the body until it has played out, then the air clip
+      // loops under it — a jump that opens on its airborne pose has no weight
+      this.jumpUntil = now + (this.clipLength(this.param<string>("jumpClip")) ?? 0.35);
+      this.landUntil = 0;
     }
+    vy = this.followGround(x, vy, z, grounded, now, dt);
     sim.setLinvel(this.entityId, [x, vy, z]);
 
     // Where the body is headed, in world terms. The clip is chosen against
@@ -712,15 +929,28 @@ class ThirdPersonController extends Script {
     // reports a strafe for the first few frames of every move.
     const facingTarget = faceCamera || backing ? Math.atan2(fx, fz) : Math.atan2(x, z);
 
-    // steer the visual (body rotations are locked)
-    if (faceCamera || backing || len > 0 || (driven && Math.hypot(x, z) > 0.05)) {
-      const target = facingTarget + this.param<number>("modelYaw");
+    // steer the visual (body rotations are locked).
+    //
+    // A claimed facing wins over movement. The controller only turns a body
+    // that is MOVING, so an AI that stops to swing would keep facing where its
+    // target used to be — and writing object.rotation.y from the outside does
+    // not work either, because the yaw interpolated here is remembered across
+    // ticks and would snap back the moment the body moved again. Hence a
+    // channel with a deadline, exactly like impulseVel: a script that dies
+    // mid-swing releases the head instead of freezing it.
+    const faced = typeof ud.faceYaw === "number" && (ud.faceUntil ?? 0) > now ? ud.faceYaw : null;
+    if (faced !== null || faceCamera || backing || len > 0 || (driven && Math.hypot(x, z) > 0.05)) {
+      const target = (faced ?? facingTarget) + this.param<number>("modelYaw");
       let diff = target - this.yaw;
       while (diff > Math.PI) diff -= Math.PI * 2;
       while (diff < -Math.PI) diff += Math.PI * 2;
-      this.yaw += diff * Math.min(1, this.param<number>("turnSpeed") * dt);
-      this.object.rotation.set(0, this.yaw, 0);
+      // Exponential, not a fraction of the frame: `turnSpeed * dt` turns at a
+      // different rate on a 30 Hz sim than on a 60 Hz one and can overshoot
+      // outright, and a turn that lands differently per machine is exactly the
+      // kind of roughness nobody can reproduce.
+      this.yaw = target - diff * Math.exp(-this.param<number>("turnSpeed") * dt);
     }
+    this.applyLean(grounded, dt);
 
     // A one-shot action — a cast, a swing — either owns the whole body or
     // rides on an upper-body LAYER over whatever gait is underneath, which is
@@ -736,22 +966,38 @@ class ThirdPersonController extends Script {
         blend !== "full" &&
         ud.actionFullBody !== true &&
         this.ctx.setAnimationLayer !== undefined &&
-        (blend === "layer" ||
-          Math.hypot(vel[0], vel[2]) > Math.max(0.2, this.param<number>("walkSpeed") * 0.5));
+        (blend === "layer" || planar > Math.max(0.2, this.param<number>("walkSpeed") * 0.5));
       if (this.actionLayered && !layered) this.ctx.clearAnimationLayer?.(0.15);
       this.action = action;
       this.actionLayered = layered;
+      // Fit the clip to the window the caller asked for. A cast that lasts
+      // three seconds and a cast animation that lasts one are not a request to
+      // play the animation three times — that repeat is what makes a long cast
+      // read as a stuck loop rather than a long cast. Where the window is too
+      // long for even the slowest playback to cover, it loops after all, and a
+      // clip nobody can measure (model still loading, headless host) keeps the
+      // old looping behaviour.
+      this.actionFit =
+        action && this.param<boolean>("fitActionClip")
+          ? fitAction(this.ctx.animationDuration?.(action) ?? null, (ud.actionUntil ?? now) - now)
+          : { rate: 1, loop: true };
       if (action && layered) {
-        // looped, like the full-body path: the action ends when actionUntil
-        // says so, not when the clip runs out
-        this.ctx.setAnimationLayer?.(action, { fade: 0.08, loop: true });
+        this.ctx.setAnimationLayer?.(action, {
+          fade: 0.08,
+          loop: this.actionFit.loop,
+          speed: this.actionFit.rate,
+        });
       }
     }
     // Full-body: the action IS the pose, so nothing below runs. Layered: fall
     // through and pick a gait as usual — the legs are still ours.
     if (action && !this.actionLayered) {
-      this.setRateRaw(1);
-      this.play(action, 0.05);
+      this.setRateRaw(this.actionFit.rate);
+      // restart: the same clip twice in a row (a second cast of one spell) has
+      // already been played to its clamped last frame, and a plain play() of
+      // the clip already current is a no-op — the character would freeze
+      // holding the pose from the previous cast.
+      this.play(action, 0.05, this.actionFit.loop, true);
       return;
     }
 
@@ -767,30 +1013,52 @@ class ThirdPersonController extends Script {
 
     if (!grounded) {
       const air = this.pick(this.param<string>("airClip"), run);
+      const start = this.pick(this.param<string>("jumpClip"), air);
+      // a model without a push-off clip stays on its looping air clip; playing
+      // that one as a one-shot would clamp it on its last frame forever
+      const pushing = start !== air && now < this.jumpUntil;
       this.setRateRaw(1);
-      this.play(variant(air), 0.15);
+      this.play(variant(pushing ? start : air), 0.15, !pushing);
       return;
+    }
+
+    if (now < this.landUntil) {
+      const land = this.pick(this.param<string>("landClip"), idle);
+      if (land !== idle) {
+        this.setRateRaw(1);
+        this.play(variant(land), 0.08, false);
+        return;
+      }
+      this.landUntil = 0;
     }
 
     // Gait comes from how fast we are ACTUALLY moving, not from the key held:
-    // a slowed or AI-driven character then still reads correctly. Thresholds
-    // sit midway between the tiers so they follow the tuning params.
-    const moving = Math.hypot(vel[0], vel[2]);
-    if (moving < Math.max(0.15, walkSpeed * 0.35)) {
+    // a slowed or AI-driven character then still reads correctly.
+    //
+    // Two different speeds, deliberately. WHICH clip comes from the horizontal
+    // speed — the pace the character is travelling at, which is what the player
+    // asked for and what a run reads as whatever the ground is doing. How fast
+    // it PLAYS comes from the distance actually covered, vertical included: on
+    // a hillside the feet travel further than the horizontal speed says, and
+    // paying that out at the horizontal rate is skating. The vertical share is
+    // capped against the horizontal so a body bouncing on the spot does not
+    // read as sprinting.
+    const tuning: GaitTuning = { walkSpeed, runSpeed, sprintSpeed };
+    const gait = this.stepGait(planar, tuning, now);
+    const moving = Math.hypot(planar, Math.min(Math.abs(vel[1]), planar * 1.2));
+    if (gait === "idle") {
       this.setRateRaw(1);
-      this.play(variant(idle), 0.25);
+      const turn = this.turnInPlace(dt);
+      this.play(variant(turn ?? idle), 0.25);
       return;
     }
+    this.turning = null;
 
-    let clip = run;
-    let nominal = runSpeed;
-    if (walk !== run && moving < (walkSpeed + runSpeed) / 2) {
-      clip = walk;
-      nominal = walkSpeed;
-    } else if (sprint !== run && moving > (runSpeed + sprintSpeed) / 2) {
-      clip = sprint;
-      nominal = sprintSpeed;
-    }
+    let clip = gait === "walk" ? walk : gait === "sprint" ? sprint : run;
+    let nominal = speedForGait(gait, tuning);
+    // a model without the clip falls back to the run cycle, which is authored
+    // at the run's pace whatever tier asked for it
+    if (clip === run) nominal = runSpeed;
 
     // Travelling in a direction the body is not pointing: a dedicated clip is
     // the only thing that reads right, because a forward cycle played while
@@ -818,6 +1086,176 @@ class ThirdPersonController extends Script {
 
     this.setRate(moving, clip, nominal);
     this.play(variant(clip), 0.15);
+  }
+
+  /**
+   * How long a clip runs, or null when nobody can say (no model yet, a
+   * headless host). Callers pick their own fallback rather than being handed a
+   * guess dressed as a measurement.
+   */
+  private clipLength(clip: string): number | null {
+    const seconds = this.ctx.animationDuration?.(clip);
+    return typeof seconds === "number" && seconds > 0 ? seconds : null;
+  }
+
+  /**
+   * Turning on the spot: which way, or null. In camera-facing mode the
+   * character pivots every time the camera does, and an idle clip played
+   * through that pivot is a statue on a turntable. Started on a brisk turn and
+   * held down to a much slower one, so a pivot that eases off does not flicker
+   * back to idle halfway through.
+   */
+  private turnInPlace(dt: number): string | null {
+    let diff = this.yaw - this.lastYaw;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    this.lastYaw = this.yaw;
+    const rate = dt > 0 ? diff / dt : 0;
+    const start = this.param<number>("turnClipSpeed");
+    if (this.turning && Math.abs(rate) < start * 0.4) this.turning = null;
+    else if (!this.turning && Math.abs(rate) > start) this.turning = rate > 0 ? "left" : "right";
+    if (!this.turning) return null;
+    const idle = this.param<string>("idleClip");
+    const clip = this.pick(
+      this.param<string>(this.turning === "left" ? "turnLeftClip" : "turnRightClip"),
+      idle,
+    );
+    return clip === idle ? null : clip;
+  }
+
+  /**
+   * The gait to play, holding the current one through a REVERSAL inside the
+   * dwell window. Speeding up is instant — that is the player's own input and
+   * has to feel like it — but dropping back to a slower clip moments after
+   * climbing out of it is never anything but noise, and each of those flips
+   * costs a crossfade the eye can see.
+   */
+  private stepGait(speed: number, tuning: GaitTuning, now: number): Gait {
+    return this.gait.step(speed, tuning, now, this.param<number>("gaitDwell"));
+  }
+
+  /**
+   * Cast the ground ray (at most every `groundProbe` seconds) and answer the
+   * one question the caller needs: is this body leaving the ground? Null means
+   * "no opinion" — no ray available, or not yet calibrated — and the caller
+   * falls back to the velocity heuristic.
+   *
+   * The resting distance is MEASURED rather than derived from the collider:
+   * the ray starts at the body's origin, which sits at a different height
+   * above the feet for every capsule, offset and model in a project. The first
+   * probe taken while the velocity heuristic is confident records it, and
+   * everything after is a comparison against that.
+   */
+  private probeGround(sim: SimLike, now: number, vy: number, planarSpeed: number): boolean | null {
+    const interval = this.param<number>("groundProbe");
+    if (!(interval > 0) || !sim.raycast) return null;
+    // Sticking to the ground needs a CURRENT normal — 50 ms is a third of a
+    // metre at a run, which is the whole crest — so a moving body that sticks
+    // probes every tick. Standing still, or with sticking off, the interval is
+    // plenty.
+    const fresh = this.param<number>("groundStick") > 0 && planarSpeed > 0.1;
+    if (fresh || now - this.probeAt >= interval) {
+      this.probeAt = now;
+      const at = (this.scratch ??= this.object.position.clone());
+      this.object.getWorldPosition(at);
+      const hit = sim.raycast([at.x, at.y, at.z], [0, -1, 0], PROBE_REACH, {
+        exclude: [this.entityId],
+      });
+      this.groundNormal = hit ? hit.normal : null;
+      this.groundDist = hit ? hit.distance : Infinity;
+      if (hit && this.groundRest === null && this.airTime === 0 && Math.abs(vy) < 1) {
+        this.groundRest = hit.distance;
+      }
+    }
+    if (this.groundRest === null) return null;
+    // Rising means the body has left the ground — unless the rise is the
+    // ground itself, climbed. Following a slope up writes exactly this
+    // velocity, and reading it as a jump is how running UP a hill ends in the
+    // falling clip with both feet on the ground.
+    if (vy > 0.8 && !this.risingByStick(vy)) return true;
+    return this.groundDist > this.groundRest + PROBE_SLACK;
+  }
+
+  /**
+   * Is this upward velocity one WE wrote to follow the ground, rather than a
+   * jump, a knockback or a launch pad? Ours is ours to overwrite; anybody
+   * else's has to survive untouched, which is the whole difference between
+   * climbing a hill and cancelling a jump.
+   */
+  private risingByStick(vy: number): boolean {
+    return risingByGround(vy, this.stickVy);
+  }
+
+  /**
+   * Vertical velocity that keeps the body ON the ground it is running over,
+   * or the one it already had.
+   *
+   * A body driven by `setLinvel` alone travels in a straight line, so every
+   * convex break in the ground throws it off: at the crest of a hill it keeps
+   * going straight while the ground drops away, and it is genuinely airborne
+   * for a third of a second until gravity catches up. Measured on a 25° ramp
+   * at 6.5 m/s, that is half a second of the falling clip at every crest —
+   * which, on terrain that merely rolls, is a character permanently gliding.
+   * No clip-picking rule can fix it, because the character really is in the
+   * air. So follow the surface: the vertical rate that keeps a body on a plane
+   * of this normal, capped by the slope the character is allowed to walk.
+   *
+   * Only inside `groundStick` metres of the ground, only on ground it could
+   * walk on, and never during a jump — a real drop still falls.
+   */
+  private followGround(
+    x: number,
+    vy: number,
+    z: number,
+    grounded: boolean,
+    now: number,
+    dt: number,
+  ): number {
+    const n = this.groundNormal;
+    // A jump owns the body outright for its grace window; everything else goes
+    // to the shared rule, which the server runs on the same body.
+    if (!grounded || !n || this.groundRest === null || now - this.lastJump < 0.25) {
+      this.stickVy = null;
+      return vy;
+    }
+    const follow = groundFollowVy(x, z, vy, n, this.groundDist - this.groundRest, {
+      stick: this.param<number>("groundStick"),
+      slopeTolerance: this.param<number>("slopeTolerance"),
+      dt,
+      ours: this.risingByStick(vy),
+    });
+    this.stickVy = follow;
+    return follow ?? vy;
+  }
+
+  /**
+   * Lean the body onto the ground it is standing on, and write the rotation.
+   *
+   * Standing bolt upright on a hillside is the other half of "the animation is
+   * wrong on slopes" — the clips are fine, the character is simply at the
+   * wrong angle to the floor. This takes part of the way there (a full align
+   * reads as a toy on a ramp) and is smoothed, because a ray is a step
+   * function and a body is not.
+   */
+  private applyLean(grounded: boolean, dt: number): void {
+    const amount = this.param<number>("slopeAlign");
+    const n = grounded && amount > 0 ? this.groundNormal : null;
+    let pitch = 0;
+    let roll = 0;
+    if (n && n[1] > 0.2) {
+      const cap = (this.param<number>("slopeAlignMax") * Math.PI) / 180;
+      // the model's own axes after the yaw: +Z is forward, +X is right
+      const sy = Math.sin(this.yaw);
+      const cy = Math.cos(this.yaw);
+      const ahead = n[0] * sy + n[2] * cy;
+      const beside = n[0] * cy - n[2] * sy;
+      pitch = clampAbs(Math.atan2(ahead, n[1]) * amount, cap);
+      roll = clampAbs(-Math.atan2(beside, n[1]) * amount, cap);
+    }
+    this.pitch = damp(this.pitch, pitch, LEAN_DAMP, dt);
+    this.roll = damp(this.roll, roll, LEAN_DAMP, dt);
+    // YXZ: yaw first about world up, then the lean about the body's own axes.
+    this.object.rotation.set(this.pitch, this.yaw, this.roll, "YXZ");
   }
 
   /**
@@ -969,10 +1407,13 @@ const NET_HOUR_KEY = "world.hour";
 class DayNight extends Script {
   static override scriptName = "day-night";
   static override params = {
-    dayLength: { default: 1200, min: 10, max: 86400, description: "Real seconds per 24-hour game day." },
+    dayLength: { default: 7200, min: 10, max: 86400, description: "Real seconds per 24-hour game day." },
     startHour: { default: 9, min: 0, max: 24, description: "Clock at scene start: 6 = sunrise, 12 = noon, 18 = sunset." },
     tilt: { default: 30, min: 0, max: 80, description: "Degrees the sun's arc leans away from straight overhead (toward -Z), so noon shadows still fall somewhere." },
     dawnColor: { default: "#ff9d5c", description: "Sun colour at the horizon; blends into the sun light's authored colour by mid-morning." },
+    sunsetColor: { default: "#e2593a", description: "Colour the cloud burns on the sun's side of the sky at the exact horizon — deeper and redder than dawnColor, which it eases into as the sun climbs." },
+    cloudGlow: { default: 1, min: 0, max: 1, description: "How hard the sun-facing clouds glow at dawn and dusk. 0 leaves the deck evenly lit, which is the look before this existed." },
+    nightCloud: { default: "#2a3350", description: "Cloud colour at full night — moonlit blue-grey. Cloud is the LAST thing to go black: a night sky reads as overcast because the cloud is still faintly visible against the stars." },
     moonColor: { default: "#93a9d6", description: "Moonlight colour — the same directional light, re-aimed for the night." },
     moonIntensity: { default: 0.25, min: 0, max: 5, description: "Moonlight intensity at its peak. The sun light's authored intensity is the noon value." },
     nightTop: { default: "#070a14", description: "Sky top colour at full night." },
@@ -1044,8 +1485,14 @@ class DayNight extends Script {
     const e = sunDir[1]; // sun elevation, -1..1
     const day = smooth01((e + 0.12) / 0.3); // 1 by mid-morning, 0 once the sun is well down
     const horizonGlow = Math.max(0, 1 - Math.abs(e) / 0.25) * (e > -0.15 ? 1 : 0);
+    // The cloud glow's window: full while the sun is within ~10° of the
+    // horizon, gone by ~20° above it and shortly after it has set. Wider than
+    // `horizonGlow` (which the sky gradient uses) and symmetric about e = 0,
+    // so the sun's side of the deck is still burning as the disc goes down.
+    const horizonBand = smooth01((0.34 - Math.abs(e)) / 0.17) * smooth01((e + 0.2) / 0.12);
 
     const dawn = hexToRgb(this.param<string>("dawnColor"));
+    const nightCloud = hexToRgb(this.param<string>("nightCloud"));
     const baseSunColor = hexToRgb(base?.sun?.color ?? "#fff1d6");
     const baseSunIntensity = base?.sun?.intensity ?? 1.2;
     const moonRgb = hexToRgb(this.param<string>("moonColor"));
@@ -1085,13 +1532,25 @@ class DayNight extends Script {
         disc: { color: rgbToHex(mixRgb(dawn, [1, 0.96, 0.88], smooth01(e / 0.3))), size: 0.9985, intensity: 1.6 * smooth01((e + 0.03) / 0.08) },
       },
       moon: { direction: moonDir, color: this.param<string>("moonColor"), size: 0.9994, intensity: 1.2 * smooth01((moonDir[1] + 0.02) / 0.1) },
-      // clouds keep the authored coverage; only their lighting follows the day —
-      // white at noon, warmed by the dawn colour near the horizon, near-black
-      // against the stars at night
+      // Clouds keep the authored coverage; only their lighting follows the
+      // day. Three separate things, because a sunset is not one colour:
+      //  - `color`/`shadow` are the AMBIENT half — daylight white over grey by
+      //    day, cooling to the moonlit blue of `nightColor` at night. It is
+      //    deliberately never the dawn colour: warming the whole dome is what
+      //    makes the flat everything-is-orange sunset, and it left midnight
+      //    cloud a dim brown.
+      //  - `sun`/`sunAmount` are the DIRECTIONAL half the dome resolves per
+      //    pixel against the sun's own azimuth — the burning side of the sky.
+      //    Open it while the sun is within ~20° of the horizon (either side,
+      //    so dusk and dawn both get it) and shut it by mid-morning.
+      // `sunset` deepens toward red exactly at the horizon, where the light
+      // has the most atmosphere to cross.
       clouds: {
         light: 0.12 + 0.88 * day,
-        color: rgbToHex(mixRgb(dawn, [1, 1, 1], smooth01(e / 0.3))),
-        shadow: rgbToHex(mixRgb([0.08, 0.1, 0.16], [0.54, 0.58, 0.66], day)),
+        color: rgbToHex(mixRgb(nightCloud, [1, 1, 1], day)),
+        shadow: rgbToHex(mixRgb(mixRgb(nightCloud, [0.08, 0.1, 0.16], 0.5), [0.54, 0.58, 0.66], day)),
+        sun: rgbToHex(mixRgb(hexToRgb(this.param<string>("sunsetColor")), dawn, smooth01((Math.abs(e) - 0.02) / 0.16))),
+        sunAmount: this.param<number>("cloudGlow") * horizonBand,
       },
       // the sky wheels about the arc's axis at the sun's own rate; stars fade
       // in once the sun is a little way down and are gone by mid-morning
@@ -1103,6 +1562,11 @@ class DayNight extends Script {
       ...(base?.ambient
         ? { ambient: { color: rgbToHex(mixRgb(mixRgb(nightBottom, hexToRgb(base.ambient.color), 0.5), hexToRgb(base.ambient.color), day)), intensity: base.ambient.intensity * keep } }
         : {}),
+      // Published for the WEATHER layer, which owns a tint but not the clock:
+      // a tint is the colour of falling rain/sand/snow LIT, so at midnight it
+      // has to be dimmed or it lights the fog back up (scene-lighting.ts
+      // applyEffective). Nothing else reads it.
+      daylight: day,
       environmentIntensity: (base?.environmentIntensity ?? 1) * keep,
       ...(refresh ? { refreshEnvironment: true } : {}),
     });
@@ -1379,6 +1843,8 @@ export function registerBuiltinScripts(
   add(Damageable);
   add(ThirdPersonController);
   add(BoneSocket);
+  // The standard enemy: terrain-aware chase/leash/return, no navmesh.
+  add(MobBrain);
   // RPG progression + grid inventory: the authority's sheet and its client view.
   add(CharacterSheetScript);
   add(CharacterUi);

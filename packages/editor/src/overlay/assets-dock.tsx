@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { assetInFolder, assetPage } from "../asset-browsing.js";
 import {
   newId,
   type AssetLibrary,
@@ -124,6 +125,7 @@ export function AssetsDock(props: {
   assetSelection: AssetSelection;
   assetsVersion: Observable<number>;
   thumbnails: Observable<Record<string, string>>;
+  thumbnailRequests?: Observable<string[]>;
   onCreateMaterial: (folder: string) => void;
   onCreateSpritesheet: (folder: string) => void;
   onCreatePrefab: (entityId: string, folder: string) => void;
@@ -140,6 +142,7 @@ export function AssetsDock(props: {
   const selectedAsset = useObservable(props.assetSelection);
   const [query, setQuery] = useState("");
   const [folder, setFolder] = useState("");
+  const [page, setPage] = useState(0);
   const tools = useObservable(props.tools ?? EMPTY_TOOLS);
   const assetTools = tools.filter((tool) => tool.surfaces.includes("assets"));
   const [toolMenuOpen, setToolMenuOpen] = useState(false);
@@ -159,7 +162,7 @@ export function AssetsDock(props: {
       return {};
     }
   });
-  const q = query.toLowerCase();
+  const q = query.trim().toLowerCase();
 
   const persistOpen = (next: Record<string, boolean>) => {
     setOpenFolders(next);
@@ -178,6 +181,7 @@ export function AssetsDock(props: {
 
   /** Select a folder and expand it plus every ancestor so it stays visible. */
   const selectFolder = (path: string) => {
+    setPage(0);
     setFolder(path);
     if (!path) return;
     const next = { ...openFolders };
@@ -190,31 +194,43 @@ export function AssetsDock(props: {
   };
 
   const folderOf = (id: string) => (id.includes("/") ? id.slice(0, id.lastIndexOf("/")) : "");
-  // prefix match: a folder shows its own assets plus everything in descendants
-  const inFolder = (id: string) => {
-    if (folder === "") return true;
-    const f = folderOf(id);
-    return f === folder || f.startsWith(folder + "/");
-  };
+  const inFolder = (id: string) => assetInFolder(id, folder, q.length > 0);
 
-  const prefabIds = props.assets
+  let prefabIds = props.assets
     .prefabIds()
     .filter((id) => inFolder(id) && props.assets.getPrefab(id)!.name.toLowerCase().includes(q));
-  const modelIds = props.assets
+  let modelIds = props.assets
     .modelIds()
     .filter((id) => inFolder(id) && props.assets.getModel(id)!.name.toLowerCase().includes(q));
-  const materials = props.assets
+  let materials = props.assets
     .dataAssetsOfType("material")
     .filter((a) => inFolder(a.id) && a.name.toLowerCase().includes(q));
-  const spritesheets = props.assets
+  let spritesheets = props.assets
     .dataAssetsOfType("spritesheet")
     .filter((a) => inFolder(a.id) && a.name.toLowerCase().includes(q));
-  const textureIds = props.assets
+  let textureIds = props.assets
     .textureIds()
     .filter((id) => inFolder(id) && id.toLowerCase().includes(q));
-  const soundIds = props.assets
+  let soundIds = props.assets
     .soundIds()
     .filter((sid) => inFolder(sid) && sid.toLowerCase().includes(q));
+
+  const matches = [...materials.map((a) => `material:${a.id}`), ...spritesheets.map((a) => `spritesheet:${a.id}`),
+    ...prefabIds.map((id) => `prefab:${id}`), ...textureIds.map((id) => `texture:${id}`),
+    ...soundIds.map((id) => `sound:${id}`), ...modelIds.map((id) => `model:${id}`)];
+  const pagination = assetPage(matches, page);
+  const visible = new Set(pagination.ids);
+  materials = materials.filter((a) => visible.has(`material:${a.id}`));
+  spritesheets = spritesheets.filter((a) => visible.has(`spritesheet:${a.id}`));
+  prefabIds = prefabIds.filter((id) => visible.has(`prefab:${id}`));
+  textureIds = textureIds.filter((id) => visible.has(`texture:${id}`));
+  soundIds = soundIds.filter((id) => visible.has(`sound:${id}`));
+  modelIds = modelIds.filter((id) => visible.has(`model:${id}`));
+  const requestKey = JSON.stringify([...materials.map((a) => a.id), ...prefabIds, ...modelIds]);
+  useEffect(() => {
+    props.thumbnailRequests?.set(JSON.parse(requestKey) as string[]);
+    return () => props.thumbnailRequests?.set([]);
+  }, [props.thumbnailRequests, requestKey]);
 
   const allIds = [
     ...props.assets.prefabIds(),
@@ -277,7 +293,7 @@ export function AssetsDock(props: {
     <>
       <DockHeader title="Assets">
         <span title="Search within the selected folder (and its subfolders)">
-          <SearchInput value={query} onChange={setQuery} />
+          <SearchInput value={query} onChange={(value) => { setQuery(value); setPage(0); }} />
         </span>
         <button
           style={buttonStyle}
@@ -449,13 +465,32 @@ export function AssetsDock(props: {
             })}
           </div>
           <div style={{ flex: 1, overflowY: "auto", padding: 8 }}>
+            {!q && tree.length > 0 && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+                {[...new Set([...allIds.map(folderOf), ...userFolders]
+                  .filter((path) => folder ? path.startsWith(`${folder}/`) : !!path)
+                  .map((path) => (folder ? path.slice(folder.length + 1) : path).split("/")[0]!))]
+                  .sort().map((name) => (
+                    <button key={name} style={buttonStyle} onClick={() => selectFolder(folder ? `${folder}/${name}` : name)}>
+                      ▸ {name}/
+                    </button>
+                  ))}
+              </div>
+            )}
+            {pagination.pages > 1 && (
+              <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+                <button style={buttonStyle} disabled={pagination.page === 0} onClick={() => setPage(pagination.page - 1)}>Previous</button>
+                <span>{matches.length} assets · page {pagination.page + 1} / {pagination.pages}</span>
+                <button style={buttonStyle} disabled={pagination.page + 1 === pagination.pages} onClick={() => setPage(pagination.page + 1)}>Next</button>
+              </div>
+            )}
             {empty && (
               <div style={{ color: "#8b949e" }}>
                 {query
                   ? "No assets match."
                   : folder
-                    ? "Folder is empty — new materials/prefabs land in the selected folder."
-                    : "Create materials/prefabs here; drop .glb in assets/models/, images in assets/textures/"}
+                    ? "No assets directly in this folder. Open a subfolder or search."
+                    : "Open a folder or search to find assets."}
               </div>
             )}
             {materials.length > 0 && (
@@ -682,6 +717,8 @@ function AssetCard(props: {
     >
       {props.thumbnail ? (
         <img
+          loading="lazy"
+          decoding="async"
           src={props.thumbnail}
           alt={props.name}
           style={{ width: "100%", height: 84, objectFit: "cover", borderRadius: 3, background: "#0b0e14" }}

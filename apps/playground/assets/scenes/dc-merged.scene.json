@@ -1,0 +1,84 @@
+{
+  "version": 1,
+  "name": "dc-merged",
+  "entities": {
+    "sky": {
+      "name": "Sky",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "sky": {
+          "top": "#232a33",
+          "bottom": "#4a5360",
+          "light": 0.9
+        }
+      }
+    },
+    "sun": {
+      "name": "Sun",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            4,
+            8,
+            5
+          ]
+        },
+        "light": {
+          "kind": "directional",
+          "intensity": 2,
+          "color": "#fff3e2"
+        }
+      }
+    },
+    "camera": {
+      "name": "Camera",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            1.2,
+            4
+          ]
+        },
+        "camera": {
+          "active": true,
+          "fov": 45,
+          "near": 0.01,
+          "far": 200
+        }
+      }
+    },
+    "root": {
+      "name": "merged",
+      "parent": null,
+      "tags": [],
+      "components": {
+        "transform": {
+          "position": [
+            0,
+            0.23288409703504043,
+            0
+          ],
+          "scale": [
+            0.04140161725067385,
+            0.04140161725067385,
+            0.04140161725067385
+          ]
+        },
+        "mesh": {
+          "source": {
+            "kind": "asset",
+            "assetId": "longsword-combo.glb",
+            "textureFilter": "nearest"
+          },
+          "material": "atlas-view/frost-reliquary-solid"
+        }
+      }
+    }
+  }
+}

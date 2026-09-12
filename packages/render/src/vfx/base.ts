@@ -175,8 +175,12 @@ export interface LiveModuleHost {
   /** Borrow one of the fixed slot lights (null when all are busy). */
   takeLight(): THREE.PointLight | null;
   giveLight(light: THREE.PointLight): void;
-  /** Camera shake request; the host sums and decays them. */
-  addShake(strength: number, duration: number, frequency: number): void;
+  /**
+   * Camera shake request; the host sums and decays them. `at` is where the
+   * shake happens and `range` how far it carries — the host attenuates by the
+   * camera's distance, so a fight across the map is not felt.
+   */
+  addShake(strength: number, duration: number, frequency: number, at?: THREE.Vector3, range?: number): void;
   /** Particle emitters live in the host's ParticleSystem, keyed by id. */
   particles: {
     register(id: string, group: THREE.Object3D, data: unknown): void;

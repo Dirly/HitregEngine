@@ -1,5 +1,7 @@
 import * as THREE from "three/webgpu";
 import { patchShadowPassAlphaTest } from "./shadow-pass-material.js";
+import { GpuUploadProbe } from "./gpu-uploads.js";
+import { cacheUniformUploads } from "./uniform-upload-cache.js";
 import {
   PostChain,
   needsPipeline,
@@ -90,6 +92,8 @@ export interface BloomOptions {
  */
 export class EngineRenderer {
   readonly renderer: THREE.WebGPURenderer;
+  uploadProbe: GpuUploadProbe | null = null;
+  uniformUploadStats: ReturnType<typeof cacheUniformUploads> | null = null;
 
   private postFxData: PostFxData | null = null;
   private fx: ResolvedPostFx = resolvePostFx(null);
@@ -152,6 +156,8 @@ export class EngineRenderer {
   async init(): Promise<Backend> {
     await this.renderer.init();
     const backend = this.renderer.backend as { isWebGPUBackend?: boolean };
+    this.uploadProbe = new GpuUploadProbe(backend);
+    this.uniformUploadStats = cacheUniformUploads(backend);
     return backend.isWebGPUBackend ? "webgpu" : "webgl";
   }
 
@@ -616,6 +622,30 @@ export class EngineRenderer {
     }
     scopes?.end();
 
+    // Main pass and shadow cascades render the SAME scene at one simulation
+    // instant. Three otherwise walks every animated bone and entity again
+    // for each pass (four full walks with three cascades in the MMO).
+    // Lighting must refit its lights first; then update once and let every
+    // pass consume that pose. Restore the caller's policy even if drawing
+    // throws, and leave manually managed scenes alone.
+    const autoUpdate = scene.matrixWorldAutoUpdate;
+    scopes?.begin("matrices");
+    try {
+      if (autoUpdate) scene.updateMatrixWorld();
+    } finally {
+      scopes?.end();
+    }
+    scene.matrixWorldAutoUpdate = false;
+    try {
+      this.renderPreparedScene(scene, camera);
+    } finally {
+      scene.matrixWorldAutoUpdate = autoUpdate;
+      this.uploadProbe?.endFrame();
+    }
+  }
+
+  private renderPreparedScene(scene: THREE.Scene, camera: THREE.Camera): void {
+    const scopes = this.scopes;
     if (!this.postUnavailable && needsPipeline(this.plan)) {
       try {
         if (

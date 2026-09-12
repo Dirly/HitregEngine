@@ -155,4 +155,24 @@ describe("foliage wind material filter", () => {
     const root = tree();
     expect(applyFoliageWind(root, { mode: "ripple", strength: 0.05, speed: 1, materials: "needles" })).toBe(0);
   });
+
+  // One rule has to cover a whole shelf of props: every leaf sheet on it is
+  // named Leaves*, every bush sheet Bush*, and "leaves,bush" is what moves
+  // both without moving a trunk.
+  it("takes a comma-separated list and matches any of it", () => {
+    const bush = new THREE.MeshStandardMaterial();
+    bush.map = new THREE.Texture();
+    bush.map.name = "BushDead";
+    const bark = new THREE.MeshStandardMaterial();
+    bark.map = new THREE.Texture();
+    bark.map.name = "Bark";
+    expect(windMaterialMatches(bush, "leaves,bush")).toBe(true);
+    expect(windMaterialMatches(bark, "leaves,bush")).toBe(false);
+    // whitespace around an entry is authoring slack, not a miss
+    expect(windMaterialMatches(bush, "leaves, bush")).toBe(true);
+    // and the single-needle form still means exactly what it did
+    expect(windMaterialMatches(bush, "leaves")).toBe(false);
+    const root = tree();
+    expect(applyFoliageWind(root, { mode: "ripple", strength: 0.05, speed: 1, materials: "leaves,bush" })).toBe(1);
+  });
 });

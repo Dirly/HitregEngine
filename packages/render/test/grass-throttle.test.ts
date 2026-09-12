@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as THREE from "three/webgpu";
+import Attributes from "three/src/renderers/common/Attributes.js";
 import { GrassSystem, type GrassData } from "../src/index.js";
 
 /**
@@ -38,6 +39,9 @@ const DATA: GrassData = {
   heightFadeEnd: 200,
 };
 
+/** LEAD_MAX_FRACTION in grass.ts — the cap on how far ahead a recenter may place. */
+const LEAD_MAX = 0.12;
+
 /** cell = radius * RECENTER_FRACTION, the grid the patch centre snaps to. */
 const CELL = DATA.radius * 0.6;
 
@@ -54,7 +58,10 @@ interface Rig {
   placements: () => Map<string, string>;
 }
 
-function rig(ground: (x: number, z: number) => number | null = () => 0): Rig {
+/** Small enough that one frame cannot finish a disc even with a free sampler. */
+const TEST_BUDGET_MS = 0.02;
+
+function rig(ground: (x: number, z: number) => number | null = () => 0, budgetMs = TEST_BUDGET_MS): Rig {
   const group = new THREE.Object3D();
   const system = new GrassSystem();
   system.register("cover", group, DATA);
@@ -67,7 +74,9 @@ function rig(ground: (x: number, z: number) => number | null = () => 0): Rig {
   const mesh = (): THREE.InstancedMesh => group.children[0] as THREE.InstancedMesh;
   const tick = (): void => {
     camera.updateMatrixWorld(true);
-    system.update(camera, () => 0, sampleGrassy);
+    // a tiny budget: the placement walk is time-budgeted, and a test sampler
+    // is free, so 2ms of it would finish the whole disc in one frame
+    system.update(camera, () => 0, sampleGrassy, budgetMs);
   };
   return {
     system,
@@ -99,6 +108,26 @@ function rig(ground: (x: number, z: number) => number | null = () => 0): Rig {
 }
 
 describe("cover re-placement hysteresis", () => {
+  it("uploads a changed placement once and keeps wind/camera frames upload-free", () => {
+    const r = rig(() => 0, 1000);
+    r.pump(0, 0);
+    const mesh = r.mesh();
+    let writes = 0;
+    const attributes = new Attributes({ createAttribute() {}, updateAttribute() { writes++; } }, { createAttribute() {} });
+    const buffers = [mesh.instanceMatrix, mesh.geometry.getAttribute("instanceRandom")];
+    const draw = () => buffers.forEach((a) => attributes.update(a, 1));
+    // The first render creates buffers. Repeated main/shadow uses do not
+    // re-upload their unchanged placement data even while wind animates.
+    draw();
+    for (let i = 0; i < 60; i++) { r.pump(0, 0); draw(); draw(); draw(); draw(); }
+    expect(writes).toBe(0);
+    r.pump(100, 100, 4);
+    expect(mesh.count).toBeGreaterThan(0);
+    expect(mesh.instanceMatrix.updateRanges).toEqual([{ start: 0, count: mesh.count * 16 }]);
+    draw(); draw(); draw(); draw();
+    expect(writes).toBe(2);
+    r.system.clear();
+  });
   it("re-samples nothing when the camera only turns", () => {
     const r = rig();
     r.pump(7.2, 3); // first placement, unbudgeted, runs to completion
@@ -122,15 +151,21 @@ describe("cover re-placement hysteresis", () => {
     r.pump(CELL * 0.53, 0, 10);
     expect([...r.placements().keys()].sort()).toEqual([...before.keys()].sort());
 
-    // clear of the deadband, so the field must follow
-    r.pump(CELL * 0.8, 0, 10);
+    // clear of the deadband, so the field must follow. Many frames, not ten:
+    // the placement walk is time-budgeted and this rig runs on a deliberately
+    // tiny budget, so a whole disc takes a while — this test is about WHERE
+    // the centre lands, not how fast it gets there.
+    r.pump(CELL * 0.8, 0, 600);
     expect([...r.placements().keys()].sort()).not.toEqual([...before.keys()].sort());
   });
 });
 
 describe("cover ground-sample cache", () => {
   it("stops asking about ground it has already walked over", () => {
-    const r = rig();
+    // Test cache reuse over the same completed route. The 0.02ms budget used
+    // by scheduling tests makes the visited discs depend on host CPU load,
+    // so the second lap could finish work the first lap never reached.
+    const r = rig(() => 0, 1000);
     // an orbit centred ON a grid boundary — the worst case, and the one a
     // third-person camera actually produces
     const orbit = (turn: number): void => {
@@ -155,7 +190,11 @@ describe("cover ground-sample cache", () => {
     r.reset();
     orbit(2);
     r.pump(CELL * 0.5 + 5, 0, 40);
-    // and every lap after that is free: the terrain field is never asked again
+    // and every lap after that is free: the terrain field is never asked
+    // again. This is also what pins the recenter LEAD (see below) to a
+    // direction that repeats — one derived from where the camera sits on the
+    // circle would put every lap's centre somewhere new and re-sample under
+    // it forever.
     expect(r.samples()).toBe(0);
   });
 
@@ -188,7 +227,9 @@ describe("cover ground-sample cache", () => {
     expect([...r.placements().values()][0], "cached, as it should be").toBe("5.0000");
 
     r.system.invalidateGround();
-    r.pump(0, 0, 30);
+    // many frames: the re-place is budgeted (unlike the first one) and the
+    // sampled disc is PLACEMENT_PAD wider than the radius it draws
+    r.pump(0, 0, 2000);
     const after = [...r.placements().values()];
     expect(after.length).toBeGreaterThan(200);
     expect(new Set(after)).toEqual(new Set(["9.0000"]));
@@ -239,7 +280,7 @@ describe("cover re-placement is amortised", () => {
     system.register("b", group, DATA);
     const tick = (): void => {
       camera.updateMatrixWorld(true);
-      system.update(camera, () => 0, sample);
+      system.update(camera, () => 0, sample, TEST_BUDGET_MS);
     };
     camera.position.set(0, 40, 0);
     tick(); // both layers' FIRST placement: unbudgeted by design
@@ -252,5 +293,114 @@ describe("cover re-placement is amortised", () => {
     expect(count).toBeGreaterThan(0);
     expect(count).toBeLessThan(cold / 2);
     system.clear();
+  });
+});
+
+describe("cover leads a travelling camera", () => {
+  /** Mean x of every blade on screen — where the field actually IS. */
+  const fieldX = (r: Rig): number => {
+    let sum = 0;
+    let n = 0;
+    for (const key of r.placements().keys()) {
+      sum += Number(key.split(",")[0]);
+      n++;
+    }
+    expect(n).toBeGreaterThan(50);
+    return sum / n;
+  };
+
+  /** How far the field's centre sits OFF the recenter grid, along x. */
+  const offGrid = (r: Rig): number => {
+    const c = fieldX(r);
+    return c - Math.round(c / CELL) * CELL;
+  };
+
+  it("places the disc ahead of a camera that keeps walking", () => {
+    // A generous budget here on purpose: this test is about WHERE a placement
+    // is centred, not how many frames it takes to fill in.
+    const r = rig(() => 0, 50);
+    let x = 0;
+    r.pump(0, 0, 20);
+    expect(offGrid(r)).toBeCloseTo(0, 1); // standing: dead on the grid
+
+    // The centre is snapped to the recenter grid and the lead is added on top
+    // of it, so the lead is exactly the field's offset FROM that grid — which
+    // makes it directly measurable, without having to reason about where in
+    // the cell the camera happens to be.
+    const cap = DATA.radius * LEAD_MAX;
+    for (let leg = 0; leg < 6; leg++) {
+      for (let i = 0; i < 200; i++) {
+        x += CELL / 200;
+        r.pump(x, 0);
+      }
+      expect(offGrid(r), `after ${leg + 1} cells of walking`).toBeCloseTo(cap, 0);
+    }
+    // walking back leads the other way
+    for (let i = 0; i < 1200; i++) {
+      x -= CELL / 200;
+      r.pump(x, 0);
+    }
+    expect(offGrid(r)).toBeCloseTo(-cap, 0);
+  });
+
+  it("does not re-place a field just because the camera stopped", () => {
+    const r = rig(() => 0, 50);
+    let x = 0;
+    for (let i = 0; i < 600; i++) {
+      x += CELL / 200;
+      r.pump(x, 0);
+    }
+    expect(offGrid(r)).toBeCloseTo(DATA.radius * LEAD_MAX, 0);
+    // The lead is a fraction of the deadband by construction, so a camera
+    // that stops inside it never triggers another placement — the field
+    // simply stays a few metres ahead, which costs nothing and is invisible.
+    r.reset();
+    r.pump(x, 0, 400);
+    expect(r.samples()).toBe(0);
+  });
+});
+
+describe("cover reaches past its own fade in every direction", () => {
+  /**
+   * The worst direction: bin every blade by its bearing from the camera and
+   * take the smallest of the per-bin maximum distances. That number is where
+   * the field ENDS on the side it ends soonest — and if it lands inside the
+   * fade band, the player sees grass stop in a hard arc rather than dissolve.
+   *
+   * This is the bug the placement pad and the coverage clamp exist for. The
+   * fade is measured from the CAMERA and the disc is placed around a snapped,
+   * hysteretic CENTRE, so on the trailing side the disc used to end at about
+   * 0.58 of the radius — well inside a fade that does not start until 0.7.
+   */
+  const worstReach = (r: Rig, camX: number, camZ: number): number => {
+    const BINS = 16;
+    const far = new Array<number>(BINS).fill(0);
+    let blades = 0;
+    for (const key of r.placements().keys()) {
+      const [x, z] = key.split(",").map(Number) as [number, number];
+      const dx = x - camX;
+      const dz = z - camZ;
+      const bin = Math.min(BINS - 1, Math.floor(((Math.atan2(dz, dx) + Math.PI) / (Math.PI * 2)) * BINS));
+      far[bin] = Math.max(far[bin]!, Math.hypot(dx, dz));
+      blades++;
+    }
+    expect(blades).toBeGreaterThan(500);
+    return Math.min(...far);
+  };
+
+  it("still covers the fade band on the side it has drifted away from", () => {
+    const r = rig(() => 0, 50);
+    let x = 0;
+    // walk far enough for many recenters, checking at every step of the cycle
+    // rather than at one lucky phase of it
+    let worst = Infinity;
+    for (let i = 0; i < 3000; i++) {
+      x += (CELL * 10) / 3000;
+      r.pump(x, 0);
+      if (i % 30 === 0 && i > 300) worst = Math.min(worst, worstReach(r, x, 0));
+    }
+    // FADE_BAND in grass.ts: nothing fades at all before 0.7 of the radius,
+    // so a field that ends inside that is a visible edge
+    expect(worst).toBeGreaterThan(DATA.radius * 0.7);
   });
 });

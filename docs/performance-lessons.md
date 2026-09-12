@@ -131,6 +131,14 @@ mitigations, all worth doing together:
    (e.g. a `chase` rig that writes an exact pose every frame regardless of
    what the collision test would compute), skip it entirely for that mode.
 
+**Postscript (2026-09-10):** the path is gone for any rigged play camera.
+`ThirdPersonCameraRig` resolves the boom with one `sim.spherecast` against a
+layer-masked physics world instead — 0.05 ms/frame measured in Ashenhold,
+against the 70% of frame time the mesh path cost — and `colliderMeshes` is
+left empty whenever a rig is driving. `camera-controls` still owns the
+editor's free camera and rigless scenes, where the list is distance-limited
+as above. See docs/camera.md.
+
 ## `SimplifyModifier` throws on glTF geometry using `InterleavedBufferAttribute`
 
 Three.js's `SimplifyModifier` (used to build a decimated mid-LOD tier) calls
@@ -724,6 +732,52 @@ supercell whose cells all fail cannot re-queue every frame. The general
 lesson: any bounded work queue fed by an event (a cell crossing) needs a
 second feeder for the case where the event stops but the work does not.
 
+## One queue, or the big job wins: an HLOD bake starved the ground under the player
+
+A profiler snapshot of the MMO scene had a p50 frame of 12 ms and a p95 of
+409 ms — fine most of the time, catastrophic in bursts. Every one of the
+fourteen events the ring buffer had kept was an `hlod.supercell` span, and the
+worst two were **3,576 ms and 2,308 ms, each for a 64-cell far block**. Nothing
+else was even recorded. Two independent causes, and they compound:
+
+**1. The bake fetched its member cells one at a time.** `loadSupercell` had a
+plain `for (const key of members) { await this.readCell(...) }`. Sixty-four
+sequential worker round-trips on a pool of six, so five workers were idle for
+the whole span and the wall-clock was simply 64 × the per-cell latency. They
+are independent; fetch them together (bounded — see
+`SUPERCELL_FETCH_CONCURRENCY`). One caution: the results now arrive out of
+order, and a bake's origin must not depend on arrival order, so sort back to
+member order before assembling.
+
+**2. The generation pool had no queue, so it had no priorities.** Requests were
+posted straight to the next worker round-robin, which means each worker's own
+message queue *was* the queue: FIFO, per worker, and unjumpable. That is
+survivable only while nothing asks for many cells at once — and the moment
+fix 1 landed, one bake would deal 64 jobs across six workers and the near
+ring's next cell would queue behind a dozen of them. **The ground arriving
+late in front of a running player is a hole they fall into**, which is a worse
+failure than any bake being slow.
+
+So the pool now holds one priority queue and keeps at most **one** job
+outstanding per worker. Cap of one is the point: two would hide a little
+dispatch latency and cost a near cell an extra job's wait, and that wait is
+the entire thing being protected. Callers say what they are
+({@link ChunkUrgency}) — `inline` (simulation ring, generated on the calling
+thread because a collider is about to be stood on), `near` (a render ring you
+can see), `bulk` (one of up to 64 members of a bake that cannot publish until
+it has them all).
+
+Two traps in the queue itself:
+
+- **A worker that errors must free its slot.** `worker.onerror` used to only
+  warn. With a per-worker in-flight cap, a leaked busy slot is a permanently
+  smaller pool, and enough of them deadlock streaming outright — a world that
+  stops loading is far worse than one lost cell.
+- **`dispose()` must reject the QUEUE as well as the in-flight map.** A queued
+  job whose workers were terminated never settles, and a `readCell` that never
+  settles holds a load slot for the rest of the session.
+
+
 ## Draw-count pass on the voxel demo (2026-09-04): two three.js traps and the far ring
 
 Reported as "443 draw calls with nothing but terrain in the scene, ~45 fps".
@@ -857,3 +911,99 @@ Left after this pass (155 draws at the spawn, JS 10 ms headless): the near
 ring's 7 species × (near submeshes × 4 passes + far) ≈ 60 draws is now the
 largest bucket, and only `cascades: 2` or fewer species would shrink it;
 far/hlod terrain proxies ≈ 40; base scene ≈ 30.
+
+### Reuse frame transforms across shadow passes
+
+The main pass and three shadow cascades were each walking the entire scene
+graph. `EngineRenderer` now updates world matrices once, after lighting refits,
+and disables automatic scene updates only for the synchronous render boundary.
+The original policy is restored even on failure; manually managed scenes stay
+manually managed. Animated bones still update on every new frame. Inactive
+editor transform helpers are also detached, removing 156 otherwise-hidden
+objects from the playing scene's matrix traversal.
+
+An alternating old/new/new/old policy probe in a settled MMO scene measured
+JS frame time of 9.07/8.10/7.91/8.86 ms (about 11% lower with reuse). This was
+headless Chrome/WebGPU at a 2560×1440 viewport with the authored pixelation
+setting: the actual render canvas was **853×480**, not native 1440p. Streaming
+was idle; animation caused minor draw-count variation. These numbers isolate
+the transform optimization, not a guaranteed player FPS or a traversal test.
+Profiler reports now include browser, visibility, backend, canvas dimensions
+and device pixel ratio so unlike sessions are not compared as equivalent.
+
+### Terrain handoffs must retire coverage, not intent
+
+The September 9 MMO snapshot showed missing terrain while supercell replacement
+bakes took 2.3–2.7 seconds. Two synchronous retirement paths exposed that delay:
+full-detail cells unloaded on demotion before their proxy existed, and promoting
+one cell disposed an entire merged part, including neighbours still needing it.
+Keep demoted cells as render-only fallbacks; replace merged blocks add-first,
+and validate that publication preserves every still-needed cell. A failed or
+stale partial bake must not erase the last good coverage. Publication must
+invalidate residency even when the player stops moving.
+
+A retiring HLOD block must also stop excluding its cells from the far-tier bake
+queue, or waiting for replacement coverage deadlocks. Regression tests exercise
+these transitions in `apps/playground/test/chunk-handoff.test.ts` without a GPU.
+Map travel now masks arrival until nearby full-detail cells, distant coverage,
+and landing collision are present. An elapsed timeout is never evidence that ground exists: keep the
+body held and report slow loading, with map re-travel or stopping play available.
+These changes address terrain continuity, not the snapshot's unexplained
+45 ms/frame off-loop cost; that still needs a browser-level trace.
+
+### Asset browsing must not pre-render the entire library
+
+The September 10 editor session had 3,811 prefabs and 3,931 models. Thumbnail
+generation visited all of them at boot and after asset changes, even with their
+folders closed. Yielding between bakes did not bound the total model loading,
+shader compilation or memory use. The asset dock now browses direct children,
+searches descendants explicitly, and pages across all asset kinds. Only the
+current page requests baked previews; leaving it cancels queued work before
+the next bake. Hiding the editor clears that demand too.
+
+Do not attribute every freeze to the browser grid: the same cave scene recorded
+`scene.build` at 34 seconds and `scene.batch` at 1 ms after demand-driven previews
+landed. Its CSG volume still meshes synchronously on a cold cache. Moving that
+work off-thread must preserve the shared render/physics/placement mesh and keep
+the previous geometry and collision valid until replacement is ready. The
+`editor.thumbnail`, `scene.build`, and `scene.batch` spans distinguish these
+paths in subsequent profiler captures.
+
+### Firefox upload stalls: DynamicDrawUsage is an unconditional upload
+
+The September 10 Firefox trace showed CanvasRenderer consuming 96% of a CPU
+core; 83% of its samples included WebGPU buffer writes and 73% included staging
+buffer allocation. The content thread repeatedly waited for painting, while
+GC slices totalled only about 0.4 seconds in an 82-second recording. This was
+CPU-side upload processing, despite short GPU timestamp measurements.
+
+Three r185's common `Attributes.update` treats `DynamicDrawUsage` as a request
+to upload on EVERY use, even with an unchanged version. It is not just a driver
+allocation hint. Grass placements, impostor attributes and cluster indices now
+use explicit `needsUpdate` version changes; particle/bolt/trail data use the
+version-gated `StreamDrawUsage` hint. Wind and billboard facing still run in the
+shader. Grass commits upload the live prefix instead of unused capacity.
+
+Node uniform arrays also repeat across submeshes and shadow passes. The renderer
+compares full CPU-owned node-uniform bytes against the last successful write to
+the actual GPU buffer. Identical writes skip; changed poses upload immediately.
+Partial writes invalidate the mirror, newly created buffers cannot inherit one,
+and GPU-writable storage is excluded. Do not replace this with "once per frame":
+different passes can legitimately need different values in the same frame.
+
+Moving-camera uniform groups can also generate hundreds of tiny, separated
+writes. Upload their enclosing range once, preserving Three's cached range
+objects and restoring the getter-only updateRanges array in place. Assigning
+that property throws in the real renderer even if a plain-object test passes.
+
+Grass coverage and upload cost are separate concerns. A completed placement
+can expand the coverage-based fade radius in one frame and reveal a ring of
+grass. Ease outward expansion over time, clamping long frame intervals; keep
+contraction inside available coverage so the mesh edge stays hidden.
+
+Queue-level instrumentation reports actual `gpuUploadCalls`/`gpuUploadBytes`
+per frame in the profiler. `perf.uploads` breaks down lifetime per-frame averages
+by source, and `perf.uniformUploads` counts reuse. These are upload metrics, not
+GPU time. Compare like-for-like camera/gameplay and exclude cold scene builds
+before claiming an FPS improvement. Tests exercise the installed Three.js
+attribute updater so a future dependency change cannot silently undo the policy.

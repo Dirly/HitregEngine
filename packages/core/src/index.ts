@@ -302,6 +302,17 @@ export {
 } from "./transfer-lock.js";
 export { LANDING_NETSTATE, landingKey, landingSchema, registerLandingNetState, isLanding, clearLanding } from "./landing.js";
 export {
+  MOB_EVENTS,
+  MOB_STATES,
+  mobEventDecls,
+  COMBAT_NETSTATE,
+  combatKey,
+  combatants,
+  type MobEventDecl,
+  type MobState,
+} from "./mob.js";
+export { ThreatTable, type ThreatEntry, type ThreatTableOptions } from "./threat.js";
+export {
   SANCTUARIES_NETSTATE,
   SANCTUARIES_KEY,
   sanctuariesSchema,

@@ -24,7 +24,7 @@ function recipe(overrides: Record<string, unknown> = {}): WorldRecipe {
 }
 
 function noFeatures(): WorldRecipe["features"] {
-  return { rivers: [], canyons: [], ridges: [], roads: [], towns: [], lakes: [], bridges: [], fills: [], riverPaths: [], tunnels: [], blobs: [], pois: [] };
+  return { rivers: [], canyons: [], ridges: [], roads: [], towns: [], lakes: [], bridges: [], fills: [], riverPaths: [], tunnels: [], blobs: [], pois: [], camps: [] };
 }
 
 describe("ridges", () => {

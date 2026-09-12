@@ -50,6 +50,15 @@ export const voxelWorldSchema = z.object({
     .default(false)
     .describe("Terrain casting shadows means every cascade re-rasterises a large mesh every frame. Off by default; turn it on for worlds whose silhouette (canyons, spires) depends on it."),
   collision: z.boolean().default(true).describe("Cook a trimesh collider for simulation-ring cells. Off only for a fly-through preview."),
+  mesher: z
+    .enum(["mc", "dc", "nets"])
+    .default("mc")
+    .describe(
+      "EXPERIMENT. How the sampled field becomes triangles: 'mc' marching cubes (the shipping mesher), " +
+        "'dc' dual contouring (a QEF vertex per cell — sharp rims and scarps survive), 'nets' surface nets " +
+        "(the same dual topology, smoothed). The dual meshers have no skirts, so an LOD transition cracks: " +
+        "use them on a scene whose fullRender ring covers what you are looking at, not on a streaming world.",
+    ),
   colliderLodStep: z
     .number()
     .int()

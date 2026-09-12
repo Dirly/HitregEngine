@@ -57,7 +57,7 @@ export class ClusteredMesh extends THREE.Mesh {
       cursor += cluster.indices.length;
     }
     const index = new THREE.BufferAttribute(indexArray, 1);
-    index.setUsage(THREE.DynamicDrawUsage);
+    index.name = "cluster-indices"; // update() versions only when the cut changes
     geometry.setIndex(index);
     geometry.setDrawRange(0, cursor);
     // bounds of the whole model — the cut is always a subset of it

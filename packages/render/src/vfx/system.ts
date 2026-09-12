@@ -328,6 +328,9 @@ export class VfxSystem implements LiveModuleHost {
   private readonly freeLights: THREE.PointLight[] = [];
   private readonly shakes: Shake[] = [];
   private readonly savedCamPos = new THREE.Vector3();
+  /** Where the camera was on the last update; shake falloff is measured from it. */
+  private readonly camPos = new THREE.Vector3();
+  private hasCamPos = false;
   private shaking = false;
   private clock = 0;
   private liveCount = 0;
@@ -384,7 +387,16 @@ export class VfxSystem implements LiveModuleHost {
     if (!this.freeLights.includes(light)) this.freeLights.push(light);
   }
 
-  addShake(strength: number, duration: number, frequency: number): void {
+  addShake(strength: number, duration: number, frequency: number, at?: THREE.Vector3, range = 0): void {
+    // Distance falloff. Without it every impact in the world shakes every
+    // camera equally — a test NPC fighting across the map jolts the player.
+    if (range > 0 && at && this.hasCamPos) {
+      const d = this.camPos.distanceTo(at);
+      if (d >= range) return;
+      const f = 1 - d / range;
+      strength *= f * f;
+    }
+    if (strength < 0.002) return;
     this.shakes.push({ strength, duration, frequency, startedAt: this.clock, phase: Math.random() * 10 });
   }
 
@@ -594,6 +606,10 @@ export class VfxSystem implements LiveModuleHost {
 
   update(dt: number, camera: THREE.Camera, scene?: THREE.Object3D): void {
     if (scene) this.attach(scene);
+    // Before the modules step: a shake begun this frame measures from here.
+    camera.updateMatrixWorld();
+    this.camPos.setFromMatrixPosition(camera.matrixWorld);
+    this.hasCamPos = true;
     this.clock += dt;
     const now = this.clock;
     for (let i = this.spells.length - 1; i >= 0; i--) {

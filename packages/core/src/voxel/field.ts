@@ -2576,6 +2576,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       best = Math.min(best, Math.sqrt((x - blob.center[0]) ** 2 + (z - blob.center[2]) ** 2) - reach);
     }
     for (const town of bucketAt(towns, x, z) as readonly TownDoc[]) {
+      if (town.excludeScatter === false) continue;
       best = Math.min(best, Math.sqrt((x - town.center[0]) ** 2 + (z - town.center[1]) ** 2) - town.radius);
     }
     return best;

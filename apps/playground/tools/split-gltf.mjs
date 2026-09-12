@@ -19,6 +19,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { boundsOf } from "./_gltf-bounds.mjs";
 
 const args = process.argv.slice(2);
 const positional = args.filter((a) => !a.startsWith("--"));
@@ -27,21 +28,64 @@ const opt = (name, fallback) => {
   return i >= 0 && i + 1 < args.length ? args[i + 1] : fallback;
 };
 if (positional.length < 2) {
-  console.error("usage: split-gltf.mjs <group.gltf> <outdir> [--skip A,B] [--rename Old=New,...] [--prefix p]");
+  console.error(
+    "usage: split-gltf.mjs <group.gltf> <outdir> [--skip A,B] [--rename Old=New|index=New,...] " +
+      "[--texnames 3=Leaves,4=Bark,...] [--reorigin] [--prefix p]",
+  );
   process.exit(2);
 }
 const [input, outdir] = positional;
 const skip = new Set((opt("skip", "") || "").split(",").filter(Boolean));
+// Keyed by source node NAME, or by its index — a shelf routinely carries two
+// nodes of the same name (a granite and a sandstone cut of the same rock),
+// and a name key cannot tell them apart.
 const rename = new Map(
   (opt("rename", "") || "")
     .split(",")
     .filter(Boolean)
     .map((pair) => pair.split("=")),
 );
+// Rename the SOURCE images by index, before anything is split. Blockbench
+// exports every pasted texture as literally "pasted", and the name-driven
+// passes downstream — `wind.materials` above all — select on that name, so an
+// unnamed group is one nothing can pick foliage out of. Naming them here,
+// once, beats renaming in the DCC tool on every re-export.
+const texnames = new Map(
+  (opt("texnames", "") || "")
+    .split(",")
+    .filter(Boolean)
+    .map((pair) => {
+      const [key, value] = pair.split("=");
+      return [Number(key), value];
+    }),
+);
+/**
+ * Stand each prop on its own base at its own origin: translate the split root
+ * so the geometry's lowest point sits at y=0 and its XZ centre at 0.
+ *
+ * Everything downstream assumes it. The voxel scatter emits its collider at
+ * `offset: [0, size.y / 2, 0]` — rising from the ENTITY origin — so a model
+ * whose geometry starts 4m below its own origin (a hoodoo modelled about its
+ * middle, a jungle tree with buttress roots) gets a collider floating 4m off
+ * the rock, and `yOffset` can only paper over one prop at a time.
+ */
+const reorigin = args.includes("--reorigin");
 const prefix = opt("prefix", "");
 
 const gltf = JSON.parse(fs.readFileSync(input, "utf8"));
 const inputDir = path.dirname(input);
+
+// Name the images/textures before the split, so every prop that shares one
+// carries the same name out (a leaf texture named once names the leaves of
+// every tree using it).
+for (const [source, name] of texnames) {
+  if (!gltf.images?.[source]) {
+    console.error(`  --texnames: no image ${source} (this file has ${gltf.images?.length ?? 0})`);
+    process.exit(2);
+  }
+  gltf.images[source].name = name;
+  for (const texture of gltf.textures ?? []) if (texture.source === source) texture.name = name;
+}
 
 /** Decode every source buffer once (data URI or sidecar file). */
 const buffers = gltf.buffers.map((b) => {
@@ -56,44 +100,6 @@ function viewBytes(index) {
   return buffer.subarray(view.byteOffset ?? 0, (view.byteOffset ?? 0) + view.byteLength);
 }
 
-const COMPONENT_BYTES = { 5120: 1, 5121: 1, 5122: 2, 5123: 2, 5125: 4, 5126: 4 };
-const TYPE_COUNT = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4, MAT2: 4, MAT3: 9, MAT4: 16 };
-
-/** Recompute an accessor's min/max from its bytes (positions may not carry them, and we trust nothing after a re-pack). */
-function accessorBounds(accessor, bytes) {
-  const n = TYPE_COUNT[accessor.type];
-  const size = COMPONENT_BYTES[accessor.componentType];
-  const view = gltf.bufferViews[accessor.bufferView];
-  const stride = view.byteStride ?? n * size;
-  const min = new Array(n).fill(Infinity);
-  const max = new Array(n).fill(-Infinity);
-  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const read = (off) => {
-    switch (accessor.componentType) {
-      case 5126:
-        return dv.getFloat32(off, true);
-      case 5125:
-        return dv.getUint32(off, true);
-      case 5123:
-        return dv.getUint16(off, true);
-      case 5122:
-        return dv.getInt16(off, true);
-      case 5121:
-        return dv.getUint8(off);
-      default:
-        return dv.getInt8(off);
-    }
-  };
-  for (let i = 0; i < accessor.count; i++) {
-    const base = (accessor.byteOffset ?? 0) + i * stride;
-    for (let c = 0; c < n; c++) {
-      const v = read(base + c * size);
-      if (v < min[c]) min[c] = v;
-      if (v > max[c]) max[c] = v;
-    }
-  }
-  return { min, max };
-}
 
 function splitNode(rootIndex) {
   const out = {
@@ -193,7 +199,6 @@ function splitNode(rootIndex) {
     materialMap.set(index, out.materials.length - 1);
     return out.materials.length - 1;
   };
-  const bounds = { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
   const copyMesh = (index) => {
     const mesh = gltf.meshes[index];
     const copy = { ...mesh, primitives: [] };
@@ -201,13 +206,6 @@ function splitNode(rootIndex) {
       const p = { ...prim, attributes: {} };
       for (const [name, acc] of Object.entries(prim.attributes)) {
         p.attributes[name] = copyAccessor(acc);
-        if (name === "POSITION") {
-          const b = accessorBounds(gltf.accessors[acc], viewBytes(gltf.accessors[acc].bufferView));
-          for (let c = 0; c < 3; c++) {
-            bounds.min[c] = Math.min(bounds.min[c], b.min[c]);
-            bounds.max[c] = Math.max(bounds.max[c], b.max[c]);
-          }
-        }
       }
       if (prim.indices !== undefined) p.indices = copyAccessor(prim.indices);
       if (prim.material !== undefined) p.material = copyMaterial(prim.material);
@@ -232,29 +230,59 @@ function splitNode(rootIndex) {
   const buffer = Buffer.concat(chunks);
   out.buffers.push({ byteLength: buffer.byteLength, uri: `data:application/octet-stream;base64,${buffer.toString("base64")}` });
   for (const key of ["materials", "textures", "images", "samplers"]) if (out[key].length === 0) delete out[key];
-  return { doc: out, bounds };
+  // Bounds AFTER the split, walking the node transforms. Raw accessor min/max
+  // is what the geometry says in its own space; a child node rotated or
+  // shifted by the DCC tool (Blockbench nests a prop's parts freely) makes
+  // that a different box from the one the prop actually occupies — and this
+  // box is what a scatter rule's `footprint` and `colliderSize` copy.
+  const bounds = boundsOf(out, () => Buffer.from(out.buffers[0].uri.slice(out.buffers[0].uri.indexOf(",") + 1), "base64"));
+  if (reorigin) {
+    const shift = [-(bounds.min[0] + bounds.max[0]) / 2, -bounds.min[1], -(bounds.min[2] + bounds.max[2]) / 2];
+    if (shift.some((v) => Math.abs(v) > 1e-4)) {
+      const root = out.nodes[0];
+      const t = root.translation ?? [0, 0, 0];
+      root.translation = [t[0] + shift[0], t[1] + shift[1], t[2] + shift[2]];
+      for (let c = 0; c < 3; c++) {
+        bounds.min[c] += shift[c];
+        bounds.max[c] += shift[c];
+      }
+      return { doc: out, bounds, shift };
+    }
+  }
+  return { doc: out, bounds, shift: null };
 }
 
 fs.mkdirSync(outdir, { recursive: true });
-const roots = gltf.scenes[gltf.scene ?? 0].nodes;
+// A shelf is usually exported as a flat list of root nodes, but a DCC tool
+// will just as happily wrap the whole shelf in ONE empty group ("Nature
+// Props"). Split along that group's children instead, or the "split" writes
+// the entire shelf back out as a single prop.
+const sceneRoots = gltf.scenes[gltf.scene ?? 0].nodes;
+const roots =
+  sceneRoots.length === 1 && gltf.nodes[sceneRoots[0]].mesh === undefined && gltf.nodes[sceneRoots[0]].children?.length
+    ? gltf.nodes[sceneRoots[0]].children
+    : sceneRoots;
+if (roots !== sceneRoots) console.log(`  (splitting the ${roots.length} children of group "${gltf.nodes[sceneRoots[0]].name ?? "?"}")`);
 let written = 0;
 for (const rootIndex of roots) {
   const node = gltf.nodes[rootIndex];
   const sourceName = node.name ?? `node${rootIndex}`;
-  if (skip.has(sourceName)) {
+  if (skip.has(sourceName) || skip.has(String(rootIndex))) {
     console.log(`  skip ${sourceName}`);
     continue;
   }
-  const name = rename.get(sourceName) ?? sourceName;
-  const { doc, bounds } = splitNode(rootIndex);
+  const name = rename.get(String(rootIndex)) ?? rename.get(sourceName) ?? sourceName;
+  const { doc, bounds, shift } = splitNode(rootIndex);
   const file = path.join(outdir, `${prefix}${name}.gltf`);
   fs.writeFileSync(file, JSON.stringify(doc));
   written++;
   const size = bounds.max.map((v, i) => v - bounds.min[i]);
   const materials = (doc.materials ?? []).length;
+  const textures = (doc.textures ?? []).map((t) => t.name ?? "?").join("/");
   console.log(
     `  ${name}.gltf  ${(fs.statSync(file).size / 1024).toFixed(0)} KB  size ${size.map((v) => v.toFixed(2)).join(" x ")}  ` +
-      `y ${bounds.min[1].toFixed(2)}..${bounds.max[1].toFixed(2)}  ${materials} material${materials === 1 ? "" : "s"}` +
+      `y ${bounds.min[1].toFixed(2)}..${bounds.max[1].toFixed(2)}  ${materials} material${materials === 1 ? "" : "s"} [${textures}]` +
+      (shift ? `  re-origined by ${shift.map((v) => v.toFixed(2)).join(",")}` : "") +
       (name !== sourceName ? `  (was ${sourceName})` : ""),
   );
 }
