@@ -1,7 +1,0 @@
-{
-  "shader": "unlit",
-  "color": "#ffffff",
-  "map": "atlas-carousel-sheet-skullknight-longsword.png",
-  "filter": "nearest",
-  "side": "double"
-}

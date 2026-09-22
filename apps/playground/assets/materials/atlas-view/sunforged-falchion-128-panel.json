@@ -1,7 +1,0 @@
-{
-  "shader": "unlit",
-  "color": "#ffffff",
-  "map": "atlas-carousel-sheet-sunforged-falchion-128.png",
-  "filter": "nearest",
-  "side": "double"
-}

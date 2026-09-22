@@ -1,7 +1,0 @@
-{
-  "shader": "unlit",
-  "color": "#ffffff",
-  "map": "atlas-carousel-sheet-warden.png",
-  "filter": "nearest",
-  "side": "double"
-}

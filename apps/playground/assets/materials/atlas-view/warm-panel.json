@@ -1,7 +1,0 @@
-{
-  "shader": "unlit",
-  "color": "#ffffff",
-  "map": "longsword-unwrapped-sheet-warm.png",
-  "filter": "nearest",
-  "side": "double"
-}

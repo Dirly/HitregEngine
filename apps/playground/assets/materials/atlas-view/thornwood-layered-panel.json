@@ -1,7 +1,0 @@
-{
-  "shader": "unlit",
-  "color": "#ffffff",
-  "map": "atlas-carousel-sheet-thornwood-layered.png",
-  "filter": "nearest",
-  "side": "double"
-}

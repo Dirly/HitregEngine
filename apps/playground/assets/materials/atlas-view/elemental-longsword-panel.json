@@ -1,7 +1,0 @@
-{
-  "shader": "unlit",
-  "color": "#ffffff",
-  "map": "atlas-carousel-sheet-elemental-longsword.png",
-  "filter": "nearest",
-  "side": "double"
-}

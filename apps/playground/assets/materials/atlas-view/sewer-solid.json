@@ -1,8 +1,0 @@
-{
-  "shader": "standard",
-  "color": "#ffffff",
-  "map": "atlas-carousel-atlas-sewer.png",
-  "filter": "nearest",
-  "roughness": 0.6,
-  "metalness": 0.1
-}
