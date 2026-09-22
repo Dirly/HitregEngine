@@ -3,6 +3,7 @@ export {
   type InputLike,
   type ScriptClass,
   type ScriptChat,
+  type ScriptCommandDecl,
   type ScriptChatMessage,
   type ScriptContext,
   type ScriptDataTypeDecl,
@@ -25,7 +26,9 @@ export {
   type SimShapecastOptions,
   type AnimationLayerOptions,
   type BiomeAt,
+  type WaterAt,
   type LiveSkyOptions,
+  type LivePostFxOptions,
   type LiveSkyBase,
 } from "./script.js";
 export { EventBus, type EventHandler, type NetRole, type TraceEntry } from "./events.js";
@@ -47,6 +50,10 @@ export {
   idleThreshold,
   leavingGround,
   playbackRate,
+  swimAim,
+  swimStateFor,
+  swimVy,
+  swimming,
   ACTION_RATE_MAX,
   ACTION_RATE_MIN,
   GAIT_HYSTERESIS,
@@ -55,6 +62,9 @@ export {
   type ActionFit,
   type Gait,
   type GaitTuning,
+  type SwimAim,
+  type SwimState,
+  type SwimTuning,
 } from "./locomotion.js";
 export { MobBrain } from "./mob-brain.js";
 export {

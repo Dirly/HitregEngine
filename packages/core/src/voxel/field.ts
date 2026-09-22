@@ -398,6 +398,26 @@ interface TunnelSegment {
   ra: number; rb: number;
 }
 
+/** Distance from (x, z) to a polyline — a single point is just that point. */
+function distanceToPolyline(points: readonly (readonly [number, number])[], x: number, z: number): number {
+  let best = Infinity;
+  if (points.length === 1) {
+    const p = points[0]!;
+    return Math.sqrt((x - p[0]) ** 2 + (z - p[1]) ** 2);
+  }
+  for (let i = 0; i + 1 < points.length; i++) {
+    const a = points[i]!;
+    const b = points[i + 1]!;
+    const dx = b[0] - a[0];
+    const dz = b[1] - a[1];
+    const len = dx * dx + dz * dz;
+    const t = len < 1e-9 ? 0 : Math.max(0, Math.min(1, ((x - a[0]) * dx + (z - a[1]) * dz) / len));
+    const d = Math.sqrt((x - (a[0] + dx * t)) ** 2 + (z - (a[1] + dz * t)) ** 2);
+    if (d < best) best = d;
+  }
+  return best;
+}
+
 function polylineBounds(
   points: readonly (readonly [number, number])[],
   pad: number,
@@ -862,12 +882,22 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     segmentsOf(ridgeDocs, (r) => (r.heights && r.heights.length === r.points.length ? r.heights : undefined)),
     ridgeReach,
   );
-  const towns = makeBuckets<TownDoc>(recipe.features.towns, (tw) => [
-    tw.center[0] - tw.radius - tw.falloff,
-    tw.center[1] - tw.radius - tw.falloff,
-    tw.center[0] + tw.radius + tw.falloff,
-    tw.center[1] + tw.radius + tw.falloff,
-  ]);
+  const towns = makeBuckets<TownDoc>(recipe.features.towns, (tw) => {
+    // a terrace may hang off the pad's edge — a shelf cut into the slope
+    // below it — so the bucket has to hold the town AND its shelves
+    let minX = tw.center[0] - tw.radius - tw.falloff;
+    let minZ = tw.center[1] - tw.radius - tw.falloff;
+    let maxX = tw.center[0] + tw.radius + tw.falloff;
+    let maxZ = tw.center[1] + tw.radius + tw.falloff;
+    for (const terrace of tw.terraces) {
+      const [tminX, tminZ, tmaxX, tmaxZ] = polylineBounds(terrace.points, terrace.radius + terrace.falloff);
+      if (tminX < minX) minX = tminX;
+      if (tminZ < minZ) minZ = tminZ;
+      if (tmaxX > maxX) maxX = tmaxX;
+      if (tmaxZ > maxZ) maxZ = tmaxZ;
+    }
+    return [minX, minZ, maxX, maxZ];
+  });
   const lakes = makeBuckets<LakeDoc>(lakeDocs, lakeBounds);
   const fillDocs = recipe.features.fills;
   const fills = makeBuckets<FillDoc>(fillDocs, (f) => polylineBounds(f.polygon, f.bank + 2));
@@ -1664,11 +1694,24 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
 
     for (const town of bucketAt(towns, x, z) as readonly TownDoc[]) {
       const d = Math.sqrt((x - town.center[0]) ** 2 + (z - town.center[1]) ** 2);
-      if (d > town.radius + town.falloff) continue;
-      const w = (1 - smoothstep(town.radius, town.radius + town.falloff, d)) * town.flatten * (1 - wet);
-      if (w <= 0) continue;
-      const pad = town.groundY ?? out;
-      out = out + (pad - out) * w;
+      if (d <= town.radius + town.falloff) {
+        const w = (1 - smoothstep(town.radius, town.radius + town.falloff, d)) * town.flatten * (1 - wet);
+        if (w > 0) {
+          const pad = town.groundY ?? out;
+          out = out + (pad - out) * w;
+        }
+      }
+      // The shelves come AFTER the pad and in order, so a terraced town whose
+      // `flatten` is 0 keeps its hill and only the shelves are level, and two
+      // shelves that overlap resolve to the later one rather than to a ridge
+      // between them.
+      for (const terrace of town.terraces) {
+        const td = distanceToPolyline(terrace.points, x, z);
+        if (td > terrace.radius + terrace.falloff) continue;
+        const w = (1 - smoothstep(terrace.radius, terrace.radius + terrace.falloff, td)) * terrace.flatten * (1 - wet);
+        if (w <= 0) continue;
+        out = out + (terrace.groundY - out) * w;
+      }
     }
 
     count = nearestPerOwner(roadSegs, x, z, hits);
@@ -2578,6 +2621,9 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     for (const town of bucketAt(towns, x, z) as readonly TownDoc[]) {
       if (town.excludeScatter === false) continue;
       best = Math.min(best, Math.sqrt((x - town.center[0]) ** 2 + (z - town.center[1]) ** 2) - town.radius);
+      // a shelf cut below the pad's edge is still the town's ground, and a
+      // tree standing on it is a tree in the street
+      for (const terrace of town.terraces) best = Math.min(best, distanceToPolyline(terrace.points, x, z) - terrace.radius);
     }
     return best;
   }

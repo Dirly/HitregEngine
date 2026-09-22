@@ -105,6 +105,35 @@ describe("postfxSchema — post stack", () => {
       motionBlur: { enabled: false, amount: 0.3, samples: 12 },
       sharpen: { enabled: false, amount: 0.4 },
       pixelate: { enabled: false, height: 240, filter: "nearest" },
+      // the second block that defaults ON. It costs nothing in a scene with no
+      // water: the renderer only builds the pass where there IS water, and
+      // then drives it from how deep the camera is (see PlanContext.water).
+      underwater: {
+        enabled: true,
+        color: "#16506b",
+        density: 0.055,
+        tint: 0.22,
+        saturation: 0.75,
+        wobble: 0.004,
+        wobbleSpeed: 1.1,
+        wobbleScale: 9,
+        edge: 0.35,
+        fade: 0.18,
+      },
+      // ...and the third, for the same reason: built only in a scene that can
+      // have weather, then driven by a uniform (see PlanContext.weather).
+      sandstorm: {
+        enabled: true,
+        color: "#c7a06a",
+        opacity: 0.5,
+        haze: 0.22,
+        scale: 20,
+        speed: 1.6,
+        streak: 9,
+        swirl: 0.5,
+        threshold: 0.26,
+        steps: 0,
+      },
     });
   });
 

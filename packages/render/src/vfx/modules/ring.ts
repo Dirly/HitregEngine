@@ -167,7 +167,7 @@ export class RingLive extends LiveModule<RingModule> {
 
   protected onUpdate(t: number, _dt: number, camera: THREE.Camera): void {
     const m = this.module;
-    const now = this.startedAt + t * this.life;
+    const now = this.now;
     this.u.time.value = now;
     this.u.opacity.value = this.opacityAt(t, now);
 

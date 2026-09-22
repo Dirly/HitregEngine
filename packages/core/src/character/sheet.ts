@@ -53,6 +53,15 @@ export const itemStackSchema = z.object({
 });
 export type ItemStack = z.infer<typeof itemStackSchema>;
 
+const actionTarget = z.object({ container: z.enum(CONTAINERS), x: z.number().int().min(0), y: z.number().int().min(0) });
+export const inventoryCommandSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("move"), uid: z.string(), to: actionTarget }),
+  z.object({ kind: z.literal("split"), uid: z.string(), qty: z.number().int().positive(), to: actionTarget }),
+  z.object({ kind: z.literal("equip"), uid: z.string(), slot: z.enum(EQUIPMENT_SLOTS).optional() }),
+  z.object({ kind: z.literal("unequip"), uid: z.string(), slot: z.enum(EQUIPMENT_SLOTS), to: actionTarget.optional() }),
+]);
+export type InventoryCommand = z.infer<typeof inventoryCommandSchema>;
+
 const attributeInts = Object.fromEntries(
   ATTRIBUTES.map((a) => [a, z.number().int().min(0).default(10)]),
 ) as Record<Attribute, z.ZodDefault<z.ZodNumber>>;
@@ -78,6 +87,12 @@ export const characterSheetSchema = z
       .prefault({})
       .describe("Every owned stack keyed by uid — worn ones have no container, carried ones name a grid and a cell."),
     seq: z.number().int().min(0).default(0).describe("Uid counter, so stack ids are deterministic on the authority."),
+    inventoryAction: z.object({
+      command: inventoryCommandSchema,
+      duration: z.number().positive(),
+      remaining: z.number().min(0),
+      requestedBy: z.string().optional(),
+    }).optional().describe("Transient authority-owned action progress. Items stay in their source until completion; clients cannot shorten it. Replicates for UI and host migration; omitted from local durable saves."),
   })
   .describe(
     "A character's whole state — level, xp, attributes, worn and carried items — as one replicated value (netState `character/<bodyId>`).",
@@ -421,9 +436,9 @@ export function equip(
   if (item.slots.length === 0) return fail(`${item.name} cannot be worn`);
   if (slot !== undefined && !EQUIPMENT_SLOTS.includes(slot)) return fail(`unknown slot "${slot}"`);
   if (slot !== undefined && !itemFitsSlot(item, slot)) return fail(`${item.name} does not go in the ${slot} slot`);
-  if (stack.qty !== 1) return fail(`split ${item.name} down to one before wearing it`);
   const accepting = EQUIPMENT_SLOTS.filter((s) => itemFitsSlot(item, s));
   const target = slot ?? accepting.find((s) => !sheet.equipment[s]) ?? accepting[0]!;
+  if (stack.qty !== 1 && target !== "consumable") return fail(`split ${item.name} down to one before wearing it`);
   const req = requirementError(item, sheet, env);
   if (req) return fail(req);
 

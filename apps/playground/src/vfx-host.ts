@@ -8,7 +8,7 @@ import {
   type Phase,
   type SpritesheetDoc,
 } from "@hitreg/core";
-import { VfxSystem, loadGltf, type VfxFrame } from "@hitreg/render";
+import { AmbientVfx, VfxSystem, loadGltf, type LightBudgetSystem, type VfxFrame } from "@hitreg/render";
 import type { RuntimeVfxFrame, RuntimeVfxHost } from "@hitreg/scripting";
 
 /**
@@ -54,6 +54,23 @@ export function warmVfx(
   const sheets = assets.dataAssetsOfType("spritesheet").map((d) => d.id);
   const sheet = sheets[0];
   return vfx.warmup(precompile, { ...(mask ? { mask } : {}), ...(sheet ? { sheet } : {}), sheets, ...(camera ? { camera } : {}) });
+}
+
+/**
+ * Standing effects (the `vfx` component) over the app's VfxSystem: effect and
+ * material ids resolve through the asset library, and each owned light joins
+ * the scene's point-light budget like any authored light. Shared by the editor
+ * and the published runtime for the same reason `createVfx` is.
+ */
+export function createAmbientVfx(vfx: VfxSystem, assets: AssetLibrary, lightBudget: LightBudgetSystem): AmbientVfx {
+  return new AmbientVfx(vfx, {
+    resolveEffect: (id) => {
+      const doc = assets.getDataAsset(id);
+      return doc?.type === "vfx" ? doc.data : undefined;
+    },
+    resolveMaterial: (id) => assets.getDataAsset(id)?.data,
+    onLight: (light) => lightBudget.register(light),
+  });
 }
 
 const NEUTRAL = paletteFor("arcane");

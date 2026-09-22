@@ -41,6 +41,8 @@ const atlasManifest = fileURLToPath(new URL("../../../tools/atlas/tool.json", im
 tools.register(JSON.parse(readFileSync(atlasManifest, "utf8")));
 const wfcManifest = fileURLToPath(new URL("../../../tools/wfc-3d/tool.json", import.meta.url));
 tools.register(JSON.parse(readFileSync(wfcManifest, "utf8")));
+const meshDcManifest = fileURLToPath(new URL("../../../tools/mesh-dc/tool.json", import.meta.url));
+tools.register(JSON.parse(readFileSync(meshDcManifest, "utf8")));
 
 const spec = buildEngineSpec({ registry, events, assets, tools });
 const target = fileURLToPath(new URL("../../../spec.json", import.meta.url));

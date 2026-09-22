@@ -78,6 +78,40 @@ export function paletteFor(element: Element): Palette {
   return { primary: p.primary, secondary: p.secondary, glow: p.glow };
 }
 
+function mixHex(a: string, b: string, t: number): string {
+  const pa = Number.parseInt(a.slice(1), 16);
+  const pb = Number.parseInt(b.slice(1), 16);
+  let out = 0;
+  for (const shift of [16, 8, 0]) {
+    const ca = (pa >> shift) & 255;
+    const cb = (pb >> shift) & 255;
+    out |= Math.round(ca + (cb - ca) * t) << shift;
+  }
+  return `#${out.toString(16).padStart(6, "0")}`;
+}
+
+/**
+ * The palette a material asset stands for, so an effect is recoloured by
+ * editing (or swapping) a material rather than its modules: `color` is the
+ * body, `emissive` the hot core (black = the body lightened), and the dark
+ * secondary is the body pulled toward black. Malformed colours fall back to
+ * `fallback` slot by slot.
+ */
+export function paletteFromMaterial(
+  material: { color?: unknown; emissive?: unknown } | undefined,
+  fallback: Palette = paletteFor("fire"),
+): Palette {
+  const hex = (v: unknown): string | null => (typeof v === "string" && /^#[0-9a-f]{6}$/i.test(v) ? v.toLowerCase() : null);
+  const body = hex(material?.color);
+  if (!body) return { ...fallback };
+  const emissive = hex(material?.emissive);
+  return {
+    primary: body,
+    glow: emissive && emissive !== "#000000" ? emissive : mixHex(body, "#ffffff", 0.6),
+    secondary: mixHex(body, "#000000", 0.65),
+  };
+}
+
 /** Resolve a module colour ("primary" | "#hex") against a palette. */
 export function resolveColor(color: string, palette: Palette): string {
   if (color === "primary" || color === "secondary" || color === "glow") return palette[color];

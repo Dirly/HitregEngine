@@ -92,7 +92,7 @@ export class SlashLive extends LiveModule<SlashModule> {
 
   protected onUpdate(t: number): void {
     const m = this.module;
-    const now = this.startedAt + t * this.life;
+    const now = this.now;
     this.u.opacity.value = this.opacityAt(t, now);
     // the head crosses the arc over sweepTime, then overshoots so the tail drains
     const k = Math.min(1, t) / Math.max(0.05, m.sweepTime);

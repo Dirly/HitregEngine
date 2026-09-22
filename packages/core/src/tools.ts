@@ -134,9 +134,10 @@ export const toolFileValueSchema = z.object({
     .string()
     .min(1)
     .regex(
-      /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/,
+      /^[A-Za-z0-9+/]+={0,2}$/,
       "invalid base64 data",
-    ),
+    )
+    .refine((data) => data.length % 4 === 0, "invalid base64 data"),
 });
 
 export const toolResultSchema = z.object({
@@ -209,9 +210,10 @@ function valueSchema(input: ToolInput): z.ZodType {
         .string()
         .min(1)
         .regex(
-          /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/,
+          /^[A-Za-z0-9+/]+={0,2}$/,
           "invalid base64 data",
-        );
+        )
+        .refine((value) => value.length % 4 === 0, "invalid base64 data");
       if (input.maxBytes !== undefined) {
         data = data.max(Math.ceil(input.maxBytes / 3) * 4);
       }

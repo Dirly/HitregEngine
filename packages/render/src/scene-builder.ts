@@ -14,6 +14,7 @@ import {
   time,
   color as tslColor,
   float,
+  frontFacing,
   mix,
   smoothstep,
   saturate,
@@ -51,6 +52,7 @@ import {
 } from "three/tsl";
 import { GLTFLoader, type GLTF } from "three/addons/loaders/GLTFLoader.js";
 import { applyFoliageNormals } from "./foliage-normals.js";
+import { waterWakeUniforms } from "./water-wake.js";
 import { applyModelBrightness } from "./model-brightness.js";
 import { applyFoliageWind, type FoliageWindOptions } from "./foliage-wind.js";
 import { applyFoliageFade } from "./foliage-fade.js";
@@ -85,6 +87,7 @@ import { buildTerrainSplatMaterial, SPLAT_ATTRIBUTES, type MacroNoiseData } from
 import { mergeModelSubmeshes } from "./static-batch.js";
 import { voxelGeometry, csgGeometry, voxelColliderProxyGeometry } from "./voxel-geometry.js";
 import type { ParticlesData } from "./particles.js";
+import type { AmbientVfxData } from "./vfx/ambient.js";
 import type { BillboardData } from "./billboards.js";
 import type { GrassData } from "./grass.js";
 import type { InstancedPropBatch } from "./foliage-lod.js";
@@ -154,6 +157,7 @@ const sharedTextures = new Map<string, THREE.Texture>();
 
 /** Once-per-asset warning for uvRotation on a render mode that ignores it. */
 const uvRotationWarned = new Set<string>();
+const instancedVisibilityWarned = new Set<string>();
 
 /**
  * Share textures across separately loaded models by name.
@@ -254,6 +258,9 @@ export interface BuildOptions {
    * ParticleSystem (the builder stays free of the simulation). `group` is the
    * entity's anchor group; the system parents its InstancedMesh under it. */
   onParticles?(entityId: string, group: THREE.Object3D, data: ParticlesData): void;
+  /** Fired for each `vfx` (standing effect) entity — the app registers it
+   * with its AmbientVfx, which plays the effect asset on its VfxSystem. */
+  onVfx?(entityId: string, group: THREE.Object3D, data: AmbientVfxData): void;
   /** Fired for every real light so the host can apply a camera-relative
    * dynamic-light budget without traversing the complete scene each frame. */
   onLight?(entityId: string, light: THREE.Light, importance: number): void;
@@ -342,6 +349,20 @@ export interface MaterialData {
   emissive: string;
   emissiveIntensity: number;
   emissiveMap?: string;
+  /** Animated pixelated noise glow on top of the surface (see the schema). */
+  overlay?: {
+    color: string;
+    opacity: number;
+    scale: number;
+    speed: [number, number];
+    threshold: number;
+    mask: "map" | "none";
+    maskStrength?: number;
+    maskCutoff?: number;
+    pixel: number;
+    steps: number;
+    frameRate: number;
+  };
   opacity: number;
   transparent: boolean;
   splat?: {
@@ -378,6 +399,10 @@ export interface MaterialData {
     flowMode?: "drift" | "channel";
     /** false: wave normals only, no vertex motion (lake sheets, ribbons). */
     displace?: boolean;
+    /** Metres of surface relief a full-strength wake pushes into the water. */
+    wakeHeight?: number;
+    /** How much the wake's crests also froth. 0 = pure water motion. */
+    wakeFoam?: number;
   };
 }
 
@@ -954,6 +979,19 @@ function buildPrimitive(
  * surface staying flat-shaded. `flowMode: "channel"` swaps the world axes
  * for the ribbon's metre uv and its `flow` attribute: moving water.
  */
+/**
+ * One read of the wake height field. `level` is not optional dressing: a
+ * texture sampled in the VERTEX stage has no derivatives to pick a mip from,
+ * so the displacement read has to name level 0 explicitly.
+ */
+interface WakeSample {
+  readonly r: THREE.Node<"float">;
+  level(level: unknown): WakeSample;
+}
+interface WakeSampler {
+  sample(uv: unknown): WakeSample;
+}
+
 function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THREE.MeshStandardNodeMaterial | THREE.MeshBasicNodeMaterial {
   const w: NonNullable<MaterialData['water']> = data.water ?? {
     shallowColor: "#3fa8c9",
@@ -1000,6 +1038,32 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
   // uv instead of world x, so the waves travel down the channel, around
   // its bends and over its falls, and never break at a cell seam because
   // the uv is continuous across pieces (`uvAlong`).
+  // -- the wake field: water something has actually pushed -------------------
+  //
+  // A world-space height field (water-wake.ts), simulated as real ripples and
+  // read here as GEOMETRY: the vertices move with it and the shading normal
+  // bends along its slope — the same two things the material does with its own
+  // waves, so a wake is the surface deforming rather than a shape drawn on it.
+  // Three earlier versions painted the mask as foam instead, and brightness
+  // has no relief: however the mask was shaped it read as a strip stuck to the
+  // lake. Froth is left as a thin optional highlight on the crests.
+  const wakeMap = waterWakeUniforms.map as unknown as WakeSampler;
+  const wakeUv = vec2(
+    positionWorld.x.sub(waterWakeUniforms.center.x).div(waterWakeUniforms.size).add(float(0.5)),
+    // world +Z runs down the mask, matching how the stamps are written
+    float(0.5).sub(positionWorld.z.sub(waterWakeUniforms.center.y).div(waterWakeUniforms.size)),
+  );
+  // the patch has edges; fade out at them rather than smearing the border texel
+  const inPatch = saturate(float(0.5).sub(wakeUv.x.sub(float(0.5)).abs()).mul(float(12)))
+    .mul(saturate(float(0.5).sub(wakeUv.y.sub(float(0.5)).abs()).mul(float(12))));
+  const wakeGain = (waterWakeUniforms.strength as unknown as THREE.Node<"float">).mul(inPatch);
+  const wakeMetres = float(Math.max(0, w.wakeHeight ?? 0.14));
+  /** The field at a uv offset from here, normalised (about -1..1). */
+  const wakeAt = (offset: THREE.Node<"vec2">): THREE.Node<"float"> =>
+    wakeMap.sample(wakeUv.add(offset)).r.mul(wakeGain);
+  const wakeRaw = wakeMap.sample(wakeUv).r.mul(wakeGain);
+  const wakeLift = wakeRaw.mul(wakeMetres);
+
   const channel = w.flowMode === "channel";
   const worldXZ = vec2(positionWorld.x, positionWorld.z);
   const flowAttribute = attribute("flow", "vec3") as unknown as THREE.Node<"vec3">;
@@ -1024,7 +1088,14 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
   const waveHeight = add(heightA, heightB);
   // a coarse sheet (a lake's polygon fan, a two-wide ribbon) keeps its
   // vertices still: lifting them tilts whole triangles into faceted streaks
-  material.positionNode = w.displace === false ? positionLocal : add(positionLocal, mul(normalLocal, waveHeight));
+  // The wake rides along with the waves — on a mesh fine enough to carry it.
+  // A sheet with `displace: false` is a polygon fan or a two-wide ribbon: its
+  // vertices are metres apart, so ANY displacement there tilts whole triangles
+  // instead of making a ripple, and the wake has to live in the normals alone.
+  const vertexWake = wakeMap.sample(wakeUv).level(float(0)).r.mul(wakeGain).mul(wakeMetres);
+  material.positionNode = w.displace === false
+    ? positionLocal
+    : add(positionLocal, mul(normalLocal, add(waveHeight, vertexWake)));
 
   // slope of the wave surface in the (along, across) frame, then rotated into
   // world XZ: the frame is the flow direction for a channel, world axes otherwise
@@ -1032,8 +1103,20 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
   const dhAcross = mul(mul(mul(ampB, kB), dirB), cos(phaseB));
   const alongDir = flowDir ?? vec2(float(1), float(0));
   const acrossDir = flowDir ? vec2(mul(flowDir.y, float(-1)), flowDir.x) : vec2(float(0), float(1));
-  const slopeX = add(mul(dhAlong, alongDir.x), mul(dhAcross, acrossDir.x));
-  const slopeZ = add(mul(dhAlong, alongDir.y), mul(dhAcross, acrossDir.y));
+  // The wake's own slope, differenced across one texel of the field and
+  // divided by what that texel is worth in metres, so the steepness is real
+  // world gradient and a coarse mask does not read as a steeper wave than a
+  // fine one. This is what carries the effect on a lake sheet, whose geometry
+  // cannot move: the surface tilts to the light, catches the sky along the
+  // ripple fronts and shadows its own troughs.
+  const wakeTexel = waterWakeUniforms.texel as unknown as THREE.Node<"float">;
+  const perTexel = mul(waterWakeUniforms.size as unknown as THREE.Node<"float">, wakeTexel);
+  const wakeRun = mul(div(wakeMetres, max(mul(perTexel, float(2)), float(1e-4))), float(1));
+  const wakeSlopeX = mul(sub(wakeAt(vec2(wakeTexel, float(0))), wakeAt(vec2(mul(wakeTexel, float(-1)), float(0)))), wakeRun);
+  // v runs opposite world z, so the taps swap to keep the gradient in +z
+  const wakeSlopeZ = mul(sub(wakeAt(vec2(float(0), mul(wakeTexel, float(-1)))), wakeAt(vec2(float(0), wakeTexel))), wakeRun);
+  const slopeX = add(add(mul(dhAlong, alongDir.x), mul(dhAcross, acrossDir.x)), wakeSlopeX);
+  const slopeZ = add(add(mul(dhAlong, alongDir.y), mul(dhAcross, acrossDir.y)), wakeSlopeZ);
   // bend the geometry's own world normal (up for a sheet, sideways for a
   // fall) by the slope, then into view space, which is what normalNode is
   const bumpedWorld = normalize(add(normalWorld, vec3(mul(slopeX, float(-1)), float(0), mul(slopeZ, float(-1)))));
@@ -1155,7 +1238,13 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
   // `foamSteps` levels, top step short of solid white so water still shows
   // through the froth rather than a painted ring
   const foamEdge = saturate(mul(floor(mul(foamRaw, foamSteps)), float(0.8).div(max(sub(foamSteps, float(1)), float(1)))));
-  base = mix(base as THREE.Node<"vec3">, tslColor(w.foamColor), foamEdge);
+  // A wake's CRESTS break into froth — a thin highlight riding the tops of the
+  // ripples, which is a different thing from the wake itself: the wake is the
+  // relief above, and this is the little the water spills doing it. Keep it
+  // small. Painting the whole disturbed patch white is what made every earlier
+  // version read as a trail decal, and `wakeFoam: 0` is pure water motion.
+  const wakeFroth = saturate(mul(sub(wakeRaw, float(0.22)), float(3.4))).mul(float(Math.min(1, Math.max(0, w.wakeFoam ?? 0.1))));
+  base = mix(base as THREE.Node<"vec3">, tslColor(w.foamColor), max(foamEdge, wakeFroth));
 
   // gentle shimmer driven by the SAME wave phases, so the color motion reads
   // as coming from the same waves that are actually moving the geometry
@@ -1169,12 +1258,37 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
   // colour at the horizon: bright by day, dark at dusk like the land around
   // it, instead of a constant near-white that floated over a fogged-out hill
   const rim = (tslColor(w.rimColor) as unknown as THREE.Node<"vec3">).mul(horizonTint as unknown as THREE.Node<"vec3">);
-  material.colorNode = mix(shaded as THREE.Node<"vec3">, rim, fresnel);
+  const lit = mix(shaded as THREE.Node<"vec3">, rim, fresnel);
+
+  // -- the surface FROM BELOW ------------------------------------------------
+  //
+  // A water plane is one-sided by default, so a swimmer looking up sees the
+  // sky straight through it — the ceiling of the lake simply is not drawn.
+  // Both faces are drawn now, and the underside gets its own look, because it
+  // is a different thing: light arriving from above, brightest looking
+  // straight up (where the sky comes through the surface almost unbent) and
+  // sliding into a mirror of the dark water as the angle goes shallow, which
+  // is what total internal reflection does. No foam underneath — that is a
+  // shoreline seen from the beach, not from under it.
+  const up = vec3(float(0), float(1), float(0));
+  const skyward = saturate(dot(viewDir as unknown as THREE.Node<"vec3">, up)); // 1 looking straight up
+  const underside = mix(
+    tslColor(w.deepColor) as unknown as THREE.Node<"vec3">,
+    (tslColor(w.rimColor) as unknown as THREE.Node<"vec3">).mul(horizonTint as unknown as THREE.Node<"vec3">),
+    pow(skyward, float(1.6)),
+  );
+  material.colorNode = mix(underside, lit as unknown as THREE.Node<"vec3">, frontFacing as unknown as THREE.Node<"float">);
 
   // -- edge fade: opacity to 0 well before the mesh's own physical boundary --
   const camDist = length(sub(cameraPosition, positionWorld));
   const edgeFade = sub(float(1), smoothstep(float(w.edgeFadeStart), float(w.edgeFadeEnd), camDist));
-  material.opacityNode = mul(float(data.opacity), edgeFade);
+  // The underside is also more OPAQUE: from below the surface is a ceiling,
+  // and a half-transparent ceiling shows the sky through it at every angle,
+  // which is the "I cannot see the top of the water" report.
+  const faceOpacity = mix(float(Math.min(1, data.opacity + 0.35)), float(data.opacity), frontFacing as unknown as THREE.Node<"float">);
+  material.opacityNode = mul(faceOpacity, edgeFade);
+  // drawn from both sides now (a scene may still force one with material.side)
+  material.side = THREE.DoubleSide;
   if (material instanceof THREE.MeshStandardNodeMaterial) material.roughnessNode = float(0.35);
   return material;
 }
@@ -1770,6 +1884,19 @@ function populateEntityGroup(
 
     if (meshData && meshData.source.kind === "asset" && meshData.renderMode === "instanced") {
       const assetId = meshData.source.assetId;
+      // An instanced entry is parented to the SCENE (`anchor` below), because
+      // every entry that shares an asset collapses into one batch that cannot
+      // live under any single entity's group. The consequence is easy to miss
+      // and silent: this entity's own `visibility`, and any transform or
+      // script on an ANCESTOR, never reach what gets drawn. Hiding one is a
+      // matrix change (or a `partMask` of 0), not `group.visible`.
+      if (visibility?.visible === false && !instancedVisibilityWarned.has(id)) {
+        instancedVisibilityWarned.add(id);
+        console.warn(
+          `[render] entity "${id}" is renderMode "instanced" and visibility.visible=false — ` +
+            "instanced meshes are parented to the scene, so it will draw anyway",
+        );
+      }
       const list = ctx.instancedPending.get(assetId);
       const entry: PendingInstance = {
         id,
@@ -1983,6 +2110,9 @@ function populateEntityGroup(
 
     const particlesData = entity.components["particles"] as ParticlesData | undefined;
     if (particlesData) options.onParticles?.(id, group, particlesData);
+
+    const vfxData = entity.components["vfx"] as AmbientVfxData | undefined;
+    if (vfxData) options.onVfx?.(id, group, vfxData);
 
     const billboardData = entity.components["billboard"] as BillboardData | undefined;
     if (billboardData) options.onBillboard?.(id, group, billboardData);
@@ -2742,7 +2872,10 @@ function instanceGltfInto(
         const geometry = cachedTier?.geometry ?? sub.geometry;
         const instanced = new InstancedProps(
           geometry,
-          cachedInstancedMaterial(`${assetId}#${node ?? ""}#${index}${materialKeySuffix}`, sub.material, { uvRotation: rotated }),
+          cachedInstancedMaterial(`${assetId}#${node ?? ""}#${index}${materialKeySuffix}`, sub.material, {
+            uvRotation: rotated,
+            uber: ubered,
+          }),
           entries.length,
         );
         // mid tier is already a distance-culled compromise — a decimated
@@ -2758,7 +2891,6 @@ function instanceGltfInto(
         }
         applyUvRotations(instanced);
         applyUber(instanced);
-    applyUber(instanced);
         instanced.instanceMatrix.needsUpdate = true;
         instanced.computeBoundingSphere();
         root.add(instanced);

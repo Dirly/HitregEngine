@@ -7,11 +7,26 @@ export type RigVec3 = [number, number, number];
  * Sweep a sphere of `radius` from `from` to `to` and return the distance along
  * that segment at which it was stopped, or `null` for a clear run.
  *
+ * `fromInside` asks for a sweep that may START touching geometry and is only
+ * stopped by what it moves INTO (Rapier's `stopAtPenetration: false`). Every
+ * sweep the rig makes asks for it: its probes start at a pivot that may be
+ * grazing a lintel or a jamb, and a sweep that treats a graze it is moving
+ * AWAY from as a hit at distance 0 slams the camera into first person. Do not
+ * lean on it for a DEEP overlap — Rapier's answer there is not dependable
+ * (measured: a probe sunk two-thirds into a box and moving straight out of it
+ * can still report 0), which is why the pivot is kept inside the body's own
+ * collider by {@link fitRigToBody} rather than rescued by a sweep.
+ *
  * Injected rather than imported so this module stays renderer-side: the host
  * hands over `sim.spherecast` (see `PhysicsSim`), a stub in tests, or nothing
  * at all in a scene with no physics.
  */
-export type CameraSweep = (radius: number, from: RigVec3, to: RigVec3) => number | null;
+export type CameraSweep = (
+  radius: number,
+  from: RigVec3,
+  to: RigVec3,
+  fromInside?: boolean,
+) => number | null;
 
 /**
  * A scene's authored `camera.rig` block, structurally. Kept as a plain shape
@@ -32,6 +47,8 @@ export interface AuthoredCameraRig {
   lookUp?: number;
   /** How far the player may angle the view down, in DEGREES. */
   lookDown?: number;
+  /** Flip the vertical mouse axis (flight-stick style). */
+  invertY?: boolean;
 }
 
 export interface CameraRigConfig {
@@ -43,62 +60,81 @@ export interface CameraRigConfig {
   /** Framing the author asked for; the wheel moves it, collision only shortens it. */
   distance: number;
   /**
-   * Floor for the resolved boom — small on purpose. Backed into a corner, the
-   * camera goes effectively FIRST PERSON rather than holding a third-person
-   * distance from inside the wall: a boom floored at a metre with a wall
-   * behind it fills the screen with masonry and shows the player nothing,
-   * while a floored-at-a-handspan boom is a view from the character's own
-   * head. `fadeTargetBelow` takes the body out of the shot on the way down.
+   * Floor for the boom — small on purpose. It is both where the wheel stops
+   * (FIRST PERSON, see `firstPersonBelow`) and where a squeezed boom ends up:
+   * backed into a corner, a boom floored a metre out fills the screen with the
+   * wall it is inside, while a handspan is a view from the character's head.
    */
   minDistance: number;
   maxDistance: number;
-  /** Pivot height above the target's origin — chest/shoulder height, not the feet. */
+  /**
+   * Pivot height above the target's ORIGIN — head/upper-chest height. Mind
+   * where the origin is: a physics capsule is centred on its entity, so a
+   * 1.8 m character whose origin is its capsule wants ~0.65 here, not 1.6.
+   * A pivot above the body's own collider is a pivot nothing keeps out of
+   * door lintels and ceilings.
+   */
   height: number;
   /** Lateral pivot offset, +right. Over-the-shoulder framing; 0 is centred. */
   shoulder: number;
   /**
    * Orbit limits in radians. `pitch` is the eye's elevation above the pivot,
    * so `pitchMax` is how far the camera may rise (view angled DOWN) and
-   * `pitchMin` how far it may drop (view angled UP).
-   *
-   * `pitchMin` is not just taste. Below `asin(-height / distance)` the eye is
-   * under the ground, and collision then crushes the boom to first person for
-   * as long as the player holds that angle — which reads as the camera being
-   * stuck rather than as a look limit. Keep it shallow enough that the crush
-   * is a squeeze, not a wall.
+   * `pitchMin` how far it may drop (view angled UP). Past roughly
+   * `asin(-pivot height over the ground / distance)` the eye meets the ground
+   * and slides along it toward the character, which is how an MMO camera
+   * looks at the sky; the band only decides how far that slide may go.
    */
   pitchMin: number;
   pitchMax: number;
   /** Radians per pixel of mouse movement. */
   lookSpeed: number;
+  /** Flip the vertical mouse axis. Off = mouse forward looks UP. */
+  invertY: boolean;
   /** Sweep radius. Must exceed the near plane's half-diagonal or corners clip. */
   collisionRadius: number;
-  /** Stop this far short of whatever the sweep hit. */
+  /** Stop this far short of whatever the sweep hit, on top of the radius. */
   skin: number;
-  /** Pivot tracking rate, horizontal — higher is tighter. */
+  /**
+   * Pivot tracking rate, horizontal — higher is tighter. Tight on purpose: the
+   * lag is `speed / rate` metres, and a pivot that trails half a metre cuts
+   * the corner of every doorway the character turns through.
+   */
   followDamping: number;
   /**
-   * Pivot tracking rate, vertical. Deliberately looser than the horizontal
-   * one: a hill town is stairs and slopes, and a pivot that tracks Y as
-   * tightly as XZ bobs once per step.
+   * Pivot tracking rate, vertical. Looser than the horizontal one: a hill
+   * town is stairs and slopes, and a pivot that tracks Y as tightly as XZ
+   * bobs once per step.
    */
   verticalDamping: number;
   /** Vertical jump treated as a teleport/fall rather than a step, in metres. */
   verticalSnap: number;
+  /**
+   * At or below this WANTED distance the rig is in first person: the wheel has
+   * been rolled all the way in, the body is hidden, and the look band opens to
+   * `firstPersonLook` because there is no boom left to bury in the ground.
+   */
+  firstPersonBelow: number;
+  /** Look band in first person, radians either way. */
+  firstPersonLook: number;
+  /** How fast the wheel's target distance is approached, per second. */
+  zoomDamping: number;
   /** Seconds the boom stays short after an obstruction clears. */
   recoverDelay: number;
-  /** How fast the boom returns afterwards, m/s. Linear — an exponential crawl reads as lag. */
+  /**
+   * The boom's return is proportional to the gap (`recoverRate`, per second),
+   * so it settles rather than arriving at full speed, and capped at
+   * `recoverSpeed` m/s so a long way back does not whip.
+   */
+  recoverRate: number;
   recoverSpeed: number;
   /**
-   * Rise over an obstruction instead of only shortening into it. This is what
-   * a town needs: pulling the boom in against a house fills the screen with
-   * masonry, while lifting the camera over the eaves keeps the character in
-   * frame. Costs up to `LIFT_CANDIDATES.length` extra sweeps, and only on the
-   * frames where the boom is actually compressed.
+   * How far ahead, in seconds, the rig looks along the target's motion and the
+   * player's own orbit for something that is ABOUT to cut the boom — a door
+   * lintel, a building corner — so it can start closing before it has to.
+   * Without it every doorway is a one-frame, six-metre jump cut. 0 disables.
    */
-  lift: boolean;
-  /** Most the rig may add to the author's pitch while avoiding, in radians. */
-  liftMax: number;
+  lookAhead: number;
   /** Hide the followed body below this boom length (host-applied). */
   fadeTargetBelow: number;
 }
@@ -113,72 +149,88 @@ export const DEFAULT_CAMERA_RIG: CameraRigConfig = {
   pitchMin: -0.56, // ~32° of look-up
   pitchMax: 1.15, // ~66° of look-down
   lookSpeed: 0.0025,
+  invertY: false,
   collisionRadius: 0.3,
-  skin: 0.2,
-  followDamping: 14,
-  verticalDamping: 7,
+  skin: 0.05,
+  followDamping: 25,
+  verticalDamping: 9,
   verticalSnap: 2.5,
-  recoverDelay: 0.12,
-  recoverSpeed: 12,
-  lift: true,
-  liftMax: 0.7,
-  fadeTargetBelow: 1.2,
+  firstPersonBelow: 0.6,
+  firstPersonLook: 1.4,
+  zoomDamping: 12,
+  recoverDelay: 0.3,
+  recoverRate: 3.5,
+  recoverSpeed: 9,
+  lookAhead: 0.4,
+  fadeTargetBelow: 1,
 };
 
-/** Extra pitch, in radians, tried in order when the boom is compressed. */
-const LIFT_CANDIDATES = [0.22, 0.45, 0.7];
-/**
- * Below this fraction of the wanted boom the rig looks for a way over — and a
- * lift is only taken if it gets back ABOVE that same fraction. Half-measures
- * are refused on purpose: tilting the camera skyward to buy 40cm against an
- * infinitely tall wall trades a clear shortened shot for a worse tilted one.
- */
-const LIFT_TRIGGER = 0.75;
-/** Rate the applied lift eases in and out at, radians per second. */
-const LIFT_RATE = 2.6;
+/** Slowest the boom closes on a forecast at, m/s — a small gap still gets closed. */
+const CLOSE_FLOOR = 3;
+/** Slowest the boom returns at, m/s — so a proportional return actually arrives. */
+const RECOVER_FLOOR = 1.2;
+/** Rate a pitch left outside the band (zooming out of first person) returns at, rad/s. */
+const BAND_RETURN_RATE = 2.5;
+/** Below this much predicted travel AND turn the look-ahead is skipped outright. */
+const LOOKAHEAD_MIN_TRAVEL = 0.12;
+const LOOKAHEAD_MIN_TURN = 0.04;
+/** Forecast points along the look-ahead. Spaced under a metre apart at a run. */
+const LOOKAHEAD_SAMPLES = 3;
+/** Most orbit the look-ahead will extrapolate, radians — a mouse flick is not a plan. */
+const LOOKAHEAD_MAX_TURN = 0.5;
+/** The body vanishes a little closer in than it comes back at, so it cannot flicker. */
+const FADE_HYSTERESIS = 0.8;
+/** Gap the pivot keeps from whatever stopped it on the way out from the target. */
+const PIVOT_SKIN = 0.03;
 /** Pivot jump treated as a teleport (fast travel, respawn) rather than motion. */
 const TELEPORT_SNAP = 12;
 
 /**
- * Third-person camera rig: pivot, orbit, boom, collision and obstruction
- * avoidance in one place, driving a plain `THREE.PerspectiveCamera`.
+ * Third-person camera rig: pivot, orbit, boom and collision in one place,
+ * driving a plain `THREE.PerspectiveCamera`. The model is the classic MMO
+ * camera (EverQuest, WoW): the boom only ever SHORTENS, the wheel runs from a
+ * wide shot all the way into first person, and nothing but the player's mouse
+ * ever changes the angle.
  *
  * ## Why it owns the camera outright
  *
- * The rig this replaces was a hybrid: `camera-controls` owned rotation and
+ * The rig this replaced was a hybrid: `camera-controls` owned rotation and
  * damped the orbit TARGET toward the player, while the host separately
  * measured clearance from the player's *true* position and called `dollyTo`
- * with the result. Those are two different origins. `camera-controls`
- * smooth-damps the target with `smoothTime` 0.25 s, so at a sprint (9.5 m/s in
- * the MMO scene) the pivot trailed the character by over two metres — and the
- * boom length computed against the character was then applied about a pivot
- * that far behind them. In open country the error is invisible. In a town
- * whose alleys are three metres wide it puts the camera through the wall the
- * sweep had just proved was clear, which is exactly the "buildings block the
- * view of the player" symptom.
+ * with the result. Two origins, over two metres apart at a sprint — so a boom
+ * proved clear against the character was applied about a pivot that far
+ * behind, through the housefront. The rig smooths the pivot itself and
+ * resolves collision against that same pivot: one origin, and what the sweep
+ * proves is what the camera gets.
  *
- * So the rig smooths the pivot itself and resolves collision against that same
- * smoothed pivot. There is one origin, and what the sweep proves is what the
- * camera gets.
+ * ## The rules that make it calm indoors
  *
- * ## What it fixes beyond that
- *
- * - **Actors don't shove the camera.** The old sweep ran against every layer,
- *   so an NPC wandering behind the player slammed the boom to nothing. The
- *   host passes a sweep already masked to world/terrain (see `Layers`).
- * - **Lift over, not only in.** A boom that can only shorten ends up flat
- *   against a housefront. `LIFT_CANDIDATES` first tries rising over the
- *   obstruction, which keeps the character framed instead of the wall.
- * - **Hold before recovering.** Snap in, then hold, then return at a linear
- *   rate. Passing a row of market stalls used to yo-yo once per stall.
- * - **A floor under the boom, with a fade.** `minDistance` keeps the camera
- *   out of the character's head; `fadeTargetBelow` tells the host to hide the
- *   body when it gets that close anyway.
+ * - **The pivot is kept out of geometry.** A boom sweep that STARTS inside a
+ *   lintel reports distance 0 and slams the camera into first person for as
+ *   long as it lasts. Two guards: the host fits the pivot inside the body's
+ *   own collider ({@link fitRigToBody} — physics then vouches for it), and the
+ *   smoothed pivot is swept out from that un-lagged point every frame, so the
+ *   lag cannot carry it through a door jamb the character turned around.
+ * - **Only the mouse pitches the camera.** An earlier cut rose over
+ *   obstructions by adding pitch of its own. Looking up drives the eye into
+ *   the ground, the boom compressed, the rig "helpfully" rose — so pushing the
+ *   mouse forward moved the view DOWN, which reads as an inverted axis, and in
+ *   a doorway the same logic pumped the camera up and down. It is gone.
+ * - **Snap in only when it must, ease in when it can see it coming.** One
+ *   frame inside a wall shows the world's backfaces, so an actual intrusion is
+ *   instant. But a look-ahead sweep from where the target is about to be finds
+ *   the lintel a third of a second early, and the boom is mostly home by the
+ *   time the hard limit arrives.
+ * - **Hold, then settle back.** The return waits `recoverDelay`, then closes
+ *   the gap proportionally. A colonnade or a row of market stalls otherwise
+ *   yo-yos the camera once per post.
+ * - **Actors don't shove the camera.** The host's sweep is masked to
+ *   world/terrain (see `Layers`).
  *
  * The rig is deliberately free of DOM and of physics: input arrives as mouse
  * deltas, collision as a `CameraSweep`. That keeps it testable in Node and
  * lets both hosts — the editor's play mode and the published runtime — share
- * one implementation instead of the two that had already drifted apart.
+ * one implementation.
  */
 export class ThirdPersonCameraRig {
   readonly config: CameraRigConfig;
@@ -189,25 +241,38 @@ export class ThirdPersonCameraRig {
   private readonly wanted = new THREE.Vector3();
   private yaw = 0;
   private pitch = -0.18;
-  /** Author/player framing distance, before collision. */
+  /** Where the wheel has asked the framing to go. */
+  private zoomGoal: number;
+  /** Framing distance in effect this frame — `zoomGoal`, smoothed. Before collision. */
   private wantedDistance: number;
   /** Resolved boom actually in use. */
   private boom: number;
   private holdTimer = 0;
-  private lift = 0;
+  /** Speed of the current forecast-driven close, m/s. Latched for the episode. */
+  private closeSpeed = 0;
   private seeded = false;
+  private hidden = false;
+
+  /** Target velocity and orbit rate, low-passed, feeding the look-ahead. */
+  private readonly velocity = new THREE.Vector3();
+  private readonly lastTarget = new THREE.Vector3();
+  private lastYaw = 0;
+  private yawRate = 0;
 
   private readonly eye = new THREE.Vector3();
   private readonly dir = new THREE.Vector3();
   private readonly right = new THREE.Vector3();
   private readonly scratch = new THREE.Vector3();
+  private readonly ahead = new THREE.Vector3();
+  private readonly probe = new THREE.Vector3();
   private readonly targetForward = new THREE.Vector3();
   private readonly from: RigVec3 = [0, 0, 0];
   private readonly to: RigVec3 = [0, 0, 0];
 
   constructor(config: Partial<CameraRigConfig> = {}) {
     this.config = { ...DEFAULT_CAMERA_RIG, ...config };
-    this.wantedDistance = this.clampDistance(this.config.distance);
+    this.zoomGoal = this.clampDistance(this.config.distance);
+    this.wantedDistance = this.zoomGoal;
     this.boom = this.wantedDistance;
     this.pitch = clamp(this.pitch, this.config.pitchMin, this.config.pitchMax);
   }
@@ -215,6 +280,7 @@ export class ThirdPersonCameraRig {
   /** Replace config in place (a live scene edit re-reads the `camera` component). */
   configure(patch: Partial<CameraRigConfig>): void {
     Object.assign(this.config, patch);
+    this.zoomGoal = this.clampDistance(this.zoomGoal);
     this.wantedDistance = this.clampDistance(this.wantedDistance);
     this.boom = Math.min(this.boom, this.wantedDistance);
   }
@@ -227,26 +293,37 @@ export class ThirdPersonCameraRig {
    * instantly obvious in the hand: `pitch` is the elevation of the EYE above
    * the pivot, so looking DOWN means raising the camera. Pushing the mouse
    * forward (`dy` negative, the standard "look up") therefore has to LOWER the
-   * pitch, and pulling it back raises it.
+   * pitch, and pulling it back raises it. `invertY` flips exactly that.
    */
   addLook(dx: number, dy: number): void {
     if (this.config.mode === "chase") return;
     this.yaw -= dx * this.config.lookSpeed;
+    const sign = this.config.invertY ? -1 : 1;
+    const next = this.pitch + sign * dy * this.config.lookSpeed;
+    // A pitch still outside the band (it is eased back in after a zoom out of
+    // first person) may move toward the band freely, never further out.
     this.pitch = clamp(
-      this.pitch + dy * this.config.lookSpeed,
-      this.config.pitchMin,
-      this.config.pitchMax,
+      next,
+      Math.min(this.bandMin(), this.pitch),
+      Math.max(this.bandMax(), this.pitch),
     );
   }
 
-  /** Wheel zoom. The framing the player WANTS; collision may still shorten it. */
+  /**
+   * Wheel zoom, in metres at the default framing. Scaled by the current
+   * distance so a notch is a nudge up close and a stride far out — the same
+   * number of clicks crosses either half of the range — and rolled all the way
+   * in it lands in first person.
+   */
   addZoom(delta: number): void {
-    this.wantedDistance = this.clampDistance(this.wantedDistance + delta);
+    const scale = clamp(this.zoomGoal / DEFAULT_CAMERA_RIG.distance, 0.25, 2);
+    this.zoomGoal = this.clampDistance(this.zoomGoal + delta * scale);
   }
 
   /** Jump straight to a framing distance (entering play with the author's `rig.distance`). */
   setDistance(distance: number): void {
-    this.wantedDistance = this.clampDistance(distance);
+    this.zoomGoal = this.clampDistance(distance);
+    this.wantedDistance = this.zoomGoal;
   }
 
   /**
@@ -255,21 +332,23 @@ export class ThirdPersonCameraRig {
    * mouse, and a chase rig sets pitch once and lets the target own yaw.
    */
   setOrbit(yaw: number | null, pitch: number | null): void {
-    if (yaw !== null) this.yaw = yaw;
-    if (pitch !== null) this.pitch = clamp(pitch, this.config.pitchMin, this.config.pitchMax);
+    if (yaw !== null) {
+      this.yaw = yaw;
+      this.lastYaw = yaw;
+      this.yawRate = 0;
+    }
+    if (pitch !== null) this.pitch = clamp(pitch, this.bandMin(), this.bandMax());
   }
 
   /**
    * Adopt a scene's authored `camera.rig` block.
    *
    * The one interesting conversion is `height`, which is an EYE elevation
-   * while the rig orbits `pivotHeight` (the character's chest). The difference
-   * between the two is therefore a PITCH, not a translation — which is why a
-   * follow rig authored at height 3.1 over distance 7.5 now starts looking
-   * gently down at the character instead of, as it did before, having its
-   * `height` ignored outright. In chase the framing is rigid, so the authored
-   * distance is horizontal, the height literal, and the boom is the
-   * hypotenuse of the two.
+   * while the rig orbits `pivotHeight`. The difference between the two is
+   * therefore a PITCH, not a translation — a follow rig authored at height 3.1
+   * over distance 7.5 starts looking gently down at the character. In chase
+   * the framing is rigid, so the authored distance is horizontal, the height
+   * literal, and the boom is the hypotenuse of the two.
    */
   applyAuthored(rig: AuthoredCameraRig): void {
     const mode = rig.mode === "chase" ? "chase" : "follow";
@@ -293,9 +372,7 @@ export class ThirdPersonCameraRig {
       height: pivotHeight,
       shoulder: rig.shoulder ?? DEFAULT_CAMERA_RIG.shoulder,
       followDamping: rig.damping ?? DEFAULT_CAMERA_RIG.followDamping,
-      // a rigid chase boom that went hunting for a way over its target's
-      // obstruction would fight whatever the target is doing; it only shortens
-      lift: mode === "follow",
+      invertY: rig.invertY ?? DEFAULT_CAMERA_RIG.invertY,
       ...(mode === "chase"
         ? { pitchMin: pitch, pitchMax: pitch }
         : {
@@ -312,8 +389,14 @@ export class ThirdPersonCameraRig {
     return this.boom;
   }
 
+  /** Where the wheel has asked the framing to go (collision may still shorten it). */
   get wantedFraming(): number {
-    return this.wantedDistance;
+    return this.zoomGoal;
+  }
+
+  /** True once the wheel is rolled all the way in. */
+  get firstPerson(): boolean {
+    return this.config.mode === "follow" && this.zoomGoal <= this.config.firstPersonBelow;
   }
 
   get orbit(): { yaw: number; pitch: number } {
@@ -322,10 +405,11 @@ export class ThirdPersonCameraRig {
 
   /**
    * True when the boom is short enough that the followed body would be drawn
-   * as the inside of its own head. The host hides the model instead.
+   * as the inside of its own head. The host hides the model instead. It has
+   * hysteresis — a boom hovering at the threshold would strobe the character.
    */
   get targetObscured(): boolean {
-    return this.boom < this.config.fadeTargetBelow;
+    return this.hidden;
   }
 
   /** Current eye position — valid after `update`. */
@@ -347,16 +431,19 @@ export class ThirdPersonCameraRig {
     const len = this.scratch.length();
     if (len < 1e-4) return;
     this.scratch.divideScalar(len);
-    this.yaw = Math.atan2(this.scratch.x, this.scratch.z);
-    this.pitch = clamp(Math.asin(this.scratch.y), this.config.pitchMin, this.config.pitchMax);
+    this.setOrbit(Math.atan2(this.scratch.x, this.scratch.z), Math.asin(this.scratch.y));
   }
 
   /** Drop all smoothing on the next update — a teleport, a respawn, a scene swap. */
   reset(): void {
     this.seeded = false;
     this.holdTimer = 0;
-    this.lift = 0;
+    this.closeSpeed = 0;
+    this.wantedDistance = this.zoomGoal;
     this.boom = this.wantedDistance;
+    this.velocity.set(0, 0, 0);
+    this.yawRate = 0;
+    this.lastYaw = this.yaw;
   }
 
   /**
@@ -401,102 +488,212 @@ export class ThirdPersonCameraRig {
     if (!this.seeded || this.pivot.distanceTo(this.wanted) > TELEPORT_SNAP) {
       this.pivot.copy(this.wanted);
       this.seeded = true;
+      this.velocity.set(0, 0, 0);
+      this.yawRate = 0;
     } else {
       const kh = approach(cfg.followDamping, dt);
       this.pivot.x += (this.wanted.x - this.pivot.x) * kh;
       this.pivot.z += (this.wanted.z - this.pivot.z) * kh;
       const dy = this.wanted.y - this.pivot.y;
       this.pivot.y += Math.abs(dy) > cfg.verticalSnap ? dy : dy * approach(cfg.verticalDamping, dt);
+      if (dt > 1e-5) {
+        // low-passed: one physics-step hitch must not read as a sprint
+        const kv = approach(10, dt);
+        this.velocity.x += ((targetPosition.x - this.lastTarget.x) / dt - this.velocity.x) * kv;
+        this.velocity.y += ((targetPosition.y - this.lastTarget.y) / dt - this.velocity.y) * kv;
+        this.velocity.z += ((targetPosition.z - this.lastTarget.z) / dt - this.velocity.z) * kv;
+        this.yawRate += (angleDelta(this.yaw, this.lastYaw) / dt - this.yawRate) * kv;
+      }
     }
+    this.lastTarget.set(targetPosition.x, targetPosition.y, targetPosition.z);
+    this.lastYaw = this.yaw;
 
-    // 2. boom direction and length, resolved against the SAME pivot.
-    //
-    // The decision to lift is made from the UNLIFTED direction, never from the
-    // lifted one. Judging it from where the camera currently sits makes the
-    // lift self-cancelling: risen over the eave, the shot is clear, so the
-    // rig stops lifting, so the eave blocks again — the camera bobs over the
-    // roofline at the ease rate for as long as you stand there.
-    const wantedBoom = this.wantedDistance;
-    const base = this.castBoom(this.pitch, wantedBoom, sweep);
-
-    // 3. compressed against something? Try rising over it before accepting a
-    // view of the wall. The chosen lift eases in and out rather than popping.
-    let liftTarget = 0;
-    if (cfg.lift && sweep && base < wantedBoom * LIFT_TRIGGER) {
-      // smallest lift that actually restores the shot wins; if none does, keep
-      // the honest compression rather than tilting for a marginal gain
-      for (const extra of LIFT_CANDIDATES) {
-        if (extra > cfg.liftMax) break;
-        const candidatePitch = Math.min(this.pitch + extra, cfg.pitchMax);
-        if (this.castBoom(candidatePitch, wantedBoom, sweep) >= wantedBoom * LIFT_TRIGGER) {
-          liftTarget = extra;
-          break;
+    // 2. keep the pivot out of geometry. Where the pivot is HEADED sits inside
+    // the body's own collider (the host fits it there), so physics vouches
+    // for it; nothing vouches for the smoothed point trailing it around a door
+    // jamb or still up under the ceiling of the stair it just came down. Walk
+    // the probe from the one to the other and stop where the world does. The
+    // worst a bad answer can do here is cancel the lag for a frame.
+    if (sweep) {
+      const reach = this.wanted.distanceTo(this.pivot);
+      if (reach > 1e-3) {
+        const hit = this.cast(sweep, this.wanted, this.pivot, true);
+        if (hit !== null) {
+          this.pivot.lerpVectors(this.wanted, this.pivot, Math.max(0, hit - PIVOT_SKIN) / reach);
         }
       }
     }
-    const liftStep = LIFT_RATE * dt;
-    this.lift += clamp(liftTarget - this.lift, -liftStep, liftStep);
-    if (this.lift < 1e-3) this.lift = 0;
-    // mid-ease the camera is at neither the base nor the candidate pitch, so
-    // the boom has to be resolved where it actually is
-    const resolved = this.lift === 0 ? base : this.castBoom(this.pitch + this.lift, wantedBoom, sweep);
 
-    // 4. snap in, hold, then return at a fixed rate. Instant intrusion because
-    // one frame inside a wall shows the player the world's backfaces; the hold
-    // and the linear return because a street of market stalls otherwise
-    // yo-yos the camera once per stall.
-    if (resolved < this.boom) {
-      this.boom = resolved;
+    // 3. the framing the player wants: the wheel's goal, approached smoothly,
+    // and a pitch left outside the band by a zoom out of first person walked
+    // back into it rather than snapped.
+    this.wantedDistance += (this.zoomGoal - this.wantedDistance) * approach(cfg.zoomDamping, dt);
+    if (Math.abs(this.zoomGoal - this.wantedDistance) < 1e-3) this.wantedDistance = this.zoomGoal;
+    const bandStep = BAND_RETURN_RATE * dt;
+    if (this.pitch < this.bandMin()) this.pitch = Math.min(this.bandMin(), this.pitch + bandStep);
+    else if (this.pitch > this.bandMax()) this.pitch = Math.max(this.bandMax(), this.pitch - bandStep);
+    const wantedBoom = this.wantedDistance;
+
+    // 4. what the world allows. `hard` is the law: past it the eye is inside
+    // something. The look-ahead asks the same question from where the target
+    // and the orbit will be in `lookAhead` seconds, and is only ever a reason
+    // to start closing early.
+    this.directionFor(this.yaw, this.pitch, this.dir);
+    const hard = this.castBoom(this.pivot, this.dir, wantedBoom, sweep);
+    let limit = hard;
+    if (sweep && cfg.lookAhead > 0) {
+      const travel = this.velocity.length() * cfg.lookAhead;
+      const turn = clamp(this.yawRate * cfg.lookAhead, -LOOKAHEAD_MAX_TURN, LOOKAHEAD_MAX_TURN);
+      if (travel > LOOKAHEAD_MIN_TRAVEL || Math.abs(turn) > LOOKAHEAD_MIN_TURN) {
+        // the target cannot run through a wall, so neither may its forecast
+        let reach = 1;
+        if (travel > 1e-4) {
+          this.ahead.copy(this.pivot).addScaledVector(this.velocity, cfg.lookAhead);
+          const hit = this.cast(sweep, this.pivot, this.ahead, true);
+          if (hit !== null) reach = Math.max(0, hit - PIVOT_SKIN) / travel;
+        }
+        // Sampled ALONG the way, not only at the end of it: under a lintel the
+        // boom is shortest for the metre just inside the door and longer again
+        // beyond, so a single far sample walks straight past the minimum and
+        // the hard limit still lands as a jump.
+        for (let k = 1; k <= LOOKAHEAD_SAMPLES; k++) {
+          const f = k / LOOKAHEAD_SAMPLES;
+          this.ahead.copy(this.pivot).addScaledVector(this.velocity, cfg.lookAhead * Math.min(f, reach));
+          this.directionFor(this.yaw + turn * f, this.pitch, this.scratch);
+          limit = Math.min(limit, this.castBoom(this.ahead, this.scratch, wantedBoom, sweep));
+        }
+      }
+    }
+
+    // 5. move the boom. Intrusion is instant; a forecast is eased toward; the
+    // way back waits out the hold and then settles.
+    if (this.boom > hard) {
+      this.boom = hard;
       this.holdTimer = cfg.recoverDelay;
-    } else if (resolved < wantedBoom && resolved <= this.boom + 1e-3) {
-      // still pinned by the same obstruction, just not cutting further. The
-      // hold has to refresh here too, or an obstruction that flickers in and
-      // out (a fence, a colonnade, a row of market stalls seen edge-on)
-      // outlives the hold every other frame and the boom yo-yos.
+    }
+    if (this.boom > limit + 1e-3) {
+      // Sized to ARRIVE as the obstruction does: the forecast is `lookAhead`
+      // seconds out, so gap / lookAhead gets the boom home on time at a steady
+      // speed. Latched at its highest for the episode — an exponential here
+      // starts at 60 m/s across a doorway and reads as the jump cut it replaces.
+      this.closeSpeed = Math.max(this.closeSpeed, (this.boom - limit) / cfg.lookAhead, CLOSE_FLOOR);
+      this.boom = Math.max(limit, this.boom - this.closeSpeed * dt);
       this.holdTimer = cfg.recoverDelay;
+    } else if (this.boom >= limit - 1e-3) {
+      // pinned by an obstruction, just not cut further. The hold refreshes here
+      // too, or one that flickers in and out (a fence, a colonnade) outlives
+      // the hold every other frame. At rest against nothing there is no hold.
+      if (limit < wantedBoom - 1e-3) this.holdTimer = cfg.recoverDelay;
     } else if (this.holdTimer > 0) {
       this.holdTimer -= dt;
     } else {
-      this.boom = Math.min(resolved, this.boom + cfg.recoverSpeed * dt);
+      const speed = clamp((limit - this.boom) * cfg.recoverRate, RECOVER_FLOOR, cfg.recoverSpeed);
+      this.boom = Math.min(limit, this.boom + speed * dt);
     }
 
-    // 5. write the pose.
-    this.directionFor(this.pitch + this.lift, this.dir);
+    if (this.boom <= limit + 1e-3) this.closeSpeed = 0;
+
+    // 6. the body. Hidden in first person and whenever the boom is inside it.
+    if (this.boom < cfg.fadeTargetBelow * FADE_HYSTERESIS) this.hidden = true;
+    else if (this.boom >= cfg.fadeTargetBelow) this.hidden = false;
+
+    // 7. write the pose.
     this.eye.copy(this.pivot).addScaledVector(this.dir, this.boom);
     camera.position.copy(this.eye);
     camera.up.set(0, 1, 0);
     camera.lookAt(this.pivot);
   }
 
-  /** Longest clear boom along `pitch`, capped at `wanted`. */
-  private castBoom(pitch: number, wanted: number, sweep?: CameraSweep | null): number {
+  /** Longest clear boom from `origin` along `dir`, capped at `wanted`. */
+  private castBoom(
+    origin: THREE.Vector3,
+    dir: THREE.Vector3,
+    wanted: number,
+    sweep?: CameraSweep | null,
+  ): number {
     const cfg = this.config;
     if (!sweep) return wanted;
-    this.directionFor(pitch, this.scratch);
-    this.from[0] = this.pivot.x;
-    this.from[1] = this.pivot.y;
-    this.from[2] = this.pivot.z;
-    this.to[0] = this.pivot.x + this.scratch.x * wanted;
-    this.to[1] = this.pivot.y + this.scratch.y * wanted;
-    this.to[2] = this.pivot.z + this.scratch.z * wanted;
-    const hit = sweep(cfg.collisionRadius, this.from, this.to);
+    this.probe.copy(origin).addScaledVector(dir, wanted);
+    const hit = this.cast(sweep, origin, this.probe, true);
     if (hit === null) return wanted;
-    // A sweep that starts already penetrating reports 0. That means the pivot
-    // itself is inside geometry (clipped into a wall, a doorway thinner than
-    // the probe), and the honest answer is the floor — not zero, which would
-    // park the camera inside the character.
     return clamp(hit - cfg.skin, cfg.minDistance, wanted);
   }
 
-  /** Unit vector from pivot toward the eye for a given pitch. */
-  private directionFor(pitch: number, out: THREE.Vector3): THREE.Vector3 {
+  private cast(sweep: CameraSweep, a: THREE.Vector3, b: THREE.Vector3, fromInside: boolean): number | null {
+    this.from[0] = a.x;
+    this.from[1] = a.y;
+    this.from[2] = a.z;
+    this.to[0] = b.x;
+    this.to[1] = b.y;
+    this.to[2] = b.z;
+    return sweep(this.config.collisionRadius, this.from, this.to, fromInside);
+  }
+
+  /** Unit vector from pivot toward the eye for a given orbit. */
+  private directionFor(yaw: number, pitch: number, out: THREE.Vector3): THREE.Vector3 {
     const cp = Math.cos(pitch);
-    return out.set(Math.sin(this.yaw) * cp, Math.sin(pitch), Math.cos(this.yaw) * cp);
+    return out.set(Math.sin(yaw) * cp, Math.sin(pitch), Math.cos(yaw) * cp);
+  }
+
+  private bandMin(): number {
+    return this.firstPerson
+      ? Math.min(this.config.pitchMin, -this.config.firstPersonLook)
+      : this.config.pitchMin;
+  }
+
+  private bandMax(): number {
+    return this.firstPerson
+      ? Math.max(this.config.pitchMax, this.config.firstPersonLook)
+      : this.config.pitchMax;
   }
 
   private clampDistance(d: number): number {
     return clamp(d, this.config.minDistance, this.config.maxDistance);
   }
+}
+
+/** The followed body's `collider` component, structurally — only what {@link fitRigToBody} reads. */
+export interface RigBodyCollider {
+  shape?: string;
+  size?: readonly number[];
+  offset?: readonly number[];
+}
+
+/**
+ * Headroom kept between the pivot and the top of the body's collider, metres.
+ * The probe radius, so the probe sphere AT the pivot never pokes out of the
+ * top of the body: wherever the character fits, the start of every boom sweep
+ * fits too, and "starts inside the lintel" cannot happen by construction.
+ */
+const PIVOT_HEADROOM = DEFAULT_CAMERA_RIG.collisionRadius;
+
+/**
+ * Keep a follow rig's pivot inside the body it follows.
+ *
+ * `pivotHeight` is measured from the target's ORIGIN and defaults to 1.6,
+ * which assumes an origin at the feet. But a collider is centred on its entity
+ * unless it is offset, so the usual capsule character has its origin at its
+ * waist — and 1.6 above that is 0.7 m over its head, where nothing stops the
+ * pivot entering a door lintel or a low ceiling. Physics keeps the collider out
+ * of the world; a pivot inside the collider inherits that for free. (Measured
+ * in the MMO town before this existed: every doorway put the pivot's probe in
+ * the lintel, the boom sweep reported 0, and the camera slammed to first
+ * person and back — the "janky entering buildings" report.)
+ *
+ * Only sized primitives are read (a cooked trimesh has no meaningful "top"),
+ * and only in follow mode: a chase rig on a vehicle frames what it authored.
+ */
+export function fitRigToBody<T extends AuthoredCameraRig>(rig: T, collider?: RigBodyCollider | null): T {
+  if (!collider || rig.mode === "chase") return rig;
+  const sized = ["box", "sphere", "capsule", "cylinder"].includes(collider.shape ?? "");
+  const size = collider.size;
+  if (!sized || !size) return rig;
+  const tall = collider.shape === "sphere" ? size[0] : size[1];
+  if (tall === undefined || !(tall > 0)) return rig;
+  const top = (collider.offset?.[1] ?? 0) + tall / 2;
+  const pivotHeight = rig.pivotHeight ?? DEFAULT_CAMERA_RIG.height;
+  const fitted = Math.min(pivotHeight, top - PIVOT_HEADROOM);
+  return fitted === pivotHeight ? rig : { ...rig, pivotHeight: fitted };
 }
 
 /**
@@ -512,6 +709,14 @@ function approach(rate: number, dt: number): number {
 
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
+}
+
+/** Shortest signed difference between two angles. */
+function angleDelta(a: number, b: number): number {
+  let d = (a - b) % (Math.PI * 2);
+  if (d > Math.PI) d -= Math.PI * 2;
+  else if (d < -Math.PI) d += Math.PI * 2;
+  return d;
 }
 
 /** Author-facing look limits are degrees; the rig works in radians. */

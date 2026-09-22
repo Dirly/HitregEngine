@@ -1,5 +1,20 @@
 /** Tiny observable primitives shared between the React overlay and viewport tools. */
 
+/** What the New scene dialog asks the host to create. */
+export interface NewSceneRequest {
+  /** Project folder the scene file goes into. */
+  project: string;
+  /** Scene file id (kebab-case). */
+  id: string;
+  /** Menu label for its own entry; unset for a stage. */
+  label?: string;
+  note?: string;
+  /** List it as a stage under this scene instead of as its own entry. */
+  variantOf?: string;
+  /** Start from the empty starter scene or a copy of the scene being edited. */
+  from: "empty" | "current";
+}
+
 export interface Observable<T> {
   get(): T;
   set(value: T): void;

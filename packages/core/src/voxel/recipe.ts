@@ -313,16 +313,113 @@ export const bridgeSchema = z.object({
   tags: z.array(z.string()).default([]),
 });
 
+/**
+ * A way into a town: where the town's own road network meets the world's.
+ *
+ * Without one, a path is routed to the town CENTRE and the search arrives on
+ * whatever bearing the ground happened to be cheapest on — over the wall,
+ * across the castle foundations, past the gate the builder put on the other
+ * side. It is also how a walled capital ends up with no path at all: the goal
+ * cell sits behind two metres of its own masonry and every grade cap fails.
+ * A gate moves the goal out to the mouth the builder chose and pins the last
+ * stretch dead straight, so the road and the arch line up by construction
+ * instead of by luck.
+ *
+ * Whatever builds the town writes these as it places the gate; `worldgen
+ * gates` adds one by hand, or derives it from the approach stub the builder
+ * already drew.
+ */
+export const townGateSchema = z.object({
+  id: z.string().default("gate"),
+  at: z
+    .tuple([z.number(), z.number()])
+    .describe("World XZ of the gate mouth — where the town's own roads end and the world's begin. Every path to this town arrives HERE, not at the centre."),
+  facing: z
+    .tuple([z.number(), z.number()])
+    .describe("Outward XZ direction the road leaves in, pointing away from the town. Normalised on use; [0, 0] is an error."),
+  width: z.number().positive().default(6).describe("Clear width of the opening. A path arriving here is drawn no wider than this."),
+  approach: z
+    .number()
+    .min(0)
+    .default(30)
+    .describe(
+      "Metres of DEAD STRAIGHT path laid outward from `at` along `facing` before the router takes over. This is what makes the road " +
+        "leave square-on through the arch instead of raking past it; 0 lets the router start bending at the gate itself.",
+    ),
+  tags: z.array(z.string()).default([]),
+});
+
+/**
+ * A shelf inside a town: the same pad carve as the town itself, at its own
+ * height, along a line rather than round a point.
+ *
+ * A town on a hillside used to be a disc of terrain pulled flat — the hill
+ * inside the pad simply vanished, which is why every generated settlement
+ * stood on a pool table. A terraced town instead leaves `flatten` at 0 (the
+ * hill stays) and steps a few shelves up it, each cut and filled to one
+ * height, joined by ramps that are ordinary graded roads. The stepped
+ * hillside IS the town's ground.
+ *
+ * `points` is the shelf's centreline, so a terrace is a thick line, not a
+ * disc: one point is a disc (a keep on a knoll), two or more follow the
+ * contour round the hill. `falloff` is the height of the step at its edge —
+ * a few metres reads as a retaining wall, twenty as a bank.
+ */
+export const terraceSchema = z.object({
+  id: z.string().default("terrace"),
+  points: z
+    .array(z.tuple([z.number(), z.number()]))
+    .min(1)
+    .describe("World-space XZ centreline of the shelf; a single point is a round pad."),
+  radius: z.number().positive().default(20).describe("Half-width of the flat shelf, measured from the centreline."),
+  falloff: z.number().min(0).default(6).describe("Distance beyond `radius` over which the shelf's height blends into what is around it — the step's face."),
+  groundY: z.number().describe("The shelf's height. Unlike a town pad this is never inferred: a terrace exists to be at a chosen level."),
+  flatten: z.number().min(0).max(1).default(1),
+  tags: z.array(z.string()).default([]),
+});
+
 /** A settlement pad: terrain pulled flat so WFC buildings have somewhere to stand. */
 export const townSchema = z.object({
   id: z.string().default("town"),
   excludeScatter: z.boolean().optional().describe("When omitted or true, exclude scatter and ground cover across the whole town pad. Set false for landscaped towns whose roads and building foundations provide local clearances."),
+  tier: z
+    .enum(["capital", "city", "town", "village", "hamlet"])
+    .optional()
+    .describe(
+      "How big a place this is. It sets the pad's size and, later, what gets built on it; `worldgen towns` buckets a world " +
+        "into a few capitals on the coast, some cities, and a long tail of villages and hamlets, because a world of forty " +
+        "identical 45 m discs reads as forty identical places. Absent on a recipe written before tiers existed — read it as " +
+        "\"capital\" when `tags` says so, \"town\" otherwise.",
+    ),
   center: z.tuple([z.number(), z.number()]),
   radius: z.number().positive().default(45),
   falloff: z.number().min(0).default(35).describe("Distance beyond `radius` over which the pad blends into natural terrain."),
   /** Pad height. Omit and the generator fills it in from the terrain's own local mean. */
   groundY: z.number().optional(),
-  flatten: z.number().min(0).max(1).default(0.95),
+  flatten: z
+    .number()
+    .min(0)
+    .max(1)
+    .default(0.95)
+    .describe(
+      "How hard the whole footprint is pulled to `groundY`. 1 is a table top. A TERRACED town sets this to 0 and leaves the " +
+        "hill alone — its `terraces` are the flat ground, and the slope between them is the point.",
+    ),
+  terraces: z
+    .array(terraceSchema)
+    .default([])
+    .describe(
+      "Shelves stepped up the site, for a town with verticality. Written by `worldgen terrace`, which also cuts the ramps " +
+        "between them as ordinary roads (`<town>-ramp-*`). Empty for a town on the flat.",
+    ),
+  gates: z
+    .array(townGateSchema)
+    .default([])
+    .describe(
+      "Ways in. A town with gates is entered ONLY through them: `worldgen paths` and `worldgen trails` route to the gate mouth " +
+        "that faces where they come from instead of to the centre, and the pad is a wall to every route not arriving at one. Leave " +
+        "empty for an open village whose lanes are the road.",
+    ),
   /** Free-form, for the WFC/POI stages to read (population tier, faction, ...). */
   tags: z.array(z.string()).default([]),
 });
@@ -474,6 +571,18 @@ export const poiSchema = z.object({
   position: z.tuple([z.number(), z.number(), z.number()]),
   rotationY: z.number().default(0),
   prefab: z.string().optional(),
+  name: z
+    .string()
+    .optional()
+    .describe("What players call this one — 'The Warren Mouth'. Set by a story; a bare generated POI has none and is labelled by its id."),
+  zone: z
+    .string()
+    .default("")
+    .describe(
+      "Region id this POI stands in (recipe `regions`), or empty in an unzoned world. Stamped by `worldgen pois` and " +
+        "re-stamped whenever the zones are redrawn, so a zone's contents can be listed, dressed and quested over without " +
+        "anything having to re-run point-in-polygon over 1000 landmarks.",
+    ),
   radius: z
     .number()
     .positive()
@@ -483,6 +592,71 @@ export const poiSchema = z.object({
     .array(z.string())
     .default([])
     .describe('Free-form; "safe" marks a sanctuary (no player-on-player damage within `radius`), "pass" a zone-border pass.'),
+});
+
+/** A pack a story beat puts at the POI it dresses; the camp doc is built from this. */
+export const storyPackSchema = z.object({
+  template: z.string().min(1).describe("NPC template id — the same thing a `spawnArea` spawn names."),
+  min: z.number().int().min(1).default(2).describe("Fewest of them at one of these places."),
+  max: z.number().int().min(1).default(4),
+  spread: z.number().min(0).default(6),
+  radius: z.number().positive().default(70).describe("How close a player must come to wake it."),
+  leash: z.number().positive().default(26),
+  roam: z.number().min(0).default(8),
+});
+
+/**
+ * One beat of a story: what to make of the POIs of a given KIND.
+ *
+ * The generator has already decided where the mine mouths, the ruins and the
+ * hollows are — a beat says what they are FOR. A `plague-ratkin` story turns
+ * the zone's mine-sites into warren mouths, a share of its ruins into plague
+ * shrines and its bogs into spoil pits, all from one small set of prefabs, and
+ * the zone reads as one place because every beat draws on the same set.
+ */
+export const storyBeatSchema = z.object({
+  kind: z.string().min(1).describe("POI kind this dresses: mine-site, ruin-site, cove, bog, …"),
+  share: z
+    .number()
+    .min(0)
+    .max(1)
+    .default(1)
+    .describe("Fraction of that kind in the zone to dress, chosen deterministically. 1 = every one of them, 0.35 = a scattering."),
+  max: z.number().int().min(0).optional().describe("Never dress more than this many, however many the zone holds."),
+  prefab: z.string().optional().describe("Prefab stamped onto the POI. The streamer builds it in the cell the POI stands in."),
+  name: z
+    .string()
+    .optional()
+    .describe('What to call them — "Warren Mouth". More than one gets numbered ("Warren Mouth II"), so quest text can name a specific one.'),
+  tags: z.array(z.string()).default([]).describe("Added to the POI, for quests and spawn tables to select on."),
+  pack: storyPackSchema.optional().describe("Monsters living at it. Written as a camp (`story-*`), which `worldgen spawn` never rewrites."),
+});
+
+/**
+ * A story: what is going on in one zone.
+ *
+ * A zone generated from terrain is a shape with a name. This is the layer that
+ * makes it a PLACE — one document, applied to one zone, that dresses the POIs
+ * already standing there and puts the right monsters in them. It is deliberately
+ * reusable: the same `plague-ratkin` document can be applied to a second zone
+ * on the other side of the world and will pick that zone's own mine mouths and
+ * ruins, using the same handful of prefabs.
+ *
+ * Applied by `worldgen story`, which is idempotent — everything it touches is
+ * tagged `story:<id>` and `--clear` takes it all back off.
+ */
+export const storySchema = z.object({
+  id: z
+    .string()
+    .regex(/^[a-z][a-z0-9-]*$/, "lowercase slug")
+    .describe("Stable slug; also the `story:<id>` tag left on everything this dresses."),
+  name: z.string().min(1).describe("What it is called out loud: 'The Plague Ratkin'."),
+  story: z
+    .string()
+    .default("")
+    .describe("Two to five sentences, written onto the zone's own `story` — what is wrong with this place and why anyone goes there."),
+  level: z.tuple([z.number().int().min(1), z.number().int().min(1)]).optional().describe("Character level band written onto the zone."),
+  beats: z.array(storyBeatSchema).min(1),
 });
 
 /**
@@ -1441,6 +1615,15 @@ export const worldRecipeSchema = z.object({
     ),
   scatter: z.array(scatterSchema).default([]),
 
+  pipeline: z
+    .record(z.string(), z.string())
+    .default({})
+    .describe(
+      "Stage name -> ISO timestamp of the last time it ran, stamped automatically whenever a worldgen stage writes " +
+        "the recipe. A world is built by a dozen stages that depend on each other, and half of them are an agent's " +
+        "job rather than a generator's; this is what lets `worldgen status` say which are done, which went STALE " +
+        "because something they depend on was re-run after them, and which have never run at all.",
+    ),
   regions: z
     .array(regionSchema)
     .default([])
@@ -1591,9 +1774,13 @@ export type CanyonDoc = z.infer<typeof canyonSchema>;
 export type RidgeDoc = z.infer<typeof ridgeSchema>;
 export type RoadDoc = z.infer<typeof roadSchema>;
 export type TownDoc = z.infer<typeof townSchema>;
+export type TownGateDoc = z.infer<typeof townGateSchema>;
+export type TerraceDoc = z.infer<typeof terraceSchema>;
 export type BlobDoc = z.infer<typeof blobSchema>;
 export type TunnelDoc = z.infer<typeof tunnelSchema>;
 export type PoiDoc = z.infer<typeof poiSchema>;
+export type StoryDoc = z.infer<typeof storySchema>;
+export type StoryBeatDoc = z.infer<typeof storyBeatSchema>;
 export type CampDoc = z.infer<typeof campSchema>;
 export type LakeDoc = z.infer<typeof lakeSchema>;
 export type BridgeDoc = z.infer<typeof bridgeSchema>;

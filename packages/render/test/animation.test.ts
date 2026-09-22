@@ -252,3 +252,87 @@ describe("AnimationSystem clip fitting", () => {
     expect(done).toEqual(["cast", "cast"]);
   });
 });
+
+/**
+ * A pose that follows a CONTINUOUS quantity — how deep the water a character
+ * is wading through is — needs two clips held at a weight, not a crossfade
+ * that always finishes. These are the rules that makes that readable as one
+ * gait rather than as two characters sharing a body.
+ */
+describe("AnimationSystem held blend", () => {
+  /** Every action the mixer is actually running, with its weight. */
+  function weights(system: AnimationSystem): Record<string, number> {
+    const entry = (system as unknown as { entries: Map<string, { mixer: THREE.AnimationMixer; actions: Map<string, THREE.AnimationAction> }> })
+      .entries.get("hero")!;
+    const out: Record<string, number> = {};
+    for (const [name, action] of entry.actions) {
+      if (action.isRunning() && action.weight > 0.001) out[name] = +action.weight.toFixed(3);
+    }
+    return out;
+  }
+
+  it("holds both clips at complementary weights", () => {
+    const system = systemWith([clip("walk"), clip("wade", 2)]);
+    system.playBlend("hero", "walk", "wade", 0.25, 0);
+    system.update(1 / 60);
+    expect(weights(system)).toEqual({ walk: 0.75, wade: 0.25 });
+
+    // …and follows the quantity, tick after tick, without restarting anything
+    system.playBlend("hero", "walk", "wade", 0.8, 0);
+    system.update(1 / 60);
+    expect(weights(system)).toEqual({ walk: 0.2, wade: 0.8 });
+  });
+
+  it("phase-matches the two cycles, so the strides land together", () => {
+    const system = systemWith([clip("walk"), clip("wade", 2)]); // 1s and 2s
+    system.playBlend("hero", "walk", "wade", 0.5, 0);
+    for (let i = 0; i < 20; i++) {
+      system.update(1 / 60);
+      system.playBlend("hero", "walk", "wade", 0.5, 0); // re-asserted every tick
+    }
+    const entry = (system as unknown as { entries: Map<string, { actions: Map<string, THREE.AnimationAction> }> })
+      .entries.get("hero")!;
+    const walk = entry.actions.get("walk")!;
+    const wade = entry.actions.get("wade")!;
+    // same phase, not the same time: a 2 s cycle is half way through when a
+    // 1 s cycle is
+    expect(wade.time / 2).toBeCloseTo(walk.time / 1, 3);
+  });
+
+  it("collapses to a plain play at either end, and a single clip ends it", () => {
+    const system = systemWith([clip("walk"), clip("wade", 2)]);
+    system.playBlend("hero", "walk", "wade", 1, 0);
+    system.update(1 / 60);
+    expect(weights(system)).toEqual({ wade: 1 });
+
+    system.playBlend("hero", "walk", "wade", 0, 0);
+    system.update(1 / 60);
+    expect(weights(system)).toEqual({ walk: 1 });
+
+    // a blend, then an ordinary play: the held half has to let go
+    system.playBlend("hero", "walk", "wade", 0.5, 0);
+    system.update(1 / 60);
+    system.play("hero", "walk", 0);
+    system.update(1 / 60);
+    expect(weights(system)).toEqual({ walk: 1 });
+  });
+
+  it("declines under a masked action layer rather than guessing", () => {
+    // A real rig this time: the layer needs a mask bone to be a LAYER at all,
+    // and it is the masked case that cannot carry a blend underneath it (the
+    // base's complement is built from one clip).
+    const { system } = layered();
+    system.playBlend("hero", "Run", "Cast", 0.9, 0);
+    system.update(1 / 60);
+    system.playLayer("hero", "Cast", { fade: 0 });
+    system.update(1 / 60);
+    expect(system.layerClip("hero")).toBe("Cast");
+
+    // asked for a blend while the layer is up: the dominant clip takes it, and
+    // the layer is still the layer
+    system.playBlend("hero", "Run", "Cast", 0.9, 0);
+    system.update(1 / 60);
+    expect(system.layerClip("hero")).toBe("Cast");
+    expect(system.currentClip("hero")).toBe("Cast"); // 0.9 → the wade half won
+  });
+});

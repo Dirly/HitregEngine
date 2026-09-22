@@ -88,7 +88,7 @@ export interface NetPresenceOptions {
    * simulates it on a physics proxy (the trust boundary: peers send
    * intentions, never state). Null = no input this instant.
    */
-  getLocalInput?(): { v: [number, number]; jump: boolean } | null;
+  getLocalInput?(): { v: [number, number]; jump: boolean; vy?: number } | null;
   /** Host: world position of a remote player's physics proxy, if spawned. */
   getProxyState?(peerId: string): { p: [number, number, number] } | null;
   /**
@@ -197,6 +197,8 @@ interface PresencePlayer {
 interface RemoteInput {
   v: [number, number];
   jump: boolean;
+  /** Vertical intent while swimming, -1 (dive) to +1 (rise). */
+  vy: number;
   yaw: number;
   seq: number;
   /** Claimed position — used ONLY to spawn the proxy, never as authority. */
@@ -582,6 +584,7 @@ export class NetPresence {
     peerId: string;
     v: [number, number];
     jump: boolean;
+    vy: number;
     p: [number, number, number];
   }> {
     if (this.role !== "host") return [];
@@ -590,11 +593,12 @@ export class NetPresence {
       peerId: string;
       v: [number, number];
       jump: boolean;
+      vy: number;
       p: [number, number, number];
     }> = [];
     for (const [peerId, input] of this.remoteInputs) {
       if (now - input.at > INPUT_STALE_MS) continue;
-      out.push({ peerId, v: input.v, jump: input.jump, p: input.p });
+      out.push({ peerId, v: input.v, jump: input.jump, vy: input.vy, p: input.p });
     }
     return out;
   }
@@ -942,6 +946,7 @@ export class NetPresence {
         seq: this.inputSeq,
         v: input?.v ?? [0, 0],
         jump: input?.jump ?? false,
+        vy: input?.vy ?? 0,
         yaw: local.yaw,
         p: local.position,
       });
@@ -998,7 +1003,7 @@ export class NetPresence {
 
   private recordInput(peer: string, input: unknown): void {
     const cmd = input as
-      | { t?: unknown; seq?: unknown; v?: unknown; jump?: unknown; yaw?: unknown; p?: unknown }
+      | { t?: unknown; seq?: unknown; v?: unknown; jump?: unknown; vy?: unknown; yaw?: unknown; p?: unknown }
       | null;
     // peer→authority event request: hand to the bus with sender attribution
     // (the bus enforces that only "to-authority" registered events pass)
@@ -1016,6 +1021,7 @@ export class NetPresence {
     this.remoteInputs.set(peer, {
       v: [v[0] as number, v[1] as number],
       jump: cmd.jump === true,
+      vy: typeof cmd.vy === "number" && Number.isFinite(cmd.vy) ? Math.max(-1, Math.min(1, cmd.vy)) : 0,
       yaw: typeof cmd.yaw === "number" && Number.isFinite(cmd.yaw) ? cmd.yaw : 0,
       seq: typeof cmd.seq === "number" && Number.isFinite(cmd.seq) ? cmd.seq : 0,
       p: [p[0] as number, p[1] as number, p[2] as number],

@@ -12,10 +12,14 @@ import {
   type ToolManifest,
 } from "../../packages/core/src/tools.ts";
 import {
+  addSceneToManifest,
+  buildSceneMenu,
+  newSceneMenuEntrySchema,
   describeMissingTools,
   projectManifestSchema,
   resolveProjectTools,
   type ProjectToolReport,
+  type SceneMenuProjectInput,
 } from "../../packages/core/src/project.ts";
 
 /**
@@ -60,7 +64,9 @@ const BRIDGE_ENDPOINTS = [
   { method: "POST", path: "/__hitreg/camera", purpose: "Aim the editor camera — this is how an agent looks at its own work (screenshots, \"show me what you mean\"). Body: { position:[x,y,z], target?:[x,y,z] } or { frame: \"<entityId>\" } (or frame:\"selection\"), plus transitionMs (default 0 = snap this frame, which is what a screenshot tool wants; >0 eases over roughly that long and holds the request open until the camera actually comes to rest). Returns the pose the camera ACTUALLY reached: { ok, id, cmdId, camera:{position,target}, playMode }. FOOTGUN: this drives the EDITOR camera. In play mode that camera is often not what is on screen — a follow/chase rig re-aims it every frame, and a scene camera or a script's active camera replaces it outright — so the move can be instantly overwritten or simply not rendered. Trust the returned `camera` over the one you asked for; if it snapped back, something else owns the view. Same per-tab keying as /__hitreg/context: pass ?id=<id>, and with several tabs live and no id this answers 409 { ok:false, multipleClients, clients } rather than aiming somebody else's window." },
   { method: "GET", path: "/__hitreg/assets-index", purpose: "Every asset file on disk, bucketed by kind (scenes, prefabs, materials, models, chunks, …)." },
   { method: "GET", path: "/__hitreg/asset-file?file=<rel>", purpose: "Read one asset file fresh from disk (bypasses Vite's cache)." },
-  { method: "POST", path: "/__hitreg/write-asset", purpose: "Write an asset file ({file, content}); live-syncs into the running app." },
+  { method: "POST", path: "/__hitreg/write-asset", purpose: "Write an asset file ({file, content, project?}); live-syncs into the running app. An existing file is overwritten where it lives; a NEW file goes into projects/<project>/assets/ when `project` names one." },
+  { method: "GET", path: "/__hitreg/scene-menu", purpose: "The editor's scene menu: { groups: [{ title, projects: [{ name, label, main, listed: [{id,label,note,depth}], other }] }] }, built from each project.json's `group`, `menuOrder` and `scenes` (the menu order; variants nest under their base) plus the scene files on disk. `name: null` is the flat assets/ tree. A scene id is its file path under assets/scenes/ without .scene.json." },
+  { method: "POST", path: "/__hitreg/scene-menu", purpose: "Add a scene to a project's menu in its project.json: { project, id, label?, note?, variantOf? }. `variantOf` lists it as a stage under that scene (and lists an unlisted base too). Writes the menu entry only; write the scene file itself with /__hitreg/write-asset { file: \"scenes/<id>.scene.json\", content, project }. 400 with the reason if the id is already listed or the manifest would be invalid." },
   { method: "GET", path: "/__hitreg/tools", purpose: "List installed editor/asset tool manifests. The same definitions drive the editor UI and the tools block in this spec." },
   { method: "POST", path: "/__hitreg/tools/:id/run", purpose: "Run a registered tool with { inputs }. Inputs are schema-validated; returns { assets, previews, warnings, report, log }." },
   { method: "GET", path: "/__hitreg/projects", purpose: "Installed projects and their declared tool dependencies: { installedTools, projects: [{ project, satisfied, installed, missing, missingOptional }] }. A project is its own git repo checked out into projects/<name>/, so it declares what it needs in project.json — read this before concluding a project's generator is broken, because \"the tool was never installed\" and \"the tool did nothing\" look identical from the outside." },
@@ -234,6 +240,23 @@ function hitregBridge(): Plugin {
       // told. project.json is that declaration. Resolve it against what is
       // actually installed and say so ONCE at boot: a missing tool otherwise
       // surfaces much later as a generator that mysteriously does nothing.
+      /** Scene ids under a scenes/ folder, subfolders included ("hollow-bastion/deepwake"). */
+      const sceneIds = (dir: string): string[] => {
+        const out: string[] = [];
+        const walk = (at: string) => {
+          if (!fs.existsSync(at)) return;
+          for (const entry of fs.readdirSync(at, { withFileTypes: true })) {
+            const full = path.join(at, entry.name);
+            if (entry.isDirectory()) walk(full);
+            else if (entry.name.endsWith(".scene.json")) {
+              out.push(path.relative(dir, full).split(path.sep).join("/").replace(/\.scene\.json$/, ""));
+            }
+          }
+        };
+        walk(dir);
+        return out;
+      };
+
       const projectReports = new Map<string, ProjectToolReport>();
       const readProjectManifests = (): void => {
         projectReports.clear();
@@ -263,15 +286,72 @@ function hitregBridge(): Plugin {
           // (to map the active scene back to a project) and how the project is
           // played together (a "server" project never forms a P2P dev room)
           const scenesDir = path.join(projectsRoot, entry.name, "assets", "scenes");
-          const scenes = fs.existsSync(scenesDir)
-            ? fs.readdirSync(scenesDir).filter((f) => f.endsWith(".scene.json")).map((f) => f.replace(/\.scene\.json$/, ""))
-            : [];
+          const scenes = sceneIds(scenesDir);
           projectReports.set(entry.name, { ...report, multiplayer: parsed.data.multiplayer, scenes } as ProjectToolReport);
           const message = describeMissingTools(report);
           if (message) console.warn(`[hitreg] ${message}`);
         }
       };
       readProjectManifests();
+
+      // The editor's scene menu: groups → projects → scenes, from each
+      // project.json's `group`/`scenes` plus what is actually on disk. Read
+      // fresh per request so a new scene or an edited manifest shows up on the
+      // next open of the menu. A project with no (or a broken) project.json
+      // still lists its scenes, ungrouped.
+      server.middlewares.use("/__hitreg/scene-menu", (req, res) => {
+        if (req.method === "POST") {
+          // add one scene to a project's menu (the editor's New scene dialog)
+          void (async () => {
+            res.setHeader("content-type", "application/json");
+            try {
+              const body = (await readJsonBody(req)) as { project?: unknown } & Record<string, unknown>;
+              const project = typeof body.project === "string" ? body.project : "";
+              if (!/^[a-z][a-z0-9-]*$/.test(project) || !fs.existsSync(path.join(projectsRoot, project))) {
+                throw new Error(`no project folder projects/${project}`);
+              }
+              const entry = newSceneMenuEntrySchema.parse(body);
+              const manifestPath = path.join(projectsRoot, project, "project.json");
+              const raw = fs.existsSync(manifestPath)
+                ? (JSON.parse(fs.readFileSync(manifestPath, "utf8")) as Record<string, unknown>)
+                : { version: 1, name: project };
+              fs.writeFileSync(manifestPath, `${JSON.stringify(addSceneToManifest(raw, entry), null, 2)}\n`);
+              res.end(JSON.stringify({ ok: true, project, id: entry.id }));
+            } catch (error) {
+              res.statusCode = 400;
+              res.end(JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+            }
+          })();
+          return;
+        }
+        const inputs: SceneMenuProjectInput[] = [];
+        if (fs.existsSync(projectsRoot)) {
+          for (const entry of fs.readdirSync(projectsRoot, { withFileTypes: true })) {
+            if (!entry.isDirectory()) continue;
+            const input: SceneMenuProjectInput = {
+              name: entry.name,
+              scenes: [],
+              files: sceneIds(path.join(projectsRoot, entry.name, "assets", "scenes")),
+            };
+            const manifestPath = path.join(projectsRoot, entry.name, "project.json");
+            if (fs.existsSync(manifestPath)) {
+              try {
+                const parsed = projectManifestSchema.safeParse(JSON.parse(fs.readFileSync(manifestPath, "utf8")));
+                if (parsed.success) {
+                  const { title, description, group, menuOrder, scenes } = parsed.data;
+                  Object.assign(input, { title, description, group, menuOrder, scenes });
+                }
+              } catch {
+                /* unreadable manifest: the boot report already warned */
+              }
+            }
+            inputs.push(input);
+          }
+        }
+        res.setHeader("content-type", "application/json");
+        res.setHeader("cache-control", "no-store");
+        res.end(JSON.stringify({ groups: buildSceneMenu(inputs, sceneIds(path.join(assetsRoot, "scenes"))) }));
+      });
 
       // Declared dependencies are part of the environment an agent is working
       // in: "this generator does nothing" and "that tool was never installed"
@@ -409,8 +489,23 @@ function hitregBridge(): Plugin {
         req.on("data", (chunk: Buffer) => (body += chunk));
         req.on("end", () => {
           try {
-            const { file, content } = JSON.parse(body) as { file: string; content: string };
-            const target = resolveAssetPath(file);
+            const { file, content, project } = JSON.parse(body) as {
+              file: string;
+              content: string;
+              project?: string;
+            };
+            let target = resolveAssetPath(file);
+            // A NEW file with a named project goes into that project. Without
+            // it, a new scene lands in the flat tree whenever more than one
+            // project has a scenes/ folder, which is every working copy.
+            if (
+              project &&
+              !fs.existsSync(target) &&
+              /^[a-z][a-z0-9-]*$/.test(project) &&
+              fs.existsSync(path.join(projectsRoot, project))
+            ) {
+              target = path.resolve(projectsRoot, project, "assets", file);
+            }
             if (!withinKnownRoot(target)) throw new Error("path outside assets/ or projects/");
             fs.mkdirSync(path.dirname(target), { recursive: true });
             fs.writeFileSync(target, content, "utf8");
@@ -1341,9 +1436,25 @@ function hitregBridge(): Plugin {
 // subpath). Without it, a normal `vite build` builds the editor app as usual.
 const gameBuild = process.env["GAME"] === "1";
 
+/**
+ * Does this build CONTAIN the developer console (`@hitreg/scripting/console`)?
+ *
+ * A build-time constant, not a runtime flag, and that distinction is the whole
+ * point: `import.meta.env.HITREG_CONSOLE` is replaced with a literal, so the
+ * `if` around the console's dynamic import folds to `false` and rollup drops
+ * the import, the module and its chunk. A published game that did not ask for
+ * the console has no console in it for anyone to find — not a disabled one.
+ *
+ * On by default while developing; OFF by default for a GAME build, which is
+ * what `tools/publish.mjs` produces. `HITREG_CONSOLE=1` turns it back on for
+ * a published bundle (publish.mjs --console), for debugging a deployed build.
+ */
+const devConsole = process.env["HITREG_CONSOLE"] === "1" || (!gameBuild && process.env["HITREG_CONSOLE"] !== "0");
+
 export default defineConfig({
   plugins: [hitregBridge()],
   base: gameBuild ? "./" : "/",
+  define: { "import.meta.env.HITREG_CONSOLE": JSON.stringify(devConsole ? "1" : "0") },
   server: {
     port: 5173,
     watch: { ignored: ["**/assets/**"] },

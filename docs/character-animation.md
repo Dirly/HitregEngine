@@ -34,6 +34,20 @@ pnpm -F playground retarget \
   --out projects/<game>/assets/models/<name>.glb
 ```
 
+**Libraries stack.** `--anim` may be repeated (or comma-joined) for packs that
+share a rig — an expansion is baked *beside* the base, not instead of it, and a
+later file wins a name collision. Only the clips merge; the first library's
+skeleton is what everything retargets from, which is safe precisely because
+they share it. The human in this repo is the two Quaternius universal libraries
+at once:
+
+```
+pnpm -F playground retarget \
+  --mesh HumanRigged.fbx --anim UAL1.fbx --anim UAL2.fbx \
+  --clips locomotion+combat+ual2 \
+  --out projects/<game>/assets/models/mmo/human.glb
+```
+
 It reads the source rig's rest pose, poses *your* rig into that same pose by
 aligning each mapped bone's aim direction, and measures every frame as a delta
 from there. Bones with no counterpart — twist bones, share bones, toes, the
@@ -371,6 +385,12 @@ dangled chain is excluded from the foot set: a tail tip lying on the floor is a
 ground-level leaf bone, and letting it vote replaces a stride measurement with
 a tail measurement — which is exactly what happened to this rat's Run, silently,
 until the tail was taken off the keyframes.
+
+**A swimming clip has no ground speed**, and the measurement does not pretend
+otherwise: legs kicking past the hip read as ~0.8 m/s of slip, and a controller
+handed that number plays the stroke at four times its rate. `retarget` leaves
+`Swim`/`Tread_Water` out of the printed `clipSpeeds` on purpose — the
+controller paces a stroke against its own `swimSpeed` instead.
 
 Restricting to true stance also raises the numbers slightly, because samples
 taken while a foot is still descending carry less slip than the ground speed.

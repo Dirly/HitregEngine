@@ -320,7 +320,7 @@ export class TelegraphLive extends LiveModule<TelegraphModule> {
 
   protected onUpdate(t: number): void {
     const m = this.module;
-    const now = this.startedAt + t * this.life;
+    const now = this.now;
     const age = now - this.startedAt;
     const o = this.opacityAt(t, now);
     if (age < m.windup) {

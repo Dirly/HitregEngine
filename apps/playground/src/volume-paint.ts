@@ -6,9 +6,41 @@ import {SPLAT_ATTRIBUTES} from '@hitreg/render';
 export function mountVolumePaint(opts:{canvas:HTMLCanvasElement;camera:THREE.PerspectiveCamera;doc:()=>SceneDoc;objects:()=>Map<string,THREE.Object3D>;editing:()=>boolean}){
  const panel=document.createElement('details');panel.style.cssText='position:fixed;right:370px;top:48px;z-index:40;background:#15232aee;color:#e1ddd0;padding:9px;border:1px solid #59646a;font:12px sans-serif;width:210px';panel.innerHTML='<summary>Volume paint</summary><p>Shift-drag on the cave to paint.</p><label>Texture <select aria-label="Volume paint texture"></select></label><p><label>Radius <input aria-label="Volume paint radius" type="number" min="0.25" max="30" step="0.25" value="3" style="width:60px"></label></p><p><label>Strength <input aria-label="Volume paint strength" type="range" min="0.05" max="1" step="0.05" value="0.5"></label></p><p><label>Mode <select aria-label="Volume paint mode"><option value="brush">Brush</option><option value="fill">Angle fill</option></select></label></p><p><label>Angle <input aria-label="Volume fill angle" type="number" min="0" max="180" value="35" style="width:60px"> degrees</label></p><button type="button">Undo paint</button> <button type="button">Redo paint</button><p><button type="button">Save paint</button></p><output>Choose a CSG scene.</output>';document.body.append(panel);
  const mode=panel.querySelectorAll('select')[1]!;const select=panel.querySelector('select')!,inputs=panel.querySelectorAll('input'),buttons=panel.querySelectorAll('button'),status=panel.querySelector('output')!;
+ const structureLabel=document.createElement('label'),structureSelect=document.createElement('select');structureLabel.textContent='Structure ';structureSelect.setAttribute('aria-label','Volume paint structure');structureLabel.append(structureSelect);panel.querySelector('summary')!.after(structureLabel);panel.querySelector('p')!.textContent='Choose a structure, then Shift-drag to paint. Shared stamps use the same volume asset.';let structureSignature='';
  type Session={doc:VolumeDoc;undo:VolumePaint[][];redo:VolumePaint[][];dirty:boolean;baseline:string};const sessions=new Map<string,Session>();let activeId='',root:THREE.Object3D|undefined,session:Session|undefined,lastRoot:THREE.Object3D|undefined;let surfaces:{g:THREE.BufferGeometry;base:Float32Array;weights:Float32Array;count:number}[]=[];
  const ray=new THREE.Raycaster();let dragging=false,lastPoint:THREE.Vector3|undefined;
- function refresh(){if(!opts.editing()){panel.hidden=true;return;}const entry=Object.entries(opts.doc().entities).find(([,e])=>(e.components.mesh as any)?.source?.kind==='csg');panel.hidden=!entry;if(!entry){session=undefined;root=undefined;return;}if(!panel.open)return;const id=(entry[1].components.mesh as any).source.volume as string;const object=opts.objects().get(entry[0]);if(!object)return;if(activeId===id&&lastRoot===object)return;activeId=id;root=object;lastRoot=object;const volume=getVolume(id);if(!volume)return;session=sessions.get(id);if(!session){session={doc:structuredClone(volume.doc),undo:[],redo:[],dirty:false,baseline:JSON.stringify(volume.doc.paint)};sessions.set(id,session);}select.replaceChildren(...session.doc.palette.map((name,i)=>{const o=document.createElement('option');o.value=String(i);o.textContent=name;return o;}));surfaces=[];const baseVolume=createVolume({...session.doc,paint:[]});object.traverse(o=>{const m=o as THREE.Mesh;if(!m.isMesh)return;const g=m.geometry,p=g.getAttribute('position'),n=g.getAttribute('normal');if(!p||!n||!g.getAttribute(SPLAT_ATTRIBUTES[0]!))return;const count=session!.doc.palette.length,base=new Float32Array(p.count*count),scratch=new Float32Array(count+3);for(let i=0;i<p.count;i++){baseVolume.surfaceAt(p.getX(i),p.getY(i),p.getZ(i),n.getY(i),scratch,0);base.set(scratch.subarray(0,count),i*count);}surfaces.push({g,base,weights:base.slice(),count});});repaint();status.textContent=session.dirty?'Unsaved paint':'Paint ready';}
+ function refresh(){
+  if(!opts.editing()){panel.hidden=true;return;}
+  const entries=Object.entries(opts.doc().entities).filter(([,e])=>(e.components.mesh as any)?.source?.kind==='csg');
+  panel.hidden=!entries.length;
+  if(!entries.length){session=undefined;root=undefined;lastRoot=undefined;structureSignature='';return;}
+  const signature=JSON.stringify(entries.map(([id,e])=>[id,e.name,(e.components.mesh as any).source.volume]));
+  if(signature!==structureSignature){
+   const previous=structureSelect.value;
+   structureSelect.replaceChildren(...entries.map(([id,e])=>{const option=document.createElement('option');option.value=id;option.textContent=e.name||id;return option;}));
+   if(entries.some(([id])=>id===previous))structureSelect.value=previous;
+   structureSignature=signature;
+  }
+  if(!panel.open)return;
+  const entry=entries.find(([id])=>id===structureSelect.value)??entries[0]!;
+  const id=(entry[1].components.mesh as any).source.volume as string,object=opts.objects().get(entry[0]),volume=getVolume(id);
+  if(!object||!volume){session=undefined;root=undefined;lastRoot=undefined;status.textContent='Loading structure…';return;}
+  if(activeId===id&&lastRoot===object)return;
+  dragging=false;lastPoint=undefined;activeId=id;root=object;lastRoot=object;
+  session=sessions.get(id);
+  if(!session){session={doc:structuredClone(volume.doc),undo:[],redo:[],dirty:false,baseline:JSON.stringify(volume.doc.paint)};sessions.set(id,session);}
+  select.replaceChildren(...session.doc.palette.map((name,i)=>{const o=document.createElement('option');o.value=String(i);o.textContent=name;return o;}));
+  surfaces=[];const baseVolume=createVolume({...session.doc,paint:[]});
+  object.traverse(o=>{
+   const m=o as THREE.Mesh;if(!m.isMesh)return;
+   const g=m.geometry,p=g.getAttribute('position'),n=g.getAttribute('normal');if(!p||!n||!g.getAttribute(SPLAT_ATTRIBUTES[0]!))return;
+   const count=session!.doc.palette.length,base=new Float32Array(p.count*count),scratch=new Float32Array(count+3);
+   for(let i=0;i<p.count;i++){baseVolume.surfaceAt(p.getX(i),p.getY(i),p.getZ(i),n.getY(i),scratch,0,n.getX(i),n.getZ(i));base.set(scratch.subarray(0,count),i*count);}
+   surfaces.push({g,base,weights:base.slice(),count});
+  });
+  repaint();status.textContent=session.dirty?'Unsaved paint':'Paint ready';
+ }
+ structureSelect.onchange=()=>refresh();panel.ontoggle=()=>refresh();
  function upload(s:typeof surfaces[number]){for(let j=0;j<Math.ceil(s.count/4);j++){const a=s.g.getAttribute(SPLAT_ATTRIBUTES[j]!);if(!a)continue;for(let i=0;i<a.count;i++)for(let k=0;k<4;k++)a.setComponent(i,k,j*4+k<s.count?s.weights[i*s.count+j*4+k]!:0);a.needsUpdate=true;}}
  function apply(stroke:VolumePaint,flush=true){for(const s of surfaces){const p=s.g.getAttribute('position');for(let i=0;i<p.count;i++)blendVolumePaint(stroke,p.getX(i),p.getY(i),p.getZ(i),s.weights,i*s.count,s.count,[s.g.getAttribute('normal').getX(i),s.g.getAttribute('normal').getY(i),s.g.getAttribute('normal').getZ(i)]);if(flush)upload(s);}}
  function repaint(){for(const s of surfaces)s.weights.set(s.base);for(const stroke of session?.doc.paint??[])apply(stroke,false);for(const s of surfaces)upload(s);}

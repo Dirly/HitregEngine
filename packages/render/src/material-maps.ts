@@ -5,21 +5,28 @@ import {
   add,
   cameraViewMatrix,
   float,
+  floor,
   int,
   max,
+  mix,
+  mx_fractal_noise_float,
   normalWorldGeometry,
   normalize,
   normalMap,
   positionWorld,
   pow,
+  saturate,
   sign,
+  step,
   texture as tslTexture,
+  time,
   uniform,
   uv,
   vec2,
   vec3,
 } from "three/tsl";
 import type { MaterialData } from "./scene-builder.js";
+import { posterize, quantize } from "./vfx/shaders.js";
 
 /**
  * The PBR map pipeline: texture loading/sharing, colour-space discipline, the
@@ -150,6 +157,9 @@ export function materialMapKey(data: MaterialData): string {
     // both of these change the compiled shader, not just a uniform
     data.vertexColors === true ? "vc" : "-",
     (data.alphaTest ?? 0) > 0 ? "cutout" : "-",
+    // the overlay adds a whole noise branch to the graph, and its mask decides
+    // whether that branch samples the map; its numbers are uniforms
+    data.overlay ? `overlay:${data.overlay.mask ?? "map"}` : "-",
   ].join("|");
 }
 
@@ -341,6 +351,16 @@ export interface MaterialUniforms {
   detailTransform: Vec4Uniform;
   /** World units per tile in triplanar mode. */
   triplanarScale: ScalarUniform;
+  /** `overlay.color`. */
+  overlayColor: ColorUniform;
+  /** (overlay.opacity, overlay.scale, overlay.threshold, overlay.pixel). */
+  overlayA: Vec4Uniform;
+  /** (overlay.speed.u, overlay.speed.v, overlay.frameRate, overlay.steps). */
+  overlayB: Vec4Uniform;
+  /** `overlay.maskStrength`. */
+  overlayMask: ScalarUniform;
+  /** `overlay.maskCutoff` (0 = off). */
+  overlayCutoff: ScalarUniform;
 }
 
 interface MaterialState {
@@ -352,6 +372,8 @@ interface MaterialState {
    * newer call started are dropped rather than interleaved into its graph.
    */
   generation: number;
+  /** Textures requested and not yet wired — the graph is about to change. */
+  loading: boolean;
 }
 
 const materialState = new WeakMap<THREE.Material, MaterialState>();
@@ -370,6 +392,19 @@ export function materialUniformsOf(material: THREE.Material): MaterialUniforms |
 /** The structural key a material was built with — `patchMaterial`'s gate. */
 export function materialMapKeyOf(material: THREE.Material): string | undefined {
   return materialState.get(material)?.mapKey;
+}
+
+/**
+ * True while a material's textures are still loading. Its node graph is about
+ * to be rewired, so compiling its pipeline now is wasted work — and a
+ * background precompile that is mid-compile when the rewire lands rebuilds the
+ * shader outside the scene pass's borrowed MRT window, which three then
+ * rejects ("Color target has no corresponding fragment stage output"). Seen
+ * first on the ember bed, whose texture no other material shares, so it was
+ * the one still in flight when the precompile ran.
+ */
+export function materialMapsLoading(material: THREE.Material): boolean {
+  return materialState.get(material)?.loading === true;
 }
 
 /** The material-asset data object a cached material was built from. */
@@ -418,8 +453,14 @@ export function makeMaterialUniforms(material: THREE.Material, data: MaterialDat
     uvTransform: uniform(new THREE.Vector4(rx, ry, ox, oy)) as Vec4Uniform,
     detailTransform: uniform(new THREE.Vector4(dx, dy, ox, oy)) as Vec4Uniform,
     triplanarScale: uniform(Math.max(data.triplanarScale ?? 1, 1e-4)) as ScalarUniform,
+    overlayColor: uniform(new THREE.Color("#000000")) as ColorUniform,
+    overlayA: uniform(new THREE.Vector4()) as Vec4Uniform,
+    overlayB: uniform(new THREE.Vector4()) as Vec4Uniform,
+    overlayMask: uniform(0.75) as ScalarUniform,
+    overlayCutoff: uniform(0) as ScalarUniform,
   };
-  materialState.set(material, { uniforms, mapKey: materialMapKey(data), generation: 0 });
+  writeOverlayUniforms(uniforms, data);
+  materialState.set(material, { uniforms, mapKey: materialMapKey(data), generation: 0, loading: false });
   return uniforms;
 }
 
@@ -440,6 +481,16 @@ export function writeMaterialUniforms(uniforms: MaterialUniforms, data: Material
   uniforms.uvTransform.value.set(rx, ry, ox, oy);
   uniforms.detailTransform.value.set(dx, dy, ox, oy);
   uniforms.triplanarScale.value = Math.max(data.triplanarScale ?? 1, 1e-4);
+  writeOverlayUniforms(uniforms, data);
+}
+
+function writeOverlayUniforms(uniforms: MaterialUniforms, data: MaterialData): void {
+  const o = data.overlay;
+  uniforms.overlayColor.value.set(o?.color ?? "#000000");
+  uniforms.overlayA.value.set(o?.opacity ?? 0, o?.scale ?? 1, o?.threshold ?? 0, o?.pixel ?? 0);
+  uniforms.overlayB.value.set(o?.speed[0] ?? 0, o?.speed[1] ?? 0, o?.frameRate ?? 0, o?.steps ?? 0);
+  uniforms.overlayMask.value = o?.maskStrength ?? 0.75;
+  uniforms.overlayCutoff.value = o?.maskCutoff ?? 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -499,6 +550,12 @@ export function applyMaterialCommon(material: THREE.Material, data: MaterialData
     pbr.envMapIntensity *= environmentScale;
     if (currentEnvironment) pbr.envMap = currentEnvironment;
     environmentMaterials.add(material);
+  }
+  // The overlay goes on at build, unmasked; `wireMaterialMaps` re-wires it
+  // with the map's brightness once the map has loaded.
+  if (data.overlay && (material as { isNodeMaterial?: boolean }).isNodeMaterial) {
+    const uniforms = makeMaterialUniforms(material, data);
+    (material as THREE.Material & { emissiveNode?: unknown }).emissiveNode = emissiveWithOverlay(uniforms, data, null);
   }
 }
 
@@ -785,6 +842,78 @@ function worldNormalToView(worldNormal: N): N {
 }
 
 // ---------------------------------------------------------------------------
+// animated overlay
+// ---------------------------------------------------------------------------
+
+/**
+ * The `overlay` glow: pixelated noise scrolling over the surface — the moving
+ * heat in an ember bed, lava crust, a forge's coals.
+ *
+ * PSX, like the fire it sits under: the noise is sampled at cell centres
+ * (`pixel` cells per tile, so it can line up with the map's texels), the heat
+ * is posterised into `steps` bands, and the clock advances in `frameRate`
+ * ticks. Two copies of the noise scroll against each other at different
+ * scales, so the pattern churns in place rather than sliding like a belt.
+ * `mask: "map"` weights it by the base map's brightness, which keeps the heat
+ * in the glowing cracks and the dark coals dark.
+ *
+ * Every knob is a uniform (`overlayA`/`overlayB`), so a live tweak never
+ * recompiles; `materialMapKey` rebuilds only when the overlay appears,
+ * disappears or changes mask.
+ */
+function overlayNode(uniforms: MaterialUniforms, data: MaterialData, mapSample: N | null): N {
+  const a: N = uniforms.overlayA; // opacity, scale, threshold, pixel
+  const b: N = uniforms.overlayB; // speed u, speed v, frameRate, steps
+  const fps: N = b.z.max(1);
+  const t: N = mix(time, floor(time.mul(fps)).div(fps), saturate(b.z));
+  const tileUv: N =
+    data.triplanar === true
+      ? vec2(positionWorld.x, positionWorld.z).div(uniforms.triplanarScale)
+      : uvTransformNode(uniforms);
+  const p: N = quantize(tileUv, a.w).mul(a.y);
+  const drift: N = vec2(b.x, b.y).mul(t);
+  // The third noise axis is time: the pattern EVOLVES in place as well as
+  // scrolling. Measured headless at 0.15/s the heat barely changed across a
+  // second, which reads as a static texture rather than moving fire.
+  const n1: N = mx_fractal_noise_float(vec3(p.add(drift), t.mul(0.6)), 2, 2, 0.5);
+  const n2: N = mx_fractal_noise_float(vec3(p.mul(1.7).sub(drift.mul(1.3)), t.mul(-0.45).add(7.3)), 2, 2, 0.5);
+  const n: N = n1.add(n2).mul(0.25).add(0.5);
+  const heat: N = saturate(n.sub(a.z).div(float(1).sub(a.z).max(1e-3)));
+  let glow: N = (uniforms.overlayColor as N).mul(posterize(heat, b.w)).mul(a.x);
+  if (mapSample && (data.overlay?.mask ?? "map") === "map") {
+    // Two lessons, both from Derek looking at it in play:
+    // - weighting by LUMINANCE made it invisible: ember art is red-dominant,
+    //   and a red crack's linear luminance is ~0.28, so the heat was halved
+    //   exactly where it should be strongest;
+    // - a FLAT colour strong enough to see washed the whole tile beige and
+    //   erased the art.
+    // So the masked glow takes the map's own colour: a crack flares hotter in
+    // its own hue, a dark coal adds next to nothing, and the art stays legible.
+    const tinted: N = saturate(mapSample.rgb.mul(1.6));
+    glow = glow.mul(mix(vec3(1, 1, 1), tinted, uniforms.overlayMask));
+    // maskCutoff: texels whose brightest channel is under it get no heat at
+    // all, so only the light parts of the art move and the dark parts stay as
+    // painted. A short ramp rather than a hard step, so the boundary does not
+    // shimmer texel by texel as the heat passes over it. 0 switches it off.
+    const cutoff: N = uniforms.overlayCutoff;
+    const brightest: N = max(mapSample.r, max(mapSample.g, mapSample.b));
+    const lit: N = saturate(brightest.sub(cutoff).div(0.06));
+    glow = glow.mul(mix(float(1), lit, step(1e-4, cutoff)));
+  }
+  return glow;
+}
+
+/**
+ * A material's emissive term with its overlay (if any) added. Emissive is the
+ * right slot on every shader: node materials add it to the output even when
+ * unlit, and the bloom pipeline samples only emissive, so the heat glows.
+ */
+export function emissiveWithOverlay(uniforms: MaterialUniforms, data: MaterialData, mapSample: N | null, base?: N): N {
+  const emissive: N = base ?? (uniforms.emissive as N).mul(uniforms.emissiveIntensity);
+  return data.overlay ? emissive.add(overlayNode(uniforms, data, mapSample)) : emissive;
+}
+
+// ---------------------------------------------------------------------------
 // node graph wiring
 // ---------------------------------------------------------------------------
 
@@ -849,13 +978,14 @@ export function wireMaterialMaps(
   }
 
   // -- emissive -----------------------------------------------------------
-  if (textures.emissiveMap) {
+  if (textures.emissiveMap || data.overlay) {
     // The bloom pipeline's MRT split (renderer.ts) samples the `emissive`
     // output ONLY. Keep writing it through emissiveNode — a material that
     // stops populating emissive silently drops out of bloom.
-    target.emissiveNode = (uniforms.emissive as N)
-      .mul(uniforms.emissiveIntensity)
-      .mul(sample(textures.emissiveMap).rgb);
+    const mapped: N | undefined = textures.emissiveMap
+      ? (uniforms.emissive as N).mul(uniforms.emissiveIntensity).mul(sample(textures.emissiveMap).rgb)
+      : undefined;
+    target.emissiveNode = emissiveWithOverlay(uniforms, data, textures.map ? sample(textures.map) : null, mapped);
   }
 
   // -- normals ------------------------------------------------------------
@@ -978,12 +1108,14 @@ export function applyMaterialMaps(
   });
   if (requests.length === 0) return;
 
+  state.loading = true;
   void Promise.allSettled(
     requests.map((request) => loadSharedTexture(request.url, request.srgb, maxAnisotropy, filter)),
   ).then((results) => {
     // a newer applyMaterialMaps started while these were in flight — its graph
     // is the current one, so drop these instead of interleaving the two
     if (state.generation !== generation) return;
+    state.loading = false;
     const textures: MaterialTextures = {};
     results.forEach((result, i) => {
       const request = requests[i]!;

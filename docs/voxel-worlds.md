@@ -2612,3 +2612,300 @@ drawing a 9 m corridor; a Catmull-Rom or moving-average pass over the
 per-point side heights would take it down further if it still shows.
 
 For native CSG dungeon brush painting and angle-limited area fills, see [volume painting](volume-paint.md).
+
+### Towns have gates, and the road arrives at one
+
+Added 2026-09-19, from the MMO's capital: the WFC town had put a west arch
+on its curtain wall and drawn a short approach stub out of it, and the only
+roads that reached the town came in over the wall on the north and south
+sides. The two never met, because nothing in the recipe said where the way
+in was — `worldgen paths` routed to the town's CENTRE and the search
+arrived on whatever bearing the ground was cheapest on.
+
+**`features.towns[].gates`** (`townGateSchema`) records it: `at` — the
+mouth where the town's own roads end and the world's begin; `facing` — the
+outward direction the road leaves in; `width`; and `approach` — metres of
+dead-straight path laid outward from `at` before the router takes over. A
+town with gates is entered ONLY through them:
+
+- `worldgen paths` routes to the gate that faces the other town, not the
+  centre, and splices the straight approach onto the road (`roadFrom`'s
+  `lead`, smoothed WITH the route but held fixed — the seam between a fixed
+  lead and a searched route is a corner, and a corner at the end of an array
+  is one nothing ever rounds).
+- The search cell is not `nearest(mouth)`: snapping to a 16 m grid puts it
+  up to 11 m off the gate's axis and the road then leaves the arch sideways.
+  It is the cell in that neighbourhood nearest the AXIS.
+- `routeGridFor({ sealGatedTowns: true })` makes a gated pad a wall with a
+  corridor bored through each gate, so a path between two OTHER towns cannot
+  take the cheap line through the market square.
+- `worldgen trails` strikes every network point inside a gated pad (radius +
+  falloff — a town's lanes and wall ring run past the flat radius) and puts
+  the gate mouths in their place.
+- `worldgen gates <world>` with no options audits: each gate and what
+  arrives at it, every walled town a path crosses anyway, the towns still
+  routed to their centre. `--town <id> --from-road <id>` derives a gate from
+  the stub the builder already drew (its far end is the mouth, its own
+  heading the facing), which is the one to reach for after a town is built.
+
+Three things fell out of the capital's case, all of them the same shape —
+a rule that was right in general silently producing *no road at all*:
+
+- **`worldgen paths` kept only `trail-*`** when it re-cut, so every road a
+  town builder had written — lanes, foundations, the gate approach — was
+  deleted on the next run. It owns `path-*`; it keeps everything else.
+- **A pad inside a pad is terrain, not a destination.** The capital's castle
+  mound was a `towns` entry 43 m from the town centre with a 14 m step over
+  6 m of falloff. The spanning tree hung the whole settlement off a link to
+  it that no grade cap could ever hold, and the capital came out roadless.
+  `settlementTowns()` drops any pad whose centre lies inside a bigger one.
+- **The cross-slope cap is laddered on a tree edge.** Keeping a path off
+  hillsides steeper than 45° is right — the cut bank beside it is a wall —
+  but the island capital's only neighbour is across a mountain flank, and it
+  had no road at any grade. A tree edge (the ones the network needs to reach
+  everywhere) now retries at 2× and 3× the cap and logs the flank angle it
+  settled for; an extra link keeps the strict cap, since a shortcut nobody
+  gets is no loss.
+
+### Towns have sizes, and towns have height
+
+Added 2026-09-19. Two things made every generated settlement the same
+settlement: they were all 45 m discs, and they were all on the flat — the
+siting filter threw away any site with more than 16 m of height across it, so
+a town was a pool table wherever it landed.
+
+**Sizes (`worldgen towns`).** `townTiers()` is the ladder: capital 78 m, city
+60, town 45, village 30, hamlet 20, with `--city-share`/`--town-share`/… for
+the mix. `--capitals 4` are sited FIRST and only within `--capital-shore`
+(500 m) of a coast, one per landmass before any doubles up; the rest are dealt
+down the ladder best-site-first, so the good ground gets the cities. The tier
+is on the doc (`TownDoc.tier`) rather than inferred from `tags`, because the
+WFC kit, the POI density and the spawn tables all want to key off it. A pad's
+separation now scales with both pads' radii — a capital does not sit in a
+village's lap. The in-game map and `worldgen map` both size their dot by tier.
+
+**Relief.** The slope cap is `--max-slope` (0.42) and the height cap
+`--max-relief` (55 m), and relief is worth something in the score rather than
+being a disqualification. A guaranteed `--cliff-towns` share (15 %) is taken
+from sites whose footprint holds a face of `--cliff-slope` (0.7, ~35°) or
+steeper — a quota, not a bonus, because a world is supposed to *have* a few
+towns clinging to a scarp.
+
+**`worldgen terrace`.** Reads the natural ground under each town (lifting off
+the pads and ramps of the previous run — without that, the second run terraces
+its own terraces and the town creeps uphill) and, where there is more than
+`--min-relief` of fall, replaces the flat pad with a staircase:
+
+- The town's `flatten` goes to 0 and `terraces` (`terraceSchema`) carry the
+  flat ground: a shelf is a polyline with a half-width, carved by the same
+  code as a town pad, with `falloff` as the riser at its edge.
+- Bands are equal HEIGHT slices (`--step-height` 6 m), not equal-area
+  quantiles. Quantiles balance the area and were tried first; on a hillside
+  whose heights bunch up they put four of five levels within three metres of
+  each other, which is a rough floor, not a staircase.
+- Each shelf's centreline is fitted to its band's own principal axis
+  (`fitShelf`) — a contour band is a long thin blob, so its principal axis IS
+  the contour — with the half-width taken from the band's spread. Adjacent
+  shelves are then shrunk so they do not overlap, all caps computed before any
+  is applied (shrinking pair-by-pair compounds, and a five-shelf town
+  collapsed into a stack of 4 m ledges).
+- Ramps between neighbouring shelves are ordinary graded roads cut by the
+  route search on a 4 m local grid at a hard grade cap, which is what makes
+  them WIND: a 6 m riser that may only be climbed at 12 % has to traverse
+  fifty metres of face and switchback where the face is steeper. Where no such
+  route fits in the room available, the link is cut as a STAIR instead —
+  a terrace nothing reaches is worse than a steep way up to it.
+- A stepped town gets a `lower-gate` at the foot of its staircase unless a
+  builder has already given it gates, so `worldgen paths` brings the road to
+  the bottom of the stair instead of to the middle of the hill.
+
+Four traps, all of them found by reading the numbers the stage prints:
+
+- **Route the ramps on the BARE hillside, not on the shelves.** Searched over
+  ground that is already stepped, a ramp sees flat shelves it can run along
+  for free and a riser it may not climb, so it sets off round the hill looking
+  for a back way: the first cut ran 286 m to gain 5.5 m. The carve lands after
+  the terraces in the field, so a ramp drawn across a riser cuts through it.
+- **No exempt end zone.** `routeWithGradeCap`'s two-cell end exemption exists
+  because a road starts on a town pad's own edge step. A ramp is eight to
+  twenty cells long, so an exempt end is an exempt ramp — the first cut came
+  out at 63 % under a 12 % cap because every cell of it was an end.
+- **Pick the ramp's ends by HEIGHT as well as by proximity.** A shelf's
+  centreline is a median through a band, so parts of it sit well off the level
+  the shelf is held at. Joining the two nearest such points gave ends 5.5 m
+  apart over 8 m of ground: the search costed two cells of level hillside and
+  the profile pins did the climbing afterwards.
+- **Seal a pad in metres, not in cells.** `routeGridFor`'s gate corridor
+  rounded a 12 m bore up to a 3×3 block of 16 m cells — 22 m of hole in the
+  wall — and paths wandered in beside the gate. It also bores inward only as
+  far as the middle of town: bored right across, the corridor is an opening on
+  both sides and a path between two other towns takes the short cut straight
+  through.
+
+### A capital per continent, and towns that are not all the same town
+
+Added 2026-09-19, second pass, from walking the first rebuild:
+
+- **A seat on every continent.** `--capitals` is a FLOOR, not a ceiling: every
+  landmass over `--continent-km2` (1.5) gets a capital on its own coast, and
+  only then do spare capitals go to the best coast anywhere. Capitals are
+  counted against the capital budget rather than towns, because a pinned
+  terrain pad (a castle mound is a `towns` entry) was eating a continent's seat.
+  A capital alone on its island also gets a neighbour: the path network is a
+  spanning tree per landmass, so a landmass with one settlement has no edge to
+  cut and the capital had no road at all.
+- **`--keep` / a `pinned` tag.** A town something has been BUILT on is not
+  re-sited and not terraced. Ashenhold's baked WFC town stands on a flat pad at
+  y 64; re-siting moves the pad out from under it and terracing drops it onto a
+  staircase. Pinned towns keep their ids, count against `--count`, and
+  everything else is sited around them.
+- **Names outlive sites.** A redraft inherits each zone's name and story from
+  the nearest previous hub, each used once, for wilderness and town zones
+  alike. The geometry is what went stale when the towns moved; "Ashmouth Reach"
+  did not.
+- **Town zones are circumscribed and clipped.** A 12-gon drawn ON a circle of
+  radius R has edges only R·cos(15°) from the middle, so a 140 m capital's zone
+  cut inside its own pad and the audit — rightly — said a border ran through
+  the town. 16 sides, divided by cos(π/n), and each vertex pulled in until it
+  is inside the parent wilderness zone it claims to be cut out of.
+- **Character per town.** `terraceCharacter` draws each town's step height,
+  riser, shelf width, level count, ramp grade and its own bar for stepping at
+  all from its id, bounded by its tier. Forty towns sharing one set of numbers
+  is the flat-pad problem in a more expensive form.
+- **Measure the link that was built, do not assume it.** The search costs a
+  route and the profile then has to fit the climb into it — and a route that
+  DIPS before it rises has less run to climb in than its length suggests, so
+  the solver holds the design grade the whole way and the end pin makes up the
+  difference in a single step. One ramp finished 9 m over 4 m: a 206 % "ramp"
+  whose every other segment was a tidy 14 %. Links are now measured after
+  building and re-cut as stairs (`<town>-stair-<n>`, capped at `--stair-grade`
+  50 %) when the built line is half again as steep as it was meant to be.
+- **A shelf sits at the height of the ground its centreline runs over**, not at
+  its band's midpoint. The midpoint is the tidier number and it put the level
+  up to two steps from the line that was actually fitted, which is where most
+  of those end-pin jumps came from.
+
+### Stories: what one zone is FOR
+
+Added 2026-09-19. The pipeline decides where the mine mouths, the ruins and the
+bogs are; it has nothing to say about what any of them is *for*, so a finished
+zone is a shape with a name and a few dozen unnamed landmarks. Two pieces close
+that gap.
+
+**`PoiDoc.zone`.** A POI is a point and a zone is a polygon, so "the POIs in
+Ashmouth Reach" was a thousand point-in-polygon tests every time anything asked
+— a story pass, a quest generator, a spawn table, the map. It is a fact about
+the world, so it is stored like every other one; `worldgen pois` stamps it and
+both zone stages re-stamp it, which is what stops it going stale when the
+borders move. POIs also gained an optional `name`, because "The Warren Mouth"
+is what quest text needs to say.
+
+**`worldgen story`** applies a STORY document (`storySchema`, kept in the
+project's `assets/stories/`, not in the recipe) to ONE zone. Each beat names a
+POI kind, a share of them to take, and what to make of them — prefab, name,
+tags, and the pack that lives there. A `plague-ratkin` document turns a zone's
+mine-sites into warren mouths, its ruin into a plague shrine, half its
+lakeshores into fouled shallows, and writes the zone's own `story` prose and
+level band. The document is deliberately separate from the world: point it at a
+second region and it finds *that* region's mine mouths and ruins and uses the
+same five prefabs, which is what makes a set of assets worth building.
+
+```
+worldgen story <world>                                  every zone, and what is dressed
+worldgen story <world> --zone "Ashmouth Reach"          what that zone has to work with
+worldgen story <world> --zone ashmouth --story plague-ratkin --scene mmo
+worldgen story <world> --zone ashmouth --clear --scene mmo
+```
+
+The decisions that matter:
+
+- **The choice is deterministic**, hashed from the story id and the POI id. A
+  random share would re-roll the whole zone on every re-apply, and anything
+  built against it — a quest naming one warren — would move underneath.
+- **Camps are `story-*`.** `patchSceneCamps` already takes an id prefix so each
+  owner deletes only its own, so a generated sweep (`camp-*`), a painted camp
+  (`spawn-*`) and a story's population coexist in one scene. `--scene` also
+  writes one placeholder capsule per npc template, not one for the lot: a scene
+  with a single capsule cannot show three kinds of ratkin apart.
+- **Missing prefabs are a TO BUILD list, not an error.** A story is written
+  before the art exists — that is the point of writing it first — and the
+  streamer simply skips a POI whose prefab is absent, so an unbuilt story is
+  inert rather than broken. The stage prints exactly which files to make.
+- **The beats' own tags are not namespaced.** A quest wants to select on
+  `ratkin`, not on `story:plague-ratkin:ratkin`. That leaves `--clear` unable
+  to tell them from a tag the world already had, so it reads the story back:
+  the zone carries `story:<id>` until cleared, and the document says which tags
+  it added. It also un-writes the zone's prose and level band, but only while
+  they are still the ones it wrote. Without the document those tags stay, and
+  the stage says so rather than guessing.
+
+### The build plan is half agentic, and `worldgen status` says so
+
+Added 2026-09-20. Every server runs its own generated world, so the PIPELINE is
+the product — and about a third of what turns a heightfield into a place is not
+a generator's job. Naming a region after the landmarks it contains, deciding
+what is wrong with it, giving its towns a character: those are agent passes over
+generated output. Until they were written down beside the procedural stages they
+were simply forgotten, and a world would ship with twenty-one regions called
+"Zone 7".
+
+**`WorldRecipe.pipeline`** maps stage name → ISO timestamp, stamped in
+`writeRecipe` — one place, so no stage has to remember. `all` sets the stage
+name around each call (`runStage`) so a dozen stages in one process are stamped
+individually rather than all as "all".
+
+**`worldgen status <world>`** walks the plan — procedural and agentic in one
+dependency-ordered list (`pipelineStages()`) — and reports each as:
+
+- `ok` — ran, and nothing it depends on has been re-run since
+- `STALE` — ran, but a stage it reads was re-run afterwards, so its output
+  describes the old world
+- `MISSING` — never ran, or ran and produced nothing
+
+`--next` prints just the next command, for scripting the loop. The failure mode
+this exists for is not a stage breaking — it is a stage being silently skipped,
+or run before something it depends on was re-run. Both look identical in the
+recipe afterwards.
+
+A freshly generated world reports 14/17, with the three agent passes missing:
+`zone-names`, `town-names`, `zone-stories`. That is the honest state of a world
+that is generated but not yet authored.
+
+Checks are behavioural, not bookkeeping — `paths` asks whether a path actually
+arrives at each town (geometrically, at its gate if it has one), not whether the
+stage ran. A path id is `path-<a>-<b>` where both halves are themselves
+hyphenated town ids, so splitting one apart is guesswork; asking the geometry is
+not.
+
+### Rivers arrived at the coast dry
+
+Added 2026-09-20, found by measuring the regenerated world rather than looking
+at it: **24 of 25 channels that reached the sea ended in a DRY reach.** Every
+river visibly stopped as an empty trench short of the coast.
+
+The wet/dry split itself was working as designed (see "Lowland water" above):
+dry reaches had a median grade of 14 % and a p90 of 32 % — genuine torrents, not
+rivers — while wet reaches sat at 0.2 %. 68 % of the network length is under the
+2 % `--wet-grade` and carries a sheet. The bug was specifically at the mouths,
+and it was three compounding things:
+
+- **`hydro.sea` is read off the UNCARVED heightfield.** A channel that cuts its
+  own way down to the coast is not "at sea" by that test, so the documented
+  "the two cells at a sea mouth are always wet" rule never fired for it. A bed
+  at or under the sea plane is a mouth whatever the land above it was doing.
+- **The short-run drying rule used the same test**, so any two-point mouth run
+  the fix did create was immediately dried again as "a puddle on a slope".
+- **A one-point run is dropped entirely** (`idx.length < 2`), so marking only
+  the final point wet produced a run that vanished and left the mouth dry
+  exactly as before. The point before it has to be marked too.
+
+With all three: 0 of 26 mouths arrive dry. Measured on a copy of the world
+first (`rivers` on a duplicate recipe) so the live world was not churned while
+the cause was still a guess.
+
+**What is still open on rivers**, and it is not a bug: a channel alternates wet
+and dry along its length, so a river reads as a chain of flat sheets joined by
+empty ravines. The 2 % rule is right — a sheet on a 14 % slope is a wall of
+water — but the steep reaches currently render as *nothing*. They want to look
+like water: a cascade drawn as a short stack of flat steps would reuse the
+existing sheet rendering without ever tilting one.

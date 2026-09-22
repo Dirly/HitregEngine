@@ -139,9 +139,15 @@ export interface LiveSkyOptions {
    * script and a day/night script can both run without knowing about each
    * other: `gloom` (0..1) dims the sun, fill, ambient, IBL and cloud light;
    * `tint` blends the fog and horizon toward a colour by `tintAmount` (sand
-   * ochre, snow grey); `wind` scales every foliage wind (1 = authored).
+   * ochre, snow grey); `wind` scales every foliage wind (1 = authored);
+   * `cloudDark` (0..1) drives the deck itself toward storm grey — gloom dims
+   * what the cloud LIGHTS, this darkens the cloud you are looking at, and a
+   * storm needs both or you get a dim world under a bright white sky;
+   * `flash` (0..1) is lightning — a momentary wash over the sky, fog, fill and
+   * ambient. It deliberately adds no light and touches no material, so it
+   * cannot trigger a recompile at the worst possible moment.
    */
-  weather?: { gloom?: number; tint?: string; tintAmount?: number; wind?: number };
+  weather?: { gloom?: number; tint?: string; tintAmount?: number; wind?: number; cloudDark?: number; flash?: number };
   /**
    * How much DAYLIGHT there is here, 0..1 — what a day/night script already
    * computes from the sun elevation, published so the weather layer can be
@@ -242,6 +248,10 @@ export class SceneLighting {
     sun: null as number | null,
     environment: null as number | null,
     cloudLight: null as number | null,
+    /** Cloud colours as the day/night script asked for them, before weather darkened them. */
+    top: null as THREE.Color | null,
+    cloudColor: null as THREE.Color | null,
+    cloudShadow: null as THREE.Color | null,
     fogColor: null as THREE.Color | null,
     bottom: null as THREE.Color | null,
     /**
@@ -255,7 +265,10 @@ export class SceneLighting {
      */
     daylight: 1,
   };
-  private readonly weather = { gloom: 0, tint: new THREE.Color("#808080"), tintAmount: 0 };
+  private readonly weather = { gloom: 0, tint: new THREE.Color("#808080"), tintAmount: 0, cloudDark: 0, flash: 0 };
+  /** The colour lightning washes everything toward — a cold, slightly blue white. */
+  private readonly flashColor = new THREE.Color("#cfe0ff");
+  private readonly cloudScratch = new THREE.Color();
   private readonly tintScratch = new THREE.Color();
   /** The weather tint dimmed to the hour — see applyEffective. */
   private readonly litTint = new THREE.Color();
@@ -361,7 +374,7 @@ export class SceneLighting {
     const dome = this.domeUniforms;
     const req = this.req;
     if (live.top !== undefined) {
-      dome?.top.value.set(live.top);
+      (req.top ??= new THREE.Color()).set(live.top);
       this.hemisphere?.color.set(live.top);
       if (this.baseSky) this.baseSky = { ...this.baseSky, top: live.top };
     }
@@ -415,8 +428,8 @@ export class SceneLighting {
       const c = live.clouds;
       if (c.coverage !== undefined) dome.cloudCoverage.value = Math.min(1, Math.max(0, c.coverage));
       if (c.light !== undefined) req.cloudLight = Math.max(0, c.light);
-      if (c.color !== undefined) dome.cloudColor.value.set(c.color);
-      if (c.shadow !== undefined) dome.cloudShadow.value.set(c.shadow);
+      if (c.color !== undefined) (req.cloudColor ??= new THREE.Color()).set(c.color);
+      if (c.shadow !== undefined) (req.cloudShadow ??= new THREE.Color()).set(c.shadow);
       if (c.sun !== undefined) dome.cloudSun.value.set(c.sun);
       if (c.sunAmount !== undefined) dome.cloudSunAmount.value = Math.min(1, Math.max(0, c.sunAmount));
       if (c.speed) dome.cloudSpeed.value.set(c.speed[0], c.speed[1]);
@@ -436,6 +449,8 @@ export class SceneLighting {
       if (w.tint !== undefined) this.weather.tint.set(w.tint);
       if (w.tintAmount !== undefined) this.weather.tintAmount = Math.min(1, Math.max(0, w.tintAmount));
       if (w.wind !== undefined) setFoliageWindScale(w.wind);
+      if (w.cloudDark !== undefined) this.weather.cloudDark = Math.min(1, Math.max(0, w.cloudDark));
+      if (w.flash !== undefined) this.weather.flash = Math.min(1, Math.max(0, w.flash));
     }
     if (live.daylight !== undefined) this.req.daylight = Math.min(1, Math.max(0, live.daylight));
     this.applyEffective();
@@ -457,12 +472,33 @@ export class SceneLighting {
     const dome = this.domeUniforms;
     const req = this.req;
     const gloom = this.weather.gloom;
-    const dim = 1 - 0.75 * gloom; // fill, ambient, IBL, cloud light
-    const sunDim = 1 - 0.85 * gloom; // the sun goes further: hard shadows vanish under cloud
+    // Lightning. One factor, applied wherever the sky's own brightness is
+    // written, so a strike lifts the whole scene for a few frames and leaves
+    // nothing behind: no light is added or removed (the light SET must stay
+    // constant — see the day-night script) and no material is touched.
+    const flash = this.weather.flash;
+    const lift = 1 + 3.5 * flash;
+    const dim = (1 - 0.75 * gloom) * lift; // fill, ambient, IBL, cloud light
+    const sunDim = (1 - 0.85 * gloom) * lift; // the sun goes further: hard shadows vanish under cloud
     if (req.hemisphere !== null && this.hemisphere) this.hemisphere.intensity = req.hemisphere * dim;
     if (req.sun !== null) for (const sun of this.directionalLights) sun.intensity = req.sun * sunDim;
     if (req.ambient !== null) for (const ambient of this.findAmbientLights()) ambient.intensity = req.ambient * dim;
     if (req.cloudLight !== null && dome) dome.cloudLight.value = req.cloudLight * dim;
+    // The deck itself: storm grey, and lit from inside by a strike. Derived
+    // from what the day/night script asked for, so the two stay independent.
+    if (dome) {
+      const darken = 1 - 0.72 * this.weather.cloudDark;
+      if (req.cloudColor) {
+        this.cloudScratch.copy(req.cloudColor).multiplyScalar(darken).lerp(this.flashColor, 0.85 * flash);
+        dome.cloudColor.value.copy(this.cloudScratch);
+      }
+      if (req.cloudShadow) {
+        // The shadowed side darkens further — that is what makes a storm deck
+        // read as a bruise rather than as evenly grey paper.
+        this.cloudScratch.copy(req.cloudShadow).multiplyScalar(1 - 0.85 * this.weather.cloudDark).lerp(this.flashColor, 0.5 * flash);
+        dome.cloudShadow.value.copy(this.cloudScratch);
+      }
+    }
     if (req.environment !== null) {
       const base = this.liveBase?.environmentIntensity ?? this.environment.current.intensity;
       const effective = req.environment * dim;
@@ -481,16 +517,45 @@ export class SceneLighting {
     const lit = 0.15 + 0.85 * req.daylight;
     const amount = this.weather.tintAmount * lit;
     this.litTint.copy(this.weather.tint).multiplyScalar(lit);
+    // The SKY ITSELF goes dark under a storm, not only what it lights. Without
+    // this a full overcast was a bright grey card with a dim world under it:
+    // gloom dims lights and `cloudDark` darkens the deck, but the dome's own
+    // gradient — which is most of what you see when you look up — answered to
+    // neither. It is the first thing anyone reads the weather off.
+    const skyDim = 1 - 0.65 * this.weather.cloudDark;
+    if (req.top) {
+      this.tintScratch.copy(req.top).multiplyScalar(skyDim).lerp(this.litTint, amount * 0.6);
+      if (flash > 0) this.tintScratch.lerp(this.flashColor, 0.45 * flash);
+      dome?.top.value.copy(this.tintScratch);
+    }
     if (req.bottom) {
-      this.tintScratch.copy(req.bottom).lerp(this.litTint, amount);
+      this.tintScratch.copy(req.bottom).multiplyScalar(skyDim).lerp(this.litTint, amount);
+      if (flash > 0) this.tintScratch.lerp(this.flashColor, 0.55 * flash);
       dome?.bottom.value.copy(this.tintScratch);
       this.hemisphere?.groundColor.copy(this.tintScratch);
       if (this.scene.background instanceof THREE.Color) this.scene.background.copy(this.tintScratch);
     }
     if (req.fogColor) {
       this.tintScratch.copy(req.fogColor).lerp(this.litTint, amount);
+      // Fog IS the air, so a strike has to light it too — without this the
+      // flash reads as the sky blinking behind a scene that never noticed.
+      if (flash > 0) this.tintScratch.lerp(this.flashColor, 0.6 * flash);
       this.fog.retune(this.scene, { color: "#" + this.tintScratch.getHexString() });
     }
+  }
+
+  /**
+   * How much DAYLIGHT there is here, 0..1, as the day/night layer last said.
+   *
+   * Published rather than recomputed because only the day/night script knows
+   * the hour, and several things that are NOT lights need it: unlit particles
+   * (rain is as white at midnight as at noon unless something dims it), a
+   * screen-space storm overlay, a script deciding when to light the torches.
+   * 1 in a scene with no day/night script, which is what such a scene looked
+   * like before this existed.
+   */
+  daylight(): number {
+    return this.req.daylight;
   }
 
   private findAmbientLights(): THREE.AmbientLight[] {

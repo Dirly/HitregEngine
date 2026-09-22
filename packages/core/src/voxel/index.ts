@@ -50,6 +50,7 @@ export {
 } from "./marching-cubes.js";
 
 export { dualContour, type DualContourOptions } from "./dual-contouring.js";
+export { csgTriangleMeshSchema, compileTriangleMesh, type CsgTriangleMesh, type CompiledTriangleMesh } from "./triangle-mesh.js";
 
 export {
   volumeDocSchema,
@@ -58,6 +59,9 @@ export {
   type VolumePaint,
   csgNodeSchema,
   csgSurfaceSchema,
+  csgHeightfieldSchema,
+  encodeHeightfieldValues,
+  decodeHeightfieldValues,
   createVolume,
   buildVolumeMesh,
   registerVolume,
@@ -70,6 +74,7 @@ export {
   type VolumeDoc,
   type CsgNode,
   type CsgSurface,
+  type CsgHeightfield,
   type CsgMeshSource,
   type Volume,
 } from "./csg.js";
@@ -83,9 +88,14 @@ export {
   canyonSchema,
   roadSchema,
   townSchema,
+  townGateSchema,
+  terraceSchema,
   blobSchema,
   tunnelSchema,
   poiSchema,
+  storySchema,
+  storyBeatSchema,
+  storyPackSchema,
   type WorldRecipe,
   type FbmSpecDoc,
   type SurfaceDoc,
@@ -97,11 +107,15 @@ export {
   type CanyonDoc,
   type RoadDoc,
   type TownDoc,
+  type TownGateDoc,
+  type TerraceDoc,
   campSchema,
   type CampDoc,
   type BlobDoc,
   type TunnelDoc,
   type PoiDoc,
+  type StoryDoc,
+  type StoryBeatDoc,
   type LakeDoc,
   type BridgeDoc,
   type FillDoc,

@@ -27,6 +27,8 @@ export interface LiveSyncDeps {
    * rebuild via assetsVersion.
    */
   patchMaterialLive: (id: string, data: unknown) => boolean;
+  /** A `vfx` effect asset changed on disk: restart the standing effects playing it. */
+  onVfxAssetChanged: (id: string) => void;
   getLastWrittenScene: () => string;
   setLastWrittenScene: (content: string) => void;
   getLastWrittenPrefab: () => string;
@@ -46,6 +48,7 @@ export function installLiveSync(deps: LiveSyncDeps): void {
     editingPrefab,
     assetsVersion,
     patchMaterialLive,
+    onVfxAssetChanged,
     getLastWrittenScene,
     setLastWrittenScene,
     getLastWrittenPrefab,
@@ -67,7 +70,8 @@ export function installLiveSync(deps: LiveSyncDeps): void {
             return;
           }
           if (content === getLastWrittenScene()) return; // our own autosave echo
-          const doc = sceneDocSchema.parse(JSON.parse(content));
+          // the file is the scene's identity, whatever the doc calls itself
+          const doc = { ...sceneDocSchema.parse(JSON.parse(content)), name };
           const issues = validateScene(doc, registry);
           if (issues.length > 0) {
             console.warn("[live-sync] scene file invalid:", issues);
@@ -142,6 +146,15 @@ export function installLiveSync(deps: LiveSyncDeps): void {
           const asset = { id, type, name: id, data: JSON.parse(content) };
           if (assets.getDataAsset(id)) assets.updateDataAsset(asset);
           else assets.addDataAsset(asset);
+        } else if (file.startsWith("vfx/")) {
+          // Standing effects (torches, braziers) resolve their asset when they
+          // start, so updating the asset and restarting those plays is the whole
+          // hot-reload. An invalid file is rejected by the schema, old one stays.
+          const id = file.slice("vfx/".length).replace(/\.json$/, "");
+          const asset = { id, type: "vfx", name: id, data: JSON.parse(content) };
+          if (assets.getDataAsset(id)) assets.updateDataAsset(asset);
+          else assets.addDataAsset(asset);
+          onVfxAssetChanged(id);
         } else if (file.startsWith("worlds/")) {
           // A world recipe governs EVERY generated cell at once, so there is
           // nothing finer to invalidate: re-register it, drop the cached cell

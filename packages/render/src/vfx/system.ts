@@ -320,7 +320,8 @@ export class VfxSystem implements LiveModuleHost {
   readonly root = new THREE.Group();
   readonly resolvers: VfxResolvers;
   readonly particles: LiveModuleHost["particles"];
-  private readonly particleSystem = new ParticleSystem();
+  // batches parent under `root`, so they precompile with the warmup sampler
+  private readonly particleSystem = new ParticleSystem({ host: this.root });
   private readonly pools = new Map<string, LiveModule[]>();
   private readonly plays: EffectPlay[] = [];
   private readonly spells: SpellPlay[] = [];
@@ -478,11 +479,16 @@ export class VfxSystem implements LiveModuleHost {
 
   // --- playing ------------------------------------------------------------
 
-  play(effect: VfxEffect, frame: VfxFrame, opts: { phaseLength?: number } = {}): VfxHandle {
+  play(
+    effect: VfxEffect,
+    frame: VfxFrame,
+    opts: { phaseLength?: number; ownLight?: () => THREE.PointLight | null } = {},
+  ): VfxHandle {
     const ctx: PlayContext = {
       frame,
       phaseLength: opts.phaseLength ?? 0,
       path: { pos: new THREE.Vector3(frame.origin[0], frame.origin[1], frame.origin[2]), vel: new THREE.Vector3(), active: false },
+      ...(opts.ownLight ? { ownLight: opts.ownLight } : {}),
     };
     const play = new EffectPlay(this, effect, ctx, this.clock);
     this.plays.push(play);
@@ -566,6 +572,8 @@ export class VfxSystem implements LiveModuleHost {
       { kind: "telegraph", shape: "line", radius: 3, width: 0.5, windup: 0.5, hold: 0.5, pixel: 24, posterize: 4 },
       { kind: "particles", burst: 4, duration: 1, emitter: { max: 8, lifetime: [1, 1] } },
       { kind: "particles", burst: 4, duration: 1, emitter: { max: 8, lifetime: [1, 1], sprite: "square", stretch: 0.05 } },
+      { kind: "particles", burst: 4, duration: 1, emitter: { max: 8, lifetime: [1, 1], sprite: "pixel" } },
+      { kind: "particles", burst: 4, duration: 1, emitter: { max: 8, lifetime: [1, 1], sprite: "flame" } },
       { kind: "particles", burst: 4, duration: 1, emitter: { max: 8, lifetime: [1, 1], softFade: 0.8 } },
       { kind: "particles", burst: 4, duration: 1, blend: "normal", emitter: { max: 8, lifetime: [1, 1], blending: "normal" } },
       { kind: "particles", burst: 4, duration: 1, blend: "normal", emitter: { max: 8, lifetime: [1, 1], blending: "normal", softFade: 0.8 } },

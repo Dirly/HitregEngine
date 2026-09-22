@@ -122,7 +122,7 @@ export class SpriteLive extends LiveModule<SpriteModule> {
       this.mesh.visible = false;
       return;
     }
-    const age = t * this.life;
+    const age = this.now - this.startedAt;
     let col: number;
     let row: number;
     if (m.cell) {
@@ -133,7 +133,7 @@ export class SpriteLive extends LiveModule<SpriteModule> {
       row = Math.min(this.rows - 1, m.row);
     }
     this.uOffset.value.set(col / this.cols, (this.rows - 1 - row) / this.rows);
-    this.uOpacity.value = this.opacityAt(t, this.startedAt + age);
+    this.uOpacity.value = this.opacityAt(t, this.now);
 
     const size = m.size * this.sizeAt(t);
     this.mesh.scale.set(size, size / Math.max(1e-3, m.aspect), 1);

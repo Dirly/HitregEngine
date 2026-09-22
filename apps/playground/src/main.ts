@@ -27,12 +27,17 @@ import {
   registerCoreEvents,
   cameraSchema,
   sceneDocSchema,
+  sceneMenuProjectOf,
   SceneStore,
   validatePrefab,
   sampleHeightmap,
   getVoxelWorld,
   worldTransforms,
+  WaterIndex,
+  waterQuery,
+  waterVolumes,
   type ApplyResult,
+  type WorldField,
   type TerrainHeightfield,
   type ChunkDoc,
   type ChunkStreamerData,
@@ -42,12 +47,15 @@ import {
   type SceneDoc,
   type SpritesheetDoc,
   type SubsceneData,
+  type SceneMenuGroup,
   type ToolDefinition,
   type ToolResult,
 } from "@hitreg/core";
 import {
   AnimationSystem,
   ClothSwaySystem,
+  WaterWake,
+  waterWakeUniforms,
   DEFAULT_CLOTH_SWAY,
   type ClothSwayOptions,
   type IslandReport,
@@ -66,6 +74,7 @@ import {
   InstancedPropPool,
   sceneLighting,
   type LiveSkyBase,
+  type LivePostFxOptions,
   type LiveSkyOptions,
   ClusterLodSystem,
   gltfLoadingCount,
@@ -87,14 +96,17 @@ import {
   type PathMeshSource,
   PortraitView,
   ThirdPersonCameraRig,
+  fitRigToBody,
+  type RigBodyCollider,
   type RigVec3,
+  type AmbientVfx,
 } from "@hitreg/render";
 
 /** The `camera` component and its authored rig block, straight off the schema. */
 type CameraComponentData = ReturnType<typeof cameraSchema.parse>;
 type CameraRigData = NonNullable<CameraComponentData["rig"]>;
 import { AudioSystem, type AudioComponentData } from "./audio-system.js";
-import { createVfx, makeVfxHost, warmVfx } from "./vfx-host.js";
+import { createAmbientVfx, createVfx, makeVfxHost, warmVfx } from "./vfx-host.js";
 import { initPhysics, Layers, PhysicsSim } from "@hitreg/physics";
 import {
   EventBus,
@@ -103,7 +115,11 @@ import {
   registerBuiltinScripts,
   ScriptRegistry,
   ScriptRuntime,
+  swimStateFor,
+  swimVy,
   type BiomeAt,
+  type SwimState,
+  type SwimTuning,
 } from "@hitreg/scripting";
 import {
   createAssetSelection,
@@ -133,6 +149,7 @@ import {
   type PlayMode,
   type TerrainBrushSettings,
   type PathCrossSection,
+  type NewSceneRequest,
 } from "@hitreg/editor";
 import { buildStarterDoc } from "./starter-scene.js";
 import { ChunkManager } from "./chunk-manager.js";
@@ -160,6 +177,7 @@ import { bakeImpostorAtlas } from "./impostor-bake.js";
 import { renderThumbnails } from "./thumbnails.js";
 import { initProjectScripts } from "./project-scripts.js";
 import { installLiveSync } from "./live-sync.js";
+import { startDevConsole, type DevConsoleHandle } from "./dev-console.js";
 import {
   applyWorldRecipeEdit,
   resolveVoxelWorld,
@@ -252,6 +270,9 @@ async function main(): Promise<void> {
   // contribute) while cost climbs steeply after 48. 32 buys 96% of the
   // available light for 0.6% more frame time.
   const lightBudget = new LightBudgetSystem(32);
+  // standing effects (the `vfx` component); created with the VfxSystem below,
+  // but the chunk and subscene streamers are built first and register into it
+  let ambientVfx: AmbientVfx | null = null;
   // "chunk sections" list for the hierarchy dock — updated on load/unload
   // (below), not per-frame: loaded cells only change when the focus crosses
   // a cell boundary, so this stays a rare React update, not a 60/sec one.
@@ -298,6 +319,7 @@ async function main(): Promise<void> {
     onInstancedBatch: (batch) => foliageLod.register(batch),
     instancePool: propPool,
     onLight: (_entityId, light, importance) => lightBudget.register(light, importance),
+    onVfx: (entityId, group, data) => ambientVfx?.register(entityId, group, data),
     bakeImpostor: (object, bounds) => bakeImpostorAtlas(renderer, object, bounds),
     onClusteredMesh: (_entityId, mesh) => clusterLod.register(mesh),
   }, {
@@ -346,6 +368,7 @@ async function main(): Promise<void> {
     resolveMaxAnisotropy: () => renderer.getMaxAnisotropy(),
     onInstancedBatch: (batch) => foliageLod.register(batch),
     onLight: (_entityId, light, importance) => lightBudget.register(light, importance),
+    onVfx: (entityId, group, data) => ambientVfx?.register(entityId, group, data),
     bakeImpostor: (object, bounds) => bakeImpostorAtlas(renderer, object, bounds),
     onClusteredMesh: (_entityId, mesh) => clusterLod.register(mesh),
   }, {
@@ -378,6 +401,18 @@ async function main(): Promise<void> {
     }
   };
 
+  // The toolbar's project → scene menu, built by the dev bridge from each
+  // project.json. Empty in a prod build (no bridge), where the flat list stays.
+  const fetchSceneMenu = async (): Promise<SceneMenuGroup[]> => {
+    try {
+      const body = (await fetch("/__hitreg/scene-menu").then((r) => r.json())) as { groups?: SceneMenuGroup[] };
+      return body.groups ?? [];
+    } catch {
+      return [];
+    }
+  };
+  const sceneMenu = observable<SceneMenuGroup[]>(await fetchSceneMenu());
+
   let initialDoc: SceneDoc | null = null;
   let sceneLoadError = "";
   let loadedSceneContent = "";
@@ -389,17 +424,23 @@ async function main(): Promise<void> {
       const requestedScene = new URLSearchParams(location.search).get("scene");
       if (requestedScene) return requestedScene;
       try {
-        return localStorage.getItem(LAST_SCENE_KEY);
+        const last = localStorage.getItem(LAST_SCENE_KEY);
+        if (last) return last;
       } catch {
-        return null;
+        /* storage disabled */
       }
+      // first run: the main scene of the first project in the menu
+      return sceneMenu.get()[0]?.projects[0]?.main ?? null;
     })();
-    const content = await loadAssets(assets, preferredScene);
-    if (content) {
-      const parsed = sceneDocSchema.safeParse(JSON.parse(content));
+    const loaded = await loadAssets(assets, preferredScene);
+    if (loaded) {
+      const parsed = sceneDocSchema.safeParse(JSON.parse(loaded.content));
       if (parsed.success) {
-        initialDoc = parsed.data;
-        loadedSceneContent = content;
+        // the FILE is the scene's identity: saves, pins and switching all key
+        // on doc.name, so a doc calling itself "Faultline Reliquary — blockout"
+        // used to save to a new file of that name in the flat assets/ tree
+        initialDoc = { ...parsed.data, name: loaded.id };
+        loadedSceneContent = loaded.content;
       } else {
         sceneLoadError = parsed.error.message.slice(0, 200);
         console.warn("[scene] scene file failed validation:", parsed.error);
@@ -431,6 +472,12 @@ async function main(): Promise<void> {
   if (seeded && !sceneList.get().includes(store.doc.name)) {
     sceneList.set([...sceneList.get(), store.doc.name].sort());
   }
+  // a scene appearing on disk (new scene, an agent's write) re-reads the menu
+  sceneList.subscribe(() => {
+    void fetchSceneMenu().then((groups) => sceneMenu.set(groups));
+  });
+  /** Project of the scene being edited: where a new scene gets written. */
+  let currentProject = sceneMenuProjectOf(sceneMenu.get(), store.doc.name)?.name ?? null;
   // -- prefab isolation editing (Unity-style): the prefab definition becomes
   // the working doc; autosave redirects to the prefab file, never a scene file
   const PREFAB_EDIT_SCENE = "__prefab-edit";
@@ -577,7 +624,7 @@ async function main(): Promise<void> {
     const content = JSON.stringify(store.doc, null, 2);
     if (content === lastWrittenScene) return;
     lastWrittenScene = content;
-    saveAsset(`scenes/${store.doc.name}.scene.json`, content);
+    saveAsset(`scenes/${store.doc.name}.scene.json`, content, currentProject);
   }
   if (seeded) persistScene();
   let sceneSaveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -837,7 +884,8 @@ async function main(): Promise<void> {
       selection.set(null);
       multiSelection.set([]);
       lastWrittenScene = content;
-      store.replace(parsed.data);
+      store.replace({ ...parsed.data, name }); // the file is the identity (see initial load)
+      currentProject = sceneMenuProjectOf(sceneMenu.get(), name)?.name ?? null;
       rememberLastScene(name);
       void pinStore.load(name);
       // hideSceneLoading() fires once the stats tick sees loadingCount hit 0
@@ -849,32 +897,49 @@ async function main(): Promise<void> {
     }
   }
 
-  function newScene(rawName: string): void {
-    if (editingPrefab.get()) {
-      console.warn("[prefab-edit] save or discard the prefab edit before creating a scene");
-      return;
+  /**
+   * The New scene dialog: write the scene file into its project, add it to
+   * that project's menu (own entry or a stage under another scene), then open
+   * it. Throws a readable Error for the dialog to show; nothing is opened
+   * unless both writes succeeded.
+   */
+  async function newScene(request: NewSceneRequest): Promise<void> {
+    if (editingPrefab.get() || editingChunk.get()) {
+      throw new Error("save or discard the prefab/chunk edit before creating a scene");
     }
-    if (editingChunk.get()) {
-      console.warn("[chunk-edit] save or discard the chunk edit before creating a scene");
-      return;
+    const { project, id } = request;
+    if (sceneList.get().includes(id) || sceneMenuProjectOf(sceneMenu.get(), id)) {
+      throw new Error(`a scene "${id}" already exists`);
     }
-    const name = rawName.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
-    if (!name) return;
-    if (sceneList.get().includes(name)) {
-      void switchScene(name);
-      return;
-    }
-    persistScene();
+    persistScene(); // flush the scene we're leaving, into ITS project
+    const doc: SceneDoc =
+      request.from === "current" ? { ...structuredClone(store.doc), name: id } : buildStarterDoc(id, registry);
+    const content = JSON.stringify(doc, null, 2);
+    const post = async (url: string, body: unknown): Promise<void> => {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const reply = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(reply.error ?? `${url} failed (${res.status})`);
+      }
+    };
+    // menu entry first: a manifest problem reaches the dialog before any file
+    // exists, and a listed id with no file is simply left out of the menu
+    const { label, note, variantOf } = request;
+    await post("/__hitreg/scene-menu", { project, id, label, note, variantOf });
+    await post("/__hitreg/write-asset", { file: `scenes/${id}.scene.json`, content, project });
     playMode.set("edit");
     selection.set(null);
     multiSelection.set([]);
-    showSceneLoading(name);
-    const starter = buildStarterDoc(name, registry);
-    lastWrittenScene = "";
-    store.replace(starter);
-    persistScene();
-    rememberLastScene(name);
-    sceneList.set([...sceneList.get(), name].sort());
+    showSceneLoading(id);
+    lastWrittenScene = content;
+    currentProject = project;
+    store.replace(doc);
+    rememberLastScene(id);
+    sceneList.set([...sceneList.get(), id].sort()); // re-reads the menu
   }
 
   // -- render side -----------------------------------------------------------
@@ -939,6 +1004,18 @@ async function main(): Promise<void> {
    * infer it from an absence of chunk files.
    */
   let activeVoxelWorld: string | null = null;
+  /**
+   * The scene's authored water as volumes, rebuilt with the scene, and whether
+   * the streaming world has water of its own. Together they answer
+   * `ctx.waterAt` (swimming) and the camera's submersion (the underwater look)
+   * — see `waterAt` below.
+   */
+  let waterIndex = new WaterIndex();
+  /** Dynamic water foam (wakes): a world-space mask the water materials read. */
+  let waterWake: WaterWake | null = null;
+  let activeWorldHasWater = false;
+  /** Camera submersion, eased — the underwater effect's own 0..1 (see the frame loop). */
+  let submersion = 0;
   /**
    * The WorldField the ground-cover sampler last answered from.
    *
@@ -1237,7 +1314,15 @@ async function main(): Promise<void> {
     // counts too, which lands snow in its canopy). Outside play, the terrain.
     groundAt: (x, y, z) => {
       const hit = sim?.raycast([x, y + 0.05, z], [0, -1, 0], 400);
-      return hit ? hit.point[1] : sampleTerrainHeight(x, z);
+      const solid = hit ? hit.point[1] : sampleTerrainHeight(x, z);
+      // Water counts as ground. It has no collider — you swim through it, so
+      // a ray goes straight past — and without this a rainstorm over a lake
+      // drops every one of its drops through the surface to splash on the
+      // BED, which is both invisible and wrong. The surface is what rain
+      // meets, and snow settling on a frozen lake wants the same answer.
+      const surface = waterAt(x, y, z);
+      if (surface && (solid === null || surface.surfaceY > solid)) return surface.surfaceY;
+      return solid;
     },
     entityByTag: (tag) => Object.entries(lastExpanded.entities).find(([, e]) => e.tags.includes(tag))?.[0],
   });
@@ -1247,6 +1332,7 @@ async function main(): Promise<void> {
   // the light set never changes mid-session (see VfxSystem).
   const vfx = createVfx(assets);
   const vfxHost = makeVfxHost(vfx);
+  ambientVfx = createAmbientVfx(vfx, assets, lightBudget);
   let vfxWarmed = false;
   const grass = new GrassSystem();
   const pathPointsInverse = new THREE.Matrix4();
@@ -1287,6 +1373,19 @@ async function main(): Promise<void> {
   function getRuntimeSky(): LiveSkyBase | null {
     return sceneLighting(built.scene)?.liveSkyBase() ?? null;
   }
+  /**
+   * ctx.setPostFx — the LENS channel.
+   *
+   * Held here rather than pushed straight at the renderer because the
+   * sandstorm has to be resolved against the camera that actually draws this
+   * frame (a chase rig, a scene camera, a cutscene camera), and scripts run on
+   * the fixed tick. So the script states the weather, and the render loop
+   * turns it into a screen angle below.
+   */
+  let livePostFx: LivePostFxOptions["sandstorm"] | null = null;
+  function setRuntimePostFx(opts: LivePostFxOptions): void {
+    if (opts.sandstorm) livePostFx = opts.sandstorm;
+  }
   // ctx.biomeAt — the weather script's "what is the ground here" question,
   // answered from the recipe's own biome rules (the same blend the terrain
   // texture and the grass use), so zone edges fade exactly where the ground does
@@ -1310,6 +1409,32 @@ async function main(): Promise<void> {
       moisture: sample.moisture,
       slope: sample.slope,
     };
+  }
+
+  // ctx.waterAt — one answer over both kinds of water, so a swimmer in a
+  // dungeon cistern and a swimmer in the open sea run the same rules. The
+  // field is looked up per call (a live recipe edit swaps it) and the index is
+  // rebuilt with the scene.
+  const waterAt = waterQuery({
+    index: () => waterIndex,
+    field: () => (activeVoxelWorld ? getVoxelWorld(activeVoxelWorld) : null),
+  });
+
+  /**
+   * Whether a procedural world holds any water at all — a sea to sink into,
+   * a lake, or a river with a surface. Asked once per scene build, because it
+   * decides whether the underwater post pass is built (see rebuild()).
+   */
+  function worldHasWater(field: WorldField | null): boolean {
+    if (!field) return false;
+    const features = field.recipe.features;
+    if (features.lakes.length > 0) return true;
+    if (features.rivers.some((river) => river.water !== false)) return true;
+    // A bounded world is ringed by open ocean by construction. An UNBOUNDED
+    // world with no lake and no river is taken at its word — its noise may dip
+    // below the sea somewhere, and you can still swim there, but it does not
+    // earn every scene in the engine a post pass on the chance that it does.
+    return field.recipe.bounds !== undefined;
   }
 
   function setPathPoints(entityId: string, points: Array<[number, number, number]>): void {
@@ -1477,6 +1602,7 @@ async function main(): Promise<void> {
     resolveMaxAnisotropy: () => renderer.getMaxAnisotropy(),
     onParticles: (entityId, group, data) =>
       particles.register(entityId, group, data, (assetId) => assets.getTexture(assetId)?.url),
+    onVfx: (entityId, group, data) => ambientVfx?.register(entityId, group, data),
     onLight: (_entityId, light, importance) => lightBudget.register(light, importance),
     onBillboard: (entityId, group, data) =>
       billboards.register(entityId, group, data, {
@@ -1544,10 +1670,20 @@ async function main(): Promise<void> {
     },
   };
 
-  function rebuild(): void {
+  /**
+   * Rebuild the whole runtime scene from the document.
+   *
+   * `docChanged` says the DOCUMENT itself moved on (an edit), not just what it
+   * is drawn from: the sim was built from the old one and has to be rebuilt
+   * with it. Everything else — an asset landing on disk, a viewport setting —
+   * keeps the sim (and the player's position with it) and only restarts the
+   * scripts, which is what the new objects require. See startScripts.
+   */
+  function rebuild(opts: { docChanged?: boolean } = {}): void {
     lastExpanded = expandForRuntime();
     animations.clear();
     particles.clear();
+    ambientVfx?.clear();
     billboards.clear();
     grass.clear();
     const endBuild = profiler.span("scene.build", `${Object.keys(lastExpanded.entities).length} entities`);
@@ -1609,10 +1745,37 @@ async function main(): Promise<void> {
     chunkManager.setProvider(voxelWorld ? voxelChunkProvider(voxelWorld, assets) : null);
     if (voxelWorld) streamer = voxelWorld.streamer;
     activeVoxelWorld = voxelWorld?.data.world ?? null;
+    activeWorldHasWater = worldHasWater(voxelWorld?.field ?? null);
     void chunkManager.configure(streamer, built.scene);
     // subscene components: whole scene files composed additively at runtime
     const subscenes: SubsceneInstance[] = [];
     const worlds = worldTransforms(expanded);
+    // Water: the authored volumes in this scene (`water` components) plus the
+    // procedural world's own sea, lakes and rivers, behind one query —
+    // `ctx.waterAt` for scripts, the camera's submersion for the underwater
+    // look. Whether the underwater PASS exists at all is settled HERE, per
+    // scene, rather than when somebody dives: rebuilding the post chain
+    // mid-dive recreates the scene pass and recompiles every material behind
+    // it (docs/performance-lessons.md).
+    waterIndex = new WaterIndex(waterVolumes(expanded, worlds));
+    const hasWater = !waterIndex.empty || activeWorldHasWater;
+    renderer.setWaterPresent(hasWater);
+    // Wakes: one world-space height field that swimmers (and later boats,
+    // rain, impacts) push into and every water material deforms with. Built
+    // with the scene, because a scene with no water has nothing to disturb.
+    if (hasWater && !waterWake) {
+      waterWake = new WaterWake({ size: 64, resolution: 512 });
+      waterWakeUniforms.strength.value = 1;
+    } else if (!hasWater && waterWake) {
+      waterWake.dispose();
+      waterWake = null;
+    }
+    // Can this scene storm at all? A scene fact, like water: the sandstorm
+    // pass is built once for a scene that carries the weather script, then
+    // driven by uniforms (see PlanContext.weather).
+    renderer.setWeatherPresent(
+      Object.values(lastExpanded.entities).some((e) => (e.components["script"] as { name?: string } | undefined)?.name === "weather"),
+    );
     // The heightmap tiles the foliage sampler reads are about to be rebuilt
     // from the new doc, so anything cover cached about the ground is now
     // about terrain that may no longer be there. Every asset live-edit lands
@@ -1656,6 +1819,16 @@ async function main(): Promise<void> {
     rebuildNetRuntimeObjects(); // server-spawned bodies survive rebuilds too
     viewport?.onSceneRebuilt();
     meshEditTool?.onSceneRebuilt();
+    // A rebuild replaces every runtime object in the scene, and a running
+    // script HOLDS one — so during play the scripts are started again on the
+    // new objects (see startScripts, which explains what a stale one looks
+    // like). Edits through the document already restarted the whole session
+    // for this reason; the other rebuild triggers — an asset landing on disk
+    // while somebody plays, a settings change — did not, and this is where
+    // they all meet.
+    if (!sim) return;
+    if (opts.docChanged) startPlaySession();
+    else startScripts();
   }
 
   const renderer = new EngineRenderer(canvas);
@@ -1733,7 +1906,7 @@ async function main(): Promise<void> {
     camera.getWorldDirection(flyDir);
     const p = camera.position;
     void controls.setLookAt(p.x, p.y, p.z, p.x + flyDir.x * 12, p.y + flyDir.y * 12, p.z + flyDir.z * 12, false);
-    controls.enabled = document.pointerLockElement !== canvas;
+    controls.enabled = playMode.get() !== "playing";
   }
   const flyDir = new THREE.Vector3();
   const flyRight = new THREE.Vector3();
@@ -1856,7 +2029,10 @@ async function main(): Promise<void> {
   // of the remaining rebuild-relevant fields so toggling any of those doesn't
   // tear down and rebuild the whole scene.
   const rebuildKey = (s: ReturnType<typeof settings.get>) =>
-    JSON.stringify({ ...s, showStats: 0, showGizmos: 0, showPhysics: 0, showLights: 0 });
+    // showSkeletons belongs with the other overlays: refreshSkeletonDebugVisibility
+    // attaches and detaches it in place, and a rebuild during play restarts every
+    // script (see rebuild()), which is a steep price for a gizmo.
+    JSON.stringify({ ...s, showStats: 0, showGizmos: 0, showPhysics: 0, showLights: 0, showSkeletons: 0 });
   let lastRebuildKey = rebuildKey(settings.get());
   let lastShowPhysics = settings.get().showPhysics;
   let lastShowLights = settings.get().showLights;
@@ -1967,7 +2143,7 @@ async function main(): Promise<void> {
     },
   });
 
-  mountVolumePaint({canvas,camera,doc:()=>store.doc,objects:()=>built?.objects??new Map(),editing:()=>playMode.get()==='edit'});
+  mountVolumePaint({canvas,camera,doc:()=>lastExpanded??store.doc,objects:()=>built?.objects??new Map(),editing:()=>playMode.get()==='edit'});
 
   new TerrainTool({
     canvas,
@@ -2088,6 +2264,7 @@ async function main(): Promise<void> {
     onFocusEntity: frameEntity,
     onUnpackModel: unpackModel,
     scenes: sceneList,
+    sceneMenu,
     onSwitchScene: (name) => void switchScene(name),
     onNewScene: newScene,
     editingPrefab,
@@ -2301,6 +2478,18 @@ async function main(): Promise<void> {
   const netProxyId = (peerId: string) => `__net:player:${peerId}`;
   const NET_MAX_SPEED = 20; // trust boundary: cap any claimed input velocity
   const NET_JUMP_VELOCITY = 8;
+  /** Origin-to-feet for a proxy capsule — the controller measures this per body; a proxy is one shape. */
+  const NET_PROXY_FOOT = 0.9;
+  /** Swim rules for a proxy: the controller's own defaults (see third-person-controller). */
+  const NET_SWIM: SwimTuning = {
+    enterDepth: 1.5,
+    exitDepth: 1.25,
+    floatDepth: 0.1,
+    buoyancy: 3.5,
+    climbSpeed: 2.6,
+  };
+  /** Which proxies are swimming — the hysteresis the shared rule needs to hold a mode. */
+  const netProxySwim = new Map<string, SwimState>();
   const NET_NUDGE_DIST = 1.0; // prediction drift beyond this eases toward authority
   const NET_SNAP_DIST = 3.5; // …and beyond this teleports (velocity reset)
 
@@ -2353,8 +2542,21 @@ async function main(): Promise<void> {
       const playerId = localPlayerId();
       const object = playerId ? built.objects.get(playerId) : undefined;
       if (!playerId || !object) return null;
-      const ud = object.userData as { speedMult?: number; frozen?: boolean };
+      const ud = object.userData as {
+        speedMult?: number;
+        frozen?: boolean;
+        swimming?: string;
+        swimVelocity?: [number, number, number];
+      };
       if (ud.frozen) return { v: [0, 0], jump: false };
+      // Swimming: the controller already solved where this body is pointed
+      // (camera pitch included), so relay THAT rather than re-deriving a flat
+      // heading here — two derivations is two answers, and the authority's
+      // wins.
+      if (ud.swimming === "swimming" && ud.swimVelocity) {
+        const [sx, sy, sz] = ud.swimVelocity;
+        return { v: [sx, sz], jump: input.isDown("Space"), vy: sy };
+      }
       let forward = 0;
       let strafe = 0;
       if (input.isDown("KeyW") || input.isDown("ArrowUp")) forward += 1;
@@ -2366,14 +2568,27 @@ async function main(): Promise<void> {
       let z = fz * forward + fx * strafe;
       const len = Math.hypot(x, z);
       const script = (lastExpanded.entities[playerId] ?? netRuntimeDocs.get(playerId))?.components["script"] as
-        | { params?: { speed?: number } }
+        | { params?: { speed?: number; swimSpeed?: number; swimDownKey?: string } }
         | undefined;
-      const speed = (script?.params?.speed ?? 6.5) * (ud.speedMult ?? 1);
+      // A swimmer asks for its swim speed, not its run speed: the authority
+      // clamps what arrives, and a stroke sent as a sprint is a body the
+      // server keeps overtaking.
+      const swimming = ud.swimming === "swimming";
+      const speed =
+        (swimming ? (script?.params?.swimSpeed ?? 3.2) : (script?.params?.speed ?? 6.5)) *
+        (ud.speedMult ?? 1);
       if (len > 0) {
         x = (x / len) * speed;
         z = (z / len) * speed;
       }
-      return { v: [x, z], jump: input.isDown("Space") };
+      // Vertical intent is only meaningful in water; out of it, Space is the
+      // jump the authority already reads.
+      // the same comma-separated list the controller reads — one key here and
+      // three there is a dive that works single-player and not on a server
+      const diveKeys = (script?.params?.swimDownKey ?? "ControlLeft,KeyC,KeyX").split(",");
+      const diving = diveKeys.some((k) => k.trim() && input.isDown(k.trim()));
+      const vy = (input.isDown("Space") ? 1 : 0) - (diving ? 1 : 0);
+      return { v: [x, z], jump: input.isDown("Space"), vy };
     },
     getProxyState: (peerId) => {
       const state = sim?.states().get(netProxyId(peerId));
@@ -2612,7 +2827,30 @@ async function main(): Promise<void> {
       );
     }
   });
-  mountCommsUI({ chat: comms.chat, voice: comms.voice, onCommand: (name, args) => socialPanel?.command(name, args) ?? false }); // bottom-left overlay; Enter opens
+  /**
+   * The developer console, when this build has one (see dev-console.ts).
+   *
+   * Two ways in, one command table: type "/" for its own input line, or type
+   * the command in the CHAT box, which is where a hand already is when
+   * somebody is playing. The chat's own commands (/team, /friend, channel
+   * picks) keep priority — the console only answers what the chat and the
+   * social panel didn't.
+   */
+  let devConsole: DevConsoleHandle | null = null;
+  void startDevConsole({
+    runtime: () => scripts,
+    isAuthority: () => (netPresence?.stats().role ?? "off") !== "peer",
+  }).then((handle) => {
+    devConsole = handle;
+  });
+  mountCommsUI({
+    chat: comms.chat,
+    voice: comms.voice,
+    onCommand: (name, args) => {
+      if (socialPanel?.command(name, args)) return true;
+      return devConsole?.command(name, args) ?? false;
+    },
+  }); // bottom-left overlay; Enter opens
   comms.voice.attachKeyboard(window); // V = say, B = team, N = party (push-to-talk)
   comms.chat.system(
     socialPanel
@@ -2782,6 +3020,12 @@ async function main(): Promise<void> {
       socialPanel.toggle();
       return;
     }
+    if (e.code === MOUSE_LOOK_KEY && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+      if (playMode.get() === "playing") {
+        setMouseLook(!mouseLook);
+        return;
+      }
+    }
     if (e.code === "Backquote") {
       if (playMode.get() === "playing") {
         playMode.set("paused");
@@ -2875,6 +3119,14 @@ async function main(): Promise<void> {
     return [viewDir.x, viewDir.z];
   }
 
+  /** The same aim with its PITCH kept — what swimming aims along (ctx.viewDirection). */
+  function viewDirection(): [number, number, number] {
+    camera.getWorldDirection(viewDir);
+    if (viewDir.lengthSq() < 1e-6) return [0, 0, -1];
+    viewDir.normalize();
+    return [viewDir.x, viewDir.y, viewDir.z];
+  }
+
   const audio = new AudioSystem(camera, (soundId) => assets.getSound(soundId)?.url);
   const playerDataBackend = new BridgePlayerDataBackend();
 
@@ -2928,13 +3180,22 @@ async function main(): Promise<void> {
    * profiling once pinned at 70% of frame time. One broadphase sweep sees
    * exactly what the player can collide with.
    */
-  function cameraBoomSweep(radius: number, from: RigVec3, to: RigVec3): number | null {
+  function cameraBoomSweep(
+    radius: number,
+    from: RigVec3,
+    to: RigVec3,
+    fromInside = false,
+  ): number | null {
     if (!sim || !followTargetId) return null;
     // exclude the target: the sweep starts inside its own capsule, and a shape
-    // stopped by itself reports distance 0 — the camera jams in the head
+    // stopped by itself reports distance 0 — the camera jams in the head.
+    // `fromInside`: the rig's probes may begin touching what they are leaving
+    // (a feet-origin sunk in the floor, a pivot parked under a lintel) and
+    // must only be stopped by what they move INTO.
     const hit = sim.spherecast(radius, from, to, {
       exclude: [followTargetId],
       layers: CAMERA_BOOM_LAYERS,
+      stopAtPenetration: !fromInside,
     });
     return hit ? hit.distance : null;
   }
@@ -2983,11 +3244,42 @@ async function main(): Promise<void> {
     // alone in the room = fresh single-player run = clean session state;
     // with others present the state belongs to the ROOM and must survive
     netPresence?.resetSessionStateIfSolo();
+    startScripts();
+    animations.setRunning(true);
+
+    // autoplay audio components (music, ambience)
+    for (const [id, entity] of Object.entries(lastExpanded.entities)) {
+      const comp = entity.components["audio"] as AudioComponentData | undefined;
+      if (comp?.autoplay) void audio.play(built.objects.get(id) ?? null, comp.src, comp);
+    }
+  }
+
+  /**
+   * (Re)start every script against the CURRENT runtime objects, keeping the
+   * sim — and with it every body's position, velocity and contact — exactly
+   * where it is.
+   *
+   * A script is handed its entity's runtime object when it starts
+   * (`ctx.object`) and the runtime copies the object map at construction, so
+   * a scene rebuild leaves every running script writing to an object that is
+   * no longer drawn: a character controller goes on steering a ghost while
+   * the body you can see stops turning, and its ground probe reads the
+   * terrain under wherever that ghost was left — which is how a character
+   * walks off a slope and out into the air. Rebinding alone is not enough
+   * (scripts resolve other bodies in onStart and hold those too), so they are
+   * started afresh. The SIM is deliberately untouched: a rebuild triggered by
+   * an asset landing on disk must not teleport the player back to the
+   * authored spawn.
+   */
+  function startScripts(): void {
+    if (!sim || !eventBus) return; // no play session to (re)start scripts in
+    const bus = eventBus;
+    scripts?.dispose();
     scripts = new ScriptRuntime({
       doc: lastExpanded,
       objects: built.objects,
       sim,
-      events: eventBus,
+      events: bus,
       // dev identity: single local player; the scene is the experience
       playerData: new PlayerDataService(playerDataBackend, {
         playerId: "local",
@@ -2997,12 +3289,14 @@ async function main(): Promise<void> {
       profiler, // per-script-name scopes under "scripts" (see RuntimeOptions)
       input,
       viewForward,
+      viewDirection,
       localPlayer: () => localPlayerId(),
       setAnimation: (entityId, clip, fade, opts) =>
         animations.play(entityId, clip, fade ?? 0.3, opts?.loop ?? true, opts?.restart ?? false),
       animationClips: (entityId) => animations.clipNames(entityId),
       animationDuration: (entityId, clip) => animations.clipDuration(entityId, clip),
       setAnimationSpeed: (entityId, multiplier) => animations.setSpeed(entityId, multiplier),
+      setAnimationBlend: (entityId, from, to, weight, fade) => animations.playBlend(entityId, from, to, weight, fade),
       setAnimationLayer: (entityId, clip, opts) => animations.playLayer(entityId, clip, opts),
       clearAnimationLayer: (entityId, fade) => animations.clearLayer(entityId, fade ?? 0.2),
       setBillboard: (entityId, opts) => billboards.setValue(entityId, opts),
@@ -3019,8 +3313,11 @@ async function main(): Promise<void> {
       },
       setLight: setRuntimeLight,
       setSky: setRuntimeSky,
+      setPostFx: setRuntimePostFx,
+      daylight: () => sceneLighting(built.scene)?.daylight() ?? 1,
       getSky: getRuntimeSky,
       biomeAt: runtimeBiomeAt,
+      waterAt, // swimming, breath meters, "do not walk into the lake"
       setPathPoints,
       // replicated session state (ctx.netState) — facts every tab agrees on
       ...(netPresence ? { netState: netPresence.netState } : {}),
@@ -3037,13 +3334,6 @@ async function main(): Promise<void> {
     scripts.start();
     chunkManager.forEachLoaded((doc, objects) => scripts?.addEntities(doc, objects));
     subsceneManager.forEachLoaded((doc, objects) => scripts?.addEntities(doc, objects));
-    animations.setRunning(true);
-
-    // autoplay audio components (music, ambience)
-    for (const [id, entity] of Object.entries(lastExpanded.entities)) {
-      const comp = entity.components["audio"] as AudioComponentData | undefined;
-      if (comp?.autoplay) void audio.play(built.objects.get(id) ?? null, comp.src, comp);
-    }
 
     // a peer mid-net-session: the host still owns the replicated NPCs, so
     // re-suspend them in the fresh session (the id set didn't change, so
@@ -3074,8 +3364,13 @@ async function main(): Promise<void> {
           [...netRuntimeDocs].find(([, e]) => e.tags.includes(tag))?.[0] ??
           null;
         followRigMode = cam.rig.mode as "follow" | "chase";
-        followRigData = cam.rig;
-        applyRigIfChanged(cam.rig);
+        // the pivot is authored from the body's ORIGIN, which on a capsule
+        // character is its waist: keep it inside the body's own collider
+        const body = followTargetId
+          ? (lastExpanded.entities[followTargetId] ?? netRuntimeDocs.get(followTargetId))
+          : undefined;
+        followRigData = fitRigToBody(cam.rig, body?.components["collider"] as RigBodyCollider | undefined);
+        applyRigIfChanged(followRigData);
         break;
       }
     }
@@ -3169,6 +3464,9 @@ async function main(): Promise<void> {
     if (change.kind === "ops" && tryReconcile(change.result)) {
       reconcileCount++;
       profiler.mark("scene.reconcile");
+      // edits during play restart the session on the new doc (the rebuild
+      // path below restarts on its own — see the tail of rebuild())
+      if (sim) startPlaySession();
       return;
     }
     rebuildCount++;
@@ -3178,11 +3476,8 @@ async function main(): Promise<void> {
     // says whether an edit caused it — the difference between a real
     // performance problem and the editor doing what it was told.
     const endRebuild = profiler.span("scene.rebuild", `${Object.keys(store.doc.entities).length} entities`);
-    rebuild();
+    rebuild({ docChanged: true }); // restarts the play session on the new doc
     endRebuild();
-  });
-  store.subscribe(() => {
-    if (sim) startPlaySession(); // edits during play restart the session on the new doc
   });
   /**
    * Entering play is a TELEPORT to wherever the player entity stands.
@@ -3232,37 +3527,70 @@ async function main(): Promise<void> {
     if (mode === "playing") holdForPlayLanding();
   });
 
-  // Fortnite-style mouse look: play mode captures the pointer, so moving the
-  // mouse IS the camera. Esc (browser-enforced) or leaving play releases it;
-  // clicking the game recaptures. camera-controls' own pointer handling is
-  // parked while locked so drags don't double-apply.
+  // HOLD-TO-LOOK, never pointer lock. The engine used to capture the pointer
+  // in play mode, Fortnite-style, and that is the wrong trade for this game
+  // and an actively hostile one for the person building it: a captured cursor
+  // cannot reach the editor panels, the other window, or anything else on the
+  // machine, and it is taken by a click rather than asked for. Holding a mouse
+  // button over the viewport looks around — the MMO convention — and the
+  // cursor stays where the player left it.
   const MOUSE_LOOK_SPEED = 0.0025; // rad per px
-  function syncPointerLockState(): void {
-    const locked = document.pointerLockElement === canvas;
-    controls.enabled = !locked;
+  /** Buttons that steer the view while held (right, middle: WoW's own pair). */
+  const LOOK_BUTTONS = 0b110;
+  /** Mouse buttons currently down, as a bitmask (bit n = button n). */
+  let heldButtons = 0;
+  /**
+   * Mouse mode. CURSOR is the default and the one the game ships in: the
+   * pointer is yours, it reaches the UI and the rest of the machine, and
+   * holding right or middle over the view turns the camera. MOUSELOOK is the
+   * opt-in mode for playing with two hands on the keyboard — the mouse steers
+   * continuously, which needs the pointer captured to keep moving past the
+   * edge of the window. Nothing enters it but the player, and leaving play,
+   * pressing Escape or toggling again all come straight back out.
+   */
+  let mouseLook = false;
+  const MOUSE_LOOK_KEY = "KeyZ";
+  const looking = (): boolean =>
+    playMode.get() === "playing" && (mouseLook || (heldButtons & LOOK_BUTTONS) !== 0);
+  function setMouseLook(on: boolean): void {
+    const want = on && playMode.get() === "playing";
+    if (want === mouseLook) return;
+    mouseLook = want;
+    if (want) void canvas.requestPointerLock()?.catch(() => { mouseLook = false; });
+    else if (document.pointerLockElement === canvas) document.exitPointerLock();
   }
-  document.addEventListener("pointerlockchange", syncPointerLockState);
-  // mouse buttons reach gameplay only while the pointer is locked on the canvas:
-  // a click on a panel is a click on a panel, never a swing
-  const mouseButton = (e: MouseEvent, down: boolean): void => {
+  // Escape (or anything else) dropping the capture leaves the mode with it,
+  // so the state can never disagree with what the browser is actually doing
+  document.addEventListener("pointerlockchange", () => {
     if (document.pointerLockElement !== canvas) {
-      if (!down) input.setMouseButton(e.button, false);
+      mouseLook = false;
+      input.releaseMouse();
+    }
+  });
+  // Mouse buttons reach gameplay only from the viewport itself: a click on a
+  // panel is a click on a panel, never a swing.
+  const mouseButton = (e: MouseEvent, down: boolean): void => {
+    if (down) heldButtons |= 1 << e.button;
+    else heldButtons &= ~(1 << e.button);
+    if (!down) {
+      input.setMouseButton(e.button, false);
       return;
     }
-    input.setMouseButton(e.button, down);
-    if (down) e.preventDefault();
+    if (playMode.get() !== "playing") return;
+    if (!mouseLook && e.target !== canvas) return;
+    input.setMouseButton(e.button, true);
+    e.preventDefault();
   };
   canvas.addEventListener("mousedown", (e) => mouseButton(e, true));
   window.addEventListener("mouseup", (e) => mouseButton(e, false));
   canvas.addEventListener("contextmenu", (e) => {
-    if (document.pointerLockElement === canvas) e.preventDefault();
-  });
-  document.addEventListener("pointerlockchange", () => {
-    if (document.pointerLockElement !== canvas) input.releaseMouse();
+    // right-drag is how you look around; a context menu on release would eat
+    // every turn of the camera
+    if (playMode.get() === "playing") e.preventDefault();
   });
   window.addEventListener("blur", () => input.releaseMouse());
   document.addEventListener("mousemove", (e) => {
-    if (document.pointerLockElement !== canvas) return;
+    if (!looking()) return;
     // chase rig: the mouse steers the TARGET (e.g. a vehicle's nose) via
     // ctx.input.mouseDelta(), not the camera — it rigidly tracks the target's
     // own heading instead of free-orbiting (see the update loop below).
@@ -3280,19 +3608,13 @@ async function main(): Promise<void> {
   // left-drag has to orbit the way camera-controls used to — otherwise
   // pausing to look at something leaves the view frozen behind the character.
   // Suppressed mid-gizmo, exactly as camera-controls was.
+  // Paused play keeps the rig on the camera, so a left-drag still orbits it —
+  // the same gesture the editor camera uses, and it cannot collide with
+  // hold-to-look because that only runs while play is running.
   canvas.addEventListener("pointermove", (e) => {
-    if (!rigDrivesCamera || document.pointerLockElement === canvas) return;
+    if (!rigDrivesCamera || playMode.get() === "playing") return;
     if (gizmoDragging || flyLookMode || (e.buttons & 1) === 0) return;
     cameraRig.addLook(e.movementX, e.movementY);
-  });
-  canvas.addEventListener("mousedown", () => {
-    if (playMode.get() === "playing" && document.pointerLockElement !== canvas) {
-      // best-effort: modern browsers return a Promise that rejects if the
-      // document isn't focused yet (e.g. this click is what's focusing it) —
-      // nothing to recover, the next click retries, just don't let it surface
-      // as an uncaught rejection
-      void canvas.requestPointerLock()?.catch(() => undefined);
-    }
   });
   // Wheel zoom in play. camera-controls' own wheel handling is parked while
   // the pointer is locked (`controls.enabled = false` above), so the game rig
@@ -3306,9 +3628,10 @@ async function main(): Promise<void> {
       e.preventDefault(); // the page must not scroll under a locked pointer
       // normalize across deltaMode (pixel vs line) — a line-mode wheel reports
       // ~3, a pixel-mode trackpad ~100, and raw deltas make one of them useless.
-      // Sized so a notch is a nudge (~0.7m) and crossing the whole band takes a
-      // deliberate scroll, not two clicks.
-      const step = e.deltaMode === 0 ? e.deltaY * 0.006 : e.deltaY * 0.25;
+      // A notch is ~1.2 m at the default framing; the rig scales it with the
+      // current distance, so about a dozen clicks run from the wide shot all the
+      // way into first person and no single click is a lurch.
+      const step = e.deltaMode === 0 ? e.deltaY * 0.012 : e.deltaY * 0.4;
       cameraRig.addZoom(step);
     },
     { passive: false },
@@ -3337,11 +3660,9 @@ async function main(): Promise<void> {
         cameraRig.applyAuthored(followRigData);
         cameraRig.reset();
       }
-      // the play-button click is our user gesture, but this fires from a
-      // store subscription (async relative to that click), so the browser
-      // can still see it as "document not focused" and reject — best-effort,
-      // the mousedown handler above retries on the player's next click
-      void canvas.requestPointerLock()?.catch(() => undefined);
+      // camera-controls stands down for the play rig; nothing captures the
+      // cursor (see hold-to-look above)
+      controls.enabled = false;
     } else {
       // hand the pose back: camera-controls has been parked all session and
       // still holds the orbit from before play, which would snap the editor
@@ -3353,6 +3674,11 @@ async function main(): Promise<void> {
         rigDrivesCamera = false;
         syncRigTargetVisibility();
       }
+      heldButtons = 0;
+      setMouseLook(false);
+      input.releaseMouse();
+      controls.enabled = true;
+      // a session that started before this change may still hold the pointer
       if (document.pointerLockElement === canvas) document.exitPointerLock();
     }
     refreshCameraColliders();
@@ -3378,6 +3704,8 @@ async function main(): Promise<void> {
     const material = built.materials.get(id);
     if (!material) return false;
     if (!patchMaterial(material, data as MaterialData)) return false;
+    // effects coloured by this material resolve their palette at start
+    ambientVfx?.restyle(id);
     refreshThumbnails();
     return true;
   }
@@ -3393,6 +3721,7 @@ async function main(): Promise<void> {
     editingPrefab,
     assetsVersion,
     patchMaterialLive,
+    onVfxAssetChanged: (id) => ambientVfx?.reloadEffect(id),
     getLastWrittenScene: () => lastWrittenScene,
     setLastWrittenScene: (content) => {
       lastWrittenScene = content;
@@ -3683,12 +4012,21 @@ async function main(): Promise<void> {
       renderer,
       chunkManager,
       propPool,
+      waterWakeUniforms,
+      // the wake height field: a probe can pin its centre or read its size
+      get waterWake() {
+        return waterWake;
+      },
       profiler,
       // the VFX system, and the validating host over it: a headless probe can
       // play a raw effect/spell document (`vfxHost.play(doc, {origin,
       // direction})`) and screenshot one module kind in isolation
       vfx,
       vfxHost,
+      // standing effects: `.stats()` says how many torches are simulating
+      get ambientVfx() {
+        return ambientVfx;
+      },
       // the editor orbit TARGET is the streaming focus in edit mode, so
       // driving it along a path is a repeatable streaming benchmark
       controls,
@@ -3854,7 +4192,7 @@ async function main(): Promise<void> {
       if (netPresence) {
         profiler.begin("net.inputs");
         const active = new Set<string>();
-        for (const { peerId, v, jump, p } of netPresence.activeRemoteInputs()) {
+        for (const { peerId, v, jump, vy: dive, p } of netPresence.activeRemoteInputs()) {
           const id = netProxyId(peerId);
           active.add(id);
           if (!netProxies.has(id)) spawnNetProxy(id, p);
@@ -3867,7 +4205,25 @@ async function main(): Promise<void> {
             vz = (vz / speed) * NET_MAX_SPEED;
           }
           let vy = vel[1];
-          if (jump && Math.abs(vy) < 0.05) vy = NET_JUMP_VELOCITY;
+          // A peer swimming has to float on this host too, or the proxy sinks
+          // to the bed while its owner's screen shows it at the surface, and
+          // the reconciliation drags the owner down with it. Same rules as the
+          // controller — this is a proxy, so it uses the defaults rather than
+          // that body's params.
+          const at = sim.states().get(id)?.position;
+          const water = at ? waterAt(at[0], at[1] - NET_PROXY_FOOT, at[2]) : null;
+          const proxySwims =
+            water !== null &&
+            water.swim &&
+            swimStateFor(water.depth, water.surfaceY - water.floorY, netProxySwim.get(id) ?? "dry", NET_SWIM) === "swimming";
+          netProxySwim.set(id, proxySwims ? "swimming" : water && water.depth > 0 ? "wading" : "dry");
+          if (proxySwims) {
+            vy = swimVy(water.depth, Math.max(-12, Math.min(12, dive)), NET_SWIM);
+            vx += water.current[0];
+            vz += water.current[1];
+          } else if (jump && Math.abs(vy) < 0.05) {
+            vy = NET_JUMP_VELOCITY;
+          }
           sim.setLinvel(id, [vx, vy, vz]);
         }
         for (const id of [...netProxies]) {
@@ -4064,6 +4420,9 @@ async function main(): Promise<void> {
         vfxWarmed = true;
         void warmVfx(vfx, assets, (group) => renderer.precompileGroup(group, renderCamera, built.scene), renderCamera);
       }
+      // standing effects start/stop/follow before the plays step, and before
+      // the light budget re-aims its slots at their lights
+      ambientVfx?.update(renderCamera, built.scene);
       vfx.update(dt, renderCamera, built.scene);
       profiler.end();
       profiler.begin("grass");
@@ -4105,6 +4464,53 @@ async function main(): Promise<void> {
       // render sits OUTSIDE "update", at the top level: it is the one scope
       // you compare directly against the GPU number, and burying it inside
       // another subtotal makes that comparison harder to read
+      // How far the camera is INTO water, eased. The ease is what stops the
+      // effect strobing while a swimming camera rides the waterline: the
+      // crossing itself is instantaneous and happens several times a second.
+      // One water query per frame, from the same source the swimmer uses, so
+      // the picture and the body can never disagree about where the surface is.
+      {
+        const eye = renderCamera.getWorldPosition(foliageLodCameraPos);
+        const here = waterAt(eye.x, eye.y, eye.z);
+        // the eye is under once the surface is above it; the last 30 cm ramps,
+        // so breaking the surface is a rise rather than a switch
+        renderer.setSubmersion(here ? Math.min(1, here.depth / 0.3) : 0, dt, {
+          ...(here?.color ? { color: here.color } : {}),
+          ...(here?.density !== undefined ? { density: here.density } : {}),
+        });
+      }
+      // The storm, against the camera that is about to draw: the renderer
+      // projects the world wind into this view (see EngineRenderer.setSandstorm).
+      renderer.setSandstorm(
+        livePostFx?.amount ?? 0,
+        livePostFx?.wind ?? [0, 0, 1],
+        renderCamera,
+        livePostFx?.color,
+      );
+      if (waterWake) {
+        // The field follows the camera and the swimmers push into it. A body
+        // says it is disturbing the surface by carrying `wake` on its runtime
+        // userData (the swim-wake script sets it); the host stamps, because
+        // only the host has the renderer and the field.
+        const eye = renderCamera.getWorldPosition(foliageLodCameraPos);
+        waterWake.setCenter(eye.x, eye.z);
+        for (const [id, object] of built.objects) {
+          const wake = (object.userData as { wake?: { radius: number; strength: number; y: number } }).wake;
+          if (!wake) continue;
+          const velocity = sim?.getLinvel(id) ?? null;
+          waterWake.stamp(
+            object.position.x,
+            object.position.z,
+            wake.radius,
+            wake.strength,
+            velocity ? velocity[0] : 0,
+            velocity ? velocity[2] : 0,
+          );
+        }
+        profiler.begin("water.wake");
+        waterWake.update(renderer.renderer, dt);
+        profiler.end();
+      }
       profiler.begin("render");
       vfx.applyShake(renderCamera); // camera shake lives only inside the draw
       renderer.render(built.scene, renderCamera); // sub-scopes itself, see setScopeSink
@@ -4129,7 +4535,7 @@ async function main(): Promise<void> {
     const mode = playMode.get();
     const hint =
       mode === "playing"
-        ? "~ pause + editor"
+        ? `~ pause + editor · mouse: ${mouseLook ? "look (Z or Esc frees it)" : "cursor (hold RMB to look · Z)"}`
         : mode === "paused"
           ? "PAUSED — ~ resume · ⏹ stop in toolbar"
           : "~ editor";

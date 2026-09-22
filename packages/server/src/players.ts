@@ -27,8 +27,15 @@ import {
   risingByGround,
   gaitSpeed,
   leavingGround,
+  idleThreshold,
   playbackRate,
+  swimStateFor,
+  swimVy,
+  swimming,
   type GaitTuning,
+  type SwimState,
+  type SwimTuning,
+  type WaterAt,
 } from "@hitreg/scripting";
 import type { HeadlessWorld } from "./world.js";
 
@@ -143,6 +150,8 @@ export function instantiatePlayer(
 export interface MovementIntent {
   v: [number, number];
   jump: boolean;
+  /** Vertical SPEED in m/s while swimming — where the swimmer is pointed, times how fast it swims. Ignored on land. */
+  vy: number;
   yaw: number;
   seq: number;
   /** Server time (ms) it arrived. */
@@ -178,6 +187,8 @@ export interface PlayerRecord {
   stickVy?: number;
   /** Sim seconds of its last jump (the grace ground-following stands clear of). */
   jumpAt?: number;
+  /** Whether this body is in water, and how deep — the swim rules need the last state to hold a mode. */
+  swim?: SwimState;
 }
 
 /** How far below a body's origin the ground ray looks, and the slack on contact. */
@@ -189,6 +200,13 @@ export interface PlayerDriverOptions {
   maxSpeed?: number;
   /** Milliseconds without input before the body is held still. Default 2000. */
   staleMs?: number;
+  /**
+   * The water over a point (`@hitreg/core`'s `waterQuery` fits). Without it
+   * the server does not know water exists, and a client that swims is a
+   * client the authority keeps dragging to the bottom of the lake — so this
+   * is not optional in any world that has water in it.
+   */
+  waterAt?: (x: number, y: number, z: number) => WaterAt | null;
 }
 
 /**
@@ -207,7 +225,18 @@ export class PlayerDriver {
   private readonly sprintSpeed: number;
   private readonly walkSpeed: number;
   private readonly jumpVelocity: number;
-  private readonly clips: { idle: string; walk: string; run: string; sprint: string; air: string };
+  private readonly clips: {
+    idle: string;
+    walk: string;
+    run: string;
+    sprint: string;
+    air: string;
+    /** "" = the model was never told it has one; fall back to the run/idle cycle. */
+    swim: string;
+    tread: string;
+    wade: string;
+    wadeIdle: string;
+  };
   private readonly tuning: GaitTuning;
   private readonly clipSpeeds: Record<string, number>;
   private readonly syncClipSpeed: boolean;
@@ -215,6 +244,16 @@ export class PlayerDriver {
   private readonly fallSpeed: number;
   private readonly slopeTolerance: number;
   private readonly groundStick: number;
+  private readonly stepPopCap: number;
+  private readonly swimEnabled: boolean;
+  private readonly wadeDeepDepth: number;
+  /** Radians; mirrors the controller's swimMaxPitch so a peer's body lies at the same angle. */
+  private readonly swimMaxPitch: number;
+  /** Origin-to-feet per body, read off its collider once. */
+  private readonly feet = new Map<string, number>();
+  private readonly swimSpeed: number;
+  private readonly swim: SwimTuning;
+  private readonly waterAt: ((x: number, y: number, z: number) => WaterAt | null) | null;
 
   constructor(
     world: HeadlessWorld,
@@ -240,6 +279,20 @@ export class PlayerDriver {
       run: str("runClip", "Run"),
       sprint: str("sprintClip", "Sprint"),
       air: str("airClip", "Jump_Loop"),
+      // Wading deep: the crouched cycle, on the same "" convention as the
+      // swim clips below — a name the server invents is a name a model may
+      // not have, and a remote body frozen on its last pose is worse than a
+      // remote body walking through the water.
+      wade: str("wadeClip", ""),
+      wadeIdle: str("wadeIdleClip", ""),
+      // Swim clips DEFAULT to the ground ones, which is the opposite of the
+      // client's rule and on purpose: the client can ask the model what clips
+      // it has and fall back, and the server cannot. Naming a clip nobody has
+      // would freeze every remote swimmer on its last pose. Set `swimClip` /
+      // `swimIdleClip` on the controller once the model has them, and both
+      // sides use them.
+      swim: str("swimClip", ""),
+      tread: str("swimIdleClip", ""),
     };
     this.tuning = {
       walkSpeed: this.walkSpeed,
@@ -253,10 +306,26 @@ export class PlayerDriver {
         ? (controller["clipSpeeds"] as Record<string, number>)
         : {};
     this.syncClipSpeed = controller["syncClipSpeed"] !== false;
+    // the client's own swim params, so the body the authority moves floats at
+    // the same line as the body its owner predicts
+    this.swimEnabled = controller["swim"] !== false;
+    this.swimSpeed = num("swimSpeed", 3.2);
+    this.wadeDeepDepth = num("wadeDeepDepth", 0.8);
+    this.swimMaxPitch = (num("swimMaxPitch", 60) * Math.PI) / 180;
+    const enterDepth = num("swimEnterDepth", 1.5);
+    this.swim = {
+      enterDepth,
+      exitDepth: Math.min(num("swimExitDepth", 1.25), enterDepth - 0.05),
+      floatDepth: num("swimFloatDepth", 0.1),
+      buoyancy: num("buoyancy", 3.5),
+      climbSpeed: num("swimClimbSpeed", 2.6),
+    };
+    this.waterAt = opts.waterAt ?? null;
     this.gaitDwell = num("gaitDwell", 0.18);
     this.fallSpeed = num("fallSpeed", 2);
     this.slopeTolerance = num("slopeTolerance", 0.8);
     this.groundStick = num("groundStick", 0.5);
+    this.stepPopCap = num("stepPopCap", 2);
   }
 
   /**
@@ -280,6 +349,11 @@ export class PlayerDriver {
     vy: number,
     vz: number,
     simNow: number,
+    swimming_ = false,
+    /** The peer's vertical request while swimming — what decides stroke vs tread. */
+    dive = 0,
+    /** Standing in water deep enough to wade through rather than walk. */
+    wading = false,
   ): { clip: string; layer?: string; rate: number; action?: number } {
     const planar = Math.hypot(vx, vz);
     const action = ud.actionClip && (ud.actionUntil ?? 0) > simNow ? ud.actionClip : null;
@@ -292,6 +366,36 @@ export class PlayerDriver {
     const layer = layered ? { layer: action! } : {};
     const rest = { ...layer, ...(window !== undefined ? { action: window } : {}) };
     if (ud.frozen) return { clip: this.clips.idle, rate: 1, ...rest };
+    // In the water there is no gait ladder and no air clip — a swimmer is not
+    // falling — so this branch comes before both. The client's controller
+    // makes the same two-way split (stroke / tread) from the same numbers.
+    if (swimming_) {
+      if (swimming(planar, dive, this.swimSpeed) === "tread") {
+        return { clip: this.clips.tread || this.clips.idle, rate: 1, ...rest };
+      }
+      const clip = this.clips.swim || this.clips.run;
+      // A stand-in run cycle depicts a RUN, so it is paid out against the run
+      // speed; a real swim clip against the swim speed. Same rule as the client.
+      const authored = this.clipSpeeds[clip] ?? (this.clips.swim ? this.swimSpeed : this.runSpeed);
+      return {
+        clip,
+        rate: this.syncClipSpeed ? playbackRate(Math.hypot(planar, vy), authored) : 1,
+        ...rest,
+      };
+    }
+    // Thigh-deep: the crouched wade, matching the client's own choice.
+    if (wading && (this.clips.wade || this.clips.wadeIdle)) {
+      if (planar < idleThreshold(this.tuning)) {
+        if (this.clips.wadeIdle) return { clip: this.clips.wadeIdle, rate: 1, ...rest };
+      } else if (this.clips.wade) {
+        const authored = this.clipSpeeds[this.clips.wade] ?? Math.max(0.3, this.walkSpeed * 0.5);
+        return {
+          clip: this.clips.wade,
+          rate: this.syncClipSpeed ? playbackRate(planar, authored) : 1,
+          ...rest,
+        };
+      }
+    }
     // Airborne on the same slope-aware terms the controller uses: a body
     // running downhill descends fast with its feet planted, and calling that a
     // fall is how a remote player ends up gliding in a jump pose.
@@ -314,11 +418,19 @@ export class PlayerDriver {
    * Cast one downward ray under a player body: how far the ground is, which
    * way it faces, and whether the feet are on it.
    *
-   * The resting distance is MEASURED rather than derived from the collider —
-   * a body's origin sits at a different height above its feet for every
-   * capsule and offset a project authors — so the first reading taken while
-   * the body is plainly settled records it, exactly as the client's controller
-   * does. One query per player per tick.
+   * The resting distance — how far the ground is when the feet are ON it —
+   * comes from the COLLIDER, which states it exactly, and is measured only
+   * where the collider cannot say. That is the same rule the client's
+   * controller follows, and for the same reason: a body that has just been
+   * PUT somewhere — spawned, respawned, teleported home, transferred in from
+   * another layer — is AT REST above whatever is under it, which is exactly
+   * what a settled body looks like. Recorded then, the resting distance is as
+   * long as the drop, and every ground test afterwards reads air as floor:
+   * the player walks out over ledges instead of falling down them. Worse here
+   * than on the client, where the reading at least had to wait out the air
+   * time — a freshly spawned body's first tick has vy = 0 exactly.
+   *
+   * One query per player per tick.
    */
   private probeGround(
     player: PlayerRecord,
@@ -329,10 +441,58 @@ export class PlayerDriver {
     if (!sim.raycast || !p) return { grounded: Math.abs(vy) < 0.05, dist: Infinity, rest: null, normal: null };
     const hit = sim.raycast(p, [0, -1, 0], PROBE_REACH, { exclude: [player.bodyId] });
     const dist = hit ? hit.distance : Infinity;
+    if (player.groundRest === undefined) player.groundRest = this.restFromCollider(player) ?? undefined;
     if (hit && player.groundRest === undefined && Math.abs(vy) < 1) player.groundRest = hit.distance;
     const rest = player.groundRest ?? null;
     const grounded = rest !== null ? dist <= rest + PROBE_SLACK : Math.abs(vy) < 0.05;
     return { grounded, dist, rest, normal: hit ? hit.normal : null };
+  }
+
+  /**
+   * The water over this body's feet, or null. `groundRest` is the measured
+   * origin-to-feet distance for this body; before the first probe answers
+   * (a player who spawned in the water) half a standing capsule stands in,
+   * exactly as the client's controller assumes.
+   */
+  private sampleWater(player: PlayerRecord, _vy: number): WaterAt | null {
+    if (!this.waterAt || !this.swimEnabled) return null;
+    const p = this.world.positionOf(player.bodyId);
+    if (!p) return null;
+    return this.waterAt(p[0], p[1] - this.footDrop(player), p[2]);
+  }
+
+  /**
+   * Origin-to-feet for one body, off its COLLIDER — the same number the
+   * client's controller uses, and for the same reason: the ground probe's
+   * measured resting distance is recorded on the first tick a body looks
+   * settled, and a body that spawned in mid-air looks settled.
+   */
+  private footDrop(player: PlayerRecord): number {
+    const cached = this.feet.get(player.bodyId);
+    if (cached !== undefined) return cached;
+    const drop = this.restFromCollider(player) ?? player.groundRest ?? 0.9;
+    this.feet.set(player.bodyId, drop);
+    return drop;
+  }
+
+  /**
+   * How far the ground is when this body is STANDING on it, straight off the
+   * collider — half its height less its offset — or null where the collider
+   * cannot say. Only the SIZED primitives: a cooked mesh collider ignores
+   * `size` entirely, so those bodies fall back to measuring (see probeGround).
+   */
+  private restFromCollider(player: PlayerRecord): number | null {
+    const collider = this.world.entities.get(player.bodyId)?.components["collider"] as
+      | { shape?: string; size?: number[]; offset?: number[] }
+      | undefined;
+    if (!collider) return null;
+    const shape = collider.shape ?? "box";
+    if (shape !== "capsule" && shape !== "box" && shape !== "sphere" && shape !== "cylinder") return null;
+    const height = collider.size?.[1];
+    if (!(typeof height === "number" && height > 0)) return null;
+    // a collider hung below the origin rests further from it, one lifted nearer
+    const reach = height / 2 - (collider.offset?.[1] ?? 0);
+    return reach > 0 ? reach : null;
   }
 
   /** The before-step hook. */
@@ -349,6 +509,7 @@ export class PlayerDriver {
         frozen?: boolean;
         impulseVel?: [number, number];
         impulseUntil?: number;
+        liftUntil?: number;
         actionClip?: string;
         actionUntil?: number;
         actionFullBody?: boolean;
@@ -374,6 +535,50 @@ export class PlayerDriver {
         vx = ud.impulseVel![0];
         vz = ud.impulseVel![1];
       }
+      // Water first: a swimming body has no ground question to answer, and
+      // asking it anyway is what drags a swimmer to the bed. Measured at the
+      // FEET, using the same resting height the ground probe measured, so the
+      // waterline means the same thing here as it does on the client.
+      const water = this.sampleWater(player, vy);
+      const swimming_ =
+        water !== null &&
+        water.swim &&
+        this.swimEnabled &&
+        !ud.frozen &&
+        swimStateFor(water.depth, water.surfaceY - water.floorY, player.swim ?? "dry", this.swim) === "swimming";
+      player.swim = water === null || water.depth <= 0 ? "dry" : swimming_ ? "swimming" : "wading";
+      if (swimming_) {
+        // The peer's own aim, clamped against what this body could actually
+        // swim: it is a claimed velocity like the horizontal pair, so it gets
+        // the same treatment.
+        const cap = this.swimSpeed + this.swim.climbSpeed;
+        const asked = fresh ? Math.max(-cap, Math.min(cap, input!.vy)) : 0;
+        vy = swimVy(water!.depth, asked, this.swim);
+        vx += water!.current[0];
+        vz += water!.current[1];
+        player.stickVy = undefined;
+        sim.setLinvel(player.bodyId, [vx, vy, vz]);
+        // Peers see the PITCH too. A swimmer's body lies along its travel, and
+        // that attitude is half of reading what another player is doing —
+        // diving away from you looks nothing like swimming away from you. The
+        // owner's controller computes the same angle locally; this is the copy
+        // everybody else gets.
+        if (object && fresh) {
+          const travel = Math.hypot(vx, vz);
+          const pitch = Math.max(
+            -this.swimMaxPitch,
+            Math.min(this.swimMaxPitch, -Math.atan2(asked, Math.max(travel, 0.001))),
+          );
+          object.rotation.set(pitch, input!.yaw, 0, "YXZ");
+        }
+        const swimAnim = this.gaitClip(player, ud, vx, vy, vz, simNow, true, fresh ? input!.vy : 0);
+        this.world.anims.set(player.bodyId, swimAnim.clip);
+        this.world.animRates.set(player.bodyId, swimAnim.rate);
+        if (swimAnim.layer) this.world.animLayers.set(player.bodyId, swimAnim.layer);
+        else this.world.animLayers.delete(player.bodyId);
+        continue;
+      }
+
       // Where the ground is, and which way it faces. The client's controller
       // asks the same question of its own copy of the body; if only one of the
       // two follows the ground, every slope is a fight between prediction and
@@ -383,19 +588,26 @@ export class PlayerDriver {
         vy = this.jumpVelocity;
         player.jumpAt = simNow;
       }
-      if (ground.normal && ground.rest !== null && simNow - (player.jumpAt ?? -999) > 0.25) {
+      // a script that launched the body on purpose owns its rise until its deadline
+      const lifted = (ud.liftUntil ?? 0) > simNow;
+      if (!lifted && ground.normal && ground.rest !== null && simNow - (player.jumpAt ?? -999) > 0.25) {
         const follow = groundFollowVy(vx, vz, vy, ground.normal, ground.dist - ground.rest, {
           stick: this.groundStick,
           slopeTolerance: this.slopeTolerance,
           dt: this.world.fixedDt,
           ours: risingByGround(vy, player.stickVy ?? null),
+          // the same guard the client's controller runs, or a doorway is a
+          // fight between a client that stays down and an authority that hops
+          popCap: this.stepPopCap,
         });
         player.stickVy = follow ?? undefined;
         if (follow !== null) vy = follow;
       } else player.stickVy = undefined;
       sim.setLinvel(player.bodyId, [vx, vy, vz]);
       if (object && fresh) object.rotation.set(0, input!.yaw, 0);
-      const anim = this.gaitClip(player, ud, vx, vel[1], vz, simNow);
+      const wadingDeep =
+        player.swim === "wading" && water !== null && water.depth > this.wadeDeepDepth;
+      const anim = this.gaitClip(player, ud, vx, vel[1], vz, simNow, false, 0, wadingDeep);
       this.world.anims.set(player.bodyId, anim.clip);
       this.world.animRates.set(player.bodyId, anim.rate);
       if (anim.layer) this.world.animLayers.set(player.bodyId, anim.layer);

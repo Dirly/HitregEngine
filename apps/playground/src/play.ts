@@ -37,8 +37,8 @@ import {
   type ChunkStreamerData,
   type SpritesheetDoc,
 } from "@hitreg/core";
-import { EngineRenderer, buildScene, type PostFxData, makeMeshGeometryProvider, AnimationSystem, ParticleSystem, BillboardSystem, LightBudgetSystem, FoliageLodSystem, ClusterLodSystem, GrassSystem, PortraitView, ThirdPersonCameraRig, type BuildOptions, type RigVec3 } from "@hitreg/render";
-import { createVfx, makeVfxHost, warmVfx } from "./vfx-host.js";
+import { EngineRenderer, buildScene, type PostFxData, makeMeshGeometryProvider, AnimationSystem, ParticleSystem, BillboardSystem, LightBudgetSystem, FoliageLodSystem, ClusterLodSystem, GrassSystem, PortraitView, ThirdPersonCameraRig, fitRigToBody, type RigBodyCollider, type BuildOptions, type RigVec3 } from "@hitreg/render";
+import { createAmbientVfx, createVfx, makeVfxHost, warmVfx } from "./vfx-host.js";
 
 /** The `camera` component, straight off the schema. */
 type CameraComponentData = ReturnType<typeof cameraSchema.parse>;
@@ -46,6 +46,7 @@ import { ScriptRegistry, registerBuiltinScripts, ScriptRuntime, InputService, Ev
 import { Layers, PhysicsSim, initPhysics } from "@hitreg/physics";
 import { applyBodyState } from "./physics-sync.js";
 import { initProjectScripts } from "./project-scripts.js";
+import { startDevConsole } from "./dev-console.js";
 import { ChunkManager } from "./chunk-manager.js";
 import { bakeImpostorAtlas } from "./impostor-bake.js";
 import { voxelGroundProbes } from "./voxel-ground.js";
@@ -159,6 +160,9 @@ async function main(): Promise<void> {
   // cost climbs steeply past 48. Shared across the main scene AND the chunk
   // streamer, so every source competes for the same slots.
   const lightBudget = new LightBudgetSystem(32);
+  // standing effects (the `vfx` component: torches, braziers) on the same
+  // VfxSystem, their lights in the same budget
+  const ambientVfx = createAmbientVfx(vfx, assets, lightBudget);
   // distance LOD for renderMode:"instanced" props (scatter: trees, rocks,
   // shrubs) — shared with the chunk streamer, since a generated world's props
   // arrive almost entirely through streamed cells
@@ -177,6 +181,7 @@ async function main(): Promise<void> {
     resolveTexture: (id: string) => assets.getTexture(id)?.url,
     resolveMaxAnisotropy: () => renderer.getMaxAnisotropy(),
     onParticles: (entityId, group, data) => particles.register(entityId, group, data, (id: string) => assets.getTexture(id)?.url),
+    onVfx: (entityId, group, data) => ambientVfx.register(entityId, group, data),
     onLight: (_entityId, light, importance) => lightBudget.register(light, importance),
     onBillboard: (entityId, group, data) =>
       billboards.register(entityId, group, data, {
@@ -304,6 +309,7 @@ async function main(): Promise<void> {
     resolveMaxAnisotropy: () => renderer.getMaxAnisotropy(),
     onInstancedBatch: (batch) => foliageLod.register(batch),
     onLight: (_entityId, light, importance) => lightBudget.register(light, importance),
+    onVfx: (entityId, group, data) => ambientVfx.register(entityId, group, data),
     onClusteredMesh: (_entityId, mesh) => clusterLod.register(mesh),
     bakeImpostor: (object, bounds) => bakeImpostorAtlas(renderer, object, bounds),
   }, {
@@ -376,8 +382,11 @@ async function main(): Promise<void> {
       if (cam.near !== undefined) camera.near = cam.near;
       if (cam.far !== undefined) camera.far = cam.far;
       camera.updateProjectionMatrix();
+      // the pivot is authored from the body's ORIGIN, which on a capsule
+      // character is its waist: keep it inside the body's own collider
+      const body = followId ? expanded.entities[followId] : undefined;
       cameraRig.applyAuthored({
-        ...cam.rig,
+        ...fitRigToBody(cam.rig, body?.components["collider"] as RigBodyCollider | undefined),
         minDistance: cam.rig.minDistance ?? PLAY_CAM_MIN,
         maxDistance: cam.rig.maxDistance ?? PLAY_CAM_MAX,
       });
@@ -394,22 +403,57 @@ async function main(): Promise<void> {
    * listed mesh per frame where this costs one broadphase sweep.
    */
   const CAMERA_BOOM_LAYERS = Layers.WORLD | Layers.TERRAIN | Layers.CAMERA_BLOCKER;
-  function cameraBoomSweep(radius: number, from: RigVec3, to: RigVec3): number | null {
+  function cameraBoomSweep(radius: number, from: RigVec3, to: RigVec3, fromInside = false): number | null {
     if (!followId) return null;
     // exclude the target: a sweep that starts inside its own capsule is
-    // stopped by itself at distance 0, which jams the camera in the head
+    // stopped by itself at distance 0, which jams the camera in the head.
+    // `fromInside`: the rig's probes may begin touching what they are leaving
+    // and must only be stopped by what they move INTO.
     const hit = sim.spherecast(radius, from, to, {
       exclude: [followId],
       layers: CAMERA_BOOM_LAYERS,
+      stopAtPenetration: !fromInside,
     });
     return hit ? hit.distance : null;
   }
 
-  // pointer-lock mouse look
+  // HOLD-TO-LOOK. The published game does not capture the cursor either: a
+  // pointer lock is taken by a click rather than asked for, and it takes the
+  // mouse away from everything else on the machine until the player finds out
+  // that Escape is the way back. Holding a button over the view turns it —
+  // the MMO convention — and the cursor stays where it was left.
   const LOOK = 0.0025;
-  document.addEventListener("pointerlockchange", () => { controls.enabled = document.pointerLockElement !== canvas; });
+  const LOOK_BUTTONS = 0b110; // right + middle
+  let heldButtons = 0;
+  /**
+   * Mouse mode, the same pair the editor host offers: CURSOR by default (the
+   * pointer is the player's, hold right/middle to turn) and MOUSELOOK on Z,
+   * which captures the pointer so the mouse can keep steering past the edge of
+   * the window. Only the player enters it; Escape or Z leaves.
+   */
+  let mouseLook = false;
+  const MOUSE_LOOK_KEY = "KeyZ";
+  window.addEventListener("keydown", (e) => {
+    if (e.code !== MOUSE_LOOK_KEY || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+    if (mouseLook) document.exitPointerLock();
+    else void canvas.requestPointerLock()?.catch(() => undefined);
+  });
+  document.addEventListener("pointerlockchange", () => {
+    mouseLook = document.pointerLockElement === canvas;
+    if (!mouseLook) input.releaseMouse();
+  });
+  const trackButton = (e: MouseEvent, down: boolean): void => {
+    if (down) heldButtons |= 1 << e.button;
+    else heldButtons &= ~(1 << e.button);
+  };
+  canvas.addEventListener("mousedown", (e) => trackButton(e, true));
+  window.addEventListener("mouseup", (e) => trackButton(e, false));
+  window.addEventListener("blur", () => { heldButtons = 0; });
+  canvas.addEventListener("contextmenu", (e) => e.preventDefault()); // right-drag is a turn
+  controls.enabled = false; // the play rig owns the camera; nothing else drags it
   document.addEventListener("mousemove", (e) => {
-    if (document.pointerLockElement !== canvas) return;
+    if (!mouseLook && (heldButtons & LOOK_BUTTONS) === 0) return;
     if (rigMode === "chase") { input.addMouseDelta(e.movementX, e.movementY); return; }
     if (followId) { cameraRig.addLook(e.movementX, e.movementY); return; }
     void controls.rotate(-e.movementX * LOOK, -e.movementY * LOOK, false);
@@ -420,11 +464,10 @@ async function main(): Promise<void> {
     (e) => {
       if (rigMode !== "follow") return;
       e.preventDefault();
-      cameraRig.addZoom(e.deltaMode === 0 ? e.deltaY * 0.006 : e.deltaY * 0.25);
+      cameraRig.addZoom(e.deltaMode === 0 ? e.deltaY * 0.012 : e.deltaY * 0.4);
     },
     { passive: false },
   );
-  canvas.addEventListener("mousedown", () => { if (document.pointerLockElement !== canvas) void canvas.requestPointerLock()?.catch(() => undefined); });
 
   // 9. the loop
   const prev = new Map<string, THREE.Vector3>();
@@ -448,6 +491,12 @@ async function main(): Promise<void> {
    *
    * F3 toggles it; it starts ON here because measuring is the point.
    */
+  // The developer console, if this bundle was published with one. Normally
+  // it was not: the import folds away at build time and nothing below runs.
+  // There is no chat in a published game, so the console brings its own input
+  // line — type "/" to open it.
+  void startDevConsole({ runtime: () => scripts });
+
   const profiler = new Profiler();
   profiler.enabled = true;
   const hud = document.createElement("div");
@@ -539,6 +588,7 @@ async function main(): Promise<void> {
         vfxWarmed = true;
         if (probe.precompile) void warmVfx(vfx, assets, (group) => renderer.precompileGroup(group, renderCam, built.scene), renderCam);
       }
+      ambientVfx.update(renderCam, built.scene); // before the plays step and the light budget re-aims
       vfx.update(dt, renderCam, built.scene);
       grass.update(renderCam, ground.sampleGround, ground.sampleCover);
       // the near->mid foliage LOD switch is judged in screen pixels, so the
@@ -575,7 +625,7 @@ async function main(): Promise<void> {
   // Probe handle for headless measurement (see docs/perf-investigation-2026-09-02.md):
   // the published build has no editor, so this is the only way a script can
   // read draw calls, chunk state and the pipeline caches behind a stall.
-  Object.assign(probe, { renderer, chunkManager, profiler, controls, camera, built, sim, lightBudget, foliageLod, grass });
+  Object.assign(probe, { renderer, chunkManager, profiler, controls, camera, built, sim, lightBudget, foliageLod, grass, ambientVfx });
   (window as unknown as { __hitreg: unknown }).__hitreg = probe;
 }
 

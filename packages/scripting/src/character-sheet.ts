@@ -7,6 +7,8 @@ import {
   createSheet,
   derivedStats,
   equip,
+  firstFit,
+  gridOf,
   grantXp,
   moveItem,
   removeItem,
@@ -16,6 +18,7 @@ import {
   type CharacterSheet,
   type EquipmentSlot,
   type GridTarget,
+  type InventoryCommand,
   type SheetEnv,
   type SheetResult,
 } from "@hitreg/core";
@@ -89,6 +92,7 @@ export class CharacterSheetScript extends Script {
   private actorId = "";
   private cancelPersist: (() => void) | null = null;
   private usedLocalStore = false;
+  private actionElapsed = 0;
 
   override onStart(): void {
     this.store = sheetStoreOf(this.ctx);
@@ -132,13 +136,13 @@ export class CharacterSheetScript extends Script {
       if (r?.ok && r.placed < (p.qty ?? 1)) this.refuse("give", `only ${r.placed} of ${p.qty} ${p.itemId} fit`);
     });
     on<{ actorId: string; uid: string; to: GridTarget }>(CHARACTER_EVENTS.move, (p, meta) =>
-      this.handle("move", p, meta, (s) => moveItem(s, p.uid, p.to, this.env)),
+      this.handle("move", p, meta, (s) => moveItem(s, p.uid, p.to, this.env), { kind: "move", uid: p.uid, to: p.to }),
     );
     on<{ actorId: string; uid: string; slot?: EquipmentSlot }>(CHARACTER_EVENTS.equip, (p, meta) =>
-      this.handle("equip", p, meta, (s) => equip(s, p.uid, p.slot, this.env)),
+      this.handle("equip", p, meta, (s) => equip(s, p.uid, p.slot, this.env), { kind: "equip", uid: p.uid, slot: p.slot }),
     );
     on<{ actorId: string; slot: EquipmentSlot; to?: GridTarget }>(CHARACTER_EVENTS.unequip, (p, meta) =>
-      this.handle("unequip", p, meta, (s) => unequip(s, p.slot, p.to, this.env)),
+      this.handle("unequip", p, meta, (s) => unequip(s, p.slot, p.to, this.env), { kind: "unequip", uid: readSheet(this.store, this.actorId)?.equipment[p.slot] ?? "", slot: p.slot, to: p.to }),
     );
     on<{ actorId: string; uid: string; qty?: number }>(CHARACTER_EVENTS.drop, (p, meta) => {
       const r = this.handle("drop", p, meta, (s) => removeItem(s, p.uid, p.qty, this.env));
@@ -154,7 +158,7 @@ export class CharacterSheetScript extends Script {
       }
     });
     on<{ actorId: string; uid: string; qty: number; to: GridTarget }>(CHARACTER_EVENTS.split, (p, meta) =>
-      this.handle("split", p, meta, (s) => splitStack(s, p.uid, p.qty, p.to, this.env)),
+      this.handle("split", p, meta, (s) => splitStack(s, p.uid, p.qty, p.to, this.env), { kind: "split", uid: p.uid, qty: p.qty, to: p.to }),
     );
   }
 
@@ -193,6 +197,7 @@ export class CharacterSheetScript extends Script {
     payload: { actorId: string },
     meta: { from?: string } | undefined,
     reduce: (sheet: CharacterSheet) => SheetResult<T>,
+    command?: InventoryCommand,
   ): ({ ok: true; sheet: CharacterSheet } & T) | null {
     if (payload.actorId !== this.actorId) return null;
     if (!this.store.isAuthority()) return null;
@@ -202,13 +207,54 @@ export class CharacterSheetScript extends Script {
     }
     const sheet = readSheet(this.store, this.actorId);
     if (!sheet) return null;
+    if (sheet.inventoryAction && ["move", "equip", "unequip", "drop", "split"].includes(request)) {
+      this.refuse(request, "finish the current inventory action first");
+      return null;
+    }
     const r = reduce(sheet);
     if (!r.ok) {
       this.refuse(request, r.error);
       return null;
     }
+    const times = this.env.progression!.inventoryDurations;
+    const duration = !command ? 0 : command.kind === "equip" ? times.equip : command.kind === "unequip" ? times.unequip
+      : command.kind === "move" && sheet.items[command.uid]?.container === undefined ? times.unequip
+      : sheet.items[command.uid]?.container !== command.to.container ? times.transfer : 0;
+    if (command && duration > 0) {
+      this.actionElapsed = 0;
+      this.write({ ...sheet, inventoryAction: { command, duration, remaining: duration, requestedBy: meta?.from } }, false);
+      return null;
+    }
     this.write(r.sheet, true);
     return r;
+  }
+
+  override onFixedUpdate(dt: number): void {
+    if (!this.store.isAuthority()) { this.actionElapsed = 0; return; }
+    const sheet = readSheet(this.store, this.actorId);
+    const action = sheet?.inventoryAction;
+    if (!sheet || !action) { this.actionElapsed = 0; return; }
+    this.actionElapsed += dt;
+    const remaining = Math.max(0, action.remaining - this.actionElapsed);
+    if (remaining > 1e-6) {
+      if (this.actionElapsed >= 0.1) {
+        this.actionElapsed = 0;
+        this.write({ ...sheet, inventoryAction: { ...action, remaining } }, false);
+      }
+      return;
+    }
+    this.actionElapsed = 0;
+    const next = { ...sheet }; delete next.inventoryAction;
+    const command = action.command;
+    let result: SheetResult = { ok: false, error: "that is not your character" };
+    if (this.mayAct({ from: action.requestedBy })) {
+      if (command.kind === "move") result = moveItem(next, command.uid, command.to, this.env);
+      else if (command.kind === "split") result = splitStack(next, command.uid, command.qty, command.to, this.env);
+      else if (command.kind === "equip") result = equip(next, command.uid, command.slot, this.env);
+      else result = next.equipment[command.slot] === command.uid ? unequip(next, command.slot, command.to, this.env) : { ok: false, error: "the equipped item changed" };
+    }
+    this.write(result.ok ? result.sheet : next, true);
+    if (!result.ok) this.refuse(command.kind, result.error);
   }
 
   private refuse(request: string, error: string): void {
@@ -254,8 +300,9 @@ export class CharacterSheetScript extends Script {
       this.cancelPersist = null;
       const sheet = readSheet(this.store, this.actorId);
       if (!sheet) return;
+      const saved = { ...sheet }; delete saved.inventoryAction;
       this.ctx.playerData
-        ?.set("character", "sheet", sheet)
+        ?.set("character", "sheet", saved)
         .catch((error: unknown) => console.warn("[character-sheet] save failed:", error));
     });
   }
@@ -271,7 +318,21 @@ export class CharacterSheetScript extends Script {
         return;
       }
       if (!this.store.isAuthority()) return; // role changed while we waited
-      this.write(parsed.data, false);
+      delete parsed.data.inventoryAction;
+      let restored = parsed.data;
+      // A smaller authored grid must never strand saved belongings offscreen.
+      for (const [uid, stack] of Object.entries(restored.items)) {
+        if (!stack.container) continue;
+        const grid = gridOf(restored, stack.container, this.env);
+        if (grid && (stack.x ?? 0) < grid.cols && (stack.y ?? 0) < grid.rows) continue;
+        for (const container of ["pockets", "bag"] as const) {
+          const cell = firstFit(restored, container, this.env);
+          if (!cell) continue;
+          const result = moveItem(restored, uid, { container, ...cell }, this.env);
+          if (result.ok) { restored = result.sheet; break; }
+        }
+      }
+      this.write(restored, false);
     } catch (error) {
       console.warn("[character-sheet] restore failed:", error);
     }

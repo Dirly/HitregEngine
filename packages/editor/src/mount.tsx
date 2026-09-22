@@ -2,6 +2,7 @@ import { createRoot } from "react-dom/client";
 import type {
   AssetLibrary,
   ComponentRegistry,
+  SceneMenuGroup,
   SceneStore,
   ToolDefinition,
   ToolResult,
@@ -20,6 +21,7 @@ import type {
   ModelBones,
   MultiSelection,
   Observable,
+  NewSceneRequest,
   Pin,
   Pins,
   PlayMode,
@@ -86,8 +88,11 @@ export interface MountOptions {
   onFocusEntity?: (entityId: string) => void;
   onUnpackModel?: (entityId: string) => void;
   scenes?: Observable<string[]>;
+  /** Grouped project → scene menu (project.json). When present it replaces the flat `scenes` list. */
+  sceneMenu?: Observable<SceneMenuGroup[]>;
   onSwitchScene?: (name: string) => void;
-  onNewScene?: (name: string) => void;
+  /** Create a scene (New scene dialog); reject with a readable Error to show it in the dialog. */
+  onNewScene?: (request: NewSceneRequest) => Promise<void>;
   /** Prefab isolation editing: id of the prefab open in the viewport, or null. */
   editingPrefab?: Observable<string | null>;
   /** Open a prefab definition alone in the viewport (host swaps the working doc). */
@@ -154,6 +159,7 @@ export function mountEditor(options: MountOptions): { unmount(): void } {
       onFocusEntity={options.onFocusEntity}
       onUnpackModel={options.onUnpackModel}
       scenes={options.scenes}
+      sceneMenu={options.sceneMenu}
       onSwitchScene={options.onSwitchScene}
       onNewScene={options.onNewScene}
       editingPrefab={options.editingPrefab}

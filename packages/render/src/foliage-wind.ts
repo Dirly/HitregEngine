@@ -110,7 +110,16 @@ export function windMaterialMatches(material: THREE.Material, filter: string): b
  * script can raise a storm without touching a material (a strength baked per
  * material is what the authored look is; this scales it).
  */
-const windScale = uniform(1);
+/**
+ * The global wind multiplier — 1 = as authored, and a storm drives it up.
+ *
+ * Exported as the NODE, not just the setter, because grass is a separate
+ * system with its own sway and it has to read the same number: a gale that
+ * thrashes the trees while the grass at your feet keeps swaying politely is
+ * the kind of half-applied effect that makes a whole scene read as fake.
+ */
+export const foliageWindScale = uniform(1);
+const windScale = foliageWindScale;
 
 export function setFoliageWindScale(scale: number): void {
   windScale.value = Math.max(0, scale);

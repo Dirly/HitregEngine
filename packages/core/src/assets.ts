@@ -15,6 +15,7 @@ import { volumeDocSchema } from "./voxel/csg.js";
 import { vfxEffectSchema } from "./vfx/modules.js";
 import { spellSchema } from "./vfx/spell.js";
 import { registerCharacterAssetTypes } from "./character/index.js";
+import { gameHudSchema, questSchema, tooltipSchema } from "./game-ui.js";
 
 export const terrainHeightfieldSchema = z.object({
   version: z.literal(1).default(1),
@@ -43,6 +44,9 @@ export function registerCoreAssetTypes(assets: AssetLibrary): void {
   assets.defineDataType("spell", spellSchema);
   // Items and levelling rules (assets/items/*.json, assets/progression/*.json).
   registerCharacterAssetTypes(assets);
+  assets.defineDataType("game-hud", gameHudSchema);
+  assets.defineDataType("quest", questSchema);
+  assets.defineDataType("tooltip", tooltipSchema);
   registerThemeAssetType(assets);
 }
 

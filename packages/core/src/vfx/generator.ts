@@ -257,6 +257,8 @@ function applyPixel(modules: VfxModule[], pixel: number, steps: number): void {
     if (m.kind === "particles" && !m.emitter.texture && m.emitter.sprite === "soft") {
       m.emitter.sprite = m.emitter.stretch > 0 ? "square" : "pixel";
     }
+    // the same alpha bands the procedural modules get, on the particle ramp
+    if (m.kind === "particles" && m.emitter.steps === 0) m.emitter.steps = steps;
   }
 }
 

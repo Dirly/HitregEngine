@@ -1,8 +1,11 @@
 import * as THREE from "three/webgpu";
 import {
   Fn,
+  convertToTexture,
+  cos,
   dot,
   emissive,
+  exp,
   float,
   mix,
   min as tslMin,
@@ -12,16 +15,22 @@ import {
   pass,
   rand,
   renderOutput,
+  saturate,
   screenCoordinate,
+  screenSize,
   screenUV,
+  sin,
   smoothstep,
   texture3D,
+  time,
   uniform,
   vec2,
   vec3,
   vec4,
   velocity,
 } from "three/tsl";
+import { mx_fractal_noise_float } from "three/tsl";
+import { posterize } from "./vfx/shaders.js";
 import { bloom } from "three/addons/tsl/display/BloomNode.js";
 import { ao as gtao } from "three/addons/tsl/display/GTAONode.js";
 import { denoise as bilateralDenoise } from "three/addons/tsl/display/DenoiseNode.js";
@@ -112,6 +121,55 @@ export interface SharpenFx {
 export type PixelateFilter = "nearest" | "linear";
 
 /**
+ * What the world looks like from INSIDE water. Driven per frame by how deep
+ * the camera is (`EngineRenderer.setSubmersion`), not by the scene document —
+ * the document only says what the water is like.
+ */
+/**
+ * The live LENS surface a script drives (ctx.setPostFx), mirrored in
+ * @hitreg/scripting the way LiveSkyOptions is — scripting takes no render
+ * dependency. The host resolves it against the camera that draws the frame
+ * (see EngineRenderer.setSandstorm).
+ */
+export interface LivePostFxOptions {
+  sandstorm?: {
+    /** 0 = clear air, 1 = the worst this storm does. */
+    amount: number;
+    /** World direction the wind blows TOWARD; turned into a screen angle per frame. */
+    wind?: [number, number, number];
+    /** The grain's colour when it differs from the authored one. */
+    color?: string;
+  };
+}
+
+/** Blowing grit across the lens. See the schema for what each knob decides. */
+export interface SandstormFx {
+  enabled: boolean;
+  color: string;
+  opacity: number;
+  haze: number;
+  scale: number;
+  speed: number;
+  streak: number;
+  swirl: number;
+  threshold: number;
+  steps: number;
+}
+
+export interface UnderwaterFx {
+  enabled: boolean;
+  color: string;
+  density: number;
+  tint: number;
+  saturation: number;
+  wobble: number;
+  wobbleSpeed: number;
+  wobbleScale: number;
+  edge: number;
+  fade: number;
+}
+
+/**
  * Low internal resolution, scaled up to the screen — the fake-PSX look. Not a
  * pass: the renderer shrinks its backing store (`EngineRenderer.setSize`) and
  * the canvas upscales, with `image-rendering: pixelated` for hard pixels.
@@ -137,6 +195,8 @@ export interface PostFxData {
   motionBlur?: Partial<MotionBlurFx>;
   sharpen?: Partial<SharpenFx>;
   pixelate?: Partial<PixelateFx>;
+  underwater?: Partial<UnderwaterFx>;
+  sandstorm?: Partial<SandstormFx>;
 }
 
 export interface ResolvedPostFx {
@@ -152,6 +212,8 @@ export interface ResolvedPostFx {
   motionBlur: MotionBlurFx;
   sharpen: SharpenFx;
   pixelate: PixelateFx;
+  underwater: UnderwaterFx;
+  sandstorm: SandstormFx;
 }
 
 const TONEMAP_MODES: readonly TonemapMode[] = ["aces", "agx", "neutral", "reinhard", "linear"];
@@ -250,6 +312,32 @@ export function resolvePostFx(data: PostFxData | null | undefined): ResolvedPost
       height: Math.round(num(d.pixelate?.height, 240)),
       filter: d.pixelate?.filter === "linear" ? "linear" : "nearest",
     },
+    sandstorm: {
+      enabled: bool(d.sandstorm?.enabled, true),
+      color: hex(d.sandstorm?.color, "#c7a06a"),
+      opacity: num(d.sandstorm?.opacity, 0.5),
+      haze: num(d.sandstorm?.haze, 0.22),
+      scale: num(d.sandstorm?.scale, 20),
+      speed: num(d.sandstorm?.speed, 1.6),
+      streak: num(d.sandstorm?.streak, 9),
+      swirl: num(d.sandstorm?.swirl, 0.5),
+      threshold: num(d.sandstorm?.threshold, 0.26),
+      steps: num(d.sandstorm?.steps, 0),
+    },
+    underwater: {
+      // the one other block that defaults ON: it costs nothing in a scene with
+      // no water, because the plan only builds it where water exists
+      enabled: bool(d.underwater?.enabled, true),
+      color: hex(d.underwater?.color, "#16506b"),
+      density: num(d.underwater?.density, 0.055),
+      tint: num(d.underwater?.tint, 0.22),
+      saturation: num(d.underwater?.saturation, 0.75),
+      wobble: num(d.underwater?.wobble, 0.004),
+      wobbleSpeed: num(d.underwater?.wobbleSpeed, 1.1),
+      wobbleScale: num(d.underwater?.wobbleScale, 9),
+      edge: num(d.underwater?.edge, 0.35),
+      fade: num(d.underwater?.fade, 0.18),
+    },
   };
 }
 
@@ -278,6 +366,8 @@ export type PostPassId =
   | "bloom"
   | "dof"
   | "motionBlur"
+  | "underwater"
+  | "sandstorm"
   | "tonemap"
   | "grade"
   | "lut"
@@ -305,6 +395,16 @@ export const POST_PASS_ORDER: readonly PostPassId[] = [
   // the open air where shafts actually live, so it is not a visible trade.
   "volumetrics",
   "ao",
+  // Absorption belongs on the LIT scene, before the tone curve: it is what the
+  // water did to the light on its way to the lens, not something the lens did.
+  // Bloom then blooms what is left of a submerged lantern, which is right, and
+  // AO reads the depth/normal attachments directly so the sway never reaches it.
+  "underwater",
+  // Grit is IN the air, between the scene and the lens, so it goes on after
+  // absorption and before bloom — a sheet of lit sand crossing a bright sky
+  // blooms, which is most of what makes it read as glare rather than as a
+  // texture stuck to the screen.
+  "sandstorm",
   "bloom",
   "dof",
   "motionBlur",
@@ -338,6 +438,7 @@ const BLAME_ORDER: readonly PostPassId[] = [
   "lut",
   "smaa",
   "sharpen",
+  "underwater",
   "chromaticAberration",
   "fxaa",
   "bloom",
@@ -358,6 +459,31 @@ export interface PlanContext {
    * `fx` instead of inside it. Null/absent means none.
    */
   volumetric?: VolumetricRequest | null | undefined;
+  /**
+   * Whether this SCENE can have weather at all — it carries the `weather`
+   * script, or something else that drives `setSandstorm`.
+   *
+   * A property of the scene, not of the frame, for exactly the reason
+   * `water` is: building the pass when the storm arrives would rebuild the
+   * post chain mid-storm, and a rebuild recompiles every material in the
+   * scene (docs/performance-lessons.md). One idle pass beats a stall the
+   * first time the wind gets up.
+   */
+  weather?: boolean;
+  /**
+   * Whether this SCENE has water in it at all — a procedural world with a sea,
+   * lakes or rivers, or an entity carrying the `water` component.
+   *
+   * It is a property of the scene, not of the frame, and that is the whole
+   * point: the underwater pass is built once for a scene that has water and
+   * then driven by a uniform (`PostChain.setSubmersion`). Planning it at the
+   * moment the camera goes under would rebuild the chain mid-dive, and a
+   * rebuild recreates the scene pass — a new render target, a new
+   * RenderContext, and every material in the scene recompiling its shader on
+   * the next draw (see docs/performance-lessons.md). One cheap always-on pass
+   * beats a 600 ms stall the first time anybody swims.
+   */
+  water?: boolean;
 }
 
 /**
@@ -378,6 +504,11 @@ export function passPlan(fx: ResolvedPostFx, ctx: PlanContext = {}): PostPassId[
     wanted.add("volumetrics");
   }
   if (fx.ao.enabled && fx.ao.intensity > 0) wanted.add("ao");
+  // Scene-level, not frame-level: see PlanContext.water.
+  if (fx.underwater.enabled && ctx.water) wanted.add("underwater");
+  // Scene-level for the same reason water is: planning it when the storm
+  // arrives would rebuild the chain mid-storm and recompile every material.
+  if (fx.sandstorm.enabled && ctx.weather) wanted.add("sandstorm");
   if (fx.bloom.enabled) wanted.add("bloom");
   if (fx.dof.enabled) wanted.add("dof");
   if (fx.motionBlur.enabled && fx.motionBlur.amount > 0) wanted.add("motionBlur");
@@ -432,6 +563,9 @@ export function pipelineSignature(fx: ResolvedPostFx, ctx: PlanContext = {}): st
   // set cannot be patched in place — it has to read as a structural change.
   if (plan.includes("volumetrics")) parts.push(`vol:${ctx.volumetric?.signature ?? ""}`);
   if (plan.includes("tonemap")) parts.push(`mode:${fx.tonemap.mode}`);
+  // The sway needs a copy of the frame to re-sample (an extra render target),
+  // so whether it is wanted at all is structure. Its STRENGTH is a uniform.
+  if (plan.includes("underwater") && fx.underwater.wobble > 0) parts.push("uw:wobble");
   if (plan.includes("ao") && fx.ao.denoise) parts.push("ao:denoise");
   if (plan.includes("lut")) parts.push(`lut:${fx.grade.lut}`);
   return parts.join("|");
@@ -784,6 +918,10 @@ export interface PostChainOptions {
   resolveTexture?: PostTextureResolver | null;
   /** Volumetric shafts from the scene's `sky` component (see PlanContext). */
   volumetric?: VolumetricRequest | null | undefined;
+  /** Whether this scene has water at all — see PlanContext.water. */
+  water?: boolean;
+  /** Whether this scene can have weather at all — see PlanContext.weather. */
+  weather?: boolean;
 }
 
 /**
@@ -814,6 +952,27 @@ export class PostChain {
   private dofBokeh: Tsl = null;
   private motionAmount: Tsl = null;
   private motionSamples: Tsl = null;
+  private uwAmount: Tsl = null;
+  /** Sandstorm: driven per frame (amount, the wind's angle on screen, how much of it is coming AT you). */
+  private sandAmount: Tsl = null;
+  private sandAngle: Tsl = null;
+  private sandColor: Tsl = null;
+  private sandOpacity: Tsl = null;
+  private sandHaze: Tsl = null;
+  private sandScale: Tsl = null;
+  private sandSpeed: Tsl = null;
+  private sandStreak: Tsl = null;
+  private sandSwirl: Tsl = null;
+  private sandThreshold: Tsl = null;
+  private sandSteps: Tsl = null;
+  private uwColor: Tsl = null;
+  private uwDensity: Tsl = null;
+  private uwTint: Tsl = null;
+  private uwSaturation: Tsl = null;
+  private uwEdge: Tsl = null;
+  private uwWobble: Tsl = null;
+  private uwWobbleSpeed: Tsl = null;
+  private uwWobbleScale: Tsl = null;
   private gradeUniforms: Record<string, Tsl> = {};
   private lutIntensity: Tsl = null;
   private caStrength: Tsl = null;
@@ -837,6 +996,8 @@ export class PostChain {
       disabled: options.disabled,
       lutReady: lutTexture !== null,
       volumetric: options.volumetric,
+      water: options.water,
+      weather: options.weather,
     };
     this.plan = passPlan(fx, ctx);
     this.signature = pipelineSignature(fx, ctx);
@@ -913,6 +1074,149 @@ export class PostChain {
       const em = emissiveColor.rgb.max(vec3(0));
       const lit = color.rgb.sub(em).max(vec3(0));
       color = vec4(lit.mul(aoTexture.r).add(em), color.a);
+    }
+
+    if (has("underwater")) {
+      const uw = fx.underwater;
+      this.uwAmount = uniform(0); // driven per frame; 0 = the camera is dry
+      this.uwColor = uniform(new THREE.Color(uw.color));
+      this.uwDensity = uniform(uw.density);
+      this.uwTint = uniform(uw.tint);
+      this.uwSaturation = uniform(uw.saturation);
+      this.uwEdge = uniform(uw.edge);
+      this.uwWobble = uniform(uw.wobble);
+      this.uwWobbleSpeed = uniform(uw.wobbleSpeed);
+      this.uwWobbleScale = uniform(uw.wobbleScale);
+      // Re-sampling the picture at a swayed uv needs a TEXTURE, and by here
+      // the colour is a chain of nodes — so the sway (and only the sway) costs
+      // the copy `convertToTexture` makes. wobble 0 skips it entirely, which
+      // is why it is part of the pipeline signature.
+      const swayed = uw.wobble > 0 ? (convertToTexture(color) as Tsl) : null;
+      if (swayed) this.disposables.push(swayed as unknown as Disposable);
+      const viewZ = scenePass.getViewZNode() as Tsl;
+      const amount = this.uwAmount;
+      const density = this.uwDensity;
+      const water = this.uwColor;
+      const tint = this.uwTint;
+      const saturation = this.uwSaturation;
+      const edge = this.uwEdge;
+      const wobble = this.uwWobble;
+      const wobbleSpeed = this.uwWobbleSpeed;
+      const wobbleScale = this.uwWobbleScale;
+      // Plain node expressions rather than an `Fn` body: the passes here
+      // compose `color` by value, and the one thing that must never happen is
+      // a graph that refers back to the variable this loop keeps reassigning.
+      let base: Tsl = color;
+      if (swayed) {
+        // two sines at right angles, at different rates, so the pattern never
+        // settles into a visible grid
+        const t: Tsl = time.mul(wobbleSpeed);
+        const sway: Tsl = vec2(
+          sin(screenUV.y.mul(wobbleScale).add(t) as Tsl),
+          sin(screenUV.x.mul(wobbleScale).add(t.mul(1.37)) as Tsl),
+        ).mul(wobble.mul(amount));
+        base = swayed.sample(screenUV.add(sway)) as Tsl;
+      }
+      // Absorption: everything fades toward the water's colour with the
+      // distance its light travelled through the water. Depth comes from the
+      // scene pass's own attachment, so the SKY — the far plane, or a dome
+      // several kilometres out — fades out completely, which is the one thing
+      // that gives a fake underwater look away.
+      const absorbed: Tsl = float(1).sub(exp(viewZ.abs().mul(density).negate() as Tsl));
+      const toward: Tsl = saturate(absorbed.add(tint) as Tsl).mul(amount);
+      const tinted: Tsl = mix(base.rgb, water, toward);
+      // Red goes first in real water; this is the cheap version of that.
+      const luma: Tsl = dot(tinted, vec3(0.2126, 0.7152, 0.0722));
+      const desaturated: Tsl = mix(vec3(luma), tinted, mix(float(1), saturation, amount));
+      // and the corners close in
+      const d: Tsl = screenUV.sub(vec2(0.5, 0.5)).length().div(0.70710678);
+      const closed: Tsl = desaturated.mul(
+        float(1).sub(smoothstep(float(0.2), float(1), d).mul(edge).mul(amount) as Tsl),
+      );
+      color = vec4(closed, base.a);
+    }
+
+    if (has("sandstorm")) {
+      const sand = fx.sandstorm;
+      this.sandAmount = uniform(0); // 0 = clear air; driven by setSandstorm
+      this.sandAngle = uniform(0);
+      this.sandColor = uniform(new THREE.Color(sand.color));
+      this.sandOpacity = uniform(sand.opacity);
+      this.sandHaze = uniform(sand.haze);
+      this.sandScale = uniform(sand.scale);
+      this.sandSpeed = uniform(sand.speed);
+      this.sandStreak = uniform(Math.max(1, sand.streak));
+      this.sandSwirl = uniform(sand.swirl);
+      this.sandThreshold = uniform(sand.threshold);
+      this.sandSteps = uniform(sand.steps);
+      const amount = this.sandAmount;
+      const angle = this.sandAngle;
+
+      // Screen space, aspect-corrected and centred, so the grain is the same
+      // size across the frame and "outward" means outward from where you are
+      // looking rather than from a corner.
+      const aspect: Tsl = screenSize.x.div(screenSize.y.max(1));
+      const centred: Tsl = screenUV.sub(vec2(0.5, 0.5)).mul(vec2(aspect, 1));
+      const travel: Tsl = time.mul(this.sandSpeed);
+
+      /**
+       * ONE LAYER of blown grit: the noise field rotated to `dir`, squeezed
+       * along that axis so each grain is a smear, and scrolled.
+       *
+       * The field does NOT rotate continuously. That was the first version and
+       * it was wrong in a way worth recording: a whole screen of noise turning
+       * about the centre does not read as sand, it reads as the LENS being
+       * warped — the eye follows the rotation, not the grains. Wind wanders a
+       * few degrees; it does not pirouette. So `swirl` is a small oscillation
+       * about the wind's own heading, and every layer travels in a straight
+       * line.
+       */
+      const layer = (dir: Tsl, cells: Tsl, rate: Tsl, seed: number): Tsl => {
+        const cs: Tsl = cos(dir);
+        const sn: Tsl = sin(dir);
+        const turned: Tsl = vec2(
+          centred.x.mul(cs).sub(centred.y.mul(sn)) as Tsl,
+          centred.x.mul(sn).add(centred.y.mul(cs)) as Tsl,
+        );
+        // Squeezing x smears each grain ALONG its travel: the streak is what
+        // the eye reads as speed, not the displacement between frames.
+        const p: Tsl = vec2(turned.x.div(this.sandStreak).add(travel.mul(rate)) as Tsl, turned.y).mul(cells);
+        return mx_fractal_noise_float(vec3(p, time.mul(0.3).add(seed)), 2, 2, 0.5).mul(0.5).add(0.5);
+      };
+
+      // A few degrees of wander, not a rotation (see above).
+      const heading: Tsl = angle.add(sin(time.mul(0.37)).mul(this.sandSwirl.mul(0.25)));
+      // Two layers at different sizes and speeds: without the parallax the
+      // grit is a flat decal on the glass, whatever else is done to it.
+      const near: Tsl = layer(heading, this.sandScale, float(1), 0);
+      const far: Tsl = layer(heading.add(0.22), this.sandScale.mul(1.7), float(0.55), 17.3);
+
+      // Grains, not cloud: a hard threshold leaves separate specks and
+      // streaks with air between them. A soft one leaves a veil, and a veil
+      // is just fog that moves — which is exactly what it looked like.
+      const threshold = this.sandThreshold;
+      // The 1.5 is CONTRAST, not brightness: lifting before the clamp widens
+      // the bright cores and keeps the dark air between them, which is the
+      // difference between grains and a beige wash. Raising `opacity` instead
+      // just fades the whole thing up, haze and all.
+      const cut = (n: Tsl): Tsl => saturate(n.sub(threshold).div(float(1).sub(threshold).max(0.001)).mul(1.5) as Tsl);
+      // Crossing layers ONLY. There was a second mode here that scrolled the
+      // grain radially when you faced into the wind; it read as ripples on
+      // the lens rather than as sand, which is the same failure the rotating
+      // field had. Sand crossing the view is what looks like sand.
+      const field: Tsl = cut(near).mul(0.65).add(cut(far).mul(0.35));
+
+      // Gusts: a big, slow mask, so the storm arrives in SHEETS. An even veil
+      // of grain has no event in it and the eye stops seeing it in seconds.
+      const gust: Tsl = mx_fractal_noise_float(vec3(centred.mul(0.55).add(vec2(travel.mul(0.3), 0)) as Tsl, time.mul(0.2)), 2, 2, 0.5)
+        .mul(0.55)
+        .add(0.7);
+
+      const banded: Tsl = posterize(saturate(field.mul(gust) as Tsl), this.sandSteps) as Tsl;
+      const grit: Tsl = banded.mul(this.sandOpacity).mul(amount);
+      // The air between you and everything else, then the grains on top of it.
+      const hazed: Tsl = mix(color.rgb, this.sandColor, this.sandHaze.mul(amount));
+      color = vec4(mix(hazed, this.sandColor, grit), color.a);
     }
 
     if (has("bloom")) {
@@ -1012,12 +1316,20 @@ export class PostChain {
       const amount = this.vignetteAmount;
       const e0 = this.vignetteInner;
       const e1 = this.vignetteOuter;
+      // Bound to a const, NOT read off `color` inside the closure. An Fn body
+      // runs when the graph is BUILT, and a later pass that re-samples the
+      // frame (fxaa, sharpen, chromatic aberration — anything that wraps the
+      // chain in a render target) builds it again by then `color` is the
+      // wrapper, and the node quietly references itself. Measured: a scene
+      // with vignette or grain and the default fxaa threw "Maximum call stack
+      // size exceeded" on its first frame and silently retired its AA.
+      const src = color;
       const vignette = Fn(() => {
         // 0 at frame centre, 1 at a corner — so `radius` reads as "fraction of
         // the half-diagonal left alone", which is what the schema promises.
         const d = screenUV.sub(vec2(0.5, 0.5)).length().div(0.70710678);
         const falloff = smoothstep(e0, e1, d);
-        return vec4(color.rgb.mul(float(1).sub(falloff.mul(amount))), color.a);
+        return vec4(src.rgb.mul(float(1).sub(falloff.mul(amount))), src.a);
       })();
       color = vignette;
     }
@@ -1031,12 +1343,13 @@ export class PostChain {
       const amount = this.grainAmount;
       const size = this.grainSize;
       const seed = this.grainSeed;
+      const src = color; // see the vignette above: never close over `color`
       const grain = Fn(() => {
         const cell = (screenCoordinate as Tsl).div(size).floor();
         const noise = rand(cell.mul(vec2(0.0011, 0.0017)).add(seed).fract() as Tsl);
         // Signed and additive: the job is hiding banding in the dark gradients
         // fog and vignette create, and a multiplicative grain leaves black flat.
-        return vec4(color.rgb.add(noise.sub(0.5).mul(amount)), color.a);
+        return vec4(src.rgb.add(noise.sub(0.5).mul(amount)), src.a);
       })();
       color = grain;
     }
@@ -1106,6 +1419,33 @@ export class PostChain {
       g["gain"].value.set(...u.gain);
       g["gammaExponent"].value.set(...u.gammaExponent);
     }
+    if (this.uwAmount) {
+      // `amount` is deliberately NOT retuned: it is this frame's submersion,
+      // written by setSubmersion, and an inspector edit must not yank the
+      // camera out of the water.
+      this.uwColor.value.set(fx.underwater.color);
+      this.uwDensity.value = fx.underwater.density;
+      this.uwTint.value = fx.underwater.tint;
+      this.uwSaturation.value = fx.underwater.saturation;
+      this.uwEdge.value = fx.underwater.edge;
+      this.uwWobble.value = fx.underwater.wobble;
+      this.uwWobbleSpeed.value = fx.underwater.wobbleSpeed;
+      this.uwWobbleScale.value = fx.underwater.wobbleScale;
+    }
+    if (this.sandColor) {
+      // `amount`, `angle` and `toward` are this frame's storm (setSandstorm);
+      // an inspector edit must not blow the sand away or turn it round.
+      const sand = fx.sandstorm;
+      this.sandColor.value.set(sand.color);
+      this.sandOpacity.value = sand.opacity;
+      this.sandHaze.value = sand.haze;
+      this.sandScale.value = sand.scale;
+      this.sandSpeed.value = sand.speed;
+      this.sandStreak.value = Math.max(1, sand.streak);
+      this.sandSwirl.value = sand.swirl;
+      this.sandThreshold.value = sand.threshold;
+      this.sandSteps.value = sand.steps;
+    }
     if (this.caStrength) this.caStrength.value = chromaticAberrationStrength(fx.chromaticAberration.amount);
     if (this.vignetteAmount) {
       this.vignetteAmount.value = fx.vignette.amount;
@@ -1118,6 +1458,36 @@ export class PostChain {
       this.grainSize.value = Math.max(fx.grain.size, 0.1);
     }
     if (this.sharpenAmount) this.sharpenAmount.value = sharpenSharpness(fx.sharpen.amount);
+  }
+
+  /**
+   * How far the camera is into water this frame, 0..1, and what that water
+   * looks like when it differs from the scene's default (a green swamp pool in
+   * a world of blue lakes). A uniform write per frame — never a rebuild.
+   *
+   * A chain built without the underwater pass ignores this, which is what lets
+   * the host call it unconditionally.
+   */
+  setSubmersion(amount: number, look?: { color?: string; density?: number }): void {
+    if (!this.uwAmount) return;
+    this.uwAmount.value = Math.max(0, Math.min(1, amount));
+    if (look?.color) this.uwColor.value.set(look.color);
+    if (look?.density !== undefined) this.uwDensity.value = Math.max(0, look.density);
+  }
+
+  /**
+   * How hard it is blowing this frame, which way the wind runs ON SCREEN
+   * (radians), and the grain's colour when the storm differs from the scene's
+   * default — a white one is a blizzard. Uniform writes; never a rebuild.
+   *
+   * A chain built without the pass ignores this, so the host calls it
+   * unconditionally.
+   */
+  setSandstorm(amount: number, angle: number, color?: string): void {
+    if (!this.sandAmount) return;
+    this.sandAmount.value = Math.max(0, Math.min(1, amount));
+    this.sandAngle.value = angle;
+    if (color) this.sandColor.value.set(color);
   }
 
   /** Per-frame uniform housekeeping. Cheap; call before every render. */

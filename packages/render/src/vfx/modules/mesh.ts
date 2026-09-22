@@ -169,7 +169,7 @@ export class MeshLive extends LiveModule<MeshModule> {
 
   protected onUpdate(t: number, dt: number): void {
     const m = this.module;
-    const now = this.startedAt + t * this.life;
+    const now = this.now;
     const k = Math.min(1, t);
     const o = this.opacityAt(t, now);
     this.material.opacity = o;

@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import type {
   AssetLibrary,
   ComponentRegistry,
+  SceneMenuGroup,
   SceneStore,
   ToolDefinition,
   ToolResult,
@@ -13,6 +14,7 @@ import type {
   GrayboxShape,
   MeshEditState,
   Observable,
+  NewSceneRequest,
   PlayMode,
   TerrainBrushSettings,
 } from "../state.js";
@@ -22,10 +24,17 @@ import { NumberField } from "./fields.js";
 import { Kbd, Tooltip, buttonStyle, useObservable, useStoreDoc } from "./common.js";
 import { Icon, type IconName } from "./icons.js";
 import { ToolDialog } from "./tool-dialog.js";
+import { NewSceneDialog } from "./new-scene-dialog.js";
+import { ScenePicker } from "./scene-picker.js";
 
 const EMPTY_SCENES: string[] = [];
 const emptyScenesObservable: Observable<string[]> = {
   get: () => EMPTY_SCENES,
+  set: () => undefined,
+  subscribe: () => () => undefined,
+};
+const emptySceneMenuObservable: Observable<SceneMenuGroup[]> = {
+  get: () => [],
   set: () => undefined,
   subscribe: () => () => undefined,
 };
@@ -247,8 +256,11 @@ export function Toolbar(props: {
   pathThickness: Observable<number>;
   pathRadius: Observable<number>;
   scenes?: Observable<string[]>;
+  /** Grouped project → scene menu (project.json). When present it replaces the flat `scenes` list. */
+  sceneMenu?: Observable<SceneMenuGroup[]>;
   onSwitchScene?: (name: string) => void;
-  onNewScene?: (name: string) => void;
+  /** Create a scene (New scene dialog); reject with a readable Error to show it in the dialog. */
+  onNewScene?: (request: NewSceneRequest) => Promise<void>;
   onEnvironment?: () => void;
   /** Open the frame profiler window (host-provided; see profiler-window.ts). */
   onProfiler?: () => void;
@@ -261,6 +273,7 @@ export function Toolbar(props: {
 }) {
   const doc = useStoreDoc(props.store);
   const scenes = useObservable(props.scenes ?? emptyScenesObservable);
+  const sceneMenu = useObservable(props.sceneMenu ?? emptySceneMenuObservable);
   const play = useObservable(props.playMode);
   const mode = useObservable(props.gizmoMode);
   const settings = useObservable(props.settings);
@@ -288,6 +301,7 @@ export function Toolbar(props: {
   const [toolMenuPosition, setToolMenuPosition] = useState({ left: 0, top: 0 });
   const toolMenuAnchor = useRef<HTMLSpanElement>(null);
   const [activeTool, setActiveTool] = useState<ToolDefinition | null>(null);
+  const [newSceneOpen, setNewSceneOpen] = useState(false);
   const set = (patch: Partial<EditorSettings>) => props.settings.set({ ...settings, ...patch });
 
   const gizmos: Array<{ key: GizmoMode; icon: IconName; tip: string; keys: string[]; shortcuts?: Array<{ keys: string[]; does: string }> }> = [
@@ -321,6 +335,9 @@ export function Toolbar(props: {
         )}
         {props.scenes && !props.editingPrefab && !props.editingChunk && (
           <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+            {sceneMenu.length > 0 ? (
+              <ScenePicker menu={sceneMenu} current={doc.name} onSwitchScene={props.onSwitchScene} />
+            ) : (
             <select
               style={{ ...selectStyle, maxWidth: 140 }}
               title="Scene (saved automatically on switch)"
@@ -334,16 +351,12 @@ export function Toolbar(props: {
                 </option>
               ))}
             </select>
-            <Segment>
-              <ToolButton
-                icon="plus"
-                tip="new scene"
-                onClick={() => {
-                  const name = window.prompt("New scene name:");
-                  if (name) props.onNewScene?.(name);
-                }}
-              />
-            </Segment>
+            )}
+            {props.onNewScene && sceneMenu.length > 0 && (
+              <Segment>
+                <ToolButton icon="plus" tip="new scene" onClick={() => setNewSceneOpen(true)} />
+              </Segment>
+            )}
           </span>
         )}
 
@@ -748,6 +761,14 @@ export function Toolbar(props: {
         </Segment>
       </div>
     </div>
+    {newSceneOpen && props.onNewScene && (
+      <NewSceneDialog
+        menu={sceneMenu}
+        current={doc.name}
+        onClose={() => setNewSceneOpen(false)}
+        onCreate={props.onNewScene}
+      />
+    )}
     {activeTool && props.runTool && (
       <ToolDialog
         key={activeTool.id}

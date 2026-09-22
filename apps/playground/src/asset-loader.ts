@@ -8,11 +8,13 @@ import { loadVolumes, loadWorldRecipes } from "./voxel-world.js";
  * Returns the freshest scene doc content found, if any. When `preferredScene`
  * (a base name, no extension) matches a scene in the index, that one loads
  * instead of the first — used to reopen the last scene the user was editing.
+ * `id` is the scene file it came from, which is the scene's identity (saves
+ * go back to that file whatever the doc calls itself).
  */
 export async function loadAssets(
   assets: AssetLibrary,
   preferredScene?: string | null,
-): Promise<string | null> {
+): Promise<{ id: string; content: string } | null> {
   const index = (await fetch("/__hitreg/assets-index").then((r) => r.json())) as Record<
     string,
     string[]
@@ -139,5 +141,6 @@ export async function loadAssets(
     (preferredScene && scenes.find((f) => f === `${preferredScene}.scene.json`)) ||
     scenes[0];
   if (!sceneFile) return null;
-  return fetch(fileUrl("scenes", sceneFile)).then((r) => r.text());
+  const content = await fetch(fileUrl("scenes", sceneFile)).then((r) => r.text());
+  return { id: sceneFile.replace(/\.scene\.json$/, ""), content };
 }

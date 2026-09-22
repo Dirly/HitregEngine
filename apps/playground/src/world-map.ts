@@ -18,7 +18,7 @@ interface WorldMapRecipe {
   name: string;
   bounds?: { limit?: number };
   features: {
-    towns: { id: string; center: [number, number]; tags: string[] }[];
+    towns: { id: string; center: [number, number]; tier?: string; tags: string[] }[];
     pois: { id: string; kind: string; position: [number, number, number] }[];
     lakes: { id: string; center: [number, number] }[];
   };
@@ -57,6 +57,14 @@ const MAX_ZOOM = 32;
 const CLICK_SLOP_PX = 4;
 
 export function createWorldMapOverlay(options: WorldMapOverlayOptions): { toggle(): void; visible(): boolean } {
+  // Custom project maps use the same host travel policy and streamed-ground hold.
+  // This is a local UI request, never a replicated gameplay command.
+  window.addEventListener("hitreg:world-map-travel", (event) => {
+    const request = (event as CustomEvent<{ x: number; z: number; reply?: (reason?: string) => void }>).detail;
+    if (!request || !Number.isFinite(request.x) || !Number.isFinite(request.z)) return;
+    const reason = options.travel ? options.travel(request.x, request.z) : "Map travel is unavailable";
+    request.reply?.(reason || undefined);
+  });
   const root = document.createElement("div");
   root.style.cssText =
     "position:fixed;inset:0;z-index:100000;display:none;background:rgba(8,10,14,0.88);color:#e6e9ef;" +
@@ -264,8 +272,11 @@ export function createWorldMapOverlay(options: WorldMapOverlayOptions): { toggle
       // zoomed in far enough, every POI can carry its name without a pile-up
       if (zoom >= 8) label(poi.position[0], poi.position[2], poi.id, "#ffe8c8");
     }
+    // the dot is the settlement's size: a capital reads as one at a glance,
+    // a hamlet as a speck (`tier`; `tags` is the fallback for older recipes)
+    const tierDot: Record<string, number> = { capital: 7, city: 5.5, town: 4.5, village: 3.5, hamlet: 2.5 };
     for (const town of recipe.features.towns) {
-      dot(town.center[0], town.center[1], "#f03c3c", town.tags.includes("capital") ? 6 : 4);
+      dot(town.center[0], town.center[1], "#f03c3c", tierDot[town.tier ?? (town.tags.includes("capital") ? "capital" : "town")] ?? 4);
       label(town.center[0], town.center[1], town.id, "#ffd2d2");
     }
     // zones: a faint white border and the name, centred on the hub, always

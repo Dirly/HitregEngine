@@ -7,8 +7,8 @@
  * sign convention (density < isolevel is SOLID) and the `SampledBlock` layout
  * are shared, and everything below is stated as a difference from it.
  *
- * MC puts a vertex on every intersected lattice EDGE. DC puts one vertex
- * inside every intersected CELL, positioned to minimise a quadratic error
+ * MC puts a vertex on every intersected lattice EDGE. DC puts a vertex for
+ * each connected surface disk inside an intersected CELL, minimising a quadratic error
  * function over the surface planes the cell's edge crossings imply, and joins
  * the four cells around each intersected edge into a quad. Three consequences,
  * all of them the reason to try it:
@@ -58,14 +58,13 @@
  *   lie exactly on the cell plane, which is an MC property — DC vertices sit
  *   in cell interiors and never do. Equal-LOD neighbours agree exactly and
  *   need no skirt; an LOD TRANSITION (the HLOD ring) will crack.
- * - No manifold guarantee. One vertex per cell pinches where two surface
- *   sheets share a cell (caves, overhangs, thin walls), which breaks the
- *   "every edge is shared by exactly two triangles" property the cooked
- *   collider leans on. Manifold DC (several vertices per cell, split by
- *   surface component) is the fix and is not implemented here.
+ * - No recovery of features invisible to the sample lattice. Separate
+ *   boundary disks in one cell have separate QEF vertices, and collapsed
+ *   collinear facets are triangulated conformingly without moving vertices.
+ *   Thin features still require a lattice that actually samples them.
  */
 
-import { CORNER_OFFSETS, EDGE_CORNERS } from "./tables.js";
+import { CORNER_OFFSETS, EDGE_CORNERS, EDGE_LATTICE, MC_TRIANGLES } from "./tables.js";
 import type { MarchOptions, MarchResult, SampledBlock } from "./marching-cubes.js";
 
 /**
@@ -94,6 +93,13 @@ export interface HermiteSource {
 }
 
 export interface DualContourOptions extends MarchOptions {
+  /**
+   * Shared lattice origin and this block's INTEGER sample offset from it.
+   * Supply samples using origin + (offset + index) * step as well. This keeps
+   * shared points bit-identical at non-binary steps: separately rounded block
+   * origins can otherwise choose different Hermite faces at a sharp join.
+   */
+  lattice?: { origin: readonly [number, number, number]; offset: readonly [number, number, number] };
   /**
    * Exact field access. Present: crossings are refined and normals are taken
    * at the crossing itself, and hard edges survive. Absent: both come from the
@@ -141,6 +147,50 @@ const RING: readonly (readonly [number, number])[] = [
   [0, -1],
   [0, 0],
   [-1, 0],
+];
+
+// The derived marching-cubes table already makes a consistent connectivity
+// decision on every shared face. Dualise each separate surface disk instead
+// of pinching all disks in an ambiguous cell into one QEF vertex.
+const SURFACE_COMPONENTS = MC_TRIANGLES.map((triangles) => {
+  const parent = Array.from({ length: 12 }, (_, i) => i), present = new Set<number>();
+  const root = (i: number): number => { while (parent[i] !== i) i = parent[i]!; return i; };
+  for (let i = 0; i < triangles.length; i += 3) {
+    const a = triangles[i]!, b = triangles[i + 1]!, c = triangles[i + 2]!;
+    present.add(a); present.add(b); present.add(c); parent[root(b)] = root(a); parent[root(c)] = root(a);
+  }
+  const groups = new Map<number, number[]>();
+  for (const edge of [...present].sort((a, b) => a - b)) { const key = root(edge), group = groups.get(key) ?? []; group.push(edge); groups.set(key, group); }
+  return [...groups.values()];
+});
+const LOCAL_EDGE = new Int8Array(24).fill(-1);
+for (let e = 0; e < EDGE_LATTICE.length; e++) {
+  const [x, y, z, axis] = EDGE_LATTICE[e]!;
+  LOCAL_EDGE[axis * 8 + x + y * 2 + z * 4] = e;
+}
+const FACE_PAIRS = MC_TRIANGLES.map((triangles, mask) => {
+  const pairs = new Int8Array(72).fill(-1), segments = new Map<string, { a: number; b: number; count: number }>();
+  for (let i = 0; i < triangles.length; i += 3) for (let e = 0; e < 3; e++) {
+    const a = triangles[i + e]!, b = triangles[i + (e + 1) % 3]!, key = a < b ? `${a}:${b}` : `${b}:${a}`;
+    const segment = segments.get(key) ?? { a, b, count: 0 }; segment.count++; segments.set(key, segment);
+  }
+  for (let axis = 0; axis < 3; axis++) for (let side = 0; side < 2; side++) {
+    const edges = EDGE_CORNERS.map((ends, edge) => ({ ends, edge })).filter(({ ends }) => CORNER_OFFSETS[ends[0]]![axis] === side && CORNER_OFFSETS[ends[1]]![axis] === side && ((mask >> ends[0]) & 1) !== ((mask >> ends[1]) & 1)).map(({ edge }) => edge);
+    if (edges.length !== 4) continue;
+    for (const segment of segments.values()) if (segment.count === 1 && edges.includes(segment.a) && edges.includes(segment.b)) {
+      pairs[(axis * 2 + side) * 12 + segment.a] = segment.b; pairs[(axis * 2 + side) * 12 + segment.b] = segment.a;
+    }
+  }
+  return pairs;
+});
+const AMBIGUOUS_CASE = FACE_PAIRS.map((pairs) => pairs.some((e) => e >= 0));
+const CELL_FACES = [
+  { corners: [0, 3, 7, 4], edges: [3, 11, 7, 8] },
+  { corners: [1, 5, 6, 2], edges: [9, 5, 10, 1] },
+  { corners: [0, 1, 2, 3], edges: [0, 1, 2, 3] },
+  { corners: [4, 7, 6, 5], edges: [7, 6, 5, 4] },
+  { corners: [0, 4, 5, 1], edges: [8, 4, 9, 0] },
+  { corners: [3, 2, 6, 7], edges: [2, 10, 6, 11] },
 ];
 
 /**
@@ -263,6 +313,8 @@ export function dualContour(block: SampledBlock, options: DualContourOptions = {
   const pad = Math.max(1, Math.floor(options.pad ?? 2));
   const sharpness = options.sharpness ?? 1;
   const tolerance = options.svdTolerance ?? 0.1;
+  const latticeOrigin = options.lattice?.origin ?? origin, latticeOffset = options.lattice?.offset ?? [0, 0, 0];
+  const world = (axis: number, index: number, fraction = 0): number => latticeOrigin[axis]! + (latticeOffset[axis]! + index + fraction) * step;
 
   // owned cells per axis, mirroring marching cubes' `cells = n - 2*pad - 1`
   const cellsX = nx - 2 * pad - 1;
@@ -311,6 +363,10 @@ export function dualContour(block: SampledBlock, options: DualContourOptions = {
 
   /** Vertex index per cell, keyed by the cell's minimum lattice corner. -1 = none. */
   const vertexOf = new Int32Array(nx * ny * nz).fill(-1);
+  const splitVertices = new Map<number, Int32Array>();
+  const cellMasks = new Uint8Array(nx * ny * nz);
+  const ambiguousCrossings = new Map<number, Float64Array>();
+  const resolvedFacePairs = new Map<number, Int8Array>();
 
   const cornerValue = new Float64Array(8);
   const ata = new Float64Array(6);
@@ -329,6 +385,36 @@ export function dualContour(block: SampledBlock, options: DualContourOptions = {
   const edgeSeen = hermite ? new Uint8Array(values.length * 3) : null;
   const grad = new Float64Array(3);
 
+  const resolveComponents = (mask: number, cx: number, cy: number, cz: number, key: number): number[][] => {
+    if (!AMBIGUOUS_CASE[mask]) return SURFACE_COMPONENTS[mask]!;
+    const parent = Array.from({ length: 12 }, (_, i) => i), present = new Set<number>(), pairs = new Int8Array(72).fill(-1);
+    const root = (e: number): number => { while (parent[e] !== e) e = parent[e]!; return e; };
+    const connect = (a: number, b: number): void => { present.add(a); present.add(b); parent[root(b)] = root(a); };
+    for (let f = 0; f < CELL_FACES.length; f++) {
+      const face = CELL_FACES[f]!, crossing: number[] = [];
+      for (let i = 0; i < 4; i++) if (((mask >> face.corners[i]!) & 1) !== ((mask >> face.corners[(i + 1) % 4]!) & 1)) crossing.push(face.edges[i]!);
+      if (crossing.length === 2) connect(crossing[0]!, crossing[1]!);
+      else if (crossing.length === 4) {
+        const axis = Math.floor(f / 2), side = f % 2;
+        const value = hermite ? hermite.value(world(0, cx, axis === 0 ? side : 0.5), world(1, cy, axis === 1 ? side : 0.5), world(2, cz, axis === 2 ? side : 0.5)) : face.corners.reduce((sum, c) => sum + cornerValue[c]!, 0) / 4;
+        const centerInside = value < iso;
+        // Connect around corners opposite the face centre's sign. A static
+        // choice can join two different source planes across a real air gap,
+        // making both component QEFs collapse to their false intersection.
+        // Both cells ask the same canonical shared face, so this decision
+        // cannot create a seam or depend on which block is meshed first.
+        for (let i = 0; i < 4; i++) if (((mask >> face.corners[i]!) & 1) !== Number(centerInside)) {
+          const a = face.edges[(i + 3) % 4]!, b = face.edges[i]!;
+          connect(a, b); pairs[f * 12 + a] = b; pairs[f * 12 + b] = a;
+        }
+      }
+    }
+    const groups = new Map<number, number[]>();
+    for (const edge of [...present].sort((a, b) => a - b)) { const r = root(edge), group = groups.get(r) ?? []; group.push(edge); groups.set(r, group); }
+    resolvedFacePairs.set(key, pairs);
+    return [...groups.values()];
+  };
+
   for (let cz = loZ; cz <= hiZ; cz++) {
     for (let cy = loY; cy <= hiY; cy++) {
       for (let cx = loX; cx <= hiX; cx++) {
@@ -342,12 +428,6 @@ export function dualContour(block: SampledBlock, options: DualContourOptions = {
         if (mask === 0 || mask === 255) continue;
 
         let count = 0;
-        let mx = 0;
-        let my = 0;
-        let mz = 0;
-        let sumNx = 0;
-        let sumNy = 0;
-        let sumNz = 0;
         for (let e = 0; e < 12; e++) {
           const ends = EDGE_CORNERS[e]!;
           const ca = ends[0]!;
@@ -398,12 +478,12 @@ export function dualContour(block: SampledBlock, options: DualContourOptions = {
               gy = edgeCache[o + 2]!;
               gz = edgeCache[o + 3]!;
             } else {
-              const ax = origin[0] + ia * step;
-              const ay = origin[1] + ja * step;
-              const az = origin[2] + ka * step;
-              const bx = origin[0] + ib * step;
-              const by = origin[1] + jb * step;
-              const bz = origin[2] + kb * step;
+              const ax = world(0, ia);
+              const ay = world(1, ja);
+              const az = world(2, ka);
+              const bx = world(0, ib);
+              const by = world(1, jb);
+              const bz = world(2, kb);
               // Refine the crossing against the REAL field. The lattice's
               // linear guess is exact only where the field is linear across
               // the edge, which is precisely not true near the feature we are
@@ -466,31 +546,38 @@ export function dualContour(block: SampledBlock, options: DualContourOptions = {
               gz /= len;
             }
           }
-          const o = count * 6;
+          const o = e * 6;
           crossings[o] = px;
           crossings[o + 1] = py;
           crossings[o + 2] = pz;
           crossings[o + 3] = gx;
           crossings[o + 4] = gy;
           crossings[o + 5] = gz;
-          mx += px;
-          my += py;
-          mz += pz;
-          sumNx += gx;
-          sumNy += gy;
-          sumNz += gz;
           count++;
         }
         if (count === 0) continue;
-
+        const cellKey = cx + cy * strideY + cz * strideZ;
+        const components = resolveComponents(mask, cx, cy, cz, cellKey);
+        cellMasks[cellKey] = mask;
+        if (AMBIGUOUS_CASE[mask]) ambiguousCrossings.set(cellKey, crossings.slice());
+        const split = components.length > 1 ? new Int32Array(12).fill(-1) : undefined;
+        if (split) splitVertices.set(cellKey, split);
+        for (const component of components) {
+        count = component.length;
+        let mx = 0, my = 0, mz = 0, sumNx = 0, sumNy = 0, sumNz = 0;
+        for (const edge of component) {
+          const o = edge * 6;
+          mx += crossings[o]!; my += crossings[o + 1]!; mz += crossings[o + 2]!;
+          sumNx += crossings[o + 3]!; sumNy += crossings[o + 4]!; sumNz += crossings[o + 5]!;
+        }
         mx /= count;
         my /= count;
         mz /= count;
 
         ata.fill(0);
         atb.fill(0);
-        for (let c = 0; c < count; c++) {
-          const o = c * 6;
+        for (const edge of component) {
+          const o = edge * 6;
           const gx = crossings[o + 3]!;
           const gy = crossings[o + 4]!;
           const gz = crossings[o + 5]!;
@@ -519,23 +606,28 @@ export function dualContour(block: SampledBlock, options: DualContourOptions = {
         ly = ly < 0 ? 0 : ly > 1 ? 1 : ly;
         lz = lz < 0 ? 0 : lz > 1 ? 1 : lz;
 
-        const wx = origin[0] + (cx + lx) * step;
-        const wy = origin[1] + (cy + ly) * step;
-        const wz = origin[2] + (cz + lz) * step;
+        const wx = world(0, cx, lx);
+        const wy = world(1, cy, ly);
+        const wz = world(2, cz, lz);
         const nlen = Math.sqrt(sumNx * sumNx + sumNy * sumNy + sumNz * sumNz);
         const vnx = nlen < 1e-9 ? 0 : sumNx / nlen;
         const vny = nlen < 1e-9 ? 1 : sumNy / nlen;
         const vnz = nlen < 1e-9 ? 0 : sumNz / nlen;
 
         const index = positions.length / 3;
-        positions.push(wx, wy, wz);
+        // Faces are tested in the same Float32 geometry that consumers get.
+        // An exact constrained QEF may put adjacent cell vertices at the
+        // same corner; the resulting collapsed face has no area to emit.
+        positions.push(Math.fround(wx), Math.fround(wy), Math.fround(wz));
         normals.push(vnx, vny, vnz);
         for (const [name, spec] of attrSpecs) {
           spec.compute(wx, wy, wz, vnx, vny, vnz, scratch, 0);
           const sink = attrOut[name]!;
           for (let s = 0; s < spec.size; s++) sink.push(scratch[s]!);
         }
-        vertexOf[cx + cy * strideY + cz * strideZ] = index;
+        vertexOf[cellKey] = index;
+        if (split) for (const edge of component) split[edge] = index;
+        }
       }
     }
   }
@@ -543,6 +635,69 @@ export function dualContour(block: SampledBlock, options: DualContourOptions = {
   if (positions.length === 0) return EMPTY;
 
   const quad = new Int32Array(4);
+  const quadCells: number[][] = Array.from({ length: 4 }, () => [0, 0, 0, 0, 0]);
+  const faceVertices = new Map<string, number>();
+  const collinearPoints = new Map<string, number>();
+  const pointKey = (i: number): string => `${positions[i * 3]},${positions[i * 3 + 1]},${positions[i * 3 + 2]}`;
+  const areaSq = (a: number, b: number, c: number): number => {
+    const ux = positions[b * 3]! - positions[a * 3]!, uy = positions[b * 3 + 1]! - positions[a * 3 + 1]!, uz = positions[b * 3 + 2]! - positions[a * 3 + 2]!;
+    const vx = positions[c * 3]! - positions[a * 3]!, vy = positions[c * 3 + 1]! - positions[a * 3 + 1]!, vz = positions[c * 3 + 2]! - positions[a * 3 + 2]!;
+    return (uy * vz - uz * vy) ** 2 + (uz * vx - ux * vz) ** 2 + (ux * vy - uy * vx) ** 2;
+  };
+  const emitTriangle = (i0: number, i1: number, i2: number, outward: boolean): void => {
+    if (i0 === i1 || i1 === i2 || i0 === i2) return;
+    if (areaSq(i0, i1, i2) === 0) {
+      const keys = [pointKey(i0), pointKey(i1), pointKey(i2)];
+      if (new Set(keys).size === 3) {
+        collinearPoints.set(keys[0]!, i0); collinearPoints.set(keys[1]!, i1); collinearPoints.set(keys[2]!, i2);
+      }
+      return;
+    }
+    if (outward) indices.push(i0, i1, i2); else indices.push(i0, i2, i1);
+  };
+  const appendVertex = (position: readonly number[], normal: readonly number[], cell: readonly number[]): number => {
+    const wx = world(0, cell[0]!, position[0]!), wy = world(1, cell[1]!, position[1]!), wz = world(2, cell[2]!, position[2]!);
+    const length = Math.hypot(...normal), nx = length ? normal[0]! / length : 0, ny = length ? normal[1]! / length : 1, nz = length ? normal[2]! / length : 0;
+    const index = positions.length / 3;
+    positions.push(Math.fround(wx), Math.fround(wy), Math.fround(wz)); normals.push(nx, ny, nz);
+    for (const [name, spec] of attrSpecs) {
+      spec.compute(wx, wy, wz, nx, ny, nz, scratch, 0);
+      for (let s = 0; s < spec.size; s++) attrOut[name]!.push(scratch[s]!);
+    }
+    return index;
+  };
+  const vertexForEdge = (key: number, edge: number): number => splitVertices.get(key)?.[edge] ?? vertexOf[key]!;
+  const faceVertex = (c: number, fixedAxis: number, side: number): number => {
+    const cellA = quadCells[c]!, cellB = quadCells[(c + 1) % 4]!, keyA = cellA[3]!, keyB = cellB[3]!, edge = cellA[4]!;
+    const pairs = resolvedFacePairs.get(keyA) ?? FACE_PAIRS[cellMasks[keyA]!]!, base = (fixedAxis * 2 + side) * 12, paired = pairs[base + edge]!;
+    if (paired < 0) return -1;
+    let other = -1;
+    for (let e = 0; e < 12; e++) if (e !== edge && e !== paired && pairs[base + e]! >= 0) { other = e; break; }
+    if (other < 0 || vertexForEdge(keyA, other) !== quad[c]) return -1;
+    const lattice = EDGE_LATTICE[other]!;
+    const otherB = LOCAL_EDGE[lattice[3] * 8 + cellA[0]! + lattice[0] - cellB[0]! + (cellA[1]! + lattice[1] - cellB[1]!) * 2 + (cellA[2]! + lattice[2] - cellB[2]!) * 4]!;
+    if (vertexForEdge(keyB, otherB) !== quad[(c + 1) % 4]) return -1;
+    // Two distinct arcs on this face would otherwise become the same indexed
+    // edge. Give each arc its own constrained face QEF vertex. Only this
+    // parallel-edge case needs the extra vertex; ordinary DC quads stay intact.
+    const edgeKey = (e: number): number => { const o = EDGE_LATTICE[e]!; return ((cellA[0]! + o[0]) + (cellA[1]! + o[1]) * strideY + (cellA[2]! + o[2]) * strideZ) * 3 + o[3]; };
+    const ka = edgeKey(edge), kb = edgeKey(paired), key = ka < kb ? `${ka}:${kb}` : `${kb}:${ka}`, cached = faceVertices.get(key);
+    if (cached !== undefined) return cached;
+    const data = ambiguousCrossings.get(keyA)!, mass = [0, 1, 2].map((a) => (data[edge * 6 + a]! + data[paired * 6 + a]!) / 2), normal = [0, 0, 0];
+    ata.fill(0); atb.fill(0);
+    for (const e of [edge, paired]) {
+      const o = e * 6, n = [data[o + 3]!, data[o + 4]!, data[o + 5]!];
+      for (let a = 0; a < 3; a++) normal[a] = normal[a]! + n[a]!;
+      n[fixedAxis] = 0;
+      const d = n[0]! * (data[o]! - mass[0]!) + n[1]! * (data[o + 1]! - mass[1]!) + n[2]! * (data[o + 2]! - mass[2]!);
+      ata[0] = ata[0]! + n[0]! ** 2; ata[1] = ata[1]! + n[0]! * n[1]!; ata[2] = ata[2]! + n[0]! * n[2]!;
+      ata[3] = ata[3]! + n[1]! ** 2; ata[4] = ata[4]! + n[1]! * n[2]!; ata[5] = ata[5]! + n[2]! ** 2;
+      for (let a = 0; a < 3; a++) atb[a] = atb[a]! + n[a]! * d;
+    }
+    solveQef(ata, atb, tolerance, solved); constrainCellQef(ata, atb, mass, tolerance, solved);
+    const point = mass.map((v, a) => Math.min(1, Math.max(0, v + solved[a]! * sharpness))); point[fixedAxis] = side;
+    const index = appendVertex(point, normal, cellA); faceVertices.set(key, index); return index;
+  };
   const cell = new Int32Array(3);
   const ownLo = pad;
   const ownHiX = pad + cellsX;
@@ -594,14 +749,33 @@ export function dualContour(block: SampledBlock, options: DualContourOptions = {
               ok = false;
               break;
             }
-            const vi = vertexOf[cxx + cyy * strideY + czz * strideZ]!;
+            const cellKey = cxx + cyy * strideY + czz * strideZ;
+            const split = splitVertices.get(cellKey);
+            const localEdge = LOCAL_EDGE[axis * 8 + i - cxx + (j - cyy) * 2 + (k - czz) * 4]!;
+            const vi = split ? split[localEdge]! : vertexOf[cellKey]!;
             if (vi < 0) {
               ok = false;
               break;
             }
             quad[c] = vi;
+            quadCells[c] = [cxx, cyy, czz, cellKey, localEdge];
           }
           if (!ok) continue;
+
+          const extra = [faceVertex(0, p, 1), faceVertex(1, q, 1), faceVertex(2, p, 0), faceVertex(3, q, 0)];
+          if (extra.some((v) => v >= 0)) {
+            const polygon: number[] = [];
+            for (let c = 0; c < 4; c++) { polygon.push(quad[c]!); if (extra[c]! >= 0) polygon.push(extra[c]!); }
+            const cell = quadCells[0]!, data = ambiguousCrossings.get(cell[3]!);
+            // The lattice-edge crossing is already a Hermite constraint and
+            // is interior to the dual face. A fan through it keeps every
+            // inserted face arc in both neighbouring polygons' boundaries.
+            const dataCell = data ? cell : quadCells.find((c) => ambiguousCrossings.has(c[3]!))!;
+            const crossing = ambiguousCrossings.get(dataCell[3]!)!, offset = dataCell[4]! * 6;
+            const center = appendVertex(Array.from(crossing.slice(offset, offset + 3)), Array.from(crossing.slice(offset + 3, offset + 6)), dataCell);
+            for (let c = 0; c < polygon.length; c++) emitTriangle(polygon[c]!, polygon[(c + 1) % polygon.length]!, center, inA);
+            continue;
+          }
 
           const a = quad[0]!;
           const b = quad[1]!;
@@ -617,7 +791,13 @@ export function dualContour(block: SampledBlock, options: DualContourOptions = {
             (positions[b * 3]! - positions[d * 3]!) ** 2 +
             (positions[b * 3 + 1]! - positions[d * 3 + 1]!) ** 2 +
             (positions[b * 3 + 2]! - positions[d * 3 + 2]!) ** 2;
-          const tris = dAC <= dBD ? [a, b, c2, a, c2, d] : [b, c2, d, b, d, a];
+          // Coincident opposite corners make the boundary double back along
+          // both remaining edges. The other diagonal would manufacture two
+          // identical, oppositely wound triangles from this zero-area quad.
+          if (dAC === 0 || dBD === 0) continue;
+          const areaAC = Math.min(areaSq(a, b, c2), areaSq(a, c2, d)), areaBD = Math.min(areaSq(b, c2, d), areaSq(b, d, a));
+          const useAC = areaAC === 0 && areaBD > 0 ? false : areaBD === 0 && areaAC > 0 ? true : dAC <= dBD;
+          const tris = useAC ? [a, b, c2, a, c2, d] : [b, c2, d, b, d, a];
 
           // RING points along +axis. Orient both triangles from the lattice
           // sign transition. Independent normal-based flips break shared-edge
@@ -626,13 +806,46 @@ export function dualContour(block: SampledBlock, options: DualContourOptions = {
             const i0 = tris[t]!;
             const i1 = tris[t + 1]!;
             const i2 = tris[t + 2]!;
-            if (i0 === i1 || i1 === i2 || i0 === i2) continue;
-            if (inA) indices.push(i0, i1, i2);
-            else indices.push(i0, i2, i1);
+            emitTriangle(i0, i1, i2, inA);
           }
         }
       }
     }
+  }
+
+  // A collapsed collinear triangle can leave A--C on one real facet and
+  // A--B--C on its neighbour. Subdivide the former at the EXISTING point B.
+  // This is exact conforming triangulation, not a displaced QEF, smoothing,
+  // welding tolerance, or a cap across an actual hole.
+  if (collinearPoints.size) {
+    const candidates = [...collinearPoints.values()];
+    const pointOnEdge = (a: number, b: number): number => {
+      if (!collinearPoints.has(pointKey(a)) && !collinearPoints.has(pointKey(b))) return -1;
+      const ax = positions[a * 3]!, ay = positions[a * 3 + 1]!, az = positions[a * 3 + 2]!;
+      const dx = positions[b * 3]! - ax, dy = positions[b * 3 + 1]! - ay, dz = positions[b * 3 + 2]! - az, lengthSq = dx * dx + dy * dy + dz * dz;
+      for (const p of candidates) {
+        const px = positions[p * 3]! - ax, py = positions[p * 3 + 1]! - ay, pz = positions[p * 3 + 2]! - az;
+        const along = px * dx + py * dy + pz * dz;
+        if (along > 0 && along < lengthSq && py * dz - pz * dy === 0 && pz * dx - px * dz === 0 && px * dy - py * dx === 0) return p;
+      }
+      return -1;
+    };
+    const conforming: number[] = [];
+    for (let i = 0; i < indices.length; i += 3) {
+      const pending: number[][] = [[indices[i]!, indices[i + 1]!, indices[i + 2]!]];
+      while (pending.length) {
+        const triangle = pending.pop()!;
+        let split = false;
+        for (let e = 0; e < 3; e++) {
+          const a = triangle[e]!, b = triangle[(e + 1) % 3]!, c = triangle[(e + 2) % 3]!, p = pointOnEdge(a, b);
+          if (p < 0) continue;
+          pending.push([a, p, c], [p, b, c]); split = true; break;
+        }
+        if (!split) conforming.push(...triangle);
+      }
+    }
+    indices.length = 0;
+    for (const i of conforming) indices.push(i);
   }
 
   if (indices.length === 0) return EMPTY;

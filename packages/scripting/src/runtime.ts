@@ -1,10 +1,12 @@
-import type { AnimationLayerOptions, LiveSkyOptions, LiveSkyBase, BiomeAt } from "./script.js";
+import type { AnimationLayerOptions, LivePostFxOptions, LiveSkyOptions, LiveSkyBase, BiomeAt, WaterAt } from "./script.js";
 import type * as THREE from "three";
 import type { NetStateStore, PlayerDataService, ProfilerLike, SceneDoc } from "@hitreg/core";
 import type {
   InputLike,
   Script,
   ScriptChatMessage,
+  ScriptClass,
+  ScriptCommandDecl,
   ScriptContext,
   ScriptSpellHandle,
   ScriptVfx,
@@ -24,6 +26,8 @@ export interface RuntimeOptions {
   input: InputLike;
   /** Horizontal camera forward [x, z] — enables camera-relative controls. */
   viewForward?: () => [number, number];
+  /** Host camera hook: the same aim in 3D, pitch included (see ScriptContext.viewDirection). */
+  viewDirection?: () => [number, number, number];
   /** This tab's own player entity id (see ScriptContext.localPlayer). */
   localPlayer?: () => string | null;
   /** Host animation hook: crossfade an entity's animator to a clip (loop:false = one-shot). */
@@ -37,6 +41,8 @@ export interface RuntimeOptions {
   animationClips?: (entityId: string) => string[];
   /** Authored seconds of one clip on an entity's model (null when absent). */
   animationDuration?: (entityId: string, clip: string) => number | null;
+  /** Host animation hook: hold two base clips at a weight (see ScriptContext.setAnimationBlend). */
+  setAnimationBlend?: (entityId: string, from: string, to: string, weight: number, fadeSeconds?: number) => void;
   /** Host animation hook: scale playback rate (1 = authored). */
   setAnimationSpeed?: (entityId: string, multiplier: number) => void;
   /** Host animation hook: play a clip on a masked layer over the base clip. */
@@ -61,8 +67,16 @@ export interface RuntimeOptions {
       rate?: number;
       colorStart?: string;
       colorEnd?: string;
+      /** Wind: where the emitter aims the particles it spawns next, and how fast. */
+      direction?: [number, number, number];
+      speed?: [number, number];
+      colorScale?: number;
     },
   ) => void;
+  /** Host clock hook: how much daylight there is (see ScriptContext.daylight). */
+  daylight?: () => number;
+  /** Host lens hook: live post-processing — the sandstorm overlay (see ScriptContext.setPostFx). */
+  setPostFx?: (opts: LivePostFxOptions) => void;
   /** Host light hook: runtime-only enable/intensity/color control. */
   setLight?: (
     entityId: string,
@@ -73,6 +87,8 @@ export interface RuntimeOptions {
   getSky?: () => LiveSkyBase | null;
   /** Host biome hook: the voxel world's biome blend at a point. */
   biomeAt?: (x: number, z: number) => BiomeAt | null;
+  /** Host water hook: the water standing over a point (authored volumes + a procedural world's own). */
+  waterAt?: (x: number, y: number, z: number) => WaterAt | null;
   /** Host path-mesh hook: rebuild an entity's path geometry from new (world-space) control points. */
   setPathPoints?: (entityId: string, points: Array<[number, number, number]>) => void;
   /**
@@ -283,6 +299,45 @@ export class ScriptRuntime {
     return out;
   }
 
+  /**
+   * Console commands the live scripts declare, each with the entity that will
+   * answer it. Only what is RUNNING: a command whose script is not in the
+   * scene is not offered, which is why `/help` differs between scenes.
+   */
+  consoleCommands(): Array<ScriptCommandDecl & { entityId: string; script: string }> {
+    const out: Array<ScriptCommandDecl & { entityId: string; script: string }> = [];
+    const seen = new Set<string>();
+    for (const [entityId, script] of this.instances) {
+      const type = script.constructor as ScriptClass;
+      for (const decl of type.commands ?? []) {
+        if (seen.has(decl.name)) continue; // first script in, first served
+        seen.add(decl.name);
+        out.push({ ...decl, entityId, script: type.scriptName });
+      }
+    }
+    return out.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  /**
+   * Run one, on the first live script that declares it. Returns null when no
+   * script owns the name (the console then says "unknown command" rather than
+   * silently doing nothing), and reports a throw as the failure text — a
+   * command implementation throws to reject an argument.
+   */
+  runConsoleCommand(name: string, args: string[]): { ok: boolean; text: string } | null {
+    for (const script of this.instances.values()) {
+      const type = script.constructor as ScriptClass;
+      if (!(type.commands ?? []).some((c) => c.name === name)) continue;
+      if (!script.onCommand) return { ok: false, text: `/${name} is declared by ${type.scriptName} but it has no onCommand` };
+      try {
+        return { ok: true, text: script.onCommand(name, args) ?? "" };
+      } catch (error) {
+        return { ok: false, text: error instanceof Error ? error.message : String(error) };
+      }
+    }
+    return null;
+  }
+
   /** Ids of entities carrying a tag — the same lookup scripts get via ctx. */
   findByTag(tag: string): string[] {
     return [...this.entities].filter(([, e]) => e.tags.includes(tag)).map(([eid]) => eid);
@@ -358,6 +413,7 @@ export class ScriptRuntime {
         after: (seconds, cb) => this.scheduleTimer(id, seconds, cb, false),
         every: (seconds, cb) => this.scheduleTimer(id, seconds, cb, true),
         ...(this.opts.viewForward ? { viewForward: this.opts.viewForward } : {}),
+        ...(this.opts.viewDirection ? { viewDirection: this.opts.viewDirection } : {}),
         ...(this.opts.localPlayer ? { localPlayer: this.opts.localPlayer } : {}),
         setActiveCamera: (cameraId) => {
           this.activeCameraId = cameraId;
@@ -371,6 +427,12 @@ export class ScriptRuntime {
         ...(this.opts.animationClips ? { animationClips: () => this.opts.animationClips!(id) } : {}),
         ...(this.opts.animationDuration
           ? { animationDuration: (clip: string) => this.opts.animationDuration!(id, clip) }
+          : {}),
+        ...(this.opts.setAnimationBlend
+          ? {
+              setAnimationBlend: (from: string, to: string, weight: number, fadeSeconds?: number) =>
+                this.opts.setAnimationBlend!(id, from, to, weight, fadeSeconds),
+            }
           : {}),
         ...(this.opts.setAnimationSpeed
           ? { setAnimationSpeed: (multiplier: number) => this.opts.setAnimationSpeed!(id, multiplier) }
@@ -403,6 +465,9 @@ export class ScriptRuntime {
                 rate?: number;
                 colorStart?: string;
                 colorEnd?: string;
+                direction?: [number, number, number];
+                speed?: [number, number];
+                colorScale?: number;
               }) => this.opts.setParticles!(entityId, opts),
             }
           : {}),
@@ -415,8 +480,11 @@ export class ScriptRuntime {
             }
           : {}),
         ...(this.opts.setSky ? { setSky: (opts: LiveSkyOptions) => this.opts.setSky!(opts) } : {}),
+        ...(this.opts.setPostFx ? { setPostFx: (opts: LivePostFxOptions) => this.opts.setPostFx!(opts) } : {}),
+        ...(this.opts.daylight ? { daylight: () => this.opts.daylight!() } : {}),
         ...(this.opts.getSky ? { getSky: () => this.opts.getSky!() } : {}),
         ...(this.opts.biomeAt ? { biomeAt: (x: number, z: number) => this.opts.biomeAt!(x, z) } : {}),
+        ...(this.opts.waterAt ? { waterAt: (x: number, y: number, z: number) => this.opts.waterAt!(x, y, z) } : {}),
         ...(this.opts.setPathPoints
           ? {
               setPathPoints: (points: Array<[number, number, number]>) =>

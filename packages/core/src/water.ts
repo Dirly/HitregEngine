@@ -3,8 +3,9 @@ import type { SceneDoc } from "./scene.js";
 import type { ComponentRegistry } from "./components/registry.js";
 import type { AssetLibrary } from "./assets.js";
 import type { Op } from "./ops.js";
+import type { WaterData } from "./components/core.js";
 import { expandScene } from "./prefab.js";
-import { worldTransforms, type Vec3 } from "./math.js";
+import { worldTransforms, type Vec3, type WorldTransform } from "./math.js";
 import { collectSceneTriangles, raycastTriangles, type TriangleSoup } from "./placement.js";
 
 /**
@@ -14,6 +15,11 @@ import { collectSceneTriangles, raycastTriangles, type TriangleSoup } from "./pl
  * solid geometry — an edge hanging in open air is "levitating water", the
  * defect the seal verifier can't see because the sheet itself is sealed
  * against nothing.
+ *
+ * The third part is the RUNTIME question — "is this point under water, and how
+ * far?" — answered by {@link WaterIndex} over the `water` components in a
+ * scene. Swimming, the underwater look and anything else that cares all read
+ * that one answer, so they can never disagree about where the waterline is.
  *
  * Pure functions over scene docs producing ops/findings; geometry comes from
  * the same triangle collection the placement solver uses.
@@ -33,6 +39,14 @@ export interface WaterFillOptions {
   material: string;
   /** Entity name (default "water"); also seeds the deterministic entity id. */
   name?: string;
+  /**
+   * Metres of swimmable water under the surface (the `water` component's
+   * `depth`). Give it the depth of the basin: a volume that reaches past the
+   * bed into the room below reports water down there too.
+   */
+  depth?: number;
+  /** false leaves the sheet visual-only — no swimming, no underwater tint. */
+  swim?: boolean;
 }
 
 export interface WaterFillReport {
@@ -118,6 +132,12 @@ export function waterFillOps(
             source: { kind: "primitive", shape: "plane", size: [r6(width), 1, r6(depth)], segments },
             material: options.material,
             castShadow: false,
+          },
+          // the gameplay half: the sheet is the top of a VOLUME you swim in
+          // (see waterSchema). Surface omitted — the plane IS at surfaceY.
+          water: {
+            ...(options.depth !== undefined ? { depth: options.depth } : {}),
+            ...(options.swim === false ? { swim: false } : {}),
           },
           // no collider: water is a surface, not a solid
         },
@@ -261,6 +281,261 @@ export function lintWater(
   }
   return findings;
 }
+
+// ---------------------------------------------------------------- runtime volumes
+
+/** One authored body of water, as the runtime asks about it. */
+export interface WaterVolume {
+  entity: EntityId;
+  /** World Y of the surface. */
+  surfaceY: number;
+  /** World Y the volume stops at (`surfaceY - depth`) — below this you are under the water, not in it. */
+  floorY: number;
+  /** Footprint in world XZ. */
+  x0: number;
+  z0: number;
+  x1: number;
+  z1: number;
+  /** False = visual only: it reports depth but nobody swims in it. */
+  swim: boolean;
+  /** Drift in m/s added to whatever swims here. */
+  current: readonly [number, number];
+  /** Per-body overrides of the underwater look. */
+  color?: string;
+  density?: number;
+}
+
+/** What a point is standing in. `depth` is negative in the air above the surface. */
+export interface WaterSample {
+  surfaceY: number;
+  floorY: number;
+  /** Metres of water over this point: `surfaceY - y`. Negative above the surface. */
+  depth: number;
+  swim: boolean;
+  current: readonly [number, number];
+  color?: string;
+  density?: number;
+  /** Entity that owns the surface, or null when it came from a procedural world. */
+  entity: EntityId | null;
+}
+
+/**
+ * The authored water in a scene, as volumes.
+ *
+ * The footprint is MEASURED off each entity's own mesh rather than declared,
+ * because the alternative is two numbers that have to agree forever: an
+ * author who widens the pool's plane and forgets its component gets a pool you
+ * can drown beside. `water.size` overrides it for the meshes the measurement
+ * cannot see — an imported GLB, a path ribbon — and for fencing a swimmable
+ * area smaller than its sheet.
+ *
+ * `doc` should be EXPANDED (prefab instances resolved), since a pool inside a
+ * prefab is the normal way to ship one.
+ */
+export function waterVolumes(
+  doc: SceneDoc,
+  world: Map<EntityId, WorldTransform> = worldTransforms(doc),
+): WaterVolume[] {
+  const entities: Record<EntityId, SceneDoc["entities"][string]> = {};
+  const datas = new Map<EntityId, WaterData>();
+  for (const [id, entity] of Object.entries(doc.entities)) {
+    const data = entity.components["water"] as WaterData | undefined;
+    if (!data) continue;
+    datas.set(id, data);
+    entities[id] = entity;
+  }
+  if (datas.size === 0) return [];
+  // the triangle pass runs over the water entities ALONE (a scene's other
+  // geometry can be millions of triangles, and none of it is water)
+  const soups = collectSceneTriangles({ ...doc, entities }, world);
+  const bounds = new Map<EntityId, { min: Vec3; max: Vec3 }>();
+  for (const soup of soups) bounds.set(soup.entity, soup.aabb);
+
+  const out: WaterVolume[] = [];
+  for (const [id, data] of datas) {
+    const at = world.get(id);
+    const box = bounds.get(id);
+    const centreX = at ? at.position[0] : 0;
+    const centreZ = at ? at.position[2] : 0;
+    let x0: number, z0: number, x1: number, z1: number;
+    if (data.size) {
+      x0 = centreX - data.size[0] / 2;
+      x1 = centreX + data.size[0] / 2;
+      z0 = centreZ - data.size[1] / 2;
+      z1 = centreZ + data.size[1] / 2;
+    } else if (box) {
+      [x0, x1] = [box.min[0], box.max[0]];
+      [z0, z1] = [box.min[2], box.max[2]];
+    } else {
+      // a mesh nothing can measure and no declared size: skip it rather than
+      // invent a footprint — silent water the size of a guess is worse than none
+      continue;
+    }
+    // Default the surface to the TOP of the mesh, not the entity's origin: a
+    // sheet authored as a thin box (or a shaped basin) has its origin
+    // somewhere in the middle, and half a metre of error at the waterline is
+    // the difference between wading and swimming.
+    const surfaceY = data.surfaceY ?? (box ? box.max[1] : (at ? at.position[1] : 0));
+    out.push({
+      entity: id,
+      surfaceY,
+      floorY: surfaceY - data.depth,
+      x0, z0, x1, z1,
+      swim: data.swim,
+      current: data.current,
+      ...(data.color ? { color: data.color } : {}),
+      ...(data.density !== undefined ? { density: data.density } : {}),
+    });
+  }
+  return out;
+}
+
+/**
+ * Point queries over a scene's authored water.
+ *
+ * Deliberately a linear scan: authored bodies of water come in handfuls (a
+ * dungeon's pools, a town's canal), the query runs once per swimming character
+ * per tick, and a grid would be more code than the thing it indexes. A
+ * PROCEDURAL world's ocean, lakes and rivers never enter here at all — they
+ * are answered from the recipe (`WorldField.waterY`), which is both exact and
+ * free of the thousands of streamed sheets that draw them.
+ */
+export class WaterIndex {
+  constructor(readonly volumes: readonly WaterVolume[] = []) {}
+
+  get empty(): boolean {
+    return this.volumes.length === 0;
+  }
+
+  /**
+   * The water at a point, or null where there is none. Points ABOVE a surface
+   * still sample it (with a negative `depth`) so a caller can watch the
+   * waterline approach — a fade that only starts once you are already under
+   * has nothing left to fade.
+   *
+   * Where volumes overlap the HIGHEST surface wins, which is what makes a
+   * cistern above a flooded cellar read correctly from inside either.
+   */
+  sampleAt(x: number, y: number, z: number): WaterSample | null {
+    let best: WaterVolume | null = null;
+    for (const v of this.volumes) {
+      if (x < v.x0 || x > v.x1 || z < v.z0 || z > v.z1) continue;
+      // Below the bed is not "in the water" — it is under the floor the water
+      // sits on, i.e. inside solid rock or in the room beneath it. The
+      // tolerance is what stops a diver who reaches the bottom from falling
+      // OUT of the water: its feet then rest exactly on the floor the author
+      // measured the volume to, and a hair of settling either way made the
+      // lake blink out of existence around them (measured — the swimmer
+      // popped to an idle clip on the bed).
+      if (y < v.floorY - FLOOR_TOLERANCE) continue;
+      if (best === null || v.surfaceY > best.surfaceY) best = v;
+    }
+    if (!best) return null;
+    return {
+      surfaceY: best.surfaceY,
+      floorY: best.floorY,
+      depth: best.surfaceY - y,
+      swim: best.swim,
+      current: best.current,
+      ...(best.color ? { color: best.color } : {}),
+      ...(best.density !== undefined ? { density: best.density } : {}),
+      entity: best.entity,
+    };
+  }
+
+  /** Surface height over (x, z) ignoring where the asker is vertically, or null. */
+  surfaceAt(x: number, z: number): number | null {
+    let best: number | null = null;
+    for (const v of this.volumes) {
+      if (x < v.x0 || x > v.x1 || z < v.z0 || z > v.z1) continue;
+      if (best === null || v.surfaceY > best) best = v.surfaceY;
+    }
+    return best;
+  }
+}
+
+/**
+ * The runtime's one water question, over both kinds of water at once:
+ * authored volumes (`water` components, via a {@link WaterIndex}) and a
+ * procedural world's own ocean, lakes and rivers (via the recipe's field).
+ *
+ * Both hosts build it — the browser for `ctx.waterAt` and the camera's
+ * submersion, the dedicated server for the body it simulates on the player's
+ * behalf — because a client that thinks it is swimming while the server
+ * thinks it is falling is the worst kind of desync there is: the authority
+ * wins, and the player watches themselves get dragged under.
+ *
+ * `field` is read through a getter: a live recipe edit swaps the field object,
+ * and a query holding the old one would answer about the previous world.
+ */
+export interface WaterQuerySources {
+  /** Authored water in the scene. */
+  index?: WaterIndex | null | (() => WaterIndex | null);
+  /** The procedural world, if the scene has one. */
+  field?: WaterField | null | (() => WaterField | null);
+}
+
+/** The slice of `WorldField` this needs — stated structurally so tests need no world. */
+export interface WaterField {
+  waterY(x: number, z: number): number | null;
+  height(x: number, z: number): number;
+  readonly worldLimit: number;
+}
+
+export function waterQuery(
+  sources: WaterQuerySources,
+): (x: number, y: number, z: number) => WaterSample | null {
+  const index = sources.index;
+  const field = sources.field;
+  const indexOf: () => WaterIndex | null = typeof index === "function" ? index : () => index ?? null;
+  const fieldOf: () => WaterField | null = typeof field === "function" ? field : () => field ?? null;
+  return (x, y, z) => {
+    const authored = indexOf()?.sampleAt(x, y, z) ?? null;
+    const world = fieldOf();
+    let generated: WaterSample | null = null;
+    if (world && (world.worldLimit === Infinity || Math.hypot(x, z) <= world.worldLimit)) {
+      const surfaceY = world.waterY(x, z);
+      const bed = surfaceY === null ? 0 : world.height(x, z);
+      if (surfaceY !== null && y >= bed - FLOOR_TOLERANCE) {
+        // The bed is the ground the generator carved under the water, so the
+        // volume ends exactly where the terrain collider starts — no pocket of
+        // air at the bottom of a lake for a diver to fall through, and no
+        // "water" reported inside the rock beneath it.
+        generated = {
+          surfaceY,
+          floorY: bed,
+          depth: surfaceY - y,
+          swim: true,
+          // A river's flow is not reported here: the recipe knows the channel's
+          // direction but `waterY` answers about a POINT, and a current worth
+          // pushing a swimmer with has to come from the channel it belongs to.
+          // Authored water carries one; generated water does not, yet.
+          current: NO_CURRENT,
+          entity: null,
+        };
+      }
+    }
+    if (!authored) return generated;
+    if (!generated) return authored;
+    // Overlapping sources: the higher surface wins, exactly as two authored
+    // volumes do — an aqueduct over a river is water at both heights, and the
+    // one you are in is the one above you.
+    return authored.surfaceY >= generated.surfaceY ? authored : generated;
+  };
+}
+
+const NO_CURRENT: readonly [number, number] = [0, 0];
+
+/**
+ * How far under a water volume's own floor still counts as being in it.
+ *
+ * A body that reaches the bottom has its feet ON the bed — which is exactly
+ * where an authored volume ends and where a generated one's analytic ground
+ * sits, give or take whatever the marching cubes actually produced. Without
+ * this, touching the bottom drops a diver out of the water entirely: back to
+ * gravity, back to the walking clips, on the floor of a lake.
+ */
+const FLOOR_TOLERANCE = 0.5;
 
 // ---------------------------------------------------------------- helpers
 

@@ -337,6 +337,124 @@ Each answer is data, and each is checked by a test:
   `window.__hitreg.vfxHost.play(doc, frame)` lets a probe play one module in
   isolation.
 
+## Standing effects: torches, braziers, campfires (the `vfx` component)
+
+Environmental fire is not a spell, but it is authored in the same vocabulary so
+there is one effects system, not two. An entity carrying
+`"vfx": { "effect": "env/fire-torch", "material": "fx/fire" }` plays that `vfx`
+asset for as long as it exists (`AmbientVfx` in `render/src/vfx/ambient.ts`,
+wired by `createAmbientVfx` in the playground host):
+
+- **It never ends.** The play's phase length is infinite, so `duration: 0`
+  modules and `stream: true` particle modules sustain. Flames are `particles`
+  modules — the engine's own emitter, nothing new.
+- **Its light is its own.** A `light` module on a standing effect gets a
+  dedicated PointLight registered with the scene's `LightBudgetSystem` (32
+  slots) instead of borrowing VfxSystem's four flash slots, which twenty
+  torches would steal from each other. The light is hidden from birth, so it
+  never enters the renderer's light set — no recompile.
+- **It follows its entity** (anchors forced to `follow`), **sleeps past
+  `cullDistance`** (10% hysteresis, fade out/in), and **dies with its group**
+  (a streamed cell unloading takes its torches with it).
+- **Its colour is a material.** `paletteFromMaterial` (core) turns a material
+  asset into the palette: `color` → primary (the flame body), `emissive` →
+  glow (the hot core), `color` darkened → secondary (the tips). Effects
+  reference palette slots, never hexes, so a blue spirit-fire is a different
+  material on the same effect. Editing the material live restarts the effects
+  using it; editing a `vfx/` file live restarts the effects playing it.
+
+**The standard fire set** is written into a project, not shipped by the
+engine: `node tools/fx.mjs fire <project>` (from `apps/playground`) writes
+`vfx/env/fire-{candle,torch,brazier,campfire,bonfire}.json` and
+`materials/fx/fire{,-spirit,-fel}.json`. The five sizes are one recipe scaled
+by `s` (core, body, embers, smoke, light), so they read as the same fire;
+entity scale does not scale an effect. Existing files are kept — they are
+data to tune — unless `--force`.
+
+**PSX particles.** The first set looked right in a smooth render and wrong for
+the game: soft round blobs, a colour ramp that glides, sub-pixel drift. Four
+`particles` fields (engine-wide, so spells use them too — the generator's
+`pixel` pass sets `steps`) are what make an emitter read as 1998:
+
+| field | does | fire uses |
+| --- | --- | --- |
+| `sprite: "flame"` | an 8x8 nearest-filtered pixel-art flame tongue (with `square` and `pixel`, the hard-texel sprites) | square embers, pixel smoke (flames now play a sheet, below) |
+| `steps` | colour, size and opacity in N hard jumps over life, each sampled mid-step | 4 flame, 3 embers/smoke |
+| `snap` | rendered positions on a world grid, quad sizes in whole cells (never below one) | `0.04 × s`; embers are exactly one cell |
+| `frameRate` | the simulation advances in whole 1/N ticks — particles hold, then jump; billboards still face the camera every frame | 12 flame, 8 smoke |
+
+**Flame particles never move** (Derek: rising flame sprites read as shapes
+floating away). The body, core and tip layers have `speed: [0, 0]`: each
+particle is born at full size inside its layer's volume and only shrinks and
+fades in place. The silhouette is the stacked birth volumes; the flicker is new
+sprites popping in on each tick. Only embers and smoke travel.
+
+**Flames play a flipbook.** The body and core layers use `fx/flame-lick.png`
+— the white row of the purchased library's Effects 12 / 580.png, cut to a
+14-frame strip with `fx.mjs particle-sheet … flame-lick=12:30 --row 5` —
+with `subUV` mode `life` (each particle licks through the strip once) and the
+particle `filter: "nearest"`. The palette tints the white art. The art fills
+only the middle of its 64 px cell, so the quads are large (0.8 × s body). A
+third "tip" layer born above the flame was removed: small sprites spawning
+over the fire read as bits floating away from it.
+
+**Particles are batched by look.** Emitters no longer own meshes: every
+emitter with the same sprite/texture, blending, sheet grid, soft-fade distance
+and filter writes into one `ParticleBatch` mesh each frame, drawn single-pass
+(`forceSinglePass` — three otherwise draws a transparent double-sided material
+twice). Measured on fire-lab (seven fires, 33 emitters): 94 draw calls → 31;
+the particles went from 66 draws to 3. A fire layer costs one draw however
+many torches share it. `ParticleSystem.drawOf(id)` / `stats()` expose the
+batching to probes and tests; the VFX system parents its batches under
+`vfx.root` so the warmup precompile still reaches them.
+
+**The ember bed under the flame** is a material, not an effect:
+`materials/fx/ember-bed` is `unlit`, maps the ember texture (Derek's
+`Embers.png`, 128 px, nearest), and carries a material `overlay` — pixelated
+noise scrolling over the surface as glow (the schema lists the knobs). It is
+added to the EMISSIVE term, so it shows on unlit, standard and toon alike and
+feeds bloom; two noise copies scroll against each other and the time axis
+evolves the pattern in place, so the heat churns rather than sliding;
+`mask: "map"` gives the heat the map's OWN colour (`maskStrength` of it), so a
+crack flares hotter in its hue while a dark coal adds almost nothing. Both
+earlier versions failed in play: weighted by luminance it was invisible (a red
+crack's linear luminance is ~0.28), and as a flat colour strong enough to see
+it washed the tile beige. `maskCutoff` then restricts the heat to the LIGHT
+parts of the art: a texel whose brightest linear channel is under it gets
+none (short ramp above it, so the edge does not shimmer). Pick it from the
+texture — the 128 px ember art has 62% of texels under 0.2 and the cracks from
+0.3 to 1.0, so the bed uses 0.3; measured headless over half a second, 0.1% of
+coal pixels changed against 26% of crack pixels. `pixel` 64 on the 128 px texture
+lands the heat on 2x2-texel blocks; `steps` bands it; `frameRate` steps the
+clock. Every number is a uniform — a live tweak patches without a recompile.
+Put it on the torch head, the brazier's coals, the campfire's bed; the fire
+generator writes it (`--embers <png>` copies the texture in). Measured
+headless: across one second the overlay tile changed ~20x the pixels a
+texture-only tile did (the rest is light flicker on the floor); at a 0.15/s
+time axis it barely moved and read as a static texture.
+
+No `softFade` and no `stretch` on PSX layers: hard intersections and square
+texels are the era. Judge them through the scene's `postfx.pixelate` (480,
+nearest) — that is how every voxel-demo scene renders.
+
+Traps:
+
+- **Never rebuild the play clock as `startedAt + t * life`** in a module. A
+  standing effect's life is Infinity and its `t` is 0, and 0 × Infinity is
+  NaN — that is what a torch's light intensity was before `LiveModule.now`.
+- **A background precompile must skip materials whose textures are still
+  loading** (`materialMapsLoading`, checked in `EngineRenderer`'s precompile
+  traverse). The graph is rewired when the maps land; a rewire mid-compile
+  rebuilds the shader outside the borrowed MRT window and three logs "Color
+  target has no corresponding fragment stage output". It surfaced with the
+  ember bed only because no other material shares its texture, so it was the
+  one still loading — 3 of 4 probes before the skip, 0 of 3 after.
+- The entity's origin is the BASE of the flame. Offsets in the effect are
+  metres above it.
+- The spell audit's budgets do not apply to standing effects; the pool sizes
+  do (`emitter.max`). A bonfire is ~340 particles, a torch ~90 — `cullDistance`
+  is what keeps a dungeon of them affordable.
+
 ## Symbol sheets: how to draw them
 
 One PNG per category (symbols, projectiles, radials…), any size, white on

@@ -3,6 +3,7 @@ import type { NetStateStore } from "../net-state.js";
 import { itemSchema } from "./items.js";
 import { progressionSchema } from "./progression.js";
 import { characterSheetSchema } from "./sheet.js";
+import { questJournalSchema } from "../game-ui.js";
 
 export * from "./items.js";
 export * from "./progression.js";
@@ -23,6 +24,7 @@ export function registerCharacterAssetTypes(assets: AssetLibrary): void {
  * and the namespace shows up in the AI-facing spec. Once per store.
  */
 export function registerCharacterNetState(store: NetStateStore): void {
+  store.define("quests", questJournalSchema.describe("Authority-owned quest journal keyed quests/<actorId>. Tracking requests validate body ownership; objective progress never accepts peer assertions."));
   store.define(
     CHARACTER_NETSTATE,
     characterSheetSchema.describe(

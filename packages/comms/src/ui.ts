@@ -34,6 +34,8 @@ export interface CommsUIOptions {
   onCommand?(name: string, args: string[]): boolean;
   /** Starting channel (default "proximity"). */
   channel?: CommsChannel;
+  /** Show receive-filter tabs using the registered channel metadata (default true). */
+  channelTabs?: boolean;
 }
 
 export interface CommsUI {
@@ -53,6 +55,12 @@ const CSS = `
   font:12px/1.45 ui-sans-serif,system-ui,sans-serif;color:#c9d1d9;z-index:40;
   display:flex;flex-direction:column;gap:6px;pointer-events:none}
 .hitreg-comms *{box-sizing:border-box}
+.hitreg-comms-tabs{display:flex;gap:2px;pointer-events:auto;flex-wrap:wrap}
+.hitreg-comms-tab{font:inherit;text-transform:capitalize;background:#161b22;color:#aeb7c2;border:1px solid #30363d;padding:4px 7px;cursor:pointer}
+.hitreg-comms-tab[aria-selected="true"]{color:#ffe0a5;border-color:#9a7744;background:#332719}
+.hitreg-comms-line[hidden]{display:none}
+.hitreg-comms-compose{align-self:stretch;text-align:left;pointer-events:auto;cursor:text;font:inherit;background:#161b22;color:#8b949e;border:1px solid #30363d;padding:5px 8px}
+.hitreg-comms[data-open="true"] .hitreg-comms-compose{display:none}
 .hitreg-comms-voice{display:flex;align-items:center;gap:6px;flex-wrap:wrap;pointer-events:auto}
 .hitreg-comms-btn{background:#21262d;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;
   padding:2px 8px;font:inherit;cursor:pointer}
@@ -126,6 +134,7 @@ export function mountCommsUI(opts: CommsUIOptions): CommsUI {
   const fadeAfterMs = (opts.fadeAfter ?? 8) * 1000;
   let channel: CommsChannel = opts.channel ?? "proximity";
   let open = false;
+  let selectedTab: CommsChannel | "all" = "all";
   const unsubs: Array<() => void> = [];
 
   const root = el("div", `hitreg-comms${opts.className ? ` ${opts.className}` : ""}`);
@@ -198,6 +207,7 @@ export function mountCommsUI(opts: CommsUIOptions): CommsUI {
   const addLine = (msg: ChatMessage) => {
     const line = el("div", "hitreg-comms-line");
     line.dataset["channel"] = msg.channel;
+    line.hidden = selectedTab !== "all" && msg.channel !== selectedTab && msg.channel !== "system";
     if (msg.channel === "system") {
       line.append(el("span", "hitreg-comms-tag", "—"), document.createTextNode(msg.text));
     } else {
@@ -233,6 +243,24 @@ export function mountCommsUI(opts: CommsUIOptions): CommsUI {
   const hint = el("span", "hitreg-comms-hint", "Esc");
   inputRow.append(chanBtn, field, hint);
   root.appendChild(inputRow);
+  const compose = el("button", "hitreg-comms-compose", "Enter to chat…");
+  compose.type = "button";
+  root.appendChild(compose);
+
+  const tabRow = el("div", "hitreg-comms-tabs");
+  tabRow.setAttribute("role", "tablist"); tabRow.setAttribute("aria-label", "Chat channels");
+  const tabs = new Map<CommsChannel | "all", HTMLButtonElement>();
+  const renderTabs = () => {
+    for (const [id, button] of tabs) {
+      button.setAttribute("aria-selected", String(id === selectedTab));
+      button.tabIndex = id === selectedTab ? 0 : -1;
+    }
+    for (const line of Array.from(log.children)) {
+      const el = line as HTMLElement;
+      el.hidden = selectedTab !== "all" && el.dataset["channel"] !== selectedTab && el.dataset["channel"] !== "system";
+    }
+    log.scrollTop = log.scrollHeight;
+  };
 
   const renderChannel = () => {
     const meta = CHANNEL_META[channel];
@@ -241,7 +269,9 @@ export function mountCommsUI(opts: CommsUIOptions): CommsUI {
   };
   const setChannel = (next: CommsChannel) => {
     channel = next;
+    selectedTab = next;
     renderChannel();
+    renderTabs();
   };
   const cycle = () => {
     const i = COMMS_CHANNELS.indexOf(channel);
@@ -261,6 +291,25 @@ export function mountCommsUI(opts: CommsUIOptions): CommsUI {
       field.blur();
     }
   };
+  compose.onclick = () => setOpen(true);
+  field.addEventListener("focus", () => { if (!open) setOpen(true); });
+  if (opts.channelTabs !== false) {
+    for (const id of ["all", ...COMMS_CHANNELS] as const) {
+      const button = el("button", "hitreg-comms-tab", id === "all" ? "All" : CHANNEL_META[id].label);
+      button.type = "button"; button.setAttribute("role", "tab");
+      const select = () => { if (id === "all") { selectedTab = "all"; renderTabs(); } else setChannel(id); };
+      button.onclick = select;
+      button.onkeydown = e => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
+        e.preventDefault(); e.stopPropagation();
+        const list = [...tabs.values()], index = list.indexOf(button);
+        const next = e.key === "Home" ? 0 : e.key === "End" ? list.length - 1 : (index + (e.key === "ArrowRight" ? 1 : -1) + list.length) % list.length;
+        list[next]!.click(); list[next]!.focus();
+      };
+      tabs.set(id, button); tabRow.append(button);
+    }
+    root.insertBefore(tabRow, log); renderTabs();
+  }
   const submit = () => {
     const parsed = parseChatInput(field.value, channel);
     field.value = "";

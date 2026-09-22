@@ -656,7 +656,7 @@ describe("terrain features", () => {
           ridges: [],
           tunnels: [],
           roads: [],
-          towns: [{ id: "t", center: [0, 0], radius: 40, falloff: 30, groundY: 12, flatten: 1, tags: [] }],
+          towns: [{ id: "t", center: [0, 0], radius: 40, falloff: 30, groundY: 12, flatten: 1, gates: [], terraces: [], tags: [] }],
           blobs: [],
           pois: [],
           camps: [],
@@ -761,7 +761,7 @@ describe("terrain features", () => {
           ridges: [],
           tunnels: [],
           roads: [],
-          towns: [{ id: "t", center: [0, 0], radius: 40, falloff: 30, groundY: 12, flatten: 1, tags: [] }],
+          towns: [{ id: "t", center: [0, 0], radius: 40, falloff: 30, groundY: 12, flatten: 1, gates: [], terraces: [], tags: [] }],
           blobs: [],
           pois: [],
           camps: [],
@@ -777,12 +777,51 @@ describe("terrain features", () => {
   it("can retain vegetation on a town grade while roads still exclude it", () => {
     const field = createWorldField(testRecipe({ features: {
       ...noFeatures(),
-      towns: [{id:"landscaped",center:[0,0],radius:40,falloff:10,groundY:12,flatten:1,tags:[],excludeScatter:false}],
+      towns: [{id:"landscaped",center:[0,0],radius:40,falloff:10,groundY:12,flatten:1,gates:[],terraces:[],tags:[],excludeScatter:false}],
       roads: [{id:"foundation",points:[[-5,0],[5,0]],width:4,shoulder:1,smooth:0,flatten:1,surfaceY:[12,12],surface:"",surfaceEdge:0}],
     }}));
     expect(field.height(0,20)).toBeCloseTo(12);
     expect(field.featureClearance(0,20)).toBeGreaterThan(0);
     expect(field.featureClearance(0,0)).toBeLessThan(0);
+  });
+
+  it("steps a terraced town up its hill instead of flattening it", () => {
+    const flat = createWorldField(testRecipe({ features: { ...noFeatures() } }));
+    const lower = flat.height(0, 0);
+    const upper = lower + 8;
+    const field = createWorldField(
+      testRecipe({
+        features: {
+          ...noFeatures(),
+          towns: [
+            {
+              id: "hill",
+              // flatten 0: the town keeps its ground, the shelves ARE the flat parts
+              center: [0, 0],
+              radius: 60,
+              falloff: 20,
+              flatten: 0,
+              gates: [],
+              tags: [],
+              terraces: [
+                { id: "low", points: [[-40, -30], [-40, 30]], radius: 12, falloff: 4, groundY: lower + 3, flatten: 1, tags: [] },
+                { id: "high", points: [[40, 0]], radius: 12, falloff: 4, groundY: upper + 9, flatten: 1, tags: [] },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+    // each shelf is level along its whole centreline, at its own height…
+    expect(field.height(-40, -20)).toBeCloseTo(lower + 3, 3);
+    expect(field.height(-40, 20)).toBeCloseTo(lower + 3, 3);
+    expect(field.height(40, 0)).toBeCloseTo(upper + 9, 3);
+    // …the two are a step apart, not one pad…
+    expect(field.height(40, 0) - field.height(-40, -20)).toBeCloseTo(14, 3);
+    // …and between them the hillside is untouched, because flatten is 0
+    expect(field.height(0, 0)).toBeCloseTo(flat.height(0, 0), 3);
+    // a shelf is town ground: nothing scatters on it
+    expect(field.featureClearance(-40, 20)).toBeLessThan(0);
   });
 
   it("measures path clearance from the shoulder's edge, and still sees a path from a boulder's clearance away", () => {
@@ -1579,7 +1618,7 @@ describe("scatter", () => {
           ridges: [],
           tunnels: [],
           roads: [],
-          towns: [{ id: "t", center: [0, 0], radius: 40, falloff: 30, groundY: 12, flatten: 1, tags: [] }],
+          towns: [{ id: "t", center: [0, 0], radius: 40, falloff: 30, groundY: 12, flatten: 1, gates: [], terraces: [], tags: [] }],
           blobs: [],
           pois: [],
           camps: [],

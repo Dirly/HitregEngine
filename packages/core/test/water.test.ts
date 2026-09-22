@@ -7,7 +7,7 @@ import {
   type Op,
   type SceneDoc,
 } from "../src/index.js";
-import { lintWater, waterFillOps } from "../src/water.js";
+import { lintWater, waterFillOps, waterQuery, waterVolumes, WaterIndex } from "../src/water.js";
 
 function registry(): ComponentRegistry {
   const r = new ComponentRegistry();
@@ -165,5 +165,121 @@ describe("lintWater", () => {
     const findings = lintWater(doc, reg);
     expect(findings.length).toBeGreaterThanOrEqual(1);
     expect(findings.every((f) => f.entity === "sheet")).toBe(true);
+  });
+});
+
+describe("water volumes (the runtime question)", () => {
+  /** A 10x6 sheet at y=2 over a basin, marked swimmable 4 m deep. */
+  function pool(reg: ComponentRegistry, extra: Record<string, unknown> = {}): SceneDoc {
+    const doc = createScene("pool");
+    return applyOps(
+      doc,
+      [
+        {
+          op: "add-entity",
+          id: "pool",
+          entity: {
+            name: "pool",
+            parent: null,
+            tags: ["water"],
+            components: {
+              transform: { position: [0, 2, 0] },
+              mesh: { source: { kind: "primitive", shape: "plane", size: [10, 1, 6] } },
+              water: { depth: 4, ...extra },
+            },
+          },
+        },
+      ],
+      reg,
+    ).doc;
+  }
+
+  it("measures the footprint off the mesh and reports depth over a point", () => {
+    const reg = registry();
+    const index = new WaterIndex(waterVolumes(pool(reg)));
+    expect(index.volumes).toHaveLength(1);
+    const [v] = index.volumes;
+    expect(v!.x0).toBeCloseTo(-5, 5);
+    expect(v!.x1).toBeCloseTo(5, 5);
+    expect(v!.z0).toBeCloseTo(-3, 5);
+    expect(v!.z1).toBeCloseTo(3, 5);
+    expect(v!.surfaceY).toBeCloseTo(2, 5);
+    expect(v!.floorY).toBeCloseTo(-2, 5);
+
+    // chest-deep in the middle
+    expect(index.sampleAt(0, 0.5, 0)?.depth).toBeCloseTo(1.5, 5);
+    // above the surface: sampled, but with a negative depth — a caller can
+    // watch the waterline approach instead of snapping at it
+    expect(index.sampleAt(0, 3, 0)?.depth).toBeCloseTo(-1, 5);
+    // outside the footprint, and well below the bed
+    expect(index.sampleAt(20, 0, 0)).toBeNull();
+    expect(index.sampleAt(0, -9, 0)).toBeNull();
+    // …but feet resting ON the bed are still in the water. Without the
+    // tolerance a diver who reaches the bottom falls out of the lake: back to
+    // gravity and the walking clips, standing on the floor of it.
+    expect(index.sampleAt(0, -2, 0)?.depth).toBeCloseTo(4, 5);
+    expect(index.sampleAt(0, -2.3, 0)).not.toBeNull();
+  });
+
+  it("honours an explicit size, swim:false and a current", () => {
+    const reg = registry();
+    const index = new WaterIndex(
+      waterVolumes(pool(reg, { size: [2, 2], swim: false, current: [1.5, 0] })),
+    );
+    expect(index.sampleAt(3, 1, 0)).toBeNull(); // fenced smaller than its sheet
+    const at = index.sampleAt(0, 1, 0);
+    expect(at?.swim).toBe(false);
+    expect(at?.current).toEqual([1.5, 0]);
+  });
+
+  it("takes the higher surface where two volumes overlap", () => {
+    const reg = registry();
+    let doc = pool(reg);
+    doc = applyOps(
+      doc,
+      [
+        {
+          op: "add-entity",
+          id: "cistern",
+          entity: {
+            name: "cistern",
+            parent: null,
+            tags: ["water"],
+            components: {
+              transform: { position: [0, 6, 0] },
+              mesh: { source: { kind: "primitive", shape: "plane", size: [4, 1, 4] } },
+              water: { depth: 2 },
+            },
+          },
+        },
+      ],
+      reg,
+    ).doc;
+    const index = new WaterIndex(waterVolumes(doc));
+    // standing in the cistern above: the water you are in is the one above you
+    expect(index.sampleAt(0, 5, 0)?.entity).toBe("cistern");
+    // under the cistern's own floor, the pool still answers
+    expect(index.sampleAt(0, 1, 0)?.entity).toBe("pool");
+  });
+
+  it("combines authored water with a procedural world's", () => {
+    const reg = registry();
+    const index = new WaterIndex(waterVolumes(pool(reg)));
+    // a field with a sea at y=0 everywhere, its bed at -8, inside a 100 m world
+    const field = {
+      waterY: () => 0,
+      height: () => -8,
+      worldLimit: 100,
+    };
+    const query = waterQuery({ index, field });
+    // over the pool, the authored sheet at y=2 wins over the sea at y=0
+    expect(query(0, 1, 0)?.entity).toBe("pool");
+    // away from it, the world answers
+    const sea = query(40, -1, 40);
+    expect(sea?.entity).toBeNull();
+    expect(sea?.depth).toBeCloseTo(1, 5);
+    expect(sea?.floorY).toBeCloseTo(-8, 5);
+    // past the world limit there is nothing to swim in at all
+    expect(query(400, -1, 400)).toBeNull();
   });
 });

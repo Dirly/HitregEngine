@@ -246,7 +246,11 @@ export const meshSchema = z.object({
             "mapped `uv * scale + offset`. Exists so one MODEL can wear any of many looks while every user of it " +
             "stays ONE draw call: a material boundary is a draw-call boundary, so the choice of sheet has to be " +
             "per-INSTANCE rather than a material per theme. `atlas-pack` writes the tile rectangles beside the " +
-            "packed sheet. Only honoured for `renderMode: \"instanced\"` asset meshes.",
+            "packed sheet. Only honoured for `renderMode: \"instanced\"` asset meshes. `scale` is ONE number, so " +
+            "every sheet on a page is the same size — `atlas-pack` skips any that is not. A page holds " +
+            "floor(edge / (sheet + 2 * gutter))^2 looks: 784 at a 128px sheet on a 4096 page, 196 on a " +
+            "2048. When that fills, add a PAGE rather than shrinking the sheet — a second page costs one " +
+            "extra draw, and only while both are in frame.",
         ),
       partMask: z
         .number()
@@ -261,7 +265,8 @@ export const meshSchema = z.object({
             "discard it. This is what makes a modular weapon one mesh and one material: thirty different swords " +
             "in a town draw as one instanced batch. Pairs with `atlasTile`; only honoured for `renderMode: " +
             "\"instanced\"` asset meshes. NOTE that `uvRotation` also claims TEXCOORD_1 — a model may carry a " +
-            "rotation pivot or a part index there, never both.",
+            "rotation pivot or a part index there, never both. At most 24 PARTS per ubermesh: the bit test is float " +
+            "arithmetic (exact below 2^24, and identical on both backends), so bit 24 and above never read.",
         ),
       textureFilter: z
         .enum(["linear", "nearest"])
@@ -638,9 +643,12 @@ export const cameraSchema = z.object({
         .number()
         .default(1.6)
         .describe(
-          "Height above the target's origin of the point the camera orbits and looks at, and the origin every " +
-            "collision sweep starts from. Chest height, not the feet: orbiting the feet swings the character " +
-            "around the screen, and a sweep starting at ground level is stopped by the ground.",
+          "Height above the target's ORIGIN of the point the camera orbits and looks at, and the origin every " +
+            "collision sweep starts from. Head/upper-chest height, not the feet: orbiting the feet swings the " +
+            "character around the screen. Mind where the origin IS: the 1.6 default assumes an origin at the " +
+            "feet, but a collider is centred on its entity, so a 1.8 m capsule character wants about 0.65. A " +
+            "pivot above the body's own collider is one nothing keeps out of door lintels and ceilings — the " +
+            "rig will hold it under them, but the framing you authored is then not the one you get indoors.",
         ),
       shoulder: z
         .number()
@@ -651,9 +659,9 @@ export const cameraSchema = z.object({
         .positive()
         .default(0.25)
         .describe(
-          "Floor for the boom when collision squeezes it. Small on purpose: backed into a corner the camera " +
-            "goes effectively FIRST PERSON, which shows the player their surroundings, where a boom floored a " +
-            "metre out just fills the screen with the wall it is inside. The body is hidden on the way down.",
+          "Floor for the boom: where the mouse wheel stops zooming in (FIRST PERSON — the body is hidden and the " +
+            "look band opens up) and where collision can squeeze it to. Small on purpose: backed into a corner a " +
+            "boom floored a metre out just fills the screen with the wall it is inside.",
         ),
       maxDistance: z.number().positive().default(14).describe("Ceiling for the player's wheel zoom."),
       collision: z
@@ -669,9 +677,10 @@ export const cameraSchema = z.object({
         .max(89)
         .default(32)
         .describe(
-          "How far the player may angle the view UP, in degrees. Shallow on purpose: past the angle where the "  +
-            "eye would sit under the ground (roughly asin(pivotHeight / distance)), collision crushes the boom to "  +
-            "first person for as long as the angle is held, which reads as the camera being stuck rather than as a limit.",
+          "How far the player may angle the view UP, in degrees. Past the angle where the eye would sit under " +
+            "the ground (roughly asin(pivot height over the ground / distance)) the eye slides in along the ground " +
+            "toward the character, MMO-style, so a wide band (45-55) is fine for a character game; 32 keeps the " +
+            "boom near full length across the whole band. First person (wheel fully in) ignores it.",
         ),
       lookDown: z
         .number()
@@ -679,13 +688,22 @@ export const cameraSchema = z.object({
         .max(89)
         .default(66)
         .describe("How far the player may angle the view DOWN, in degrees — i.e. how far the camera may rise above the pivot."),
+      invertY: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Flip the vertical mouse axis. Off (default): pushing the mouse forward looks UP, as in EverQuest, WoW " +
+            "and every shooter. On: forward looks down, flight-stick style. A player preference, authored here " +
+            "until there is a settings screen.",
+        ),
       damping: z
         .number()
         .positive()
-        .default(14)
+        .default(25)
         .describe(
-          "How tightly the orbit pivot tracks the target, per second. Higher is tighter. Loose damping reads " +
-            "as cinematic in open country and as the camera falling behind into walls in a town.",
+          "How tightly the orbit pivot tracks the target, per second. Higher is tighter; the pivot trails by " +
+            "speed / damping metres. Loose damping reads as cinematic in open country and, in a town, as a " +
+            "pivot that cuts the corner of every doorway the character turns through.",
         ),
     })
     .optional(),
@@ -909,6 +927,97 @@ export const materialSchema = z.object({
         "with unlit glowing detail (e.g. a lit robot body with unlit glowing eyes/screens/edge trim) without " +
         "switching the whole material to the `unlit` shader.",
     ),
+  overlay: z
+    .object({
+      color: hexColor
+        .default("#ffc040")
+        .describe(
+          "Colour the moving noise adds. Make it HOTTER than the surface (yellow over red embers): the same orange " +
+            "added onto orange barely changes what you see.",
+        ),
+      opacity: z
+        .number()
+        .min(0)
+        .max(4)
+        .default(1.5)
+        .describe(
+          "Strength of the overlay on top of the surface. It is written as emissive and goes through tonemapping, so " +
+            "readable heat on a bright texture wants 1.5–3; above ~1 it also feeds bloom.",
+        ),
+      scale: z
+        .number()
+        .positive()
+        .default(3)
+        .describe("Noise features per texture tile. Low = big slow blobs of heat; high = fine flicker."),
+      speed: z
+        .tuple([z.number(), z.number()])
+        .default([0.04, 0.1])
+        .describe(
+          "Tiles per second the noise scrolls [u, v]. A second copy runs the other way at a different scale, so the " +
+            "heat churns in place instead of sliding across the surface like a conveyor belt.",
+        ),
+      threshold: z
+        .number()
+        .min(0)
+        .max(1)
+        .default(0.3)
+        .describe("Noise below this adds nothing. Higher = sparser, hotter licks; 0 = a wash over everything."),
+      mask: z
+        .enum(["map", "none"])
+        .default("map")
+        .describe(
+          "map = the heat takes the base `map`'s own colour, so glowing cracks flare hotter in their own hue and dark " +
+            "coals add almost nothing — the art stays readable at any strength (the ember-bed look); none = one flat " +
+            "colour everywhere, which washes a textured surface out long before it reads as moving.",
+        ),
+      maskStrength: z
+        .number()
+        .min(0)
+        .max(1)
+        .default(0.75)
+        .describe(
+          "How much `mask: map` holds the heat to the cracks. 1 = only the bright cracks move and the dark coals stay " +
+            "dead still; lower lets heat wash over the coals too, which reads more clearly as MOVING fire.",
+        ),
+      maskCutoff: z
+        .number()
+        .min(0)
+        .max(1)
+        .default(0)
+        .describe(
+          "`mask: map` only: texels whose brightest colour channel (linear, 0–1) is below this get NO heat at all — " +
+            "the light parts of the art move, the dark parts stay exactly as painted. 0 = off. For glowing cracks in " +
+            "dark coals, pick a value between the two (the ember bed uses 0.3); a short ramp softens the edge.",
+        ),
+      pixel: z
+        .number()
+        .int()
+        .min(0)
+        .max(1024)
+        .default(32)
+        .describe(
+          "PSX pixelation: the noise is sampled in this many cells per texture tile (0 = smooth). Use the map's own " +
+            "resolution or a divisor of it — 64 on a 128 px texture gives 2x2-texel blocks that line up with the art.",
+        ),
+      steps: z
+        .number()
+        .int()
+        .min(0)
+        .max(16)
+        .default(4)
+        .describe("Posterise the heat into this many hard bands (0 = smooth)."),
+      frameRate: z
+        .number()
+        .min(0)
+        .default(12)
+        .describe("The scroll advances in ticks of 1/frameRate s, so it steps rather than glides (0 = smooth)."),
+    })
+    .optional()
+    .describe(
+      "An animated, pixelated noise overlay added on top of the surface as glow — the moving heat in an ember bed " +
+        "under a campfire or a torch head, lava crust, a forge's coals. Works on unlit, standard and toon. Every " +
+        "number is a uniform, so tuning it live never recompiles; adding/removing it or changing `mask` rebuilds.",
+    ),
   opacity: z.number().min(0).max(1).default(1),
   transparent: z
     .boolean()
@@ -1128,6 +1237,26 @@ export const materialSchema = z.object({
             "sheet (one polygon fan) or a river ribbon (two vertices across), where lifting the few vertices " +
             "tilts whole triangles into faceted streaks. false keeps the wave NORMALS (lighting still moves) " +
             "and leaves the geometry flat. `worldgen rivers` writes the lake and river materials with false.",
+        ),
+      wakeHeight: z
+        .number()
+        .min(0)
+        .default(0.2)
+        .describe(
+          "Metres of relief a wake pushes into this surface. A wake is a simulated height field (a swimmer, " +
+            "a boat, rain) that this material DISPLACES its vertices by and bends its normals along, so a " +
+            "wake DEFORMS the water instead of colouring it. On a `displace: false` sheet the geometry " +
+            "cannot move and only the normals respond, which still reads as ripples. 0 turns wakes off here.",
+        ),
+      wakeFoam: z
+        .number()
+        .min(0)
+        .max(1)
+        .default(0.1)
+        .describe(
+          "How much a wake's CRESTS also froth, in `foamColor`. Small on purpose: whitening the whole " +
+            "disturbed patch is what made every earlier wake read as a decal stuck to the surface. " +
+            "0 = pure water motion.",
         ),
     })
     .optional()
@@ -1519,6 +1648,93 @@ export const postfxSchema = z.object({
       smoothness: z.number().min(0).max(1).default(0.4).describe("Width of the falloff band. Low values give a visible hard ring."),
     })
     .prefault({}),
+  sandstorm: z
+    .object({
+      enabled: z
+        .boolean()
+        .default(true)
+        .describe(
+          "Defaults TRUE but costs nothing in a scene that cannot have weather: like the underwater pass, it " +
+            "is only BUILT where the thing can happen (a scene carrying the `weather` script), then driven by " +
+            "a uniform. Set false to keep a sandstorm outside the lens.",
+        ),
+      color: hexColor
+        .default("#c7a06a")
+        .describe("The grain's own colour, lit. A script drives this per storm — white with a low `streak` is a blizzard."),
+      opacity: z
+        .number()
+        .min(0)
+        .max(1)
+        .default(0.5)
+        .describe(
+          "How solid the sheets of grain get at full strength. This is the part you watch PASS you; `haze` is " +
+            "the part you cannot see through.",
+        ),
+      haze: z
+        .number()
+        .min(0)
+        .max(1)
+        .default(0.22)
+        .describe(
+          "Flat wash of `color` over the whole frame at full strength — the air itself. Fog already eats the " +
+            "distance; this is what puts sand between you and the thing two metres away.",
+        ),
+      scale: z
+        .number()
+        .positive()
+        .default(20)
+        .describe(
+          "Grain cells across the screen. Low = big torn sheets close to the lens; high = fine dust. This is " +
+            "the knob that decides whether it reads as sand or as television static.",
+        ),
+      speed: z.number().min(0).default(1.6).describe("How fast the sheets cross the view, roughly screens per second."),
+      streak: z
+        .number()
+        .min(1)
+        .max(20)
+        .default(9)
+        .describe(
+          "How far each grain is smeared along its own travel. 1 is round specks, which read as drifting dust " +
+            "however fast they move; 4-8 is blown sand. The streak IS the speed — the eye reads the smear, not " +
+            "the displacement.",
+        ),
+      swirl: z
+        .number()
+        .min(0)
+        .max(4)
+        .default(0.5)
+        .describe(
+          "Radians per second the whole field turns. Sand does not travel in a straight line; with 0 the sheets " +
+            "slide past like a conveyor belt and the illusion dies.",
+        ),
+      threshold: z
+        .number()
+        .min(0)
+        .max(1)
+        .default(0.26)
+        .describe("Noise below this is empty air. Higher = fewer, more separate sheets; 0 is a solid veil of colour."),
+      steps: z
+        .number()
+        .int()
+        .min(0)
+        .max(8)
+        .default(0)
+        .describe(
+          "PSX banding: the grain is posterised into this many jumps instead of a smooth gradient. 0 = smooth, " +
+            "and 0 is the DEFAULT here even in a PSX-styled game: banding turns blowing grit into flat torn-paper " +
+            "patches that read as camouflage, not sand. Let `postfx.pixelate` supply the retro look — chunky " +
+            "pixels of a smooth field still look like sand; smooth pixels of a banded one do not.",
+        ),
+    })
+    .prefault({})
+    .describe(
+      "Blowing grit ACROSS THE LENS — the difference between standing in a sandstorm and watching one. A " +
+        "world-space particle bank can only ever be a cloud you look at: at the density a storm needs the " +
+        "quads either swallow the camera or hang off in the middle distance, which is why a bank alone reads " +
+        "as fog with a tint. This is a screen-space pass instead — streaked, rotating, gusting noise driven by " +
+        "the weather's own wind, which rushes OUTWARD from the centre of the view when you turn to face into " +
+        "it. Drive it with `ctx.setPostFx`; the `weather` builtin already does.",
+    ),
   grain: z
     .object({
       enabled: z.boolean().default(false),
@@ -1607,6 +1823,73 @@ export const postfxSchema = z.object({
     })
     .prefault({})
     .describe("Render the frame at a low internal resolution and scale it up to the screen — the fake-PSX look. Not a shader pass: it changes the canvas backing size, so it costs nothing and speeds everything else up."),
+  underwater: z
+    .object({
+      enabled: z
+        .boolean()
+        .default(true)
+        .describe(
+          "Defaults TRUE but costs nothing in a scene with no water: the pass is only built where water " +
+            "exists (a voxel world with a sea, lakes or rivers, or an entity carrying the `water` component). " +
+            "Set false to keep a submerged camera looking exactly like a dry one.",
+        ),
+      color: hexColor
+        .default("#16506b")
+        .describe("What the water absorbs TOWARD — the colour everything fades to with distance. A `water` component's own `color` overrides it per body of water."),
+      density: z
+        .number()
+        .min(0)
+        .default(0.055)
+        .describe(
+          "Murk, per metre. Sight fades exponentially, so this is roughly 'the reciprocal of how far you can " +
+            "see': 0.02 is a clear tarn, 0.15 a silty river. It fogs the SKY too, which is the point — the one " +
+            "thing that gives away a fake underwater look is a clear blue sky through the surface above you.",
+        ),
+      tint: z
+        .number()
+        .min(0)
+        .max(1)
+        .default(0.22)
+        .describe("Flat wash of `color` over the whole frame, distance or no distance — what your own hands look like underwater."),
+      saturation: z
+        .number()
+        .min(0)
+        .max(1)
+        .default(0.75)
+        .describe("Colour left in the scene under water, 1 = untouched. Red goes first in real water; this is the cheap version of that."),
+      wobble: z
+        .number()
+        .min(0)
+        .max(0.05)
+        .default(0.004)
+        .describe(
+          "Refraction: how far the image sways, as a fraction of the screen. Costs an extra full-frame copy " +
+            "(the pass has to re-sample the picture it is given), so 0 turns that copy off as well as the sway.",
+        ),
+      wobbleSpeed: z.number().min(0).default(1.1).describe("How fast the sway travels. Slow reads as deep and heavy; fast as a shallow chop."),
+      wobbleScale: z.number().positive().default(9).describe("Ripples across the screen. Low is a lazy lens-wide swell; high is fine chop."),
+      edge: z
+        .number()
+        .min(0)
+        .max(1)
+        .default(0.35)
+        .describe("Darkening toward the corners while submerged — the closing-in feeling. Independent of `vignette`, which stays on out of the water."),
+      fade: z
+        .number()
+        .min(0)
+        .max(2)
+        .default(0.18)
+        .describe(
+          "Seconds the effect takes to come up as the camera goes under, and to drop as it surfaces. A hard " +
+            "switch at the waterline flickers every time a swimming camera bobs across it.",
+        ),
+    })
+    .prefault({})
+    .describe(
+      "What being UNDER the water looks like: distance absorption (the sky included), a tint, desaturation, a " +
+        "refraction sway and a closing-in vignette, all driven by how deep the camera is. Swimming itself is " +
+        "the `third-person-controller`'s job and works with or without this.",
+    ),
 });
 
 /**
@@ -1695,12 +1978,55 @@ export const particlesSchema = z.object({
   /** Texture asset id; omitted = procedural soft round sprite. */
   texture: z.string().optional(),
   sprite: z
-    .enum(["soft", "square", "pixel"])
+    .enum(["soft", "square", "pixel", "flame", "ring", "streak", "noise"])
     .default("soft")
     .describe(
       "The procedural sprite used when no `texture` is given: soft = a radial falloff (smoke, glow); square = a " +
         "hard-edged square with a one-texel fade (PSX sparks and rain); pixel = a chunky 6x6 blob with stepped " +
-        "alpha (retro embers, motes).",
+        "alpha (retro embers, motes); flame = an 8x8 pixel-art flame tongue pointing up the screen (PSX fire); " +
+        "ring = a hollow annulus, which is what a splash on the ground actually looks like (pair it with " +
+        "`orient: ground` and a growing `sizeCurve`); streak = a vertical tapered line for rain and sparks " +
+        "(pair it with `orient: velocity`); noise = a torn, cloudy puff with real internal " +
+        "structure, for anything big and slow that would otherwise read as a smooth grey blob — dust banks, " +
+        "smoke fronts (give a noise puff some `spin`: the structure is only visible because it turns). " +
+        "Every sprite but soft is nearest-filtered, so its texels stay hard " +
+        "at any size.",
+    ),
+  filter: z
+    .enum(["linear", "nearest"])
+    .default("linear")
+    .describe(
+      "Magnification of a `texture` sheet. nearest keeps low-res pixel-art sheets hard-edged (the PSX look); linear " +
+        "smears them. The procedural sprites choose their own filtering and ignore this.",
+    ),
+  steps: z
+    .number()
+    .int()
+    .min(0)
+    .max(16)
+    .default(0)
+    .describe(
+      "PSX banding: colour, size and opacity change in this many hard jumps over a particle's life instead of " +
+        "gliding (each step shows the value at its middle). 0 = smooth. 3–5 is the retro look — a flame that " +
+        "goes white, orange, red, gone reads as 1998; one that fades through every shade in between does not.",
+    ),
+  snap: z
+    .number()
+    .min(0)
+    .default(0)
+    .describe(
+      "PSX grid snap, in metres: rendered positions snap to a world grid of this size and quad sizes to multiples " +
+        "of it (a living particle never snaps below one cell). The same wobble as PSX vertex precision. 0 = off. " +
+        "Size it to the effect — around a fifth of the particle size — or it reads as a lattice.",
+    ),
+  frameRate: z
+    .number()
+    .min(0)
+    .default(0)
+    .describe(
+      "PSX stepping: the simulation advances in whole ticks of 1/frameRate seconds, so particles jump rather than " +
+        "slide (billboards still face the camera every frame). 0 = every frame. 8–15 is the retro range; flames at " +
+        "12, lazy smoke lower.",
     ),
   subUV: z
     .object({
@@ -1731,7 +2057,10 @@ export const particlesSchema = z.object({
       "Metres over which a particle fades as it approaches solid geometry. 0 = off. " +
         "A quad slicing visibly into the ground is THE thing that reads as cheap, and " +
         "nothing else fixes it. Costs a scene-depth read, so leave it off for effects " +
-        "that never touch a surface (sparks in mid-air).",
+        "that never touch a surface (sparks in mid-air) — and NEVER pair it with " +
+        "`orient: ground`, which lies a quad centimetres above the surface behind it: " +
+        "the fade then measures that gap and erases the whole thing, which looks exactly " +
+        "like the effect failing to spawn.",
     ),
   stretch: z
     .number()
@@ -1740,6 +2069,18 @@ export const particlesSchema = z.object({
     .describe(
       "Stretch each particle along its own velocity, in seconds of travel. 0 = round. " +
         "Sparks and debris read as DOTS without this — the streak is the motion.",
+    ),
+  orient: z
+    .enum(["camera", "velocity", "ground", "upright"])
+    .default("camera")
+    .describe(
+      "What each quad points at. camera = the usual billboard, always square to the viewer. velocity = the " +
+        "quad's long axis is locked to the particle's WORLD velocity and it spins about that axis to face the " +
+        "camera — the difference between rain that falls the way the wind blows and rain that tilts with " +
+        "wherever you happen to be looking, which is what camera+`stretch` gives you (that one rolls the " +
+        "billboard by the SCREEN-space velocity, so the streaks swing as you turn and never foreshorten). " +
+        "ground = laid flat in the XZ plane, facing up: splash rings, ripples, scorch marks. upright = billboard " +
+        "that turns about Y only, so a tall quad stays vertical when you look up — dust banks, distant haze.",
     ),
   sizeCurve: z
     .array(z.tuple([z.number().min(0).max(1), z.number().min(0)]))
@@ -1773,7 +2114,21 @@ export const particlesSchema = z.object({
       splash: z
         .string()
         .optional()
-        .describe("Entity id (or tag) of another emitter to burst ONE particle from at the contact point — a raindrop's splash. That emitter usually has rate 0."),
+        .describe(
+          "Emitters to burst at the contact point — a raindrop's splash. A comma-separated list of entity ids or " +
+            "tags, each optionally `*n` for n particles (`weather-splash-ring,weather-splash*3` = one ring plus " +
+            "three droplets per drop). Those emitters usually have rate 0 and are fired only by this.",
+        ),
+      splashChance: z
+        .number()
+        .min(0)
+        .max(1)
+        .default(1)
+        .describe(
+          "Fraction of landings that splash. Heavy rain lands more than a thousand drops a second and a splash " +
+            "for every one of them is both a fill-rate bill and visually WRONG — real rain reads as scattered " +
+            "rings, not a continuous sheet. 0.1–0.2 for a downpour.",
+        ),
     })
     .optional()
     .describe(
@@ -1782,6 +2137,48 @@ export const particlesSchema = z.object({
         "tested. Needs space: world. Settled particles count toward `max`, so a settling snowfall wants a large one.",
     ),
 });
+
+/**
+ * A standing effect: plays a `vfx` data asset (assets/vfx/<id>.json) on this
+ * entity for as long as it exists — torches, braziers, campfires, candles,
+ * the glow over a forge. The same module vocabulary and renderer as spells
+ * (`particles` modules run on the engine's particle emitter), with two
+ * differences that make it safe to place hundreds of: sustained modules never
+ * end, and `light` modules become real lights in the scene's point-light
+ * budget instead of borrowing the spell system's four flash slots.
+ */
+export const vfxComponentSchema = z.object({
+  effect: z
+    .string()
+    .min(1)
+    .describe(
+      "vfx data-asset id (assets/vfx/<id>.json). Keep ambient effects in one shared folder (e.g. `env/fire-torch`) so " +
+        "every torch in the game is the SAME asset: retune it once and all of them change. Modules with `duration: 0` " +
+        "and particle modules with `stream: true` run forever here; anything with a finite duration plays once each time " +
+        "the effect comes into range.",
+    ),
+  material: z
+    .string()
+    .optional()
+    .describe(
+      "Material asset id whose colours ARE the effect's palette: `color` → primary (the body of a flame), `emissive` → " +
+        "glow (the hot core; black means `color` lightened), and secondary (the dark tip) is `color` darkened. This is " +
+        "how a fire is recoloured — point a torch at `fx/fire-spirit` instead of `fx/fire`, or edit the material and " +
+        "every effect using it follows. Omitted = the fire element's palette.",
+    ),
+  playing: z.boolean().default(true).describe("False parks the effect (a snuffed torch) without removing the component."),
+  cullDistance: z
+    .number()
+    .min(0)
+    .default(60)
+    .describe(
+      "Metres from the camera past which the effect stops simulating (it fades out, and fades back in on approach, " +
+        "with 10% hysteresis). Its light is budgeted separately and goes further. 0 = never culled — only for a " +
+        "landmark bonfire meant to be seen across a valley; a dungeon of torches at 0 simulates every one of them.",
+    ),
+});
+
+export type VfxComponentData = z.infer<typeof vfxComponentSchema>;
 
 /**
  * A ground-cover layer: thousands of camera-following instances scattered
@@ -1977,6 +2374,79 @@ export const netObjectSchema = z.object({
 export type NetObjectData = z.infer<typeof netObjectSchema>;
 
 /**
+ * A body of water a character can SWIM in — the gameplay half of water, which
+ * the `water` material shader (the visible surface) knows nothing about.
+ *
+ * Attach it beside the mesh that draws the surface: the component turns that
+ * sheet into a VOLUME, from its surface down by `depth`, and the runtime
+ * answers "how deep is this point under water?" from it (`ctx.waterAt`) —
+ * which is what the swim controller, the underwater look and anything else
+ * that cares (a breath meter, an AI that will not walk into a lake) all read.
+ * No collider: water is entered by swimming through it, not by standing on it.
+ *
+ * PROCEDURAL worlds do not need this. A voxel world's ocean, lakes and rivers
+ * are answered analytically from the recipe (the same `waterY` the generator
+ * carves beds with), so the thousands of streamed river ribbons and lake
+ * sheets carry no component and cost no index. This is for AUTHORED water: a
+ * dungeon pool, a flooded cellar, a cistern, a canal.
+ */
+export const waterSchema = z
+  .object({
+    surfaceY: z
+      .number()
+      .optional()
+      .describe(
+        "World Y of the surface. Defaults to the entity's own world Y, which is where the sheet is — " +
+          "set it only when the mesh is not AT the waterline (a shaped basin whose origin sits on its floor).",
+      ),
+    depth: z
+      .number()
+      .positive()
+      .default(30)
+      .describe(
+        "How far below the surface the volume extends. It only has to reach the bed: the bed's own collider " +
+          "stops a swimmer, and a volume that stops SHORT of it leaves a pocket of air at the bottom that a " +
+          "diving character falls through.",
+      ),
+    size: z
+      .tuple([z.number().positive(), z.number().positive()])
+      .optional()
+      .describe(
+        "Footprint [x, z] in metres, centred on the entity. Normally omitted: the footprint is measured from " +
+          "the entity's own mesh. Set it for water drawn by something the measurement cannot see (an imported " +
+          "GLB whose sheet is one of many submeshes), or to fence a swimmable area smaller than its sheet.",
+      ),
+    swim: z
+      .boolean()
+      .default(true)
+      .describe(
+        "False makes it visual-only water: it still tints the camera and still reports depth, but a character " +
+          "walks through it as if it were not there. Ankle-deep streams and decorative sheets want this.",
+      ),
+    current: z
+      .tuple([z.number(), z.number()])
+      .default([0, 0])
+      .describe("Drift [x, z] in m/s added to anything swimming in it — a canal that carries you, a millrace."),
+    color: hexColor
+      .optional()
+      .describe(
+        "Underwater tint for THIS body of water, overriding `postfx.underwater.color`: a green swamp pool and " +
+          "a blue tarn look nothing alike from the inside, and one setting for both reads wrong in both.",
+      ),
+    density: z
+      .number()
+      .min(0)
+      .optional()
+      .describe("Murk, overriding `postfx.underwater.density` — how fast sight fades with distance under this water."),
+  })
+  .describe(
+    "Marks an authored water surface as a swimmable VOLUME (surface down by `depth`). Procedural worlds answer " +
+      "from their recipe instead and need no component. See `postfx.underwater` for what it looks like from inside.",
+  );
+
+export type WaterData = z.infer<typeof waterSchema>;
+
+/**
  * Server-side enemy population that exists only while a player is near.
  *
  * Nothing spawns at boot. The first player inside `radius` wakes the area:
@@ -2041,8 +2511,10 @@ export function registerCoreComponents(registry: ComponentRegistry): void {
   registry.register("sky", skySchema);
   registry.register("postfx", postfxSchema);
   registry.register("particles", particlesSchema);
+  registry.register("vfx", vfxComponentSchema);
   registry.register("billboard", billboardSchema);
   registry.register("grass", grassSchema);
+  registry.register("water", waterSchema);
   registry.register("netObject", netObjectSchema);
   registerPlacementComponent(registry);
   registerDecalComponent(registry);

@@ -31,12 +31,24 @@ export interface LiveSkyOptions {
     softness?: number;
   };
   ambient?: { color?: string; intensity?: number };
-  /** Applied on top of the day/night values: gloom 0..1 dims sun/fill/ambient/IBL, tint blends fog + horizon, wind scales foliage wind. */
-  weather?: { gloom?: number; tint?: string; tintAmount?: number; wind?: number };
+  /** Applied on top of the day/night values: gloom 0..1 dims sun/fill/ambient/IBL, tint blends fog + horizon, wind scales foliage wind, cloudDark drives the deck itself toward storm grey, flash is lightning (a momentary wash over sky, fog and fill — no light is added). */
+  weather?: { gloom?: number; tint?: string; tintAmount?: number; wind?: number; cloudDark?: number; flash?: number };
   /** How much DAYLIGHT there is, 0..1 — a day/night script publishes it so the weather tint (a LIT colour) can be dimmed to the hour instead of lighting up midnight fog. Defaults to 1. */
   daylight?: number;
   environmentIntensity?: number;
   refreshEnvironment?: boolean;
+}
+
+/** The live lens surface — see `ScriptContext.setPostFx`. */
+export interface LivePostFxOptions {
+  sandstorm?: {
+    /** 0 = clear air, 1 = the worst this storm does. */
+    amount: number;
+    /** World direction the wind blows TOWARD; the renderer turns it into a screen angle. */
+    wind?: [number, number, number];
+    /** The grain's colour when it differs from the authored one (white = a blizzard). */
+    color?: string;
+  };
 }
 
 /** Mirrors `LayerOptions` in @hitreg/render (scripting takes no render dependency). */
@@ -72,6 +84,26 @@ export interface BiomeAt {
   temperature: number;
   moisture: number;
   slope: number;
+}
+
+/**
+ * What `ctx.waterAt` reports: the water standing over a point, whatever put it
+ * there — an authored pool's `water` component or a procedural world's ocean,
+ * lakes and rivers. One answer from both, so a swim controller written against
+ * it works in a dungeon cistern and in the open sea without knowing which it
+ * is in.
+ */
+export interface WaterAt {
+  /** World Y of the surface. */
+  surfaceY: number;
+  /** Metres of water over the point asked about — NEGATIVE in the air above the surface. */
+  depth: number;
+  /** World Y the water stops at. A procedural world reports the bed it carved. */
+  floorY: number;
+  /** False = visual-only water: report it, but nobody swims in it. */
+  swim: boolean;
+  /** Drift in m/s [x, z] — a river's current, a canal's flow. */
+  current: readonly [number, number];
 }
 
 /** Mirrors `LiveSkyBase` in @hitreg/render. */
@@ -133,6 +165,13 @@ export interface ScriptContext {
   every(seconds: number, cb: () => void): () => void;
   /** Horizontal camera forward [x, z], normalized — for camera-relative movement. */
   viewForward?(): [number, number];
+  /**
+   * The camera's full forward [x, y, z], normalized — the same aim including
+   * its PITCH. What swimming (and flying, and a free-aim spell) needs: the
+   * horizontal pair above cannot tell "looking at the bottom of the lake"
+   * from "looking across it".
+   */
+  viewDirection?(): [number, number, number];
   /** Switch the render camera to another camera-component entity (runtime-only). */
   setActiveCamera?(entityId: string | null): void;
   /**
@@ -154,6 +193,15 @@ export interface ScriptContext {
       restart?: boolean;
     },
   ): void;
+  /**
+   * Hold two base clips at once — `from` at `1 - weight`, `to` at `weight`,
+   * strides phase-matched. For a pose that follows a CONTINUOUS quantity
+   * rather than a state: wading takes on the wade a little at a time as the
+   * water climbs, instead of crossing a line and ducking. Weight 0 or 1 is
+   * just {@link setAnimation} of whichever won, so it is safe to call every
+   * tick. Declines under a masked action layer (the dominant clip plays).
+   */
+  setAnimationBlend?(from: string, to: string, weight: number, fadeSeconds?: number): void;
   /**
    * Clip names this entity's model actually shipped with. Lets a behavior
    * degrade instead of stalling: a locomotion script can fall back from a
@@ -203,6 +251,16 @@ export interface ScriptContext {
     rate?: number;
     colorStart?: string;
     colorEnd?: string;
+    /**
+     * Re-aim and re-speed the emitter for the particles it spawns NEXT — this
+     * is wind. One rain emitter blown by whatever the weather is doing, rather
+     * than an authored emitter per direction. Particles already in the air
+     * keep the velocity they launched with, which is what a gust looks like.
+     */
+    direction?: [number, number, number];
+    speed?: [number, number];
+    /** Multiply the whole colour ramp — how a weather script dims its emitters after dark. */
+    colorScale?: number;
   }): void;
   /** Runtime-only control for this entity's light component. */
   setLight?(entityId: string, opts: { enabled?: boolean; intensity?: number; color?: string }): void;
@@ -216,8 +274,38 @@ export interface ScriptContext {
   setSky?(opts: LiveSkyOptions): void;
   /** The authored sky and lights a day/night script derives its day from; null when the scene has no sky. */
   getSky?(): LiveSkyBase | null;
+  /**
+   * How much daylight there is right now, 0..1 — what the `day-night` script
+   * last published, or 1 in a scene that has none.
+   *
+   * The one number that anything UNLIT needs. Particles draw with a basic
+   * material, so a raindrop is as white at midnight as at noon; a weather
+   * script reads this and dims its emitters by it. Also the honest way for a
+   * script to ask "is it night" without owning a clock of its own.
+   */
+  daylight?(): number;
+  /**
+   * Drive the LENS per frame — what is between the camera and the world,
+   * rather than what is in the world. Uniform writes only, never a rebuild;
+   * the passes themselves are built from the scene's `postfx` component.
+   *
+   * Today: `sandstorm`, the screen-space grit a storm throws across the view.
+   * Hand it a world-space wind direction and the renderer works out how that
+   * crosses THIS camera — a script never needs to know where anyone is looking.
+   */
+  setPostFx?(opts: LivePostFxOptions): void;
   /** The procedural world's biome blend under a point (voxel worlds only); null off-world or in a scene without one. */
   biomeAt?(x: number, z: number): BiomeAt | null;
+  /**
+   * The water over a world point, or null where there is none. `y` is what the
+   * returned `depth` is measured against — pass the body's feet and `depth` is
+   * how deep you are wading.
+   *
+   * Cheap enough to call once per body per tick and no cheaper: it is a scan
+   * of the scene's authored water plus, in a procedural world, the recipe's
+   * own lake/river/sea query. Don't call it per particle.
+   */
+  waterAt?(x: number, y: number, z: number): WaterAt | null;
   /**
    * Composed effects and whole spells — the VFX system (`@hitreg/render`
    * VfxSystem behind it). `play` fires one effect (a module list, or a `vfx`
@@ -669,6 +757,13 @@ export abstract class Script {
   static params: Record<string, ScriptParamSpec> = {};
   static events: ScriptEventDecl[] = [];
   /**
+   * Developer-console commands this script type owns — declared here, so a
+   * script that owns some world state also owns the way a human pokes at it,
+   * and the console needs no table of its own. See {@link ScriptCommandDecl}
+   * and {@link Script.onCommand}.
+   */
+  static commands: ScriptCommandDecl[] = [];
+  /**
    * Data-asset types a project owns, so a project can register its own
    * ScriptableObject types without editing the shared app bootstrap — same
    * pattern as {@link Script.events}. Loading the script is enough to register
@@ -692,6 +787,17 @@ export abstract class Script {
 
   onStart?(): void;
   onFixedUpdate?(dt: number): void;
+  /**
+   * Run one of this script's declared console commands. Return the line to
+   * print (or null for "nothing to say"); THROW to report a bad argument —
+   * the console catches it and prints the message, so a command reads as
+   * straight-line code instead of a result-type ladder.
+   *
+   * Only ever called from the developer console, which a published build
+   * normally strips (see `@hitreg/scripting/console`). Treat it as a debug
+   * surface, not an API: nothing in the engine calls it.
+   */
+  onCommand?(name: string, args: string[]): string | null;
   onCollision?(otherId: string): void;
   /** Play session ended (stop pressed) — clean up anything external (DOM, timers). */
   onDispose?(): void;
@@ -737,9 +843,35 @@ export interface ScriptDataTypeDecl {
   schema: z.ZodType;
 }
 
+/**
+ * One developer-console command a script type owns ("/time", "/weather").
+ *
+ * Declared on the script rather than registered somewhere central, for the
+ * same reason events and data types are: the script that owns the state owns
+ * the command, a project's own script can add its own commands without
+ * touching the app bootstrap, and `/help` is generated from these rather than
+ * written twice.
+ */
+export interface ScriptCommandDecl {
+  /** Typed without the slash: "time" is reached as "/time". */
+  name: string;
+  /** Argument shape for help, e.g. "[hour|dawn|dusk|+n]". Free text — the command parses its own args. */
+  args?: string;
+  /** One line. It is what `/help` prints, so say what it DOES, not what it is. */
+  description: string;
+  /**
+   * True when the command changes state the AUTHORITY owns (the clock, the
+   * weather). On a peer such a change is overwritten by the next sync, so the
+   * console says so instead of letting a tester watch their command undo
+   * itself two seconds later.
+   */
+  authority?: boolean;
+}
+
 export type ScriptClass = (new () => Script) & {
   scriptName: string;
   params?: Record<string, ScriptParamSpec>;
   events?: ScriptEventDecl[];
   dataTypes?: ScriptDataTypeDecl[];
+  commands?: ScriptCommandDecl[];
 };

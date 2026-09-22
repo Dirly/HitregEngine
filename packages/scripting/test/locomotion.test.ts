@@ -38,6 +38,8 @@ function harness(opts: {
   durations?: Record<string, number>;
   /** What a downward ground ray finds: distance below the body, and the normal. */
   ground?: { distance: number; normal?: [number, number, number] } | null;
+  /** A collider on the body — what bounds the measured resting distance. */
+  collider?: Record<string, unknown>;
 }) {
   const held = new Set(opts.keys ?? []);
   const input: InputLike = { isDown: (code) => held.has(code) };
@@ -75,6 +77,7 @@ function harness(opts: {
         tags: ["player"],
         components: {
           transform: {},
+          ...(opts.collider ? { collider: opts.collider } : {}),
           script: { name: "third-person-controller", params: opts.params ?? {} },
         },
       },
@@ -859,5 +862,72 @@ describe("following the ground", () => {
     h.setGround({ distance: 1, normal: DOWN25 });
     h.stepAt([0, 0, -6], 5);
     expect(h.velocity()[1]).toBeCloseTo(0, 3);
+  });
+});
+
+describe("a body that was PUT somewhere", () => {
+  const params = { walkSpeed: 2, speed: 6, sprintSpeed: 10, jump: 8 };
+  /** The MMO player's capsule: 1.8 m tall, so its feet rest 0.9 m below the origin. */
+  const CAPSULE = { shape: "capsule", size: [0.8, 1.8, 0.8] };
+
+  it("takes its resting distance from the collider, not from where it was held", () => {
+    // The host's fast-travel hold: the body is pinned two and a half metres
+    // above the destination with its velocity zeroed every frame while the
+    // terrain streams in. That looks EXACTLY like a settled body — no motion,
+    // no air time — so a MEASURED resting distance records 3.4 m as "how far
+    // the ground is when I am standing on it", and every ground test after it
+    // reads three metres of air as floor.
+    const h = harness({ clips: ALL_CLIPS, params, collider: CAPSULE, ground: { distance: 3.4 } });
+    h.stepAt([0, 0, 0], 30);
+
+    // the hold releases and the body lands
+    h.setGround({ distance: 0.9 });
+    h.stepAt([0, 0, 0], 10);
+
+    // walking off a 1.5 m lip is a drop, not a floor
+    h.hold("KeyW");
+    h.setGround({ distance: 2.4 });
+    h.stepAt([0, -3, -6], 20);
+    expect(h.lastClip()).toBe("Jump_Loop");
+    expect(h.velocity()[1]).toBeCloseTo(-3, 3); // falling, not being held up
+
+    // and the collider's own reach is what it stands on: 0.9 m, plus slack
+    h.setGround({ distance: 0.9 });
+    h.stepAt([0, 0, -6], 10);
+    expect(h.lastClip()).toBe("Run");
+  });
+
+  it("still measures its own resting distance when no collider can state it", () => {
+    // a body driven some other way keeps the old behaviour — the first
+    // reading taken while it is plainly settled
+    const h = harness({ clips: ALL_CLIPS, params, ground: { distance: 0.85 } });
+    h.stepAt([0, 0, 0], 10);
+    h.hold("KeyW");
+    h.setGround({ distance: 1.0 }); // a centimetre of step, still the floor
+    h.stepAt([0, 0, -6], 10);
+    expect(h.lastClip()).toBe("Run");
+  });
+
+  it("does not play a landing when it was teleported onto the ground", () => {
+    const h = harness({
+      clips: [...ALL_CLIPS, "Jump_Land"],
+      durations: { Jump_Land: 0.4 },
+      params,
+      collider: CAPSULE,
+      ground: { distance: 0.9 },
+    });
+    h.stepAt([0, 0, 0], 10); // settled
+
+    // a long fall somewhere else…
+    h.setGround(null);
+    h.stepAt([0, -12, 0], 60);
+    expect(h.lastClip()).toBe("Jump_Loop");
+
+    // …and a respawn: the body is MOVED to the ground rather than arriving at
+    // it, so there is no impact to absorb (and no stale normal to follow)
+    h.object.position.set(1200, 40, -800);
+    h.setGround({ distance: 0.9 });
+    h.stepAt([0, 0, 0], 10);
+    expect(h.lastClip()).toBe("Idle");
   });
 });

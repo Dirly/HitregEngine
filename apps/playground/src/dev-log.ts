@@ -1,9 +1,10 @@
 /** Persist an asset file through the dev server's write endpoint. */
-export function saveAsset(file: string, content: string): void {
+/** `project` places a NEW file in projects/<project>/assets/; an existing file is written where it lives. */
+export function saveAsset(file: string, content: string, project?: string | null): void {
   void fetch("/__hitreg/write-asset", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ file, content }),
+    body: JSON.stringify({ file, content, project: project ?? undefined }),
   }).then((res) => {
     if (!res.ok) console.warn("[playground] asset save failed:", file);
   });

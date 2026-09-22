@@ -58,6 +58,8 @@ interface Entry {
   baseAction: THREE.AnimationAction | null;
   baseLoop: boolean;
   layer: Layer | null;
+  /** A second base action held at a weight beside the first — see playBlend. */
+  blend: { clip: string; action: THREE.AnimationAction } | null;
   animator: AnimatorData | null;
   /** Locomotion rate multiplier — applies to the base only, never the layer. */
   speedMul: number;
@@ -188,6 +190,7 @@ export class AnimationSystem {
       baseAction: null,
       baseLoop: true,
       layer: null,
+      blend: null,
       animator,
       speedMul: 1,
       fading: [],
@@ -265,6 +268,12 @@ export class AnimationSystem {
   play(entityId: string, clip: string, fade = 0.3, loop = true, restart = false): void {
     const entry = this.entryFor(entityId);
     if (!entry) return;
+    // asking for one clip ends a held blend (see playBlend)
+    if (entry.blend) {
+      this.fadeOut(entry, entry.blend.action, fade);
+      entry.blend = null;
+      if (entry.baseAction) entry.baseAction.weight = 1;
+    }
     if (!entry.actions.has(clip)) {
       console.warn(
         `[anim] ${entityId}: no clip "${clip}" (has: ${[...entry.actions.keys()].join(", ")})`,
@@ -279,6 +288,70 @@ export class AnimationSystem {
     entry.current = clip;
     entry.baseLoop = loop;
     this.applyBase(entry, fade, false, restart);
+  }
+
+  /**
+   * Hold TWO base clips at once, `from` at `1 - weight` and `to` at
+   * `weight`, phase-matched so their strides land together.
+   *
+   * A crossfade is a blend that always finishes. This one is a blend that
+   * STAYS, which is what a continuous quantity needs: a character wading into
+   * a lake should take on the wade a little at a time as the water climbs, not
+   * cross a line and duck. The caller ramps `weight` and the pose follows it.
+   *
+   * The ends are not special-cased by the caller: weight 0 or 1 falls through
+   * to a plain {@link play} of the clip that won, so a blend can be asked for
+   * every tick and simply stops existing when it is no longer a blend.
+   *
+   * A masked override layer is the one case this declines — that path builds
+   * the base's complement from ONE clip, and two complements is a great deal
+   * of machinery for a cast played while wading. The dominant clip takes it,
+   * which is what a crossfade would have given anyway.
+   */
+  playBlend(entityId: string, from: string, to: string, weight: number, fade = 0.25): void {
+    const entry = this.entryFor(entityId);
+    if (!entry) return;
+    const w = Math.max(0, Math.min(1, weight));
+    const over = entry.clips.has(to) ? entry.actions.get(to) : undefined;
+    if (!over || from === to || (entry.layer && !entry.layer.additive)) {
+      this.play(entityId, w >= 0.5 && over ? to : from, fade);
+      return;
+    }
+    if (w <= 0.001) return this.play(entityId, from, fade);
+    if (w >= 0.999) return this.play(entityId, to, fade);
+    // the base half goes through the ordinary path, so `current`, the
+    // finished-event origin map and the fade bookkeeping stay exactly as they
+    // are for a single clip
+    if (entry.current !== from) {
+      entry.current = from;
+      entry.baseLoop = true;
+      this.applyBase(entry, fade, true);
+    }
+    const base = entry.baseAction;
+    if (!base || base === over) return;
+    if (entry.blend && entry.blend.action !== over) {
+      this.fadeOut(entry, entry.blend.action, fade);
+      entry.blend = null;
+    }
+    if (!entry.blend) {
+      over.enabled = true;
+      over.paused = false;
+      over.setLoop(THREE.LoopRepeat, Infinity);
+      over.clampWhenFinished = false;
+      over.stopFading();
+      over.play();
+      entry.blend = { clip: to, action: over };
+    }
+    over.timeScale = base.timeScale;
+    // Phase-matched: two cycles at their own phases read as two characters
+    // wearing one body. Matched, a half-and-half mix is one gait.
+    const baseDuration = base.getClip().duration;
+    const overDuration = over.getClip().duration;
+    if (baseDuration > 0 && overDuration > 0) over.time = (base.time / baseDuration) * overDuration;
+    base.stopFading();
+    over.stopFading();
+    base.weight = 1 - w;
+    over.weight = w;
   }
 
   /**

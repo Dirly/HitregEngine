@@ -108,7 +108,7 @@ export class TrailLive extends LiveModule<TrailModule> {
 
   protected onUpdate(t: number, _dt: number, camera: THREE.Camera): void {
     const m = this.module;
-    const now = this.startedAt + t * this.life;
+    const now = this.now;
     // keep sampling while alive; during the tail the ribbon just drains
     if (t < 1) {
       const last = (this.head - 1 + MAX) % MAX;

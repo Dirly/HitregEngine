@@ -7,6 +7,7 @@ export {
   elementSchema,
   feelSchema,
   paletteFor,
+  paletteFromMaterial,
   resolveColor,
   type Element,
   type ElementPalette,

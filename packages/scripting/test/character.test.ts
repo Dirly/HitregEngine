@@ -21,11 +21,13 @@ registerCoreComponents(coreRegistry);
 
 const noInput: InputLike = { isDown: () => false };
 
-function harness(startingItems: Array<{ itemId: string; qty?: number }> = []) {
+function harness(startingItems: Array<{ itemId: string; qty?: number; equip?: boolean }> = [], timed = false) {
   const events = new EventRegistry();
   registerCoreEvents(events);
   const assets = new AssetLibrary();
   registerCoreAssetTypes(assets);
+  assets.addDataAsset({ id: "timed", type: "progression", name: "Timed", data: { pockets: { cols: 4, rows: 1 }, inventoryDurations: { transfer: 1, equip: 1.5, unequip: 1.5 } } });
+  assets.addDataAsset({ id: "bag", type: "item", name: "Bag", data: { name: "Bag", slots: ["bag"], bag: { cols: 4, rows: 2 } } });
   assets.addDataAsset({
     id: "helm",
     type: "item",
@@ -61,7 +63,7 @@ function harness(startingItems: Array<{ itemId: string; qty?: number }> = []) {
         tags: [],
         components: {
           transform: {},
-          script: { name: "character-sheet", params: { actor: "player", startingItems, persist: false } },
+          script: { name: "character-sheet", params: { actor: "player", startingItems, persist: false, progression: timed ? "timed" : "" } },
         },
       },
     },
@@ -100,6 +102,52 @@ function harness(startingItems: Array<{ itemId: string; qty?: number }> = []) {
 }
 
 describe("character-sheet builtin", () => {
+  it("holds equipment in its source until the authority finishes and refuses overlapping actions", () => {
+    const h = harness([{ itemId: "helm" }], true);
+    h.bus.emit("inventory.equip", { actorId: "player", uid: "i1" }); h.tick(30);
+    expect(h.sheet().equipment.helm).toBeUndefined();
+    expect(h.sheet().inventoryAction?.remaining).toBeGreaterThan(.9);
+    h.bus.emit("inventory.drop", { actorId: "player", uid: "i1" }); h.tick();
+    expect(h.heard.at(-1)).toMatchObject({ name: "character.refused", payload: { error: /current inventory action/ } });
+    h.tick(60); expect(h.sheet().equipment.helm).toBe("i1"); expect(h.sheet().inventoryAction).toBeUndefined();
+    // A move request for worn gear must not bypass the unequip timer.
+    h.bus.emit("inventory.move", { actorId: "player", uid: "i1", to: { container: "pockets", x: 0, y: 0 } }); h.tick(30);
+    expect(h.sheet().equipment.helm).toBe("i1"); h.tick(61);
+    expect(h.sheet().equipment.helm).toBeUndefined(); expect(h.sheet().items.i1?.container).toBe("pockets");
+    h.runtime.dispose();
+  });
+
+  it("times bag/pocket transfers and cross-container splits but not rearranging the same grid", () => {
+    const h = harness([{ itemId: "bag", equip: true }, { itemId: "potion", qty: 4 }], true);
+    h.bus.emit("inventory.move", { actorId: "player", uid: "i2", to: { container: "pockets", x: 0, y: 0 } }); h.tick(30);
+    expect(h.sheet().items.i2?.container).toBe("bag"); h.tick(31);
+    expect(h.sheet().items.i2?.container).toBe("pockets");
+    h.bus.emit("inventory.move", { actorId: "player", uid: "i2", to: { container: "pockets", x: 3, y: 0 } }); h.tick();
+    expect(h.sheet().items.i2?.x).toBe(3); expect(h.sheet().inventoryAction).toBeUndefined();
+    h.bus.emit("inventory.split", { actorId: "player", uid: "i2", qty: 2, to: { container: "bag", x: 0, y: 0 } }); h.tick(30);
+    expect(h.sheet().items.i2?.qty).toBe(4); h.tick(31); expect(h.sheet().items.i2?.qty).toBe(2);
+    expect(Object.values(h.sheet().items).find(s => s.itemId === "potion" && s.container === "bag")?.qty).toBe(2);
+    h.runtime.dispose();
+  });
+
+  it("revalidates ownership at completion without losing items", () => {
+    const h = harness([{ itemId: "helm" }], true);
+    h.bus.setNetRole("authority"); h.netState.set("owner/player", "peer-a");
+    h.bus.injectFromPeer("peer-a", [{ name: "inventory.equip", payload: { actorId: "player", uid: "i1" } }]); h.tick(10);
+    h.netState.set("owner/player", "peer-b"); h.tick(90);
+    expect(h.sheet().equipment.helm).toBeUndefined(); expect(h.sheet().items.i1).toBeDefined(); expect(h.sheet().inventoryAction).toBeUndefined();
+    expect(h.heard.at(-1)).toMatchObject({ payload: { error: /not your character/ } });
+    h.runtime.dispose();
+  });
+
+  it("replicates a resumable countdown and never advances it on a peer", () => {
+    const h = harness([{ itemId: "helm" }], true);
+    h.bus.emit("inventory.equip", { actorId: "player", uid: "i1" }); h.tick(12);
+    const remaining = h.sheet().inventoryAction!.remaining;
+    h.netState.setAuthority(false); h.tick(120); expect(h.sheet().inventoryAction!.remaining).toBe(remaining);
+    h.netState.setAuthority(true); h.tick(90); expect(h.sheet().equipment.helm).toBe("i1");
+    h.runtime.dispose();
+  });
   it("registers its request contracts with their network direction", () => {
     const { events } = harness();
     expect(events.replicationOf("inventory.move")).toBe("to-authority");

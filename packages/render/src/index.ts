@@ -23,8 +23,11 @@ export { AnimationSystem, type AnimatorData } from "./animation.js";
 export { ClothSwaySystem, DEFAULT_CLOTH_SWAY, markClothVertices, type ClothSwayOptions, type IslandReport } from "./cloth-sway.js";
 export { ParticleSystem, type ParticlesData, type ParticleValue } from "./particles.js";
 export {
+  AmbientVfx,
   VfxSystem,
   resolveAnchor,
+  type AmbientVfxData,
+  type AmbientVfxOptions,
   type SpellHandle,
   type SpellPlayOptions,
   type VfxFrame,
@@ -77,6 +80,8 @@ export {
   pixelateRatio,
   type PixelateFx,
   type PixelateFilter,
+  type LivePostFxOptions,
+  type SandstormFx,
 } from "./post.js";
 export { FoliageLodSystem, type InstancedPropBatch } from "./foliage-lod.js";
 export { simplifyGeometry, simplifierReady, type SimplifiedGeometry, type SimplifyOptions } from "./mesh-simplify.js";
@@ -107,7 +112,7 @@ export {
 } from "./impostor.js";
 export { LightBudgetSystem } from "./light-budget.js";
 export { pathGeometry, type PathMeshSource } from "./path-mesh.js";
-export { WaterSimulation } from "./water-sim.js";
+export { WaterWake, waterWakeUniforms, type WaterWakeOptions } from "./water-wake.js";
 export { polyMeshGeometry, polyFaceForHit } from "./poly-mesh-geometry.js";
 export {
   CASCADE_BIAS_SCALE_CAP,
@@ -215,6 +220,8 @@ export {
   type CameraRigConfig,
   type CameraSweep,
   type RigVec3,
+  fitRigToBody,
+  type RigBodyCollider,
 } from "./camera-rig.js";
 
 export { voxelGeometry, csgGeometry, voxelColliderProxyGeometry } from "./voxel-geometry.js";

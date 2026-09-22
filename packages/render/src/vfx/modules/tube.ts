@@ -128,7 +128,7 @@ export class ColumnLive extends LiveModule<ColumnModule> {
 
   protected onUpdate(t: number): void {
     const m = this.module;
-    const now = this.startedAt + t * this.life;
+    const now = this.now;
     this.tube.u.time.value = now;
     this.tube.u.opacity.value = this.opacityAt(t, now);
     const expand = m.expand[0] + (m.expand[1] - m.expand[0]) * Math.min(1, t);
@@ -241,7 +241,7 @@ export class BeamLive extends LiveModule<BeamModule> {
 
   protected onUpdate(t: number): void {
     const m = this.module;
-    const now = this.startedAt + t * this.life;
+    const now = this.now;
     const age = now - this.startedAt;
     const o = this.opacityAt(t, now);
     this.endPoint(tmpEnd);

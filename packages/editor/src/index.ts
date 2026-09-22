@@ -38,6 +38,7 @@ export {
   type EditingPrefab,
   type EditingChunk,
   type EditingChunkCell,
+  type NewSceneRequest,
   type EditorSettings,
   type FocusHit,
   type GizmoMode,

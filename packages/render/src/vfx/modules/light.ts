@@ -19,6 +19,8 @@ const FLASH: ReadonlyArray<readonly [number, number]> = [
 export class LightLive extends LiveModule<LightModule> {
   readonly kind = "light" as const;
   private light: THREE.PointLight | null = null;
+  /** The light came from `ctx.ownLight` (a standing effect), not the slot pool. */
+  private owned = false;
   private phase = 0;
 
   constructor(host: LiveModuleHost) {
@@ -30,7 +32,9 @@ export class LightLive extends LiveModule<LightModule> {
   }
 
   protected onBegin(): void {
-    this.light = this.host.takeLight();
+    const own = this.ctx.ownLight?.() ?? null;
+    this.owned = own !== null;
+    this.light = own ?? this.host.takeLight();
     this.phase = Math.random() * 100;
     if (!this.light) return;
     this.light.color.copy(this.color);
@@ -44,7 +48,7 @@ export class LightLive extends LiveModule<LightModule> {
     const l = this.light;
     if (!l) return;
     const m = this.module;
-    const now = this.startedAt + t * this.life;
+    const now = this.now;
     const env = m.intensityCurve ? sampleCurve(m.intensityCurve, Math.min(1, t)) : sampleCurve(FLASH, Math.min(1, t));
     let flicker = 1;
     if (m.flicker > 0) {
@@ -58,8 +62,11 @@ export class LightLive extends LiveModule<LightModule> {
   protected onEnd(): void {
     if (this.light) {
       this.light.intensity = 0;
-      this.host.giveLight(this.light);
+      // an owned light leaves the scene; the light budget prunes it next frame
+      if (this.owned) this.light.removeFromParent();
+      else this.host.giveLight(this.light);
       this.light = null;
+      this.owned = false;
     }
   }
 

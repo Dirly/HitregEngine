@@ -28,6 +28,7 @@ export const SLOT_KINDS = [
   "secondary",
   "offhand",
   "bag",
+  "consumable",
 ] as const;
 export type SlotKind = (typeof SLOT_KINDS)[number];
 
@@ -45,6 +46,7 @@ export const EQUIPMENT_SLOTS = [
   "secondary",
   "offhand",
   "bag",
+  "consumable",
 ] as const;
 export type EquipmentSlot = (typeof EQUIPMENT_SLOTS)[number];
 

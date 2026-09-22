@@ -98,7 +98,7 @@ export class ShellLive extends LiveModule<ShellModule> {
 
   protected onUpdate(t: number): void {
     const m = this.module;
-    const now = this.startedAt + t * this.life;
+    const now = this.now;
     this.u.time.value = now;
     this.u.opacity.value = this.opacityAt(t, now);
     this.u.d.value = m.dissolve ? sampleCurve(m.dissolve, Math.min(1, t)) : 0;

@@ -5,6 +5,7 @@ import {
   prefabFromSubtree,
   type AssetLibrary,
   type ComponentRegistry,
+  type SceneMenuGroup,
   type SceneStore,
   type ToolDefinition,
   type ToolResult,
@@ -20,6 +21,7 @@ import type {
   MeshEditState,
   MultiSelection,
   Observable,
+  NewSceneRequest,
   Pin,
   Pins,
   PlayMode,
@@ -97,8 +99,11 @@ export interface AppProps {
   onProfiler?: () => void;
   /** Scene management (host-provided): available scene names + switching. */
   scenes?: Observable<string[]>;
+  /** Grouped project → scene menu (project.json). When present it replaces the flat `scenes` list. */
+  sceneMenu?: Observable<SceneMenuGroup[]>;
   onSwitchScene?: (name: string) => void;
-  onNewScene?: (name: string) => void;
+  /** Create a scene (New scene dialog); reject with a readable Error to show it in the dialog. */
+  onNewScene?: (request: NewSceneRequest) => Promise<void>;
   /** Prefab isolation editing: id of the prefab open in the viewport, or null. */
   editingPrefab?: Observable<string | null>;
   /** Open a prefab definition alone in the viewport (host swaps the working doc). */
@@ -255,6 +260,7 @@ export function App(props: AppProps) {
             pathThickness={props.pathThickness}
             pathRadius={props.pathRadius}
             scenes={props.scenes}
+            sceneMenu={props.sceneMenu}
             onSwitchScene={props.onSwitchScene}
             onNewScene={props.onNewScene}
             onEnvironment={selectEnvironment}

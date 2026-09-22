@@ -2,6 +2,7 @@ import { z } from "zod";
 import { dualContour } from "./dual-contouring.js";
 import { perlin3 } from "./noise.js";
 import type { VoxelMesh } from "./mesh.js";
+import { csgTriangleMeshSchema, compileTriangleMesh, type CompiledTriangleMesh } from "./triangle-mesh.js";
 
 /**
  * VOLUMES — solids authored as CSG, meshed by dual contouring.
@@ -50,13 +51,152 @@ export const csgSurfaceSchema = z.object({
   ceiling: z.number().int().min(0).default(0).describe("Palette index for downward-facing surfaces."),
 });
 
+// ---------------------------------------------------------------------------
+// Heightfield samples: base64 float32, hand-rolled
+// ---------------------------------------------------------------------------
+//
+// Core has one dependency and it is Zod, and it runs in Node and in a browser
+// tab from the same build — so neither `Buffer` nor `atob` is assumed here.
+// Sixteen lines of codec is cheaper than either assumption failing in one of
+// the two hosts. Little-endian float32 explicitly, via DataView, so a document
+// written on one machine reads the same on every other.
+
+const BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const BASE64_REVERSE = (() => {
+  const table = new Int16Array(128).fill(-1);
+  for (let i = 0; i < BASE64_ALPHABET.length; i++) table[BASE64_ALPHABET.charCodeAt(i)] = i;
+  return table;
+})();
+
+/** Bytes of a base64 string, or null if it is not base64 at all. Whitespace and padding are ignored. */
+function base64Bytes(text: string): Uint8Array | null {
+  let count = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c === 32 || c === 9 || c === 10 || c === 13 || c === 61 /* '=' */) continue;
+    if (c > 127 || BASE64_REVERSE[c]! < 0) return null;
+    count++;
+  }
+  if (count % 4 === 1) return null;
+  const out = new Uint8Array(Math.floor((count * 3) / 4));
+  let acc = 0;
+  let bits = 0;
+  let o = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c > 127) continue;
+    const v = BASE64_REVERSE[c]!;
+    if (v < 0) continue;
+    acc = (acc << 6) | v;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out[o++] = (acc >>> bits) & 255;
+    }
+  }
+  return out;
+}
+
+/** Heights as the compact `values` form: base64 of little-endian float32. */
+export function encodeHeightfieldValues(values: Float32Array | readonly number[]): string {
+  const bytes = new Uint8Array(values.length * 4);
+  const view = new DataView(bytes.buffer);
+  for (let i = 0; i < values.length; i++) view.setFloat32(i * 4, values[i]!, true);
+  let out = "";
+  for (let i = 0; i < bytes.length; i += 3) {
+    const word = (bytes[i]! << 16) | ((bytes[i + 1] ?? 0) << 8) | (bytes[i + 2] ?? 0);
+    out +=
+      BASE64_ALPHABET[(word >>> 18) & 63]! +
+      BASE64_ALPHABET[(word >>> 12) & 63]! +
+      (i + 1 < bytes.length ? BASE64_ALPHABET[(word >>> 6) & 63]! : "=") +
+      (i + 2 < bytes.length ? BASE64_ALPHABET[word & 63]! : "=");
+  }
+  return out;
+}
+
+/** The inverse of `encodeHeightfieldValues`. Throws on anything that is not whole float32s of base64. */
+export function decodeHeightfieldValues(text: string): Float32Array {
+  const bytes = base64Bytes(text);
+  if (!bytes) throw new TypeError("heightfield values are not valid base64");
+  if (bytes.byteLength % 4 !== 0) throw new TypeError("heightfield values are not a whole number of float32s");
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const out = new Float32Array(bytes.byteLength / 4);
+  for (let i = 0; i < out.length; i++) out[i] = view.getFloat32(i * 4, true);
+  return out;
+}
+
+/**
+ * A sampled height surface, thickened into a slab.
+ *
+ * This is the one CSG node whose shape is DATA rather than a formula: a
+ * scanned floor, a sculpted cavern roof, a vault profile solved elsewhere. It
+ * exists because the alternative — approximating a measured surface with a
+ * hundred boxes — is both worse looking and slower to evaluate. Core decodes
+ * numbers and nothing else: an image is somebody else's problem, so heights
+ * arrive as an array or as base64 float32, never as a PNG.
+ */
+export const csgHeightfieldSchema = z
+  .object({
+    width: z
+      .number()
+      .int()
+      .min(2)
+      .max(2048)
+      .describe("Samples across local X, both edges included. Spacing is size[0]/(width-1) metres."),
+    depth: z
+      .number()
+      .int()
+      .min(2)
+      .max(2048)
+      .describe("Samples across local Z, both edges included. Spacing is size[2]/(depth-1) metres."),
+    values: z
+      .union([z.array(z.number().finite()), z.string()])
+      .describe(
+        "width*depth heights in LOCAL metres, relative to the node's own origin. Row-major with X fastest: index 0 is the -x/-z corner, index width*depth-1 the +x/+z one. Either a plain number array or a base64 string of little-endian float32 of exactly that length — see `encodeHeightfieldValues`.",
+      ),
+    mode: z
+      .enum(["floor", "ceiling"])
+      .default("floor")
+      .describe(
+        "Which side of the sampled surface the slab hangs on. `floor` is solid from h-size[1] up to h (ground you stand on); `ceiling` is solid from h up to h+size[1] (a vault you walk under).",
+      ),
+  })
+  .describe(
+    "Heights sampled on a regular grid and thickened into a slab. The footprint is size[0] x size[2] in local X/Z centred on the origin, size[1] is the slab THICKNESS, and heights are bilinear between samples and clamped at the edges. Nothing outside the footprint is solid, so the node has a real boundary. Its distance field is an APPROXIMATION (exact under a flat patch, an under-estimate on a slope), which is why it disables distance-based block rejection the way `noise` does.",
+  )
+  .superRefine((hf, ctx) => {
+    const wanted = hf.width * hf.depth;
+    if (typeof hf.values === "string") {
+      const bytes = base64Bytes(hf.values);
+      if (!bytes) {
+        ctx.addIssue({ code: "custom", message: "heightfield.values is not valid base64", path: ["values"] });
+        return;
+      }
+      if (bytes.byteLength !== wanted * 4)
+        ctx.addIssue({
+          code: "custom",
+          message: `heightfield.values decodes to ${bytes.byteLength} bytes (${bytes.byteLength / 4} float32); width*depth is ${wanted}, i.e. ${wanted * 4} bytes`,
+          path: ["values"],
+        });
+      return;
+    }
+    if (hf.values.length !== wanted)
+      ctx.addIssue({
+        code: "custom",
+        message: `heightfield.values has ${hf.values.length} entries; width*depth is ${wanted}`,
+        path: ["values"],
+      });
+  });
+
 export const csgNodeSchema = z.object({
   id: z.string().default("node"),
   op: z
     .enum(["add", "sub", "intersect"])
     .default("add")
     .describe("`add` unions this shape into the solid, `sub` carves it out as air, `intersect` clips the solid to it."),
-  shape: z.enum(["box", "sphere", "ellipsoid", "cylinder", "capsule", "cone", "torus", "wedge", "prism"]).default("box"),
+  shape: z
+    .enum(["box", "sphere", "ellipsoid", "cylinder", "capsule", "cone", "torus", "wedge", "prism", "heightfield", "mesh"])
+    .default("box"),
   polygon: z.array(z.tuple([z.number().finite(), z.number().finite()])).min(3).max(128).default([[-.5,-.5],[.5,-.5],[.5,.5],[-.5,.5]]).describe("Prism footprint in local X/Z metres, extruded by height along Y. Simple non-self-intersecting boundary, either winding; concave outlines allowed. Do not repeat the closing vertex."),
   position: vec3.default([0, 0, 0]),
   /** Euler XYZ in radians. Uniform scale is deliberately absent: it breaks the distance field. */
@@ -79,6 +219,15 @@ export const csgNodeSchema = z.object({
     .describe("Smooth-min radius against everything before it. 0 is a hard boolean; raise it where cut rock should melt into a natural cave."),
   surface: csgSurfaceSchema.optional().describe("Palette indices this node paints. Omit to inherit the document default."),
   noise: z.object({amount:z.number().min(0).max(4),scale:z.number().positive(),seed:z.number().int().default(1)}).optional().describe("Bounded two-frequency displacement of this primitive in local metres. Use on cave cuts; leave masonry cuts unperturbed. Disables distance-based block rejection."),
+  heightfield: csgHeightfieldSchema.optional().describe("Required by, and only read by, `shape: \"heightfield\"`: the sampled surface this node thickens into a slab. Its footprint and thickness come from `size`."),
+  mesh: csgTriangleMeshSchema.optional().describe("Required by shape mesh: closed indexed local triangle solids, unioned and sampled by the shared CSG/DC path. Node position/rotation apply; size is ignored. Triangle palette assignments remain repaintable with volume paint."),
+}).superRefine((node, ctx) => {
+  // A heightfield node with no heights would silently contribute nothing,
+  // which is exactly the kind of failure this module refuses to have.
+  if (node.shape === "heightfield" && !node.heightfield)
+    ctx.addIssue({ code: "custom", message: 'shape "heightfield" needs a `heightfield` block', path: ["heightfield"] });
+  if (node.shape === "mesh" && !node.mesh)
+    ctx.addIssue({ code: "custom", message: 'shape "mesh" needs a `mesh` block', path: ["mesh"] });
 });
 
 export const volumePaintSchema = z.object({
@@ -111,6 +260,11 @@ export const volumeDocSchema = z.object({
   surface: csgSurfaceSchema.prefault({}).describe("Default palette triple, used by any node that declares none."),
   nodes: z.array(csgNodeSchema).default([]).describe("Applied IN ORDER over empty space. Later nodes win."),
   paint: z.array(volumePaintSchema).default([]).describe("Persistent ordered texture strokes, evaluated after the CSG surface palette."),
+}).superRefine((doc, ctx) => {
+  for (let i = 0; i < doc.nodes.length; i++) {
+    const materials = doc.nodes[i]!.mesh?.triangleMaterials;
+    if (materials?.some((index) => index >= doc.palette.length)) ctx.addIssue({ code: "custom", path: ["nodes", i, "mesh", "triangleMaterials"], message: "mesh.triangleMaterials must reference an existing volume palette entry" });
+  }
 });
 
 export type VolumePaint = z.infer<typeof volumePaintSchema>;
@@ -124,6 +278,7 @@ export function blendVolumePaint(stroke: VolumePaint, x: number, y: number, z: n
 }
 
 export type CsgSurface = z.infer<typeof csgSurfaceSchema>;
+export type CsgHeightfield = z.infer<typeof csgHeightfieldSchema>;
 export type CsgNode = z.infer<typeof csgNodeSchema>;
 export type VolumeDoc = z.infer<typeof volumeDocSchema>;
 
@@ -145,6 +300,7 @@ interface PreparedNode {
   /** Inverse rotation, row-major 3x3 — world direction into the node's local frame. */
   inv: Float64Array;
   surface: CsgSurface;
+  mesh?: CompiledTriangleMesh;
   /** World-space AABB of everything this node can affect, blend and round included. */
   min: [number, number, number];
   max: [number, number, number];
@@ -176,9 +332,69 @@ function transpose(m: Float64Array): Float64Array {
   return Float64Array.from([m[0]!, m[3]!, m[6]!, m[1]!, m[4]!, m[7]!, m[2]!, m[5]!, m[8]!]);
 }
 
+/**
+ * Decoded heights for one heightfield block, plus the range they span.
+ *
+ * Keyed on the block object itself, so re-parsing a document reads the string
+ * once and every sample after that reads numbers. A million-sample field in a
+ * document is a base64 string; decoding it per density query would make the
+ * node unusable, and decoding it eagerly in the schema would put a typed array
+ * in a document that is supposed to be JSON.
+ */
+interface HeightfieldSamples {
+  values: Float32Array;
+  min: number;
+  max: number;
+}
+const heightfieldCache = new WeakMap<object, HeightfieldSamples>();
+
+function heightfieldSamples(hf: CsgHeightfield): HeightfieldSamples {
+  const hit = heightfieldCache.get(hf);
+  if (hit) return hit;
+  const values = typeof hf.values === "string" ? decodeHeightfieldValues(hf.values) : Float32Array.from(hf.values);
+  let min = Infinity;
+  let max = -Infinity;
+  for (let i = 0; i < values.length; i++) {
+    if (values[i]! < min) min = values[i]!;
+    if (values[i]! > max) max = values[i]!;
+  }
+  if (!Number.isFinite(min)) {
+    min = 0;
+    max = 0;
+  }
+  const entry = { values, min, max };
+  heightfieldCache.set(hf, entry);
+  return entry;
+}
+
+/**
+ * Nodes whose field is an APPROXIMATION of distance rather than the thing
+ * itself. Their sign is right everywhere; their magnitude is not a bound. Any
+ * shortcut that skips work because "the surface is at least d away" must not
+ * be taken for these — the same rule `noise` has always carried, and the
+ * reason `prepare` pads their AABB instead of trusting the field.
+ */
+function isApproximateField(node: CsgNode): boolean {
+  return node.noise !== undefined || node.shape === "heightfield";
+}
+
 /** Local half-extent of a shape before rounding, used for both the AABB and the SDF. */
 function localExtent(node: CsgNode): [number, number, number] {
   switch (node.shape) {
+    case "mesh": {
+      const mesh = compileTriangleMesh(node.mesh!);
+      return [0, 1, 2].map((a) => Math.max(Math.abs(mesh.min[a]!), Math.abs(mesh.max[a]!))) as [number, number, number];
+    }
+    case "heightfield": {
+      if (!node.heightfield) return [node.size[0]! / 2, node.size[1]! / 2, node.size[2]! / 2];
+      const { min: low, max: high } = heightfieldSamples(node.heightfield);
+      const bottom = node.heightfield.mode === "ceiling" ? low : low - node.size[1]!;
+      const top = node.heightfield.mode === "ceiling" ? high + node.size[1]! : high;
+      // Extents are measured from the node ORIGIN, which a heightfield's slab
+      // need not straddle — so the half-extent is the farther end, not half
+      // the span.
+      return [node.size[0]! / 2, Math.max(Math.abs(bottom), Math.abs(top)), node.size[2]! / 2];
+    }
     case "prism":
       return [Math.max(...node.polygon.map(p=>Math.abs(p[0]))),node.height/2,Math.max(...node.polygon.map(p=>Math.abs(p[1])))];
     case "box":
@@ -200,7 +416,9 @@ function localExtent(node: CsgNode): [number, number, number] {
 function prepare(node: CsgNode, fallback: CsgSurface): PreparedNode {
   const rot = eulerMatrix(node.rotation[0]!, node.rotation[1]!, node.rotation[2]!);
   const inv = transpose(rot);
-  const e = localExtent(node);
+  const mesh = node.shape === "mesh" ? compileTriangleMesh(node.mesh!) : undefined;
+  const center: [number, number, number] = mesh ? [0, 1, 2].map((a) => (mesh.min[a]! + mesh.max[a]!) / 2) as [number, number, number] : [0, 0, 0];
+  const e = mesh ? [0, 1, 2].map((a) => (mesh.max[a]! - mesh.min[a]!) / 2) : localExtent(node);
   const pad = node.round + node.blend + (node.noise?.amount ?? 0);
   // A rotated box's world AABB is the rotated extent, per axis the sum of
   // |R[axis][k]| * extent[k] — the standard conservative bound.
@@ -209,12 +427,14 @@ function prepare(node: CsgNode, fallback: CsgSurface): PreparedNode {
     half[a] =
       Math.abs(rot[a * 3]!) * e[0]! + Math.abs(rot[a * 3 + 1]!) * e[1]! + Math.abs(rot[a * 3 + 2]!) * e[2]! + pad;
   }
+  const worldCenter = [0, 1, 2].map((a) => node.position[a]! + rot[a * 3]! * center[0] + rot[a * 3 + 1]! * center[1] + rot[a * 3 + 2]! * center[2]);
   return {
     node,
     inv,
+    mesh,
     surface: node.surface ?? fallback,
-    min: [node.position[0]! - half[0]!, node.position[1]! - half[1]!, node.position[2]! - half[2]!],
-    max: [node.position[0]! + half[0]!, node.position[1]! + half[1]!, node.position[2]! + half[2]!],
+    min: [worldCenter[0]! - half[0]!, worldCenter[1]! - half[1]!, worldCenter[2]! - half[2]!],
+    max: [worldCenter[0]! + half[0]!, worldCenter[1]! + half[1]!, worldCenter[2]! + half[2]!],
   };
 }
 
@@ -222,6 +442,55 @@ function prepare(node: CsgNode, fallback: CsgSurface): PreparedNode {
 function shapeDistance(node: CsgNode, x: number, y: number, z: number): number {
   const r = node.round;
   switch (node.shape) {
+    case "mesh":
+      return compileTriangleMesh(node.mesh!).distance(x, y, z) - r;
+    case "heightfield": {
+      // Sampled surface, thickened into a slab, clipped to its footprint.
+      //
+      // The field is the VERTICAL distance to the bilinear patch, rescaled by
+      // cos(tilt) of that patch — 1/sqrt(1+|grad h|^2). That is exact under a
+      // flat patch and an UNDER-estimate on a slope, which is the safe
+      // direction (it never claims more clearance than there is), but it is
+      // still an approximation and `isApproximateField` says so. The slab's
+      // other face is the same surface offset vertically, so it shares the
+      // scale; `max` against it and against the footprint box is the usual
+      // convex-intersection composition the box and wedge use.
+      const hf = node.heightfield;
+      if (!hf) return SOLID_OUTSIDE;
+      const { values } = heightfieldSamples(hf);
+      const w = node.size[0]!;
+      const d = node.size[2]!;
+      const thickness = node.size[1]!;
+      const cellX = w / (hf.width - 1);
+      const cellZ = d / (hf.depth - 1);
+      // clamped at the edges: a sample off the footprint reads the rim, and
+      // the footprint box below is what actually ends the shape there
+      const u = Math.min(hf.width - 1, Math.max(0, (x + w / 2) / Math.max(cellX, 1e-12)));
+      const v = Math.min(hf.depth - 1, Math.max(0, (z + d / 2) / Math.max(cellZ, 1e-12)));
+      const i0 = Math.min(hf.width - 2, Math.floor(u));
+      const k0 = Math.min(hf.depth - 2, Math.floor(v));
+      const fu = u - i0;
+      const fv = v - k0;
+      const row = k0 * hf.width + i0;
+      const h00 = values[row]!;
+      const h10 = values[row + 1]!;
+      const h01 = values[row + hf.width]!;
+      const h11 = values[row + hf.width + 1]!;
+      const lo = h00 + (h10 - h00) * fu;
+      const hi = h01 + (h11 - h01) * fu;
+      const h = lo + (hi - lo) * fv;
+      const gx = ((h10 - h00) * (1 - fv) + (h11 - h01) * fv) / (cellX || 1e-12);
+      const gz = ((h01 - h00) * (1 - fu) + (h11 - h10) * fu) / (cellZ || 1e-12);
+      const scale = 1 / Math.sqrt(1 + gx * gx + gz * gz);
+      const ceiling = hf.mode === "ceiling";
+      const top = ceiling ? h + thickness : h;
+      const bottom = ceiling ? h : h - thickness;
+      const slab = Math.max(y - top, bottom - y) * scale;
+      const qx = Math.abs(x) - w / 2;
+      const qz = Math.abs(z) - d / 2;
+      const foot = Math.hypot(Math.max(qx, 0), Math.max(qz, 0)) + Math.min(Math.max(qx, qz), 0);
+      return Math.max(slab, foot) - r;
+    }
     case "prism": {
       let inside=false, distanceSquared=Infinity;
       const poly=node.polygon;
@@ -328,6 +597,14 @@ export interface Volume {
   readonly surfaceCount: number;
   readonly min: [number, number, number];
   readonly max: [number, number, number];
+  /**
+   * True when any node's field only APPROXIMATES distance (`noise`, a
+   * `heightfield`). The sign is still right everywhere; the magnitude is not a
+   * bound, so a caller must not skip a region because the distance at its
+   * centre looks large. Meshing already samples every candidate block for
+   * unrelated reasons; this is for anyone who would rather not.
+   */
+  readonly approximate: boolean;
   /** Signed density at a point. Negative is solid, matching the rest of the voxel path. */
   density(x: number, y: number, z: number): number;
   /** The same field restricted to a region, with unreachable nodes dropped. */
@@ -337,6 +614,8 @@ export interface Volume {
   ): (x: number, y: number, z: number) => number;
   /** Splat weights for a vertex, from the node that owns the surface there and the vertex normal. */
   surfaceAt(x: number, y: number, z: number, ny: number, out: Float32Array, offset: number, nx?: number, nz?: number): void;
+  /** Exact source-face normal where an unrounded/unblended triangle node owns the boundary. */
+  surfaceNormalAt?(x: number, y: number, z: number, out: Float64Array): boolean;
 }
 
 export function createVolume(input: VolumeDoc | unknown): Volume {
@@ -381,7 +660,7 @@ export function createVolume(input: VolumeDoc | unknown): Volume {
       // cell. Keep nearby boundary owners for material queries (two cells
       // cover the cell diagonal), without changing density/collision sampling.
       const margin = owner ? doc.voxelSize * 2 : 0;
-      if (x < p.min[0]! - margin || x > p.max[0]! + margin || y < p.min[1]! - margin || y > p.max[1]! + margin || z < p.min[2]! - margin || z > p.max[2]! + margin) {
+      if (!p.mesh && (x < p.min[0]! - margin || x > p.max[0]! + margin || y < p.min[1]! - margin || y > p.max[1]! + margin || z < p.min[2]! - margin || z > p.max[2]! + margin)) {
         if (node.op !== "intersect") continue;
       }
       const px = x - node.position[0]!;
@@ -413,13 +692,25 @@ export function createVolume(input: VolumeDoc | unknown): Volume {
 
   const activeAll = prepared;
   const ownerScratch = new Int32Array(1);
+  const sourceNormal = new Float64Array(3);
 
   return {
     doc,
     surfaceCount: doc.palette.length,
+    approximate: prepared.some((p) => isApproximateField(p.node)),
     min,
     max,
     density: (x, y, z) => evaluate(x, y, z, null, activeAll),
+    surfaceNormalAt: (x, y, z, out) => {
+      evaluate(x, y, z, ownerScratch, activeAll);
+      const p = ownerScratch[0]! >= 0 ? prepared[ownerScratch[0]!] : undefined;
+      if (!p?.mesh || p.node.noise || p.node.round || p.node.blend) return false;
+      const px = x - p.node.position[0], py = y - p.node.position[1], pz = z - p.node.position[2], m = p.inv;
+      p.mesh.normalAt(m[0]! * px + m[1]! * py + m[2]! * pz, m[3]! * px + m[4]! * py + m[5]! * pz, m[6]! * px + m[7]! * py + m[8]! * pz, sourceNormal);
+      const direction = p.node.op === "sub" ? -1 : 1;
+      for (let a = 0; a < 3; a++) out[a] = direction * (m[a]! * sourceNormal[0]! + m[a + 3]! * sourceNormal[1]! + m[a + 6]! * sourceNormal[2]!);
+      return true;
+    },
     /**
      * An evaluator for one region, with every node that cannot reach it
      * dropped. This is the difference between a dungeon meshing in a second
@@ -432,6 +723,10 @@ export function createVolume(input: VolumeDoc | unknown): Volume {
     sampler: (lo, hi) => {
       const active = prepared.filter(
         (p) =>
+          // Mesh fields stay exact outside their bounds. Dropping a positive
+          // distant term would preserve signs but break sampler/density
+          // agreement and the Lipschitz guarantee used by mesh block culling.
+          p.mesh !== undefined ||
           p.node.op === "intersect" ||
           (p.max[0]! >= lo[0]! && p.min[0]! <= hi[0]! && p.max[1]! >= lo[1]! && p.min[1]! <= hi[1]! && p.max[2]! >= lo[2]! && p.min[2]! <= hi[2]!),
       );
@@ -439,7 +734,13 @@ export function createVolume(input: VolumeDoc | unknown): Volume {
     },
     surfaceAt: (x, y, z, ny, out, offset, nx=0, nz=0) => {
       evaluate(x, y, z, ownerScratch, activeAll);
-      const surface = ownerScratch[0]! >= 0 ? prepared[ownerScratch[0]!]!.surface : doc.surface;
+      const owning = ownerScratch[0]! >= 0 ? prepared[ownerScratch[0]!]! : undefined;
+      const surface = owning?.surface ?? doc.surface;
+      let triangleMaterial: number | undefined;
+      if (owning?.mesh && owning.node.mesh?.triangleMaterials) {
+        const px = x - owning.node.position[0], py = y - owning.node.position[1], pz = z - owning.node.position[2], m = owning.inv;
+        triangleMaterial = owning.mesh.materialAt(m[0]! * px + m[1]! * py + m[2]! * pz, m[3]! * px + m[4]! * py + m[5]! * pz, m[6]! * px + m[7]! * py + m[8]! * pz);
+      }
       const count = doc.palette.length;
       for (let s = 0; s < count; s++) out[offset + s] = 0;
       // Blend across the thresholds rather than switching: a hard swap between
@@ -452,9 +753,12 @@ export function createVolume(input: VolumeDoc | unknown): Volume {
         const i = Math.min(count - 1, Math.max(0, index));
         out[offset + i] = out[offset + i]! + weight;
       };
-      add(surface.floor, up);
-      add(surface.ceiling, down);
-      add(surface.wall, wall);
+      if (triangleMaterial !== undefined) add(triangleMaterial, 1);
+      else {
+        add(surface.floor, up);
+        add(surface.ceiling, down);
+        add(surface.wall, wall);
+      }
       for (const stroke of doc.paint) blendVolumePaint(stroke, x, y, z, out, offset, count, [nx,ny,nz]);
       // tint: the material multiplies by it, and a volume has no biome
       out[offset + count] = 1;
@@ -489,6 +793,11 @@ export function buildVolumeMesh(volume: Volume, lodStep = 1): VoxelMesh {
   // magnitude outside a cut is NOT a conservative distance to that cut.
   // A centre-distance block reject can therefore erase floors between stacked
   // rooms, even for unblended boxes. Sample all candidate blocks instead.
+  // Triangle fields remain exact outside their AABB. A mesh-only sampler is
+  // therefore 1-Lipschitz, including ordered hard/smooth CSG, and its centre
+  // distance safely proves a whole padded block homogeneous. Keep the older
+  // primitive/heightfield path's conservative behavior unchanged.
+  const canCullBlocks = volume.doc.nodes.length > 0 && volume.doc.nodes.every((node) => node.shape === "mesh" && !node.noise);
   const surfaceCount = volume.surfaceCount;
   const cells = [0, 1, 2].map((a) => Math.max(1, Math.ceil((volume.max[a]! - volume.min[a]!) / step)));
 
@@ -521,19 +830,28 @@ export function buildVolumeMesh(volume: Volume, lodStep = 1): VoxelMesh {
         const nx = cx + 2 * PAD + 1;
         const ny = cy + 2 * PAD + 1;
         const nz = cz + 2 * PAD + 1;
+        const lattice = { origin: volume.min, offset: [bx - PAD, by - PAD, bz - PAD] as [number, number, number] };
+        // Evaluate a shared integer sample through the same arithmetic in
+        // every block. blockOrigin + localIndex * step is not interchangeable
+        // in floating point, particularly on a symmetric imported ridge.
+        const xs = Float64Array.from({ length: nx }, (_, i) => volume.min[0] + (lattice.offset[0] + i) * step);
+        const ys = Float64Array.from({ length: ny }, (_, i) => volume.min[1] + (lattice.offset[1] + i) * step);
+        const zs = Float64Array.from({ length: nz }, (_, i) => volume.min[2] + (lattice.offset[2] + i) * step);
         const density = volume.sampler(origin, [
-          origin[0]! + (nx - 1) * step,
-          origin[1]! + (ny - 1) * step,
-          origin[2]! + (nz - 1) * step,
+          xs[nx - 1]!, ys[ny - 1]!, zs[nz - 1]!,
         ]);
+        if (canCullBlocks) {
+          const rx = (nx - 1) * step / 2, ry = (ny - 1) * step / 2, rz = (nz - 1) * step / 2;
+          if (Math.abs(density(origin[0] + rx, origin[1] + ry, origin[2] + rz)) > Math.hypot(rx, ry, rz)) continue;
+        }
         const values = new Float32Array(nx * ny * nz);
         for (let k = 0; k < nz; k++) {
-          const wz = origin[2]! + k * step;
+          const wz = zs[k]!;
           for (let j = 0; j < ny; j++) {
-            const wy = origin[1]! + j * step;
+            const wy = ys[j]!;
             const row = j * nx + k * nx * ny;
             for (let i = 0; i < nx; i++) {
-              values[row + i] = density(origin[0]! + i * step, wy, wz);
+              values[row + i] = density(xs[i]!, wy, wz);
             }
           }
         }
@@ -549,6 +867,7 @@ export function buildVolumeMesh(volume: Volume, lodStep = 1): VoxelMesh {
         const hermite = {
           value: density,
           gradient: (x: number, y: number, z: number, out: Float64Array): void => {
+            if (volume.surfaceNormalAt?.(x, y, z, out)) return;
             const a = density(x + g, y - g, z - g);
             const b = density(x - g, y - g, z + g);
             const c = density(x - g, y + g, z - g);
@@ -558,7 +877,7 @@ export function buildVolumeMesh(volume: Volume, lodStep = 1): VoxelMesh {
             out[2] = -a + b - c + d;
           },
         };
-        const result = dualContour({ values, nx, ny, nz, origin, step }, { pad: PAD, attributes, hermite });
+        const result = dualContour({ values, nx, ny, nz, origin, step }, { pad: PAD, attributes, hermite, lattice });
         if (result.triangleCount === 0) continue;
 
         const interleaved = result.attributes["surface"];
@@ -705,5 +1024,3 @@ export function csgMesh(source: CsgMeshSource): VoxelMesh {
   volumeMeshes.set(key, mesh);
   return mesh;
 }
-
-

@@ -268,7 +268,7 @@ export class BoltLive extends LiveModule<BoltModule> {
 
   protected onUpdate(t: number, _dt: number, camera: THREE.Camera): void {
     const m = this.module;
-    const now = this.startedAt + t * this.life;
+    const now = this.now;
     if (now >= this.nextRoll) {
       this.roll();
       this.nextRoll = now + 1 / m.refreshHz;

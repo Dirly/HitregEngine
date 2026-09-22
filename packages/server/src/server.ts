@@ -22,7 +22,16 @@ import {
   type Transport,
   type ReplicaEntry,
 } from "@hitreg/net";
-import { isTransferLocked, type EntityDoc, type NetObjectData, type RecipeEdit, type WorldRecipe } from "@hitreg/core";
+import {
+  isTransferLocked,
+  WaterIndex,
+  waterQuery,
+  waterVolumes,
+  type EntityDoc,
+  type NetObjectData,
+  type RecipeEdit,
+  type WorldRecipe,
+} from "@hitreg/core";
 import type { HeadlessWorld } from "./world.js";
 import type { TerrainStreamer } from "./terrain.js";
 import type { CommitInput, PlayerSave } from "./cluster/player-store.js";
@@ -110,6 +119,8 @@ interface RemoteInputCommand {
   seq?: unknown;
   v?: unknown;
   jump?: unknown;
+  /** Vertical SPEED in m/s while swimming (see swimAim), not a -1..1 intent. */
+  vy?: unknown;
   yaw?: unknown;
   p?: unknown;
 }
@@ -119,6 +130,9 @@ function isFiniteVec(v: unknown, len: number): v is number[] {
 }
 
 const r3 = (v: number): number => Math.round(v * 1000) / 1000;
+
+/** Absolute cap on a claimed vertical swim speed, before the driver's own clamp. */
+const VERTICAL_CAP = 20;
 
 export class GameServer {
   readonly world: HeadlessWorld;
@@ -196,7 +210,17 @@ export class GameServer {
       ? [authored[0]!, authored[1]!, authored[2]!]
       : [0, 2, 0];
     this.spawnPoint = opts.spawnPoint ?? (() => fallback);
-    this.driver = this.template ? new PlayerDriver(this.world, this.players, this.template.controller) : null;
+    // The same water the client swims in: authored volumes from the scene plus
+    // the streaming world's own sea, lakes and rivers. Without it the
+    // authority does not know water exists and hauls every swimmer to the bed.
+    const waterIndex = new WaterIndex(waterVolumes(this.world.expanded));
+    const waterAt = waterQuery({
+      index: waterIndex,
+      field: () => this.terrain?.resolved.field ?? null,
+    });
+    this.driver = this.template
+      ? new PlayerDriver(this.world, this.players, this.template.controller, { waterAt })
+      : null;
     if (this.driver) this.world.beforeStep.add(this.driver.step);
 
     this.host = new RoomHost(opts.transport, {
@@ -605,6 +629,11 @@ export class GameServer {
     player.input = {
       v: [c.v[0]!, c.v[1]!],
       jump: c.jump === true,
+      // A vertical SPEED in m/s while swimming (where the swimmer is pointed
+      // times how fast it swims, plus its rise/dive keys). Clamped like every
+      // other claimed number — intent, never state — and the driver clamps it
+      // again against that body's own swim speed.
+      vy: typeof c.vy === "number" && Number.isFinite(c.vy) ? Math.max(-VERTICAL_CAP, Math.min(VERTICAL_CAP, c.vy)) : 0,
       yaw: typeof c.yaw === "number" && Number.isFinite(c.yaw) ? c.yaw : 0,
       seq: typeof c.seq === "number" && Number.isFinite(c.seq) ? c.seq : 0,
       at: Date.now(),

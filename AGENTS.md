@@ -3,21 +3,25 @@
 This file is the tool-neutral entry point (Codex, Cursor, Gemini, etc. —
 Claude sessions get the same content via CLAUDE.md and `.claude/skills/`).
 
-**Read first:**
+**Read first:** `CLAUDE.md` — shared commands, invariants, and the task-specific
+reading route (tool-neutral despite its filename). Follow that route rather
+than loading every subsystem manual. Read references once per relevant task;
+revisit them when the task or implementation changes.
 
-1. `CLAUDE.md` — commands, non-negotiable invariants, repo layout, and the
-   file-first AI workflow (despite the filename, everything in it is
-   tool-agnostic except the skill pointers).
-2. `docs/scene-authoring.md` — the complete scene/prefab/component format
-   reference with pitfalls. This replaces the Claude-only scene-authoring
-   skill for non-Claude agents.
-3. `ARCHITECTURE.md` — binding technical decisions. `VISION.md` — the thesis.
-4. `docs/tools.md` — registered editor/asset tools, plugin manifests,
-   permissions, discovery, and the shared human/AI invocation path.
-5. `docs/voxel-worlds.md` — procedural marching-cubes worlds: the world
-   recipe, biome rules, streaming, the `worldgen` pipeline, and the
-   invariants (one mesh for render/physics/placement, welded seams, closed
-   volumes) that break silently if you change the wrong thing.
+For dungeon work, start with the installed `hitreg-dungeon-authoring` skill,
+its quickstart, the existing kit README, and the current project's plan/notes.
+Reference images, measured layouts, applicable stamp/carving tools, and the
+validation stages remain required by that workflow. A smaller context means
+loading the relevant material, not omitting design or verification stages.
+
+`docs/scene-authoring.md` remains the scene/prefab reference; `ARCHITECTURE.md`
+contains binding engine decisions; `VISION.md` explains product direction;
+`docs/tools.md` covers registered tools; `docs/voxel-worlds.md` covers procedural
+worlds and extraction invariants; `docs/image-generation.md` covers getting any
+image drawn (`image-request.mjs gen` drives the Codex CLI headlessly and verifies
+the result). Consult each when its subsystem is involved.
+The detailed live-editor and gameplay command reference is
+`docs/agent-workflow.md`.
 
 **The short version of how to work here:**
 
@@ -78,6 +82,9 @@ Claude sessions get the same content via CLAUDE.md and `.claude/skills/`).
   vite.config.ts) so `/__hitreg/spec` self-lists it. A new behavior/script =
   register it (name + params surface automatically); document only its runtime
   `ctx` API in `docs/scene-authoring.md` — that's not a schema.
+- A script that owns world state declares its own console commands
+  (`static commands` + `onCommand` — see `ScriptCommandDecl`), so `/help` is
+  generated rather than written twice. Never add a command table to a host.
 - Prose (this file, CLAUDE.md, `docs/`) is for judgment only: invariants, mental
   models, pitfalls. Never re-list fields the spec already defines — point at it.
   A new subsystem gets a `docs/` doc, linked from "Read first" if foundational.

@@ -53,6 +53,14 @@ export interface PlayContext {
   phaseLength: number;
   /** The projectile, for `path` anchors — driven by the sequencer or the host. */
   path: { pos: THREE.Vector3; vel: THREE.Vector3; active: boolean };
+  /**
+   * Hand a `light` module a light of its OWN instead of a borrowed slot. A
+   * standing effect (a torch) holds its light for its whole life, so on the
+   * four flash slots twenty torches would steal from each other every frame;
+   * the owner parents the light and registers it with the scene's point-light
+   * budget. The module removes it from its parent when it ends.
+   */
+  ownLight?: () => THREE.PointLight | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -202,6 +210,13 @@ export abstract class LiveModule<M extends VfxModule = VfxModule> {
   protected startedAt = 0;
   /** Seconds it lives; Infinity for "until stopped". */
   protected life = 1;
+  /**
+   * Play-clock seconds of the current update. Read THIS rather than
+   * rebuilding it as `startedAt + t * life`: a standing effect's life is
+   * Infinity, its `t` stays 0, and 0 × Infinity is NaN — which silently
+   * turned a torch's light intensity into NaN.
+   */
+  protected now = 0;
   /** Fade-out requested by an early stop: [from, until] on the play clock. */
   private fadeFrom = -1;
   private fadeUntil = -1;
@@ -276,6 +291,7 @@ export abstract class LiveModule<M extends VfxModule = VfxModule> {
       this.finish();
       return false;
     }
+    this.now = now;
     this.track();
     this.onUpdate(this.life > 0 ? age / this.life : 1, dt, camera);
     return true;

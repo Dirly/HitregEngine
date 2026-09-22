@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ToolRegistry } from "../src/index.js";
+import { ToolRegistry, toolFileValueSchema } from "../src/index.js";
 
 const definition = {
   version: 1 as const,
@@ -66,5 +66,24 @@ describe("ToolRegistry", () => {
     const registry = new ToolRegistry();
     registry.register(definition);
     expect(() => registry.register(definition)).toThrow(/already registered/);
+  });
+
+  it("accepts a multi-megabyte file without overflowing the regexp stack", () => {
+    const registry = new ToolRegistry();
+    const maxBytes = 8 * 1024 * 1024;
+    registry.register({ ...definition, inputs: { ...definition.inputs, source: { ...definition.inputs.source, maxBytes } } });
+    const file = { name: "large.png", mediaType: "image/png", data: Buffer.alloc(maxBytes, 42).toString("base64") };
+    expect(registry.validate(definition.id, { source: file }).ok).toBe(true);
+    expect(toolFileValueSchema.safeParse(file).success).toBe(true);
+    expect(registry.validate(definition.id, { source: { ...file, data: file.data + "AAAA" } }).ok).toBe(false);
+  });
+
+  it("rejects malformed base64 padding and truncated groups", () => {
+    const registry = new ToolRegistry(); registry.register(definition);
+    for (const data of ["A", "AAA", "AAAA=", "AAAA===", "AA=A", "====", "AA A", "AA-_", "AA==AAAA"]) {
+      const file = { name: "source.png", mediaType: "image/png", data };
+      expect(registry.validate(definition.id, { source: file }).ok, data).toBe(false);
+      expect(toolFileValueSchema.safeParse(file).success, data).toBe(false);
+    }
   });
 });

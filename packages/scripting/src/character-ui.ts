@@ -2,6 +2,7 @@ import {
   ATTRIBUTES,
   CHARACTER_EVENTS,
   DERIVED_STATS,
+  EQUIPMENT_SLOTS,
   derivedStats,
   firstFit,
   RARITY_TINT,
@@ -64,7 +65,12 @@ export class CharacterUi extends Script {
     },
     toggleKey: { default: "KeyI", description: "KeyboardEvent.code that opens/closes the screen (Escape always closes)" },
     startOpen: { default: false },
+    modal: { default: true, description: "Show a scrim and capture gameplay keys while open. False creates a floating nonmodal window; text fields still own their input." },
     title: { default: "Character" },
+    showDetails: { default: true, description: "Show a permanent selected-item column; false uses floating item tooltips only." },
+    showSearch: { default: true, description: "Show the inventory text-search field." },
+    equipmentSlots: { default: [...EQUIPMENT_SLOTS], description: "Ordered equipment slot ids to display. Existing occupied slots are always retained so gear cannot become inaccessible." },
+    cssClass: { default: "", description: "Optional game skin class; styles stay owned by the project." },
     cellSize: { default: 44, min: 24, max: 96, description: "pixels per inventory cell and equipment slot" },
     portraitSpin: { default: 0, min: -3, max: 3, description: "turntable speed of the centre portrait, radians/second; 0 faces you" },
     portraitClip: {
@@ -97,6 +103,10 @@ export class CharacterUi extends Script {
   private drag: DragState | null = null;
   private readonly offs: Array<() => void> = [];
   private catalog!: (id: string) => Item | undefined;
+  private selectedUid = "";
+  private search = "";
+  private category = "all";
+  private renderedContent = "";
 
   override onStart(): void {
     if (typeof document === "undefined") return;
@@ -106,6 +116,8 @@ export class CharacterUi extends Script {
 
     const root = document.createElement("div");
     root.className = "hr-char";
+    const skin = this.param<string>("cssClass");
+    if (/^[a-zA-Z][\w-]*$/.test(skin)) root.classList.add(skin);
     root.hidden = true;
     root.innerHTML = `<style>${CSS}</style>`;
     const cell = this.param<number>("cellSize");
@@ -118,13 +130,18 @@ export class CharacterUi extends Script {
     root.style.setProperty("--hr-slot-border", `${this.param<number>("slotBorder")}px`);
 
     const scrim = el("div", "hr-scrim");
+    scrim.hidden = !this.param<boolean>("modal");
     scrim.addEventListener("pointerdown", () => this.setOpen(false));
     root.append(scrim);
     this.panel = el("div", "hr-panel");
+    this.panel.setAttribute("role", "dialog");
+    this.panel.setAttribute("aria-modal", String(this.param<boolean>("modal")));
+    this.panel.setAttribute("aria-label", this.param<string>("title"));
     this.body = el("div", "hr-body");
     this.panel.append(this.body);
     root.append(this.panel);
     this.tip = el("div", "hr-tip");
+    this.tip.setAttribute("role", "tooltip");
     this.tip.hidden = true;
     root.append(this.tip);
     this.toast = el("div", "hr-toast");
@@ -138,31 +155,38 @@ export class CharacterUi extends Script {
     this.root = root;
 
     const onKey = (e: KeyboardEvent): void => {
+      if (e.repeat) return;
+      if (e.code === "Escape" && this.open) { e.preventDefault(); this.setOpen(false); return; }
       const t = e.target;
-      if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) return;
+      if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement) return;
       if (e.code === this.param<string>("toggleKey")) {
         e.preventDefault();
         this.setOpen(!this.open);
-      } else if (e.code === "Escape" && this.open) {
-        this.setOpen(false);
       }
     };
     window.addEventListener("keydown", onKey);
     this.offs.push(() => window.removeEventListener("keydown", onKey));
+    const resize = (): void => { if (this.open && !this.drag) this.render(); };
+    window.addEventListener("resize", resize);
+    this.offs.push(() => window.removeEventListener("resize", resize));
+    const toggle = (): void => this.setOpen(!this.open);
+    window.addEventListener("hitreg:character-toggle", toggle);
+    this.offs.push(() => window.removeEventListener("hitreg:character-toggle", toggle));
     const onMove = (e: PointerEvent): void => this.dragMove(e);
     const onUp = (e: PointerEvent): void => this.dragEnd(e);
+    const onCancel = (): void => this.cancelDrag();
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
-    window.addEventListener("pointercancel", onUp);
+    window.addEventListener("pointercancel", onCancel);
     this.offs.push(
       () => window.removeEventListener("pointermove", onMove),
       () => window.removeEventListener("pointerup", onUp),
-      () => window.removeEventListener("pointercancel", onUp),
+      () => window.removeEventListener("pointercancel", onCancel),
     );
 
-    this.store.onChange((key) => {
+    this.offs.push(this.store.onChange((key) => {
       if (key === sheetKey(this.actorId)) this.dirty = true;
-    });
+    }));
     this.ctx.events?.on(CHARACTER_EVENTS.refused, (payload) => {
       const p = payload as { actorId: string; error: string };
       if (p.actorId === this.actorId) this.showToast(p.error);
@@ -180,7 +204,11 @@ export class CharacterUi extends Script {
     }
     if (this.dirty && this.open && !this.drag) {
       this.dirty = false;
-      this.render();
+      const sheet = this.sheet();
+      const signature = sheet ? JSON.stringify({ ...sheet, inventoryAction: undefined }) : "";
+      const progress = this.body.querySelector<HTMLElement>(".hr-action");
+      if (sheet && progress && signature === this.renderedContent) this.renderAction(progress, sheet);
+      else this.render();
     }
   }
 
@@ -200,7 +228,8 @@ export class CharacterUi extends Script {
     if (!this.root || open === this.open) return;
     this.open = open;
     this.root.hidden = !open;
-    this.ctx.input.captureKeyboard?.(this.entityId, open);
+    window.dispatchEvent(new CustomEvent("hitreg:character-visibility", { detail: { open } }));
+    this.ctx.input.captureKeyboard?.(this.entityId, open && this.param<boolean>("modal"));
     if (open) {
       if (document.pointerLockElement) document.exitPointerLock();
       this.render();
@@ -260,6 +289,7 @@ export class CharacterUi extends Script {
     body.replaceChildren();
     this.panel.querySelector(".hr-head")?.remove();
     const sheet = this.sheet();
+    this.renderedContent = sheet ? JSON.stringify({ ...sheet, inventoryAction: undefined }) : "";
     const head = el("div", "hr-head");
     head.append(el("div", "hr-title", this.param<string>("title")));
     if (!sheet) {
@@ -268,6 +298,7 @@ export class CharacterUi extends Script {
       return;
     }
     const { derived, env } = this.derived(sheet);
+    if (!this.selectedUid || !sheet.items[this.selectedUid]) this.selectedUid = Object.keys(sheet.items).find(uid => sheet.items[uid]?.container !== undefined) ?? "";
 
     head.append(el("div", "hr-level", `Lv ${sheet.level}`));
     const xp = el("div", "hr-xp");
@@ -282,9 +313,19 @@ export class CharacterUi extends Script {
         : `${sheet.xp - derived.levelXp} / ${span} xp to level ${sheet.level + 1}`;
     head.append(xp);
     head.append(el("div", "hr-hint", `${keyLabel(this.param<string>("toggleKey"))} / Esc to close`));
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "hr-close";
+    close.textContent = "×";
+    close.setAttribute("aria-label", "Close inventory");
+    close.onclick = () => this.setOpen(false);
+    head.append(close);
     this.panel.prepend(head);
 
-    body.append(this.renderStats(sheet, derived), this.renderDoll(sheet), this.renderGrids(sheet, derived, env));
+    const character = el("div", "hr-character-column");
+    character.append(this.renderDoll(sheet), this.renderStats(sheet, derived));
+    body.append(character, this.renderGrids(sheet, derived, env));
+    if (this.param<boolean>("showDetails")) body.append(this.renderDetails(sheet, derived, env));
   }
 
   private renderStats(sheet: CharacterSheet, derived: DerivedSheet): HTMLElement {
@@ -330,16 +371,22 @@ export class CharacterUi extends Script {
     const doll = el("div", "hr-doll");
     const portraitWrap = el("div", "hr-portrait-wrap");
     portraitWrap.style.gridColumn = "2";
-    portraitWrap.style.gridRow = `1 / ${DOLL_ROWS + 1}`;
+    const requested = this.param<string[]>("equipmentSlots") ?? [...EQUIPMENT_SLOTS];
+    const slots = [...new Set([...requested.filter(s => EQUIPMENT_SLOTS.includes(s as EquipmentSlot)), ...Object.keys(sheet.equipment)])] as EquipmentSlot[];
+    const rows = Math.ceil(slots.length / 2);
+    portraitWrap.style.gridRow = `1 / ${rows + 1}`;
     portraitWrap.append(this.portrait);
     doll.append(portraitWrap);
-    for (const [slot, [col, row]] of Object.entries(DOLL_LAYOUT) as Array<[EquipmentSlot, [number, number]]>) {
+    for (const [i, slot] of slots.entries()) {
+      const col = i < rows ? 1 : 3;
+      const row = i % rows + 1;
       const cellEl = el("div", "hr-slot");
       cellEl.style.gridColumn = String(col);
       cellEl.style.gridRow = String(row);
       cellEl.dataset["drop"] = "slot";
       cellEl.dataset["slot"] = slot;
       cellEl.append(el("div", "lbl", slotKind(slot)));
+      cellEl.title = slotKind(slot);
       const uid = sheet.equipment[slot];
       const stack = uid ? sheet.items[uid] : undefined;
       if (uid && stack) {
@@ -358,11 +405,40 @@ export class CharacterUi extends Script {
 
   private renderGrids(sheet: CharacterSheet, derived: DerivedSheet, env: SheetEnv): HTMLElement {
     const section = el("section", "hr-section");
+    section.classList.add("hr-inventory-column");
+    const filters = el("div", "hr-filters");
+    for (const [id, label] of [["all", "All"], ["equipment", "Gear"], ["consumable", "Consumables"], ["material", "Materials"], ["quest", "Quest"]]) {
+      const button = document.createElement("button");
+      button.textContent = label!;
+      button.className = id === this.category ? "active" : "";
+      button.setAttribute("aria-pressed", String(id === this.category));
+      button.onclick = () => { this.category = id!; this.render(); };
+      filters.append(button);
+    }
+    const search = document.createElement("input");
+    search.type = "search"; search.placeholder = "Search belongings…"; search.value = this.search;
+    search.setAttribute("aria-label", "Search inventory");
+    search.oninput = () => {
+      this.search = search.value;
+      for (const item of Array.from(section.querySelectorAll<HTMLElement>(".hr-grid .hr-item"))) {
+        const uid = item.dataset["uid"]!;
+        const def = this.catalog(sheet.items[uid]!.itemId);
+        item.classList.toggle("hr-filtered", !this.matches(def));
+      }
+    };
+    section.append(filters);
+    if (this.param<boolean>("showSearch")) section.append(search);
+    const progress = el("div", "hr-action");
+    progress.setAttribute("role", "progressbar"); progress.setAttribute("aria-label", "Inventory action");
+    progress.setAttribute("aria-valuemin", "0"); progress.setAttribute("aria-valuemax", "100");
+    progress.append(el("i", ""), el("span", "")); section.append(progress);
+    this.renderAction(progress, sheet);
     const grids: Array<[Container, GridSize | null]> = [
       ["bag", derived.grids.bag],
       ["pockets", derived.grids.pockets],
     ];
-    const cell = this.param<number>("cellSize");
+    const cell = this.cellPixels();
+    const overflow = el("div", "hr-overflow");
     for (const [container, grid] of grids) {
       section.append(el("h4", "", grid ? `${container} ${grid.cols}×${grid.rows}` : `${container} — none worn`));
       if (!grid) continue;
@@ -383,6 +459,11 @@ export class CharacterUi extends Script {
         if (stack.container !== container) continue;
         const item = this.catalog(stack.itemId);
         const itemEl = this.renderItem(uid, stack.qty, item, stack.itemId);
+        if ((stack.x ?? 0) >= grid.cols || (stack.y ?? 0) >= grid.rows) {
+          itemEl.style.width = itemEl.style.height = `${cell}px`; itemEl.style.position = "relative";
+          overflow.append(itemEl); continue;
+        }
+        itemEl.classList.toggle("hr-filtered", !this.matches(item));
         itemEl.style.left = `${(stack.x ?? 0) * cell}px`;
         itemEl.style.top = `${(stack.y ?? 0) * cell}px`;
         itemEl.style.width = `${cell}px`;
@@ -402,15 +483,72 @@ export class CharacterUi extends Script {
       }
       section.append(gridEl);
     }
+    for (const [uid, stack] of Object.entries(sheet.items)) {
+      if (stack.container !== "bag" || derived.grids.bag) continue;
+      const itemEl = this.renderItem(uid, stack.qty, this.catalog(stack.itemId), stack.itemId);
+      itemEl.style.width = itemEl.style.height = `${cell}px`; itemEl.style.position = "relative"; overflow.append(itemEl);
+    }
+    if (overflow.childElementCount) section.append(el("h4", "", "Overflow · drag to a free slot"), overflow);
     const trash = el("div", "hr-trash", "drop here to discard");
     trash.dataset["drop"] = "trash";
     section.append(trash);
     return section;
   }
 
+  private matches(item: Item | undefined): boolean {
+    return (!this.search || item?.name.toLowerCase().includes(this.search.toLowerCase()) === true) && (this.category === "all" || item?.kind === this.category);
+  }
+
+  private cellPixels(): number {
+    return (this.root && Number.parseFloat(getComputedStyle(this.root).getPropertyValue("--hr-cell"))) || this.param<number>("cellSize");
+  }
+
+  private renderDetails(sheet: CharacterSheet, derived: DerivedSheet, env: SheetEnv): HTMLElement {
+    const panel = el("section", "hr-details");
+    const stack = sheet.items[this.selectedUid];
+    const item = stack ? this.catalog(stack.itemId) : undefined;
+    if (!stack || !item) {
+      panel.append(el("h4", "", "Item details"), el("p", "hr-muted", "Select a belonging to inspect it."), el("p", "hr-muted", "Drag to move · Double-click to equip · Right-click to split"));
+      return panel;
+    }
+    const url = item.icon ? this.iconUrl(item.icon) : undefined;
+    if (url) { const img = document.createElement("img"); img.src = url; img.alt = item.name; panel.append(img); }
+    const name = el("h3", "", item.name); name.style.color = item.tint ?? RARITY_TINT[item.rarity];
+    panel.append(name, el("p", "hr-item-kind", `${item.rarity} · ${item.kind}`));
+    for (const [key, value] of Object.entries(item.modifiers)) panel.append(el("p", "hr-modifier", `${value > 0 ? "+" : ""}${value} ${STAT_LABEL[key] ?? key}`));
+    if (item.bag) panel.append(el("p", "", `${item.bag.cols * item.bag.rows} bag slots · ${item.bag.cols} × ${item.bag.rows}`));
+    panel.append(el("p", "hr-description", item.description || "A trusty companion on the road."), el("p", "hr-muted", `${item.weight} kg · ${stack.qty} owned`));
+    for (const [key, value] of Object.entries(item.requires)) panel.append(el("p", "hr-requirement", `Requires ${key} ${value}`));
+    const slot = EQUIPMENT_SLOTS.find(s => sheet.equipment[s] === this.selectedUid);
+    const action = (label: string, run: () => void): void => {
+      const b = document.createElement("button"); b.textContent = label; b.onclick = run; panel.append(b);
+    };
+    if (slot) action("Unequip", () => this.emit(CHARACTER_EVENTS.unequip, { slot }));
+    else if (item.slots.length) action("Equip", () => this.emit(CHARACTER_EVENTS.equip, { uid: this.selectedUid }));
+    action("Drop", () => this.emit(CHARACTER_EVENTS.drop, { uid: this.selectedUid }));
+    if (stack.qty > 1 && !slot) action("Split stack", () => {
+      const to = (derived.grids.bag && spotIn(sheet, "bag", env)) ?? spotIn(sheet, "pockets", env);
+      if (to) this.emit(CHARACTER_EVENTS.split, { uid: this.selectedUid, qty: Math.floor(stack.qty / 2), to });
+      else this.showToast("No room to split");
+    });
+    return panel;
+  }
+
   private renderItem(uid: string, qty: number, item: Item | undefined, itemId: string): HTMLDivElement {
     const node = el("div", "hr-item");
     node.dataset["uid"] = uid;
+    node.tabIndex = 0;
+    node.setAttribute("role", "button");
+    node.setAttribute("aria-label", item?.name ?? itemId);
+    const select = (): void => {
+      this.selectedUid = uid;
+      const sheet = this.sheet();
+      if (sheet) { const { derived, env } = this.derived(sheet); this.body.querySelector(".hr-details")?.replaceWith(this.renderDetails(sheet, derived, env)); }
+      this.body.querySelectorAll(".hr-item.selected").forEach(e => e.classList.remove("selected"));
+      node.classList.add("selected");
+    };
+    node.onclick = select;
+    node.onkeydown = e => { if (e.code === "Enter" || e.code === "Space") { e.preventDefault(); select(); } };
     const tint = item?.tint ?? (item ? RARITY_TINT[item.rarity] : "#ff5a5a");
     node.style.setProperty("--tint", tint);
     const url = item?.icon ? this.iconUrl(item.icon) : undefined;
@@ -468,6 +606,8 @@ export class CharacterUi extends Script {
       if (req.length > 0) tip.append(el("div", "req", "requires " + req.map(([k, v]) => `${k} ${v}`).join(", ")));
       if (item.description) tip.append(el("div", "desc", item.description));
     }
+    if (this.drag?.moved) return;
+    tip.append(el("div", "meta", "Drag to move · Double-click to equip / unequip · Right-click to split"));
     tip.hidden = false;
     this.placeTip(e);
   }
@@ -476,8 +616,8 @@ export class CharacterUi extends Script {
     if (this.tip.hidden) return;
     const pad = 14;
     const r = this.tip.getBoundingClientRect();
-    const x = Math.min(e.clientX + pad, window.innerWidth - r.width - 4);
-    const y = Math.min(e.clientY + pad, window.innerHeight - r.height - 4);
+    const x = Math.max(4, Math.min(e.clientX + pad, window.innerWidth - r.width - 4));
+    const y = Math.max(4, Math.min(e.clientY + pad, window.innerHeight - r.height - 4));
     this.tip.style.left = `${x}px`;
     this.tip.style.top = `${y}px`;
   }
@@ -486,6 +626,7 @@ export class CharacterUi extends Script {
 
   private dragStart(e: PointerEvent, node: HTMLDivElement, uid: string): void {
     if (e.button !== 0 || this.drag) return;
+    if (this.sheet()?.inventoryAction) { this.showToast("Finish the current inventory action first"); return; }
     e.preventDefault();
     const rect = node.getBoundingClientRect();
     const ghost = node.cloneNode(true) as HTMLDivElement;
@@ -495,8 +636,9 @@ export class CharacterUi extends Script {
     ghost.style.top = `${rect.top}px`;
     ghost.style.width = `${rect.width}px`;
     ghost.style.height = `${rect.height}px`;
-    document.body.append(ghost);
-    node.classList.add("lifted");
+    ghost.style.display = "none";
+    // Keep the ghost in the inventory's stacking context, above its raised panel.
+    this.root!.append(ghost);
     this.tip.hidden = true;
     this.drag = {
       uid,
@@ -506,12 +648,31 @@ export class CharacterUi extends Script {
       grabX: e.clientX - rect.left,
       grabY: e.clientY - rect.top,
       over: null,
+      startX: e.clientX,
+      startY: e.clientY,
+      moved: false,
     };
+  }
+
+  private renderAction(progress: HTMLElement, sheet: CharacterSheet): void {
+    const action = sheet.inventoryAction;
+    progress.hidden = !action;
+    if (!action) return;
+    const pct = Math.max(0, Math.min(100, (1 - action.remaining / action.duration) * 100));
+    progress.setAttribute("aria-valuenow", String(Math.round(pct)));
+    progress.querySelector<HTMLElement>("i")!.style.width = `${pct}%`;
+    const label = action.command.kind === "equip" ? "Equipping" : action.command.kind === "unequip" ? "Unequipping" : "Transferring";
+    const item = sheet.items[action.command.uid];
+    progress.querySelector("span")!.textContent = `${label} ${item ? this.catalog(item.itemId)?.name ?? item.itemId : "item"} · ${action.remaining.toFixed(1)}s`;
   }
 
   private dragMove(e: PointerEvent): void {
     const d = this.drag;
     if (!d) return;
+    if (!d.moved && Math.hypot(e.clientX - d.startX, e.clientY - d.startY) < 5) return;
+    d.moved = true;
+    d.ghost.style.display = "";
+    d.node.classList.add("lifted");
     d.ghost.style.left = `${e.clientX - d.grabX}px`;
     d.ghost.style.top = `${e.clientY - d.grabY}px`;
     const target = this.dropTarget(e);
@@ -527,7 +688,7 @@ export class CharacterUi extends Script {
     if (!d) return;
     const target = this.dropTarget(e);
     this.cancelDrag();
-    if (!target) return;
+    if (!target || !d.moved) return;
     if (target.kind === "trash") {
       this.emit(CHARACTER_EVENTS.drop, { uid: d.uid });
     } else if (target.kind === "slot") {
@@ -560,7 +721,7 @@ export class CharacterUi extends Script {
       if (kind === "trash") return { kind, el: node };
       if (kind === "slot") return { kind, el: node, slot: node.dataset["slot"] as EquipmentSlot };
       if (kind === "grid") {
-        const cell = this.param<number>("cellSize");
+        const cell = this.cellPixels();
         const r = node.getBoundingClientRect();
         const cols = Math.round(r.width / cell);
         const rows = Math.round(r.height / cell);
@@ -591,6 +752,9 @@ export class CharacterUi extends Script {
 }
 
 interface DragState {
+  startX: number;
+  startY: number;
+  moved: boolean;
   uid: string;
   fromSlot: EquipmentSlot | null;
   node: HTMLDivElement;
@@ -642,24 +806,17 @@ const STAT_LABEL: Record<string, string> = {
   ...Object.fromEntries(ATTRIBUTES.map((a) => [a, a])),
 };
 
-/** Paper doll: [column, row] per slot — armour down the left, accessories down the right, the portrait between. */
-const DOLL_ROWS = 6;
-const DOLL_LAYOUT: Record<EquipmentSlot, [number, number]> = {
-  helm: [1, 1],
-  chest: [1, 2],
-  gloves: [1, 3],
-  legs: [1, 4],
-  boots: [1, 5],
-  primary: [1, 6],
-  jewelry: [3, 1],
-  trinket: [3, 2],
-  trinket2: [3, 3],
-  offhand: [3, 4],
-  bag: [3, 5],
-  secondary: [3, 6],
-};
-
 const CSS = `
+.hr-char .hr-details{min-width:180px;max-width:260px;padding:12px;background:#10131a;border:1px solid #39425a}
+.hr-char .hr-details>img{display:block;width:64px;height:80px;object-fit:contain;margin:12px auto;image-rendering:pixelated}
+.hr-char .hr-details button,.hr-char .hr-filters button,.hr-char .hr-close{font:inherit;color:inherit;background:#202735;border:1px solid #45516a;padding:7px 10px;cursor:pointer}
+.hr-char .hr-details button{margin:4px}.hr-char .hr-filters{display:flex;gap:3px;margin-bottom:9px}.hr-char .hr-filters .active{background:#453627}
+.hr-char .hr-inventory-column input{width:100%;box-sizing:border-box;margin-bottom:12px;background:#10131a;border:1px solid #39425a;color:inherit;padding:8px;font:inherit}
+.hr-char .hr-filtered{opacity:.18;pointer-events:none}.hr-char .hr-item.selected{box-shadow:inset 0 0 0 2px #ffd57b}
+.hr-char .hr-muted{color:#aaa397}.hr-char .hr-description{font-style:italic;line-height:1.6}.hr-char .hr-modifier{color:#9cb58b}
+.hr-char :focus-visible{outline:2px solid #eed399;outline-offset:2px}
+.hr-char .hr-character-column>.hr-section+section{margin-top:12px}
+@media(max-width:800px){.hr-char .hr-body{grid-template-columns:auto auto}.hr-char .hr-details{grid-column:1/-1;max-width:none}.hr-char .hr-head{min-width:0;flex-wrap:wrap}}
 .hr-char{position:fixed;inset:0;z-index:60;font:12px/1.35 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;color:#dfe3ec;-webkit-font-smoothing:antialiased;user-select:none}
 .hr-char[hidden]{display:none}
 .hr-char .hr-scrim{position:absolute;inset:0;background:rgba(4,6,10,.35)}
@@ -671,7 +828,7 @@ const CSS = `
 .hr-char .hr-xp{flex:1;height:6px;background:#12151c;border-radius:3px;overflow:hidden;box-shadow:inset 0 0 0 1px #272c38}
 .hr-char .hr-xp i{display:block;height:100%;background:#5b8cff;transform-origin:left center}
 .hr-char .hr-hint{font-size:10px;color:#6d768c;white-space:nowrap}
-.hr-char .hr-body{display:grid;grid-template-columns:200px auto auto;gap:18px;align-items:start}
+.hr-char .hr-body{display:grid;grid-template-columns:auto auto 220px;gap:18px;align-items:start}
 .hr-char .hr-section h4{margin:10px 0 6px;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:#8b93a7;font-weight:600}
 .hr-char .hr-section h4:first-child{margin-top:0}
 .hr-char .hr-attr{display:grid;grid-template-columns:1fr auto 22px;align-items:center;gap:6px;padding:3px 0;border-bottom:1px solid #1c2130}
@@ -693,6 +850,7 @@ const CSS = `
 .hr-char .hr-slot .lbl{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:2px;font-size:7px;line-height:1.1;letter-spacing:.04em;text-transform:uppercase;color:#4d566a;text-align:center;word-break:break-all;pointer-events:none}
 .hr-char .hr-slot.over,.hr-char .hr-grid.over{filter:brightness(1.35)}
 .hr-char .hr-grid{position:relative}
+.hr-char .hr-overflow{display:flex;flex-wrap:wrap;gap:4px}
 .hr-char .hr-cell{position:absolute;width:var(--hr-cell);height:var(--hr-cell);box-sizing:border-box;
   border:var(--hr-slot-border) solid transparent;border-image:var(--hr-slot-img) var(--hr-slot-slice) fill / var(--hr-slot-border) stretch}
 .hr-char .hr-item,.hr-item.hr-ghost{position:absolute;box-sizing:border-box;border:1px solid var(--tint,#b9c0d0);border-radius:4px;

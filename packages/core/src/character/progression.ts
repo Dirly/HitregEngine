@@ -67,6 +67,11 @@ export const progressionSchema = z
     pockets: gridSizeSchema
       .default({ cols: 4, rows: 2 })
       .describe("The grid every character always has, bag or no bag."),
+    inventoryDurations: z.object({
+      transfer: z.number().min(0).max(30).default(0).describe("Seconds for moving or splitting stacks between bag and pockets; rearranging within a container is immediate."),
+      equip: z.number().min(0).max(30).default(0).describe("Seconds before an equipment change takes effect, including replacing worn gear."),
+      unequip: z.number().min(0).max(30).default(0).describe("Seconds before removing worn gear takes effect."),
+    }).prefault({}).describe("Authority-enforced inventory action times. One action per character; destinations and ownership are rechecked at completion."),
     derived: z.object(derivedFormulas).prefault({}),
   })
   .describe(

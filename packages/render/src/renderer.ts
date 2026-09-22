@@ -2,6 +2,7 @@ import * as THREE from "three/webgpu";
 import { patchShadowPassAlphaTest } from "./shadow-pass-material.js";
 import { GpuUploadProbe } from "./gpu-uploads.js";
 import { cacheUniformUploads } from "./uniform-upload-cache.js";
+import { materialMapsLoading } from "./material-maps.js";
 import {
   PostChain,
   needsPipeline,
@@ -90,6 +91,9 @@ export interface BloomOptions {
  * A scene with no postfx (or postfx with nothing but tone mapping) builds no
  * pipeline at all and renders through renderer.render() exactly as before.
  */
+/** Scratch for the wind's world→view projection; the render loop never allocates. */
+const tmpWind = new THREE.Vector3();
+
 export class EngineRenderer {
   readonly renderer: THREE.WebGPURenderer;
   uploadProbe: GpuUploadProbe | null = null;
@@ -116,6 +120,19 @@ export class EngineRenderer {
    */
   private volumetric: VolumetricRequest | null = null;
   private volumetricKey = volumetricPlanKey(null);
+
+  /**
+   * Whether the current SCENE has water in it (see PlanContext.water): the
+   * underwater pass is built for a scene, and driven per frame by a uniform.
+   */
+  private waterPresent = false;
+  /** This scene can have weather (it carries a `weather` script) — see PlanContext.weather. */
+  private weatherPresent = false;
+  /** This frame's storm, eased here so a caller can hand over a target and forget about it. */
+  private storm = { amount: 0, angle: 0, color: undefined as string | undefined };
+  /** This frame's camera submersion, 0..1, and the look of the water it is in. */
+  private submersion = 0;
+  private submersionLook: { color?: string; density?: number } | undefined;
 
   /** What the host last asked for in setSize(); re-applied when pixelate changes. */
   private viewport: { width: number; height: number; pixelRatio: number } | null = null;
@@ -293,6 +310,73 @@ export class EngineRenderer {
     this.applyPostFxState();
   }
 
+  /**
+   * Tell the renderer this scene contains water, so the underwater pass is
+   * built for it. Called once per scene build (it is a fact about the scene,
+   * not about the frame) — flipping it mid-dive would rebuild the whole post
+   * chain, which recompiles every material in the scene. See PlanContext.water.
+   */
+  setWaterPresent(present: boolean): void {
+    if (present === this.waterPresent) return;
+    this.waterPresent = present;
+    this.applyPostFxState();
+  }
+
+  /**
+   * Tell the renderer this scene can have weather, so the sandstorm pass is
+   * built for it. Once per scene build, for the same reason as
+   * `setWaterPresent`: flipping it when the wind gets up would rebuild the
+   * post chain and recompile every material in the scene.
+   */
+  setWeatherPresent(present: boolean): void {
+    if (present === this.weatherPresent) return;
+    this.weatherPresent = present;
+    this.applyPostFxState();
+  }
+
+  /**
+   * This frame's sandstorm: how hard (0..1), the WORLD direction the wind is
+   * blowing toward, and optionally the grain's colour.
+   *
+   * The world→screen part is done here because only the renderer knows the
+   * camera: the wind is projected into view space to get the angle the grain
+   * crosses the frame at. A script therefore says "it is blowing this hard,
+   * that way" and never has to think about where the player is looking.
+   */
+  setSandstorm(amount: number, wind: readonly [number, number, number], camera: THREE.Camera, color?: string): void {
+    this.storm.amount = Math.max(0, Math.min(1, amount));
+    this.storm.color = color;
+    if (this.storm.amount > 0) {
+      // the wind in the camera's own frame: x right, y up, z back toward the eye
+      tmpWind.set(wind[0], wind[1], wind[2]);
+      if (tmpWind.lengthSq() < 1e-8) tmpWind.set(0, 0, 1);
+      tmpWind.normalize().transformDirection(camera.matrixWorldInverse);
+      this.storm.angle = Math.atan2(tmpWind.y, tmpWind.x);
+    }
+    this.chain?.setSandstorm(this.storm.amount, this.storm.angle, this.storm.color);
+  }
+
+  /**
+   * How deep the camera is in water this frame — 0 (dry) to 1 (eye fully
+   * under) — plus the frame's `dt` and, where it differs from the scene's
+   * default, the look of the water it is in.
+   *
+   * The easing toward that target lives here rather than in the caller because
+   * its duration is an authored knob (`postfx.underwater.fade`), and because
+   * it is the thing that stops the effect strobing: a camera riding the
+   * waterline crosses it several times a second, and each crossing is
+   * instantaneous. A uniform write; safe every frame, a no-op with no water.
+   */
+  setSubmersion(target: number, dt: number, look?: { color?: string; density?: number }): void {
+    const want = Math.max(0, Math.min(1, target));
+    const fade = this.fx.underwater.fade;
+    this.submersion =
+      fade > 0 && dt > 0 ? this.submersion + (want - this.submersion) * Math.min(1, dt / fade) : want;
+    if (this.submersion < 0.002) this.submersion = 0; // settle, rather than approach forever
+    this.submersionLook = look;
+    this.chain?.setSubmersion(this.submersion, look);
+  }
+
   /** The passes actually in the graph right now, in execution order. */
   postFxPlan(): readonly PostPassId[] {
     return this.plan;
@@ -346,7 +430,13 @@ export class EngineRenderer {
 
     const lutReady =
       this.fx.grade.lut === this.lutState.id ? this.lutState.ready : this.resolveTexture !== null;
-    const ctx = { disabled: this.failedPasses, lutReady, volumetric: this.volumetric };
+    const ctx = {
+      disabled: this.failedPasses,
+      lutReady,
+      volumetric: this.volumetric,
+      water: this.waterPresent,
+      weather: this.weatherPresent,
+    };
     this.plan = passPlan(this.fx, ctx);
     const signature = pipelineSignature(this.fx, ctx);
     if (signature !== this.signature) {
@@ -481,6 +571,22 @@ export class EngineRenderer {
       const material = (object as THREE.Mesh).material;
       const transparent = Array.isArray(material) ? material.some((m) => m.transparent) : material?.transparent;
       if (transparent && object.visible) {
+        object.visible = false;
+        hidden.push(object);
+        return;
+      }
+      // Meshes whose material textures are still loading sit it out too: the
+      // graph is rewired when they land, and a rewire in the middle of this
+      // async compile rebuilds the shader outside the borrowed MRT window,
+      // which three rejects ("Color target has no corresponding fragment stage
+      // output"). Found on the ember bed, whose texture nothing else shares.
+      // They compile on first draw, with their maps.
+      const loading = Array.isArray(material)
+        ? material.some((m) => materialMapsLoading(m))
+        : material
+          ? materialMapsLoading(material)
+          : false;
+      if (loading && object.visible) {
         object.visible = false;
         hidden.push(object);
         return;
@@ -724,7 +830,12 @@ export class EngineRenderer {
       disabled: this.failedPasses,
       resolveTexture: this.resolveTexture,
       volumetric: this.volumetric,
+      water: this.waterPresent,
+      weather: this.weatherPresent,
     });
+    chain.setSubmersion(this.submersion, this.submersionLook);
+    // a rebuilt chain starts clear; hand it back the storm it was in
+    chain.setSandstorm(this.storm.amount, this.storm.angle, this.storm.color);
     const pipeline = new THREE.RenderPipeline(this.renderer);
     // The chain applies the tone curve and the working->output colour-space
     // conversion itself (renderOutput), because grade/vignette/grain/AA have to

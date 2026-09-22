@@ -139,6 +139,13 @@ left empty whenever a rig is driving. `camera-controls` still owns the
 editor's free camera and rigless scenes, where the list is distance-limited
 as above. See docs/camera.md.
 
+**Postscript (2026-09-19):** the rig now makes up to six sweeps a frame while
+the character moves (a pivot guard, the boom, a forecast path and three
+forecast booms — the look-ahead that turns a doorway's jump cut into a
+dolly-in) and one at rest. Measured running through Ashenhold with the engine
+profiler: 0.08 ms/frame average, 0.2 ms p95. Still nothing next to the mesh
+path, because every one of them is a layer-masked broadphase query.
+
 ## `SimplifyModifier` throws on glTF geometry using `InterleavedBufferAttribute`
 
 Three.js's `SimplifyModifier` (used to build a decimated mid-LOD tier) calls
@@ -465,6 +472,31 @@ FIRST play of any spell created 10–12 pipelines on the main thread — a
 
 Cheap guard for next time: play the effect twice and compare pipeline
 counts — if the second play is zero, it was compile, not the effect.
+
+## Particles: sharing a program is not sharing a draw — batch emitters by look
+
+Found 2026-09-13 on a seven-fire test scene that drew **94 draw calls**. The
+section above made every emitter of a look share one *program*, but each
+emitter was still its own mesh, so each was still its own draw. Worse, each
+was drawn **twice**: three renders a transparent `DoubleSide` material as a
+back-face pass then a front-face pass. Hiding the 33 emitter meshes dropped
+the frame to 28 draws — the particles alone were 66.
+
+Fix (`packages/render/src/particles.ts`): emitters only simulate; a
+`ParticleBatch` per look (texture or procedural sprite, blending, sub-UV grid,
+soft-fade distance, filter) owns ONE `InstancedProps` mesh, and every member
+emitter writes its world-space instances into it back to back each frame.
+Batch materials set `forceSinglePass` (billboards face the camera; the second
+pass drew nothing new). Result: **94 → 31**, particles 66 draws → 3, and a
+new torch adds zero draws. The mesh grows by powers of two as emitters join
+and never shrinks, so a streamed dungeon does not reallocate per torch.
+
+Two things this changes: sorting is per batch, not per emitter (invisible for
+additive layers); and batch meshes live in the scene (or a host, e.g.
+`vfx.root`), not under the entity — code that looked for an emitter's mesh
+under its group must use `ParticleSystem.drawOf(id)`. Measure with
+`renderer.info.render.drawCalls` with the particle meshes hidden and shown in
+one page session.
 
 ## Streaming while flying: bound the concurrency, and never re-bake a SHRINKING HLOD supercell
 

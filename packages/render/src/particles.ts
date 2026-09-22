@@ -49,17 +49,40 @@ export interface ParticlesData {
   opacityEnd: number;
   blending: "normal" | "additive";
   texture?: string;
-  /** Procedural sprite when no texture: soft radial, hard square, or a chunky pixel blob. */
-  sprite?: "soft" | "square" | "pixel";
+  /** Procedural sprite when no texture: soft radial, hard square, a chunky pixel blob, a flame, a splash ring or a rain streak. */
+  sprite?: "soft" | "square" | "pixel" | "flame" | "ring" | "streak" | "noise";
+  /** Magnification of a `texture` sheet: nearest keeps pixel art hard. */
+  filter?: "linear" | "nearest";
+  /** PSX banding: colour/size/opacity in this many hard jumps over life (0 = smooth). */
+  steps?: number;
+  /** PSX grid snap in metres for rendered positions and quad sizes (0 = off). */
+  snap?: number;
+  /** PSX stepping: simulation ticks per second (0 = every frame). */
+  frameRate?: number;
   subUV?: { cols: number; rows: number; mode: "life" | "loop" | "random"; fps: number };
   softFade: number;
   stretch: number;
+  /** What the quad points at — see the schema. Default "camera". */
+  orient?: "camera" | "velocity" | "ground" | "upright";
   sizeCurve?: Array<[number, number]>;
   opacityCurve?: Array<[number, number]>;
   colorGradient?: Array<[number, string]>;
   space: "local" | "world";
   /** Terrain contact — see the schema. */
-  ground?: { mode: "kill" | "settle"; hold: number; fade: number; offset: number; splash?: string } | undefined;
+  ground?: { mode: "kill" | "settle"; hold: number; fade: number; offset: number; splash?: string; splashChance?: number } | undefined;
+}
+
+/** `"ring,drops*3"` → the emitters a landing fires, and how many each gets. */
+function parseSplashList(spec: string | undefined): Array<{ ref: string; count: number }> | undefined {
+  if (!spec) return undefined;
+  const out: Array<{ ref: string; count: number }> = [];
+  for (const part of spec.split(",")) {
+    const [ref, times] = part.split("*");
+    const id = (ref ?? "").trim();
+    if (!id) continue;
+    out.push({ ref: id, count: Math.max(1, Math.min(16, Math.floor(Number(times) || 1))) });
+  }
+  return out.length > 0 ? out : undefined;
 }
 
 /** Sample a [[t, value], …] curve at normalized life `t`. Stops are ordered. */
@@ -95,31 +118,73 @@ export interface ParticleValue {
    */
   colorStart?: string;
   colorEnd?: string;
+  /**
+   * Re-aim and re-speed the emitter live, for newly born particles. This is
+   * WIND: one rain emitter blown by whatever the weather is doing, rather
+   * than an authored emitter per direction. Applies at birth only — drops
+   * already in the air keep the velocity they were launched with, which is
+   * also what real gusts look like.
+   */
+  direction?: [number, number, number];
+  speed?: [number, number];
+  /**
+   * Multiply the whole ramp, live. THE NIGHT KNOB.
+   *
+   * Particles are unlit — a billboard batch draws with a basic material, so a
+   * raindrop is exactly as white at midnight as it is at noon, and a storm at
+   * night comes out as bright white scratches over a black world. Nothing in
+   * the ramp can fix that, because the ramp is the authored colour of the
+   * drop; what changes is how much light is falling on it. A weather script
+   * drives this from the hour.
+   */
+  colorScale?: number;
 }
 
 /** Renderer-side safety net on top of the schema's own cap. */
 const HARD_MAX = 8000;
+/** A batch never grows past this many instances, however many emitters share it. */
+const BATCH_MAX = 1 << 17;
 const MIN_LIFE = 0.01;
 
-// one quad shared by every emitter; PlaneGeometry faces +Z, which the
+// one quad shared by every batch; PlaneGeometry faces +Z, which the
 // camera-quaternion billboard rotates toward the viewer
 let sharedQuad: THREE.PlaneGeometry | null = null;
 
 // procedural soft round sprite (radial falloff) used when no texture asset is
-// given — generated once, shared by all emitters
+// given — generated once, shared by all batches
 let softSprite: THREE.Texture | null = null;
 const spriteVariants = new Map<string, THREE.Texture>();
+
+/**
+ * The `flame` sprite, drawn as pixel art: '#' solid, '+' half alpha. Top row is
+ * the top of the quad, so the tongue points up the screen. Leans a texel to
+ * one side on purpose — a symmetric flame reads as a teardrop icon.
+ */
+const FLAME_SPRITE = [
+  "   +    ",
+  "   ++   ",
+  "  +#+   ",
+  "  +##+  ",
+  " +###+  ",
+  " +####+ ",
+  " +####+ ",
+  "  ++++  ",
+];
 
 /**
  * PSX-flavoured procedural sprites: a hard square with a one-texel fade, or a
  * 6x6 blob with stepped alpha. Nearest-filtered so the blockiness survives
  * scaling — the whole point.
  */
-function variantSpriteTexture(kind: "square" | "pixel"): THREE.Texture | null {
+function variantSpriteTexture(kind: "square" | "pixel" | "flame" | "ring" | "streak" | "noise"): THREE.Texture | null {
   const cached = spriteVariants.get(kind);
   if (cached) return cached;
   if (typeof document === "undefined") return null;
-  const size = kind === "square" ? 8 : 6;
+  // `noise` is the odd one out: every other variant is a few texels meant to
+  // stay hard at any size, but this one is stretched across a five-metre quad,
+  // where 32 texels is a visible chequerboard. It gets real resolution and
+  // smooth filtering below.
+  const size = kind === "pixel" ? 6 : kind === "noise" ? 128 : kind === "ring" || kind === "streak" ? 16 : 8;
   const canvas = document.createElement("canvas");
   canvas.width = size;
   canvas.height = size;
@@ -129,7 +194,47 @@ function variantSpriteTexture(kind: "square" | "pixel"): THREE.Texture | null {
     for (let x = 0; x < size; x++) {
       const i = (y * size + x) * 4;
       let a = 1;
-      if (kind === "square") {
+      if (kind === "flame") {
+        const texel = FLAME_SPRITE[y]![x];
+        a = texel === "#" ? 1 : texel === "+" ? 0.5 : 0;
+      } else if (kind === "ring") {
+        // A hollow annulus: solid at the rim, hollow inside, gone outside.
+        // A splash is a RING expanding on the ground — a filled blob there is
+        // the "puff of smoke at your feet" look, whatever its colour.
+        const dx = x + 0.5 - size / 2;
+        const dy = y + 0.5 - size / 2;
+        const d = Math.hypot(dx, dy) / (size / 2);
+        a = d > 1 ? 0 : d > 0.86 ? 0.55 : d > 0.64 ? 1 : d > 0.5 ? 0.45 : 0;
+      } else if (kind === "noise") {
+        // A TORN puff: value noise at two octaves, faded to nothing at the rim.
+        // A smooth radial blob is why a bank of big quads reads as fog however
+        // it is tinted — there is no structure in it to see moving, so a
+        // hundred of them are one grey shape. This one has edges inside it,
+        // and with a little spin you can watch them turn.
+        const nx = (x + 0.5) / size;
+        const ny = (y + 0.5) / size;
+        // four octaves, because this is seen BIG: two gave a lumpy blob whose
+        // structure was all at one scale, which still reads as a smooth cloud
+        // once it is ten metres across.
+        const detail =
+          valueNoise2D(nx * 3, ny * 3) * 0.5 +
+          valueNoise2D(nx * 6.3 + 3.1, ny * 6.3 + 7.7) * 0.26 +
+          valueNoise2D(nx * 13.7 + 11.2, ny * 13.7 + 2.4) * 0.15 +
+          valueNoise2D(nx * 27.1 + 5.5, ny * 27.1 + 19.3) * 0.09;
+        const dx = x + 0.5 - size / 2;
+        const dy = y + 0.5 - size / 2;
+        const d = Math.hypot(dx, dy) / (size / 2);
+        const rim = d >= 1 ? 0 : Math.min(1, (1 - d) * 2.2);
+        a = Math.max(0, Math.min(1, (detail - 0.32) / 0.5)) * rim * rim;
+      } else if (kind === "streak") {
+        // A vertical line with a soft core and tapered ends: what a falling
+        // drop looks like when it is moving faster than the eye resolves.
+        const nx = Math.abs(x + 0.5 - size / 2) / (size / 2);
+        const ny = Math.abs(y + 0.5 - size / 2) / (size / 2);
+        const core = nx > 0.42 ? 0 : nx > 0.2 ? 0.4 : 1;
+        const taper = ny > 0.95 ? 0 : ny > 0.72 ? 0.45 : 1;
+        a = core * taper;
+      } else if (kind === "square") {
         const edge = x === 0 || y === 0 || x === size - 1 || y === size - 1;
         a = edge ? 0.45 : 1;
       } else {
@@ -147,10 +252,41 @@ function variantSpriteTexture(kind: "square" | "pixel"): THREE.Texture | null {
   ctx.putImageData(img, 0, 0);
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
-  tex.magFilter = THREE.NearestFilter;
-  tex.minFilter = THREE.NearestFilter;
+  if (kind === "noise") {
+    // Smooth and mipmapped: a dust bank is soft matter seen close up, and
+    // nearest-filtering it just shows the texel grid.
+    tex.magFilter = THREE.LinearFilter;
+    tex.minFilter = THREE.LinearMipmapLinearFilter;
+    tex.generateMipmaps = true;
+  } else {
+    tex.magFilter = THREE.NearestFilter;
+    tex.minFilter = THREE.NearestFilter;
+  }
   spriteVariants.set(kind, tex);
   return tex;
+}
+
+/**
+ * Tiny value noise for the procedural sprites — a hash on the lattice with a
+ * smooth interpolation. Baked into a canvas once, so it costs nothing per
+ * frame and needs no texture asset to ship with the engine.
+ */
+export function valueNoise2D(x: number, y: number): number {
+  const hash = (i: number, j: number): number => {
+    const n = Math.sin(i * 127.1 + j * 311.7) * 43758.5453;
+    return n - Math.floor(n);
+  };
+  const xi = Math.floor(x);
+  const yi = Math.floor(y);
+  const xf = x - xi;
+  const yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf);
+  const v = yf * yf * (3 - 2 * yf);
+  const a = hash(xi, yi);
+  const b = hash(xi + 1, yi);
+  const c = hash(xi, yi + 1);
+  const d = hash(xi + 1, yi + 1);
+  return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
 }
 
 function softSpriteTexture(): THREE.Texture | null {
@@ -184,36 +320,54 @@ const tmpDir = new THREE.Vector3();
 const tmpAxis = new THREE.Vector3();
 const worldQuat = new THREE.Quaternion();
 const camQuat = new THREE.Quaternion();
+/** Camera world position — the velocity/upright billboards need the vector TO
+ * the viewer per particle, which a rotation alone cannot give. */
+const camPos = new THREE.Vector3();
+const tmpBasis = new THREE.Matrix4();
+const tmpRight = new THREE.Vector3();
+const tmpUp = new THREE.Vector3();
+const tmpFwd = new THREE.Vector3();
 /** Inverse of the camera rotation — velocity stretch needs it per particle,
  * so it is derived once per frame rather than cloned in the inner loop. */
 const invCamQuat = new THREE.Quaternion();
 const Z_AXIS = new THREE.Vector3(0, 0, 1);
+const X_AXIS = new THREE.Vector3(1, 0, 0);
+const Y_AXIS = new THREE.Vector3(0, 1, 0);
+/** PlaneGeometry's normal is +Z; this lies it flat in the XZ plane, facing up. */
+const FLAT = new THREE.Quaternion().setFromAxisAngle(X_AXIS, -Math.PI / 2);
 
 function randRange(min: number, max: number): number {
   return min + Math.random() * (max - min);
 }
 
 /**
- * One emitter: an InstancedMesh of billboarded quads + a CPU simulation over
- * preallocated typed-array pools (swap-remove keeps the live range dense).
- *
- * The InstancedMesh stays parented to the entity group (so rebuilds discard it
- * with the scene), but its local matrix is pinned each frame to the INVERSE of
- * the group's world matrix — its effective world transform is identity, and
- * instance matrices are written directly in world space. That makes billboards
- * exact regardless of emitter rotation/scale, and makes "world" space trivial:
- * world-space particle positions simply stay put while the emitter moves.
+ * Everything that decides the compiled shader and its textures — emitters
+ * with the same key draw through one batch. The softFade DISTANCE is baked
+ * into the graph as a constant, so it is part of the key, not just its sign.
+ */
+function batchKey(d: ParticlesData): string {
+  const look = d.texture ? `tex:${d.texture}` : `sprite:${d.sprite ?? "soft"}`;
+  const sheet = d.subUV ? `${Math.max(1, d.subUV.cols)}x${Math.max(1, d.subUV.rows)}` : "-";
+  return [d.blending, look, sheet, d.softFade > 0 ? `soft:${d.softFade}` : "-", d.filter ?? "linear"].join("|");
+}
+
+/**
+ * One emitter: a CPU simulation over preallocated typed-array pools
+ * (swap-remove keeps the live range dense). It owns NO GPU object — every
+ * frame its batch asks it to `write` its live particles, as world-space
+ * instance matrices, into the batch's shared buffers.
  */
 class Emitter {
-  readonly mesh: InstancedProps;
-  /** Per-particle tint, an instanced attribute the shader reads as `aColor`. */
-  private readonly colorAttr: THREE.InstancedBufferAttribute;
-  private readonly material: THREE.MeshBasicNodeMaterial;
-  private readonly capacity: number;
+  readonly capacity: number;
+  /** Where this emitter's particles start in its batch, and how many it wrote, this frame. */
+  offset = 0;
+  drawn = 0;
   private alive = 0;
   private spawnDebt = 0;
   private emitting: boolean;
   private runtimeVisible = true;
+  /** Hidden (by the document or at runtime) this frame: no simulation, nothing drawn. */
+  private asleep = false;
   // struct-of-arrays pools, sized once at registration
   private readonly pos: Float32Array;
   private readonly vel: Float32Array;
@@ -225,37 +379,32 @@ class Emitter {
   private readonly phase: Float32Array;
   /** Emitter-local clock driving the turbulence field. */
   private elapsed = 0;
+  /** Frame time not yet spent on a whole `frameRate` tick. */
+  private stepDebt = 0;
   private readonly colorStart = new THREE.Color();
   private readonly colorEnd = new THREE.Color();
   private readonly color = new THREE.Color();
+  /** Live brightness multiplier on the whole ramp — see ParticleValue.colorScale. */
+  private colorScale = 1;
   /** Parsed `colorGradient` stops, or null when the simple two-colour ramp is used. */
   private readonly gradient: Array<[number, THREE.Color]> | null;
-  /**
-   * Per-particle shader data: (opacity, subUV frame, seed, unused).
-   *
-   * This is what buys REAL per-particle alpha. The previous encoding faded
-   * additive particles toward black and SHRANK alpha-blended ones, because a
-   * quad had no way to carry its own opacity — which is why smoke could never
-   * simply thin out. A vec4 instanced attribute read by the node material
-   * fixes that and leaves room for the next two things that need it.
-   */
-  private readonly shaderData: Float32Array;
-  private readonly shaderAttr: THREE.InstancedBufferAttribute;
   /** Per-particle sub-UV frame offset, so identical quads stop looking identical. */
   private readonly seed: Float32Array;
   /** Ground height under each particle at birth (world Y), NaN when unknown. */
   private readonly groundY: Float32Array;
   /** 1 once a `settle` particle has landed: physics stops, the fade clock starts. */
   private readonly landed: Uint8Array;
+  /** 1 once the ground under a particle has been re-checked where it actually fell. */
+  private readonly rechecked: Uint8Array;
   /** The normalized age a landed particle froze at (its size/colour stay there) and the age it landed. */
   private readonly landT: Float32Array;
   private readonly landAge: Float32Array;
   private readonly subFrames: number;
 
   constructor(
-    private readonly group: THREE.Object3D,
+    readonly group: THREE.Object3D,
     private readonly data: ParticlesData,
-    resolveTexture?: (assetId: string) => string | undefined,
+    readonly batch: ParticleBatch,
     /** Height of whatever is below world (x, y, z) — terrain, or a roof when the host asks its physics — or null when nothing is. */
     private readonly groundAt?: (x: number, y: number, z: number) => number | null,
     /** A particle met the ground at this world point (`ground.splash` fires through it). */
@@ -272,12 +421,9 @@ class Emitter {
     this.seed = new Float32Array(this.capacity);
     this.groundY = new Float32Array(this.capacity).fill(NaN);
     this.landed = new Uint8Array(this.capacity);
+    this.rechecked = new Uint8Array(this.capacity);
     this.landT = new Float32Array(this.capacity);
     this.landAge = new Float32Array(this.capacity);
-    this.shaderData = new Float32Array(this.capacity * 4);
-    this.shaderAttr = new THREE.InstancedBufferAttribute(this.shaderData, 4);
-    this.shaderAttr.setUsage(THREE.StreamDrawUsage);
-    this.shaderAttr.name = "particle-shader";
     this.subFrames = data.subUV ? Math.max(1, data.subUV.cols * data.subUV.rows) : 1;
     this.gradient =
       data.colorGradient && data.colorGradient.length > 0
@@ -285,137 +431,30 @@ class Emitter {
         : null;
     this.colorStart.set(data.colorStart);
     this.colorEnd.set(data.colorEnd);
-
-    // MeshBasicNodeMaterial (not ShaderMaterial) so the same emitter renders
-    // on the WebGPU backend and its WebGL fallback.
-    this.material = new THREE.MeshBasicNodeMaterial({
-      transparent: true,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-      blending: data.blending === "additive" ? THREE.AdditiveBlending : THREE.NormalBlending,
-    });
-    const sprite = data.sprite && data.sprite !== "soft" ? variantSpriteTexture(data.sprite) : softSpriteTexture();
-    if (sprite) this.material.map = sprite;
-    const textureUrl = data.texture ? resolveTexture?.(data.texture) : undefined;
-    if (textureUrl) {
-      // swap in async — WebGPU crashes on textures whose image is still null
-      new THREE.TextureLoader().load(
-        textureUrl,
-        (texture) => {
-          texture.colorSpace = THREE.SRGBColorSpace;
-          this.applyTexture(texture);
-        },
-        undefined,
-        (error) => console.warn(`[particles] texture failed to load: ${textureUrl}`, error),
-      );
-    }
-
-    // Per-emitter geometry, not the shared quad: instanced attributes live on
-    // the geometry, so emitters that share one would overwrite each other's
-    // per-particle data.
-    //
-    // An `InstancedProps` (instance matrices as geometry attributes), NOT an
-    // InstancedMesh: three's InstancedMesh path bakes a uniform buffer named
-    // after the node's id (`NodeBuffer_<id>`) and the capacity into the WGSL,
-    // so every emitter — even two with identical settings — compiled its own
-    // shader and pipeline (measured 2026-09-03: +2 pipelines per emitter on
-    // every first cast of a spell, ~30 ms each). With attributes the program
-    // is keyed by material + layout and shared by every emitter of a look.
-    sharedQuad ??= new THREE.PlaneGeometry(1, 1);
-    this.mesh = new InstancedProps(sharedQuad, this.material, this.capacity);
-    this.mesh.geometry.setAttribute("aParticle", this.shaderAttr);
-    this.colorAttr = new THREE.InstancedBufferAttribute(new Float32Array(this.capacity * 3), 3);
-    this.colorAttr.setUsage(THREE.StreamDrawUsage);
-    this.colorAttr.name = "particle-colors";
-    this.mesh.geometry.setAttribute("aColor", this.colorAttr);
-    this.mesh.instanceCount = 0;
-    this.mesh.frustumCulled = false;
-    this.mesh.matrixAutoUpdate = false; // we write mesh.matrix by hand
-    this.mesh.instanceMatrix.setUsage(THREE.StreamDrawUsage);
-    Object.assign(this.mesh.instanceMatrix, { name: "particle-matrices" });
-    this.mesh.raycast = () => {}; // particles are never click-selectable
-    this.buildShader();
-    applyInstancedProps(this.material);
-    group.add(this.mesh);
-  }
-
-  /**
-   * Build the node graph: sub-UV frame selection, real per-particle alpha, and
-   * an optional soft depth fade.
-   *
-   * All three are TSL nodes hung on the MeshBasicNodeMaterial the emitter
-   * already used — no second renderer, no ShaderMaterial, and the WebGL
-   * fallback keeps working. `viewportDepthTexture` is the same scene-depth
-   * read the water surface uses for its shoreline foam, so soft particles need
-   * no renderer changes either.
-   */
-  private buildShader(): void {
-    const d = this.data;
-    // (opacity, frame, seed, unused)
-    const per: N = attribute("aParticle", "vec4");
-
-    // Sub-UV: slide the quad's UVs onto one cell of the sheet. The frame index
-    // is chosen on the CPU (it already walks every particle), so the shader
-    // only has to turn a number into an offset.
-    let sampleUv: N = uv();
-    if (d.subUV) {
-      const cols = Math.max(1, d.subUV.cols);
-      const rows = Math.max(1, d.subUV.rows);
-      const frame = per.y;
-      const col = frame.mod(float(cols)).floor();
-      // v is flipped: texture row 0 is the TOP of the sheet.
-      const row = float(rows - 1).sub(frame.div(float(cols)).floor());
-      sampleUv = uv()
-        .mul(vec2(1 / cols, 1 / rows))
-        .add(vec2(col.mul(1 / cols), row.mul(1 / rows)));
-    }
-
-    // Per-particle colour is an instanced attribute (see the constructor),
-    // read here explicitly — a plain Mesh has no `instanceColor` of its own.
-    const tint: N = attribute("aColor", "vec3");
-    const map = this.material.map;
-    if (map) {
-      const sampled: N = tslTexture(map, sampleUv);
-      // Instance colour still tints; the sheet supplies shape and detail.
-      this.material.colorNode = sampled.rgb.mul(tint);
-      this.material.opacityNode = mul(sampled.a, per.x);
-    } else {
-      this.material.colorNode = tint;
-      this.material.opacityNode = per.x;
-    }
-
-    // Soft particles: fade as the quad approaches whatever is behind it. A
-    // hard intersection line where a particle cuts into the ground is the
-    // single clearest tell that an effect is cheap.
-    if (d.softFade > 0) {
-      const sceneViewZ = perspectiveDepthToViewZ(viewportDepthTexture(), cameraNear, cameraFar);
-      const behind: N = tslMax(sub(positionView.z, sceneViewZ), float(0));
-      const fade: N = saturate(behind.div(float(d.softFade)));
-      this.material.opacityNode = mul((this.material.opacityNode ?? float(1)) as N, fade);
-    }
-    this.material.needsUpdate = true;
-  }
-
-  /** Swap the sheet in once it loads, then rebuild the graph around it. */
-  private applyTexture(texture: THREE.Texture): void {
-    this.material.map = texture;
-    this.buildShader();
   }
 
   setValue(value: ParticleValue): void {
     if (value.restart) {
       this.alive = 0;
       this.spawnDebt = 0;
-      this.mesh.instanceCount = 0;
     }
     if (value.emitting !== undefined) this.emitting = value.emitting;
     if (value.rate !== undefined) this.data.rate = Math.max(0, value.rate);
+    // Wind. Written into the authored tuples in place — this runs every tick
+    // on every weather emitter, so it must not allocate.
+    if (value.direction) {
+      this.data.direction[0] = value.direction[0];
+      this.data.direction[1] = value.direction[1];
+      this.data.direction[2] = value.direction[2];
+    }
+    if (value.speed) {
+      this.data.speed[0] = value.speed[0];
+      this.data.speed[1] = value.speed[1];
+    }
     if (value.colorStart !== undefined) this.colorStart.set(value.colorStart);
     if (value.colorEnd !== undefined) this.colorEnd.set(value.colorEnd);
-    if (value.visible !== undefined) {
-      this.runtimeVisible = value.visible;
-      this.mesh.visible = value.visible;
-    }
+    if (value.colorScale !== undefined) this.colorScale = Math.max(0, value.colorScale);
+    if (value.visible !== undefined) this.runtimeVisible = value.visible;
     if (value.burst && value.burst > 0 && this.runtimeVisible && this.isHierarchyVisible()) {
       this.group.updateWorldMatrix(true, false);
       this.spawn(Math.floor(value.burst));
@@ -429,6 +468,13 @@ class Emitter {
       current = current.parent;
     }
     return true;
+  }
+
+  /** The Scene this emitter's entity lives in, or null while it is detached. */
+  sceneRoot(): THREE.Object3D | null {
+    let current: THREE.Object3D = this.group;
+    while (current.parent) current = current.parent;
+    return (current as THREE.Scene).isScene ? current : null;
   }
 
   /**
@@ -523,6 +569,7 @@ class Emitter {
       this.phase[i] = Math.random() * Math.PI * 2;
       this.seed[i] = Math.random();
       this.landed[i] = 0;
+      this.rechecked[i] = 0;
       this.groundY[i] = this.data.ground && this.groundAt && world ? (this.groundAt(tmpPos.x, tmpPos.y, tmpPos.z) ?? NaN) : NaN;
     }
   }
@@ -556,13 +603,14 @@ class Emitter {
       this.phase[i] = Math.random() * Math.PI * 2;
       this.seed[i] = Math.random();
       this.landed[i] = 0;
+      this.rechecked[i] = 0;
       this.groundY[i] = NaN;
     }
   }
 
   /** Swap-remove particle `i`; the caller re-examines index `i`. */
   private retire(i: number): void {
-    const { pos, vel, age, life, rot, phase, seed, groundY, landed, landT, landAge } = this;
+    const { pos, vel, age, life, rot, phase, seed, groundY, landed, landT, landAge, rechecked } = this;
     const last = --this.alive;
     if (i !== last) {
       pos[i * 3] = pos[last * 3]!;
@@ -578,31 +626,35 @@ class Emitter {
       seed[i] = seed[last]!;
       groundY[i] = groundY[last]!;
       landed[i] = landed[last]!;
+      rechecked[i] = rechecked[last]!;
       landT[i] = landT[last]!;
       landAge[i] = landAge[last]!;
     }
   }
 
-  update(dt: number): void {
+  /** Advance the simulation one frame. Draws nothing — see `write`. */
+  simulate(frameDt: number): void {
     const d = this.data;
     // Authored-hidden and runtime-hidden effects are genuinely asleep: no
-    // births, integration, instance uploads, or invisible steady-state cloud.
-    if (!this.runtimeVisible || !this.isHierarchyVisible()) {
+    // births, integration, instance writes, or invisible steady-state cloud.
+    this.asleep = !this.runtimeVisible || !this.isHierarchyVisible();
+    if (this.asleep) {
       this.alive = 0;
       this.spawnDebt = 0;
-      this.mesh.instanceCount = 0;
       return;
     }
     this.group.updateWorldMatrix(true, false);
+    // simulation time this frame: the whole frame, or whole PSX ticks (often 0)
+    const dt = this.stepped(frameDt);
 
     // integrate + retire (swap-remove keeps [0, alive) dense — no compaction)
-    const { pos, vel, age, life, rot, phase, seed } = this;
+    const { pos, vel, age, life, rot, phase } = this;
     const damp = d.drag > 0 ? Math.max(0, 1 - d.drag * dt) : 1;
     this.elapsed += dt;
     const swirl = d.turbulence > 0 ? d.turbulence * dt : 0;
     const clock = this.elapsed * d.turbulenceSpeed;
     const ground = d.ground;
-    const { groundY, landed, landT, landAge } = this;
+    const { groundY, landed, landT, landAge, rechecked } = this;
     for (let i = 0; i < this.alive; i++) {
       age[i] = age[i]! + dt;
       if (age[i]! >= life[i]!) {
@@ -634,10 +686,46 @@ class Emitter {
       if (d.spin !== 0) rot[i] = rot[i]! + d.spin * dt;
       // terrain contact (world-space emitters only; groundY is NaN otherwise)
       if (ground) {
-        const g = groundY[i]!;
+        let g = groundY[i]!;
+        /**
+         * The ground was sampled straight down from where this particle was
+         * BORN. Wind then carried it: a drop falling for half a second in a
+         * 13 m/s gale lands seven metres downwind, over ground that is not
+         * the height we measured. Uphill it splashes in mid-air, downhill it
+         * splashes underneath the surface — and both were visible in the MMO
+         * scene the moment rain had any lean to it.
+         *
+         * So the first contact is only a TRIGGER: re-sample where the drop
+         * actually is, once, and land on that. Bounded to two queries per
+         * particle, and skipped entirely when there is no sideways motion to
+         * drift with (a dead-calm drizzle re-samples nothing).
+         */
+        if (
+          g === g &&
+          rechecked[i] === 0 &&
+          this.groundAt &&
+          // Two metres EARLY, not at the stale floor itself: by the time a
+          // drop reaches the height we measured it may already be inside a
+          // rise, and correcting then only moves the splash, it cannot un-sink
+          // it. The lead gives the corrected floor room to arrive first.
+          pos[i * 3 + 1]! <= g + ground.offset + 2 &&
+          vel[i * 3]! * vel[i * 3]! + vel[i * 3 + 2]! * vel[i * 3 + 2]! > 0.0625
+        ) {
+          rechecked[i] = 1;
+          const again = this.groundAt(pos[i * 3]!, pos[i * 3 + 1]!, pos[i * 3 + 2]!);
+          if (again !== null) {
+            groundY[i] = again;
+            g = again;
+          }
+        }
         const floor = g + ground.offset;
         if (g === g && pos[i * 3 + 1]! <= floor) {
-          if (ground.splash) this.onLand?.(pos[i * 3]!, floor, pos[i * 3 + 2]!);
+          // Not every drop splashes: a downpour lands a thousand a second and
+          // a ring for each is a sheet of white, which is not what rain looks
+          // like (and is a fill-rate bill besides).
+          if (ground.splash && (ground.splashChance === undefined || ground.splashChance >= 1 || Math.random() < ground.splashChance)) {
+            this.onLand?.(pos[i * 3]!, floor, pos[i * 3 + 2]!);
+          }
           if (ground.mode === "kill") {
             this.retire(i);
             i--;
@@ -664,19 +752,35 @@ class Emitter {
         this.spawn(births);
       }
     }
+  }
 
-    // pin the mesh's world transform to identity: instance matrices below are
-    // WORLD matrices (see class doc)
-    this.mesh.matrix.copy(this.group.matrixWorld).invert();
-
+  /**
+   * Write this emitter's live particles into a batch's buffers starting at
+   * instance `offset`: WORLD-space matrices (the batch mesh sits at the world
+   * origin, so billboards are exact whatever the emitter's own rotation or
+   * scale), colour, and (opacity, frame, seed). Returns the count written.
+   * Runs every frame even when the simulation stepped 0 — billboards must keep
+   * facing a camera that turned.
+   */
+  write(matrices: Float32Array, shader: Float32Array, colors: Float32Array, offset: number): number {
+    this.offset = offset;
+    if (this.asleep) return (this.drawn = 0);
+    const d = this.data;
+    const { pos, vel, age, life, rot, seed, landed, landT, landAge } = this;
+    const ground = d.ground;
     const local = d.space === "local";
-    const colors = this.colorAttr;
-    const colorArray = colors.array as Float32Array;
-    const shader = this.shaderData;
     const stretch = d.stretch;
+    const orient = d.orient ?? "camera";
+    const steps = d.steps ?? 0;
+    const snap = d.snap ?? 0;
+    const scale = this.colorScale;
     for (let i = 0; i < this.alive; i++) {
+      const o = offset + i;
       const rest = landed[i] === 1;
-      const t = rest ? landT[i]! : age[i]! / life[i]!;
+      const lifeT = rest ? landT[i]! : age[i]! / life[i]!;
+      // PSX banding: the look is sampled at the middle of the step the particle
+      // is in, so it jumps between `steps` values and no step is invisible
+      const t = steps > 0 ? Math.min(1, (Math.floor(lifeT * steps) + 0.5) / steps) : lifeT;
 
       // Opacity: a curve when one is authored, otherwise the two-point ramp.
       // `fadeIn` ramps up from nothing over the first slice of life, so a
@@ -693,9 +797,12 @@ class Emitter {
         const since = age[i]! - landAge[i]! - ground.hold;
         if (since > 0) opacity *= ground.fade > 0 ? Math.max(0, 1 - since / ground.fade) : 0;
       }
-      const size = d.sizeCurve
+      const rawSize = d.sizeCurve
         ? sampleCurve(d.sizeCurve, t)
         : d.sizeStart + (d.sizeEnd - d.sizeStart) * t;
+      // snapped to whole grid cells, but never below one: a living particle
+      // must not vanish because it is smaller than the grid
+      const size = snap > 0 && rawSize > 0 ? Math.max(snap, Math.round(rawSize / snap) * snap) : rawSize;
 
       // Colour: a multi-stop gradient when authored, else the two-colour ramp.
       if (this.gradient) {
@@ -714,38 +821,87 @@ class Emitter {
       } else {
         this.color.lerpColors(this.colorStart, this.colorEnd, t);
       }
-      colorArray[i * 3] = this.color.r;
-      colorArray[i * 3 + 1] = this.color.g;
-      colorArray[i * 3 + 2] = this.color.b;
+      colors[o * 3] = this.color.r * scale;
+      colors[o * 3 + 1] = this.color.g * scale;
+      colors[o * 3 + 2] = this.color.b * scale;
 
-      // Opacity now rides its own attribute (see `shaderData`) instead of
-      // being faked by darkening the colour or shrinking the quad, so
-      // alpha-blended smoke can finally just thin out where it stands.
-      shader[i * 4] = opacity;
-      shader[i * 4 + 1] = this.frameAt(t, age[i]!, seed[i]!);
-      shader[i * 4 + 2] = seed[i]!;
+      // Opacity rides its own attribute instead of being faked by darkening the
+      // colour or shrinking the quad, so alpha-blended smoke can just thin out.
+      shader[o * 4] = opacity;
+      shader[o * 4 + 1] = this.frameAt(lifeT, age[i]!, seed[i]!);
+      shader[o * 4 + 2] = seed[i]!;
 
       tmpPos.set(pos[i * 3]!, pos[i * 3 + 1]!, pos[i * 3 + 2]!);
       if (local) tmpPos.applyMatrix4(this.group.matrixWorld); // local sim → world
+      if (snap > 0) {
+        // PSX precision: positions land on a world grid, so a drifting mote
+        // hops cell to cell instead of gliding
+        tmpPos.set(Math.round(tmpPos.x / snap) * snap, Math.round(tmpPos.y / snap) * snap, Math.round(tmpPos.z / snap) * snap);
+      }
 
-      // Orientation: velocity-stretched when asked for, else camera-facing. A
-      // spark that is not stretched along its own motion reads as a dot, and
-      // no amount of texture work fixes that.
-      let stretched = false;
-      if (stretch > 0) {
+      // Orientation. Four cases; the schema's `orient` says why the velocity
+      // one has to exist at all.
+      let oriented = false;
+      if (orient === "ground") {
+        // Flat in the XZ plane, facing up — a ring ON the ground rather than a
+        // billboard standing in it. Here `rot` is a yaw, not a roll.
+        if (rot[i] !== 0) {
+          tmpSpin.setFromAxisAngle(Y_AXIS, rot[i]!);
+          tmpQuat.copy(tmpSpin).multiply(FLAT);
+        } else {
+          tmpQuat.copy(FLAT);
+        }
+        tmpScale.set(size, size, size);
+        oriented = true;
+      } else if (orient === "velocity" || (orient === "camera" && stretch > 0)) {
         tmpDir.set(vel[i * 3]!, vel[i * 3 + 1]!, vel[i * 3 + 2]!);
         const speed = tmpDir.length();
         if (speed > 1e-3) {
-          // Roll the camera-facing quad so its +Y lies along the velocity as
-          // the camera sees it, then lengthen it by distance travelled.
-          tmpAxis.copy(tmpDir).divideScalar(speed).applyQuaternion(invCamQuat);
-          tmpSpin.setFromAxisAngle(Z_AXIS, Math.atan2(tmpAxis.x, tmpAxis.y));
-          tmpQuat.copy(camQuat).multiply(tmpSpin);
+          if (orient === "velocity") {
+            // The quad's long axis IS the world velocity; it spins about that
+            // axis to face the viewer. So a streak points where the drop is
+            // actually going — down, or downwind — and foreshortens honestly
+            // when you look along it. The camera-roll branch beside it can only
+            // lay the streak along the velocity as PROJECTED on screen, which
+            // swings the whole rainfall about as you turn your head and never
+            // shortens: the "tilted lines" look.
+            tmpUp.copy(tmpDir).divideScalar(speed);
+            tmpFwd.copy(camPos).sub(tmpPos);
+            tmpRight.crossVectors(tmpUp, tmpFwd);
+            if (tmpRight.lengthSq() < 1e-10) {
+              // looking straight down the velocity: any perpendicular will do
+              tmpRight.crossVectors(tmpUp, Math.abs(tmpUp.y) > 0.9 ? X_AXIS : Y_AXIS);
+            }
+            tmpRight.normalize();
+            tmpFwd.crossVectors(tmpRight, tmpUp).normalize();
+            tmpBasis.makeBasis(tmpRight, tmpUp, tmpFwd);
+            tmpQuat.setFromRotationMatrix(tmpBasis);
+          } else {
+            // Roll the camera-facing quad so its +Y lies along the velocity as
+            // the camera sees it, then lengthen it by distance travelled.
+            tmpAxis.copy(tmpDir).divideScalar(speed).applyQuaternion(invCamQuat);
+            tmpSpin.setFromAxisAngle(Z_AXIS, Math.atan2(tmpAxis.x, tmpAxis.y));
+            tmpQuat.copy(camQuat).multiply(tmpSpin);
+          }
           tmpScale.set(size, size + speed * stretch, size);
-          stretched = true;
+          oriented = true;
         }
+      } else if (orient === "upright") {
+        // Turns about Y only: a tall quad stays vertical however far up you
+        // look, which is what a bank of dust standing on the ground must do.
+        tmpQuat.setFromAxisAngle(Y_AXIS, Math.atan2(camPos.x - tmpPos.x, camPos.z - tmpPos.z));
+        // ...and it still ROLLS in its own plane. This branch used to drop
+        // `rot` on the floor, so `spin` on an upright emitter did nothing at
+        // all: a dust bank churning at half a radian a second sat there
+        // perfectly still, which is most of why a bank of them read as fog.
+        if (rot[i] !== 0) {
+          tmpSpin.setFromAxisAngle(Z_AXIS, rot[i]!);
+          tmpQuat.multiply(tmpSpin);
+        }
+        tmpScale.set(size, size, size);
+        oriented = true;
       }
-      if (!stretched) {
+      if (!oriented) {
         if (rot[i] !== 0) {
           tmpSpin.setFromAxisAngle(Z_AXIS, rot[i]!);
           tmpQuat.copy(camQuat).multiply(tmpSpin);
@@ -755,12 +911,27 @@ class Emitter {
         tmpScale.set(size, size, size);
       }
       tmpMat.compose(tmpPos, tmpQuat, tmpScale);
-      this.mesh.setMatrixAt(i, tmpMat);
+      tmpMat.toArray(matrices, o * 16);
     }
-    this.mesh.instanceCount = this.alive;
-    this.mesh.instanceMatrix.needsUpdate = true;
-    this.shaderAttr.needsUpdate = true;
-    colors.needsUpdate = true;
+    return (this.drawn = this.alive);
+  }
+
+  /**
+   * Simulation seconds for this frame. With `frameRate` set the simulation
+   * advances only in whole ticks of 1/frameRate — most frames get 0 and the
+   * particles hold still, then jump — which is the PSX motion. Rendering still
+   * runs every frame, so billboards keep facing a camera that turns between
+   * ticks. Capped so a stalled tab does not integrate one enormous step.
+   */
+  private stepped(frameDt: number): number {
+    const rate = this.data.frameRate ?? 0;
+    if (!(rate > 0)) return frameDt;
+    const tick = 1 / rate;
+    this.stepDebt += frameDt;
+    if (this.stepDebt < tick) return 0;
+    const ticks = Math.floor(this.stepDebt / tick);
+    this.stepDebt -= ticks * tick;
+    return Math.min(ticks * tick, 0.25);
   }
 
   /**
@@ -780,11 +951,209 @@ class Emitter {
     if (sub.mode === "loop") return Math.floor(age * sub.fps) % frames;
     return Math.min(frames - 1, Math.floor(t * frames));
   }
+}
+
+/**
+ * Every emitter of one LOOK (see `batchKey`) drawn as ONE instanced mesh.
+ *
+ * Measured 2026-09-13 on a fire test scene of seven fires: 33 emitters cost 66
+ * draw calls — one mesh each, and each drawn twice, because three renders a
+ * transparent double-sided material as a back-face pass then a front-face
+ * pass. Particles are camera-facing quads, so one pass is all they need
+ * (`forceSinglePass`), and emitters that share a shader have no reason to be
+ * separate meshes at all: they write into this batch's buffers back to back
+ * each frame, and a fire layer costs one draw however many torches there are.
+ *
+ * Sorting is per batch, not per emitter — invisible for additive layers, and
+ * the trade for normal-blended smoke is worth a draw per plume.
+ */
+class ParticleBatch {
+  mesh: InstancedProps;
+  private readonly material: THREE.MeshBasicNodeMaterial;
+  private shaderAttr!: THREE.InstancedBufferAttribute;
+  private colorAttr!: THREE.InstancedBufferAttribute;
+  private capacity = 0;
+  readonly emitters = new Set<Emitter>();
+  private disposed = false;
+
+  constructor(
+    private readonly data: ParticlesData,
+    resolveTexture: ((assetId: string) => string | undefined) | undefined,
+    private readonly host: THREE.Object3D | undefined,
+  ) {
+    // MeshBasicNodeMaterial (not ShaderMaterial) so the same batch renders on
+    // the WebGPU backend and its WebGL fallback.
+    this.material = new THREE.MeshBasicNodeMaterial({
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      blending: data.blending === "additive" ? THREE.AdditiveBlending : THREE.NormalBlending,
+    });
+    this.material.forceSinglePass = true;
+    const sprite = data.sprite && data.sprite !== "soft" ? variantSpriteTexture(data.sprite) : softSpriteTexture();
+    if (sprite) this.material.map = sprite;
+    const textureUrl = data.texture ? resolveTexture?.(data.texture) : undefined;
+    if (textureUrl) {
+      // swap in async — WebGPU crashes on textures whose image is still null
+      new THREE.TextureLoader().load(
+        textureUrl,
+        (texture) => {
+          if (this.disposed) {
+            texture.dispose();
+            return;
+          }
+          texture.colorSpace = THREE.SRGBColorSpace;
+          if (data.filter === "nearest") {
+            texture.magFilter = THREE.NearestFilter;
+            texture.minFilter = THREE.NearestFilter;
+            texture.generateMipmaps = false;
+          }
+          this.material.map = texture;
+          this.buildShader();
+        },
+        undefined,
+        (error) => console.warn(`[particles] texture failed to load: ${textureUrl}`, error),
+      );
+    }
+    this.mesh = this.allocate(16);
+    this.buildShader();
+    applyInstancedProps(this.material);
+  }
+
+  /**
+   * A mesh with room for `capacity` particles. An `InstancedProps` (instance
+   * matrices as geometry attributes), NOT an InstancedMesh: three's
+   * InstancedMesh path bakes a uniform buffer named after the node's id and
+   * the capacity into the WGSL, so every mesh compiled its own pipeline
+   * (measured 2026-09-03: +2 pipelines per emitter on every first cast). With
+   * attributes the program is keyed by material + layout, so a batch that
+   * grows into a new mesh compiles nothing.
+   */
+  private allocate(capacity: number): InstancedProps {
+    sharedQuad ??= new THREE.PlaneGeometry(1, 1);
+    const mesh = new InstancedProps(sharedQuad, this.material, capacity);
+    this.shaderAttr = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 4), 4);
+    this.shaderAttr.setUsage(THREE.StreamDrawUsage);
+    this.shaderAttr.name = "particle-shader";
+    mesh.geometry.setAttribute("aParticle", this.shaderAttr);
+    this.colorAttr = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 3), 3);
+    this.colorAttr.setUsage(THREE.StreamDrawUsage);
+    this.colorAttr.name = "particle-colors";
+    mesh.geometry.setAttribute("aColor", this.colorAttr);
+    mesh.instanceCount = 0;
+    mesh.frustumCulled = false;
+    mesh.matrixAutoUpdate = false; // identity: instance matrices are world space
+    mesh.instanceMatrix.setUsage(THREE.StreamDrawUsage);
+    Object.assign(mesh.instanceMatrix, { name: "particle-matrices" });
+    mesh.name = "particles";
+    mesh.raycast = () => {}; // particles are never click-selectable
+    this.capacity = capacity;
+    return mesh;
+  }
+
+  add(emitter: Emitter): void {
+    this.emitters.add(emitter);
+    let need = 0;
+    for (const e of this.emitters) need += e.capacity;
+    if (need <= this.capacity) return;
+    // grow (never shrink — a streamed world's torches come and go) to the next
+    // power of two, so a dungeon's worth of registrations reallocates a few
+    // times rather than once per torch
+    let next = this.capacity;
+    while (next < need && next < BATCH_MAX) next *= 2;
+    const old = this.mesh;
+    this.mesh = this.allocate(Math.min(next, BATCH_MAX));
+    old.parent?.add(this.mesh);
+    old.removeFromParent();
+    old.geometry.dispose();
+  }
+
+  remove(emitter: Emitter): void {
+    this.emitters.delete(emitter);
+  }
+
+  /** Graph: sub-UV frame selection, real per-particle alpha, optional soft depth fade. */
+  private buildShader(): void {
+    const d = this.data;
+    // (opacity, frame, seed, unused)
+    const per: N = attribute("aParticle", "vec4");
+
+    // Sub-UV: slide the quad's UVs onto one cell of the sheet. The frame index
+    // is chosen on the CPU (it already walks every particle), so the shader
+    // only has to turn a number into an offset.
+    let sampleUv: N = uv();
+    if (d.subUV) {
+      const cols = Math.max(1, d.subUV.cols);
+      const rows = Math.max(1, d.subUV.rows);
+      const frame = per.y;
+      const col = frame.mod(float(cols)).floor();
+      // v is flipped: texture row 0 is the TOP of the sheet.
+      const row = float(rows - 1).sub(frame.div(float(cols)).floor());
+      sampleUv = uv()
+        .mul(vec2(1 / cols, 1 / rows))
+        .add(vec2(col.mul(1 / cols), row.mul(1 / rows)));
+    }
+
+    // Per-particle colour is an instanced attribute, read explicitly — a
+    // plain Mesh has no `instanceColor` of its own.
+    const tint: N = attribute("aColor", "vec3");
+    const map = this.material.map;
+    if (map) {
+      const sampled: N = tslTexture(map, sampleUv);
+      // Instance colour still tints; the sheet supplies shape and detail.
+      this.material.colorNode = sampled.rgb.mul(tint);
+      this.material.opacityNode = mul(sampled.a, per.x);
+    } else {
+      this.material.colorNode = tint;
+      this.material.opacityNode = per.x;
+    }
+
+    // Soft particles: fade as the quad approaches whatever is behind it. A
+    // hard intersection line where a particle cuts into the ground is the
+    // single clearest tell that an effect is cheap.
+    if (d.softFade > 0) {
+      const sceneViewZ = perspectiveDepthToViewZ(viewportDepthTexture(), cameraNear, cameraFar);
+      const behind: N = tslMax(sub(positionView.z, sceneViewZ), float(0));
+      const fade: N = saturate(behind.div(float(d.softFade)));
+      this.material.opacityNode = mul((this.material.opacityNode ?? float(1)) as N, fade);
+    }
+    this.material.needsUpdate = true;
+  }
+
+  /** Collect every member's particles into the shared buffers and upload once. */
+  flush(): void {
+    const mesh = this.mesh;
+    const matrices = mesh.instanceMatrix.array as Float32Array;
+    const shader = this.shaderAttr.array as Float32Array;
+    const colors = this.colorAttr.array as Float32Array;
+    let count = 0;
+    let root: THREE.Object3D | null = null;
+    for (const emitter of this.emitters) {
+      count += emitter.write(matrices, shader, colors, count);
+      root ??= emitter.sceneRoot();
+    }
+    mesh.instanceCount = count;
+    // The batch lives in the scene its emitters do (or under the host's own
+    // root — the VFX system keeps its batches beside its other modules).
+    const parent = this.host ?? root;
+    if (parent && mesh.parent !== parent) parent.add(mesh);
+    if (count === 0) return;
+    mesh.instanceMatrix.clearUpdateRanges();
+    mesh.instanceMatrix.addUpdateRange(0, count * 16);
+    mesh.instanceMatrix.needsUpdate = true;
+    this.shaderAttr.clearUpdateRanges();
+    this.shaderAttr.addUpdateRange(0, count * 4);
+    this.shaderAttr.needsUpdate = true;
+    this.colorAttr.clearUpdateRanges();
+    this.colorAttr.addUpdateRange(0, count * 3);
+    this.colorAttr.needsUpdate = true;
+  }
 
   dispose(): void {
+    this.disposed = true;
     this.mesh.removeFromParent();
-    this.mesh.geometry.dispose(); // per-emitter instanced geometry (its own instance buffers), see the constructor
-    this.material.dispose(); // per-emitter (blending differs); sprite is shared
+    this.mesh.geometry.dispose(); // the batch's own instance buffers
+    this.material.dispose(); // per batch; procedural sprites are shared
   }
 }
 
@@ -806,10 +1175,17 @@ export interface ParticleSystemOptions {
   groundAt?: (x: number, y: number, z: number) => number | null;
   /** Resolve an entity TAG to an entity id, for `ground.splash` references by tag. */
   entityByTag?: (tag: string) => string | undefined;
+  /**
+   * Parent for the batch meshes. Default: the Scene the emitters live in. The
+   * VFX system passes its own root so its batches travel (and precompile) with
+   * its other modules.
+   */
+  host?: THREE.Object3D;
 }
 
 export class ParticleSystem {
   private readonly emitters = new Map<string, Emitter>();
+  private readonly batches = new Map<string, ParticleBatch>();
   constructor(private readonly options: ParticleSystemOptions = {}) {}
 
   register(
@@ -818,29 +1194,51 @@ export class ParticleSystem {
     data: ParticlesData,
     resolveTexture?: (assetId: string) => string | undefined,
   ): void {
-    this.emitters.get(entityId)?.dispose();
-    const splash = data.ground?.splash;
-    const onLand = splash
+    this.unregister(entityId);
+    const key = batchKey(data);
+    let batch = this.batches.get(key);
+    if (!batch) {
+      batch = new ParticleBatch(data, resolveTexture, this.options.host);
+      this.batches.set(key, batch);
+    }
+    // A splash is usually two effects at once — a ring spreading on the
+    // ground and a few drops thrown back up — and one emitter cannot be both,
+    // so `ground.splash` is a list.
+    const splashes = parseSplashList(data.ground?.splash);
+    const onLand = splashes
       ? (x: number, y: number, z: number) => {
-          const target = this.emitters.get(splash) ?? this.emitters.get(this.options.entityByTag?.(splash) ?? "");
-          target?.spawnAt(x, y, z, 1);
+          for (const { ref, count } of splashes) {
+            const target = this.emitters.get(ref) ?? this.emitters.get(this.options.entityByTag?.(ref) ?? "");
+            target?.spawnAt(x, y, z, count);
+          }
         }
       : undefined;
-    this.emitters.set(entityId, new Emitter(group, data, resolveTexture, this.options.groundAt, onLand));
+    const emitter = new Emitter(group, data, batch, this.options.groundAt, onLand);
+    batch.add(emitter);
+    this.emitters.set(entityId, emitter);
   }
 
-  /** Tick every emitter. `camera` = the camera this frame renders with. */
+  /** Tick every emitter, then upload each batch once. `camera` = the camera this frame renders with. */
   update(dt: number, camera: THREE.Camera): void {
     if (this.emitters.size === 0) return;
     camera.getWorldQuaternion(camQuat);
+    camera.getWorldPosition(camPos);
     invCamQuat.copy(camQuat).invert();
-    for (const emitter of this.emitters.values()) emitter.update(dt);
+    for (const emitter of this.emitters.values()) emitter.simulate(dt);
+    for (const batch of this.batches.values()) batch.flush();
   }
 
-  /** Dispose one entity's emitter (its visuals were rebuilt or removed). */
+  /** Drop one entity's emitter (its visuals were rebuilt or removed); an emptied batch goes with it. */
   unregister(entityId: string): void {
-    this.emitters.get(entityId)?.dispose();
+    const emitter = this.emitters.get(entityId);
+    if (!emitter) return;
     this.emitters.delete(entityId);
+    const batch = emitter.batch;
+    batch.remove(emitter);
+    if (batch.emitters.size === 0) {
+      batch.dispose();
+      for (const [key, b] of this.batches) if (b === batch) this.batches.delete(key);
+    }
   }
 
   /** Runtime-only control; the authoring document remains untouched. */
@@ -848,8 +1246,22 @@ export class ParticleSystem {
     this.emitters.get(entityId)?.setValue(value);
   }
 
+  /** The mesh an emitter draws through and its slot range as of the last update — probes and tests. */
+  drawOf(entityId: string): { mesh: InstancedProps; offset: number; count: number } | undefined {
+    const emitter = this.emitters.get(entityId);
+    return emitter ? { mesh: emitter.batch.mesh, offset: emitter.offset, count: emitter.drawn } : undefined;
+  }
+
+  /** Emitters, batches (= draw calls), and particles drawn as of the last update. */
+  stats(): { emitters: number; batches: number; particles: number } {
+    let particles = 0;
+    for (const batch of this.batches.values()) particles += batch.mesh.instanceCount;
+    return { emitters: this.emitters.size, batches: this.batches.size, particles };
+  }
+
   clear(): void {
-    for (const emitter of this.emitters.values()) emitter.dispose();
+    for (const batch of this.batches.values()) batch.dispose();
+    this.batches.clear();
     this.emitters.clear();
   }
 }

@@ -1,8 +1,9 @@
 import * as THREE from "three/webgpu";
+import { foliageWindScale } from "./foliage-wind.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type N = any;
-import {
+import { sqrt,
   attribute,
   texture as tslTexture,
   uv,
@@ -430,7 +431,16 @@ class GrassPatch {
     const bend = positionGeometry.y.div(float(Math.max(0.001, data.bladeHeight)));
     const bendEased = mul(bend, bend);
     const phase = mul(perInstance.x, float(Math.PI * 2));
-    const sway = mul(sin(add(mul(time, float(data.windSpeed)), phase)), float(data.windStrength));
+    // The SAME global scale the tree/leaf materials use (foliage-wind.ts), so
+    // one `weather.wind` drives the whole scene: without it a storm thrashed
+    // the canopy while the grass underneath swayed at its authored strength.
+    // AMPLITUDE, not rate. Scaling the clock as well made a storm look like
+    // the grass was vibrating — three times the speed reads as a bug, not as
+    // weather, and the leaf materials (foliage-wind.ts) have always scaled
+    // only the amount. A little more rate is right, so it goes in under a
+    // square root: 3x the wind is ~1.7x the rate and 3x the bend.
+    const rate = mul(float(data.windSpeed), sqrt(foliageWindScale));
+    const sway = mul(sin(add(mul(time, rate), phase)), mul(float(data.windStrength), foliageWindScale));
     this.material.positionNode = add(
       positionLocal,
       vec3(mul(sway, bendEased), 0, mul(mul(sway, bendEased), float(0.3))),
