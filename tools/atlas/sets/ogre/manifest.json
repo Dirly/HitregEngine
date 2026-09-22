@@ -1,0 +1,95 @@
+{
+  "size": 256,
+  "bleed": 3,
+  "bgLum": 236,
+  "keyColor": "#00ffff",
+  "groundFringe": 1,
+  "fitSearch": 1.6,
+  "slots": {
+    "#ff0000": {
+      "name": "head",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#ff7d00": {
+      "name": "chest-front",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#b35300": {
+      "name": "chest-back",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#3cff00": {
+      "name": "legs-front",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#0f3e00": {
+      "name": "legs-back",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#1f00ff": {
+      "name": "arm-top",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#00a2ff": {
+      "name": "arm-bottom",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "arm-top"
+    },
+    "#a900ff": {
+      "name": "hand-top",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "arm-top"
+    },
+    "#ff8b8b": {
+      "name": "hand-palm",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "arm-top"
+    },
+    "#00c08b": {
+      "name": "foot",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "legs-front"
+    },
+    "#ffee00": {
+      "name": "arm-front",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "arm-top"
+    },
+    "#00786b": {
+      "name": "hand-side",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "arm-top"
+    },
+    "#ff2e93": {
+      "name": "hand-inner",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "arm-top"
+    }
+  }
+}

@@ -189,6 +189,12 @@ export const CLIP_PRESETS = {
     Turn_R: "Armature|Turn90_R",
     Crouch_Idle: "Armature|Crouch_Idle_Loop",
     Crouch_Fwd: "Armature|Crouch_Fwd_Loop",
+    // Swimming: the two names the controller's `swimClip` / `swimIdleClip`
+    // default to, so a character baked with this preset swims without being
+    // told how. Without them the stroke falls back to the run cycle tipped
+    // onto its face, which reads as a crawl but is plainly a stand-in.
+    Swim: "Armature|Swim_Fwd_Loop",
+    Tread_Water: "Armature|Swim_Idle_Loop",
   },
 
   /**
@@ -227,5 +233,76 @@ export const CLIP_PRESETS = {
     Hit_Stomach: "Armature|Hit_Stomach",
     Death: "Armature|Death01",
     Death_Alt: "Armature|Death02",
+  },
+
+  /**
+   * Universal Animation Library **2** — an expansion on the same rig, not a
+   * replacement, so it is baked alongside UAL1 rather than instead of it:
+   *
+   *   retarget --anim UAL1.fbx --anim UAL2.fbx --clips locomotion+combat+ual2
+   *
+   * The sword set is the interesting half. UAL1 has one swing; this has a
+   * three-hit combo with recoveries, a heavy finisher, a block and a dash —
+   * i.e. the vocabulary the defensive layer (guard / parry / dodge) already
+   * resolves against, which until now had no poses of its own.
+   */
+  ual2: {
+    // sword: a chain with recoveries, so a combo can be interrupted on the
+    // recovery rather than only between swings
+    Sword_A: "Armature|Sword_Regular_A",
+    Sword_A_Rec: "Armature|Sword_Regular_A_Rec",
+    Sword_B: "Armature|Sword_Regular_B",
+    Sword_B_Rec: "Armature|Sword_Regular_B_Rec",
+    Sword_C: "Armature|Sword_Regular_C",
+    Sword_Combo: "Armature|Sword_Regular_Combo",
+    Sword_Heavy: "Armature|Sword_Heavy_Combo",
+    Sword_Block: "Armature|Sword_Block",
+    Sword_Dash: "Armature|Sword_Dash",
+    // shield
+    Shield_Idle: "Armature|Idle_Shield_Loop",
+    Shield_Break: "Armature|Idle_Shield_Break",
+    Shield_Dash: "Armature|Shield_Dash",
+    Shield_Bash: "Armature|Shield_OneShot",
+    // taking a hit hard enough to move you
+    Hit_Knockback: "Armature|Hit_Knockback",
+    // movement the engine has no clips for yet
+    Slide_Start: "Armature|Slide_Start",
+    Slide_Loop: "Armature|Slide_Loop",
+    Slide_Exit: "Armature|Slide_Exit",
+    Climb_1m: "Armature|ClimbUp_1m",
+    Leap_Start: "Armature|NinjaJump_Start",
+    Leap_Loop: "Armature|NinjaJump_Idle_Loop",
+    Leap_Land: "Armature|NinjaJump_Land",
+    Walk_Carry: "Armature|Walk_Carry_Loop",
+    Stand_Up: "Armature|LayToIdle",
+    // interactions a world needs before it needs another attack
+    Chest_Open: "Armature|Chest_Open",
+    Consume: "Armature|Consume",
+    Harvest: "Armature|Farm_Harvest",
+    Plant: "Armature|Farm_PlantSeed",
+    Water: "Armature|Farm_Watering",
+    Chop: "Armature|TreeChopping_Loop",
+    Throw: "Armature|OverhandThrow",
+    Punch_Hook: "Armature|Melee_Hook",
+    Punch_Hook_Rec: "Armature|Melee_Hook_Rec",
+    // idles that say something
+    Idle_FoldArms: "Armature|Idle_FoldArms_Loop",
+    Idle_Lantern: "Armature|Idle_Lantern_Loop",
+    Idle_Lean: "Armature|Idle_Rail_Loop",
+    Idle_Lean_Call: "Armature|Idle_Rail_Call",
+    Emote_Yes: "Armature|Yes",
+    Emote_No: "Armature|Idle_No_Loop",
+  },
+
+  /**
+   * The zombie set from UAL2, as a MOB vocabulary: baked onto an undead
+   * humanoid it is a complete shambler, and it deliberately reuses the
+   * locomotion names (`Idle`, `Walk`) so a mob brain needs no special casing.
+   */
+  undead: {
+    Idle: "Armature|Zombie_Idle_Loop",
+    Walk: "Armature|Zombie_Walk_Fwd_Loop",
+    Run: "Armature|Zombie_Walk_Fwd_Loop",
+    Attack1: "Armature|Zombie_Scratch",
   },
 };

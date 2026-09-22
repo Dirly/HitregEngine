@@ -2,7 +2,9 @@
 /**
  * Look at the swords an atlas run made.
  *
- *   pnpm -F playground atlas-view --recipe longsword --atlas tools/atlas/out-bone/atlas.png
+ *   pnpm -F playground atlas-view --recipe longsword --atlas tools/atlas/out/longsword/bone/atlas.png
+ *   pnpm -F playground atlas-view --recipe ogre --height 3 --atlas tools/atlas/out/ogre/moss/atlas.png
+ *   pnpm -F playground atlas-view --recipe ogre --height 3 --atlas-dir tools/atlas/out/ogre
  *   pnpm -F playground atlas-view --model <file.glb> --atlas a.png b.png c.png
  *
  * A shell glob over the atlas output folders works too and is the usual way in.
@@ -16,6 +18,10 @@
  * assembled into a weapon. Families come from the node names with their
  * trailing number removed, which is the naming the model already uses;
  * `--variant 2` takes the second of each instead of the first.
+ *
+ * `--project <name>` writes the scene, models, textures and materials into
+ * projects/<name>/assets/ so the carousel sits in that project's scene menu.
+ * Without it they go to the flat assets/ tree, which is for throwaway checks.
  *
  * Nothing here is sword-specific. It reads the model's node names and its
  * materials, and works on anything unwrap-weapon has been through.
@@ -63,6 +69,10 @@ const list = (v) => (v === undefined || v === true ? [] : [].concat(v));
 
 const RECIPE_DEFAULTS = {
   longsword: { model: "MMO/3d/Weapons/LongSword-unwrapped.glb" },
+  // A creature has no families — every part of the ogre is the only one of its
+  // kind — so the build is simply all ten shells, and `--variant` does nothing.
+  // Give it `--height 3` unless you want it standing at a sword's 2.4 m.
+  ogre: { model: "MMO/3d/Mobs/Ogre-unwrapped.glb" },
 };
 const recipe = args.recipe && RECIPE_DEFAULTS[String(args.recipe)];
 if (!args.model && !recipe) {
@@ -81,7 +91,12 @@ if (!fs.existsSync(modelPath)) {
     ? "atlas-carousel"
     : path.basename(modelPath).replace(/\.(glb|gltf)$/i, "").toLowerCase();
   const name = String(args.name && args.name !== true ? args.name : defaultName);
-const assets = path.join(PLAYGROUND, "assets");
+const project = args.project && args.project !== true ? String(args.project) : null;
+if (project && !fs.existsSync(path.join(PLAYGROUND, "projects", project))) {
+  console.error(`! no project folder at projects/${project}`);
+  process.exit(1);
+}
+const assets = project ? path.join(PLAYGROUND, "projects", project, "assets") : path.join(PLAYGROUND, "assets");
 const modelId = `${name}.glb`;
 
 // ---------------------------------------------------------------------------
@@ -97,7 +112,7 @@ const addSheet = (file) => {
   const abs = path.resolve(String(file));
   if (seenSheets.has(abs) || !fs.existsSync(abs)) return;
   seenSheets.add(abs);
-  const dir = path.basename(path.dirname(abs)).replace(/^out-/, "");
+  const dir = path.basename(path.dirname(abs));
   const stem = path.basename(abs).replace(/\.png$/i, "");
   const label = (stem === "atlas" ? dir : stem).replace(/[^a-z0-9_-]+/gi, "-").toLowerCase();
   sheets.push({ abs, label });
@@ -111,14 +126,25 @@ if (args["atlas-dir"] && args["atlas-dir"] !== true) {
   if (!fs.existsSync(atlasDir)) {
     console.warn(`! atlas directory not found: ${atlasDir}`);
   } else {
-    // An atlas RUN writes `out-<name>/atlas.png`. The folder also holds raw art
-    // sheets, keys and check renders — none of them atlases, and none of them
-    // even the same size. Prefer the runs; fall back to loose PNGs only when
-    // there are no runs at all.
-    const runs = fs
-      .readdirSync(atlasDir)
-      .filter((d) => d.startsWith("out-") && fs.existsSync(path.join(atlasDir, d, "atlas.png")))
-      .sort();
+    // An atlas RUN writes `out/<set>/<theme>/atlas.png`. Point this at
+    // tools/atlas and it finds every theme of every set; point it at
+    // tools/atlas/out/ogre and it finds that mob's. The folder also holds keys,
+    // manifests and raw art sheets — none of them atlases, and none of them even
+    // the same size — so only real runs count, and loose PNGs are the fallback
+    // for a hand-made sheet in a scratch folder.
+    const runs = [];
+    const walk = (dir, depth) => {
+      if (fs.existsSync(path.join(dir, "atlas.png"))) {
+        runs.push(path.relative(atlasDir, dir));
+        return;
+      }
+      if (depth > 3) return;
+      for (const e of fs.readdirSync(dir, { withFileTypes: true }))
+        if (e.isDirectory() && e.name !== "slices" && e.name !== "sets" && e.name !== "art")
+          walk(path.join(dir, e.name), depth + 1);
+    };
+    walk(atlasDir, 0);
+    runs.sort();
     if (runs.length) for (const d of runs) addSheet(path.join(atlasDir, d, "atlas.png"));
     else
       for (const file of fs.readdirSync(atlasDir).filter((f) => /\.png$/i.test(f)).sort())
@@ -381,11 +407,17 @@ for (const b of builds) console.log(`  ${b.label}: ${b.names.join(" + ")}`);
 // ---------------------------------------------------------------------------
 
 const step = Math.max(wholeSize.x * unit * 5, 0.45);
-const bay = Number(args.spacing ?? Math.max(TARGET * 0.85, 1.6) + step * (builds.length - 1));
-const rackW = Math.max(bay * sheets.length, 3);
-// Each sheet hangs behind its OWN weapon with air either side, so it reads as
-// that weapon's sheet rather than one long wall of texture.
-const panel = Math.min(TARGET * 0.55, bay * 0.62);
+// Every weapon stands at once, in a GRID: variants across X, themes back
+// along Z. It used to be a flip-book with one theme visible at a time, which
+// could never have worked — an entity drawn `instanced` is parented to the
+// SCENE, not to its own group (scene-builder: `anchor: scene ?? group`), so
+// neither `visibility` nor a parent transform reaches it. Sixteen themes all
+// rendered, stacked in the same four spots, which reads as one sword wearing
+// every texture at once. A grid is also the better demo: 64 different weapons
+// on screen together is the claim the ubermesh is making.
+const rowGap = Number(args.spacing ?? step * 1.35);
+const rackW = Math.max(step * builds.length, 3);
+const rackD = Math.max(rowGap * sheets.length, 3);
 
 const entities = {};
 const ent = (id, body) => {
@@ -430,28 +462,13 @@ ent("floor", {
 for (const [i, s] of sheets.entries()) {
   const x = 0;
 
-  // A thin BOX, not a `plane`: the renderer lays a plane primitive flat, and
-  // `size` wants all THREE numbers on every shape — two throws during scene
-  // expansion and takes the whole build with it.
-  if (false) ent(`panel-${s.label}`, {
-    name: `${s.label} sheet`,
-    components: {
-      transform: { position: [x, panel / 2, -Math.max(TARGET * 0.5, 0.9)] },
-      mesh: {
-        source: { kind: "primitive", shape: "box", size: [panel, panel, 0.02] },
-        material: s.panel,
-      },
-    },
-  });
-
+  // A grouping row, and nothing more. No `visibility`, no `script` — see the
+  // note on `rowGap`: an instanced child ignores both.
+  const rz = (i - (sheets.length - 1) / 2) * rowGap;
   ent(`stand-${s.label}`, {
     name: s.label,
     tags: ["atlas-carousel-item"],
-    components: {
-      visibility: { visible: i === 0 },
-      transform: { position: [x, 0, 0] },
-      script: { name: "spinner", params: { speed: 0.5 } },
-    },
+    components: { transform: { position: [x, 0, rz] } },
   });
   // ONE entity, the whole ubermesh, wearing this sheet's tile of the packed
   // atlas and showing only the parts this weapon is made of. Both of those are
@@ -467,7 +484,7 @@ for (const [i, s] of sheets.entries()) {
       parent: `stand-${s.label}`,
       components: {
         transform: {
-          position: [bx - (whole.min.x + wholeSize.x / 2) * unit, -whole.min.y * unit, 0],
+          position: [bx - (whole.min.x + wholeSize.x / 2) * unit, -whole.min.y * unit, rz],
           scale: [unit, unit, unit],
         },
         mesh: {
@@ -487,26 +504,21 @@ for (const [i, s] of sheets.entries()) {
   }
 }
 
-ent("atlas-carousel", {
-  name: "Atlas Carousel",
-  components: { script: { name: "atlas-carousel" } },
-});
-
-// Only one weapon is visible at a time, so frame the active sword rather than
-// fitting the entire atlas row into view. The sheets remain available behind
-// the selected sword without making the weapon tiny on screen.
+// Frame the whole rack: every weapon is up at once, so the shot that matters
+// is the one where you can see two themes differ and two variants differ in
+// the same glance.
 {
-  // Framed on ONE page: the carousel shows a page at a time, so what has to
-  // fit is the row of variants on it, not the whole rack.
-  const page = step * builds.length + TARGET * 0.6;
-  const eye = [0, TARGET * 0.62, Math.max(page * 1.25, TARGET * 1.65)];
-  const at = [0, TARGET * 0.45, 0];
+  const spanX = step * builds.length + TARGET * 0.6;
+  const spanZ = rowGap * sheets.length;
+  const dist = Math.max(spanX, spanZ) * 0.95 + TARGET * 1.2;
+  const eye = [0, dist * 0.62, spanZ / 2 + dist * 0.75];
+  const at = [0, TARGET * 0.4, 0];
   const pitch = Math.atan2(at[1] - eye[1], eye[2] - at[2]);
   ent("camera", {
     name: "Camera",
     components: {
       transform: { position: eye, rotation: [Math.sin(pitch / 2), 0, 0, Math.cos(pitch / 2)] },
-      camera: { active: true, fov: 38, near: 0.01, far: 400 },
+      camera: { active: true, fov: 42, near: 0.01, far: 400 },
     },
   });
 }

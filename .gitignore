@@ -47,6 +47,14 @@ tools/*
 !tools/atlas/
 !tools/wfc-3d/
 !tools/texture-intake/
+!tools/mesh-dc/
+
+# the 1254 generator sheets an atlas is registered FROM. ~1.7 MB each, and
+# disposable once the atlas exists — the atlas is what ships, and a sheet is
+# only ever painted against one key, so a key that changes needs new art rather
+# than this art again. `node tools/atlas/tidy.mjs --art` clears the registered
+# ones. Kept on disk, out of the repo.
+tools/atlas/art/
 
 # generated tool output — every registered tool under tools/ writes its runs
 # into out/ or out-<variant>/. Regenerate by re-running the tool; the inputs

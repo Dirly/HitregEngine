@@ -240,6 +240,7 @@ export function planBarriers(regions: readonly RegionDoc[], paths: ReadonlyArray
     const id = `pass-${a}-${b}-${n}`;
     passes.push({ a, b, pass: p, id });
     return {
+      zone: "",
       id,
       kind: "waystation",
       position: [Math.round(p.x * 10) / 10, Math.round(opts.field.height(p.x, p.z) * 10) / 10, Math.round(p.z * 10) / 10],

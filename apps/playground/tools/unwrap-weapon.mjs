@@ -234,6 +234,192 @@ const RECIPES = {
       ["Blade4", "CrossGuard4", "CrossFlavor1", "Pummel1", "Handle", "Ornate", "OrnateBottom"],
     ],
   },
+  // A CREATURE, not a modular weapon — the same machinery, one difference worth
+  // stating once: there are no families and no alternatives here. The ogre's ten
+  // meshes are the ten shells of ONE body, so every part is always drawn and the
+  // sheet's job is not to tell four crossguards apart but to give each shell of
+  // one animal its own stretch of skin. Nothing cuts; an ogre is solid.
+  //
+  // The body is modelled in halves that already face the way they want to be
+  // unwrapped: ChestFront/LegsFront face +X (58%/54% of their area, with 1%/3%
+  // facing back), ChestBack/LegsBack face -X (71%/57%, with nothing facing
+  // forward). Those four are therefore pure planar shells — projected along X
+  // there is no front-onto-back fold to worry about, because each shell IS one
+  // face of the body.
+  //
+  // The head, the arm and the hands are whole pieces instead, and for a head the
+  // fold direction matters: looked at along X, the face would be painted onto the
+  // back of the skull. They are looked at along Z, so the island is a PROFILE and
+  // the mirror puts the left cheek's paint on the right cheek, which is what a
+  // bilaterally symmetric animal wants. The foot is looked at down Y, so the
+  // island is a footprint and the sole — never seen — shares the top's texels.
+  //
+  // Arm, hand and foot exist ONCE in the file (left arm, right foot); the other
+  // side is the same mesh mirrored, so it wears the same paint by construction.
+  ogre: {
+    // Straight off the FBX: this model is not round-tripped through Blockbench,
+    // so there is no OBJ and no 1/100 to undo. The ogre stands 302 units tall
+    // here; `retarget.mjs --height` is what puts a character on a metre ruler.
+    source: "MMO/3d/Mobs/Ogre.fbx",
+    sourceScale: 1,
+    outMesh: "MMO/3d/Mobs/Ogre-unwrapped",
+    sheet: 1254,
+    // 48 sheet px is 9.8 texels at 256, which clears the 2x bleed the importer
+    // asks for with room to spare. The sword's 60 was read against a 128 atlas;
+    // read against this one it would cost density for nothing.
+    gutter: 48,
+    // Every island drawn 8px larger than its geometry, in its own colour, so a
+    // generator that draws a piece slightly small still fills it. See STROKE.
+    keyStroke: 8,
+    // A body is not a set of facets. 48 degrees keeps the jaw line, the top of
+    // the foot and the knuckles as edges and smooths everything else.
+    smooth: 48,
+    margin: 22,
+    atlas: {
+      // 256, twice the sword's, because this is a three-metre animal you fight
+      // at arm's length rather than a prop in the corner of the screen. At the
+      // layout below that is about 0.65 texels per model unit — the chest shell
+      // lands ~90 texels tall, which is the PS1-era density this game is drawn
+      // at. `--size 512` re-cuts it denser without touching anything else.
+      size: 256,
+      // 60 sheet px is 12 texels at 256, so 4 of bleed fits inside it twice
+      // over, which is what the importer asks for.
+      // 3, not 4: the 8px keyStroke grows every island toward its neighbour, so
+      // the 48px gutter is 32px of clear space by the time the importer sees it
+      // — 6.5 texels at 256, which covers a bleed of 3 on both sides and not 4.
+      // Widening the gutter instead would re-cut the layout and strand every
+      // sheet already painted against this key.
+      bleed: 3,
+      // Nothing on this sheet cuts, so the ground bar can sit higher than the
+      // sword's 228: no region needs pure white for anything. 236 leaves bone
+      // and tusk ivory (~218) safe while still finding a white background, and
+      // an off-white one down to 236.
+      bgLum: 236,
+    },
+    // ONE SLOT PER PART, ten of them. Colours are LABELS — white is the ground
+    // and cyan #00ffff is the cut colour, so neither may be a slot.
+    //
+    // `matchTo` names the piece each small part MEETS on the body. A generator
+    // paints every block to look right on its own, so a hand comes back paler
+    // than the arm it is attached to (measured: 18% and 26% on two sheets) and
+    // reads on the model as a glove. The importer gains the whole island to the
+    // named island's mean luminance — level only, hue untouched, because a palm
+    // IS pinker than a forearm and that is not the error.
+    slots: {
+      // No sizeScale. The head had 1.3 — a third more texels per unit than the
+      // rest of the ogre — on the theory that the face is what a player looks
+      // at. It reads as a different material: a crisp face on a soft body, which
+      // is worse than either alone. One density for the whole animal.
+      head: { color: "#ff0000", fit: "contain" },
+      "chest-front": { color: "#ff7d00", fit: "contain" },
+      "chest-back": { color: "#b35300", fit: "contain" },
+      "legs-front": { color: "#3cff00", fit: "contain" },
+      "legs-back": { color: "#0f3e00", fit: "contain" },
+      "arm-top": { color: "#1f00ff", fit: "contain" },
+      "arm-bottom": { color: "#00a2ff", fit: "contain", matchTo: "arm-top" },
+      "hand-top": { color: "#a900ff", fit: "contain", matchTo: "arm-top" },
+      "hand-palm": { color: "#ff8b8b", fit: "contain", matchTo: "arm-top" },
+      foot: { color: "#00c08b", fit: "contain", matchTo: "legs-front" },
+      // The three faces a single flat view cannot reach — see `split` below.
+      "arm-front": { color: "#ffee00", fit: "contain", matchTo: "arm-top" },
+      "hand-side": { color: "#00786b", fit: "contain", matchTo: "arm-top" },
+      "hand-inner": { color: "#ff2e93", fit: "contain", matchTo: "arm-top" },
+    },
+    parts: {
+      // The four body shells: looked at along X, so the island is the body seen
+      // squarely from the front or the back. No rim — a shell's own sides are
+      // continuous with it and belong at the edge of its island, compressed,
+      // rather than in a separate bar a generator would paint as a different
+      // thing.
+      Ogre_ChestFront: { slot: "chest-front", method: "plane", u: "+z", v: "-y", flare: 0.3 },
+      Ogre_ChestBack: { slot: "chest-back", method: "plane", u: "+z", v: "-y", flare: 0.3 },
+      Ogre_LegsFront: { slot: "legs-front", method: "plane", u: "+z", v: "-y", flare: 0.28 },
+      Ogre_LegsBack: { slot: "legs-back", method: "plane", u: "+z", v: "-y", flare: 0.2 },
+      // The head: a profile, with a band under it for the skull top, the brow,
+      // the face front and the underside of the jaw — everything the profile
+      // cannot see. Seam at the chin, so the band reads jaw -> face -> brow ->
+      // crown -> nape.
+      Ogre_Head: { slot: "head", method: "plane", u: "+x", v: "-y", flare: 0.8 },
+      // The arm's outer shell, seen from outside the body: shoulder at the top,
+      // wrist at the bottom, with its front and back edges in the band beneath.
+      Ogre_Arm_Top: {
+        slot: "arm-top",
+        method: "plane",
+        u: "+x",
+        v: "-y",
+        flare: 0.5,
+        // The FRONT of the arm. Measured, its faces point (0.98, 0.05, 0.18) —
+        // square-on to +X and edge-on to the view down Z that the rest of the
+        // shell wants, so left in arm-top they fold flat onto the outer arm.
+        // Looked at down their own axis they are a clean strip: the front of a
+        // limb, shoulder at the top, wrist at the bottom.
+        split: [{ slot: "arm-front", facing: "+x", above: 0.6, u: "+z", v: "-y", flare: 0.3 }],
+      },
+      // The inner panel that closes the arm: 89% of it already faces Z, so it
+      // projects whole and has no band.
+      Ogre_Arm_Bottom: { slot: "arm-bottom", method: "plane", u: "+x", v: "-y", flare: 0.35 },
+      // The hand is a slab hanging at 45 degrees, so neither axis sees it
+      // square-on; Z keeps two thirds and the band takes the knuckles and the
+      // edge of the hand.
+      // The back of the hand turns a corner: measured, 52% of its area faces
+      // +X and 56% faces -Z. One flat view cannot have both, so it gets two.
+      Orge_HandTop: {
+        slot: "hand-top",
+        method: "plane",
+        u: "+x",
+        v: "-y",
+        flare: 0.15,
+        split: [{ slot: "hand-side", facing: "+x", above: 0.6, u: "+z", v: "-y", flare: 0.2 }],
+      },
+      // The palm, the same corner from the other side: 63% faces -X, 65% +Z.
+      Orge_HandPalm: {
+        slot: "hand-palm",
+        method: "plane",
+        u: "+x",
+        v: "-y",
+        flare: 0.15,
+        split: [{ slot: "hand-inner", facing: "-x", above: 0.6, u: "+z", v: "-y", flare: 0.2 }],
+      },
+      // The foot from ABOVE: the island is a footprint with the toes to the
+      // right, the sole shares the top's texels (it is never seen), and the band
+      // under it wraps the sides, the toe and the heel. Seam at the heel.
+      Ogre_Foot: { slot: "foot", method: "plane", u: "+x", v: "+z", flare: 0.45 },
+    },
+    // The sheet reads as the animal: the FRONT of the ogre down the left column
+    // — head, chest, legs, in that order — the BACK down the middle, and the
+    // arm with the small parts on the right. Laying the two halves out as
+    // columns is also what packs: the leg shells are the tallest islands on the
+    // sheet and stacking them together would set the scale for everything else.
+    //
+    // The arm split put three more islands on the sheet and this arrangement
+    // paid for all of them: the first attempt at it solved to 2.24 px/unit and
+    // this one to 2.77, which is what it was before the split. A layout is worth
+    // ten minutes.
+    layout: {
+      row: [
+        { col: ["head", "chest-front", "legs-front"] },
+        { col: ["chest-back", "legs-back", "arm-front"] },
+        { col: ["arm-top", "arm-bottom", { row: ["foot", "hand-top"] }, { row: ["hand-palm", "hand-side", "hand-inner"] }] },
+      ],
+    },
+    // An ogre is solid: no alpha anywhere on this sheet.
+    cutoutSlots: [],
+    // One assembly, because there is only one — the whole animal.
+    combos: [
+      [
+        "Ogre_Head",
+        "Ogre_ChestFront",
+        "Ogre_ChestBack",
+        "Ogre_LegsFront",
+        "Ogre_LegsBack",
+        "Ogre_Arm_Top",
+        "Ogre_Arm_Bottom",
+        "Orge_HandTop",
+        "Orge_HandPalm",
+        "Ogre_Foot",
+      ],
+    ],
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -272,10 +458,18 @@ const srcPath = path.resolve(args.in ? String(args.in) : path.join(STUDIO, recip
 const outMesh = path.resolve(
   args["out-mesh"] ? String(args["out-mesh"]) : path.join(STUDIO, recipe?.outMesh ?? "survey"),
 );
+// ONE FOLDER PER SET, named for the recipe. Everything that describes how a
+// model is unwrapped — the key, the slot manifest, the check render and the
+// generator prompt — lives together in tools/atlas/sets/<recipe>/, and the
+// things generated FROM it live in siblings: tools/atlas/art/<recipe>/<theme>
+// for the 1254 sheets and tools/atlas/out/<recipe>/<theme>/ for the atlases.
+// Flat, that folder reached 40 MB and 38 output directories across three
+// different keys with nothing but a filename prefix to say which was which.
 const atlasDir = path.resolve(args["atlas-dir"] ? String(args["atlas-dir"]) : path.join(ENGINE, "tools/atlas"));
-const keyPath = path.join(atlasDir, `key-${recipeName}.png`);
-const manifestPath = path.join(atlasDir, `manifest-${recipeName}.json`);
-const checkPath = path.join(atlasDir, `key-${recipeName}-check.png`);
+const setDir = path.join(atlasDir, "sets", recipeName);
+const keyPath = path.join(setDir, "key.png");
+const manifestPath = path.join(setDir, "manifest.json");
+const checkPath = path.join(setDir, "key-check.png");
 
 // ---------------------------------------------------------------------------
 // small geometry helpers
@@ -702,6 +896,10 @@ if (missing.length) {
 }
 console.log(`  ${parts.length} parts, ${parts.reduce((a, p) => a + p.world.length / 3, 0)} triangles`);
 
+// The surface normal at every shared position, which both the flare (below)
+// and the exported mesh's smooth shading are measured from.
+const NORMALS = surfaceNormals(parts);
+
 // ---------------------------------------------------------------------------
 // per-part unwrap, in island-local world units
 // ---------------------------------------------------------------------------
@@ -800,12 +998,157 @@ function bandUnwrap(part, spec) {
  * and roughly the right share of the sheet. It touches the silhouette, so the
  * two read (and register) as one island rather than two.
  */
+/**
+ * Positions shared between triangles, and the normal of the SURFACE there.
+ *
+ * The mesh is non-indexed, so the same corner appears once per face with that
+ * face's own normal. Anything that moves a vertex has to move every copy of it
+ * the same way or the island tears, so the average at a position is the only
+ * usable answer. Area-weighted, and no crease angle: a crease would split the
+ * average and tear exactly the islands this is here to keep whole.
+ */
+function surfaceNormals(parts) {
+  const q = (n) => Math.round(n * 1e3);
+  const key = (v) => `${q(v.x)},${q(v.y)},${q(v.z)}`;
+  const at = new Map();
+  const faces = new Map();
+  for (const part of parts) {
+    const ns = [];
+    for (let t = 0; t < part.world.length / 3; t++) {
+      const p = [0, 1, 2].map((k) => part.world[t * 3 + k]);
+      const n = new THREE.Vector3()
+        .subVectors(p[1], p[0])
+        .cross(new THREE.Vector3().subVectors(p[2], p[0]));
+      const area = n.length() / 2;
+      if (area > 1e-12) n.normalize();
+      ns.push({ n, area });
+      for (const v of p) {
+        const k = key(v);
+        if (!at.has(k)) at.set(k, []);
+        at.get(k).push({ n, area });
+      }
+    }
+    faces.set(part.name, ns);
+  }
+  const avg = new Map();
+  for (const [k, list] of at) {
+    const a = new THREE.Vector3();
+    for (const { n, area } of list) a.addScaledVector(n, area);
+    avg.set(k, a.lengthSq() > 1e-12 ? a.normalize() : new THREE.Vector3(0, 1, 0));
+  }
+  return { faces, at: (v) => avg.get(key(v)) ?? new THREE.Vector3(0, 1, 0), key };
+}
+
+/**
+ * FLARE: unfold the part of a shell that curves away from the projection,
+ * instead of letting it collapse into the silhouette's edge.
+ *
+ * A plane projection is honest about the face it looks at and brutal to
+ * everything else. On a weapon that costs nothing — a blade has no sides worth
+ * the name. On an ANIMAL it is the whole problem: the front of an ogre's face
+ * is a real surface a hand's breadth across, and looked at along the head's
+ * left-to-right axis it is exactly edge-on, so it lands on a one-texel line at
+ * the right of the island and the artwork there smears forward over the muzzle
+ * as a starburst. The sides of the chest, the outside of a thigh and the
+ * knuckles all go the same way, and a face too edge-on to keep any area at all
+ * ends up wearing one flat patch — the stray facets on the ogre's chest.
+ *
+ * So push every vertex OUTWARD, along the direction the surface is heading,
+ * by how deep it sits under the part's outer surface. Unfolding a box this way
+ * lays its sides out as bands attached to the front face, which is what a paper
+ * model does; on a curved shell it is the same thing continuously, and it is
+ * monotonic — a sphere's angle θ maps to sinθ + (1 - cosθ), which never turns
+ * back on itself, so the island cannot fold over itself either.
+ *
+ * Depth is measured differently depending on whether the part is a SHELL or a
+ * whole piece, and the difference matters:
+ *
+ *   one-sided (a front shell: 58% of the ogre's chest faces forward and 1%
+ *     back) — depth runs from the frontmost surface backwards, so the middle of
+ *     the chest does not move and its sides swing out.
+ *   two-sided (a head: both cheeks) — the projection already folds left onto
+ *     right, so depth is measured from the OUTER surface inward: the cheeks
+ *     themselves do not move, and the muzzle, the crown and the jaw — the
+ *     surfaces the fold cannot see — unfold out past the profile.
+ */
+function flareOf(part, spec, dropped, normals) {
+  const flare = Number(spec.flare ?? 0);
+  if (!flare) return null;
+  let plus = 0;
+  let minus = 0;
+  for (let t = 0; t < part.world.length / 3; t++) {
+    const { n, area } = normals.faces.get(part.name)[t];
+    const c = n.getComponent(dropped);
+    if (c > 0) plus += area * c;
+    else minus += area * -c;
+  }
+  const vals = part.world.map((v) => v.getComponent(dropped));
+  const lo = Math.min(...vals);
+  const hi = Math.max(...vals);
+  const mid = (lo + hi) / 2;
+  const half = (hi - lo) / 2 || 1e-6;
+  const twoSided = Math.min(plus, minus) / (plus + minus || 1) > 0.15;
+  const depth = twoSided
+    ? (v) => half - Math.abs(v.getComponent(dropped) - mid)
+    : plus >= minus
+      ? (v) => hi - v.getComponent(dropped)
+      : (v) => v.getComponent(dropped) - lo;
+  return { flare, depth, twoSided };
+}
+
+/**
+ * A part seen flat-on — or, where one flat view cannot see all of it, SPLIT
+ * into face groups that each get their own flat view.
+ *
+ * A shell that turns a corner defeats a single projection outright, and the
+ * ogre's arm and hands are both corners: measured, 52% of the back of the hand
+ * faces +X and 56% faces -Z. Look down Z and the +X half is edge-on, folds onto
+ * the half you kept, and comes out as triangles laid over each other — the
+ * "folded in tris" on the upper arm. Look down X and you lose the other half
+ * instead. Neither axis is wrong; the assumption that one axis has to do is.
+ *
+ * So a part may declare `split`: a list of groups, each a direction a face has
+ * to be pointing and the slot it goes to. A group may carry its own `u`/`v`
+ * and its own `flare`, and then those faces are projected DOWN THEIR OWN AXIS
+ * and land square-on; omit them and the group inherits the base projection,
+ * which is the cheaper fix for a lip that only needs to be somewhere else.
+ * Groups are tested in order and the first match wins, so put the narrow tests
+ * first; anything unmatched stays with the part's own slot.
+ */
 function planeUnwrap(part, spec) {
-  const du = dir(spec.u);
-  const dv = dir(spec.v);
-  // The projection drops the axis neither u nor v uses — the one we look along.
-  const dropped = [0, 1, 2].find((a) => a !== du.axis && a !== dv.axis);
-  const face = slots.get(spec.slot);
+  /** Base group last: it is the fallback, and it owns the rim. */
+  const groups = [...(spec.split ?? []), {}].map((g, i, all) => {
+    const base = i === all.length - 1;
+    const du = dir(g.u ?? spec.u);
+    const dv = dir(g.v ?? spec.v);
+    const dropped = [0, 1, 2].find((a) => a !== du.axis && a !== dv.axis);
+    const flare = flareOf(part, { flare: g.flare ?? spec.flare }, dropped, NORMALS);
+    const want = base ? null : dir(g.facing);
+    return {
+      base,
+      slot: slots.get(g.slot ?? spec.slot),
+      name: g.slot ?? spec.slot,
+      du,
+      dv,
+      dropped,
+      takes: (n) => base || axisValue(n, want) > (g.above ?? 0.25),
+      project: (v) => {
+        const iu = axisValue(v, du);
+        const iv = axisValue(v, dv);
+        if (!flare) return [iu, iv];
+        const n = NORMALS.at(v);
+        const nu = n.getComponent(du.axis) * du.sign;
+        const nv = n.getComponent(dv.axis) * dv.sign;
+        const len = Math.hypot(nu, nv);
+        if (len < 1e-3) return [iu, iv]; // square-on to the view: nowhere to unfold to
+        const d = flare.flare * flare.depth(v);
+        return [iu + (nu / len) * d, iv + (nv / len) * d];
+      },
+    };
+  });
+  const home = groups[groups.length - 1];
+  const dropped = home.dropped;
+  const moved = new Map();
   const rimTris = [];
   const mine = [];
   for (let t = 0; t < part.world.length / 3; t++) {
@@ -821,16 +1164,19 @@ function planeUnwrap(part, spec) {
       rimTris.push({ t, p });
       continue;
     }
+    const g = groups.find((x) => x.takes(n));
     const tri = {
       part: part.name,
       idx: [0, 1, 2].map((k) => t * 3 + k),
-      uv: p.map((v) => [axisValue(v, du), axisValue(v, dv)]),
-      front: n.getComponent(dropped) > 0,
+      uv: p.map(g.project),
+      front: n.getComponent(g.dropped) > 0,
       p,
     };
-    face.tris.push(tri);
-    mine.push(tri);
+    g.slot.tris.push(tri);
+    if (g.base) mine.push(tri);
+    else moved.set(g.name, (moved.get(g.name) ?? 0) + 1);
   }
+  for (const [to, n] of moved) console.log(`  ${part.name}: ${n} faces split into ${to}`);
   if (!rimTris.length) return;
 
   // Where the silhouette ended up, so the bar can be hung under it.
@@ -851,7 +1197,7 @@ function planeUnwrap(part, spec) {
   // The bar is as WIDE as the silhouette and as TALL as the part is THICK, hung
   // directly under it so the two touch and register as one island.
   for (const [i, { t }] of rimTris.entries()) {
-    face.tris.push({
+    home.slot.tris.push({
       part: part.name,
       idx: [0, 1, 2].map((k) => t * 3 + k),
       uv: band.uv(i).map(([arc, along]) => [
@@ -1159,6 +1505,18 @@ console.log(
     `(${(SCALE * (recipe.atlas.size / SHEET)).toFixed(2)} texels/unit at ${recipe.atlas.size})`,
 );
 
+// `--islands` prints where every island ended up, which is what the region key
+// in prompt-<recipe>.md has to be written from: a prompt that describes a block
+// the layout no longer puts there is worse than no prompt at all.
+if (args.islands) {
+  for (const [name, at] of [...placed].sort((a, b) => a[1].y - b[1].y || a[1].x - b[1].x))
+    console.log(
+      `    ${name.padEnd(13)} x ${at.x.toFixed(0).padStart(4)}..${(at.x + at.w).toFixed(0).padStart(4)}  ` +
+        `y ${at.y.toFixed(0).padStart(4)}..${(at.y + at.h).toFixed(0).padStart(4)}  ` +
+        `(${at.w.toFixed(0)}x${at.h.toFixed(0)} px, ${((at.w * recipe.atlas.size) / SHEET).toFixed(0)}x${((at.h * recipe.atlas.size) / SHEET).toFixed(0)} texels)`,
+    );
+}
+
 // Island-local -> sheet pixels -> normalised UV.
 for (const [name, slot] of slots) {
   const b = boxes.get(name);
@@ -1169,31 +1527,163 @@ for (const [name, slot] of slots) {
   for (const t of slot.tris) t.px = t.uv.map(([u, v]) => [at.x + (u - b.x0) * sx, at.y + (v - b.y0) * sy]);
 }
 
-// Faces a projection could not see get a small triangle just inside the island
+// One atlas texel, in sheet pixels: the finest distinction the finished sheet
+// can hold, and so the size below which a triangle cannot carry its own paint.
+const TEXEL_PX = SHEET / recipe.atlas.size;
+const STROKE = Number(args.stroke ?? recipe.keyStroke ?? 0);
+
+// Faces a projection could not see get a small triangle cut out of a NEIGHBOUR
 // rather than a zero-area one, which would sample a line of texels.
+//
+// Two things here were paid for on the ogre, whose shells are nothing but faces
+// turned edge-on to their projection.
+//
+// WHICH triangles. Zero area is not the test — a face a degree off edge-on
+// comes out a hundred pixels long and ONE across, which has area to spare and
+// still cannot carry paint: it samples a one-pixel line of the sheet, and where
+// that line falls in the gutter the face renders as background. Measured on the
+// ogre's first sheet: black bands down the arm and the shin, on faces of 43 to
+// 91 square pixels. Anything thinner than one ATLAS texel is in this position,
+// since a texel is the finest thing the sheet can say.
+//
+// WHERE the patch goes. Inside the island's BOX is not good enough: an island
+// is a silhouette, and the box around a pair of legs is mostly the gap between
+// them. The patch is a shrunken copy of the nearest triangle that DID project,
+// which is inside that triangle by construction and so is painted, and near
+// enough that it takes the colour of the part of the shell the face belongs to.
 let rescued = 0;
 for (const [name, slot] of slots) {
   const at = placed.get(name);
   if (!at) continue;
-  const tiny = Math.max(2, Math.min(at.w, at.h) * 0.06);
-  for (const t of slot.tris) {
-    const [a, b, c] = t.px;
+  const centroid = (px) => [(px[0][0] + px[1][0] + px[2][0]) / 3, (px[0][1] + px[1][1] + px[2][1]) / 3];
+  // A NEEDLE ONLY NEEDS RESCUING WHEN IT HAS NOWHERE TO LAND. It was rescued
+  // because a face a degree off edge-on samples a one-pixel line of the sheet
+  // that mostly is not its island — but `keyStroke` grows every island outward
+  // in its own colour, so with a margin wider than a texel that line IS its
+  // island and the face takes a smear of the skin beside it. That is the better
+  // answer by far: a patch is one flat colour over the whole face, and on a
+  // shell that cannot flare far — the ogre's legs run at 0.15 so the gap
+  // between them survives — fifteen inner-thigh faces of up to 225 square units
+  // came out as flat facets floating in the leg. Below the margin, the old rule
+  // stands; a triangle that cannot be sampled at all is always rescued.
+  const needles = STROKE < TEXEL_PX;
+  const carries = (px) => {
+    const [a, b, c] = px;
     const area = Math.abs((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])) / 2;
-    if (area >= 1) continue;
-    const cx = (a[0] + b[0] + c[0]) / 3;
-    const cy = (a[1] + b[1] + c[1]) / 3;
-    const inset = tiny * 1.2;
-    const x = Math.min(at.x + at.w - inset, Math.max(at.x + inset, cx));
-    const y = Math.min(at.y + at.h - inset, Math.max(at.y + inset, cy));
-    t.px = [
-      [x, y - tiny],
-      [x - tiny, y + tiny],
-      [x + tiny, y + tiny],
-    ];
+    if (area < 1) return false;
+    if (!needles) return true;
+    const L = (i, j) => Math.hypot(px[i][0] - px[j][0], px[i][1] - px[j][1]);
+    return (2 * area) / Math.max(L(0, 1), L(1, 2), L(0, 2)) >= TEXEL_PX;
+  };
+  const hosts = slot.tris.filter((t) => carries(t.px));
+  if (!hosts.length) continue; // a slot of nothing but edge-on faces: leave it alone
+  for (const t of slot.tris) {
+    if (carries(t.px)) continue;
+    const [cx, cy] = centroid(t.px);
+    let host = hosts[0];
+    let best = Infinity;
+    for (const h of hosts) {
+      const [hx, hy] = centroid(h.px);
+      const d = (hx - cx) ** 2 + (hy - cy) ** 2;
+      if (d < best) { best = d; host = h; }
+    }
+    const [hx, hy] = centroid(host.px);
+    t.px = host.px.map(([x, y]) => [hx + (x - hx) * 0.35, hy + (y - hy) * 0.35]);
     rescued++;
   }
 }
-if (rescued) console.log(`  ${rescued} edge-on triangles given a patch inside their island`);
+if (rescued) console.log(`  ${rescued} edge-on triangles given a patch cut out of a neighbour`);
+
+// OVERLAP: how much of an island is covered by more than one triangle.
+//
+// A plane projection folds the two sides of the dropped axis onto each other.
+// That is the point of it on a symmetric part — paint once, appear twice — and
+// it is a fault anywhere the two sides are not the same surface. A shell that
+// wraps past its own silhouette has faces pointing BACK along the view axis,
+// and those land on top of the faces pointing forward: two different pieces of
+// skin fighting over one patch of sheet, which reads on the model as warping
+// that no amount of repainting fixes.
+//
+// Rasterised at one sample per sheet pixel, which is exact enough to act on and
+// cheap enough to run every time.
+{
+  const rows = [];
+  for (const [name, slot] of slots) {
+    const at = placed.get(name);
+    if (!at || !slot.tris.length) continue;
+    const w = Math.max(1, Math.ceil(at.w));
+    const h = Math.max(1, Math.ceil(at.h));
+    const count = new Uint8Array(w * h);
+    const by = new Map();
+    for (const t of slot.tris) {
+      const P = t.px.map(([x, y]) => [x - at.x, y - at.y]);
+      const [a, b, c] = P;
+      const area = (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
+      if (Math.abs(area) < 1e-9) continue;
+      const x0 = Math.max(0, Math.floor(Math.min(a[0], b[0], c[0])));
+      const x1 = Math.min(w - 1, Math.ceil(Math.max(a[0], b[0], c[0])));
+      const y0 = Math.max(0, Math.floor(Math.min(a[1], b[1], c[1])));
+      const y1 = Math.min(h - 1, Math.ceil(Math.max(a[1], b[1], c[1])));
+      for (let y = y0; y <= y1; y++)
+        for (let x = x0; x <= x1; x++) {
+          const px = x + 0.5;
+          const py = y + 0.5;
+          const w0 = ((b[0] - a[0]) * (py - a[1]) - (px - a[0]) * (b[1] - a[1])) / area;
+          const w1 = ((px - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (py - a[1])) / area;
+          if (w0 < 0 || w1 < 0 || 1 - w0 - w1 < 0) continue;
+          const d = y * w + x;
+          if (count[d] === 1) by.set(t.part, (by.get(t.part) ?? 0) + 1);
+          if (count[d] < 255) count[d]++;
+        }
+    }
+    let covered = 0;
+    let twice = 0;
+    for (const n of count) {
+      if (n >= 1) covered++;
+      if (n >= 2) twice++;
+    }
+    // IS THE OVERLAP THE POINT? A plane projection folds the two sides of the
+    // dropped axis together. On a part with real surface on BOTH sides — a head,
+    // whose two cheeks are one mirrored surface, or a foot, whose sole is never
+    // seen — that fold is the whole reason for the projection and the island is
+    // ~100% doubled by design. On a SHELL, where one side carries the area and
+    // the other is a lip that turned back, the same number is a fault. Same test
+    // the flare uses, so the two always agree about what a part is.
+    let mirrored = false;
+    for (const t of slot.tris) {
+      const ps = recipe.parts[t.part];
+      if (!ps || ps.slot !== name) continue;
+      // An unroll or a band asked to `fold` mirrors its far face onto its near
+      // one deliberately — that is what makes a crossguard symmetric by
+      // construction — so its island is doubled on purpose, same as a head's.
+      if (ps.method !== "plane") {
+        mirrored = !!ps.fold;
+        break;
+      }
+      const drop = [0, 1, 2].find((a) => a !== dir(ps.u).axis && a !== dir(ps.v).axis);
+      let plus = 0;
+      let minus = 0;
+      for (const { n, area } of NORMALS.faces.get(t.part)) {
+        const c = n.getComponent(drop);
+        if (c > 0) plus += area * c;
+        else minus += area * -c;
+      }
+      mirrored = Math.min(plus, minus) / (plus + minus || 1) > 0.15;
+      break;
+    }
+    if (twice) rows.push([name, (100 * twice) / (covered || 1), [...by.keys()].join(", "), mirrored]);
+  }
+  rows.sort((a, b) => b[1] - a[1]);
+  for (const [name, pct, who, mirrored] of rows) {
+    const bad = pct >= 5 && !mirrored;
+    const line = mirrored
+      ? `    ${name}: ${pct.toFixed(0)}% doubled — mirrored, which is what this projection is for`
+      : `  ${bad ? "!" : " "} ${name}: ${pct.toFixed(1)}% of the island is covered twice (${who})` +
+        (bad ? " — split the faces a flat view cannot reach into their own group" : "");
+    if (bad) console.error(line);
+    else if (args.overlap) console.log(line);
+  }
+}
 
 // `--debug-slot <name>` draws one island's triangles in alternating colours,
 // zoomed, which is the only way to see whether they tile it or fight over it.
@@ -1227,7 +1717,7 @@ if (args["debug-slot"]) {
         buf[o] = (buf[o] + c[0]) >> 1; buf[o+1] = (buf[o+1] + c[1]) >> 1; buf[o+2] = (buf[o+2] + c[2]) >> 1;
       }
     }
-    const out = path.join(atlasDir, `debug-${name}.png`);
+    const out = path.join(setDir, `debug-${name}.png`);
     fs.writeFileSync(out, encodePng(W2, H2, buf));
     console.log(`  wrote ${path.relative(STUDIO, out)} — ${slot.tris.length} triangles`);
   }
@@ -1291,12 +1781,57 @@ for (const [i, name] of slotIds.entries()) {
   const rgb = rgbOf(recipe.slots[name].color);
   for (const t of slot.tris) fillTri(t.px, rgb, i, clash);
 }
+
+// STROKE: grow every island outward by a few pixels in its OWN colour.
+//
+// A generator draws a piece, not a mask. Measured on the first ogre sheet, the
+// artwork's own outline sat one to three pixels inside the island's on nearly
+// every piece and 4-19% of each island came back unpainted, which is a fringe
+// of wrong colour all the way round a limb. Drawn a little large the artwork
+// instead runs off the edge, where it is cropped and nobody can tell.
+//
+// So the island the generator is shown is the island the geometry uses plus a
+// margin. Everything downstream reads that: the importer takes the island's
+// extent from this key, so the fit lands on the grown outline, and a triangle
+// whose UV hangs a pixel past its geometry still samples its own paint.
+//
+// Growth is a level-synchronous flood from every island at once into WHITE
+// only, so two islands cannot meet in the middle — the nearest one takes each
+// pixel — and no island can ever eat another's. The layout's gutter is 48
+// pixels, so a stroke of a few costs nothing it needs.
+if (STROKE > 0) {
+  let frontier = [];
+  for (let d = 0; d < SHEET * SHEET; d++) if (owner[d] >= 0) frontier.push(d);
+  for (let step = 0; step < STROKE && frontier.length; step++) {
+    const next = [];
+    for (const d of frontier) {
+      const x = d % SHEET;
+      const y = (d / SHEET) | 0;
+      for (const [ox, oy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nx = x + ox;
+        const ny = y + oy;
+        if (nx < 0 || ny < 0 || nx >= SHEET || ny >= SHEET) continue;
+        const nd = ny * SHEET + nx;
+        if (owner[nd] >= 0) continue;
+        owner[nd] = owner[d];
+        const rgb = rgbOf(recipe.slots[slotIds[owner[d]]].color);
+        key[nd * 4] = rgb[0];
+        key[nd * 4 + 1] = rgb[1];
+        key[nd * 4 + 2] = rgb[2];
+        key[nd * 4 + 3] = 255;
+        next.push(nd);
+      }
+    }
+    frontier = next;
+  }
+  console.log(`  islands grown ${STROKE}px in their own colour, as a margin for the artwork`);
+}
 if (clash.size) {
   console.error(`! islands overlap: ${[...clash].join(", ")}`);
   process.exit(1);
 }
 
-fs.mkdirSync(atlasDir, { recursive: true });
+fs.mkdirSync(setDir, { recursive: true });
 fs.writeFileSync(keyPath, encodePng(SHEET, SHEET, key));
 console.log(`  wrote ${path.relative(STUDIO, keyPath)}`);
 
@@ -1359,7 +1894,23 @@ const badBy = new Map();
 // point-sampled reliably — its own rasterised footprint may miss every pixel
 // centre — and it takes its colour from its island's bleed regardless. Checking
 // one is a false alarm, not a finding.
-const TEXEL = (SHEET / recipe.atlas.size) ** 2;
+const TEXEL = TEXEL_PX ** 2;
+// A NEEDLE is that same false alarm wearing a different shape, and a creature's
+// shells are full of them: a face turned nearly edge-on to the projection comes
+// out a hundred pixels long and one across. It has area to spare, so the test
+// above lets it through, and then the sample rounds to a pixel centre just
+// outside it. Measured on the ogre: minimum altitudes of 0.84 to 1.27 sheet
+// pixels, a fifth of an atlas texel. Anything thinner than one atlas texel
+// takes its colour from the island around it whatever its UVs say, exactly as
+// a sub-texel triangle does.
+const thinnerThanATexel = (px) => {
+  const L = (i, j) => Math.hypot(px[i][0] - px[j][0], px[i][1] - px[j][1]);
+  const longest = Math.max(L(0, 1), L(1, 2), L(0, 2));
+  const a = Math.abs(
+    (px[1][0] - px[0][0]) * (px[2][1] - px[0][1]) - (px[2][0] - px[0][0]) * (px[1][1] - px[0][1]),
+  ) / 2;
+  return longest > 0 && (2 * a) / longest < TEXEL_PX;
+};
 for (const [name, slot] of slots) {
   const want = rgbOf(recipe.slots[name].color).join(",");
   for (const t of slot.tris)
@@ -1369,7 +1920,7 @@ for (const [name, slot] of slots) {
           (t.px[1][0] - t.px[0][0]) * (t.px[2][1] - t.px[0][1]) -
             (t.px[2][0] - t.px[0][0]) * (t.px[1][1] - t.px[0][1]),
         ) / 2;
-      if (area < TEXEL) { slivers++; break; }
+      if (area < TEXEL || (STROKE < TEXEL_PX && thinnerThanATexel(t.px))) { slivers++; break; }
       const u = w[0] * t.px[0][0] + w[1] * t.px[1][0] + w[2] * t.px[2][0];
       const v = w[0] * t.px[0][1] + w[1] * t.px[1][1] + w[2] * t.px[2][1];
       const x = Math.min(SHEET - 1, Math.max(0, Math.round(u - 0.5)));
@@ -1493,6 +2044,60 @@ const isCutout = (part) => {
 // loss: the mesh is non-indexed and every face is flat, so the recomputed
 // normal IS the authored one, and it survives whatever the source format did
 // or did not store.
+//
+// `smooth: <degrees>` averages them instead, ACROSS THE WHOLE BODY rather than
+// within a part — the shells share their border vertices, so smoothing each one
+// alone would leave a shading seam exactly where the chest meets the back. Flat
+// is right for a weapon: a blade's bevel is a real crease and every facet of a
+// pommel is meant to read. It is wrong for an animal, where the same facets
+// read as the low-poly cage they are. The angle is a crease threshold: faces
+// that meet sharper than it keep their own normal, so a jaw line or the top of
+// a foot stays an edge while the barrel of a chest goes smooth.
+
+
+/**
+ * Per-vertex normals, averaged at shared positions but only across faces that
+ * meet within `degrees` of each other, so a crease survives.
+ */
+function creasedNormals(parts, degrees) {
+  const cos = Math.cos((degrees * Math.PI) / 180);
+  const q = (n) => Math.round(n * 1e3);
+  const key = (v) => `${q(v.x)},${q(v.y)},${q(v.z)}`;
+  const at = new Map();
+  const faceOf = new Map();
+  for (const part of parts) {
+    const ns = [];
+    for (let t = 0; t < part.world.length / 3; t++) {
+      const p = [0, 1, 2].map((k) => part.world[t * 3 + k]);
+      const n = new THREE.Vector3()
+        .subVectors(p[1], p[0])
+        .cross(new THREE.Vector3().subVectors(p[2], p[0]));
+      const area = n.length() / 2;
+      if (area > 1e-12) n.normalize();
+      ns.push({ n, area });
+      for (const v of p) {
+        const k = key(v);
+        if (!at.has(k)) at.set(k, []);
+        at.get(k).push({ n, area });
+      }
+    }
+    faceOf.set(part.name, ns);
+  }
+  for (const part of parts) {
+    const out = new Float32Array(part.world.length * 3);
+    for (let t = 0; t < part.world.length / 3; t++) {
+      const f = faceOf.get(part.name)[t].n;
+      for (let k = 0; k < 3; k++) {
+        const acc = new THREE.Vector3();
+        for (const c of at.get(key(part.world[t * 3 + k])) ?? [])
+          if (c.n.dot(f) >= cos) acc.addScaledVector(c.n, c.area);
+        (acc.lengthSq() > 1e-12 ? acc.normalize() : f).toArray(out, (t * 3 + k) * 3);
+      }
+    }
+    part.normal = out;
+  }
+}
+if (recipe.smooth) creasedNormals(parts, Number(recipe.smooth));
 
 const baked = new THREE.Group();
 baked.name = path.basename(outMesh);
@@ -1502,7 +2107,8 @@ for (const part of parts) {
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
   geo.setAttribute("uv", new THREE.BufferAttribute(part.uv, 2));
-  geo.computeVertexNormals();
+  if (part.normal) geo.setAttribute("normal", new THREE.BufferAttribute(part.normal, 3));
+  else geo.computeVertexNormals();
   const mesh = new THREE.Mesh(geo, isCutout(part) ? cutout : solid);
   mesh.name = part.name;
   baked.add(mesh);
@@ -1540,10 +2146,12 @@ console.log(
   const pos = new Float32Array(n * 3);
   const uv = new Float32Array(n * 2);
   const uv1 = new Float32Array(n * 2);
+  const nrm = parts.every((p) => p.normal) ? new Float32Array(n * 3) : null;
   let at = 0;
   for (const [index, part] of parts.entries()) {
     for (const [i, v] of part.world.entries()) {
       v.toArray(pos, (at + i) * 3);
+      if (nrm) nrm.set(part.normal.subarray(i * 3, i * 3 + 3), (at + i) * 3);
       uv[(at + i) * 2] = part.uv[i * 2];
       uv[(at + i) * 2 + 1] = part.uv[i * 2 + 1];
       uv1[(at + i) * 2] = index; // which part this vertex belongs to
@@ -1554,7 +2162,8 @@ console.log(
   geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
   geo.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
   geo.setAttribute("uv1", new THREE.BufferAttribute(uv1, 2));
-  geo.computeVertexNormals();
+  if (nrm) geo.setAttribute("normal", new THREE.BufferAttribute(nrm, 3));
+  else geo.computeVertexNormals();
   // ONE material for the lot, so it stays one draw. `alphaTest` is free on the
   // solid parts — the atlas is opaque everywhere except the ornament cuts — and
   // double-sided is what those single-plane ornaments need.
@@ -1694,7 +2303,20 @@ console.log(
       "",
     ].join("\n"),
   );
-  console.log(`  wrote ${path.relative(STUDIO, outMesh)}.obj — merged, and -parts.obj — one object each (+ .mtl)`);
+  // The .mtl names `<recipe>-atlas.png` beside it, so PUT IT THERE. Without
+  // this the OBJ opens untextured in every modeller — the sheet exists, but it
+  // is three directories away in the engine checkout under a different name,
+  // and a texture an .mtl points at and cannot find is indistinguishable from
+  // no unwrap at all to the person who opened the file to check the unwrap.
+  let sheetNote = "";
+  if (args.atlas) {
+    const beside = path.join(path.dirname(outMesh), `${recipeName}-atlas.png`);
+    fs.copyFileSync(path.resolve(String(args.atlas)), beside);
+    sheetNote = ` + ${path.basename(beside)}`;
+  }
+  console.log(
+    `  wrote ${path.relative(STUDIO, outMesh)}.obj — merged, and -parts.obj — one object each (+ .mtl${sheetNote})`,
+  );
 }
 
 // ---------------------------------------------------------------------------

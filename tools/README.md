@@ -19,11 +19,12 @@ arrangement as `apps/playground/projects/`. No submodule, no gitlink.
 | `atlas/`          | `hitreg.armor-atlas`   | Registers generated armor art against the character UV key, preserves cyan cutouts, packs a game-ready atlas with bleed. |
 | `wfc-3d/`         | `hitreg.wfc-3d`        | 3D wave-function-collapse over a prefab tileset; emits a reusable prefab of nested instances. `kit.mjs` turns a modelled kit (parts + example structures) into atlased modules, cell prefabs and a learned tileset. |
 | `texture-intake/` | —                      | Normalizes dropped image sets into the material map channels the renderer expects. |
+| `mesh-dc/`        | `hitreg.mesh-dc`        | Converts closed Blender structures into editable, palette-preserving DC volume prefabs. See its README for source preparation and validation. |
 
 These are tracked because they are the reference implementations of the
 contract and because the engine's own test and spec depend on them: root
 `pnpm test` runs `tools/wfc-3d/self-test.mjs`, and
-`packages/core/examples/write-spec.ts` composes the atlas and wfc manifests
+`packages/core/examples/write-spec.ts` composes the atlas, WFC, and mesh-DC manifests
 into the committed `spec.json`.
 
 ## Installing a third-party tool

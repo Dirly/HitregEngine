@@ -30,6 +30,7 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--slices") out.slices = true;
+    else if (a === "--no-match") out["no-match"] = true;
     else if (a === "--art-margin") out.artMargin = true;
     else if (a.startsWith("--")) out[a.slice(2)] = argv[++i];
   }
@@ -37,20 +38,52 @@ function parseArgs(argv) {
 }
 
 const args = parseArgs(process.argv.slice(2));
+const here = path.dirname(fileURLToPath(import.meta.url));
+
+// `--set ogre --theme frost` is the whole command for a set that lives in the
+// standard layout, and it is four paths nobody has to type or get wrong:
+//
+//   sets/<set>/key.png        what the artwork was painted over
+//   sets/<set>/manifest.json  the slot table
+//   art/<set>/<theme>.png     the 1254 sheet the generator handed back
+//   out/<set>/<theme>/        where the atlas goes
+//
+// The explicit flags still work and still win, for a one-off or a sheet that
+// lives somewhere else.
+if (args.set) {
+  const set = String(args.set);
+  const theme = String(args.theme ?? set);
+  args.key ??= path.join(here, "sets", set, "key.png");
+  args.manifest ??= path.join(here, "sets", set, "manifest.json");
+  args.art ??= path.join(here, "art", set, `${theme}.png`);
+  args.out ??= path.join(here, "out", set, theme);
+}
 if (!args.key || !args.art) {
   console.error(
-    "usage: node tools/atlas/import-atlas.mjs --key <key.png> --art <art.png> " +
-      "[--manifest m.json] [--out dir] [--size 256] [--bleed 8] [--slices]",
+    "usage: node tools/atlas/import-atlas.mjs --set <set> --theme <theme>" + String.fromCharCode(10) +
+      "   or: node tools/atlas/import-atlas.mjs --key <key.png> --art <art.png> " +
+      "[--manifest m.json] [--out dir] [--size 256] [--bleed 8] [--slices] [--install <dir>]",
   );
   process.exit(1);
 }
+for (const [what, f] of [["key", args.key], ["art", args.art], ["manifest", args.manifest]]) {
+  if (f && !fs.existsSync(f)) {
+    console.error(`! no ${what} at ${f}`);
+    process.exit(1);
+  }
+}
 
-const here = path.dirname(fileURLToPath(import.meta.url));
 const manifest = JSON.parse(fs.readFileSync(args.manifest ?? path.join(here, "manifest.json"), "utf8"));
 const SIZE = Number(args.size ?? manifest.size ?? 256);
 const BLEED = Number(args.bleed ?? manifest.bleed ?? 8);
 const OUT = args.out ?? path.join(here, "out");
 fs.mkdirSync(OUT, { recursive: true });
+
+// A stale slices/ is worse than none: it is the PREVIOUS run's pieces sitting
+// beside this run's atlas, and nothing downstream reads them — they exist to be
+// looked at once. Asked for, they are rewritten below; not asked for, they go.
+if (!args.slices && fs.existsSync(path.join(OUT, "slices")))
+  fs.rmSync(path.join(OUT, "slices"), { recursive: true, force: true });
 
 const keyImg = decodePng(fs.readFileSync(args.key));
 const artImg = decodePng(fs.readFileSync(args.art));
@@ -236,6 +269,35 @@ const scale = W / SIZE;
 
 // hysteresis: strong seeds, weak grows out from them
 const BG_LUM = Number(args["bg-lum"] ?? manifest.bgLum ?? 200);
+
+// THE SHEET'S BACKGROUND HAS TO BE BRIGHT, and when it is not, nothing after
+// this point makes sense. Ground is found by flooding in from the border
+// through everything brighter than BG_LUM, so a sheet handed back on BLACK has
+// no ground at all: every island's "artwork" then runs off into the background,
+// the contain fit stretches each piece to cover it, and the run ends in a
+// faceful of overhang warnings that name the wrong problem. Measured once, on a
+// moss ogre sheet that came back on black — six warnings, none of them the
+// cause. Check the border and say the real thing.
+{
+  const edge = [];
+  for (let x = 0; x < W; x++) { edge.push(x); edge.push((H - 1) * W + x); }
+  for (let y = 0; y < H; y++) { edge.push(y * W); edge.push(y * W + W - 1); }
+  let bright = 0;
+  for (const i of edge) {
+    const l = 0.299 * artImg.data[i * 4] + 0.587 * artImg.data[i * 4 + 1] + 0.114 * artImg.data[i * 4 + 2];
+    if (l > BG_LUM) bright++;
+  }
+  const pct = (100 * bright) / edge.length;
+  if (pct < 50) {
+    console.error(
+      `! the artwork's background is not bright: only ${pct.toFixed(0)}% of its border is above ` +
+        `bgLum ${BG_LUM}. The ground is found by flooding in from the border, so this sheet has ` +
+        `none — every piece will read as running off into it. Ask the generator again for a sheet ` +
+        `on PURE WHITE (#FFFFFF); nothing here can rescue one on black.`,
+    );
+    process.exit(1);
+  }
+}
 const BG_SAT = Number(args["bg-sat"] ?? manifest.bgSat ?? 0.18);
 
 const strong = new Uint8Array(N);
@@ -652,6 +714,10 @@ function componentsUnder(isl, minFrac = 0.05) {
   );
 }
 
+/** Warnings raised before the report object exists; merged into it below. */
+const earlyWarnings = [];
+/** matchTo gains applied, for the run log. */
+const matched = [];
 const containIslands = islands.filter((i) => manifest.slots[i.hex]?.fit?.startsWith("contain"));
 {
   for (const isl of containIslands) {
@@ -789,6 +855,33 @@ const containIslands = islands.filter((i) => manifest.slots[i.hex]?.fit?.startsW
       insetY: +(insetY / scale).toFixed(1),
     };
     isl.uncovered = uncovered(isl.sample, isl.cx, isl.cy, isl.fit.dx, isl.fit.dy, isl.fit.sx, isl.fit.sy, !!isl.transparency);
+
+    // A CONTAIN FIT THAT MAKES THINGS WORSE IS NOT A FIT. It maps the bounding
+    // box of the artwork onto the island, which is the right answer when the
+    // generator drew the piece the wrong SIZE, and the wrong one when it drew
+    // the piece the right size and then let something hang off it: the desert
+    // ogre's waist sash was drawn spilling out of the chest block into the
+    // gutter below it, so the blob's box came back a third too tall and the
+    // whole chest was squashed to 0.79 and shoved up 62px — 4% of the island
+    // uncovered became 23%. The artwork's own outline is a guess about intent;
+    // how much of the island ends up painted is a measurement. When the
+    // measurement says the guess was worse, keep the identity and say so.
+    // Not a hair-trigger: contain exists to correct SIZE, and cropping a piece
+    // that was drawn oversized legitimately leaves a little more of the island
+    // bare. Only a fit that is both half again as bare AND three points worse
+    // is the pathological case above — measured, that keeps the five honest
+    // sub-pixel corrections on the desert sheet and rejects the one disaster.
+    if (isl.uncovered > isl.baseUncovered * 1.5 + 0.03) {
+      earlyWarnings.push(
+        `${isl.name}: contain fit left ${(100 * isl.uncovered).toFixed(1)}% of the island unpainted ` +
+          `against ${(100 * isl.baseUncovered).toFixed(1)}% unfitted — kept the artwork where it was drawn ` +
+          `(something is probably drawn outside this block)`,
+      );
+      isl.fit = { dx: 0, dy: 0, sx: 1, sy: 1, cost: 0 };
+      isl.contained = null;
+      isl.artClip = null;
+      isl.uncovered = isl.baseUncovered;
+    }
   }
 }
 
@@ -1465,7 +1558,7 @@ const minGap = new Map(); // "a|b" -> smallest observed gap in texels
  * Copy `values` outward from seed texels to every texel its owner island
  * reaches, nearest source first.
  */
-function padNearest(values, stride, authored, seedOf, { gutterOnly = false } = {}) {
+function padNearest(values, stride, authored, seedOf, { throughIslands = false } = {}) {
   const src = new Int32Array(SN).fill(-1);
   let frontier = [];
   for (let d = 0; d < SN; d++) {
@@ -1488,10 +1581,33 @@ function padNearest(values, stride, authored, seedOf, { gutterOnly = false } = {
           const ny = y + oy;
           if (nx < 0 || ny < 0 || nx >= S || ny >= S) continue;
           const nd = ny * S + nx;
-          // Traverse THROUGH authored texels (they are not overwritten below) —
-          // otherwise the clean core of an island cannot reach past its own
-          // authored edge ring to pad the gutter.
-          if (gutterOnly && island256[nd] >= 0) continue;
+          // COLOUR traverses THROUGH island texels; alpha does not. They are
+          // never overwritten — the fill below skips anything authored — but
+          // for colour they have to be walkable, and the guard that used to
+          // stand here refused them, which is the opposite of what the comment
+          // beside it claimed.
+          //
+          // Alpha keeps the old walls, and must: a hole in a cut-out ornament
+          // is a deliberate transparent texel INSIDE its island, and a pass
+          // that can walk in from the metal around it fills the hole in.
+          // Measured on the skullknight sword, letting alpha through closed 156
+          // texels of the two ornaments' openwork.
+          if (!throughIslands && island256[nd] >= 0) continue;
+          //
+          // What that cost. A seed is a CLEAN texel: painted, and not in the
+          // band next to the ground where the generator's edge and the
+          // background have blurred into each other. An island whose outer ring
+          // is all fringe therefore has every seed walled in behind it, the
+          // gutter beside that stretch is never padded, and the buffer's black
+          // stands hard against the paint. On the ogre sheet — whose pieces are
+          // hand-drawn silhouettes, so the whole outline is fringe — that read
+          // as black seams down the arm, the shin and the hand in the engine.
+          // It also leaves the 4-19% of each island the artwork did not quite
+          // cover unpainted, for the same reason and with the same result.
+          //
+          // Nothing can leak between islands: `owner` below is the nearest
+          // island to every texel, so a step into another island's body or its
+          // share of the gutter is refused there.
           if (src[nd] >= 0) continue;
           if (owner[nd] !== island) continue; // never cross into another island
           src[nd] = src[d];
@@ -1525,12 +1641,83 @@ for (const isl of islands) {
   if (seeds > 0) continue;
   for (let d = 0; d < SN; d++) if (island256[d] === isl.id && colorAuthored[d]) colorSeed[d] = 1;
 }
-const colorFilled = padNearest(rgb, 3, colorAuthored, (d) => colorSeed[d] === 1, { gutterOnly: true });
+// ---------------------------------------------------------------------------
+// matchTo: make a piece the same VALUE as the piece it joins
+// ---------------------------------------------------------------------------
+//
+// A generator cannot hold one value across ten separate drawings. It paints
+// each block to look right on its own, so the hand comes back paler than the
+// arm it is attached to and the foot paler than the leg — and on the model that
+// reads as a lighting bug, a glove and a sock, because a hand and a wrist are
+// ONE piece of skin and the eye knows it. Told about it in the prompt it gets
+// better and not reliably right; measured on two ogre sheets the hand came back
+// 18% and 26% brighter than the forearm.
+//
+// So a slot may name another slot it MEETS on the model, and its whole island
+// is gained to that island's mean luminance. One number per island, applied
+// flat, which preserves everything inside it — the modelling, the dirt, the
+// nails — and moves only the level the generator got wrong. Luminance only;
+// hue and saturation are left alone, because a palm IS pinker than a forearm
+// and that is not the error.
+//
+// Clamped, because a gain is a correction and not a repaint: if a piece is
+// more than a third out, something else is wrong and silently dragging it into
+// line would hide it.
+{
+  const meanOf = new Map();
+  for (const isl of islands) {
+    let sum = 0;
+    let n = 0;
+    for (let d = 0; d < SN; d++) {
+      if (island256[d] !== isl.id || !colorAuthored[d]) continue;
+      sum += 0.299 * rgb[d * 3] + 0.587 * rgb[d * 3 + 1] + 0.114 * rgb[d * 3 + 2];
+      n++;
+    }
+    if (n) meanOf.set(isl.name, { mean: sum / n, n });
+  }
+  const byName = new Map(islands.map((i) => [i.name, i]));
+  // `--no-match` turns the whole pass off for one sheet. It has to exist,
+  // because `matchTo` assumes the two pieces are the SAME MATERIAL — a hand and
+  // the wrist it grows out of — and a theme is free to break that assumption on
+  // purpose. The armoured ogre paints a blackened iron gauntlet on the hands and
+  // leaves the arm bare hide: measured, 38-51% apart in value, every one of them
+  // clamped, and the correction was busy washing the gauntlets out. The tool
+  // cannot tell a deliberate second material from a mistake, so when the
+  // warnings below say a piece is far out and clamped, that is the question
+  // being asked — answer it with this flag.
+  const NO_MATCH = args["no-match"] === true;
+  for (const isl of islands) {
+    const to = NO_MATCH ? null : manifest.slots[isl.hex]?.matchTo;
+    if (!to) continue;
+    const mine = meanOf.get(isl.name);
+    const theirs = meanOf.get(to);
+    if (!mine || !theirs || !byName.has(to)) {
+      earlyWarnings.push(`${isl.name}: matchTo "${to}" — no such island with paint in it, left alone`);
+      continue;
+    }
+    const raw = theirs.mean / (mine.mean || 1);
+    const gain = Math.min(1.35, Math.max(0.74, raw));
+    if (Math.abs(raw - 1) > 0.35)
+      earlyWarnings.push(
+        `${isl.name}: ${((raw - 1) * 100).toFixed(0)}% off ${to} in value — clamped to ` +
+          `${((gain - 1) * 100).toFixed(0)}%. Either the artwork is wrong, or this piece is a different MATERIAL on purpose — if so, re-run with --no-match`,
+      );
+    if (Math.abs(gain - 1) < 0.01) continue;
+    for (let d = 0; d < SN; d++) {
+      if (island256[d] !== isl.id) continue;
+      for (let c = 0; c < 3; c++)
+        rgb[d * 3 + c] = Math.max(0, Math.min(255, Math.round(rgb[d * 3 + c] * gain)));
+    }
+    matched.push(`${isl.name} x${gain.toFixed(2)} to ${to}`);
+  }
+}
+
+const colorFilled = padNearest(rgb, 3, colorAuthored, (d) => colorSeed[d] === 1, { throughIslands: true });
 
 // alpha: authored inside the island, derived outward from there
 const alphaAuthored = new Uint8Array(SN);
 for (let d = 0; d < SN; d++) alphaAuthored[d] = island256[d] >= 0 && alphaOk[d] ? 1 : 0;
-const alphaFilled = padNearest(alpha, 1, alphaAuthored, (d) => alphaAuthored[d] === 1, { gutterOnly: true });
+const alphaFilled = padNearest(alpha, 1, alphaAuthored, (d) => alphaAuthored[d] === 1);
 
 // anything no island reached (far background) is never sampled by a UV, but
 // leave it a flat neutral rather than white so a stray sample is obvious
@@ -1552,6 +1739,30 @@ for (let d = 0; d < SN; d++) {
   outRGBA[d * 4 + 3] = alpha[d];
 }
 fs.writeFileSync(path.join(OUT, "atlas.png"), encodePng(S, S, outRGBA));
+
+// INSTALL: put the finished sheet where the game will actually read it.
+//
+// Without this the atlas stops in the tool's own output folder and somebody has
+// to remember which of thirty-eight of them was the good one and where it was
+// supposed to go. `installTo` in the manifest is the set's home — a directory,
+// relative to the repo root — and `--install <dir>` overrides it for a one-off.
+// The file is named <set>-<theme>.png so a folder of them is readable.
+//
+// A MOB usually wants the sheet baked into its GLB instead (unwrap-weapon
+// --atlas), which makes the model self-contained; installing a loose PNG is for
+// anything driven by an engine material, and for atlas-view.
+{
+  const dir = args.install ?? manifest.installTo;
+  if (dir) {
+    const set = String(args.set ?? path.basename(path.dirname(OUT)));
+    const theme = String(args.theme ?? path.basename(OUT));
+    const to = path.resolve(path.join(here, "../.."), String(dir));
+    fs.mkdirSync(to, { recursive: true });
+    const file = path.join(to, `${set}-${theme}.png`);
+    fs.copyFileSync(path.join(OUT, "atlas.png"), file);
+    console.log(`installed ${path.relative(path.join(here, "../.."), file)}`);
+  }
+}
 
 // preview: alpha over a checker, so cut regions are visible at a glance
 const preview = new Uint8Array(SN * 4);
@@ -1625,7 +1836,7 @@ const report = {
   keyCleanup: { contaminantsRemoved: keyContaminants },
   globalFit: { dx: +global.dx.toFixed(2), dy: +global.dy.toFixed(2), scale: +global.sx.toFixed(4) },
   islands: [],
-  warnings: [],
+  warnings: [...earlyWarnings],
 };
 
 console.log(`\nkey ${W}x${H}  ->  atlas ${S}x${S}    ${NEAREST ? "nearest" : "box"} filter, ${colorFilled} texels padded`);
@@ -1703,5 +1914,7 @@ for (const [pair, gap] of gutters.slice(0, 5)) {
 }
 
 fs.writeFileSync(path.join(OUT, "report.json"), JSON.stringify(report, null, 2));
+if (matched.length) console.log(`
+value matched: ${matched.join(", ")}`);
 console.log(`\n${report.warnings.length} warning(s). wrote atlas.png, atlas-preview.png, report.json to ${OUT}`);
 for (const w of report.warnings) console.log(`  ! ${w}`);

@@ -527,11 +527,20 @@ export function smoothRoute(
   points: [number, number][],
   passes: number,
   passable: (x: number, z: number) => boolean,
+  /**
+   * Points that must not move — a town gate's straight approach, spliced onto
+   * the route before smoothing. Their NEIGHBOURS still move, which is the
+   * whole reason to smooth the joined line rather than each half: the seam
+   * between a fixed lead and a searched route is a corner, and a corner at
+   * the end of an array is one nothing ever rounds.
+   */
+  fixed?: (index: number) => boolean,
 ): [number, number][] {
   let cur = points.map((p) => [p[0], p[1]] as [number, number]);
   for (let pass = 0; pass < passes; pass++) {
     const next = cur.map((p) => [p[0], p[1]] as [number, number]);
     for (let i = 1; i + 1 < cur.length; i++) {
+      if (fixed?.(i)) continue;
       const x = (cur[i - 1]![0] + cur[i]![0] * 2 + cur[i + 1]![0]) / 4;
       const z = (cur[i - 1]![1] + cur[i]![1] * 2 + cur[i + 1]![1]) / 4;
       if (passable(x, z)) next[i] = [x, z];

@@ -1,6 +1,6 @@
 # Longsword-atlas generation prompt
 
-The weapon sheet. Same pipeline as the armor sheet (`prompt.md`), different key:
+The weapon sheet. Same pipeline as the armor sheet (`sets/armor/prompt.md`), different key:
 one modular sword ubermesh — four blades, four crossguards, three collars, three
 pommels, a grip and two cut-out ornaments — that the game mixes and matches at
 runtime. **Seventeen parts, seventeen separate regions.** Nothing on this sheet
@@ -11,16 +11,16 @@ Regenerate the key and the mesh's UVs (needed whenever the model changes):
     pnpm -F playground unwrap-weapon --recipe longsword
 
 Paste the block below into the image generator together with
-**`tools/atlas/key-longsword.png`**. Swap only the **SUBJECT** block to make a
+**`tools/atlas/sets/longsword/key.png`**. Swap only the **SUBJECT** block to make a
 new set. Then register the result and bake it into the mesh:
 
     node tools/atlas/import-atlas.mjs \
-      --key tools/atlas/key-longsword.png --art <art.png> \
-      --manifest tools/atlas/manifest-longsword.json \
-      --out tools/atlas/out-<name> --slices
+      --key tools/atlas/sets/longsword/key.png --art <art.png> \
+      --manifest tools/atlas/sets/longsword/manifest.json \
+      --out tools/atlas/out/<set>/<theme> --slices
 
     pnpm -F playground unwrap-weapon --recipe longsword \
-      --atlas tools/atlas/out-<name>/atlas.png
+      --atlas ../../tools/atlas/out/<set>/<theme>/atlas.png
 
 The second run writes `LongSword-unwrapped.glb` with the atlas inside it and the
 ornaments already on a double-sided cut-out material. Look at

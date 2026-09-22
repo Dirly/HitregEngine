@@ -49,7 +49,9 @@ import {
   mulberry32,
   fbm2,
   smoothstep,
+  storySchema,
   auditRegions,
+  regionAt,
   BORDER_CLASSES,
   type RegionDoc,
   type WorldField,
@@ -58,8 +60,11 @@ import {
   type CanyonDoc,
   type RoadDoc,
   type TownDoc,
+  type TownGateDoc,
+  type TerraceDoc,
   type CampDoc,
   type PoiDoc,
+  type StoryDoc,
   type LakeDoc,
   type FillDoc,
   type BridgeDoc,
@@ -92,6 +97,19 @@ function stringOption(name: string, fallback: string): string {
 }
 
 const PLAYGROUND = path.resolve(import.meta.dirname, "..");
+
+/**
+ * Which stage is writing, for the recipe's `pipeline` stamp. It is the command
+ * name, except under `all`, which runs a dozen stages in one process and sets
+ * this around each so they are stamped individually rather than all as "all".
+ */
+let currentStage = command === "all" || command === "status" ? "" : command;
+/** Run one stage of `all` under its own name. */
+function runStage(name: string, fn: () => void): void {
+  currentStage = name;
+  fn();
+  currentStage = "";
+}
 
 /** `--extent`, defaulting to the recipe's world limit (plus a margin) when it has one. */
 function extentFor(recipe: WorldRecipe, fallback = 3000): number {
@@ -140,6 +158,10 @@ function loadRecipe(name = worldName): { recipe: WorldRecipe; file: string } {
 }
 
 function writeRecipe(recipe: WorldRecipe, file: string): void {
+  // Stamp the stage that is writing. One place rather than fifteen: every
+  // stage goes through here, so `worldgen status` can tell what has run and
+  // what went stale underneath it without any stage having to remember to say so.
+  if (currentStage) recipe.pipeline = { ...recipe.pipeline, [currentStage]: new Date().toISOString() };
   // validate BEFORE writing: a stage must never leave a broken world on disk
   const parsed = worldRecipeSchema.safeParse(recipe);
   if (!parsed.success) fail(`refusing to write an invalid recipe:\n${parsed.error.message}`);
@@ -173,7 +195,42 @@ const HELP = `worldgen — procedural world pipeline
                    and print the valley-floor polyline as --points (--simplify 30 m)
   profile <world>  --points "x,z;…" [--width 14]: ground, grade and bank heights along a route —
                    what to read before writing a river
-  towns  <world>   flat, dry, off-the-beach sites near water, spread across the landmasses
+  status <world>   the build plan: every stage, procedural AND agentic, as ok / STALE / MISSING, in dependency
+                   order, with the reason. STALE means it ran but something it reads was re-run afterwards.
+                   --next prints just the next command (or the next agent pass) for scripting the loop
+  story  <world>   what is going on in ONE ZONE. No --zone indexes every zone and what is dressed; --zone
+                   <id|name> reports that zone's POIs by kind; --zone X --story <file|name> applies a story
+                   document (storySchema, assets/stories/*.json) — each beat takes the POIs of one kind
+                   standing in the zone and dresses a share of them with a prefab, a name, tags and the
+                   monsters that live there, and writes the zone's own story and level band. --scene <name>
+                   also materialises the camps as spawnArea entities (+ a placeholder capsule per template).
+                   Idempotent and exactly reversible: it all carries a story:<id> tag, --clear takes it off.
+                   Prefabs that do not exist yet are printed as a TO BUILD list, not treated as an error
+  towns  <world>   dry, off-the-beach sites near water, spread across the landmasses and BUCKETED BY SIZE:
+                   a capital on the coast of EVERY continent (--capitals 4 is a floor, --capital-shore 500,
+                   --continent-km2 1.5), then cities/towns/villages/hamlets down the ladder, best site first
+                   (--city-share .12 --town-share .28 --village-share .35 --hamlet-share .25,
+                   --capital-radius 78 --city-radius 60 …; --keep <ids> or a "pinned" tag leaves a town where a
+                   builder has already built on it). Relief is allowed now (--max-relief 55
+                   --max-slope 0.42 --max-altitude 220 --relief-weight 1.1) — the old 16 m cap is why every
+                   town in every world stood on a table top — with QUOTAS for the places worth walking to:
+                   --cliff-towns (15%, a face of --cliff-slope 0.7 inside the footprint) and --mountain-towns
+                   (12%, over --mountain-height 110 m). "terrace" turns the fall into shelves
+  terrace <world>  VERTICALITY: read the natural ground under each town and, where there is real fall across
+                   it, cut it into contour shelves (terraces) joined by ramps that WIND — an ordinary route
+                   search on a 4 m grid at a hard grade cap — or by a STAIR where no ramp fits. Every town
+                   draws its own step height, shelf width, riser, ramp grade and level count from its id
+                   within its tier, so no two read alike; --terrace-share .65 of the rolling sites stay flat
+                   market towns, but anything with --dramatic 2.5x the --min-relief 8 m always steps.
+                   --town <id> for one town; --step-height 6 --max-terraces 5 --riser 5 --min-shelf 9
+                   --max-shelf --ramp-grade 0.12 --ramp-width 7 --sample 4 set the middle of each range.
+                   Idempotent (lifts the last run's pads and ramps off first); re-run "paths" after
+  gates  <world>   where a town's own roads meet the world's. With no options it AUDITS: every gate and
+                   whether a path arrives at it, every walled town a path crosses instead of entering,
+                   the towns still routed to their centre (exit 1 on findings). To record one after a
+                   town is built: --town town-1 --from-road <the stub the builder drew> (or --at "x,z"
+                   --facing "dx,dz"); --id --width 6 --approach 30 --back 12 --remove <id|all>.
+                   A town with gates is entered ONLY through them — re-run paths/trails after
   paths  <world>   footpaths between the towns that FOLLOW the ground (--width 2.4 --max-grade 0.18, cut-only,
                    --max-cross 1.0 keeps them off hillsides steeper than 45° — the cut bank would be a wall;
                    --turn-weight 24 --max-turn 1 give them a turning radius, --smooth-passes 2 rounds the corners;
@@ -221,7 +278,7 @@ const HELP = `worldgen — procedural world pipeline
   regions <world>  audit the zones: area, towns and pois per zone, hubs outside, overlaps, unclaimed towns, and
                    every shared border measured — metres of water/steep/canyon/coast/ridge/town/pass/OPEN; an
                    open run >= 60 m is a finding (exit 1) until 'barriers' walls it
-  all    <world>   init (if missing) + canyons + rivers + towns + zones + paths + barriers + pois + trails + barriers + caves + map + stats
+  all    <world>   init (if missing) + canyons + rivers + towns + terrace + zones + paths + barriers + pois + trails + barriers + caves + map + stats
                    — one line from nothing to a hostable world: --from <world> (the look), --continents 3
                    --islands 2 --lobes 2 --continent-radius 2000 --gap 700 (the landmasses, fresh worlds
                    only), --seed N, --scene
@@ -1440,7 +1497,7 @@ function commandRivers(): void {
         const x = points[i]![0];
         const z = points[i]![1];
         if (falls.every((f) => Math.hypot(f.position[0] - x, f.position[2] - z) > 120)) {
-          falls.push({ id: `falls-${falls.length + 1}`, kind: "falls", position: [round(x), round(bed[i]!), round(z)], rotationY: 0, tags: [] });
+          falls.push({ id: `falls-${falls.length + 1}`, kind: "falls", position: [round(x), round(bed[i]!), round(z)], rotationY: 0, zone: "", tags: [] });
         }
       }
     }
@@ -1527,8 +1584,20 @@ function commandRivers(): void {
     const keptAlong = keep.map((i) => along[i]!);
     const wet: boolean[] = keep.map((i, k) => {
       if (wetOrRing[cells[i]!]! >= 0 || inLake[cells[i]!]) return true;
-      // the mouth: the last step drops under the sea plane, which is not a slope
+      // The mouth: the last step drops under the sea plane, which is not a slope.
+      //
+      // `hydro.sea` is read off the UNCARVED heightfield, so a channel that
+      // cuts its own way down to the coast is not "at sea" by that test — and
+      // since that final plunge is the steepest part of any river, it failed
+      // the grade test too. 24 of 25 rivers in the regenerated world arrived
+      // at the coast as an empty trench. A bed at or under the sea plane is a
+      // mouth whatever the land above it was doing before the carve.
+      // The point BEFORE it counts too: a run has to be two points to be
+      // written at all (`idx.length < 2` is dropped), so marking only the last
+      // point wet produced a one-point run that vanished and left the mouth
+      // dry exactly as before.
       if (hydro.sea[cells[i]!] || (i + 1 < cells.length && hydro.sea[cells[i + 1]!])) return true;
+      if (bed[i]! <= recipe.seaLevel || bed[keep[Math.min(keep.length - 1, k + 1)]!]! <= recipe.seaLevel) return true;
       const a = Math.max(0, k - 1);
       const b = Math.min(keep.length - 1, k + 1);
       const run = keptAlong[b]! - keptAlong[a]!;
@@ -1543,7 +1612,11 @@ function commandRivers(): void {
       }
       let e = k;
       while (e + 1 < wet.length && wet[e + 1]) e++;
-      const touchesLake = keep.slice(k, e + 1).some((i) => wetOrRing[cells[i]!]! >= 0 || inLake[cells[i]!] || hydro.sea[cells[i]!] === 1);
+      // …and a mouth counts as touching water by the same bed test, or this
+      // rule dries the very two-point run the mouth rule above just made wet
+      const touchesLake = keep
+        .slice(k, e + 1)
+        .some((i) => wetOrRing[cells[i]!]! >= 0 || inLake[cells[i]!] || hydro.sea[cells[i]!] === 1 || bed[i]! <= recipe.seaLevel);
       if (e - k + 1 < 3 && !touchesLake) for (let j = k; j <= e; j++) wet[j] = false;
       k = e + 1;
     }
@@ -2282,7 +2355,7 @@ function simplify(points: [number, number][], tolerance: number): [number, numbe
   return points.filter((_, i) => keep[i] === 1);
 }
 
-function pointSegmentDistance(p: [number, number], a: [number, number], b: [number, number]): number {
+function pointSegmentDistance(p: readonly [number, number], a: readonly [number, number], b: readonly [number, number]): number {
   const dx = b[0] - a[0];
   const dz = b[1] - a[1];
   const lenSq = dx * dx + dz * dz;
@@ -2292,16 +2365,65 @@ function pointSegmentDistance(p: [number, number], a: [number, number], b: [numb
 
 // ---------------------------------------------------------------- towns
 
+/** How big a place is: its pad, and how much of the world's settlements are of that size. */
+interface TownTier {
+  name: NonNullable<TownDoc["tier"]>;
+  radius: number;
+  /** Share of the towns left after the capitals, largest first. Capitals are counted, not shared. */
+  share: number;
+}
+
 /**
- * Site towns where a town would actually go: flat, dry, off the beach, not
- * in a swamp, near fresh water or the coast, and spread across every
- * landmass big enough to deserve one. Each term is printed so a world that
- * sites its towns somewhere daft can be diagnosed by reading the numbers.
+ * The size ladder.
+ *
+ * A world of forty identical 45 m discs reads as forty identical places: you
+ * cannot tell the capital from the fishing village until you are standing in
+ * it, and nothing downstream (WFC kit, POI density, spawn tables) has a size
+ * to key off. Capitals are dealt separately — they are sited on the COAST, a
+ * few of them, before anything else — and the rest are dealt down the ladder
+ * best-site-first, so the good ground gets the cities and the long tail of
+ * hamlets fills in the rest.
+ */
+function townTiers(): TownTier[] {
+  return [
+    { name: "capital", radius: option("capital-radius", 78), share: 0 },
+    { name: "city", radius: option("city-radius", 60), share: option("city-share", 0.12) },
+    { name: "town", radius: option("town-radius", 45), share: option("town-share", 0.28) },
+    { name: "village", radius: option("village-radius", 30), share: option("village-share", 0.35) },
+    { name: "hamlet", radius: option("hamlet-radius", 20), share: option("hamlet-share", 0.25) },
+  ];
+}
+
+/** A town's tier, with the fallback for recipes written before tiers existed. */
+function tierOf(town: TownDoc): NonNullable<TownDoc["tier"]> {
+  return town.tier ?? (town.tags.includes("capital") ? "capital" : "town");
+}
+
+/**
+ * Site towns where a town would actually go: dry, off the beach, not in a
+ * swamp, near fresh water or the coast, and spread across every landmass big
+ * enough to deserve one. Each term is printed so a world that sites its towns
+ * somewhere daft can be diagnosed by reading the numbers.
+ *
+ * Two things changed on 2026-09-19, both of them about a world reading as a
+ * place rather than as a scatter of equal discs:
+ *
+ * - **Sizes.** See `townTiers`: a few capitals, some cities, a tail of
+ *   villages and hamlets. Capitals are sited FIRST and only on the coast —
+ *   that is where a capital is, and it gives a world its shape.
+ * - **Relief.** The old filter threw away any site with more than 16 m of
+ *   height across it, so every town in every world stood on a pool table. The
+ *   cap is now `--max-relief` (55 m) with a slope cap to match, relief is
+ *   worth something in the score rather than being a disqualification, and
+ *   `worldgen terrace` turns what it accepted into stepped shelves and ramps.
+ *   A site's relief is recorded on the doc so that stage does not have to
+ *   re-derive it.
  */
 function commandTowns(): void {
   const { recipe, file } = loadRecipe();
   const field = createWorldField(recipe);
   const extent = extentFor(recipe);
+  const tiers = townTiers();
   const radius = option("radius", 45);
   const grid = sampleWorldGrid(field, extent, option("step", 24));
   // default: one town per ~3 km² of land (--per-km2 to change, --count to force)
@@ -2309,7 +2431,10 @@ function commandTowns(): void {
   for (let i = 0; i < grid.n * grid.n; i++) if (grid.height[i]! >= recipe.seaLevel) landCells++;
   const landKm2 = (landCells * grid.step * grid.step) / 1e6;
   const count = Math.round(option("count", Math.max(4, landKm2 * option("per-km2", 0.35))));
-  console.log(`  ${landKm2.toFixed(1)} km² of land -> ${count} towns`);
+  const maxSlope = option("max-slope", 0.42);
+  const maxRelief = option("max-relief", 55);
+  const capitalShore = option("capital-shore", 500);
+  const maxAltitude = option("max-altitude", 220);
   const minSeparation = option("separation", Math.max(radius * 8, extent / Math.max(3, Math.sqrt(count)) / 1.6));
   const n = grid.n;
 
@@ -2323,14 +2448,30 @@ function commandTowns(): void {
   const landmass = landComponentsOf(grid.height, n, recipe.seaLevel);
   const landArea = new Map<number, number>();
   for (let i = 0; i < n * n; i++) if (landmass[i]! > 0) landArea.set(landmass[i]!, (landArea.get(landmass[i]!) ?? 0) + 1);
+  // A CONTINENT — anything over --continent-km2 of land — gets a capital of its
+  // own, near its own coast. `--capitals` is a floor, not a ceiling: a world
+  // with five continents and "4 capitals" would otherwise leave one whole
+  // landmass with no seat on it, reachable only by whatever village happened
+  // to be dealt there.
+  const continentCells = option("continent-km2", 1.5) * 1e6 / (grid.step * grid.step);
+  const continents = [...landArea.entries()].filter(([, cells]) => cells >= continentCells).sort((a, b) => b[1] - a[1]).map(([id]) => id);
+  const capitals = Math.max(0, Math.min(count, Math.max(Math.round(option("capitals", 4)), continents.length)));
+  console.log(
+    `  ${landKm2.toFixed(1)} km² of land -> ${count} towns, ${capitals} capitals on the coast ` +
+      `(${continents.length} continent${continents.length === 1 ? "" : "s"}, one each)`,
+  );
 
   const probe = Math.max(2, Math.round(radius / grid.step));
-  const scored: { x: number; z: number; score: number; flat: number; water: number; ground: number; mass: number }[] = [];
+  const scored: { x: number; z: number; score: number; flat: number; water: number; relief: number; scarp: number; shore: number; ground: number; low: number; altitude: number; mass: number }[] = [];
   for (let iz = probe; iz < n - probe; iz += 1) {
     for (let ix = probe; ix < n - probe; ix += 1) {
       const i = ix + iz * n;
       const h = grid.height[i]!;
-      if (h < recipe.seaLevel + 3 || h > recipe.seaLevel + 110) continue;
+      // the altitude ceiling is `--max-altitude` (220 m over the sea), not the
+      // old 110: a town on a mountain SIDE is one of the places a world is
+      // worth walking to, and the score still prefers the lowlands, so high
+      // ground is reached by the mountain quota below rather than by accident
+      if (h < recipe.seaLevel + 3 || h > recipe.seaLevel + maxAltitude) continue;
       if (grid.shore[i]! < 70) continue; // off the beach
       if (grid.swamp[i]! > 0.4) continue; // nobody builds in a bog
       let slopeSum = 0;
@@ -2338,6 +2479,7 @@ function commandTowns(): void {
       let max = -Infinity;
       let samples = 0;
       let wet = 0;
+      let steepest = 0;
       for (let dz = -probe; dz <= probe; dz += 1) {
         for (let dx = -probe; dx <= probe; dx += 1) {
           const j = ix + dx + (iz + dz) * n;
@@ -2346,6 +2488,7 @@ function commandTowns(): void {
           const gz = (grid.height[j + n]! - grid.height[j - n]!) / (2 * grid.step);
           const g = Math.hypot(gx, gz);
           slopeSum += g / Math.sqrt(1 + g * g);
+          if (g > steepest) steepest = g;
           if (hh < min) min = hh;
           if (hh > max) max = hh;
           if (hh < recipe.seaLevel + 0.5) wet++;
@@ -2355,7 +2498,10 @@ function commandTowns(): void {
       if (wet > 0) continue;
       const meanSlope = slopeSum / samples;
       const spread = max - min;
-      if (meanSlope > 0.22 || spread > 16) continue;
+      // Relief is ALLOWED now, up to a slope a terrace can be cut into and a
+      // ramp can climb. The old 16 m spread cap is why every generated town in
+      // every world stood on a table top.
+      if (meanSlope > maxSlope || spread > maxRelief) continue;
       const x = grid.worldX(ix);
       const z = grid.worldZ(iz);
       if (field.waterY(x, z) !== null) continue;
@@ -2364,50 +2510,783 @@ function commandTowns(): void {
       const coast = Math.max(0, 1 - Math.max(0, grid.shore[i]! - 70) / 400);
       const fresh = nearest === Infinity ? 0 : Math.max(0, 1 - nearest / 350);
       const water = Math.max(fresh, coast * 0.8);
-      const flat = 1 - meanSlope / 0.22;
-      const score = flat * 2 + water * 1.6 + (1 - Math.abs(h - recipe.seaLevel - 20) / 90);
-      scored.push({ x, z, score, flat, water, ground: (min + max) / 2, mass: landmass[i]! });
+      const flat = 1 - meanSlope / maxSlope;
+      // …and relief is worth something: a town stepping up a hillside is the
+      // one worth walking to. The peak of the bonus is a site with a couple of
+      // shelves' worth of fall across it, not a cliff.
+      const relief = Math.min(1, spread / 26) * (1 - Math.max(0, spread - 40) / (maxRelief - 40 + 1e-6));
+      const score = flat * 1.3 + water * 1.6 + relief * option("relief-weight", 1.1) + (1 - Math.abs(h - recipe.seaLevel - 20) / 90);
+      scored.push({
+        x,
+        z,
+        score,
+        flat,
+        water,
+        relief: spread,
+        scarp: steepest,
+        shore: grid.shore[i]!,
+        ground: (min + max) / 2,
+        low: min,
+        altitude: h - recipe.seaLevel,
+        mass: landmass[i]!,
+      });
     }
   }
   if (scored.length === 0) fail("no buildable ground found — widen --extent or soften the terrain");
   scored.sort((a, b) => b.score - a.score);
 
-  const towns: TownDoc[] = [];
+  // Towns something has already been BUILT on are not re-sited. A baked WFC
+  // town, its walls and its gate are pinned to a place; move the pad out from
+  // under them and the buildings stand on a hillside. They keep their ids, they
+  // count against `--count`, and everything else is sited around them.
+  const keepIds = new Set(stringOption("keep", "").split(",").map((s) => s.trim()).filter(Boolean));
+  const pinned = recipe.features.towns.filter((t) => t.tags.includes("pinned") || keepIds.has(t.id));
+  const taken = new Set(pinned.map((t) => t.id));
+  let nextId = 1;
+  const towns: TownDoc[] = [...pinned];
   const masses = new Set<number>();
-  const place = (site: (typeof scored)[number]): void => {
+  const tierByTown: string[] = pinned.map((t) => tierOf(t));
+  if (pinned.length > 0) console.log(`  keeping ${pinned.length} pinned town(s): ${pinned.map((t) => `${t.id} (${tierOf(t)})`).join(", ")}`);
+  const place = (site: (typeof scored)[number], tier: TownTier): void => {
     masses.add(site.mass);
+    while (taken.has(`town-${nextId}`)) nextId += 1;
+    taken.add(`town-${nextId}`);
     towns.push({
-      id: `town-${towns.length + 1}`,
+      id: `town-${nextId}`,
+      tier: tier.name,
       center: [round(site.x), round(site.z)],
-      radius,
-      falloff: radius * 0.8,
+      radius: tier.radius,
+      falloff: round(tier.radius * 0.8),
+      // The pad sits at the site's MEAN height while it is flat. `worldgen
+      // terrace` re-reads the ground and moves it onto the lowest shelf if it
+      // decides the site is a stepped one.
       groundY: round(site.ground),
       flatten: 0.95,
-      tags: towns.length === 0 ? ["capital"] : ["village"],
+      // an open village until something walls it: `worldgen gates` records the
+      // entrance once a builder has put a gate somewhere
+      gates: [],
+      terraces: [],
+      tags: [tier.name],
     });
+    tierByTown.push(tier.name);
     console.log(
-      `  ${towns[towns.length - 1]!.id}: [${round(site.x)}, ${round(site.z)}] ground ${round(site.ground)}  ` +
-        `flat ${site.flat.toFixed(2)} water ${site.water.toFixed(2)} landmass ${site.mass}`,
+      `  ${towns[towns.length - 1]!.id} (${tier.name}, r${tier.radius}): [${round(site.x)}, ${round(site.z)}] ground ${round(site.ground)}  ` +
+        `flat ${site.flat.toFixed(2)} water ${site.water.toFixed(2)} relief ${site.relief.toFixed(0)}m scarp ${degreesOf(site.scarp)}° alt ${site.altitude.toFixed(0)}m shore ${site.shore.toFixed(0)}m landmass ${site.mass}`,
     );
   };
-  const clearOf = (site: (typeof scored)[number]): boolean =>
-    towns.every((t) => Math.hypot(t.center[0] - site.x, t.center[1] - site.z) > minSeparation);
+  /** Room for both pads and then some: a capital does not sit in a village's lap. */
+  const clearOf = (site: (typeof scored)[number], tier: TownTier): boolean =>
+    towns.every((t) => {
+      const want = minSeparation * ((t.radius + tier.radius) / (radius * 2));
+      return Math.hypot(t.center[0] - site.x, t.center[1] - site.z) > want;
+    });
 
-  // every landmass over ~1.5 km² gets a town before the best sites are filled in
+  // ---- the capitals: one per continent, on that continent's own coast
+  const capitalTier = tiers[0]!;
+  const coastal = scored.filter((s) => s.shore <= capitalShore);
+  if (coastal.length === 0 && capitals > 0) console.warn(`  no site within ${capitalShore} m of a shore — capitals will be inland`);
+  const pinnedCapitals = pinned.filter((t) => tierOf(t) === "capital");
+  const pinnedCapitalMasses = new Set(pinnedCapitals.map((t) => landmass[grid.nearest(t.center[0], t.center[1])]!));
+  // count CAPITALS against the capital budget, not towns: a pinned terrain pad
+  // (a castle mound) is in `towns` too, and counting it left a whole continent
+  // without a seat
+  let seats = pinnedCapitals.length;
+  for (const mass of continents) {
+    if (seats >= capitals || towns.length >= count) break;
+    if (pinnedCapitalMasses.has(mass)) continue; // it already has its seat
+    // its own coast first; failing that, the site on THIS continent nearest to
+    // one, because a continent whose good ground is all inland still needs its
+    // seat — better a capital 800 m up a river than a continent without one
+    const own = coastal.find((site) => site.mass === mass && clearOf(site, capitalTier));
+    const inland = own ?? [...scored].filter((s) => s.mass === mass && clearOf(s, capitalTier)).sort((a, b) => a.shore - b.shore)[0];
+    if (!inland) {
+      console.warn(`  landmass ${mass} has no room for a capital — it gets whatever the tiers deal it`);
+      continue;
+    }
+    if (!own) console.log(`    (landmass ${mass}: nothing within ${capitalShore} m of its shore; its capital sits ${inland.shore.toFixed(0)} m inland)`);
+    place(inland, capitalTier);
+    seats += 1;
+  }
+  // any capitals over and above one per continent go to the best coast anywhere
+  for (const site of coastal.length > 0 ? coastal : scored) {
+    if (seats >= capitals || towns.length >= count) break;
+    if (!clearOf(site, capitalTier)) continue;
+    place(site, capitalTier);
+    seats += 1;
+  }
+
+  // ---- then everything else, down the ladder, best site first
+  const rest = tiers.slice(1);
+  const shareTotal = rest.reduce((sum, t) => sum + t.share, 0) || 1;
+  const remaining = Math.max(0, count - towns.length);
+  const quota = rest.map((t) => Math.round((remaining * t.share) / shareTotal));
+  // rounding must not lose or invent a town
+  quota[quota.length - 1] = Math.max(0, remaining - quota.slice(0, -1).reduce((a, b) => a + b, 0));
+
+  // every landmass over ~1.5 km² gets something before the best sites are filled in
   const bigMasses = [...landArea.entries()].filter(([, cells]) => cells * grid.step * grid.step > 1.5e6).map(([id]) => id);
+  const midTier = rest[Math.min(1, rest.length - 1)]!;
   for (const mass of bigMasses) {
     if (towns.length >= count) break;
-    const best = scored.find((site) => site.mass === mass && clearOf(site));
-    if (best) place(best);
+    if (towns.some((t) => landmass[grid.nearest(t.center[0], t.center[1])] === mass)) continue;
+    const best = scored.find((site) => site.mass === mass && clearOf(site, midTier));
+    if (best) place(best, midTier);
   }
-  for (const site of scored) {
-    if (towns.length >= count) break;
-    if (clearOf(site)) place(site);
+  // A quota of CLIFFSIDE towns, taken before the tier's ordinary sites.
+  // A score bonus would only make cliff sites likelier; a world is supposed to
+  // HAVE a few towns clinging to a scarp, so it is a quota. A cliff site is one
+  // whose footprint holds a face of `--cliff-slope` or steeper while the site
+  // as a whole is still buildable — which is exactly the ground `terrace` cuts
+  // its deepest staircases into.
+  const cliffSlope = option("cliff-slope", 0.7);
+  let cliffLeft = Math.round(option("cliff-towns", Math.max(1, count * 0.15)));
+  const cliffPool = scored.filter((s) => s.scarp >= cliffSlope);
+  if (cliffPool.length === 0 && cliffLeft > 0) console.warn(`  no site with a face of ${degreesOf(cliffSlope)}° or steeper across it — no cliffside towns`);
+  // …and a quota of MOUNTAIN-SIDE towns, for the same reason: the score prefers
+  // water and gentle ground, so left to itself a world puts every settlement in
+  // the lowlands and the whole upland half of it is empty. High and steep is a
+  // place, and `terrace` cuts its longest staircases there.
+  const mountainHeight = option("mountain-height", 110);
+  let mountainLeft = Math.round(option("mountain-towns", Math.max(1, count * 0.12)));
+  const mountainPool = scored.filter((s) => s.altitude >= mountainHeight && s.relief >= 12);
+  if (mountainPool.length === 0 && mountainLeft > 0) console.warn(`  no buildable site over ${mountainHeight} m with any fall across it — no mountain towns`);
+  rest.forEach((tier, t) => {
+    let left = quota[t]!;
+    while (left > 0 && towns.length < count) {
+      const wantCliff = cliffLeft > 0 && cliffPool.length > 0;
+      const wantMountain = !wantCliff && mountainLeft > 0 && mountainPool.length > 0;
+      const pool = wantCliff ? cliffPool : wantMountain ? mountainPool : scored;
+      const pick = pool.find((site) => clearOf(site, tier));
+      if (!pick) {
+        // the quota's sites are all taken or too close to something: give up on
+        // it rather than on the town
+        if (wantCliff) {
+          cliffLeft = 0;
+          continue;
+        }
+        if (wantMountain) {
+          mountainLeft = 0;
+          continue;
+        }
+        break;
+      }
+      place(pick, tier);
+      if (pick.altitude >= mountainHeight) mountainLeft -= 1;
+      if (pick.scarp >= cliffSlope) cliffLeft -= 1;
+      left -= 1;
+    }
+  });
+
+  // A capital alone on its island has no road: the path network is a spanning
+  // tree PER LANDMASS, and a landmass with one settlement has no edge to cut.
+  // Give every capital a neighbour, even if the island only really wants one
+  // town — a seat of power reachable by nothing is not a place.
+  const settlementsOn = (mass: number): number => settlementTowns(towns).filter((t) => landmass[grid.nearest(t.center[0], t.center[1])] === mass).length;
+  const lonelyTier = rest[rest.length - 1] ?? capitalTier;
+  for (const capital of towns.filter((t) => tierOf(t) === "capital")) {
+    const mass = landmass[grid.nearest(capital.center[0], capital.center[1])]!;
+    if (settlementsOn(mass) > 1) continue;
+    const mate = scored.find((site) => site.mass === mass && clearOf(site, lonelyTier));
+    if (mate) {
+      console.log(`  ${capital.id} was alone on landmass ${mass} — giving it a neighbour so it can have a road`);
+      place(mate, lonelyTier);
+    } else {
+      console.warn(`  ! ${capital.id} is alone on landmass ${mass} and there is no room for a second town — it will have no road`);
+    }
   }
 
   recipe.features.towns = towns;
   writeRecipe(recipe, file);
-  console.log(`sited ${towns.length} towns across ${masses.size} landmasses`);
+  const byTier = tiers.map((t) => `${tierByTown.filter((x) => x === t.name).length} ${t.name}`).filter((s) => !s.startsWith("0 "));
+  console.log(`sited ${towns.length} towns across ${masses.size} landmasses: ${byTier.join(", ")}`);
+  console.log(`  ${towns.filter((t) => t.tier !== "capital").length} of them may be stepped — run: worldgen terrace ${worldName}`);
+}
+
+// ---------------------------------------------------------------- terracing
+
+/**
+ * A square of the world sampled finely around one point.
+ *
+ * `sampleWorldGrid` is centred on the origin and stepped for the whole world:
+ * a town is four cells across in it, which is no use for laying a shelf or
+ * cutting a ramp. This is the same structure at a few metres per cell over one
+ * settlement. The climate channels are left empty — nothing inside a town asks
+ * for swampiness — and `shore` is Infinity rather than 0 so that anything that
+ * did read it would not think the whole town was on a beach.
+ */
+function sampleLocalGrid(field: WorldField, cx: number, cz: number, extent: number, step: number): WorldGridSample {
+  const n = Math.max(8, Math.round((extent * 2) / step) + 1);
+  const actualStep = (extent * 2) / (n - 1);
+  const total = n * n;
+  const height = new Float32Array(total);
+  const zero = new Float32Array(total);
+  const shore = new Float32Array(total).fill(Infinity);
+  const worldX = (ix: number): number => cx - extent + ix * actualStep;
+  const worldZ = (iz: number): number => cz - extent + iz * actualStep;
+  for (let iz = 0; iz < n; iz++) for (let ix = 0; ix < n; ix++) height[ix + iz * n] = field.height(worldX(ix), worldZ(iz));
+  return {
+    n,
+    step: actualStep,
+    extent,
+    height,
+    rain: zero,
+    swamp: zero,
+    dunes: zero,
+    shore,
+    zone: new Int16Array(total).fill(-1),
+    anchorIds: [],
+    seaLevel: field.recipe.seaLevel,
+    worldX,
+    worldZ,
+    nearest: (x, z) => clampIndex(Math.round((x - cx + extent) / actualStep), n) + clampIndex(Math.round((z - cz + extent) / actualStep), n) * n,
+  };
+}
+
+/** A route grid over a local sample: open ground, real gradients, no water rules — inside a town there is none. */
+function localRouteGrid(grid: WorldGridSample): RouteGrid {
+  const n = grid.n;
+  const total = n * n;
+  const gradX = new Float32Array(total);
+  const gradZ = new Float32Array(total);
+  const h = grid.height;
+  for (let z = 0; z < n; z++) {
+    for (let x = 0; x < n; x++) {
+      const i = x + z * n;
+      const xm = h[Math.max(0, x - 1) + z * n]!;
+      const xp = h[Math.min(n - 1, x + 1) + z * n]!;
+      const zm = h[x + Math.max(0, z - 1) * n]!;
+      const zp = h[x + Math.min(n - 1, z + 1) * n]!;
+      const mx = Math.max(Math.abs(xp - h[i]!), Math.abs(h[i]! - xm)) / grid.step;
+      const mz = Math.max(Math.abs(zp - h[i]!), Math.abs(h[i]! - zm)) / grid.step;
+      gradX[i] = xp >= xm ? mx : -mx;
+      gradZ[i] = zp >= zm ? mz : -mz;
+    }
+  }
+  return { n, step: grid.step, height: h, cost: new Float32Array(total).fill(1), river: new Float32Array(total), gradX, gradZ };
+}
+
+/** A stable hash of a string: a town's character must be the same on every run of the stage. */
+function hashString(text: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+/**
+ * What KIND of stepped town this one is.
+ *
+ * One set of terracing numbers applied to forty towns gives forty of the same
+ * town — the same 6 m steps, the same shelf width, the same ramp grade — which
+ * is the flat-pad problem again in a more expensive form. Every town draws its
+ * own numbers from its id (stable across runs, so re-running the stage does not
+ * reshuffle the world), bounded by its tier: a capital may stack six broad
+ * shelves, a hamlet gets two narrow ones. `terrace` decides whether a town
+ * steps at all the same way, so a share of the buildable-but-rolling sites stay
+ * flat and the stepped ones read as a choice rather than as a rule.
+ */
+function terraceCharacter(
+  town: TownDoc,
+  seed: number,
+  base: { stepHeight: number; riser: number; minShelf: number; maxShelf: number; maxTerraces: number; rampGrade: number; minRelief: number; share: number },
+): { steps: number; riser: number; minShelf: number; maxShelf: number; maxTerraces: number; rampGrade: number; threshold: number; steep: boolean } {
+  const rng = mulberry32((hashString(town.id) ^ Math.imul(seed >>> 0, 2654435761)) >>> 0);
+  const between = (lo: number, hi: number): number => lo + rng() * (hi - lo);
+  const byTier: Record<string, { levels: number; width: number }> = {
+    capital: { levels: 1, width: 1.3 },
+    city: { levels: 0, width: 1.15 },
+    town: { levels: 0, width: 1 },
+    village: { levels: -1, width: 0.85 },
+    hamlet: { levels: -2, width: 0.7 },
+  };
+  const tier = byTier[tierOf(town)] ?? byTier.town!;
+  const width = between(0.8, 1.45) * tier.width;
+  // a town either takes its steps in small tread-like lifts or in big bold
+  // ones; the middle is the least characterful place to sit
+  const steps = base.stepHeight * (rng() < 0.5 ? between(0.65, 0.9) : between(1.15, 1.7));
+  return {
+    steps,
+    riser: base.riser * between(0.6, 1.5),
+    minShelf: base.minShelf * width,
+    maxShelf: base.maxShelf * width,
+    maxTerraces: Math.max(2, base.maxTerraces + tier.levels),
+    rampGrade: base.rampGrade * between(0.7, 1.4),
+    // its own bar for stepping at all, so two towns with the same fall across
+    // them need not make the same choice
+    threshold: base.minRelief * between(0.7, 1.8),
+    steep: rng() < base.share,
+  };
+}
+
+/** Distance from a point to a polyline (a single point is just that point) — the same rule the field's terrace carve uses. */
+function distanceToPolylineXZ(points: readonly (readonly [number, number])[], x: number, z: number): number {
+  if (points.length === 1) return Math.hypot(x - points[0]![0], z - points[0]![1]);
+  let best = Infinity;
+  for (let i = 0; i + 1 < points.length; i++) best = Math.min(best, pointSegmentDistance([x, z], points[i]!, points[i + 1]!));
+  return best;
+}
+
+/** The value at `q` (0..1) of a sorted-on-the-spot copy — medians and percentiles without pulling in a stats lib. */
+function quantile(values: readonly number[], q: number): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const at = Math.max(0, Math.min(sorted.length - 1, Math.round(q * (sorted.length - 1))));
+  return sorted[at]!;
+}
+
+/**
+ * A shelf's centreline and half-width, fitted to the points that fall in one
+ * height band.
+ *
+ * A contour band on a hillside is a long thin blob, so its own principal axis
+ * IS the contour: project the points onto it, bin them along it, and take the
+ * median across the axis in each bin. That gives a line that follows the
+ * hill round rather than cutting across it — which is the difference between
+ * a terrace and a trench. The half-width is the band's own spread, so a shelf
+ * is as wide as the ground it was cut from, clamped so it is neither a ledge
+ * nor the whole town.
+ */
+function fitShelf(
+  points: readonly (readonly [number, number])[],
+  limits: { minWidth: number; maxWidth: number; maxBins: number },
+): { points: [number, number][]; radius: number } | null {
+  if (points.length < 3) return null;
+  let cx = 0;
+  let cz = 0;
+  for (const p of points) {
+    cx += p[0] / points.length;
+    cz += p[1] / points.length;
+  }
+  let sxx = 0;
+  let szz = 0;
+  let sxz = 0;
+  for (const p of points) {
+    sxx += (p[0] - cx) ** 2;
+    szz += (p[1] - cz) ** 2;
+    sxz += (p[0] - cx) * (p[1] - cz);
+  }
+  // principal axis of a 2x2 covariance, closed form
+  const theta = 0.5 * Math.atan2(2 * sxz, sxx - szz);
+  const ux = Math.cos(theta);
+  const uz = Math.sin(theta);
+  const along = points.map((p) => (p[0] - cx) * ux + (p[1] - cz) * uz);
+  const across = points.map((p) => -(p[0] - cx) * uz + (p[1] - cz) * ux);
+  const spanAlong = Math.max(...along) - Math.min(...along);
+  const halfWidth = Math.max(limits.minWidth, Math.min(limits.maxWidth, quantile(across.map(Math.abs), 0.75)));
+  const bins = Math.max(1, Math.min(limits.maxBins, Math.round(spanAlong / Math.max(20, halfWidth * 2))));
+  if (bins === 1) return { points: [[round(cx), round(cz)]], radius: round(halfWidth) };
+  const lo = Math.min(...along);
+  const width = spanAlong / bins;
+  const line: [number, number][] = [];
+  for (let b = 0; b < bins; b++) {
+    const inBin: number[] = [];
+    let meanAlong = 0;
+    let hits = 0;
+    for (let i = 0; i < points.length; i++) {
+      const t = along[i]!;
+      if (t < lo + b * width || (b < bins - 1 && t >= lo + (b + 1) * width)) continue;
+      inBin.push(across[i]!);
+      meanAlong += t;
+      hits += 1;
+    }
+    if (hits === 0) continue;
+    meanAlong /= hits;
+    const v = quantile(inBin, 0.5);
+    line.push([round(cx + ux * meanAlong - uz * v), round(cz + uz * meanAlong + ux * v)]);
+  }
+  if (line.length === 0) return null;
+  return { points: line.length === 1 ? line : line, radius: round(halfWidth) };
+}
+
+/**
+ * `worldgen terrace <world>` — give the towns verticality.
+ *
+ * A town pad is a disc of terrain pulled flat, so a settlement on a hillside
+ * used to delete the hillside: forty towns, forty pool tables, and the only
+ * height anywhere near one was whatever the WFC buildings brought with them.
+ * This reads the NATURAL ground under each town (the pads and the ramps of a
+ * previous run are lifted off first), and where there is real fall across the
+ * site it cuts the ground into shelves and joins them with ramps:
+ *
+ *   - The town's own `flatten` goes to 0 — the hill stays.
+ *   - Two to five `terraces`, one per `--step-height` band of the fall, each a
+ *     line fitted to the contour (see `fitShelf`) held at one level with a
+ *     short riser at its edge. Equal HEIGHT bands, not equal-area quantiles:
+ *     quantiles balance the area but put four of five levels within three
+ *     metres of each other on a hillside whose heights bunch up, which is a
+ *     rough floor rather than a staircase.
+ *   - A ramp between each pair of neighbouring shelves, cut by the ordinary
+ *     route search at a hard grade cap on a 4 m grid — which is what makes it
+ *     WIND: a 6 m riser it may only climb at 12 % has to traverse 50 m of
+ *     face, so it takes the slope at an angle and switchbacks where it must,
+ *     exactly as a road up a cliff does. Where no such route exists in the
+ *     room available, the link is cut as a STAIR instead — steep and direct —
+ *     because a terrace nothing reaches is worse than a steep way up to it.
+ *     Both are `<town>-ramp-<n>` roads and nothing but this stage writes or
+ *     removes them.
+ *
+ * Every town draws its OWN numbers — step height, shelf width, riser, ramp
+ * grade, how many levels, and its own bar for stepping at all — from its id,
+ * bounded by its tier (`terraceCharacter`). One set of numbers applied to forty
+ * towns is forty of the same town, which is the flat-pad problem again in a
+ * more expensive form. A site under its own threshold, or one of the
+ * `--terrace-share` that roll flat, is left as a pad and says so; a site with
+ * `--dramatic` (2.5×) the minimum fall always steps, because ignoring that much
+ * height is how you get a table top on a mountainside.
+ *
+ * Idempotent: re-running re-reads the natural ground and rewrites both, and the
+ * character is seeded from the id, so nothing reshuffles.
+ */
+function commandTerrace(): void {
+  const { recipe, file } = loadRecipe();
+  const only = stringOption("town", "");
+  // A PINNED town has been built on — its ground is load-bearing for whatever
+  // stands on it, and re-cutting it into shelves drops a baked WFC town onto a
+  // staircase. Naming one with --town terraces it anyway, for the case where
+  // the buildings are going to be re-laid on the new ground.
+  const pinnedOut = recipe.features.towns.filter((t) => t.tags.includes("pinned") && t.id !== only);
+  const targets = recipe.features.towns.filter((t) => (only ? t.id === only : !t.tags.includes("pinned")));
+  if (targets.length === 0) fail(only ? `no town "${only}"` : "no towns — run: worldgen towns <world>");
+  if (pinnedOut.length > 0) console.log(`  ${pinnedOut.length} pinned town(s) left as they are: ${pinnedOut.map((t) => t.id).join(", ")}`);
+  const minRelief = option("min-relief", 8);
+  const sampleStep = option("sample", 4);
+  const rampWidth = option("ramp-width", 7);
+  const dramatic = option("dramatic", 2.5);
+  const base = {
+    stepHeight: option("step-height", 6),
+    riser: option("riser", 5),
+    minShelf: option("min-shelf", 9),
+    maxShelf: option("max-shelf", 0), // 0 = from the town's own radius
+    maxTerraces: Math.max(2, Math.round(option("max-terraces", 5))),
+    rampGrade: option("ramp-grade", 0.12),
+    minRelief,
+    share: option("terrace-share", 0.65),
+  };
+  const paint = pathSurfaces(recipe);
+
+  // The natural ground: every pad we are about to re-cut lifted off, and the
+  // ramps of the last run with them. Without this the second run terraces its
+  // own terraces — reading a stepped hillside as the ground truth and stepping
+  // it again — and the town creeps upward every time the stage is run.
+  const bare = structuredClone(recipe);
+  const targetIds = new Set(targets.map((t) => t.id));
+  bare.features.towns = bare.features.towns.map((t) => (targetIds.has(t.id) ? { ...t, flatten: 0, terraces: [] } : t));
+  bare.features.roads = bare.features.roads.filter((r) => ![...targetIds].some((id) => (r.id.startsWith(`${id}-ramp-`) || r.id.startsWith(`${id}-stair-`))));
+  const bareField = createWorldField(bare);
+
+  let stepped = 0;
+  let flat = 0;
+  const plans = new Map<string, { town: TownDoc; terraces: TerraceDoc[]; character: ReturnType<typeof terraceCharacter> }>();
+  for (const town of targets) {
+    const grid = sampleLocalGrid(bareField, town.center[0], town.center[1], town.radius * 1.15, sampleStep);
+    const inside: { x: number; z: number; h: number }[] = [];
+    for (let iz = 0; iz < grid.n; iz++) {
+      for (let ix = 0; ix < grid.n; ix++) {
+        const x = grid.worldX(ix);
+        const z = grid.worldZ(iz);
+        if (Math.hypot(x - town.center[0], z - town.center[1]) > town.radius) continue;
+        inside.push({ x, z, h: grid.height[ix + iz * grid.n]! });
+      }
+    }
+    if (inside.length < 16) continue;
+    const heights = inside.map((p) => p.h);
+    // p5..p95, not min..max: one spike of rock inside the footprint is not
+    // what the town is built on, and it used to set the whole band layout
+    const low = quantile(heights, 0.05);
+    const high = quantile(heights, 0.95);
+    const relief = high - low;
+    const me = terraceCharacter(town, recipe.seed, { ...base, maxShelf: base.maxShelf || Math.max(14, town.radius * 0.45) });
+    const stepHeight = me.steps;
+    const leaveFlat = (why: string): void => {
+      town.flatten = 0.95;
+      town.terraces = [];
+      town.groundY = round(quantile(heights, 0.5));
+      flat += 1;
+      console.log(`  ${town.id} (${tierOf(town)}): ${relief.toFixed(1)} m of fall — ${why}, flat at ${town.groundY}`);
+    };
+    // Its own bar, and its own coin. A site with `--dramatic` times the minimum
+    // fall across it steps whatever the coin says: a town that ignores twenty
+    // metres of hill is the pool table this stage exists to stop.
+    if (relief < Math.max(minRelief, me.threshold) || (!me.steep && relief < minRelief * dramatic)) {
+      leaveFlat(relief < me.threshold ? "under its own bar" : "this one stays a market town");
+      continue;
+    }
+    // EQUAL HEIGHT bands, not equal-area quantiles. Quantiles looked right on
+    // paper and came out as mush: on a hillside whose heights bunch up, four
+    // of the five bands land within three metres of each other, which is not a
+    // staircase. A step is a step — `--step-height` apart, whatever share of
+    // the site each one happens to get — and a band too thin to stand on is
+    // dropped rather than flattened into its neighbour.
+    const bands = Math.max(2, Math.min(me.maxTerraces, Math.round(relief / stepHeight)));
+    const bandHeight = relief / bands;
+    const minMembers = Math.max(3, Math.round(inside.length * option("min-shelf-area", 0.04)));
+    const terraces: TerraceDoc[] = [];
+    for (let b = 0; b < bands; b++) {
+      const bandLo = low + b * bandHeight;
+      const bandHi = low + (b + 1) * bandHeight;
+      const members = inside.filter((p) => (b === 0 ? true : p.h >= bandLo) && (b === bands - 1 ? true : p.h < bandHi));
+      if (members.length < minMembers) continue;
+      const shelf = fitShelf(
+        members.map((p) => [p.x, p.z] as [number, number]),
+        { minWidth: me.minShelf, maxWidth: Math.max(me.minShelf + 2, me.maxShelf), maxBins: 4 },
+      );
+      if (!shelf) continue;
+      // The shelf sits at the height of the ground ITS CENTRELINE runs over,
+      // not at the band's midpoint. The midpoint is the tidier number and it
+      // put the level up to two steps away from the line that was fitted, so
+      // a ramp's ends — chosen on the hillside at the shelf's height — were
+      // metres below where the pins then dragged them: every ramp held 11-14 %
+      // along its length and finished with a 100-190 % jump onto the shelf.
+      const along = shelf.points.length === 1 ? [shelf.points[0]!] : densifyPolyline(shelf.points, sampleStep);
+      const level = round(quantile(along.map((p) => grid.height[grid.nearest(p[0], p[1])]!), 0.5));
+      // never two shelves a stumble apart: that is a rough floor, not a step
+      if (terraces.some((t) => Math.abs(t.groundY - level) < Math.max(1.5, stepHeight * 0.4))) continue;
+      terraces.push({
+        id: `${town.id}-terrace-${terraces.length + 1}`,
+        points: shelf.points,
+        radius: shelf.radius,
+        falloff: round(me.riser),
+        groundY: level,
+        flatten: 1,
+        tags: [],
+      });
+    }
+    if (terraces.length < 2) {
+      leaveFlat("no band held a shelf");
+      continue;
+    }
+    terraces.sort((a, b) => a.groundY - b.groundY);
+    // Neighbouring shelves must not lie on top of each other: each half-width
+    // came from the spread of its own band, and two bands that bulge towards
+    // each other both claim the same ground — whereupon the later carve wins
+    // and eats the riser, which is the step. Adjacent LEVELS only, and every
+    // cap worked out before any is applied: shrinking pair by pair compounds,
+    // and a five-shelf town collapsed to a stack of 4 m ledges. Shelves two
+    // levels apart may overlap; the higher one simply wins, which is what a
+    // hillside cut back into itself looks like anyway.
+    const caps = terraces.map((t) => t.radius);
+    for (let a = 0; a + 1 < terraces.length; a++) {
+      const A = terraces[a]!;
+      const B = terraces[a + 1]!;
+      let gap = Infinity;
+      for (const p of densifyPolyline(A.points.length === 1 ? [A.points[0]!, A.points[0]!] : A.points, sampleStep * 2)) {
+        gap = Math.min(gap, distanceToPolylineXZ(B.points, p[0], p[1]));
+      }
+      const want = A.radius + B.radius;
+      if (!Number.isFinite(gap) || want <= gap) continue;
+      const scale = gap / want;
+      caps[a] = Math.min(caps[a]!, A.radius * scale);
+      caps[a + 1] = Math.min(caps[a + 1]!, B.radius * scale);
+    }
+    const floor = me.minShelf * 0.7;
+    terraces.forEach((t, i) => {
+      t.radius = round(Math.max(floor, Math.min(t.radius, caps[i]!)));
+    });
+    town.terraces = terraces;
+    town.flatten = 0; // the hill stays; the shelves are the flat ground
+    town.groundY = terraces[0]!.groundY; // what a path arriving at the town is pinned to
+    // A stepped town has an obvious way in — the bottom of the staircase — so
+    // give it one, and the road network will come to it instead of to the
+    // middle of the hill (see `townGateSchema`). Only when nothing has said
+    // otherwise: a builder's own gate always wins.
+    if (town.gates.length === 0) {
+      const line = terraces[0]!.points;
+      let mouth = line[0]!;
+      let far = -1;
+      for (const p of line) {
+        const d = Math.hypot(p[0] - town.center[0], p[1] - town.center[1]);
+        if (d > far) {
+          far = d;
+          mouth = p;
+        }
+      }
+      const away = normaliseXZ([mouth[0] - town.center[0], mouth[1] - town.center[1]]);
+      if (away) {
+        town.gates = [
+          {
+            id: "lower-gate",
+            at: [round(mouth[0] + away[0] * terraces[0]!.radius), round(mouth[1] + away[1] * terraces[0]!.radius)],
+            facing: away,
+            width: option("gate-width", 6),
+            approach: option("gate-approach", 30),
+            tags: ["terrace"],
+          },
+        ];
+      }
+    }
+    stepped += 1;
+    plans.set(town.id, { town, terraces, character: me });
+    console.log(
+      `  ${town.id} (${tierOf(town)}): ${relief.toFixed(1)} m of fall -> ${terraces.length} shelves ` +
+        `${terraces.map((t) => `${t.groundY}m×${t.radius}`).join(" / ")}  ` +
+        `[${me.steps.toFixed(1)} m steps, ${me.riser.toFixed(1)} m risers, ramps ${(me.rampGrade * 100).toFixed(0)} %]`,
+    );
+  }
+
+  // Ramps are routed and cut on the NATURAL hillside, not on the shelves just
+  // written. That is what makes one wind: a ramp searched over stepped ground
+  // sees flat shelves it can run along for free and a riser it may not climb,
+  // so it sets off round the hill looking for a back way (the first cut ran
+  // 286 m to gain 5.5 m). Over the bare slope, a 6 m rise it may only take at
+  // 12 % simply has to traverse fifty metres of face, and switchback where the
+  // face is steeper than that. The carve lands after the terraces in the
+  // field, so where a ramp crosses a riser it cuts through it — which is what
+  // a ramp is.
+  recipe.features.roads = recipe.features.roads.filter((r) => ![...targetIds].some((id) => (r.id.startsWith(`${id}-ramp-`) || r.id.startsWith(`${id}-stair-`))));
+  const ramps: RoadDoc[] = [];
+  for (const { town, terraces, character } of plans.values()) {
+    const rampGrade = character.rampGrade;
+    const grid = sampleLocalGrid(bareField, town.center[0], town.center[1], town.radius * 1.3, sampleStep);
+    const routeGrid = localRouteGrid(grid);
+    for (let k = 0; k + 1 < terraces.length; k++) {
+      const lower = terraces[k]!;
+      const upper = terraces[k + 1]!;
+      // Where the two shelves come nearest each other — the shortest riser, and
+      // the natural place for a stair. Measured along the DENSIFIED centrelines,
+      // not between their handful of vertices: two shelves that run side by side
+      // can have their vertices at opposite ends and the ramp then sets off
+      // round the hill to join them.
+      //
+      // The two ends are also chosen by HEIGHT, not only by proximity: a
+      // shelf's centreline is a median fitted through a band, so parts of it
+      // sit well above or below the level the shelf is held at. Joining the
+      // two nearest such points gave a ramp whose pinned ends were 5.5 m apart
+      // over 8 m of ground — a 68 % "ramp" under a 12 % cap, because the
+      // search saw two cells of level hillside and the pins did the climbing
+      // afterwards. Each end is taken where the natural ground is already at
+      // that shelf's height, so the climb the pins ask for is the climb the
+      // search actually costed.
+      const walk = (line: readonly (readonly [number, number])[]): [number, number][] =>
+        line.length === 1 ? [[line[0]![0], line[0]![1]]] : densifyPolyline(line, grid.step);
+      const onLevel = (line: readonly (readonly [number, number])[], y: number): [number, number][] => {
+        const points = walk(line);
+        const err = points.map((p) => Math.abs(grid.height[grid.nearest(p[0], p[1])]! - y));
+        const best = Math.min(...err);
+        // a metre of slack, not half a step: widen it and the two ends drift
+        // back off their levels, and the pins go back to doing the climbing
+        const tolerance = Math.max(best + 0.01, 1);
+        return points.filter((_, i) => err[i]! <= tolerance);
+      };
+      const lowLine = onLevel(lower.points, lower.groundY);
+      const highLine = onLevel(upper.points, upper.groundY);
+      let bestA = lowLine[0]!;
+      let bestB = highLine[0]!;
+      let bestD = Infinity;
+      for (const a of lowLine) {
+        for (const b of highLine) {
+          const d = Math.hypot(a[0] - b[0], a[1] - b[1]);
+          if (d < bestD) {
+            bestD = d;
+            bestA = a;
+            bestB = b;
+          }
+        }
+      }
+      const from = grid.nearest(bestA[0], bestA[1]);
+      const to = grid.nearest(bestB[0], bestB[1]);
+      if (from === to) continue;
+      const search = {
+        maxGrade: rampGrade,
+        gradeWeight: 12,
+        riverToll: 0,
+        turnWeight: option("ramp-turn-weight", 8),
+        maxTurn: 1,
+        maxExpansions: 300000,
+        // the riser is a wall by design — a ramp that refused to traverse a
+        // steep face could never climb the step it exists to climb
+        maxCross: 4,
+        crossWeight: 1,
+      };
+      // NO exempt end zone. The stock two-cell exemption is there because a
+      // road starts on a town pad's own edge step; a ramp is eight to twenty
+      // cells long, so an exempt end is an exempt ramp — the first cut came out
+      // at 63 % under a 12 % cap, because every cell of it was an end.
+      const graded = routeWithGradeCap(routeGrid, from, to, search, 0, { caps: [1.3, 2, 3.5] });
+      // A ramp that wanders is not winding, it is lost. The yardstick is not
+      // the straight line — a switchback is meant to be longer than that — but
+      // the run the grade itself demands: climb / grade, with the straight
+      // distance as the floor.
+      const climbNeeded = Math.max(0, upper.groundY - lower.groundY);
+      const fair = Math.max(bestD, climbNeeded / rampGrade, grid.step * 3);
+      const wanders = graded.route !== null && graded.route.length * grid.step > fair * option("ramp-detour", 3.5);
+      // …and where no ramp fits, a STAIR: straight up the riser at whatever it
+      // takes. A terrace nothing reaches is worse than a steep way up to it.
+      const stair = !graded.route || wanders;
+      // A stair is steep on purpose, but it is still a stair: cap it at
+      // `--stair-grade` (50 %, about as steep as a monumental flight gets) and
+      // let it take a longer line to hold that. Uncapped, the fallback happily
+      // returned a two-cell link at 200 % — a cliff with a road painted on it.
+      const stairGrade = option("stair-grade", 0.5);
+      const climbed = stair
+        ? routeWithGradeCap(routeGrid, from, to, { ...search, maxGrade: stairGrade, gradeWeight: 4 }, 0, { caps: [1, 1.6] })
+        : graded;
+      const desperate = stair && !climbed.route ? routeWithGradeCap(routeGrid, from, to, { ...search, maxGrade: 1, gradeWeight: 1 }, 0, { caps: [undefined] }) : null;
+      if (desperate?.route) console.warn(`  ! ${town.id}: ${lower.id} to ${upper.id} needs a climb steeper than ${(stairGrade * 100).toFixed(0)} %`);
+      const route = climbed.route ?? desperate?.route ?? null;
+      if (!route || route.length < 2) {
+        console.warn(`  ! ${town.id}: nothing joins ${lower.id} to ${upper.id} — that shelf is unreachable`);
+        continue;
+      }
+      // a stair is its own kind of thing downstream — a flight of steps, not a
+      // road surface — so it says so in its id
+      const cut = (asStair: boolean, on: readonly number[]): { roads: RoadDoc[]; steepest: number } => {
+        const outcome = roadFrom(`${town.id}-${asStair ? "stair" : "ramp"}-${k + 1}`, on, grid, bareField, routeGrid, {
+          width: asStair ? Math.min(rampWidth, option("stair-width", 4.5)) : rampWidth,
+          maxGrade: asStair ? stairGrade : rampGrade,
+          // a built ramp holds its grade: it is masonry, not a goat track
+          finalClamp: "grade",
+          maxFill: option("ramp-fill", 5),
+          maxCut: option("ramp-cut", 6),
+          pinStart: lower.groundY,
+          pinEnd: upper.groundY,
+          smoothPasses: 2,
+          bridgeMin: 1e9,
+          surface: paint.surface,
+          surfaceByBiome: paint.surfaceByBiome,
+        });
+        let steepest = 0;
+        for (const road of outcome.roads) {
+          for (let i = 1; i < road.points.length; i++) {
+            const run = Math.hypot(road.points[i]![0] - road.points[i - 1]![0], road.points[i]![1] - road.points[i - 1]![1]);
+            if (run > 0.5) steepest = Math.max(steepest, Math.abs(road.surfaceY![i]! - road.surfaceY![i - 1]!) / run);
+          }
+        }
+        return { roads: outcome.roads, steepest };
+      };
+      // MEASURE what was built, do not assume it. The search costs a route and
+      // the profile then has to fit the climb into it — and a route that dips
+      // before it rises has less run to climb in than its length suggests, so
+      // the solver holds the design grade all the way along and the end pin
+      // makes up the difference in one step (one ramp finished with 9 m over
+      // 4 m: a 206 % "ramp" whose every other segment was a tidy 14 %). If the
+      // built line is half again as steep as it was meant to be, it is not a
+      // ramp, and it is re-cut as the stair it actually is.
+      let link = cut(stair, route);
+      let asStair = stair;
+      const tolerable = Math.max(0.25, (stair ? stairGrade : rampGrade) * 1.6);
+      if (!asStair && link.steepest > tolerable) {
+        const retry = climbed.route && climbed !== graded ? climbed : routeWithGradeCap(routeGrid, from, to, { ...search, maxGrade: stairGrade, gradeWeight: 4 }, 0, { caps: [1, 1.6, undefined] });
+        if (retry.route) {
+          asStair = true;
+          link = cut(true, retry.route);
+        }
+      }
+      ramps.push(...link.roads);
+      const climb = upper.groundY - lower.groundY;
+      const run = route.length * grid.step;
+      console.log(
+        `    ${town.id}-${asStair ? "stair" : "ramp"}-${k + 1}: ${climb.toFixed(1)} m up in ${run.toFixed(0)} m, ` +
+          `steepest ${(link.steepest * 100).toFixed(0)} %${asStair ? " — a stair; no ramp fits" : ""}`,
+      );
+    }
+  }
+
+  recipe.features.roads = [...recipe.features.roads, ...ramps];
+  writeRecipe(recipe, file);
+  console.log(`terraced ${stepped} town(s) with ${ramps.length} ramps; ${flat} left flat`);
+  if (stepped > 0) console.log(`  the ground moved — re-run: worldgen paths ${worldName}${project ? ` --project ${project}` : ""}`);
 }
 
 /** Flood-fill land (8-connected, above sea level) into components. 0 = water. */
@@ -2936,9 +3815,28 @@ function commandSpawnPaint(): void {
 function commandZones(): void {
   const { recipe, file } = loadRecipe();
   if (recipe.regions.length > 0 && !flag("force")) {
-    console.log(`${recipe.regions.length} regions already in ${recipe.name} — pass --force to redraft (names and stories will be lost)`);
+    console.log(`${recipe.regions.length} regions already in ${recipe.name} — pass --force to redraft (the geometry is redrawn; names are inherited by proximity)`);
     return;
   }
+  // the zones being replaced, so their names can outlive them
+  const townZonesBefore = recipe.regions.filter((r) => r.tags.includes("town"));
+  const namedBefore = recipe.regions
+    .filter((r) => r.within === undefined && !r.tags.includes("town") && r.hub && r.name && !/^Zone d+$/.test(r.name))
+    .map((r) => ({ name: r.name, story: r.story, hub: r.hub! }));
+  const inheritZone = (at: readonly [number, number]): { name: string; story: string } | undefined => {
+    let best = -1;
+    let bestD = Infinity;
+    namedBefore.forEach((z, i) => {
+      const d = Math.hypot(z.hub[0] - at[0], z.hub[1] - at[1]);
+      if (d < bestD) {
+        bestD = d;
+        best = i;
+      }
+    });
+    if (best < 0) return undefined;
+    const [taken] = namedBefore.splice(best, 1);
+    return taken;
+  };
   const towns = recipe.features.towns;
   if (towns.length === 0) {
     console.log("no towns yet — run `worldgen towns` first (zones are seeded from towns)");
@@ -2969,8 +3867,10 @@ function commandZones(): void {
   const minZoneCells = 0.5e6 / (grid.step * grid.step); // half a km²: smaller islets join nothing and get no seed
   const seedable = (i: number): boolean => townMass[i]! > 0 && (massCells.get(townMass[i]!) ?? 0) >= minZoneCells;
   const seeds: number[] = [];
-  const capital = Math.max(0, towns.findIndex((t) => t.tags.includes("capital")));
-  if (seedable(capital)) seeds.push(capital);
+  // every capital seeds a zone before anything else — a world with four of
+  // them has four regions built around them, not one built around the first
+  for (let i = 0; i < towns.length && seeds.length < count; i++) if (tierOf(towns[i]!) === "capital" && seedable(i)) seeds.push(i);
+  if (seeds.length === 0 && seedable(0)) seeds.push(0);
   const massesSeen = new Set<number>(seeds.map((s) => townMass[s]!));
   for (let i = 0; i < towns.length; i++) {
     if (seeds.length >= count) break;
@@ -3251,10 +4151,15 @@ function commandZones(): void {
     }
     const town = towns[townIndex]!;
     const inside = towns.filter((t) => t.id !== town.id && pointInPolygon(capped, t.center[0], t.center[1])).map((t) => t.id);
+    // A redraft keeps the NAMES. The zones are redrawn because the towns
+    // moved, but "Ashmouth Reach" was written by hand and the patch of world
+    // it referred to has not gone anywhere: the nearest previous hub lends its
+    // name and story to the new zone, each used once.
+    const inherited = inheritZone(town.center);
     regions.push({
       id: `zone-${regions.length + 1}`,
-      name: `Zone ${regions.length + 1}`,
-      story: "",
+      name: inherited?.name ?? `Zone ${regions.length + 1}`,
+      story: inherited?.story ?? "",
       polygon: capped.map(([x, z]) => [Math.round(x), Math.round(z)] as [number, number]),
       hub: [town.center[0], town.center[1]],
       landmarks: [town.id, ...inside], // the hub town first
@@ -3262,7 +4167,8 @@ function commandZones(): void {
     });
   });
 
-  recipe.regions = [...regions, ...townZones(regions, towns, option("town-cap", 120))];
+  recipe.regions = [...regions, ...townZones(regions, towns, option("town-cap", 120), townZonesBefore)];
+  stampPoiZones(recipe);
   writeRecipe(recipe, file);
   console.log(`drafted ${regions.length} zones from ${seeds.length} seed towns over ${landKm2.toFixed(1)} km² of land (step ${grid.step} m), plus ${recipe.regions.length - regions.length} town zones`);
   const report = auditRegions(recipe.regions, recipe.features);
@@ -3279,24 +4185,69 @@ function commandZones(): void {
  * town simulates no packs, the whole thing a sanctuary. Placeholder names;
  * the zone-setup pass names them.
  */
-function townZones(wilderness: readonly RegionDoc[], towns: readonly TownDoc[], cap: number): RegionDoc[] {
+function townZones(wilderness: readonly RegionDoc[], towns: readonly TownDoc[], cap: number, previous: readonly RegionDoc[] = []): RegionDoc[] {
   const out: RegionDoc[] = [];
+  // Names outlive sites. Re-siting the towns throws away where they were but
+  // not what they were CALLED — those were written by hand — so each new town
+  // zone inherits the name and story of the nearest old one, each used once.
+  // A zone whose town has moved a kilometre keeps its name; only the geometry
+  // is redrawn.
+  const unclaimed = previous.filter((r) => r.name && !/^Town \d+$/.test(r.name) && r.hub);
+  const inherit = (town: TownDoc): RegionDoc | undefined => {
+    let best: RegionDoc | undefined;
+    let bestD = Infinity;
+    for (const zone of unclaimed) {
+      const d = Math.hypot(zone.hub![0] - town.center[0], zone.hub![1] - town.center[1]);
+      if (d < bestD) {
+        bestD = d;
+        best = zone;
+      }
+    }
+    if (best) unclaimed.splice(unclaimed.indexOf(best), 1);
+    return best;
+  };
   towns.forEach((town, i) => {
     const parent = wilderness.find((r) => r.within === undefined && pointInPolygon(r.polygon, town.center[0], town.center[1]));
     if (!parent) {
       console.log(`  ${town.id}: in no wilderness zone — no town zone written (claim it first)`);
       return;
     }
-    const reach = town.radius + town.falloff + 4;
+    // CIRCUMSCRIBED, not inscribed: a 12-gon drawn on a circle of radius R has
+    // edges only R·cos(15°) from the middle, so the zone of a 140 m pad cut
+    // 1.3 m inside it and the audit — rightly — said a border ran through the
+    // town. Divide by cos(π/n) and the edges clear the pad instead.
+    const sides = 16;
+    const reach = (town.radius + town.falloff + 4) / Math.cos(Math.PI / sides);
     const polygon: [number, number][] = [];
-    for (let k = 0; k < 12; k++) {
-      const a = (k / 12) * Math.PI * 2;
-      polygon.push([Math.round(town.center[0] + Math.cos(a) * reach), Math.round(town.center[1] + Math.sin(a) * reach)]);
+    for (let k = 0; k < sides; k++) {
+      const a = (k / sides) * Math.PI * 2;
+      let vx = town.center[0] + Math.cos(a) * reach;
+      let vz = town.center[1] + Math.sin(a) * reach;
+      // …and clipped to the parent it claims to be cut out of. A town near a
+      // wilderness border — and a 78 m capital reaches a long way — otherwise
+      // writes a zone that hangs outside its own parent, which the region
+      // audit reports and the cluster's zone lookup cannot resolve.
+      //
+      // But never in past the PAD. A town whose pad straddles a wilderness
+      // border cannot have a zone that both encloses it and sits inside its
+      // parent, and of the two, enclosing wins: a zone that stops short of its
+      // own town puts a player standing in the market square in the wilderness
+      // zone, which loses the town's safety. A zone that pokes out of its
+      // parent is only an inexact `within`.
+      const floor = town.radius + town.falloff;
+      for (let pull = 0; pull < 24 && !pointInPolygon(parent.polygon, vx, vz); pull++) {
+        const next: [number, number] = [town.center[0] + (vx - town.center[0]) * 0.88, town.center[1] + (vz - town.center[1]) * 0.88];
+        if (Math.hypot(next[0] - town.center[0], next[1] - town.center[1]) < floor) break;
+        vx = next[0];
+        vz = next[1];
+      }
+      polygon.push([Math.round(vx), Math.round(vz)]);
     }
+    const old = inherit(town);
     out.push({
       id: `${town.id}-zone`,
-      name: `Town ${i + 1}`,
-      story: "",
+      name: old?.name ?? `Town ${i + 1}`,
+      story: old?.story ?? "",
       polygon,
       hub: [town.center[0], town.center[1]],
       landmarks: [town.id],
@@ -3316,10 +4267,13 @@ function commandTownZones(): void {
     console.log("no zones yet — run `worldgen zones` first");
     return;
   }
-  const towns = townZones(kept, recipe.features.towns, option("town-cap", 120));
+  const before = recipe.regions.filter((r) => r.tags.includes("town"));
+  const towns = townZones(kept, recipe.features.towns, option("town-cap", 120), before);
   recipe.regions = [...kept, ...towns];
+  stampPoiZones(recipe);
   writeRecipe(recipe, file);
-  console.log(`wrote ${towns.length} town zones inside ${kept.length} wilderness zones (cap ${option("town-cap", 120)})`);
+  const inherited = towns.filter((r) => !/^Town \d+$/.test(r.name)).length;
+  console.log(`wrote ${towns.length} town zones inside ${kept.length} wilderness zones (cap ${option("town-cap", 120)}), ${inherited} keeping an existing name`);
   const report = auditRegions(recipe.regions, recipe.features);
   if (report.findings.length > 0) console.log(`  findings:\n    ${report.findings.join("\n    ")}`);
 }
@@ -3359,7 +4313,22 @@ function round(v: number): number {
 // ---------------------------------------------------------------- roads
 
 /** The grid every route is searched on: heights with all features, water as walls, rivers tolled. */
-function routeGridFor(field: WorldField, recipe: WorldRecipe, grid: WorldGridSample): RouteGrid {
+function routeGridFor(
+  field: WorldField,
+  recipe: WorldRecipe,
+  grid: WorldGridSample,
+  options: {
+    /**
+     * Make the pad of every town that declares gates a WALL, with a corridor
+     * punched through each gate. A walled town is entered through its gates
+     * or not at all — without this the cheapest line between two other towns
+     * runs through the market square and over the curtain wall on both
+     * sides. Towns with no gates are untouched: an open village's lanes are
+     * the road, and its centre is where a path is meant to arrive.
+     */
+    sealGatedTowns?: boolean;
+  } = {},
+): RouteGrid {
   const n = grid.n;
   const total = n * n;
   const cost = new Float32Array(total).fill(1);
@@ -3467,7 +4436,175 @@ function routeGridFor(field: WorldField, recipe: WorldRecipe, grid: WorldGridSam
       }
     }
   }
+  if (options.sealGatedTowns) {
+    // METRES, not cells. Counting cells rounds a 12 m corridor up to a 3x3
+    // block of 16 m cells — 22 m of hole in the wall — and paths then wandered
+    // into the pad beside the gate and the audit flagged them with nothing to
+    // point at.
+    const disc = (x: number, z: number, r: number, value: number): void => {
+      const cells = Math.ceil(r / grid.step);
+      const c = grid.nearest(x, z);
+      const cx = c % n;
+      const cz = (c / n) | 0;
+      for (let dz = -cells; dz <= cells; dz++) {
+        for (let dx = -cells; dx <= cells; dx++) {
+          const ix = cx + dx;
+          const iz = cz + dz;
+          if (ix < 0 || iz < 0 || ix >= n || iz >= n) continue;
+          if (Math.hypot(grid.worldX(ix) - x, grid.worldZ(iz) - z) > r) continue;
+          cost[ix + iz * n] = value;
+        }
+      }
+    };
+    for (const town of recipe.features.towns) {
+      if (town.gates.length === 0) continue;
+      // A pad narrower than a couple of routing cells cannot be walled on this
+      // grid: the disc is two cells across and the corridor bored through the
+      // gate re-opens most of it, so all the seal achieves is a warning nothing
+      // can act on. Its gate still moves where the path ARRIVES, which is the
+      // part that matters for a hamlet.
+      if (town.radius < grid.step * 2) continue;
+      disc(town.center[0], town.center[1], town.radius, Infinity);
+      // …then bore each gate open, from inside the pad out past its mouth, so
+      // the one way through is the one the builder drew.
+      for (const gate of town.gates) {
+        const dir = normaliseXZ(gate.facing);
+        if (!dir) continue;
+        // inward as far as the middle of town and no further: bored right
+        // across, the corridor is a hole in the wall on BOTH sides and a path
+        // between two other towns takes the short cut straight through
+        const inner = -Math.min(town.radius + grid.step, Math.hypot(gate.at[0] - town.center[0], gate.at[1] - town.center[1]) + grid.step);
+        const outer = gate.approach + grid.step * 2;
+        for (let t = inner; t <= outer; t += grid.step * 0.5) {
+          disc(gate.at[0] + dir[0] * t, gate.at[1] + dir[1] * t, Math.max(gate.width * 0.5, grid.step * 0.75), 1);
+        }
+      }
+    }
+  }
   return { n, step: grid.step, height: grid.height, cost, river, gradX, gradZ, exempt };
+}
+
+/** A slope given as rise-over-run, printed as the angle a reader can picture. */
+function degreesOf(slope: number): string {
+  return ((Math.atan(slope) * 180) / Math.PI).toFixed(0);
+}
+
+/** Unit XZ, or null for a zero-length direction (a gate that never says which way it faces). */
+function normaliseXZ(v: readonly [number, number]): [number, number] | null {
+  const len = Math.hypot(v[0], v[1]);
+  return len < 1e-6 ? null : [v[0] / len, v[1] / len];
+}
+
+/**
+ * The gate a traveller coming from `towards` would use: the one that FACES
+ * that way, near ties broken by distance. A town with one gate always gets
+ * that gate — if every road has to come round to the west door, that is what
+ * the builder asked for by only cutting a west door.
+ */
+function gateFacing(town: TownDoc, towards: readonly [number, number]): TownGateDoc | null {
+  let best: TownGateDoc | null = null;
+  let bestScore = -Infinity;
+  for (const gate of town.gates) {
+    const dir = normaliseXZ(gate.facing);
+    if (!dir) continue;
+    const dx = towards[0] - gate.at[0];
+    const dz = towards[1] - gate.at[1];
+    const len = Math.hypot(dx, dz) || 1;
+    const score = (dir[0] * dx + dir[1] * dz) / len - len / 1e7;
+    if (score > bestScore) {
+      bestScore = score;
+      best = gate;
+    }
+  }
+  return best;
+}
+
+/** Where a path to a town starts its search, and the straight run that ties that back to the gate. */
+interface TownTerminal {
+  /** Grid cell the route search starts (or ends) at. */
+  cell: number;
+  /** Exact world points from the gate out to that cell, gate FIRST; empty for an ungated town. */
+  lead: [number, number][];
+  /** Height the profile is pinned to at this end. */
+  pinY: number | undefined;
+  gate: TownGateDoc | null;
+}
+
+/**
+ * The end of a path at a town.
+ *
+ * Ungated: the centre, as it always was. Gated: the mouth of the gate facing
+ * the other town, with the searched route starting a short way outside it and
+ * a dead-straight lead joining the two. The lead is spliced into the road
+ * outside the smoothing pass (`roadFrom`'s `lead`), so the stretch at the
+ * gate is exactly the line the builder drew and not a rounded corner the
+ * router found nearby.
+ *
+ * The search cell is not simply `nearest(mouth)`: snapping to a 16 m grid
+ * puts it up to 11 m off the gate's axis, and the road then leaves the arch
+ * sideways. It is the cell in that neighbourhood closest to the AXIS, which
+ * costs a few metres of approach length and keeps the heading.
+ */
+function townTerminal(
+  town: TownDoc,
+  towards: readonly [number, number],
+  grid: WorldGridSample,
+  field: WorldField,
+  routeGrid: RouteGrid,
+): TownTerminal {
+  const open = (cell: number): number => {
+    // a terminal cell is never a wall, whatever the pad now touches: a goal
+    // the search cannot step into fails every cap and the road is simply missing
+    if (!Number.isFinite(routeGrid.cost[cell]!)) routeGrid.cost[cell] = 1;
+    return cell;
+  };
+  const gate = gateFacing(town, towards);
+  if (!gate) {
+    // A terraced town has no single pad height — `groundY` is only its lowest
+    // shelf — so a path running to its centre is pinned to the ground THERE,
+    // which may be four steps up. (A stepped town normally has a gate at the
+    // foot of its stair, so this is the case of one that was told not to.)
+    const pinY = town.terraces.length > 0 ? round(field.height(town.center[0], town.center[1])) : town.groundY;
+    return { cell: open(grid.nearest(town.center[0], town.center[1])), lead: [], pinY, gate: null };
+  }
+  const dir = normaliseXZ(gate.facing)!;
+  const target: [number, number] = [gate.at[0] + dir[0] * gate.approach, gate.at[1] + dir[1] * gate.approach];
+  const n = grid.n;
+  const home = grid.nearest(target[0], target[1]);
+  const reach = 2;
+  let cell = home;
+  let bestScore = Infinity;
+  for (let dz = -reach; dz <= reach; dz++) {
+    for (let dx = -reach; dx <= reach; dx++) {
+      const ix = (home % n) + dx;
+      const iz = ((home / n) | 0) + dz;
+      if (ix < 0 || iz < 0 || ix >= n || iz >= n) continue;
+      const c = ix + iz * n;
+      if (!Number.isFinite(routeGrid.cost[c]!)) continue;
+      const ox = grid.worldX(ix) - gate.at[0];
+      const oz = grid.worldZ(iz) - gate.at[1];
+      const along = ox * dir[0] + oz * dir[1];
+      if (along < Math.max(grid.step, gate.approach * 0.5)) continue; // never behind the gate
+      const lateral = Math.abs(ox * dir[1] - oz * dir[0]);
+      const score = lateral + Math.abs(along - gate.approach) * 0.15;
+      if (score < bestScore) {
+        bestScore = score;
+        cell = c;
+      }
+    }
+  }
+  const mouth: [number, number] = [grid.worldX(cell % n), grid.worldZ((cell / n) | 0)];
+  // one lead point every half cell: the profile is solved on the dense line,
+  // and a single 40 m segment would be one straight ramp over whatever the
+  // ground does under it
+  const span = Math.hypot(mouth[0] - gate.at[0], mouth[1] - gate.at[1]);
+  const steps = Math.max(1, Math.round(span / (grid.step * 0.5)));
+  const lead: [number, number][] = [];
+  for (let s = 0; s < steps; s++) {
+    const t = s / steps;
+    lead.push([gate.at[0] + (mouth[0] - gate.at[0]) * t, gate.at[1] + (mouth[1] - gate.at[1]) * t]);
+  }
+  return { cell: open(cell), lead, pinY: field.height(gate.at[0], gate.at[1]), gate };
 }
 
 /**
@@ -3587,6 +4724,13 @@ function roadFrom(
     bridgeMin?: number;
     /** Deck height over the water. */
     bridgeClearance?: number;
+    /**
+     * Exact world points spliced onto the ends of the route, OUTSIDE the
+     * smoothing: a town gate's straight approach, whose whole point is that
+     * it is not rounded off or snapped to the routing grid. The searched
+     * middle still smooths as usual.
+     */
+    lead?: { start?: readonly (readonly [number, number])[]; end?: readonly (readonly [number, number])[] };
   },
 ): { roads: RoadDoc[]; bridges: BridgeDoc[] } {
   const n = grid.n;
@@ -3596,8 +4740,15 @@ function roadFrom(
   // heights from a different line than the one it draws.
   const raw = route.map((c) => [grid.worldX(c % n), grid.worldZ((c / n) | 0)] as [number, number]);
   const passable = (x: number, z: number): boolean => Number.isFinite(routeGrid.cost[grid.nearest(x, z)]!);
-  const points = smoothRoute(raw, options.smoothPasses ?? 2, passable);
-  const natural = points.map((p, i) => (options.smoothPasses === 0 ? grid.height[route[i]!]! : field.height(p[0], p[1])));
+  const leadStart = (options.lead?.start ?? []).map((p) => [p[0], p[1]] as [number, number]);
+  const leadEnd = (options.lead?.end ?? []).map((p) => [p[0], p[1]] as [number, number]);
+  const leaded = leadStart.length > 0 || leadEnd.length > 0;
+  // The lead is smoothed WITH the route and held fixed, not concatenated
+  // afterwards: the seam is a corner, and the searched route's own first
+  // point is an endpoint no smoothing pass would ever round.
+  const joined = [...leadStart, ...raw, ...leadEnd];
+  const points = smoothRoute(joined, options.smoothPasses ?? 2, passable, (i) => i < leadStart.length || i >= joined.length - leadEnd.length);
+  const natural = points.map((p, i) => (options.smoothPasses === 0 && !leaded ? grid.height[route[i]!]! : field.height(p[0], p[1])));
   const spans = points.map((pt, i) => (i === 0 ? 0 : Math.hypot(pt[0] - points[i - 1]![0], pt[1] - points[i - 1]![1])));
   // Fords. Where the route crosses water the surface is pinned just under
   // it, so the road neither follows the channel down into the bed (a road
@@ -3825,6 +4976,11 @@ function nearestRiverAt(
  * reachable, no redundancy) plus the shortest few extra links, because a
  * pure tree makes every journey pass through the capital.
  *
+ * A town that declares GATES is joined at its gates, never at its centre —
+ * see `townGateSchema`. That is the difference between a road that arrives
+ * at the arch the builder put there and one that climbs the curtain wall on
+ * the far side because the ground was flatter.
+ *
  * These were 6 m graded ROADS until 2026-09-04: a wide cut with a 15 m
  * corridor of embankment looked like earthworks on every hillside, and the
  * 2.4 m trails cut for the peaks looked like the world had been walked in.
@@ -3835,14 +4991,20 @@ function nearestRiverAt(
  */
 function commandPaths(): void {
   const { recipe, file } = loadRecipe();
-  const towns = recipe.features.towns;
+  const towns = settlementTowns(recipe.features.towns);
   if (towns.length < 2) fail("need at least two towns — run: worldgen towns <world>");
-  recipe.features.roads = recipe.features.roads.filter((r) => r.id.startsWith("trail-"));
-  recipe.features.bridges = recipe.features.bridges.filter((b) => b.id.startsWith("bridge-trail-"));
+  const nested = recipe.features.towns.length - towns.length;
+  if (nested > 0) console.log(`  ${nested} pad(s) sit inside another town — terrain, not destinations; not roaded`);
+  // This stage owns `path-*` and nothing else. It used to keep only `trail-*`,
+  // which quietly deleted every road a town builder had written — the lanes,
+  // the foundations and the gate approach of a baked WFC town, gone on the
+  // next `worldgen paths`.
+  recipe.features.roads = recipe.features.roads.filter((r) => !r.id.startsWith("path-"));
+  recipe.features.bridges = recipe.features.bridges.filter((b) => !b.id.startsWith("bridge-path-"));
   const field = createWorldField(recipe);
   const extent = extentFor(recipe);
   const grid = sampleWorldGrid(field, extent, option("step", 16));
-  const routeGrid = routeGridFor(field, recipe, grid);
+  const routeGrid = routeGridFor(field, recipe, grid, { sealGatedTowns: true });
   const maxGrade = option("max-grade", 0.18);
   const bridges: BridgeDoc[] = [];
   const paint = pathSurfaces(recipe);
@@ -3860,26 +5022,26 @@ function commandPaths(): void {
   });
   if (groups.size > 1) console.log(`  towns sit on ${groups.size} separate landmasses — roading each independently`);
 
-  const edges: [number, number][] = [];
+  const edges: { a: number; b: number; tree: boolean }[] = [];
   for (const members of groups.values()) {
     const local = spanningEdges(
       members.map((i) => towns[i]!),
       option("extra", 2),
     );
-    for (const [a, b] of local) edges.push([members[a]!, members[b]!]);
+    for (const edge of local) edges.push({ a: members[edge.a]!, b: members[edge.b]!, tree: edge.tree });
   }
 
-  // a town centre is never a wall, whatever water its pad now touches: a
-  // goal cell the search cannot step into fails every cap and the road is
-  // simply missing
-  for (const town of towns) {
-    const c = grid.nearest(town.center[0], town.center[1]);
-    if (!Number.isFinite(routeGrid.cost[c]!)) routeGrid.cost[c] = 1;
-  }
   const paths: RoadDoc[] = [];
-  for (const [a, b] of edges) {
-    const from = grid.nearest(towns[a]!.center[0], towns[a]!.center[1]);
-    const to = grid.nearest(towns[b]!.center[0], towns[b]!.center[1]);
+  /** Gates a path actually arrived at, `town/gate`, for the unserved-gate report below. */
+  const served = new Set<string>();
+  for (const { a, b, tree } of edges) {
+    // The end of a path is the town's GATE when it has one, and the two ends
+    // are chosen against each other: the gate of A that faces B, the gate of
+    // B that faces A.
+    const start = townTerminal(towns[a]!, towns[b]!.center, grid, field, routeGrid);
+    const end = townTerminal(towns[b]!, towns[a]!.center, grid, field, routeGrid);
+    const from = start.cell;
+    const to = end.cell;
     const t0 = performance.now();
     // each 45° bend costs as much as 24 m of path, and a path may bend by at
     // most one of them per cell: a hairpin is four bends over four cells.
@@ -3890,18 +5052,39 @@ function commandPaths(): void {
     // 17 % step on a 16 m grid). The ladder stops at 4×: an uncapped last
     // resort once joined two towns with a path climbing a cliff at 150 %,
     // and an unlinked pair (logged below) is better than that.
-    const { route, cap } = routeWithGradeCap(routeGrid, from, to, {
-      maxGrade,
-      gradeWeight: 12,
-      riverToll: 420,
-      turnWeight: option("turn-weight", 24),
-      maxTurn: option("max-turn", 1),
-      maxExpansions: 1500000,
-      maxCross: option("max-cross", 1.0),
-      crossWeight: 3,
-    }, 2, { caps: [1.5, 2.5, 4], exempt: 3 });
+    //
+    // The CROSS-slope cap is laddered too, but only on a tree edge. A path is
+    // kept off hillsides steeper than 45° because the cut bank beside it is a
+    // wall — but a town whose only link crosses a mountain flank gets no road
+    // at all under that rule, and an island capital with no road is a worse
+    // world than a traverse with a steep bank. An extra link keeps the strict
+    // cap: a shortcut nobody gets is no loss.
+    const baseCross = option("max-cross", 1.0);
+    const crossLadder = tree ? [baseCross, baseCross * 2, baseCross * 3] : [baseCross];
+    let route: number[] | null = null;
+    let cap: number | undefined;
+    let usedCross = baseCross;
+    for (const maxCross of crossLadder) {
+      const attempt = routeWithGradeCap(routeGrid, from, to, {
+        maxGrade,
+        gradeWeight: 12,
+        riverToll: 420,
+        turnWeight: option("turn-weight", 24),
+        maxTurn: option("max-turn", 1),
+        maxExpansions: 1500000,
+        maxCross,
+        crossWeight: 3,
+      }, 2, { caps: [1.5, 2.5, 4], exempt: 3 });
+      if (attempt.route) {
+        route = attempt.route;
+        cap = attempt.cap;
+        usedCross = maxCross;
+        break;
+      }
+    }
     if (!route) {
-      console.warn(`  no route between ${towns[a]!.id} and ${towns[b]!.id} within ${(maxGrade * 400).toFixed(0)} % — left unlinked`);
+      const how = tree ? `${(maxGrade * 400).toFixed(0)} % over a ${degreesOf(baseCross * 3)}° flank` : `${(maxGrade * 400).toFixed(0)} %`;
+      console.warn(`  no route between ${towns[a]!.id} and ${towns[b]!.id} within ${how} — left unlinked`);
       continue;
     }
     const built = roadFrom(`path-${towns[a]!.id}-${towns[b]!.id}`, route, grid, field, routeGrid, {
@@ -3912,20 +5095,36 @@ function commandPaths(): void {
       finalClamp: "cut",
       maxFill: option("max-fill", 0.8),
       maxCut: option("max-cut", 3),
-      pinStart: towns[a]!.groundY,
-      pinEnd: towns[b]!.groundY,
+      pinStart: start.pinY,
+      pinEnd: end.pinY,
       smoothPasses: option("smooth-passes", 2),
       bridgeMin: option("bridge-min", 6),
       surface: paint.surface,
       surfaceByBiome: paint.surfaceByBiome,
+      lead: { start: start.lead, end: [...end.lead].reverse() },
     });
     paths.push(...built.roads);
     bridges.push(...built.bridges);
+    if (start.gate) served.add(`${towns[a]!.id}/${start.gate.id}`);
+    if (end.gate) served.add(`${towns[b]!.id}/${end.gate.id}`);
     const len = (route.length * grid.step) / 1000;
-    const relaxed = cap === undefined ? ", grade cap DROPPED" : cap > maxGrade * 2 ? ", grade cap relaxed" : "";
+    const relaxed =
+      (cap === undefined ? ", grade cap DROPPED" : cap > maxGrade * 2 ? ", grade cap relaxed" : "") +
+      (usedCross > baseCross ? `, across a ${degreesOf(usedCross)}° flank` : "");
     const spans = built.bridges.length > 0 ? `, ${built.bridges.length} bridge${built.bridges.length > 1 ? "s" : ""}` : "";
     const pts = built.roads.reduce((n, r) => n + r.points.length, 0);
-    console.log(`  ${built.roads[0]?.id ?? "path"}: ${pts} points, ${len.toFixed(1)} km${spans}${relaxed} (${((performance.now() - t0) / 1000).toFixed(1)}s)`);
+    const through = [start.gate && `${towns[a]!.id}'s ${start.gate.id}`, end.gate && `${towns[b]!.id}'s ${end.gate.id}`].filter(Boolean);
+    const gated = through.length > 0 ? `, through ${through.join(" and ")}` : "";
+    console.log(`  ${built.roads[0]?.id ?? "path"}: ${pts} points, ${len.toFixed(1)} km${spans}${relaxed}${gated} (${((performance.now() - t0) / 1000).toFixed(1)}s)`);
+  }
+
+  // A gate nothing arrives at is a door onto a field — either the town has
+  // more gates than the network needs, or the one facing the neighbours is
+  // missing and every road is coming round the back.
+  for (const town of towns) {
+    for (const gate of town.gates) {
+      if (!served.has(`${town.id}/${gate.id}`)) console.warn(`  ! ${town.id}'s ${gate.id} has no path arriving at it`);
+    }
   }
 
   recipe.features.roads = [...paths, ...recipe.features.roads];
@@ -3972,7 +5171,7 @@ function commandTrails(): void {
   const field = createWorldField(recipe);
   const extent = extentFor(recipe);
   const grid = sampleWorldGrid(field, extent, option("step", 16));
-  const routeGrid = routeGridFor(field, recipe, grid);
+  const routeGrid = routeGridFor(field, recipe, grid, { sealGatedTowns: true });
   const maxGrade = option("max-grade", 0.22);
   const n = grid.n;
   const paint = pathSurfaces(recipe);
@@ -3981,8 +5180,28 @@ function commandTrails(): void {
   // attach to the nearest point of the path network (towns included) on the
   // SAME landmass — a peak on an island must not try to reach the mainland
   const landmass = landComponentsOf(grid.height, n, recipe.seaLevel);
-  const network: number[][] = recipe.features.roads.map((r) => r.points.map((pt) => grid.nearest(pt[0], pt[1])));
-  network.push(recipe.features.towns.map((t) => grid.nearest(t.center[0], t.center[1])));
+  // A walled town is left the way it is entered. Everything inside a gated
+  // pad — its own lanes, its market square, its centre — is struck out of the
+  // network and its gate mouths put in instead; otherwise a trail sets off
+  // from the middle of town and climbs out over the curtain wall.
+  // …out to the whole pad, blend included: a town's own lanes and its wall
+  // ring run past the flat radius, and a trail that joins one of those has
+  // joined the town anywhere but at its gate.
+  const walled = recipe.features.towns.filter((t) => t.gates.length > 0);
+  const insideWalls = (x: number, z: number): boolean => walled.some((t) => Math.hypot(x - t.center[0], z - t.center[1]) < t.radius + t.falloff);
+  const network: number[][] = recipe.features.roads.map((r) =>
+    r.points.filter((pt) => !insideWalls(pt[0], pt[1])).map((pt) => grid.nearest(pt[0], pt[1])),
+  );
+  network.push(
+    settlementTowns(recipe.features.towns).flatMap((t) => {
+      if (t.gates.length === 0) return [grid.nearest(t.center[0], t.center[1])];
+      return t.gates.map((gate) => {
+        const dir = normaliseXZ(gate.facing);
+        const at = dir ? ([gate.at[0] + dir[0] * gate.approach, gate.at[1] + dir[1] * gate.approach] as const) : gate.at;
+        return grid.nearest(at[0], at[1]);
+      });
+    }),
+  );
   if (network.every((r) => r.length === 0)) fail("no paths or towns to start a trail from");
 
   const trails: RoadDoc[] = [];
@@ -4063,8 +5282,664 @@ function commandTrails(): void {
   console.log(`cut ${trails.length} trails`);
 }
 
-/** Minimum spanning tree over the towns, plus the `extra` shortest leftover links. */
-function spanningEdges(towns: TownDoc[], extra: number): [number, number][] {
+/**
+ * The towns a road network actually serves.
+ *
+ * A pad whose centre sits inside a bigger pad is that town's TERRAIN — a
+ * castle mound, a harbour terrace, a keep on a knoll — not a destination of
+ * its own. Routing to it means routing through the town it is part of, over
+ * whatever the builder stood on it, and the spanning tree then hangs the
+ * whole settlement off a link that can never be cut (the capital's castle
+ * mound is a 14 m step over 6 m of falloff: no grade cap survives it, so the
+ * capital came out with no road at all).
+ */
+function settlementTowns(towns: readonly TownDoc[]): TownDoc[] {
+  return towns.filter(
+    (town) =>
+      !towns.some(
+        (other) =>
+          other !== town &&
+          other.radius > town.radius &&
+          Math.hypot(town.center[0] - other.center[0], town.center[1] - other.center[1]) < other.radius,
+      ),
+  );
+}
+
+/** "north", "north-west", … for a direction, so a gate can name itself after the way it faces. */
+function compassOf(dir: readonly [number, number]): string {
+  // +z is south in this world's convention (the map draws -z up)
+  const names = ["east", "south-east", "south", "south-west", "west", "north-west", "north", "north-east"];
+  const octant = Math.round(Math.atan2(dir[1], dir[0]) / (Math.PI / 4));
+  return names[((octant % 8) + 8) % 8]!;
+}
+
+/** `--name "x,z"` as a pair, or null when it was not given. */
+function pairOption(name: string): [number, number] | null {
+  const raw = stringOption(name, "");
+  if (!raw) return null;
+  const parts = raw.split(/[,;\s]+/).filter(Boolean).map(Number);
+  if (parts.length !== 2 || !parts.every((v) => Number.isFinite(v))) fail(`--${name} wants "x,z", got "${raw}"`);
+  return [parts[0]!, parts[1]!];
+}
+
+/**
+ * Town gates: where a town's own roads hand over to the world's.
+ *
+ * A walled town built by the WFC stage already knows where its gate is — it
+ * placed the arch and usually drew a short approach stub out of it — but the
+ * recipe never recorded it, so `worldgen paths` routed to the town CENTRE and
+ * the road that turned up came over the wall somewhere else entirely. This
+ * writes the gate down (`features.towns[].gates`), which is all the routing
+ * stages need to arrive at it instead.
+ *
+ * With no options it REPORTS, and exits 1 on a finding:
+ *   - every town's gates, and whether a path actually arrives at each;
+ *   - every walled town whose pad a path or trail crosses anyway (the road
+ *     over the curtain wall this whole feature exists to stop);
+ *   - the towns with no gates at all, which keep the old centre routing.
+ *
+ * Adding one:
+ *   worldgen gates <world> --town town-1 --at "1610,-6302" --facing "-1,-0.05"
+ *   worldgen gates <world> --town town-1 --from-road wfc-town-approach
+ *
+ * `--from-road` is the one to reach for after a town is built: it takes the
+ * stub the builder drew, uses its far end as the mouth and its own heading as
+ * the facing, so the world's path continues the town's road in a straight
+ * line rather than meeting it at an angle. Re-running either form replaces a
+ * gate of the same id; `--remove <id|all>` deletes.
+ *
+ * Gates are data, not geometry — nothing is carved here. Run `worldgen paths`
+ * (and `trails`) afterwards to cut the roads that use them.
+ */
+function commandGates(): void {
+  const { recipe, file } = loadRecipe();
+  const townId = stringOption("town", "");
+  const removeId = stringOption("remove", "");
+  const fromRoad = stringOption("from-road", "");
+  const at = pairOption("at");
+  const facing = pairOption("facing");
+
+  if (!townId && (removeId || fromRoad || at || facing)) fail("--town <id> says whose gate this is");
+
+  if (townId) {
+    const town = recipe.features.towns.find((t) => t.id === townId);
+    if (!town) fail(`no town "${townId}" — ${recipe.features.towns.map((t) => t.id).join(", ") || "none placed yet"}`);
+    if (removeId) {
+      const before = town.gates.length;
+      town.gates = removeId === "all" ? [] : town.gates.filter((g) => g.id !== removeId);
+      if (town.gates.length === before) fail(`${townId} has no gate "${removeId}"`);
+      writeRecipe(recipe, file);
+      console.log(`${townId}: ${before - town.gates.length} gate(s) removed`);
+      return;
+    }
+    let mouth = at;
+    let dir = facing ? normaliseXZ(facing) : null;
+    if (fromRoad) {
+      const road = recipe.features.roads.find((r) => r.id === fromRoad);
+      if (!road) fail(`no road "${fromRoad}" in the recipe`);
+      if (road.points.length < 2) fail(`road "${fromRoad}" is a single point — nothing to take a heading from`);
+      const head = road.points[0]!;
+      const tail = road.points[road.points.length - 1]!;
+      const outerFirst =
+        Math.hypot(tail[0] - town.center[0], tail[1] - town.center[1]) >= Math.hypot(head[0] - town.center[0], head[1] - town.center[1])
+          ? [...road.points].reverse()
+          : road.points;
+      const end = outerFirst[0]!;
+      // a heading taken from the last two points of a simplified polyline is
+      // whatever that one segment happened to be; back off a proper distance first
+      const back = option("back", 12);
+      let inner = outerFirst[outerFirst.length - 1]!;
+      let run = 0;
+      for (let i = 1; i < outerFirst.length; i++) {
+        run += Math.hypot(outerFirst[i]![0] - outerFirst[i - 1]![0], outerFirst[i]![1] - outerFirst[i - 1]![1]);
+        if (run >= back) {
+          inner = outerFirst[i]!;
+          break;
+        }
+      }
+      mouth = at ?? [end[0], end[1]];
+      dir = facing ? normaliseXZ(facing) : normaliseXZ([end[0] - inner[0], end[1] - inner[1]]);
+    }
+    if (!mouth) fail("--at \"x,z\" (or --from-road <id>) says where the gate is");
+    if (!dir) fail("--facing \"dx,dz\" (or --from-road <id>) says which way it faces — it must not be zero-length");
+    const gate = {
+      id: stringOption("id", `${compassOf(dir)}-gate`),
+      at: mouth,
+      facing: dir,
+      width: option("width", 6),
+      approach: option("approach", 30),
+      tags: [] as string[],
+    };
+    town.gates = [...town.gates.filter((g) => g.id !== gate.id), gate];
+    writeRecipe(recipe, file);
+    console.log(
+      `${townId}: ${gate.id} at [${round(gate.at[0])}, ${round(gate.at[1])}] facing ${compassOf(dir)} ` +
+        `(${dir[0].toFixed(2)}, ${dir[1].toFixed(2)}), ${gate.approach} m straight approach`,
+    );
+    console.log("  now re-cut the network: worldgen paths <world>  (and trails, if the peaks are linked)");
+    return;
+  }
+
+  // ---- report
+  const tolerance = option("tolerance", 12);
+  const problems: string[] = [];
+  const network = recipe.features.roads.filter((r) => r.id.startsWith("path-") || r.id.startsWith("trail-"));
+  for (const town of recipe.features.towns) {
+    if (town.gates.length === 0) {
+      console.log(`  ${town.id}: open — paths run to the centre`);
+      continue;
+    }
+    // "Crossing" means inside the pad and NOT on its way in or out of a gate.
+    // A gate can sit inside the pad — a terraced town's is at the foot of its
+    // stair, well within the footprint — so the throat of each gate, the line
+    // it runs on from outside to the middle, is the part of the pad a road is
+    // entitled to be on.
+    const throats = town.gates.map((gate) => {
+      const dir = normaliseXZ(gate.facing) ?? ([1, 0] as [number, number]);
+      // the whole corridor, not just the part inside: a gate may sit well
+      // within the footprint (a terraced town's is at the foot of its stair),
+      // so its straight approach runs through the pad on the way out too
+      const inner: [number, number] = [gate.at[0] - dir[0] * (town.radius + town.falloff), gate.at[1] - dir[1] * (town.radius + town.falloff)];
+      const outer: [number, number] = [gate.at[0] + dir[0] * (gate.approach + 16), gate.at[1] + dir[1] * (gate.approach + 16)];
+      return { a: outer as readonly [number, number], b: inner as readonly [number, number], width: Math.max(gate.width, 12) };
+    });
+    // A road that CLIPS the pad edge is not a road through the town: the seal
+    // works on cell centres and a smoothed polyline bulges a little between
+    // them, so a path can finish half a metre inside a 45 m pad and mean
+    // nothing by it. The finding is for a road in the streets, so the test
+    // circle is a road's width in from the boundary.
+    const inside = Math.max(town.radius * 0.5, town.radius - option("graze", 6));
+    const offGate = (p: readonly [number, number]): boolean =>
+      Math.hypot(p[0] - town.center[0], p[1] - town.center[1]) <= inside && !throats.some((t) => pointSegmentDistance(p, t.a, t.b) <= t.width);
+    // a pad too small to wall on the routing grid is not audited for crossings
+    const crossing = town.radius < 32 ? [] : network.filter((r) => r.points.some(offGate));
+    console.log(`  ${town.id}: ${town.gates.length} gate(s)`);
+    for (const gate of town.gates) {
+      const dir = normaliseXZ(gate.facing);
+      const arriving = network.filter((r) => r.points.some((p) => Math.hypot(p[0] - gate.at[0], p[1] - gate.at[1]) <= tolerance));
+      const where = dir ? compassOf(dir) : "NO FACING";
+      console.log(
+        `    ${gate.id}: ${where} at [${round(gate.at[0])}, ${round(gate.at[1])}] — ${arriving.length > 0 ? arriving.map((r) => r.id).join(", ") : "nothing arrives"}`,
+      );
+      if (!dir) problems.push(`${town.id}/${gate.id} has a zero-length facing`);
+      if (arriving.length === 0) problems.push(`${town.id}/${gate.id}: no path arrives within ${tolerance} m`);
+    }
+    for (const road of crossing) problems.push(`${road.id} crosses ${town.id}'s pad instead of using a gate`);
+  }
+  for (const p of problems) console.log(`  ! ${p}`);
+  console.log(
+    `${recipe.features.towns.filter((t) => t.gates.length > 0).length} walled / ${recipe.features.towns.length} towns, ` +
+      `${recipe.features.towns.reduce((n, t) => n + t.gates.length, 0)} gates, ${problems.length} finding(s)`,
+  );
+  if (problems.length > 0) process.exit(1);
+}
+
+// ---------------------------------------------------------------- status
+
+/** One step of building a world: what it needs first, how to tell it is done, and how to run it. */
+interface PipelineStage {
+  name: string;
+  /** Stages whose output this one reads. Re-running any of them makes this STALE. */
+  after: string[];
+  /** Who does it: the generator, or an agent reading the generated world. */
+  by: "procedural" | "agent";
+  /** What to run (or ask an agent to do). `<world>` is substituted. */
+  how: string;
+  /** Done, and why not. Returning a string means "not done, here is what is missing". */
+  check: (recipe: WorldRecipe) => string | null;
+  /** Stages that are allowed to be absent — a world with no canyons is a fine world. */
+  optional?: boolean;
+}
+
+const GENERIC_ZONE = /^Zone \d+$/;
+const GENERIC_TOWN = /^Town \d+$/;
+
+/**
+ * The plan for building a world, procedural AND agentic in one list.
+ *
+ * Half of what turns a generated heightfield into a place is not a generator's
+ * job: naming a region after the landmarks it actually contains, deciding what
+ * is wrong with it, reshaping the towns that carry its story. Those are agent
+ * passes, and until they were written down next to the procedural stages they
+ * were simply forgotten — a world would ship with twenty-one regions called
+ * "Zone 7". They are in the same list, in dependency order, so `status` can say
+ * a world is generated but not yet AUTHORED.
+ */
+function pipelineStages(): PipelineStage[] {
+  const has = (n: number): string | null => (n > 0 ? null : "nothing written");
+  return [
+    { name: "init", after: [], by: "procedural", how: "worldgen init <world> --from <look>", check: () => null },
+    {
+      name: "continents",
+      after: ["init"],
+      by: "procedural",
+      how: "worldgen continents <world> --count 5 --islands 3 --limit 10500",
+      check: (r) => (r.bounds?.continents?.length ? null : "no landmasses: the world is endless noise"),
+    },
+    { name: "canyons", after: ["continents"], by: "procedural", how: "worldgen canyons <world>", optional: true, check: (r) => has(r.features.canyons.length) },
+    {
+      name: "rivers",
+      after: ["continents", "canyons"],
+      by: "procedural",
+      how: "worldgen rivers <world> --trace --catchment 0.6 --lakes 14",
+      check: (r) => (r.features.rivers.length > 0 || r.features.lakes.length > 0 ? null : "no rivers and no lakes"),
+    },
+    { name: "towns", after: ["rivers"], by: "procedural", how: "worldgen towns <world>", check: (r) => has(r.features.towns.length) },
+    {
+      name: "terrace",
+      after: ["towns"],
+      by: "procedural",
+      how: "worldgen terrace <world>",
+      check: (r) => (r.features.towns.some((t) => t.terraces.length > 0) ? null : "no town has been stepped — has it run?"),
+    },
+    { name: "zones", after: ["towns", "terrace"], by: "procedural", how: "worldgen zones <world>", check: (r) => has(r.regions.length) },
+    {
+      name: "paths",
+      after: ["towns", "terrace", "zones"],
+      by: "procedural",
+      how: "worldgen paths <world>",
+      // Geometric, not by id: a path id is `path-<a>-<b>` where both are
+      // themselves hyphenated town ids, so splitting it apart is guesswork.
+      // "Does a path actually arrive here" is the question anyway.
+      check: (r) => {
+        const paths = r.features.roads.filter((x) => x.id.startsWith("path-"));
+        if (paths.length === 0) return "no paths";
+        const arrives = (t: TownDoc): boolean =>
+          paths.some((road) =>
+            road.points.some((p) =>
+              t.gates.length > 0
+                ? t.gates.some((g) => Math.hypot(p[0] - g.at[0], p[1] - g.at[1]) <= Math.max(40, g.approach + 20))
+                : Math.hypot(p[0] - t.center[0], p[1] - t.center[1]) <= t.radius + t.falloff,
+            ),
+          );
+        const lonely = settlementTowns(r.features.towns).filter((t) => !arrives(t));
+        return lonely.length > 0 ? `${lonely.length} town(s) with no road: ${lonely.slice(0, 5).map((t) => t.id).join(", ")}` : null;
+      },
+    },
+    {
+      name: "barriers",
+      after: ["paths", "zones"],
+      by: "procedural",
+      how: "worldgen barriers <world>",
+      check: (r) => (r.regions.length === 0 ? "no zones to wall" : r.features.ridges.length > 0 || r.features.pois.some((p) => p.tags.includes("pass")) ? null : "no ridges or passes"),
+    },
+    { name: "pois", after: ["towns", "paths"], by: "procedural", how: "worldgen pois <world>", check: (r) => has(r.features.pois.length) },
+    { name: "trails", after: ["pois", "paths"], by: "procedural", how: "worldgen trails <world>", check: (r) => (r.features.roads.some((x) => x.id.startsWith("trail-")) ? null : "no trails") },
+    { name: "caves", after: ["continents"], by: "procedural", how: "worldgen caves <world>", optional: true, check: (r) => has(r.features.tunnels.length) },
+    { name: "spawn", after: ["zones", "paths"], by: "procedural", how: "worldgen spawn <world> --scene <scene>", check: (r) => has(r.features.camps.length) },
+    {
+      name: "zone-names",
+      after: ["zones"],
+      by: "agent",
+      how: "the `zone-setup` skill / zone-architect agent: name each zone from its landmarks",
+      check: (r) => {
+        const generic = r.regions.filter((z) => !z.within && GENERIC_ZONE.test(z.name));
+        return generic.length > 0 ? `${generic.length} zone(s) still called "Zone N"` : null;
+      },
+    },
+    {
+      name: "town-names",
+      after: ["zones", "zone-names"],
+      by: "agent",
+      how: "name each town zone for the settlement in it (region `name`, and the town's own character)",
+      check: (r) => {
+        const generic = r.regions.filter((z) => z.within && GENERIC_TOWN.test(z.name));
+        return generic.length > 0 ? `${generic.length} town zone(s) still called "Town N"` : null;
+      },
+    },
+    {
+      name: "zone-stories",
+      after: ["zone-names", "pois", "spawn"],
+      by: "agent",
+      how: "write a story doc per zone, then: worldgen story <world> --zone <id> --story <name> --scene <scene>",
+      check: (r) => {
+        const wild = r.regions.filter((z) => !z.within);
+        const told = wild.filter((z) => z.story.trim().length > 0);
+        return told.length === wild.length ? null : `${wild.length - told.length} of ${wild.length} zones have no story`;
+      },
+    },
+    { name: "map", after: ["paths", "trails", "zone-names"], by: "procedural", how: "worldgen map <world>", check: () => null },
+  ];
+}
+
+/**
+ * `worldgen status <world>` — what is built, what went stale, what is next.
+ *
+ * A world is a dozen interdependent stages and several agent passes, and the
+ * failure mode is not that a stage breaks but that one is silently SKIPPED, or
+ * run before something it depends on was re-run. Both are invisible in the
+ * recipe: it looks the same either way. Every stage stamps its time in
+ * `pipeline` when it writes, so this can say which ones ran, which ran BEFORE
+ * something they read was re-run, and which have never run at all.
+ *
+ *   ok       ran, and nothing it depends on has changed since
+ *   STALE    ran, but <dep> was re-run afterwards — its output is from the old world
+ *   MISSING  never ran, or ran and produced nothing
+ *
+ * `--next` prints just the next command to run, for scripting the loop.
+ */
+function commandStatus(): void {
+  const { recipe } = loadRecipe();
+  const stages = pipelineStages();
+  const at = (name: string): number => {
+    const stamp = recipe.pipeline[name];
+    return stamp ? Date.parse(stamp) : NaN;
+  };
+  type Row = { stage: PipelineStage; state: "ok" | "STALE" | "MISSING"; why: string };
+  const rows: Row[] = stages.map((stage) => {
+    const missing = stage.check(recipe);
+    const ran = at(stage.name);
+    if (missing !== null) return { stage, state: "MISSING" as const, why: missing };
+    if (Number.isNaN(ran)) return { stage, state: "ok" as const, why: "done (before stages were stamped)" };
+    const after = stage.after.filter((dep) => {
+      const when = at(dep);
+      return !Number.isNaN(when) && when > ran;
+    });
+    if (after.length > 0) return { stage, state: "STALE" as const, why: `${after.join(", ")} re-run since` };
+    return { stage, state: "ok" as const, why: "" };
+  });
+
+  const next = rows.find((r) => (r.state === "MISSING" && !r.stage.optional) || r.state === "STALE");
+  if (flag("next")) {
+    if (!next) {
+      console.log("(nothing to do)");
+      return;
+    }
+    console.log(next.stage.by === "agent" ? next.stage.how : next.stage.how.replace("<world>", worldName) + (project ? ` --project ${project}` : ""));
+    return;
+  }
+
+  console.log(`${recipe.name}: ${rows.filter((r) => r.state === "ok").length}/${rows.length} stages done`);
+  for (const row of rows) {
+    const mark = row.state === "ok" ? "ok     " : row.state === "STALE" ? "STALE  " : "MISSING";
+    const who = row.stage.by === "agent" ? " (agent)" : "";
+    const why = row.why && row.state !== "ok" ? ` — ${row.why}` : "";
+    const opt = row.state === "MISSING" && row.stage.optional ? " (optional)" : "";
+    console.log(`  ${mark} ${row.stage.name.padEnd(13)}${who.padEnd(9)}${why}${opt}`);
+  }
+  if (next) {
+    console.log(`\nnext: ${next.stage.by === "agent" ? "AGENT — " : ""}${next.stage.how.replace("<world>", worldName)}`);
+    console.log("  (--next prints just that line)");
+  } else {
+    console.log("\nevery stage done — generated AND authored");
+  }
+}
+
+// ---------------------------------------------------------------- stories
+
+/**
+ * Write each POI's zone onto it.
+ *
+ * A POI is a point and a zone is a polygon, so "the POIs in Ashmouth Reach" is
+ * a thousand point-in-polygon tests every time anything asks — a story stage, a
+ * quest generator, a spawn table, the map. It is a fact about the world, so it
+ * is stored like every other one; the zone stages re-stamp it, which is what
+ * keeps it from going stale when the borders move.
+ */
+function stampPoiZones(recipe: WorldRecipe): { stamped: number; orphans: number } {
+  let stamped = 0;
+  let orphans = 0;
+  for (const poi of recipe.features.pois) {
+    const zone = regionAt(recipe.regions, poi.position[0], poi.position[2]);
+    const id = zone?.id ?? "";
+    if (poi.zone !== id) stamped += 1;
+    poi.zone = id;
+    if (!id) orphans += 1;
+  }
+  return { stamped, orphans };
+}
+
+/** Resolve `--zone` against a region id OR its name, so "Ashmouth Reach" works as well as "zone-4". */
+function zoneByRef(recipe: WorldRecipe, ref: string): RegionDoc {
+  const slug = ref.trim().toLowerCase();
+  const found =
+    recipe.regions.find((r) => r.id.toLowerCase() === slug) ??
+    recipe.regions.find((r) => r.name.toLowerCase() === slug) ??
+    recipe.regions.find((r) => r.name.toLowerCase().includes(slug));
+  if (!found) fail(`no zone "${ref}". Wilderness zones: ${recipe.regions.filter((r) => !r.within).map((r) => `${r.id} (${r.name})`).join(", ")}`);
+  return found;
+}
+
+/** I, II, III… for naming the several places one beat dresses. */
+const ROMAN = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII"];
+
+/** Read a story document by path, by bare name (assets/stories/<name>.json), or by id. */
+function loadStory(ref: string): StoryDoc {
+  const candidates = [
+    ref,
+    path.join(assetsRoot(), "stories", `${ref}.json`),
+    path.join(assetsRoot(), "stories", ref),
+    path.join(PLAYGROUND, "assets", "stories", `${ref}.json`),
+  ];
+  const found = candidates.find((c) => fs.existsSync(c) && fs.statSync(c).isFile());
+  if (!found) fail(`no story "${ref}" — looked in ${path.join(assetsRoot(), "stories")}`);
+  const parsed = storySchema.safeParse(JSON.parse(fs.readFileSync(found, "utf8")));
+  if (!parsed.success) fail(`story ${found} is invalid:\n${parsed.error.message}`);
+  return parsed.data;
+}
+
+/**
+ * `worldgen story <world> --zone <id|name>` — what is going on in one zone.
+ *
+ * The generator decides where the mine mouths, the ruins and the bogs are; it
+ * has nothing to say about what they are FOR, so a zone comes out as a shape
+ * with a name and a thousand unnamed landmarks. This applies a STORY document
+ * (`storySchema`) to one zone: each beat takes the POIs of one kind standing in
+ * that zone and dresses a share of them — a prefab, a name, tags, and the
+ * monsters that live there — so a handful of assets turn a region into a place.
+ *
+ * The same document applies to any zone. `plague-ratkin` pointed at a second
+ * region finds that region's own mine mouths and ruins and uses the same
+ * prefabs; that is the point of keeping it out of the world recipe.
+ *
+ *   worldgen story <world>                                  the index: every zone, and what is dressed
+ *   worldgen story <world> --zone "Ashmouth Reach"          what that zone has to work with
+ *   worldgen story <world> --zone ashmouth --story plague-ratkin
+ *   worldgen story <world> --zone ashmouth --clear
+ *
+ * Everything it writes is tagged `story:<id>` — POIs, camps and the zone — so
+ * it is exactly reversible, and re-applying replaces its own last pass instead
+ * of piling onto it. Camps are written as `story-*`, which neither `worldgen
+ * spawn` (`camp-*`) nor `spawn-paint` (`spawn-*`) rewrites, so a generated
+ * population and an authored one coexist.
+ */
+function commandStory(): void {
+  const { recipe, file } = loadRecipe();
+  if (recipe.regions.length === 0) fail("no zones yet — run: worldgen zones <world>");
+  stampPoiZones(recipe);
+  const zoneRef = stringOption("zone", "");
+  if (!zoneRef) {
+    console.log("zones (--zone <id|name> for one):");
+    for (const zone of recipe.regions.filter((r) => !r.within)) {
+      const pois = recipe.features.pois.filter((p) => p.zone === zone.id);
+      const dressed = pois.filter((p) => p.tags.some((t) => t.startsWith("story:")));
+      const stories = [...new Set(dressed.flatMap((p) => p.tags.filter((t) => t.startsWith("story:"))))];
+      console.log(
+        `  ${zone.id.padEnd(20)} ${zone.name.padEnd(20)} ${String(pois.length).padStart(4)} POIs` +
+          `${stories.length > 0 ? `  — ${stories.join(", ")} on ${dressed.length}` : "  — undressed"}`,
+      );
+    }
+    return;
+  }
+  const zone = zoneByRef(recipe, zoneRef);
+  const inZone = recipe.features.pois.filter((p) => p.zone === zone.id);
+  const storyRef = stringOption("story", "");
+
+  if (flag("clear")) {
+    // The beats' own tags — "ratkin", "shrine" — are the useful ones, so they
+    // are NOT namespaced; a quest wants to select on `ratkin`, not on
+    // `story:plague-ratkin:ratkin`. That leaves clearing unable to tell them
+    // from a tag the world already had, so it reads the story back: the zone
+    // carries `story:<id>` until it is cleared, and the document says exactly
+    // which tags it added. Without the document those tags stay, and it says so.
+    const applied = zone.tags.find((t) => t.startsWith("story:"))?.slice("story:".length) ?? "";
+    let doc: StoryDoc | null = null;
+    if (applied) {
+      try {
+        doc = loadStory(applied);
+      } catch {
+        doc = null;
+      }
+    }
+    const beatTags = new Set(doc?.beats.flatMap((b) => b.tags) ?? []);
+    let undressed = 0;
+    for (const poi of inZone) {
+      if (!poi.tags.some((t) => t.startsWith("story:"))) continue;
+      delete poi.prefab;
+      delete poi.name;
+      poi.tags = poi.tags.filter((t) => !t.startsWith("story:") && !t.startsWith("beat:") && !beatTags.has(t));
+      undressed += 1;
+    }
+    const before = recipe.features.camps.length;
+    recipe.features.camps = recipe.features.camps.filter((c) => !(c.zone === zone.id && c.tags.some((t) => t.startsWith("story:"))));
+    zone.tags = zone.tags.filter((t) => !t.startsWith("story:"));
+    // and the prose it wrote onto the zone, when it is still the prose it wrote
+    if (doc && zone.story === doc.story) zone.story = "";
+    if (doc?.level && zone.level && zone.level[0] === doc.level[0] && zone.level[1] === doc.level[1]) delete zone.level;
+    writeRecipe(recipe, file);
+    console.log(`${zone.name}: undressed ${undressed} POIs, removed ${before - recipe.features.camps.length} camps`);
+    if (applied && !doc) console.warn(`  ! could not read story "${applied}" — its own tags were left on the POIs`);
+    // and the entities it put in a scene, matched on the zone tag the patch
+    // wrote rather than on the story id, so this works even without the document
+    const clearScene = stringOption("scene", "");
+    if (clearScene) {
+      const sceneFile = path.join(assetsRoot(), "scenes", `${clearScene}.scene.json`);
+      if (!fs.existsSync(sceneFile)) {
+        console.warn(`  no scene ${path.relative(process.cwd(), sceneFile)}`);
+        return;
+      }
+      const sceneDoc = JSON.parse(fs.readFileSync(sceneFile, "utf8")) as { entities: Record<string, { tags?: string[] }> };
+      let removed = 0;
+      for (const [id, entity] of Object.entries(sceneDoc.entities)) {
+        if (!id.startsWith("story-") || !(entity.tags ?? []).includes(`zone:${zone.id}`)) continue;
+        delete sceneDoc.entities[id];
+        removed += 1;
+      }
+      fs.writeFileSync(sceneFile, `${JSON.stringify(sceneDoc, null, 2)}\n`);
+      console.log(`  removed ${removed} spawnArea entities from ${path.relative(process.cwd(), sceneFile)} (placeholder mobs left — they may be shared)`);
+    }
+    return;
+  }
+
+  if (!storyRef) {
+    const byKind = new Map<string, PoiDoc[]>();
+    for (const poi of inZone) byKind.set(poi.kind, [...(byKind.get(poi.kind) ?? []), poi]);
+    const camps = recipe.features.camps.filter((c) => c.zone === zone.id);
+    console.log(`${zone.name} (${zone.id})${zone.level ? `  levels ${zone.level[0]}-${zone.level[1]}` : ""}`);
+    if (zone.story) console.log(`  "${zone.story}"`);
+    console.log(`  ${inZone.length} POIs, ${camps.length} camps; landmarks: ${zone.landmarks.slice(0, 6).join(", ") || "none"}`);
+    for (const [kind, list] of [...byKind].sort((a, b) => b[1].length - a[1].length)) {
+      const dressed = list.filter((p) => p.prefab);
+      const how = dressed.length > 0 ? `  (${dressed.length} dressed: ${[...new Set(dressed.map((p) => p.prefab))].join(", ")})` : "";
+      console.log(`    ${kind.padEnd(16)} ${String(list.length).padStart(3)}${how}`);
+    }
+    console.log("  --story <file|name> to dress it, --clear to undress it");
+    return;
+  }
+
+  const story = loadStory(storyRef);
+  const zoneTag = `story:${story.id}`;
+  // its own previous pass comes off first, so re-applying replaces rather than accumulates
+  for (const poi of inZone) {
+    if (!poi.tags.includes(zoneTag)) continue;
+    delete poi.prefab;
+    delete poi.name;
+    poi.tags = poi.tags.filter((t) => t !== zoneTag && !t.startsWith("beat:"));
+  }
+  recipe.features.camps = recipe.features.camps.filter((c) => !(c.zone === zone.id && c.tags.includes(zoneTag)));
+
+  const camps: CampDoc[] = [];
+  let dressed = 0;
+  for (const beat of story.beats) {
+    const pool = inZone.filter((p) => p.kind === beat.kind);
+    if (pool.length === 0) {
+      console.warn(`  ! ${zone.name} has no "${beat.kind}" — that beat has nothing to stand on`);
+      continue;
+    }
+    // Deterministic choice: the same zone, story and POIs every run. A random
+    // share would re-roll the zone on every re-apply, and anything built
+    // against it — a quest naming one of them — would move underneath.
+    const ranked = [...pool].sort((a, b) => hashString(`${story.id}:${a.id}`) - hashString(`${story.id}:${b.id}`));
+    const want = Math.min(beat.max ?? ranked.length, Math.max(beat.share > 0 ? 1 : 0, Math.round(ranked.length * beat.share)));
+    const chosen = ranked.slice(0, want);
+    chosen.forEach((poi, i) => {
+      if (beat.prefab) poi.prefab = beat.prefab;
+      if (beat.name) poi.name = chosen.length > 1 ? `${beat.name} ${ROMAN[i] ?? String(i + 1)}` : beat.name;
+      poi.tags = [...new Set([...poi.tags, ...beat.tags, zoneTag, `beat:${beat.kind}`])];
+      dressed += 1;
+      const pack = beat.pack;
+      if (!pack) return;
+      const count = pack.min + (hashString(`${story.id}:pack:${poi.id}`) % Math.max(1, pack.max - pack.min + 1));
+      camps.push({
+        id: `story-${story.id}-${poi.id}`,
+        center: [round(poi.position[0]), round(poi.position[2])],
+        zone: zone.id,
+        area: {
+          radius: pack.radius,
+          sleepRadius: round(pack.radius * 1.5),
+          idleSeconds: 10,
+          spawns: [{ template: pack.template, count, spread: pack.spread }],
+          leash: pack.leash,
+          roam: pack.roam,
+        },
+        tags: [zoneTag, `beat:${beat.kind}`],
+      });
+    });
+    const withPack = beat.pack ? ` with ${beat.pack.template}` : "";
+    console.log(`  ${beat.kind}: dressed ${chosen.length} of ${pool.length}${beat.prefab ? ` as ${beat.prefab}` : ""}${withPack}`);
+  }
+
+  if (story.story) zone.story = story.story;
+  if (story.level) zone.level = story.level;
+  zone.tags = [...new Set([...zone.tags.filter((t) => !t.startsWith("story:")), zoneTag])];
+  recipe.features.camps = [...recipe.features.camps, ...camps];
+  writeRecipe(recipe, file);
+  console.log(`${zone.name}: "${story.name}" — ${dressed} POIs dressed, ${camps.length} camps`);
+  // What is now missing, as a list to go and build. A story is written before
+  // the art exists — that is the point of writing it first — so naming the
+  // holes is the useful half of applying it. The streamer simply skips a POI
+  // whose prefab is not there, so an unbuilt story is inert, not broken.
+  const used = [...new Set(recipe.features.pois.filter((p) => p.zone === zone.id && p.prefab).map((p) => p.prefab!))];
+  const missingPrefabs = used.filter((id) => !fs.existsSync(path.join(assetsRoot(), "prefabs", `${id}.json`)));
+  const templates = [...new Set(camps.flatMap((c) => c.area.spawns.map((s) => s.template)))];
+  console.log(`  prefabs: ${used.length - missingPrefabs.length}/${used.length} exist`);
+  if (missingPrefabs.length > 0) console.log(`    TO BUILD: ${missingPrefabs.map((id) => `assets/prefabs/${id}.json`).join(", ")}`);
+  if (templates.length > 0) console.log(`  npc templates the camps ask for: ${templates.join(", ")}`);
+
+  // A camp in the recipe is data nothing reads: the server adopts the scene's
+  // spawnArea ENTITIES. `--scene` materialises them, owning only the ids of
+  // this story (`story-<id>-*`) so a generated sweep, a painted camp and a
+  // story's population all coexist in one scene.
+  const scene = stringOption("scene", "");
+  if (!scene) {
+    console.log(`  --scene <name> to write the camps into a scene as spawnArea entities`);
+    return;
+  }
+  const field = createWorldField(recipe);
+  const mine = recipe.features.camps.filter((c) => c.tags.includes(zoneTag));
+  patchSceneCamps(recipe, field, mine, scene, templates[0] ?? "mob", `story-${story.id}-`);
+  // one placeholder per template the story names, not one for the lot: a
+  // scene with a single capsule cannot show three kinds of ratkin apart
+  const doc = JSON.parse(fs.readFileSync(path.join(assetsRoot(), "scenes", `${scene}.scene.json`), "utf8")) as {
+    entities: Record<string, Record<string, unknown>>;
+  };
+  let added = 0;
+  for (const template of templates) {
+    if (ensureMobTemplate(doc, recipe, field, mine, template)) added += 1;
+  }
+  if (added > 0) {
+    fs.writeFileSync(path.join(assetsRoot(), "scenes", `${scene}.scene.json`), `${JSON.stringify(doc, null, 2)}\n`);
+    console.log(`  wrote ${added} placeholder capsule mob(s) so the camps have something to spawn until the art exists`);
+  }
+}
+
+/**
+ * Minimum spanning tree over the towns, plus the `extra` shortest leftover
+ * links. `tree` marks the ones that MUST be cut for the network to reach
+ * everywhere — an extra that no route can hold is a shortcut nobody gets, a
+ * tree edge that fails is a town with no road.
+ */
+function spanningEdges(towns: TownDoc[], extra: number): { a: number; b: number; tree: boolean }[] {
   const all: { a: number; b: number; d: number }[] = [];
   for (let a = 0; a < towns.length; a++) {
     for (let b = a + 1; b < towns.length; b++) {
@@ -4078,15 +5953,15 @@ function spanningEdges(towns: TownDoc[], extra: number): [number, number][] {
   all.sort((x, y) => x.d - y.d);
   const parent = towns.map((_, i) => i);
   const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i]!)));
-  const tree: [number, number][] = [];
-  const leftover: [number, number][] = [];
+  const tree: { a: number; b: number; tree: boolean }[] = [];
+  const leftover: { a: number; b: number; tree: boolean }[] = [];
   for (const edge of all) {
     const ra = find(edge.a);
     const rb = find(edge.b);
-    if (ra === rb) leftover.push([edge.a, edge.b]);
+    if (ra === rb) leftover.push({ a: edge.a, b: edge.b, tree: false });
     else {
       parent[ra] = rb;
-      tree.push([edge.a, edge.b]);
+      tree.push({ a: edge.a, b: edge.b, tree: true });
     }
   }
   return [...tree, ...leftover.slice(0, Math.max(0, extra))];
@@ -4391,7 +6266,7 @@ function commandPois(): void {
     placed.push({ x, z, kind: c.kind });
     const k = (counts.get(c.kind) ?? 0) + 1;
     counts.set(c.kind, k);
-    out.push({ id: `${c.kind}-${k}`, kind: c.kind, position: [round(x), round(grid.height[c.i]!), round(z)], rotationY: 0, tags: c.tags });
+    out.push({ id: `${c.kind}-${k}`, kind: c.kind, position: [round(x), round(grid.height[c.i]!), round(z)], rotationY: 0, zone: "", tags: c.tags });
     return true;
   };
   // round-robin over kinds up to each quota, then a second pass fills the remainder by score
@@ -4422,11 +6297,13 @@ function commandPois(): void {
   }
 
   recipe.features.pois = [...kept, ...out];
+  stampPoiZones(recipe);
   writeRecipe(recipe, file);
   const summary = [...counts].sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}`).join(", ");
   console.log(`marked ${out.length} points of interest over ${landKm2.toFixed(1)} km² (${((out.length + kept.length) / (landKm2 / 2.59)).toFixed(0)} per sq mi with ${kept.length} kept from other stages):`);
   console.log(`  ${summary}`);
-  console.log("(no `prefab` set yet — give a POI one and it spawns in the cell that contains it)");
+  const dressed = recipe.features.pois.filter((p) => p.prefab).length;
+  console.log(`  ${dressed} of them carry a prefab; a bare POI is a place-name with nothing on it — "worldgen story" dresses a zone's worth`);
 }
 
 /** Intersection point of segments a-b and c-d in XZ, or null. */
@@ -4642,6 +6519,7 @@ function commandCaves(): void {
       kind: "cave",
       position: [round(cave.x), round(cave.y), round(cave.z)] as [number, number, number],
       rotationY: Math.atan2(cave.inX, cave.inZ),
+      zone: "",
       tags: [`clearance:${cave.clearance.toFixed(2)}`, `depth:${cave.depth.toFixed(0)}`],
     })),
   ];
@@ -5171,6 +7049,7 @@ function commandMonoliths(): void {
       kind: "spire-field",
       position: [round(c.x), round(field.height(c.x, c.z)), round(c.z)] as [number, number, number],
       rotationY: 0,
+      zone: "",
       tags: [`radius:${fieldRadius}`, `biome:${biomeId}`],
     })),
   ];
@@ -5355,7 +7234,23 @@ function commandMap(): void {
   for (const road of recipe.features.roads) stroke(road.points, road.id.startsWith("trail-") ? [200, 170, 110] : [235, 215, 160], road.id.startsWith("trail-") ? 0 : 1);
   for (const town of recipe.features.towns) {
     const [px, py] = toPixel(town.center[0], town.center[1]);
-    plot(px, py, [240, 60, 60], Math.max(2, Math.round(town.radius / step)));
+    const r = Math.max(2, Math.round(town.radius / step));
+    // A filled disc is the right mark for a town on a world map and the wrong
+    // one the moment you zoom into a town: at half a metre per pixel the pad
+    // is a 300 px block of red over the streets, terraces and ramps you zoomed
+    // in to look at. Past a dozen pixels it becomes a ring.
+    if (r > 12) {
+      for (let a = 0; a < 360; a += 1) plot(px + Math.round(Math.cos((a * Math.PI) / 180) * r), py + Math.round(Math.sin((a * Math.PI) / 180) * r), [240, 60, 60], 1);
+      plot(px, py, [240, 60, 60], 3);
+      // the shelves, so a terraced town reads as one: lighter, and labelled by
+      // their own centrelines rather than by a blob
+      for (const terrace of town.terraces) {
+        // the centreline, thin: filled at the shelf's real width the shelves
+        // paint over each other and over the ramps between them
+        if (terrace.points.length === 1) plot(...toPixel(terrace.points[0]![0], terrace.points[0]![1]), [255, 160, 120], 2);
+        else stroke(terrace.points, [255, 160, 120], 1);
+      }
+    } else plot(px, py, [240, 60, 60], r);
   }
   // Additive blobs stand above the heightfield this map samples, so they are
   // invisible to it by construction. Plot them, or a stage that raised forty
@@ -6146,6 +8041,20 @@ switch (command) {
   case "towns":
     commandTowns();
     break;
+  case "status":
+    commandStatus();
+    break;
+  case "story":
+  case "stories":
+    commandStory();
+    break;
+  case "terrace":
+  case "terraces":
+    commandTerrace();
+    break;
+  case "gates":
+    commandGates();
+    break;
   case "paths":
   case "roads":
     commandPaths();
@@ -6215,27 +8124,30 @@ switch (command) {
     // `--continents` (not `--count`, which towns and pois read) re-lays the
     // landmasses only on a FRESH world; an existing recipe keeps its bounds.
     const fresh = !findRecipeFile(worldName);
-    if (fresh) commandInit();
+    if (fresh) runStage("init", commandInit);
     const continents = option("continents", 0);
-    if (fresh && continents > 0) commandContinents(continents);
+    if (fresh && continents > 0) runStage("continents", () => commandContinents(continents));
     else if (!fresh && continents > 0) console.log("(--continents ignored: the recipe exists — run `worldgen continents` to re-lay it, then `all` again)");
     // canyons BEFORE rivers: the hydrology then drains through the gorges it
     // finds; cut after, a canyon floor under a lake outline flooded 90 m deep
-    commandCanyons();
-    commandRivers();
-    commandTowns();
+    runStage("canyons", commandCanyons);
+    runStage("rivers", commandRivers);
+    runStage("towns", commandTowns);
+    // terrace before zones and paths: it moves the ground under every town it
+    // steps, and both of those measure that ground
+    runStage("terrace", commandTerrace);
     // zones after towns (seeded from them) and rivers (borders follow them)
-    commandZones();
-    commandPaths();
+    runStage("zones", commandZones);
+    runStage("paths", commandPaths);
     // barriers after paths (passes are cut where paths cross) and before pois (waystations exist when pois places its own)
-    commandBarriers();
-    commandPois();
-    commandTrails();
+    runStage("barriers", commandBarriers);
+    runStage("pois", commandPois);
+    runStage("trails", commandTrails);
     // once more after trails: a trail that leaves a town or crosses a ridge is
     // a path like any other and wants its gate / pass (idempotent, seconds)
-    commandBarriers();
-    commandCaves();
-    commandMap();
+    runStage("barriers", commandBarriers);
+    runStage("caves", commandCaves);
+    runStage("map", commandMap);
     commandStats();
     break;
   }

@@ -1,30 +1,168 @@
-// Image bridge: an agent that cannot generate images (a Claude session) asks one that can (Codex, or Derek)
-// through the filesystem. Requests are JSON files under apps/playground/.hitreg/image-requests/ (gitignored);
-// the fulfilling side writes the PNG to `target`, then sets status "done" on the request. Nothing here draws.
+// Image bridge: gets pictures made for agents that cannot draw them.
 //
-//   node tools/image-request.mjs new --id plan --target projects/x/references/plan.png --size 1024x1280 \
-//        --purpose "top-down plan reference" --prompt-file prompt.txt        # or --prompt "…"
-//   node tools/image-request.mjs wait --id plan --timeout 900                  # blocks until done/failed
-//   node tools/image-request.mjs list                                          # pending / done / failed
-//   node tools/image-request.mjs done --id plan [--note "…"]                   # fulfiller: marks done after writing target
-//   node tools/image-request.mjs fail --id plan --note "…"
+// Two modes, one queue and the same provenance records:
+//   gen / gen-set  — drive `codex exec` directly and block until the PNG is on disk (preferred; no human needed)
+//   new / wait     — queue a request for a separate fulfiller (another Codex session, or Derek) to pick up
 //
-// Prompts stay in the request file (under .hitreg/, never in a project); the fulfiller copies nothing but the image.
+// Requests are JSON files under apps/playground/.hitreg/image-requests/ (gitignored); the fulfilling side writes
+// the PNG to `target`, then sets status "done". Prompts live in the request file, never in a project folder.
+//
+//   node tools/image-request.mjs gen --id flagstone --target projects/x/assets/textures/flagstone.png \
+//        --size 512x512 --prompt-file prompt.txt [--ref existing.png] [--alpha] [--timeout 600] [--force]
+//   node tools/image-request.mjs gen-set --manifest set.json [--timeout 1800]   # N images in ONE codex session
+//   node tools/image-request.mjs new --id plan --target … --size 1024x1280 --prompt "…"   # queue only
+//   node tools/image-request.mjs wait --id plan --timeout 900                   # blocks until done/failed
+//   node tools/image-request.mjs list | done --id … | fail --id … --note "…"
+//
+// gen stages into .hitreg/image-staging/ and installs only the verified PNG, so stray notes files the generator
+// emits alongside the image never land in a project folder.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dir = path.join(root, ".hitreg", "image-requests");
+const stageRoot = path.join(root, ".hitreg", "image-staging");
 fs.mkdirSync(dir, { recursive: true });
 const [cmd, ...rest] = process.argv.slice(2);
 const opt = (k, d) => { const i = rest.indexOf(`--${k}`); return i >= 0 ? rest[i + 1] : d; };
+const flag = (k) => rest.includes(`--${k}`);
+const opts = (k) => rest.reduce((a, v, i) => (rest[i - 1] === `--${k}` ? [...a, v] : a), []);
 const file = (id) => path.join(dir, `${id}.json`);
 const read = (id) => JSON.parse(fs.readFileSync(file(id), "utf8"));
 const write = (id, v) => fs.writeFileSync(file(id), JSON.stringify(v, null, 2));
-const usage = () => { console.error("usage: image-request.mjs new|wait|list|done|fail …"); process.exit(2); };
+const usage = () => { console.error("usage: image-request.mjs gen|gen-set|new|wait|list|done|fail …"); process.exit(2); };
 
-if (cmd === "new") {
+// PNG signature + IHDR only: width, height, colour type. No decoding, no deps.
+function pngInfo(f) {
+  const b = Buffer.alloc(26);
+  const fd = fs.openSync(f, "r");
+  try { fs.readSync(fd, b, 0, 26, 0); } finally { fs.closeSync(fd); }
+  if (b.toString("latin1", 0, 8) !== "\x89PNG\r\n\x1a\n") return null;
+  const colorType = b[25];
+  return { w: b.readUInt32BE(16), h: b.readUInt32BE(20), colorType, alpha: colorType === 4 || colorType === 6 };
+}
+
+// Verify a produced PNG against what was asked for. Returns an error string, or null when good.
+function checkPng(f, { size, alpha }) {
+  if (!fs.existsSync(f)) return "not written";
+  const info = pngInfo(f);
+  if (!info) return "not a PNG";
+  if (size) {
+    const [w, h] = String(size).toLowerCase().split("x").map(Number);
+    if (info.w !== w || info.h !== h) return `wrong size ${info.w}x${info.h}, wanted ${w}x${h}`;
+  }
+  if (alpha && !info.alpha) return `no alpha channel (PNG colour type ${info.colorType})`;
+  return null;
+}
+
+// One codex exec session. The prompt goes in on stdin so a variadic -i cannot swallow it.
+function runCodex(cwd, prompt, refs, timeoutSec) {
+  const args = ["exec", "--cd", cwd, "-s", "workspace-write", "--skip-git-repo-check"];
+  for (const r of refs) args.push("-i", path.resolve(r));
+  args.push("-");
+  const res = spawnSync("codex", args, { input: prompt, encoding: "utf8", shell: true, timeout: timeoutSec * 1000, maxBuffer: 1 << 26 });
+  if (res.error?.code === "ENOENT") { console.error("codex CLI not found on PATH — queue the request with `new` instead"); process.exit(4); }
+  return res;
+}
+
+// The parts of the brief that must hold for every image we ask for.
+function brief(items) {
+  const one = items.length === 1;
+  const lines = [
+    `Generate ${one ? "one image" : `${items.length} separate images`} and save ${one ? "it" : "them"} into the current working directory.`,
+    `Write ONLY the PNG file${one ? "" : "s"} listed below — no notes file, no prompt log, no extra files.`,
+    "",
+  ];
+  for (const it of items) {
+    lines.push(`## ${it.file}`);
+    lines.push(`Exact output size: ${it.size} pixels. Save as exactly "${it.file}" in the cwd.`);
+    if (it.alpha) lines.push("Background MUST be fully transparent (a real PNG alpha channel, not white, not a checkerboard pattern).");
+    if (it.ref) lines.push("A reference image is attached: match its palette, grain and pixel density. Follow the text below for subject and layout.");
+    lines.push("", it.prompt.trim(), "");
+  }
+  lines.push(`Resize to the exact pixel size with nearest-neighbour (never bilinear) so pixel art stays crisp${items.some((i) => i.alpha) ? ", preserving alpha" : ""}.`);
+  lines.push("Reply with only the filename and byte size of each PNG you wrote.");
+  return lines.join("\n");
+}
+
+// gen / gen-set: record the request, generate, verify, install, record the outcome.
+async function generate(items, timeoutSec) {
+  const stage = path.join(stageRoot, Date.now().toString(36));
+  fs.mkdirSync(stage, { recursive: true });
+
+  for (const it of items) {
+    const existing = fs.existsSync(file(it.id)) ? read(it.id) : null;
+    if (existing?.status === "done" && fs.existsSync(existing.target) && !flag("force")) {
+      console.error(`request ${it.id} already done (${existing.target}) — pass --force to regenerate`);
+      process.exit(1);
+    }
+    write(it.id, {
+      id: it.id, status: "pending", createdAt: new Date().toISOString(), requester: opt("requester", "claude"),
+      purpose: it.purpose ?? "", size: it.size, target: it.target, prompt: it.prompt,
+      refs: it.ref ? [path.resolve(it.ref)] : [], notes: "",
+    });
+  }
+
+  const refs = items.map((i) => i.ref).filter(Boolean);
+  const t0 = Date.now();
+  const res = runCodex(stage, brief(items), refs, timeoutSec);
+  const secs = Number(((Date.now() - t0) / 1000).toFixed(0));
+
+  if (res.status !== 0 && !items.some((it) => fs.existsSync(path.join(stage, it.file)))) {
+    const why = `codex exec exited ${res.status}${res.signal ? ` (${res.signal})` : ""}`;
+    for (const it of items) write(it.id, { ...read(it.id), status: "failed", finishedAt: new Date().toISOString(), fulfiller: "codex", notes: why });
+    console.error((res.stderr || res.stdout || "").slice(-2000));
+    console.error(`${why} after ${secs}s`);
+    process.exit(1);
+  }
+
+  const out = [];
+  let bad = 0;
+  for (const it of items) {
+    const produced = path.join(stage, it.file);
+    const err = checkPng(produced, it);
+    if (err) {
+      write(it.id, { ...read(it.id), status: "failed", finishedAt: new Date().toISOString(), fulfiller: "codex", notes: err });
+      out.push({ id: it.id, status: "failed", reason: err });
+      bad++;
+      continue;
+    }
+    fs.mkdirSync(path.dirname(it.target), { recursive: true });
+    fs.copyFileSync(produced, it.target);
+    const info = pngInfo(it.target);
+    write(it.id, { ...read(it.id), status: "done", finishedAt: new Date().toISOString(), fulfiller: "codex", notes: `${secs}s` });
+    out.push({ id: it.id, status: "done", target: it.target, bytes: fs.statSync(it.target).size, size: `${info.w}x${info.h}`, alpha: info.alpha });
+  }
+  const strays = fs.readdirSync(stage).filter((f) => !items.some((it) => it.file === f));
+  console.log(JSON.stringify({ seconds: secs, results: out, ...(strays.length ? { discardedStrays: strays } : {}) }, null, 2));
+  process.exit(bad ? 1 : 0);
+}
+
+if (cmd === "gen") {
+  const id = opt("id"); const target = opt("target"); if (!id || !target) usage();
+  const prompt = opt("prompt") ?? (opt("prompt-file") ? fs.readFileSync(opt("prompt-file"), "utf8") : null);
+  if (!prompt) usage();
+  await generate([{
+    id, file: `${id}.png`, target: path.resolve(root, target), size: opt("size", "1024x1024"),
+    prompt, alpha: flag("alpha"), ref: opts("ref")[0], purpose: opt("purpose", ""),
+  }], Number(opt("timeout", 900)));
+} else if (cmd === "gen-set") {
+  const m = opt("manifest"); if (!m) usage();
+  const spec = JSON.parse(fs.readFileSync(path.resolve(m), "utf8"));
+  const list = Array.isArray(spec) ? spec : spec.images;
+  const shared = (Array.isArray(spec) ? "" : spec.brief ?? "").trim();
+  if (!list?.length) usage();
+  await generate(list.map((it) => {
+    if (!it.id || !it.target || !it.prompt) { console.error(`manifest entry needs id, target, prompt: ${JSON.stringify(it)}`); process.exit(2); }
+    return {
+      id: it.id, file: `${it.id}.png`, target: path.resolve(root, it.target), size: it.size ?? "1024x1024",
+      prompt: shared ? `${shared}\n\n${it.prompt}` : it.prompt, alpha: !!it.alpha,
+      ref: it.ref ? path.resolve(root, it.ref) : undefined, purpose: it.purpose ?? "",
+    };
+  }), Number(opt("timeout", 1800)));
+} else if (cmd === "new") {
   const id = opt("id"); const target = opt("target"); if (!id || !target) usage();
   const prompt = opt("prompt") ?? (opt("prompt-file") ? fs.readFileSync(opt("prompt-file"), "utf8") : null);
   if (!prompt) usage();

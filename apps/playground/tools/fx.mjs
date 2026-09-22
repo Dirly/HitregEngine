@@ -203,6 +203,11 @@ else if (cmd === "masks") {
   const sizeFlag = rest.indexOf("--size");
   const { cmdMasks } = await import("./fx-masks.mjs");
   cmdMasks(rest[0], sizeFlag >= 0 ? Number(rest[sizeFlag + 1]) : 48);
+} else if (cmd === "fire") {
+  const { cmdFire } = await import("./fx-fire.mjs");
+  const at = rest.indexOf("--embers");
+  const embers = at >= 0 ? rest[at + 1] : undefined;
+  cmdFire(rest.find((a, i) => !a.startsWith("--") && rest[i - 1] !== "--embers"), rest.includes("--force"), embers);
 } else if (cmd === "symbols") {
   const { cmdSymbols } = await import("./fx-symbols.mjs");
   cmdSymbols(rest[0], rest[1], rest[2], rest.slice(3));
@@ -214,6 +219,8 @@ else if (cmd === "masks") {
   node tools/fx.mjs particle-sheet <project> <name>=<set>:<idx> [--row 5]
   node tools/fx.mjs import <project> <name>=<set>:<idx> ...
   node tools/fx.mjs masks <project> [--size 48]     # PSX black/white masks for ring textures
+  node tools/fx.mjs fire <project> [--force] [--embers <png>]
+                                                    # the standard fire set: vfx/env/fire-* + materials/fx/fire* + fx/ember-bed
   node tools/fx.mjs symbols <project> <name> <sheet.png> [--roles sigil,glyph] [--rows 0-2=head,3-5=stuck] [--tags ...]
                                                     # slice a hand-drawn symbol sheet into a grid + catalog entries`);
   process.exit(1);

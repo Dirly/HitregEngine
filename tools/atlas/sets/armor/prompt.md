@@ -6,7 +6,7 @@ to make a new set. Run the result through:
     node tools/atlas/import-atlas.mjs \
       --key <key.png> --art <art.png> \
       --manifest tools/atlas/manifest-layered.json \
-      --out tools/atlas/out-<name> --slices
+      --out tools/atlas/out/<set>/<theme> --slices
 
 Use `manifest-layered.json`, not `manifest.json` — it is the one where an empty
 area on the body, head and gear regions actually cuts a hole. With

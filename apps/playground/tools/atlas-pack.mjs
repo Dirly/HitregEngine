@@ -4,7 +4,7 @@
  * them can share a single material — which is the whole point, because a
  * material boundary is a draw-call boundary.
  *
- *   pnpm -F playground atlas-pack --out weapons --sheets tools/atlas/out-bone/atlas.png ...
+ *   pnpm -F playground atlas-pack --out weapons --sheets tools/atlas/out/longsword/<theme>/atlas.png
  *   pnpm -F playground atlas-pack --out weapons --dir tools/atlas --size 128
  *
  * Writes, into the playground's assets:
@@ -56,9 +56,17 @@ let files = list(args.sheets).map((f) => path.resolve(String(f)));
 if (!files.length && args.dir && args.dir !== true) {
   const dir = path.resolve(String(args.dir));
   const want = args.size && args.size !== true ? Number(args.size) : null;
-  for (const entry of fs.readdirSync(dir)) {
-    const file = path.join(dir, entry, "atlas.png");
-    if (!entry.startsWith("out-") || !fs.existsSync(file)) continue;
+  const walk = (d, depth) => {
+    if (fs.existsSync(path.join(d, "atlas.png"))) return [d];
+    if (depth > 3) return [];
+    return fs
+      .readdirSync(d, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && e.name !== "slices" && e.name !== "sets" && e.name !== "art")
+      .flatMap((e) => walk(path.join(d, e.name), depth + 1));
+  };
+  for (const found of walk(dir, 0)) {
+    const entry = path.relative(dir, found);
+    const file = path.join(found, "atlas.png");
     if (want) {
       const b = fs.readFileSync(file);
       if (b.readUInt32BE(16) !== want) continue;
@@ -75,7 +83,7 @@ if (!files.length) {
 // A label per tile, taken from the folder the sheet came out of.
 const tiles = [];
 for (const file of files) {
-  const dir = path.basename(path.dirname(file)).replace(/^out-/, "");
+  const dir = path.basename(path.dirname(file));
   const stem = path.basename(file).replace(/\.png$/i, "");
   const label = (stem === "atlas" ? dir : stem).replace(/-128$/, "").replace(/[^a-z0-9_-]+/gi, "-").toLowerCase();
   if (tiles.some((t) => t.label === label)) continue; // the -128 duplicates

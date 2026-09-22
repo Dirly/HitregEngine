@@ -51,7 +51,11 @@ function parseArgs(argv) {
     const next = argv[i + 1];
     if (next === undefined || next.startsWith("--")) out[key] = true;
     else {
-      out[key] = next;
+      // --anim may be repeated (or comma-joined): the animation library ships
+      // as a base plus expansion packs on the same rig, and a character wants
+      // clips from both in one bake.
+      if (key === "anim" && out[key] !== undefined) out[key] = `${out[key]},${next}`;
+      else out[key] = next;
       i++;
     }
   }
@@ -65,7 +69,9 @@ if (args.help || (!args.mesh && !args.list)) {
 retarget — bake an FBX animation library onto a differently-rigged character
 
   --mesh <file.fbx>     rigged character (skin + skeleton). Required.
-  --anim <file.fbx>     animation library. Omit to export the mesh alone.
+  --anim <file.fbx>     animation library. Repeat it (or comma-join) to merge
+                        several packs on the same rig; later files win a name
+                        collision. Omit to export the mesh alone.
   --out  <file.glb>     output. Default: alongside --mesh, same basename.
   --rig  <id>           skeleton map id. Default: cc-base<-ue-mannequin
   --clips <preset|list> preset name(s, joined with +), or Out=Source,Out2=Source2.
@@ -78,6 +84,7 @@ retarget — bake an FBX animation library onto a differently-rigged character
 
 Examples:
   node tools/retarget.mjs --anim UAL1.fbx --list
+  node tools/retarget.mjs --anim UAL1.fbx --anim UAL2.fbx --list
   node tools/retarget.mjs --mesh HumanRigged.fbx --anim UAL1.fbx \\
     --out projects/voxel-demo/assets/models/mmo/human.glb
 `);
@@ -373,6 +380,12 @@ function measureClipSpeeds(root, bones, clips, rigMap, groundY) {
   const mixer = new THREE.AnimationMixer(root);
   const out = {};
   for (const clip of clips) {
+    // A clip with no ground under it has no ground speed. Swimming measures
+    // ~0.8 units/sec off legs kicking past the hip, and a controller told that
+    // number plays the stroke at four times its rate — so the one case where
+    // the measurement is not merely useless but actively wrong is excluded by
+    // name. The controller then rates a stroke against its own swim speed.
+    if (/^(swim|tread)/i.test(clip.name)) continue;
     const N = 120;
     const dt = clip.duration / N;
     if (!(dt > 0)) continue;
@@ -423,10 +436,28 @@ if (!rigMap) {
 
 let animGroup = null;
 if (args.anim) {
-  process.stdout.write(`reading ${path.basename(args.anim)} … `);
-  const t0 = Date.now();
-  animGroup = loadFbx(args.anim);
-  console.log(`${animGroup.animations.length} clips (${Date.now() - t0}ms)`);
+  const files = String(args.anim).split(",").map((f) => f.trim()).filter(Boolean);
+  for (const file of files) {
+    process.stdout.write(`reading ${path.basename(file)} … `);
+    const t0 = Date.now();
+    const group = loadFbx(file);
+    console.log(`${group.animations.length} clips (${Date.now() - t0}ms)`);
+    if (!animGroup) animGroup = group;
+    else {
+      // Only the CLIPS are merged. The first library's skeleton is the one
+      // everything is retargeted from, which is safe precisely because these
+      // packs share a rig — and if one ever does not, its clips would address
+      // bones this skeleton lacks and land in the skip list rather than
+      // silently deforming the character.
+      const have = new Set(animGroup.animations.map((c) => c.name));
+      for (const clip of group.animations) {
+        if (have.has(clip.name)) {
+          animGroup.animations = animGroup.animations.filter((c) => c.name !== clip.name);
+        }
+        animGroup.animations.push(clip);
+      }
+    }
+  }
 }
 
 if (args.list) {

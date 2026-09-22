@@ -48,7 +48,7 @@ the same result contract.
 ## Distribution: tools are plugins, `tools/` is an install directory
 
 A tool is its own git repo, and `tools/` is where you clone one. The engine
-repo tracks only the first-party set (`atlas/`, `wfc-3d/`, `texture-intake/`)
+repo tracks only the first-party set (`atlas/`, `wfc-3d/`, `texture-intake/`, `mesh-dc/`)
 and ignores everything else under `tools/`, so an installed third-party tool
 is invisible to it — no submodule, no gitlink, the same arrangement as
 `apps/playground/projects/`. Installing is `git clone <repo> tools/<folder>`;
@@ -97,3 +97,10 @@ propagate edits. The tileset is normally not hand-written: `tools/wfc-3d/kit.mjs
 and example structures built from them, atlases the textures, composes cell
 prefabs and learns the allowed face pairs, and the registered runner consumes
 that tileset unchanged.
+
+`hitreg.mesh-dc` converts grouped closed Blender solids into editable CSG volume
+assets and a reusable anchored prefab. Source preparation, material-role
+preservation, and the separate extraction/traversal gates are explained in
+[`tools/mesh-dc/README.md`](../tools/mesh-dc/README.md). Import validation establishes
+valid source solids; it does not certify the extracted dungeon's topology or
+walkability.

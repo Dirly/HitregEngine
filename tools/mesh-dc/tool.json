@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "id": "hitreg.mesh-dc",
+  "name": "Blender to DC",
+  "description": "Import grouped Blender solids as editable volumes with their original palette and an entrance anchor.",
+  "category": "Assets/Import",
+  "surfaces": ["tools", "assets"],
+  "permissions": ["assets.write:volumes", "assets.write:prefabs", "assets.write:materials"],
+  "entry": "./run.mjs",
+  "inputs": {
+    "source": {
+      "kind": "file",
+      "label": "Blender mesh export",
+      "description": "JSON created by the Blender exporter. Each group becomes an editable volume.",
+      "accept": ["application/json"],
+      "maxBytes": 33554432
+    },
+    "name": {
+      "kind": "string",
+      "label": "Output name",
+      "description": "A new name for the imported assets.",
+      "default": "mesh-import",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,70}$",
+      "maxLength": 71
+    },
+    "voxelSize": {
+      "kind": "number",
+      "label": "Surface resolution (m)",
+      "description": "Smaller values preserve finer details and take longer to load.",
+      "default": 0.12,
+      "min": 0.02,
+      "max": 2,
+      "step": 0.01
+    },
+    "maxCells": {
+      "kind": "number",
+      "label": "Maximum cells per group",
+      "description": "Limits import size. Split oversized groups or increase surface resolution.",
+      "default": 15000000,
+      "min": 1,
+      "max": 15000000,
+      "integer": true
+    },
+    "materialId": {
+      "kind": "string",
+      "label": "Palette material ID",
+      "description": "Optional new material ID. Defaults to the output name followed by /dc-palette.",
+      "required": false,
+      "pattern": "^[a-z0-9][a-z0-9_-]*(?:/[a-z0-9][a-z0-9_-]*)*$",
+      "maxLength": 160
+    },
+    "group": {
+      "kind": "string",
+      "label": "Group name",
+      "description": "Optional exact group name. Leave empty to import all groups.",
+      "required": false,
+      "maxLength": 200
+    }
+  }
+}
