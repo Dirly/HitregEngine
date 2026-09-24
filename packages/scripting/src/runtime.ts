@@ -205,6 +205,13 @@ export class ScriptRuntime {
   /** entity id -> its script component's name, for per-script profiler scopes. */
   private readonly instanceNames = new Map<string, string>();
   private readonly entities: Map<string, SceneDoc["entities"][string]>;
+  /**
+   * tag -> ids carrying it, kept in step with `entities`. findByTag used to
+   * spread the whole entity map on every call; with a streamed world that is
+   * every resident chunk entity (16k in the MMO), several times per fixed
+   * tick per AI — the single largest allocation source in play.
+   */
+  private readonly tagIndex = new Map<string, Set<string>>();
   private readonly objects: Map<string, THREE.Object3D>;
   /** Per-script event unsubscribers — cleared when the script disposes. */
   private readonly subscriptions = new Map<string, Set<() => void>>();
@@ -217,6 +224,7 @@ export class ScriptRuntime {
 
   constructor(private readonly opts: RuntimeOptions) {
     this.entities = new Map(Object.entries(opts.doc.entities));
+    for (const [id, entity] of this.entities) this.indexTags(id, entity.tags);
     // COPY, never alias: the runtime deletes from this map when entities are
     // removed/suspended — aliasing the caller's render-object map would
     // silently destroy renderer/net entries too (a suspended NPC's ghost
@@ -246,7 +254,10 @@ export class ScriptRuntime {
     opts?: { silent?: boolean },
   ): void {
     for (const [id, entity] of Object.entries(doc.entities)) {
+      const previous = this.entities.get(id);
+      if (previous) this.unindexTags(id, previous.tags);
       this.entities.set(id, entity);
+      this.indexTags(id, entity.tags);
       const object = objects.get(id);
       if (object) this.objects.set(id, object);
       if (this.started) {
@@ -393,7 +404,25 @@ export class ScriptRuntime {
 
   /** Ids of entities carrying a tag — the same lookup scripts get via ctx. */
   findByTag(tag: string): string[] {
-    return [...this.entities].filter(([, e]) => e.tags.includes(tag)).map(([eid]) => eid);
+    const ids = this.tagIndex.get(tag);
+    return ids ? [...ids] : [];
+  }
+
+  private indexTags(id: string, tags: readonly string[]): void {
+    for (const tag of tags) {
+      let ids = this.tagIndex.get(tag);
+      if (!ids) this.tagIndex.set(tag, (ids = new Set()));
+      ids.add(id);
+    }
+  }
+
+  private unindexTags(id: string, tags: readonly string[]): void {
+    for (const tag of tags) {
+      const ids = this.tagIndex.get(tag);
+      if (!ids) continue;
+      ids.delete(id);
+      if (ids.size === 0) this.tagIndex.delete(tag);
+    }
   }
 
   /** Restart scripts suspended earlier (the authority handed them back). */
@@ -423,7 +452,9 @@ export class ScriptRuntime {
         this.instanceNames.delete(id);
       }
       this.dropSubscriptions(id);
-      const known = this.entities.delete(id);
+      const known = this.entities.get(id);
+      if (known) this.unindexTags(id, known.tags);
+      this.entities.delete(id);
       this.objects.delete(id);
       if (known && this.started && !opts?.silent) {
         this.opts.events?.emit("entity.destroyed", { entityId: id });

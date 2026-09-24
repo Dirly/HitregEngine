@@ -4,6 +4,11 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  three@0.185.1:
+    hash: rq7i6wba6txvwomxylmhyvz24e
+    path: patches/three@0.185.1.patch
+
 importers:
 
   .: {}
@@ -33,10 +38,10 @@ importers:
         version: link:../../packages/scripting
       camera-controls:
         specifier: ^3.1.2
-        version: 3.1.2(three@0.185.1)
+        version: 3.1.2(three@0.185.1(patch_hash=rq7i6wba6txvwomxylmhyvz24e))
       three:
         specifier: ^0.185.1
-        version: 0.185.1
+        version: 0.185.1(patch_hash=rq7i6wba6txvwomxylmhyvz24e)
       zod:
         specifier: ^4.0.0
         version: 4.4.3
@@ -111,10 +116,10 @@ importers:
         version: 19.2.7(react@19.2.7)
       three:
         specifier: ^0.185.1
-        version: 0.185.1
+        version: 0.185.1(patch_hash=rq7i6wba6txvwomxylmhyvz24e)
       three-bvh-csg:
         specifier: ^0.0.18
-        version: 0.0.18(three-mesh-bvh@0.9.14(three@0.185.1))(three@0.185.1)
+        version: 0.0.18(three-mesh-bvh@0.9.14(three@0.185.1(patch_hash=rq7i6wba6txvwomxylmhyvz24e)))(three@0.185.1(patch_hash=rq7i6wba6txvwomxylmhyvz24e))
     devDependencies:
       '@types/react':
         specifier: ^19.2.17
@@ -177,7 +182,7 @@ importers:
         version: 1.2.0
       three:
         specifier: ^0.185.1
-        version: 0.185.1
+        version: 0.185.1(patch_hash=rq7i6wba6txvwomxylmhyvz24e)
     devDependencies:
       '@types/three':
         specifier: ^0.185.1
@@ -203,7 +208,7 @@ importers:
         version: 0.185.1
       three:
         specifier: ^0.185.1
-        version: 0.185.1
+        version: 0.185.1(patch_hash=rq7i6wba6txvwomxylmhyvz24e)
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
@@ -236,7 +241,7 @@ importers:
         version: 8.23.0
       three:
         specifier: ^0.185.1
-        version: 0.185.1
+        version: 0.185.1(patch_hash=rq7i6wba6txvwomxylmhyvz24e)
       ws:
         specifier: ^8.18.0
         version: 8.21.3
@@ -1541,9 +1546,9 @@ snapshots:
 
   cac@6.7.14: {}
 
-  camera-controls@3.1.2(three@0.185.1):
+  camera-controls@3.1.2(three@0.185.1(patch_hash=rq7i6wba6txvwomxylmhyvz24e)):
     dependencies:
-      three: 0.185.1
+      three: 0.185.1(patch_hash=rq7i6wba6txvwomxylmhyvz24e)
 
   chai@5.3.3:
     dependencies:
@@ -1810,16 +1815,16 @@ snapshots:
     dependencies:
       js-tokens: 9.0.1
 
-  three-bvh-csg@0.0.18(three-mesh-bvh@0.9.14(three@0.185.1))(three@0.185.1):
+  three-bvh-csg@0.0.18(three-mesh-bvh@0.9.14(three@0.185.1(patch_hash=rq7i6wba6txvwomxylmhyvz24e)))(three@0.185.1(patch_hash=rq7i6wba6txvwomxylmhyvz24e)):
     dependencies:
-      three: 0.185.1
-      three-mesh-bvh: 0.9.14(three@0.185.1)
+      three: 0.185.1(patch_hash=rq7i6wba6txvwomxylmhyvz24e)
+      three-mesh-bvh: 0.9.14(three@0.185.1(patch_hash=rq7i6wba6txvwomxylmhyvz24e))
 
-  three-mesh-bvh@0.9.14(three@0.185.1):
+  three-mesh-bvh@0.9.14(three@0.185.1(patch_hash=rq7i6wba6txvwomxylmhyvz24e)):
     dependencies:
-      three: 0.185.1
+      three: 0.185.1(patch_hash=rq7i6wba6txvwomxylmhyvz24e)
 
-  three@0.185.1: {}
+  three@0.185.1(patch_hash=rq7i6wba6txvwomxylmhyvz24e): {}
 
   tinybench@2.9.0: {}
 

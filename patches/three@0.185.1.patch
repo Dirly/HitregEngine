@@ -1,0 +1,237 @@
+diff --git a/build/three.cjs b/build/three.cjs
+index 8939a67dd76325ccd25ee8806fc4d22b1caea88a..dbd52d61b1ef223d331ce254455ed148a687a9c5 100644
+--- a/build/three.cjs
++++ b/build/three.cjs
+@@ -6085,13 +6085,16 @@ class Matrix3 {
+ 		 *
+ 		 * @type {Array<number>}
+ 		 */
+-		this.elements = [
++		// HitReg patch: a typed array can never become a generic (boxed) V8 array. A plain
++		// array flips to holey-object elements via V8's store feedback, after which every
++		// matrix write allocates a heap number (~50 MB/s in the MMO). See docs/performance-lessons.md.
++		this.elements = new Float64Array( [
+ 
+ 			1, 0, 0,
+ 			0, 1, 0,
+ 			0, 0, 1
+ 
+-		];
++		] );
+ 
+ 		if ( n11 !== undefined ) {
+ 
+@@ -9908,14 +9911,17 @@ class Matrix4 {
+ 		 *
+ 		 * @type {Array<number>}
+ 		 */
+-		this.elements = [
++		// HitReg patch: a typed array can never become a generic (boxed) V8 array. A plain
++		// array flips to holey-object elements via V8's store feedback, after which every
++		// matrix write allocates a heap number (~50 MB/s in the MMO). See docs/performance-lessons.md.
++		this.elements = new Float64Array( [
+ 
+ 			1, 0, 0, 0,
+ 			0, 1, 0, 0,
+ 			0, 0, 1, 0,
+ 			0, 0, 0, 1
+ 
+-		];
++		] );
+ 
+ 		if ( n11 !== undefined ) {
+ 
+@@ -56644,10 +56650,13 @@ class Matrix2 {
+ 		 *
+ 		 * @type {Array<number>}
+ 		 */
+-		this.elements = [
++		// HitReg patch: a typed array can never become a generic (boxed) V8 array. A plain
++		// array flips to holey-object elements via V8's store feedback, after which every
++		// matrix write allocates a heap number (~50 MB/s in the MMO). See docs/performance-lessons.md.
++		this.elements = new Float64Array( [
+ 			1, 0,
+ 			0, 1,
+-		];
++		] );
+ 
+ 		if ( n11 !== undefined ) {
+ 
+diff --git a/build/three.core.js b/build/three.core.js
+index 0bb9262cd029f411933d077fd44197a51ec5e8e9..0af84cd383ecbe7a01c40137dac0bf62dbb3020a 100644
+--- a/build/three.core.js
++++ b/build/three.core.js
+@@ -6105,13 +6105,16 @@ class Matrix3 {
+ 		 *
+ 		 * @type {Array<number>}
+ 		 */
+-		this.elements = [
++		// HitReg patch: a typed array can never become a generic (boxed) V8 array. A plain
++		// array flips to holey-object elements via V8's store feedback, after which every
++		// matrix write allocates a heap number (~50 MB/s in the MMO). See docs/performance-lessons.md.
++		this.elements = new Float64Array( [
+ 
+ 			1, 0, 0,
+ 			0, 1, 0,
+ 			0, 0, 1
+ 
+-		];
++		] );
+ 
+ 		if ( n11 !== undefined ) {
+ 
+@@ -9928,14 +9931,17 @@ class Matrix4 {
+ 		 *
+ 		 * @type {Array<number>}
+ 		 */
+-		this.elements = [
++		// HitReg patch: a typed array can never become a generic (boxed) V8 array. A plain
++		// array flips to holey-object elements via V8's store feedback, after which every
++		// matrix write allocates a heap number (~50 MB/s in the MMO). See docs/performance-lessons.md.
++		this.elements = new Float64Array( [
+ 
+ 			1, 0, 0, 0,
+ 			0, 1, 0, 0,
+ 			0, 0, 1, 0,
+ 			0, 0, 0, 1
+ 
+-		];
++		] );
+ 
+ 		if ( n11 !== undefined ) {
+ 
+@@ -56664,10 +56670,13 @@ class Matrix2 {
+ 		 *
+ 		 * @type {Array<number>}
+ 		 */
+-		this.elements = [
++		// HitReg patch: a typed array can never become a generic (boxed) V8 array. A plain
++		// array flips to holey-object elements via V8's store feedback, after which every
++		// matrix write allocates a heap number (~50 MB/s in the MMO). See docs/performance-lessons.md.
++		this.elements = new Float64Array( [
+ 			1, 0,
+ 			0, 1,
+-		];
++		] );
+ 
+ 		if ( n11 !== undefined ) {
+ 
+diff --git a/build/three.webgpu.js b/build/three.webgpu.js
+index 2e490796d4d4aa9479b04a5c46ddbf31cc05b1a1..08f7f6352cf284c50b035d3026b77f7cedbfd0c5 100644
+--- a/build/three.webgpu.js
++++ b/build/three.webgpu.js
+@@ -51846,7 +51846,7 @@ class NodeBuilder {
+ 
+ 		} else if ( typeLength >= 4 && value && ( value.isMatrix2 || value.isMatrix3 || value.isMatrix4 ) ) {
+ 
+-			return `${ this.getType( type ) }( ${ value.elements.map( generateConst ).join( ', ' ) } )`;
++			return `${ this.getType( type ) }( ${ Array.from( value.elements, generateConst ).join( ', ' ) } )`;
+ 
+ 		} else if ( typeLength > 4 ) {
+ 
+diff --git a/build/three.webgpu.nodes.js b/build/three.webgpu.nodes.js
+index f707acc24f5711fdae065ce920b08435b0869c1b..ae0ac2c87957323d6238068484025b552403a98c 100644
+--- a/build/three.webgpu.nodes.js
++++ b/build/three.webgpu.nodes.js
+@@ -51846,7 +51846,7 @@ class NodeBuilder {
+ 
+ 		} else if ( typeLength >= 4 && value && ( value.isMatrix2 || value.isMatrix3 || value.isMatrix4 ) ) {
+ 
+-			return `${ this.getType( type ) }( ${ value.elements.map( generateConst ).join( ', ' ) } )`;
++			return `${ this.getType( type ) }( ${ Array.from( value.elements, generateConst ).join( ', ' ) } )`;
+ 
+ 		} else if ( typeLength > 4 ) {
+ 
+diff --git a/examples/jsm/exporters/GLTFExporter.js b/examples/jsm/exporters/GLTFExporter.js
+index ab3bb954be245a05c54489d8e64c580e3dadf8d1..c7db2a77d61bee770693a5926bada95b4ef48035 100644
+--- a/examples/jsm/exporters/GLTFExporter.js
++++ b/examples/jsm/exporters/GLTFExporter.js
+@@ -2491,7 +2491,7 @@ class GLTFWriter {
+ 
+ 			if ( isIdentityMatrix( object.matrix ) === false ) {
+ 
+-				nodeDef.matrix = object.matrix.elements;
++				nodeDef.matrix = Array.from( object.matrix.elements );
+ 
+ 			}
+ 
+diff --git a/src/math/Matrix2.js b/src/math/Matrix2.js
+index b7b82c1dd0d3e09a2ee1b8cc741886d989d56aae..4af5a0554607e4015de5090e4c0820bbf3532ebf 100644
+--- a/src/math/Matrix2.js
++++ b/src/math/Matrix2.js
+@@ -56,10 +56,13 @@ export class Matrix2 {
+ 		 *
+ 		 * @type {Array<number>}
+ 		 */
+-		this.elements = [
++		// HitReg patch: a typed array can never become a generic (boxed) V8 array. A plain
++		// array flips to holey-object elements via V8's store feedback, after which every
++		// matrix write allocates a heap number (~50 MB/s in the MMO). See docs/performance-lessons.md.
++		this.elements = new Float64Array( [
+ 			1, 0,
+ 			0, 1,
+-		];
++		] );
+ 
+ 		if ( n11 !== undefined ) {
+ 
+diff --git a/src/math/Matrix3.js b/src/math/Matrix3.js
+index 1ce4def6d838f12ef4feb7a5c1b4149efb39fcdf..f7cbc3c6126ae9c906fa6fa224113ac559a62f34 100644
+--- a/src/math/Matrix3.js
++++ b/src/math/Matrix3.js
+@@ -65,13 +65,16 @@ class Matrix3 {
+ 		 *
+ 		 * @type {Array<number>}
+ 		 */
+-		this.elements = [
++		// HitReg patch: a typed array can never become a generic (boxed) V8 array. A plain
++		// array flips to holey-object elements via V8's store feedback, after which every
++		// matrix write allocates a heap number (~50 MB/s in the MMO). See docs/performance-lessons.md.
++		this.elements = new Float64Array( [
+ 
+ 			1, 0, 0,
+ 			0, 1, 0,
+ 			0, 0, 1
+ 
+-		];
++		] );
+ 
+ 		if ( n11 !== undefined ) {
+ 
+diff --git a/src/math/Matrix4.js b/src/math/Matrix4.js
+index fdac88099c0c2467df2670a0e1cbeaa9c2ff5866..d62665b00eaab8c002034aaa66e4c77087220dc1 100644
+--- a/src/math/Matrix4.js
++++ b/src/math/Matrix4.js
+@@ -83,14 +83,17 @@ class Matrix4 {
+ 		 *
+ 		 * @type {Array<number>}
+ 		 */
+-		this.elements = [
++		// HitReg patch: a typed array can never become a generic (boxed) V8 array. A plain
++		// array flips to holey-object elements via V8's store feedback, after which every
++		// matrix write allocates a heap number (~50 MB/s in the MMO). See docs/performance-lessons.md.
++		this.elements = new Float64Array( [
+ 
+ 			1, 0, 0, 0,
+ 			0, 1, 0, 0,
+ 			0, 0, 1, 0,
+ 			0, 0, 0, 1
+ 
+-		];
++		] );
+ 
+ 		if ( n11 !== undefined ) {
+ 
+diff --git a/src/nodes/core/NodeBuilder.js b/src/nodes/core/NodeBuilder.js
+index be00b81ef36e1af83b0066603e616f8f1f81a115..3527339ef46b4548256468e9224f461a58a9e23e 100644
+--- a/src/nodes/core/NodeBuilder.js
++++ b/src/nodes/core/NodeBuilder.js
+@@ -1455,7 +1455,7 @@ class NodeBuilder {
+ 
+ 		} else if ( typeLength >= 4 && value && ( value.isMatrix2 || value.isMatrix3 || value.isMatrix4 ) ) {
+ 
+-			return `${ this.getType( type ) }( ${ value.elements.map( generateConst ).join( ', ' ) } )`;
++			return `${ this.getType( type ) }( ${ Array.from( value.elements, generateConst ).join( ', ' ) } )`;
+ 
+ 		} else if ( typeLength > 4 ) {
+ 

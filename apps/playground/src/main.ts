@@ -1340,6 +1340,9 @@ async function main(): Promise<void> {
   let netSelfId: string | null = null;
   const animations = new AnimationSystem();
   const cloth = new ClothSwaySystem();
+  /** tag -> the entity id `entityByTag` last found for it (re-checked on use), null for a miss. */
+  const tagLookup = new Map<string, string | null>();
+  let tagLookupDoc: SceneDoc | undefined;
   const particles = new ParticleSystem({
     // `particles.ground`: rain dies and splashes where it meets the streamed
     // terrain, snow settles on it — one height sample per particle at birth
@@ -1358,7 +1361,25 @@ async function main(): Promise<void> {
       if (surface && (solid === null || surface.surfaceY > solid)) return surface.surfaceY;
       return solid;
     },
-    entityByTag: (tag) => Object.entries(lastExpanded.entities).find(([, e]) => e.tags.includes(tag))?.[0],
+    // called per landing particle (rain splashes look up their emitter by
+    // tag): remember each answer instead of scanning every streamed entity
+    entityByTag: (tag) => {
+      if (tagLookupDoc !== lastExpanded) {
+        tagLookup.clear();
+        tagLookupDoc = lastExpanded;
+      }
+      const hit = tagLookup.get(tag);
+      if (hit === null) return undefined; // a known miss for this doc
+      if (hit !== undefined && lastExpanded.entities[hit]?.tags.includes(tag)) return hit;
+      for (const id in lastExpanded.entities) {
+        if (lastExpanded.entities[id]!.tags.includes(tag)) {
+          tagLookup.set(tag, id);
+          return id;
+        }
+      }
+      tagLookup.set(tag, null);
+      return undefined;
+    },
   });
   const billboards = new BillboardSystem();
   // composed effects + spells (ctx.vfx). Re-attached to whatever `built.scene`
@@ -2386,11 +2407,18 @@ async function main(): Promise<void> {
     for (const id of keep) netSuspended.add(id);
   }
 
+  // The HUD, the compass and weather each ask several times a frame; scanning
+  // the whole expanded doc (every streamed entity) each time was one of the
+  // top allocation sources in play. Remember the answer and re-check it.
+  let cachedPlayerId: string | null = null;
   function localPlayerId(): string | null {
     if (netSelfId && built.objects.has(netSelfId)) return netSelfId;
-    return (
-      Object.entries(lastExpanded.entities).find(([, e]) => e.tags.includes("player"))?.[0] ?? null
-    );
+    if (cachedPlayerId !== null && lastExpanded.entities[cachedPlayerId]?.tags.includes("player")) return cachedPlayerId;
+    cachedPlayerId = null;
+    for (const id in lastExpanded.entities) {
+      if (lastExpanded.entities[id]!.tags.includes("player")) return (cachedPlayerId = id);
+    }
+    return null;
   }
 
   // -- dedicated-server runtime entities ---------------------------------------

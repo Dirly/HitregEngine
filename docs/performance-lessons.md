@@ -1077,3 +1077,58 @@ prototype, which is the only way to see detached-but-retained objects:
 Before/after, over 10 minutes of streaming: `Object3D` 2,173 → 8,601 versus
 2,141 → 2,336, and uniform buffers 381 → 2,117 versus 347 → 479. Watch
 `renderObjectSweep.stats` on the renderer.
+
+## Matrix arrays went generic: every matrix write allocated (three patched to Float64Array)
+
+Play mode on the MMO allocated ~120 MB/s, and about 45% of that was billed to
+three's matrix code (`multiplyMatrices`, `updateMatrix`, `compose`). Those
+functions only write numbers into existing arrays. The cause was V8 elements
+kinds. `Matrix4.elements` is a plain `Array`, and once play started, 21,714 of
+27,274 matrix arrays were `HOLEY_ELEMENTS` (generic storage) even though every
+value in them was a number. In a generic array, each double written is boxed
+as a new heap number.
+
+No code wrote a bad value. A trap on every `Matrix4` method found no
+non-number and no reassigned `elements`. The arrays were born as normal double
+arrays (for example in GLTFLoader's `new Mesh`) and later flipped inside
+ordinary three calls. The flip is contagious: re-packing 4,406 arrays into
+clean double arrays saw 3,247 of them go generic again within seconds, because
+the keyed-store feedback in the shared matrix code upgrades each array that
+passes through it. Chasing V8's heuristics is not a fix.
+
+The fix is `patches/three@0.185.1.patch` (pnpm `patchedDependencies`).
+`Matrix2`/`Matrix3`/`Matrix4` construct `elements` as a `Float64Array`, which
+has one fixed element type and full double precision, so it can never become
+generic. Two call sites needed `Array.from` because they relied on a real
+Array: TSL's constant-matrix codegen (`elements.map(generateConst)` would
+coerce the generated strings back to numbers) and `GLTFExporter`'s
+`nodeDef.matrix` (a typed array serializes to JSON as an object). Measured in
+one A/B on the same scene: 118–128 MB/s down to 67–90 MB/s, and frame
+p50/p95/p99/max went from 12.4/21.7/29.3/44.1 ms to 10.3/14.4/17.9/24.3 ms,
+with identical draws and triangles. Our own code reads `elements` only as
+`ArrayLike`. **When three is upgraded, re-create the patch.**
+
+Two traps from the same investigation:
+
+- **Don't use a micro-benchmark's allocation inside the running app as
+  evidence.** While the app keeps the compiler busy, the benchmark loop runs
+  unoptimized, and unoptimized code boxes every intermediate double. A plain
+  `{x,y}` object "allocated" 22 MB per million writes that way. That briefly
+  looked like `Vector3` itself was poisoned; in a three-only page it allocates
+  nothing. `%HasObjectElements`/`%HasHoleyElements`
+  (`--js-flags=--allow-natives-syntax`) are the evidence, together with an A/B
+  of the real frame.
+- **Chrome on Windows prints nothing from V8's `--trace-*` flags or
+  `%DebugPrint`**, even with `--single-process`. Use the natives that return
+  values (`%HaveSameMap`, `%HasFastProperties`, the elements-kind predicates)
+  and report through `console.log`.
+
+The other allocation sources were plain O(n) scans over every streamed
+entity: `ScriptRuntime.findByTag` spread the whole entity map on every call
+(now a tag index), and `localPlayerId` / the particle `entityByTag` ran
+`Object.entries` over the expanded doc per frame or per raindrop (now cached
+and re-validated). Allocation went from 127 to 55 MB/s. The rest is terrain
+height/water queries (rain drop births, grass, swim checks) and the particle
+writer. In steady play the GC'd heap moves about 30 MB, which is roughly
+V8's young generation. Large swings come from garbage left by world loading
+and streaming, and V8 frees it with a concurrent major GC.
