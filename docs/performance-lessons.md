@@ -1039,3 +1039,41 @@ by source, and `perf.uniformUploads` counts reuse. These are upload metrics, not
 GPU time. Compare like-for-like camera/gameplay and exclude cold scene builds
 before claiming an FPS improvement. Tests exercise the installed Three.js
 attribute updater so a future dependency change cannot silently undo the policy.
+
+## Unloaded chunks stayed alive: shared materials pin three's render objects
+
+Long editor sessions on the MMO scene grew until the tab froze. Idle and
+standing still in play were flat; **streaming** leaked. Every out-and-back
+camera sweep left about 1,050 `Object3D`s, 300 `BufferGeometry`s and 280 GPU
+uniform buffers alive, detached from the scene: unloaded `chunk:x_z` groups,
+`hlod-proxy` groups and `hlod-supercell` groups.
+
+The retainer is three r185's `RenderObject`. The renderer keeps one per
+(object, material, context, lights) it has drawn, holding that object's bind
+groups (an object-scope uniform buffer included). The object leaving the
+scene frees nothing, and `geometry.dispose()` only clears the attribute
+cache. The ONLY release is the material's `dispose` event, and every render
+object subscribes to it. This engine deliberately never disposes materials
+(they are shared across chunks; see "cache shared GPU resources" above).
+So the material's listener array held every render object ever drawn with
+it, each render object held its mesh, and each mesh's `parent` held its
+whole unloaded group.
+
+The fix is `packages/render/src/render-object-sweep.ts`, run from
+`EngineRenderer.render()`. It records every render object three creates,
+and every 120 frames it disposes the ones whose object's root was not passed
+to `renderer.render()` during the last two sweeps. That is the same
+`dispose()` a material disposal runs. Doing this with a live shared material
+is safe: shared bind groups, node-builder states and pipelines are
+reference-counted and freed only with their last user. A culled object inside
+the drawn scene is never touched, because its root is the scene. The fix is
+generic, so it also covers editor scene rebuilds and one-off bake scenes, not
+only chunk unloads.
+
+Measure it with `apps/playground/tools/leak-probe.mjs` (`stream`, `idle`,
+`play`). It forces a GC before every sample and counts live objects by
+prototype, which is the only way to see detached-but-retained objects:
+`renderer.info` and the scene graph both looked healthy throughout.
+Before/after, over 10 minutes of streaming: `Object3D` 2,173 → 8,601 versus
+2,141 → 2,336, and uniform buffers 381 → 2,117 versus 347 → 479. Watch
+`renderObjectSweep.stats` on the renderer.

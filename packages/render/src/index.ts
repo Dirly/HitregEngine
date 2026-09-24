@@ -207,6 +207,7 @@ export {
   isFrozenStaticSubtree,
 } from "./static-transforms.js";
 export { bumpShadowPassMaterials } from "./shadow-pass-material.js";
+export { trackRenderObjects, SWEEP_FRAMES, type RenderObjectSweep } from "./render-object-sweep.js";
 export { InstancedPropPool, type PoolEntry, type PoolStats } from "./prop-pool.js";
 export {
   flushDecals,

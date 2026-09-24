@@ -2,6 +2,7 @@ import * as THREE from "three/webgpu";
 import { patchShadowPassAlphaTest } from "./shadow-pass-material.js";
 import { GpuUploadProbe } from "./gpu-uploads.js";
 import { cacheUniformUploads } from "./uniform-upload-cache.js";
+import { trackRenderObjects, type RenderObjectSweep } from "./render-object-sweep.js";
 import { materialMapsLoading } from "./material-maps.js";
 import {
   PostChain,
@@ -98,6 +99,8 @@ export class EngineRenderer {
   readonly renderer: THREE.WebGPURenderer;
   uploadProbe: GpuUploadProbe | null = null;
   uniformUploadStats: ReturnType<typeof cacheUniformUploads> | null = null;
+  /** Frees three's per-draw state for objects no drawn scene holds — see render-object-sweep.ts. */
+  renderObjectSweep: RenderObjectSweep | null = null;
 
   private postFxData: PostFxData | null = null;
   private fx: ResolvedPostFx = resolvePostFx(null);
@@ -175,6 +178,7 @@ export class EngineRenderer {
     const backend = this.renderer.backend as { isWebGPUBackend?: boolean };
     this.uploadProbe = new GpuUploadProbe(backend);
     this.uniformUploadStats = cacheUniformUploads(backend);
+    this.renderObjectSweep = trackRenderObjects(this.renderer);
     return backend.isWebGPUBackend ? "webgpu" : "webgl";
   }
 
@@ -713,6 +717,7 @@ export class EngineRenderer {
 
   render(scene: THREE.Scene, camera: THREE.Camera): void {
     const scopes = this.scopes;
+    this.renderObjectSweep?.tick();
     scopes?.begin("lighting");
     // Cascade refits, the shared IBL seam and the volumetric light query all
     // key off the render camera and off WHICH scene is actually being drawn,
