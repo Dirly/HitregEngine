@@ -59,6 +59,47 @@ export interface LoadedChunkCell {
 
 const EMPTY_CHUNK_CELLS: Observable<LoadedChunkCell[]> = observable([]);
 
+/**
+ * The streamed-cell list, subscribed on its own. It republishes several times
+ * a second while chunks stream; read in HierarchyDock, every publish
+ * re-rendered the whole entity tree too — the editor's largest share of the
+ * garbage made while flying around a streamed world.
+ */
+function ChunkCellList(props: {
+  cells: Observable<LoadedChunkCell[]>;
+  onEditChunkCell?: (world: string, cx: number, cz: number) => void;
+}) {
+  const cells = useObservable(props.cells);
+  if (cells.length === 0) return null;
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <div style={{ color: "#8b949e", fontSize: 10, marginBottom: 2 }}>
+        streamed chunks · double-click to edit
+      </div>
+      {cells.map((cell) => (
+        <div
+          key={`${cell.world}:${cell.cx}_${cell.cz}`}
+          onDoubleClick={() => props.onEditChunkCell?.(cell.world, cell.cx, cell.cz)}
+          title={`Edit ${cell.world} ${cell.cx}_${cell.cz} (${cell.count} entities)`}
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            padding: "2px 4px",
+            cursor: "pointer",
+            borderRadius: 3,
+            color: "#d29922",
+          }}
+        >
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            ▤ {cell.world} · {cell.cx}_{cell.cz}
+          </span>
+          <span style={{ color: "#8b949e", fontSize: 10 }}>{cell.count}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function HierarchyDock(props: {
   store: SceneStore;
   selection: Selection;
@@ -76,7 +117,6 @@ export function HierarchyDock(props: {
   const doc = useStoreDoc(props.store);
   const selected = useObservable(props.selection);
   const multiIds = useObservable(props.multiSelection);
-  const chunkCells = useObservable(props.loadedChunkCells ?? EMPTY_CHUNK_CELLS);
   const [query, setQuery] = useState("");
 
   // "#tag" searches tags; anything else searches names
@@ -135,33 +175,7 @@ export function HierarchyDock(props: {
           }
         }}
       >
-        {chunkCells.length > 0 && (
-          <div style={{ marginBottom: 8 }}>
-            <div style={{ color: "#8b949e", fontSize: 10, marginBottom: 2 }}>
-              streamed chunks · double-click to edit
-            </div>
-            {chunkCells.map((cell) => (
-              <div
-                key={`${cell.world}:${cell.cx}_${cell.cz}`}
-                onDoubleClick={() => props.onEditChunkCell?.(cell.world, cell.cx, cell.cz)}
-                title={`Edit ${cell.world} ${cell.cx}_${cell.cz} (${cell.count} entities)`}
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  padding: "2px 4px",
-                  cursor: "pointer",
-                  borderRadius: 3,
-                  color: "#d29922",
-                }}
-              >
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  ▤ {cell.world} · {cell.cx}_{cell.cz}
-                </span>
-                <span style={{ color: "#8b949e", fontSize: 10 }}>{cell.count}</span>
-              </div>
-            ))}
-          </div>
-        )}
+        <ChunkCellList cells={props.loadedChunkCells ?? EMPTY_CHUNK_CELLS} onEditChunkCell={props.onEditChunkCell} />
         <div style={{ color: "#8b949e", fontSize: 10, marginBottom: 4 }}>
           drag rows to nest · drop on empty space for root
         </div>

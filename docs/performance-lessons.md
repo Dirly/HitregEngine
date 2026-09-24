@@ -1132,3 +1132,58 @@ height/water queries (rain drop births, grass, swim checks) and the particle
 writer. In steady play the GC'd heap moves about 30 MB, which is roughly
 V8's young generation. Large swings come from garbage left by world loading
 and streaming, and V8 frees it with a concurrent major GC.
+
+## Streaming garbage: the worker meshed nothing the main thread used
+
+Flying across the MMO in the editor allocated **202 MB/s** (15.5 GB in 77 s).
+The streaming profile (sampling heap profiler, collected objects included, a
+scripted camera flight in edit mode) split it into four causes. All four were
+fixed, which brought it down to about 32 MB/s. Frame p95 went from 19.2 to
+~9 ms and the worst frame from 28.5 to ~14 ms.
+
+- **Near cells were marched twice.** The voxel worker generated each cell's
+  doc, then `buildScene` asked `voxelMesh()` for the terrain. The cache was
+  empty (only the dedicated server ever called `primeVoxelMesh`), so every
+  visible cell ran marching cubes synchronously on the main thread: 169
+  misses in two flight legs. The worker's `cell` job now meshes the cell's
+  voxel sources and transfers the buffers, and the pool primes core's cache
+  before resolving the doc, which took the misses to 0. Only
+  `near`-priority jobs do this. HLOD bakes read member cells with `bulk`
+  urgency and re-mesh them coarser themselves, so full-resolution meshes for
+  them would waste worker time the far ring is waiting on. The `inline`
+  simulation ring still builds on the main thread, so spawns never fall
+  through.
+- **Grass evaluated the terrain once per blade.** The probe lattice already
+  cached slope and surface mix at 2 m, but blade height was an exact
+  `field.height()` call, kept exact on the theory that an interpolated blade
+  floats. Measured against the terrain collider, the reverse is true: the
+  drawn ground IS the 2 m lattice interpolated. Exact height is 3.3 cm off
+  on average (107 cm worst); bilinear on the lattice is 1.1 cm (28.8 cm
+  worst). Height now comes off the probe lattice, and lattice heights are
+  shared between neighbouring probes. That second change is exact: `slope()`
+  is a central difference at ±voxelSize, which are the neighbouring lattice
+  points.
+- **Per-frame whole-doc scans in edit mode.** `socket-preview` ran two
+  `Object.entries/values` scans over the expanded doc per held-item socket
+  every frame. It now indexes once per doc and re-derives looks only when the
+  doc or the selection changes.
+- **Every cell crossing rebuilt everything in reach.** At a 28-cell far ring
+  that is ~3,500 keys. A crossing cost 2.2 MB and 5.6 ms; after these
+  changes it is 0.9 MB and 2.8 ms:
+  - `computeChunkStates` walks the grid by integer instead of building and
+    regex-parsing a Set of keys;
+  - `parseChunkKey` is hand-parsed, with a parity test against the old regex;
+  - `hasCell`/coordinates are memoized per provider;
+  - Map walks use `forEach` (an entries walk allocates a pair per cell);
+  - a quadratic hlod/far overlap loop now checks membership per key.
+
+Also: the hierarchy dock re-rendered its entire entity tree on every
+streamed-cell publish, because the chunk list lived in the same component.
+It is now its own subscriber.
+
+Measuring traps from this pass:
+
+- Time-to-ready A/Bs are worthless while another session edits the repo:
+  vite reloads every open probe page on each change (count `framenavigated`).
+- Check for stray background processes before timing anything. A forgotten
+  `find /` had used 10,000 CPU-seconds.

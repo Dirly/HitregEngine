@@ -322,16 +322,14 @@ export function computeChunkStates(
   const fcz = Math.round(focus.z / config.cellSize);
   const reach = Math.ceil(rings.farTerrain + rings.padding);
 
-  const candidates = new Set<string>(prev.keys());
-  for (let dz = -reach; dz <= reach; dz++) {
-    for (let dx = -reach; dx <= reach; dx++) candidates.add(chunkKey(fcx + dx, fcz + dz));
-  }
-
+  // Walk the square of cells in reach by integer offset, then only the
+  // previously-resident cells outside it. (This used to build a Set of every
+  // key in reach and regex-parse each one back, on every cell crossing.)
   const out = new Map<string, ChunkRep>();
-  for (const key of candidates) {
-    const coords = parseChunkKey(key);
-    if (!coords) continue;
-    const d = Math.hypot(coords[0] - fcx, coords[1] - fcz);
+  const visit = (key: string, cx: number, cz: number): void => {
+    const ddx = cx - fcx;
+    const ddz = cz - fcz;
+    const d = Math.sqrt(ddx * ddx + ddz * ddz);
     const prevLevel = REP_LEVEL[prev.get(key) as ChunkRep] ?? 0;
     const rising = levelByDistance(d, rings, 0);
     // rising/steady snaps up immediately; falling holds until beyond the pad
@@ -339,6 +337,17 @@ export function computeChunkStates(
       rising >= prevLevel ? rising : Math.min(prevLevel, levelByDistance(d, rings, rings.padding));
     const rep = LEVEL_REP[level];
     if (rep) out.set(key, rep);
+  };
+  for (let dz = -reach; dz <= reach; dz++) {
+    for (let dx = -reach; dx <= reach; dx++) visit(chunkKey(fcx + dx, fcz + dz), fcx + dx, fcz + dz);
+  }
+  for (const key of prev.keys()) {
+    if (out.has(key)) continue;
+    const coords = parseChunkKey(key);
+    if (!coords) continue;
+    // inside the square it was just visited (and came out unloaded)
+    if (Math.abs(coords[0] - fcx) <= reach && Math.abs(coords[1] - fcz) <= reach) continue;
+    visit(key, coords[0], coords[1]);
   }
   return out;
 }
@@ -447,8 +456,32 @@ export function partitionScene(scene: SceneDoc, options: PartitionOptions): Part
 
 /** Inverse of chunkKey; null for anything not two integers around one underscore. */
 export function parseChunkKey(key: string): [number, number] | null {
-  const m = /^(-?\d+)_(-?\d+)$/.exec(key);
-  return m ? [Number(m[1]), Number(m[2])] : null;
+  // Hand-parsed, same grammar as /^(-?\d+)_(-?\d+)$/: the streamer parses
+  // cell keys by the thousand on every cell crossing, and the regex's match
+  // arrays were a measurable share of the garbage streaming produced.
+  const n = key.length;
+  let i = 0;
+  const int = (): number | null => {
+    let sign = 1;
+    if (key.charCodeAt(i) === 45 /* - */) {
+      sign = -1;
+      i++;
+    }
+    const start = i;
+    let v = 0;
+    for (; i < n; i++) {
+      const c = key.charCodeAt(i) - 48;
+      if (c < 0 || c > 9) break;
+      v = v * 10 + c;
+    }
+    return i === start ? null : sign * v;
+  };
+  const x = int();
+  if (x === null || key.charCodeAt(i) !== 95 /* _ */) return null;
+  i++;
+  const z = int();
+  if (z === null || i !== n) return null;
+  return [x, z];
 }
 
 /**

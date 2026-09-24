@@ -40,6 +40,9 @@ export interface SocketPreviewDeps {
 interface SocketEntity {
   id: string;
   parent: string;
+  /** The `equipment-look` child that styles this socket's model, if any. */
+  lookId: string | null;
+  lookParams: Record<string, unknown>;
   params: { bone?: string; offset?: number[]; rotationDeg?: number[]; altBone?: string; altOffset?: number[]; altRotationDeg?: number[] };
   model: string | null;
 }
@@ -53,41 +56,56 @@ export function createSocketPreview(deps: SocketPreviewDeps) {
   const parentQ = new THREE.Quaternion();
   let cachedDoc: SceneDoc | null = null;
   let sockets: SocketEntity[] = [];
+  /** actor -> its character-sheet params, from the same pass as `sockets`. */
+  let sheets = new Map<unknown, Record<string, unknown>>();
+  // Looks depend only on the doc and the selection. Recomputing them every
+  // frame scanned the whole expanded doc (every streamed entity) twice per
+  // socket — a top allocation source while chunks stream in.
+  let looksFor: string | null | undefined;
 
   const scriptOf = (e: SceneDoc["entities"][string]) =>
     e.components["script"] as { name?: string; params?: Record<string, unknown> } | undefined;
 
   function index(doc: SceneDoc): SocketEntity[] {
     const out: SocketEntity[] = [];
-    for (const [id, e] of Object.entries(doc.entities)) {
+    const looks = new Map<string, { id: string; params: Record<string, unknown> }>(); // socket id -> first look child
+    sheets = new Map();
+    for (const id in doc.entities) {
+      const e = doc.entities[id]!;
       const s = scriptOf(e);
+      if (s?.name === "equipment-look" && e.parent && !looks.has(e.parent)) looks.set(e.parent, { id, params: s.params ?? {} });
+      if (s?.name === "character-sheet" && !sheets.has(s.params?.["actor"])) sheets.set(s.params?.["actor"], s.params ?? {});
       if (s?.name !== "bone-socket" || !e.parent) continue;
       const mesh = e.components["mesh"] as { source?: { kind?: string; assetId?: string } } | undefined;
       out.push({
         id,
         parent: e.parent,
+        lookId: null,
+        lookParams: {},
         params: (s.params ?? {}) as SocketEntity["params"],
         model: mesh?.source?.kind === "asset" ? (mesh.source.assetId ?? null) : null,
       });
+    }
+    for (const socket of out) {
+      const look = looks.get(socket.id);
+      socket.lookId = look?.id ?? null;
+      socket.lookParams = look?.params ?? {};
     }
     return out;
   }
 
   /** What a socket should show: see the header. */
-  function lookFor(doc: SceneDoc, socket: SocketEntity, selected: string | null): ModelLook {
+  function lookFor(socket: SocketEntity, selected: string | null): ModelLook {
     if (!socket.model) return HIDE;
-    const lookEntry = Object.entries(doc.entities).find(([, e]) => e.parent === socket.id && scriptOf(e)?.name === "equipment-look");
-    const lookParams = (lookEntry ? scriptOf(lookEntry[1])?.params : undefined) ?? {};
+    const lookParams = socket.lookParams;
     const slot = (lookParams["slot"] as string | undefined) ?? "primary";
     const actor = lookParams["actor"] as string | undefined;
-    const sheet = Object.values(doc.entities)
-      .map((e) => scriptOf(e))
-      .find((s) => s?.name === "character-sheet" && s.params?.["actor"] === actor);
-    const starting = ((sheet?.params?.["startingItems"] as Array<{ itemId: string; equip?: boolean }>) ?? []).filter(Boolean);
+    const sheet = sheets.get(actor);
+    const starting = ((sheet?.["startingItems"] as Array<{ itemId: string; equip?: boolean }>) ?? []).filter(Boolean);
     const fits = starting
       .map((s) => ({ ...s, item: deps.item(s.itemId) }))
       .filter((s) => s.item?.appearance?.model === socket.model && (s.item.slots ?? []).includes(slot === "offhand" ? "offhand" : slot));
-    const isSelected = selected !== null && (selected === socket.id || selected === lookEntry?.[0]);
+    const isSelected = selected !== null && (selected === socket.id || selected === socket.lookId);
     const pick = fits.find((s) => s.equip) ?? (isSelected ? fits[0] : undefined);
     const appearance = pick?.item?.appearance;
     if (!appearance) return HIDE;
@@ -98,18 +116,24 @@ export function createSocketPreview(deps: SocketPreviewDeps) {
     /** Once per frame in edit mode. */
     update(): void {
       const doc = deps.doc();
+      let fresh = false;
       if (doc !== cachedDoc) {
         cachedDoc = doc;
         sockets = index(doc);
+        fresh = true;
       }
       const dragging = deps.dragging();
       const selected = deps.selected();
+      const relook = fresh || selected !== looksFor;
+      looksFor = selected;
       for (const socket of sockets) {
-        const look = lookFor(doc, socket, selected);
-        const key = JSON.stringify(look);
-        if (shown.get(socket.id) !== key) {
-          shown.set(socket.id, key);
-          deps.setLook(socket.id, look);
+        if (relook) {
+          const look = lookFor(socket, selected);
+          const key = JSON.stringify(look);
+          if (shown.get(socket.id) !== key) {
+            shown.set(socket.id, key);
+            deps.setLook(socket.id, look);
+          }
         }
         if (dragging.includes(socket.id)) continue;
         const object = deps.objectOf(socket.id);
@@ -141,6 +165,7 @@ export function createSocketPreview(deps: SocketPreviewDeps) {
     reset(): void {
       shown.clear();
       cachedDoc = null;
+      looksFor = undefined;
     },
   };
 }

@@ -25,6 +25,15 @@ describe("chunk LOD rings", () => {
     expect(parseChunkKey("1_2_3")).toBeNull();
   });
 
+  it("parseChunkKey accepts exactly the old /^(-?\\d+)_(-?\\d+)$/ grammar", () => {
+    const regex = (key: string) => {
+      const m = /^(-?\d+)_(-?\d+)$/.exec(key);
+      return m ? [Number(m[1]), Number(m[2])] : null;
+    };
+    const cases = ["0_0", "12_-340", "-1_-1", "007_8", "", "_", "1_", "_1", "-_1", "1_-", "--1_2", "1__2", "a_1", "1_2 ", " 1_2", "1.5_2", "+1_2", "far:1_2", "99999_-99999"];
+    for (const key of cases) expect(parseChunkKey(key), key).toEqual(regex(key));
+  });
+
   it("resolves rings when set (clamped non-decreasing) and falls back to radius", () => {
     // out-of-order rings clamp so simulation <= fullRender <= hlod <= farTerrain
     const messy = resolveChunkRings(streamer({ rings: { simulation: 5, fullRender: 2, hlod: 3, farTerrain: 1 } }));

@@ -533,16 +533,48 @@ export class ChunkManager {
       provider.key !== undefined &&
       Object.is(provider.key, this.provider.key);
     this.provider = provider;
+    this.hasCellMemo.clear();
     if (sameCells) return;
     this.unloadAll();
     this.lastFocus = null;
   }
 
   /** True when this world can supply the cell — file index, or provider. */
+  /**
+   * A provider's answer for a key, remembered: `update` asks for every cell in
+   * reach several times on each cell crossing, and parsing each key back into
+   * coordinates was steady garbage while streaming. A provider's cell set is
+   * fixed for its lifetime, so the memo only resets when the provider does
+   * (and when it has grown large, since a long flight visits many keys).
+   */
+  private readonly hasCellMemo = new Map<string, boolean>();
+
+  /**
+   * `parseChunkKey`, remembered. The supercell pass maps every proxy cell in
+   * reach to its block on each crossing; the tuples are shared and read-only.
+   */
+  private readonly coordsMemo = new Map<string, readonly [number, number] | null>();
+
+  private cellCoords(key: string): readonly [number, number] | null {
+    let coords = this.coordsMemo.get(key);
+    if (coords === undefined) {
+      if (this.coordsMemo.size >= 65536) this.coordsMemo.clear();
+      coords = parseChunkKey(key);
+      this.coordsMemo.set(key, coords);
+    }
+    return coords;
+  }
+
   private hasCell(key: string): boolean {
     if (this.provider) {
-      const coords = parseChunkKey(key);
-      return coords !== null && this.provider.has(coords[0], coords[1]);
+      let has = this.hasCellMemo.get(key);
+      if (has === undefined) {
+        if (this.hasCellMemo.size >= 65536) this.hasCellMemo.clear();
+        const coords = parseChunkKey(key);
+        has = coords !== null && this.provider.has(coords[0], coords[1]);
+        this.hasCellMemo.set(key, has);
+      }
+      return has;
     }
     return this.available.has(key);
   }
@@ -680,7 +712,7 @@ export class ChunkManager {
     // Supercell-covered cells don't carry an exact rep (hlod vs far collapses to
     // one representation either way) — "hlod" is a fine stand-in for hysteresis.
     const prev = new Map<string, ChunkRep>();
-    for (const [key, chunk] of this.loaded) prev.set(key, chunk.rep);
+    this.loaded.forEach((chunk, key) => prev.set(key, chunk.rep));
     for (const sc of this.loadedSupercells.values()) {
       for (const key of sc.cellKeys) if (!prev.has(key)) prev.set(key, "hlod");
     }
@@ -694,10 +726,12 @@ export class ChunkManager {
     this.profiler?.begin("cells");
 
     // -- simulation/fullRender cells: per-cell load/unload, unchanged --
-    for (const [key, rep] of target) {
-      if (isProxy(rep)) continue; // handled by the supercell pass below
-      if (this.suppressed.has(key)) continue; // isolation-editing owns this cell right now
-      if (!this.hasCell(key)) continue; // this world has no cell here
+    // forEach, not for-of over entries: these walks cover every cell in reach
+    // on each crossing, and an entries walk allocates a [key, value] per cell
+    target.forEach((rep, key) => {
+      if (isProxy(rep)) return; // handled by the supercell pass below
+      if (this.suppressed.has(key)) return; // isolation-editing owns this cell right now
+      if (!this.hasCell(key)) return; // this world has no cell here
       const chunk = this.loaded.get(key);
       if (!chunk) {
         // `pending` counts as in-flight: its document is already here and is
@@ -716,14 +750,14 @@ export class ChunkManager {
       } else {
         chunk.rep = rep; // detail label shifted but render/sim behavior is the same
       }
-    }
+    });
     // Out-of-range cells can leave immediately. Demotions remain render-only
     // fallbacks until a published proxy actually covers them.
-    for (const [key, chunk] of this.loaded) {
+    this.loaded.forEach((chunk, key) => {
       const rep = target.get(key);
       if (!rep || (isProxy(rep) && this.hasProxyCoverage(key))) this.unload(key, chunk);
       else if (isProxy(rep) && chunk.simulated) this.retier(chunk, "fullRender");
-    }
+    });
     // `target` is the authority on what a queued load should become — and on
     // whether it is still wanted at all by the time its turn arrives
     this.desiredCells = target;
@@ -738,12 +772,12 @@ export class ChunkManager {
     // FAR_VOXEL_COARSEN, which is what lets the ring reach a kilometre for the
     // same bake and triangle budget).
     const desired = new Map<string, Set<string>>(); // supercell key -> member "cx_cz" keys
-    for (const [key, rep] of target) {
-      if (!isProxy(rep)) continue;
-      if (this.suppressed.has(key)) continue;
-      if (!this.hasCell(key)) continue;
-      const coords = parseChunkKey(key);
-      if (!coords) continue;
+    target.forEach((rep, key) => {
+      if (!isProxy(rep)) return;
+      if (this.suppressed.has(key)) return;
+      if (!this.hasCell(key)) return;
+      const coords = this.cellCoords(key);
+      if (!coords) return;
       const far = rep === "far";
       const [scx, scz] = supercellForCell(coords[0], coords[1], supercellFactor(factor, far));
       const scKey = supercellKeyFor(scx, scz, far);
@@ -753,22 +787,26 @@ export class ChunkManager {
         desired.set(scKey, members);
       }
       members.add(key);
-    }
+    });
     // A cell an hlod block currently holds is never wanted by a far block:
     // the hlod block keeps drawing it (finer, and kept on purpose — see
     // SHRANK below) until it unloads, at which point the far block finds the
     // cell missing and appends it. Without this, moving away double-drew
     // every cell along the hlod/far boundary.
     const hlodHeld = new Set<string>();
-    for (const [scKey, sc] of this.loadedSupercells) {
-      if (isFarSupercellKey(scKey) || !desired.has(scKey)) continue;
+    this.loadedSupercells.forEach((sc, scKey) => {
+      if (isFarSupercellKey(scKey) || !desired.has(scKey)) return;
       for (const key of sc.cellKeys) hlodHeld.add(key);
-    }
-    for (const [scKey, members] of desired) {
-      if (!isFarSupercellKey(scKey)) continue;
-      for (const key of hlodHeld) members.delete(key);
+    });
+    // each member checked against the held set — not the whole held set
+    // walked once per far block, which was quadratic in the far ring
+    desired.forEach((members, scKey) => {
+      if (!isFarSupercellKey(scKey)) return;
+      members.forEach((key) => {
+        if (hlodHeld.has(key)) members.delete(key);
+      });
       if (members.size === 0) desired.delete(scKey);
-    }
+    });
     // Merged geometry cannot be edited in place, so every membership change
     // is a bake of SOMETHING. Which something is the whole cost, and the three
     // ways a supercell's membership moves each want a different answer:
@@ -802,7 +840,9 @@ export class ChunkManager {
     // proxy and the fine cell both draw, which is far cheaper to look at than
     // a hole, and it self-corrects on the next pass.
     const nearOwned = new Set<string>();
-    for (const [key, rep] of target) if (!isProxy(rep) && this.loaded.has(key)) nearOwned.add(key);
+    target.forEach((rep, key) => {
+      if (!isProxy(rep) && this.loaded.has(key)) nearOwned.add(key);
+    });
     for (const [scKey, sc] of [...this.loadedSupercells]) {
       const members = desired.get(scKey);
       if (!members) {
@@ -813,9 +853,15 @@ export class ChunkManager {
       }
       // Replace atomically. Removing a merged part for ONE promoted cell
       // also removed its neighbours for the entire asynchronous bake.
-      const promoted = [...sc.cellKeys].filter((key) => nearOwned.has(key));
       if (this.inFlightSupercells.has(scKey)) continue; // a bake is already catching up
-      if (promoted.length > 0) {
+      let promoted = false;
+      for (const key of sc.cellKeys) {
+        if (nearOwned.has(key)) {
+          promoted = true;
+          break;
+        }
+      }
+      if (promoted) {
         const replacement = new Set(members);
         for (const key of sc.cellKeys) {
           if (target.has(key) && !nearOwned.has(key) && !this.hasProxyCoverage(key, scKey)) replacement.add(key);
@@ -840,8 +886,9 @@ export class ChunkManager {
           continue;
         }
       }
-      const missing = new Set([...members].filter((key) => !sc.cellKeys.has(key)));
-      if (missing.size === 0) continue;
+      let missing: Set<string> | null = null;
+      for (const key of members) if (!sc.cellKeys.has(key)) (missing ??= new Set()).add(key);
+      if (missing === null) continue;
       if (sc.parts.length >= MAX_SUPERCELL_PARTS) {
         // consolidate: one bake of the whole block instead of a fifth part.
         // Queued, NOT unloaded first — loadSupercell swaps the merged block in
@@ -861,8 +908,10 @@ export class ChunkManager {
   }
 
   private hasProxyCoverage(key: string, except?: string): boolean {
-    for (const [scKey, sc] of this.loadedSupercells) {
-      if (scKey !== except && sc.cellKeys.has(key)) return true;
+    // keys, not entries: this runs per loaded cell per crossing, and an
+    // entries walk allocates a [key, value] pair for every supercell visited
+    for (const scKey of this.loadedSupercells.keys()) {
+      if (scKey !== except && this.loadedSupercells.get(scKey)!.cellKeys.has(key)) return true;
     }
     return false;
   }

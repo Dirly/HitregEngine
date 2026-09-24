@@ -1117,14 +1117,22 @@ async function main(): Promise<void> {
    * second for a mere recenter. That is the "the grass follows me a moment
    * late" everybody sees while running.
    *
-   * Height stays exact — a blade an interpolated hand's breadth off the
-   * ground is the one artefact nobody misses. But SLOPE and the SURFACE MIX
-   * are low-frequency by construction: they come from noise bands and patch
-   * blotches tens of metres across, and the terrain itself is a 2 m voxel
-   * isosurface, so there is nothing under 2 m for them to resolve. Sampling
-   * them on a 2 m lattice and bilinearly interpolating gives the same answer
-   * a hundred times cheaper — bilinear rather than nearest so the gate's edge
-   * around a dirt patch is still a curve, not a 2 m staircase.
+   * SLOPE and the SURFACE MIX are low-frequency by construction: they come
+   * from noise bands and patch blotches tens of metres across, and the
+   * terrain itself is a 2 m voxel isosurface, so there is nothing under 2 m
+   * for them to resolve. Sampling them on a 2 m lattice and bilinearly
+   * interpolating gives the same answer a hundred times cheaper — bilinear
+   * rather than nearest so the gate's edge around a dirt patch is still a
+   * curve, not a 2 m staircase.
+   *
+   * HEIGHT comes off the same lattice. It used to stay exact, on the theory
+   * that an interpolated blade floats — but the ground that is DRAWN is the
+   * 2 m lattice interpolated (marching cubes), so the exact field height is
+   * the one that floats. Measured against the terrain collider on the MMO:
+   * exact height is 3.3 cm off the rendered ground on average and 107 cm at
+   * worst; bilinear on the 2 m lattice is 1.1 cm and 28.8 cm. It is also free:
+   * the probe computes that height anyway, and the exact per-blade call was
+   * the largest source of garbage while streaming.
    *
    * Net: 25.4us -> ~7us per blade, and the placement that was three seconds
    * is well under one.
@@ -1142,6 +1150,8 @@ async function main(): Promise<void> {
   const foliageProbeKey = new Float64Array(FOLIAGE_PROBE_LIMIT).fill(NaN);
   /** slope per slot, and the splat mix per slot (stride = the field's surface count). */
   const foliageProbeSlope = new Float32Array(FOLIAGE_PROBE_LIMIT);
+  /** ground height per slot (Float64: world heights need the precision). */
+  const foliageProbeHeight = new Float64Array(FOLIAGE_PROBE_LIMIT);
   /** 1 when the ground at that probe is above water and its splat mix is meaningful. */
   const foliageProbeDry = new Uint8Array(FOLIAGE_PROBE_LIMIT);
   let foliageProbeSplat = new Float32Array(0);
@@ -1150,8 +1160,27 @@ async function main(): Promise<void> {
   /** Surface names resolved to palette indices ONCE per layer, not per blade. */
   const foliageSurfaceIndex = new WeakMap<GrassData, Int32Array>();
 
+  /**
+   * Field height per lattice point, shared between neighbouring probes. A
+   * probe's slope is a central difference over its four lattice neighbours
+   * (when the probe spacing is the field's voxel size, as `slope()` uses), so
+   * without this every height was evaluated five times over.
+   */
+  const latticeHeights = new Map<number, number>();
+  function latticeHeight(field: NonNullable<ReturnType<typeof getVoxelWorld>>, gx: number, gz: number): number {
+    const key = gx * 4294967296 + (gz >>> 0);
+    let y = latticeHeights.get(key);
+    if (y === undefined) {
+      if (latticeHeights.size >= 65536) latticeHeights.clear();
+      y = field.height(gx * FOLIAGE_PROBE, gz * FOLIAGE_PROBE);
+      latticeHeights.set(key, y);
+    }
+    return y;
+  }
+
   /** Drop every cached probe — the ground under them is not the ground any more. */
   function invalidateFoliageProbes(): void {
+    latticeHeights.clear();
     foliageProbeSlot.clear();
     foliageProbeKey.fill(NaN);
     foliageProbeNext = 0;
@@ -1179,9 +1208,21 @@ async function main(): Promise<void> {
     if (!Number.isNaN(evicted)) foliageProbeSlot.delete(evicted);
     const x = gx * FOLIAGE_PROBE;
     const z = gz * FOLIAGE_PROBE;
-    const steep = field.slope(x, z);
-    const y = field.height(x, z);
+    let steep: number;
+    let y: number;
+    if (Math.max(field.voxelSize, 0.5) === FOLIAGE_PROBE) {
+      // exactly field.slope(x, z): the same four heights, the same formula
+      y = latticeHeight(field, gx, gz);
+      const dx = (latticeHeight(field, gx + 1, gz) - latticeHeight(field, gx - 1, gz)) / (2 * FOLIAGE_PROBE);
+      const dz = (latticeHeight(field, gx, gz + 1) - latticeHeight(field, gx, gz - 1)) / (2 * FOLIAGE_PROBE);
+      const g = Math.sqrt(dx * dx + dz * dz);
+      steep = g / Math.sqrt(1 + g * g);
+    } else {
+      steep = field.slope(x, z);
+      y = field.height(x, z);
+    }
     foliageProbeSlope[slot] = steep;
+    foliageProbeHeight[slot] = y;
     const dry = y > field.recipe.seaLevel;
     foliageProbeDry[slot] = dry ? 1 : 0;
     if (dry) {
@@ -1282,7 +1323,12 @@ async function main(): Promise<void> {
       foliageProbeSlope[s01]! * w01 +
       foliageProbeSlope[s11]! * w11;
     if (steep > data.slopeMax) return null;
-    const ground = field.height(x, z) - foliageSink(data, steep);
+    const height =
+      foliageProbeHeight[s00]! * w00 +
+      foliageProbeHeight[s10]! * w10 +
+      foliageProbeHeight[s01]! * w01 +
+      foliageProbeHeight[s11]! * w11;
+    const ground = height - foliageSink(data, steep);
     if (ground <= field.recipe.seaLevel) return null; // nothing grows in the sea
     // Cover must respect the same town/road clearance as chunk scatter.
     // Include the widest randomized card so its edge cannot enter a foundation.

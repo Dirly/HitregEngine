@@ -47,6 +47,14 @@ interface CellMessage {
   id: number;
   cx: number;
   cz: number;
+  /**
+   * Also mesh the cell's terrain and send it back (see the handler). Only for
+   * cells that will be BUILT at full detail: an HLOD bake reads its member
+   * cells' docs too, re-meshes them coarser itself, and a full-resolution
+   * mesh per member would be wasted worker time right when the far ring
+   * is waiting on those bakes.
+   */
+  mesh: boolean;
 }
 
 /**
@@ -86,7 +94,7 @@ export type VoxelWorkerRequest = InitMessage | CellMessage | MeshMessage | Super
 
 export type VoxelWorkerResponse =
   | { kind: "ready" }
-  | { kind: "cell"; id: number; doc: ChunkDoc }
+  | { kind: "cell"; id: number; doc: ChunkDoc; meshes: Array<{ source: VoxelMeshSource; mesh: VoxelMesh }> }
   | { kind: "cell"; id: number; error: string }
   | { kind: "mesh"; id: number; mesh: VoxelMesh | null }
   | { kind: "mesh"; id: number; error: string }
@@ -173,7 +181,32 @@ ctx.onmessage = (event: MessageEvent<VoxelWorkerRequest>) => {
   }
   try {
     const doc = voxelChunkDoc(field, world, message.cx, message.cz, options);
-    ctx.postMessage({ kind: "cell", id: message.id, doc } satisfies VoxelWorkerResponse);
+    // Mesh the cell's terrain here too. The main thread primes core's mesh
+    // cache with these, so buildScene and the physics cooker find the mesh
+    // instead of marching the cell again synchronously — which is what every
+    // near cell did: the worker made the doc and the main thread then ran
+    // marching cubes on it inside buildScene (a stall per cell, and the
+    // largest share of the garbage streaming produced).
+    const meshes: Array<{ source: VoxelMeshSource; mesh: VoxelMesh }> = [];
+    const transfer: Transferable[] = [];
+    if (message.mesh) for (const entity of Object.values(doc.entities)) {
+      const source = (entity.components["mesh"] as { source?: { kind?: string } } | undefined)?.source;
+      if (source?.kind !== "voxel") continue;
+      const voxel = source as VoxelMeshSource;
+      if (voxel.world !== world) continue; // only this worker's field can mesh it
+      const mesh = buildVoxelMesh(field, voxel);
+      meshes.push({ source: voxel, mesh });
+      if (mesh.triangleCount > 0) {
+        transfer.push(
+          mesh.positions.buffer as ArrayBuffer,
+          mesh.normals.buffer as ArrayBuffer,
+          mesh.indices.buffer as ArrayBuffer,
+          mesh.splat.buffer as ArrayBuffer,
+          mesh.tint.buffer as ArrayBuffer,
+        );
+      }
+    }
+    ctx.postMessage({ kind: "cell", id: message.id, doc, meshes } satisfies VoxelWorkerResponse, transfer);
   } catch (error) {
     ctx.postMessage({
       kind: "cell",

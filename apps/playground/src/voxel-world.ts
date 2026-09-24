@@ -6,6 +6,7 @@ import {
   registerVolume,
   getVolume,
   invalidateVolume,
+  primeVoxelMesh,
   voxelChunkDoc,
   voxelChunkOptionsFrom,
   worldRecipeSchema,
@@ -361,6 +362,11 @@ function createVoxelWorkerPool(
           return;
         }
         pending.delete(message.id);
+        // the cell's terrain, meshed alongside its doc: in core's cache before
+        // anything builds the doc, so the main thread never marches it again
+        if (message.kind === "cell" && "meshes" in message) {
+          for (const { source, mesh } of message.meshes) primeVoxelMesh(source, mesh);
+        }
         if ("error" in message) entry.reject(new Error(message.error));
         else
           entry.resolve(
@@ -407,7 +413,9 @@ function createVoxelWorkerPool(
 
 
   return {
-    cell: (cx, cz, priority) => submit<ChunkDoc>((id) => ({ kind: "cell", id, cx, cz }), priority),
+    // near cells come with their terrain meshed; bulk reads (HLOD bakes) do not
+    cell: (cx, cz, priority) =>
+      submit<ChunkDoc>((id) => ({ kind: "cell", id, cx, cz, mesh: priority !== PRIORITY_BULK }), priority),
     mesh: (source) => submit<VoxelMesh | null>((id) => ({ kind: "mesh", id, source }), PRIORITY_BULK),
     supercell: (buckets) =>
       submit<Array<{ key: string; mesh: VoxelMesh }>>((id) => ({ kind: "supercell", id, buckets }), PRIORITY_BULK),
