@@ -72,7 +72,7 @@ The machinery is identical; what a recipe MEANS changes.
 | parts | alternatives — four blades, pick one | shells of one body — all drawn at once |
 | families | `Blade1..4` → one family | none; every part is the only one of its kind |
 | `combos` | one per sample weapon | one, listing everything |
-| `cutoutSlots` | the ornaments | empty; an animal is solid |
+| `cutoutSlots` | the ornaments | empty for a bare animal; the HEM of anything it wears |
 | `partMask` / `--variant` | picks the look | does nothing |
 | shading | flat — a bevel is a real crease | smooth — facets read as the cage they are |
 | sheet | one page per weapon TYPE, packed | one sheet per mob, baked into its GLB |
@@ -299,6 +299,338 @@ is far out AND clamped, that is the question being asked. Answer it with
 `--no-match`, which turns the pass off for that sheet. Ordinary sheets want it
 on: across six ogre themes the honest corrections ran 0.74 to 1.14.
 
+## A distinctive detail goes looking for a shape
+
+When a block keeps stealing an identity, look for the ORNAMENT in the SUBJECT
+that is hunting for somewhere to go. The ratkin hood crown came back as an ear
+sheet after sheet — and, tellingly, with a HOOP RING through it. The armoured
+theme, whose SUBJECT names no ring, never had the problem; the shaman-s said "a
+small bone ring through the rim" of the ear, and the generator put that memorable
+detail on the nearest ear-shaped block. Deleting the ring fixed it in one roll:
+the crown came back within 8% of the hood-s own colour unprompted.
+
+Note what did NOT work first: labelling the block, moving it, and matchColor.
+Colour correction can only recolour a wrongly-drawn ear; it cannot un-draw it.
+
+## An island is painted partly from its NEIGHBOURS
+
+Where an island SITS on the sheet is part of what it says. A generator paints a
+sheet as one picture, so a block takes cues from whatever is next to it — and
+that beats both the label and the prompt.
+
+Measured on the ratkin hood crown, which must be the same cloth as the hood:
+sitting 898px from the hood and wedged between the two shoulder lames, it came
+back painted as a third shoulder plate on every sheet. Moved to the gap under
+the head, 255px from the hood, it came back FLESH-PINK. Two different wrong
+answers, both borrowed from the new neighbours. Labelling the block did not
+shift it; neither did four rounds of prose.
+
+**So put a piece near the piece it belongs to** — `move: [dx, dy]` on a part
+slides its island in sheet pixels after reading it from the file, for a layout
+fault not worth a round trip to the modeller (it diverges the shipped mesh from
+their file by that offset, so the tool says so out loud).
+
+**And when two islands are ONE material, force it.** `matchTo` moves luminance
+only, deliberately, because a palm IS pinker than a forearm. That is wrong for a
+pair that is one piece cut in two by the unwrap: a crown strip is the same cowl,
+with the same dye. `matchColor: "<slot>"` gains all THREE channels to the
+target-s mean, flat, so the weave and the dirt survive and only the material
+moves. On the ratkin it pulled the pink crown back to the hood-s green at
+x0.60/0.75/0.66 with no regeneration at all. Use matchColor for one-piece-cut-in-
+two; keep matchTo for two pieces that merely meet.
+
+## Label the key, then keep the prompt short
+
+A generator reads a flat colour key as SHAPES and matches them against whatever
+the prompt describes, so any block that happens to look like a distinctive thing
+attracts that thing. Measured over six rounds on the ratkin: an EAR was painted
+onto the top-of-hood block (a pointed pentagon) and onto the lower shoulder lame
+(a rounded teardrop); a TASSET came back as a finger with a ring round it; the
+robe took the shoulder-s material; the chest back took the shoulder-s bone.
+
+Every one of those was answered with another paragraph of prose, and the prompt
+grew from 19k to **37k characters while the per-block assignments got LESS
+reliable** — the instructions that mattered drowned in the warnings. That is the
+trap: each fix makes the next thing worse, and it looks like generator variance.
+
+`unwrap-weapon` now writes **`key-labelled.png`** beside `key.png`, with each
+slot-s name lettered inside its own island (`_font.mjs`, auto-scaled, contrast
+ink, halo-checked so it never spills off the block). Hand the generator the
+LABELLED one; `key.png` stays flat for the importer, so the lettering never
+reaches the atlas. With the blocks self-identifying, the whole region-key section
+and every "this is not an ear" warning can go, and the prompt halves.
+
+**But do not cut the sections that were working.** Trimmed to 13k the sheet lost
+its face and its tassets — the head landmark table needs its three named
+mistakes beside it, and a narrow block needs to be told what it is NOT. 16k with
+the labels was the sweet spot. Cut the SHAPE descriptions, keep the CONTENT ones.
+
+**Label narrow blocks on end, and let a label be an instruction.** The
+labeller letters a tall narrow block vertically when a horizontal word would be
+tiny. On the ghoul's first sheets the five blocks too narrow to letter were
+exactly the five painted wrong (tassets as clawed hands, hands as sleeve cuffs).
+And `label: "rib-upper bone"` on a slot replaces the word: the ribs came back
+as cloth on every sheet while lettered RIB-UPPER and parked beside the belt;
+moved beside the spine and lettered with their material, all three came back
+bone. Put the head ABOVE its hood, too — a generator draws "a hooded face" as
+one picture into the first of the two blocks it meets.
+
+## A face needs coordinates, not adjectives
+
+The head is where every unwrap decision shows up first, and it is also the block
+a generator places worst. The ratkin's first sheet came back with the eye out on
+the snout, the mouth under the chin and a dark stripe over the skull — three
+placement faults from a prompt that described the block in words ("one eye, set
+high in the middle third"). Words do not work here, because flare makes the
+island longer and taller than the head's true silhouette, so a generator drawing
+a natural-looking rat head into the block puts every feature too far forward.
+
+**Measure the landmarks and give the prompt percentages.** Sample each triangle
+into the island, then for a world-space point on the skull find the covered
+pixel nearest it and report it as a percentage across and down the block. The
+ratkin's table — ear 35%/26%, brow 46%/15%, EYE 54%/42%, snout begins 64%/41%,
+mouth line 68%/82%, chin 61%/97%, nose tip 99%/61% — replaced the prose and the
+next sheet landed. Note how unobvious two of those are: the eye is barely past
+the middle (the generator had it at 75%), and the mouth line is at 80% DOWN
+rather than on the bottom edge, because the bottom fifth of the island is the
+underside of the jaw. State the three failures by name in the prompt as well;
+naming the mistake is what stops it.
+
+**A crown is not a band, it is a surface.** A third of the ratkin's head faces
++Y. Left in the profile it can only be a compressed strip along the top of the
+island, and a generator reads that strip as the top of the SILHOUETTE and paints
+the head's outline into it — which renders as a dark stripe across the skull.
+Flare does not fix it: the crown's share moved only 32% -> 27% across a flare
+sweep from 0.8 to 0.25, so it is a real surface, not an artifact to tune away.
+Split it (`facing: "+y"`, looked at down Y) and it becomes a plain oval, nose to
+the right, that a generator paints correctly first time.
+
+**Give a split its own `flare`.** A split group inherits the part's flare when
+it does not declare one, and the value that unfolds a profile is far too much
+for a top-down view: at the head's 0.8 the crown island ballooned and reported
+11.8% overlap. Swept, `above: 0.75, flare: 0.15` gave 0.4% overlap at 10.02
+px/unit — the same density as before the split, so the island was free.
+
+**A crown split is NOT mirrored.** The profile folds left onto right and is
+painted once for both cheeks; the crown holds both sides at once. The prompt has
+to say so, or the artwork comes back with one ear root.
+
+## A part with no good axis: `view`
+
+`u`/`v` name world axes and the third is dropped, which is all an axis-aligned
+shell needs. A DOME is not one. Measured, the ratkin shoulder pad faces
+(0.24, 0.51, 0.83) on average and a flat view keeps 57% of its area down Z, 42%
+down Y and 66% down its own mean normal — so down either axis about a third of
+it is edge-on and warps visibly. `view: [x, y, z]` projects down an arbitrary
+direction and derives u and v from it (u across the sheet, v down it):
+
+    ShoulderPad: { slot: "shoulder", method: "plane",
+                   view: [0.15, 0.5, 0.85], flare: 0.2 },
+
+Measured on that pad, the area crushed to under a quarter of the median stretch
+went from **29% to 2%**, at the same sheet density. Find the direction by
+sweeping the hemisphere for the one that keeps the most projected area; the
+area-weighted mean normal is a good first guess and was within a few degrees.
+
+**Prefer `view` over `split` for a small, prominent piece.** A split would also
+have fixed the pad, and was rejected: it puts a SEAM across the middle of a
+dome a player looks straight at, and a seam on a visible curved surface is worse
+than a little compression at the rim. Split a shell that turns a hard corner;
+tilt the view for one that is merely oblique.
+
+`rim` is not available on an oblique view — edgeBand walks a world axis and
+there is not one — and the tool says so rather than writing a wrong bar.
+
+## A bent tube: `tube`
+
+`unroll` peels around ONE straight world axis. A rib curves half way round the
+chest, so no axis runs along it. `method: "tube"` walks the tube's own rings
+instead: the two open ends are the mesh's boundary loops, a vertex's ring is its
+hop distance from one end, and the tube comes out as one straight rectangle —
+arc round the rings across, mean vertex-to-vertex step along. No flare, no
+overlap, every face connected. `seam` picks the side the cut runs down (the
+side nobody sees); `u: "along"` lays the strip horizontal.
+
+It also takes a tube CLOSED to a point at one end — the ghoul's belt is a band
+with a hidden lid fanned to one apex; the fan collapses onto the strip's edge
+and the rescue pass patches it.
+
+    Ghoul_RibUpper: { slot: "rib-upper", method: "tube", seam: "+z", u: "along" },
+    Belt:           { slot: "belt", method: "tube", seam: "-x" },
+
+**A tube that narrows wants `taper: true`.** By default every ring is stretched
+to the mean width, which suits a belt. A spider leg's thin tip then gets the
+full strip width. The generator paints a pointed leg into that rectangle anyway,
+and the empty corners smear over the tip on the model. With `taper` each ring is
+laid out at its own perimeter, centred, and a closed end becomes a real point
+one tip-length beyond the last ring, so the island is the leg's shape.
+Measured on the anansi: the tip went from 4 patched needles per leg to 0, and the
+unpainted share of each leg island from 12-18% to 4-6%.
+
+## A strip over a mirrored piece: `mirror`
+
+A crown strip seen from above holds BOTH sides of the head at once, but the hood
+under it is a profile painted once and worn on both sides — so the two never
+line up at the join. `mirror: "z"` on a plane projection (or a `split`
+group) folds the part about the body's centre plane before projecting: the
+island is half as wide, its top edge is the centre line, and it is painted once
+for both sides like the piece it sits on. The overlap report knows a mirrored
+part is doubled on purpose.
+
+## A head that is seen from every side: `sphere`
+
+Four cuts of the ghoul's head failed Derek's eye before this one. A FRONT view
+folds the face onto the back of the skull; a PROFILE squeezes the face to a
+7-texel sliver; front + back halves never matched at their joins; `unroll`
+walked the lumpy outline into a ragged strip; and a latitude/longitude globe
+with the crown mapped into it stretched the face ("major warping").
+
+`method: "sphere", v: "height"` is the one that holds: a strip round the head,
+across = true arc length round the head's own oval, down = plain height, so
+every vertical surface — face, temples, back of the skull — is laid out at its
+real size. The CROWN stays its own island (top-down, front toward the strip),
+centred over it with `{ col: [crown, head], align: "center" }`. Measure the face
+landmarks with rays from the front and give the percentages in the prompt; say
+the face is a narrow panel drawn at real size, or it comes back wide enough to
+wrap its eyes round onto the temples.
+
+**The underside of the jaw splits off too.** A flat cap under the chin, fanned
+from the chin to the back of the skull, can only be crushed into the strip's
+bottom edge by a height mapping — on the anansi one such triangle ran out as a
+sliver across half the island. `split` works on a `sphere` exactly as on a
+plane: `split: [{ slot: "head-under", facing: "-y", above: 0.6, u: "+z", v: "-x" }]`
+puts it on its own island seen from below, centred under the strip.
+
+## Face MARKS on the key, and room for the face the generator draws
+
+Percentages in the prompt did not place the ghoul's face: one sheet drew it
+tiny, one off to the side. `marks` in a recipe draws landmarks into
+key-labelled.png only — each a WORLD point on the model (`at: [x,y,z]`, or
+`from`/`to` for a line), snapped to the part's surface and drawn where it
+really lands: eyes as black discs ringed white, a nose dot, a mouth bar. Read
+the points off the face's own vertex rings. `labelMax` keeps the slot's
+lettering small so it cannot sit on the marks.
+
+With the marks every face landed centred — and every face came back about
+TWICE the real width, eyes wrapping onto the temples. The generator paints a
+face at its own proportions whatever it is told, so the unwrap makes room:
+`face: { half, scale, blend }` on a `sphere` head counts arc `scale` times
+within `half` degrees of the front, easing back over `blend`. The face gets
+the texels the painting wants; the sides and back stay at true size.
+
+## Fixing the artwork at import: `flush`, `even`, `solidFrom`
+
+Some mistakes survive every prompt, so the importer corrects them in sheet
+space, under the key's island mask, before registration:
+
+- **`flush: true`** — a generator asked for a hood draws a cowl with a black
+  opening; on a flat profile island that is a dark band round the rim. Each row
+  keeps only the cloth (brighter than `flushCavity` × the island median) and is
+  resampled across the island's own span.
+- **`even: { detail, shade, streak }`** — keep the TEXTURE, lose the big
+  light/dark swings: fine detail (texel minus local blur) × `detail`, broad
+  shading × `shade`, around the material colour (the `solidBand` luminance
+  percentiles, default 40-85%; bone on a dark sheet wants [0.6, 0.95]).
+  `streak: "x"` blurs by column, erasing bands that run ALONG a straightened
+  rib. **Do not flatten to one colour** — Derek: a solid fill "looks odd as
+  hell"; he wants texture with a narrow value range.
+- **`boneFrom: [slots]`** (with `even`) — centre the island on the bone the
+  generator painted ELSEWHERE: the brightest band (`boneBand`) of the unsaturated
+  (`boneSat`) pixels of the named islands, so gold trim and ember glow stay out.
+  The ghoul's spine and ribs match the ribcage painted on its chest; Derek wants
+  every bone on a model to read as one material.
+- **`clearPaper: { edge }`** — an ornament drawn on an off-white PAPER panel
+  with a border registers as a solid plate; turn the dominant light unsaturated
+  colour to ground and clear an `edge`-px rim.
+- **`borrow: true`** (with `solidFrom` + `even`) — always take the source's
+  artwork: the head crown borrows the head strip's painted top band, so it
+  matches the head and never carries the second face the generator draws there.
+- **`solidFrom: "<slot>[:top]"`** — take the colour (flat) from another island;
+  with `even`, share its centre colour and borrow its artwork if this block
+  came back blank. The ghoul's head crown uses `"head:top"`: left alone the
+  generator drew a second little face there.
+
+## A split has TWO seams, and they need different fixes
+
+Splitting a shell buys a square-on view and costs a join, and the join shows up
+as a line on the model in two independent ways. Both were measured on the
+ratkin's crown; fixing one alone leaves the line there.
+
+**The TEXTURE step.** The generator paints the two islands as two separate
+drawings. `matchTo` is not the answer on its own: the crown was only 6% off the
+head in MEAN value, and a flat gain moves an island's level without making its
+EDGE agree with the edge it meets. So `unwrap-weapon --atlas` now runs a SEAM
+BLEND before baking: it finds edges that are adjacent in 3D but far apart in UV,
+averages the two sides across them and feathers inward over `seamBlend` texels
+(default 2, `--seam-blend N`, `--no-seam-blend`). Measured across the ratkin's
+69 split seams the step at the join roughly halved — head 19.5 -> 8.1, robe
+21.6 -> 4.4, arm 19.9 -> 5.2 out of 255 — and the ogre picked up 23 seams of the
+same treatment for free. It writes `atlas-seamblend.png` beside the atlas and
+embeds that, so the GLB, the modeller's sheet and the check render all carry the
+same pixels.
+
+Only edges WITHIN one part are blended. That is exactly the set of splits, and
+the only set where the two sides are guaranteed to be one surface and one
+material — blending between two meshes would smear a robe into the body under
+it. A mirrored part's fold is not a seam: both halves map to the same texels,
+so the under-a-texel test skips it.
+
+**The SHADING step.** `smooth` is a crease threshold, and an edge wider than it
+stays HARD in the GLB — which the engine draws as a lighting line whatever the
+texture does. Measured on the ratkin head at the body's 48 degrees, 8 of the 34
+edges where the crown rejoins the profile were still hard. So the threshold is
+now per-part: `smooth` on a `parts` entry overrides the recipe's, while the
+normal accumulation stays global (which is what keeps the chest and the back
+shading alike where they meet). The head runs 60, taking that to 2 of 34 and
+still keeping the jaw, the brow and the ear as creases.
+
+**Diagnose them apart.** `_softrender` computes FLAT per-face normals, so
+`key-check.png` cannot show you a shading seam the engine will have, and it
+makes every low-poly head look heavily faceted. Render with a flat grey texture
+to see shading alone, and compute the crease normals yourself to preview what
+ships. A line that survives a flat grey sheet is never a texture problem.
+
+## A mob that wears something
+
+A creature modelled with its kit — the ratkin has a robe, a hooded cowl and a
+shoulder pad as their own meshes — is still one body for the sheet: every piece
+is drawn at once, so they all share the palette and the value range. Two things
+change.
+
+**A hanging piece CUTS at its hem.** A robe, a tasset or a tabard ends on the
+straight polygon edge the modeller gave it, and the only way to get a torn or
+frayed one is alpha. That is the same pair of settings the human armour sheet
+uses on its robe and its tasset, and the ratkin copies it:
+
+    "robes-back": { color: "#5e8c00", fit: "contain",
+                    transparency: true, cut: "bottom",
+                    anchor: "top", fitPadding: 0 },
+
+plus the slot's name in `cutoutSlots`, or the geometry stays on the opaque
+material and the cut never renders. `anchor: "top"` pins the WAIST — the edge
+that is actually attached — so the contain fit cannot slide the garment down and
+eat the hem it was asked for; `fitPadding: 0` because the default for a cut
+island insets the artwork by 3 and a robe fills its block.
+
+**`cut: "bottom"`, not `cut: true`.** Two reasons, and the first one is a trap.
+The importer defaults a MISSING `cut` to true, but `unwrap-weapon` always writes
+the key, and it writes `cut: rest.cut ?? false` — so a slot given
+`transparency: true` and nothing else lands in the manifest as `cut: false`,
+which makes `hole()` return 0 outright and the transparency does nothing at all,
+silently, with no warning anywhere. Always give a transparency slot an explicit
+`cut`. And "bottom" is the better value than true: it opens an island only where
+the empty run reaches the island's bottom edge, so a generator that paints the
+robe a fifth too short loses that fifth off the HEM — which is what a hem is —
+instead of punching a hole through the middle of the cloth.
+
+**A cap cannot be flared out of a patch.** The ratkin's tail is a tapering box
+projected down Z; its tip cap's normal is -X, so it lies in the dropped plane
+and collapses to a line however hard the part is flared — flare measures depth
+UNDER the outer surface and a cap has none. That is the case the patch exists
+for (the same as a blade's flat tip), so a creature with a tail, a horn or a
+stump reports a few patched triangles and is finished. Check WHICH slot before
+chasing it; a needle on a shell is a real fault, a cap is not.
+
 **One density for the whole animal.** The ogre's head carried a `sizeScale` of
 1.3 on the theory that the face is what a player looks at. It reads as a
 different material — a crisp face on a soft body — which is worse than either
@@ -312,6 +644,13 @@ model unit on a 302-unit body: a chest shell ~90 texels tall, a head ~65×49, a
 hand ~16×26. That is the PS1-era density this game is drawn at, and everything
 upstream is resolution-independent, so `--size 512` re-cuts it denser without
 touching anything else.
+
+**Choose the size from a texel DENSITY, not from the body's size** (texels per
+metre as the mob stands in the game): docs/weapon-atlas.md → *Texel density*.
+Give the recipe `metresPerUnit` and `texelsPerMetre` and the unwrap prints the
+density and the size that would hit the target. Mobs that fight side by side,
+and the gear a mob holds, should agree, or one of them reads as a different art
+style. The mob recipes predate the check and do not declare it yet.
 
 Unlike weapons, a mob sheet is not packed onto a shared page — it is baked into
 that mob's GLB, so `atlas-pack`'s capacity rules do not apply.

@@ -68,6 +68,11 @@ folder. Project manifests reference request ids.
   basalt tile returns basalt in the same palette and grain, but with its own masonry cut. Describe the layout you
   want in words; use the reference for the look.
 - **Seamlessness is claimed, not guaranteed.** Ask for it, then check by tiling the result before it ships.
+- **A sheet asked for opaque can come back TRANSPARENT.** Measured on a ratkin atlas: 59.5% of it fully
+  transparent, every border pixel at alpha 0, artwork complete. Downstream that is indistinguishable from a
+  sheet drawn on black and the atlas importer refuses it outright. Unlike black it is trivially recoverable —
+  the ground is absent, not wrong — so `gen` now composites an opaque request onto white before installing and
+  reports `fixed` in its JSON. Keep saying "background must be pure white" anyway; this is the safety net.
 - **Alpha needs demanding.** Pass `--alpha` (or `"alpha": true`) and say "fully transparent background, real PNG
   alpha, not white, not a checkerboard" — the flag also makes the tool reject an opaque result.
 - **Nearest-neighbour on the downsample** is in the shared brief already; it is what keeps pixel art crisp.

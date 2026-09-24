@@ -1,0 +1,175 @@
+{
+  "size": 256,
+  "bleed": 2,
+  "bgLum": 236,
+  "keyColor": "#00ffff",
+  "groundFringe": 1,
+  "fitSearch": 1.6,
+  "slots": {
+    "#ff0000": {
+      "name": "head",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#8c0000": {
+      "name": "head-crown",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchColor": "head"
+    },
+    "#ff0080": {
+      "name": "ear-front",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#8c0046": {
+      "name": "ear-back",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "ear-front"
+    },
+    "#ff00ff": {
+      "name": "hood",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#8c008c": {
+      "name": "hood-crown",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchColor": "hood"
+    },
+    "#ff8000": {
+      "name": "body-front",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#8c4600": {
+      "name": "body-back",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#ffff00": {
+      "name": "robes",
+      "transparency": true,
+      "cut": "bottom",
+      "fit": "contain",
+      "anchor": "top",
+      "fitPadding": 0,
+      "hem": {
+        "depth": 2,
+        "jag": 5,
+        "wave": 4
+      }
+    },
+    "#8c8c00": {
+      "name": "belt",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#80ff00": {
+      "name": "buckle",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#468c00": {
+      "name": "tasset-front",
+      "transparency": true,
+      "cut": "bottom",
+      "fit": "contain",
+      "anchor": "top",
+      "fitPadding": 0,
+      "hem": {
+        "depth": 2,
+        "jag": 4,
+        "wave": 3
+      }
+    },
+    "#008c8c": {
+      "name": "tasset-back",
+      "transparency": true,
+      "cut": "bottom",
+      "fit": "contain",
+      "anchor": "top",
+      "fitPadding": 0,
+      "hem": {
+        "depth": 2,
+        "jag": 4,
+        "wave": 3
+      },
+      "matchTo": "tasset-front"
+    },
+    "#00ff00": {
+      "name": "legs-front",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#008c00": {
+      "name": "legs-back",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#00ff80": {
+      "name": "foot",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#008c46": {
+      "name": "tail",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#0080ff": {
+      "name": "shoulder",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#00468c": {
+      "name": "shoulder-2",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "shoulder"
+    },
+    "#0000ff": {
+      "name": "arm-top",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#00008c": {
+      "name": "arm-under",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "arm-top"
+    },
+    "#8000ff": {
+      "name": "hand-top",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#46008c": {
+      "name": "hand-palm",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    }
+  }
+}

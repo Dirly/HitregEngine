@@ -84,6 +84,14 @@ const STUDIO = path.resolve(ENGINE, "..");
 // where the islands sit on the sheet. Sizes come from the mesh, so the layout
 // only says what sits next to what — the scale is solved to fit.
 
+/**
+ * Texels per metre every HELD or WORN item is authored to, so a sword and the
+ * shield in the other hand show the same pixel size. The longsword set it:
+ * 2.07 texels per model unit at 128, and it is placed at 0.019 m per unit.
+ * Docs: docs/weapon-atlas.md -> "Texel density".
+ */
+const HELD_GEAR_TEXELS_PER_M = 109;
+
 const RECIPES = {
   longsword: {
     // Blockbench is where this model is actually edited, so the OBJ it exports
@@ -91,6 +99,10 @@ const RECIPES = {
     source: "MMO/3d/Weapons/LongSword.obj",
     sourceScale: 100,
     outMesh: "MMO/3d/Weapons/LongSword-unwrapped",
+    // placed in the hand at 0.019 m per unit (player-sword.mts) — the set that
+    // DEFINES the held-gear density
+    metresPerUnit: 0.019,
+    texelsPerMetre: HELD_GEAR_TEXELS_PER_M,
     sheet: 1254, // the generator's canvas; the human sheets are all 1254
     // 60 sheet px = 12 texels at a 256 atlas, which is the 2x bleed the atlas
     // importer asks for. Tighter buys density and starts mixing islands in
@@ -232,6 +244,301 @@ const RECIPES = {
       ["Blade2", "CrossGuard2", "CrossFlavor2", "Pummel2", "Handle"],
       ["Blade3", "CrossGuard3", "CrossFlavor3", "Pummel3", "Handle"],
       ["Blade4", "CrossGuard4", "CrossFlavor1", "Pummel1", "Handle", "Ornate", "OrnateBottom"],
+    ],
+  },
+  // A shield is three alternative bodies (round, heater, tower) and two
+  // alternative deflectors (the boss on the face); an instance is ONE body and
+  // AT MOST one deflector — a shield whose face carries an emblem goes bare, so
+  // the emblem owns the centre. Every face of all five
+  // parts points along X, so each piece is a straight projection: the FRONT
+  // (+X, the side the deflector sits on) and the BACK (-X, the side the arm is
+  // on) are two islands, never a fold. A shield's front and back are different
+  // things — a device on the face, straps and planking behind — so painting one
+  // onto the other is wrong here in a way it is right for a blade. The
+  // deflectors have no back faces at all; each is one front island.
+  //
+  // Both views read the way you would SEE that side: the front looked at from
+  // +X, the back from -X, so u runs opposite ways and neither island is
+  // mirrored.
+  shield: {
+    source: "MMO/3d/Weapons/Shield.obj",
+    sourceScale: 100,
+    outMesh: "MMO/3d/Weapons/Shield-unwrapped",
+    metresPerUnit: 0.019, // player-shield.mts, the same scale as the sword
+    texelsPerMetre: HELD_GEAR_TEXELS_PER_M,
+    sheet: 1254,
+    gutter: 60,
+    margin: 22,
+    // Sized to MATCH THE LONGSWORD'S TEXEL DENSITY, so a shield held beside a
+    // sword has the same pixel size: the sword is 2.07 texels per model unit at
+    // 128, this layout is 2.46 at 256, so 256 x 2.07 / 2.46 = 216 (2.08). At 256
+    // the shield read visibly finer-grained than the blade next to it. Not a
+    // power of two, which WebGPU and WebGL2 both mip fine; a 4096 page holds
+    // 17x17 = 289 looks. Re-derive this whenever the layout changes. 60 sheet
+    // px = 10 texels at 216, room for a bleed of 3 each side.
+    atlas: { size: 216, bleed: 3, bgLum: 228 },
+    slots: {
+      "shield1-front": { color: "#1f00ff", fit: "contain" },
+      "shield1-back": { color: "#00a2ff", fit: "contain" },
+      "shield2-front": { color: "#ff0000", fit: "contain" },
+      "shield2-back": { color: "#ff7d00", fit: "contain" },
+      "shield3-front": { color: "#a900ff", fit: "contain" },
+      "shield3-back": { color: "#e0a0ff", fit: "contain" },
+      deflector1: { color: "#3cff00", fit: "contain" },
+      deflector2: { color: "#0f3e00", fit: "contain" },
+    },
+    parts: {
+      Shield1: {
+        slot: "shield1-front", method: "plane", u: "-z", v: "-y",
+        split: [{ slot: "shield1-back", facing: "-x", above: 0.25, u: "+z", v: "-y" }],
+      },
+      Shield2: {
+        slot: "shield2-front", method: "plane", u: "-z", v: "-y",
+        split: [{ slot: "shield2-back", facing: "-x", above: 0.25, u: "+z", v: "-y" }],
+      },
+      // the tower: the heater's build, 44 units tall to its 39
+      Shield3: {
+        slot: "shield3-front", method: "plane", u: "-z", v: "-y",
+        split: [{ slot: "shield3-back", facing: "-x", above: 0.25, u: "+z", v: "-y" }],
+      },
+      Deflector1: { slot: "deflector1", method: "plane", u: "-z", v: "-y" },
+      Deflector2: { slot: "deflector2", method: "plane", u: "-z", v: "-y" },
+    },
+    // Tower and heater fronts in the left column, their backs in the middle,
+    // each back level with its own front; the round shield's front and back
+    // and the two small deflectors down the right. Densest of seven layouts
+    // tried when the tower went in (2.46 texels/unit at 256; the rest 1.73-2.45).
+    layout: { row: [{ col: ["shield3-front", "shield2-front"] }, { col: ["shield3-back", "shield2-back"] }, { col: ["shield1-front", "shield1-back", { row: ["deflector1", "deflector2"] }] }] },
+    cutoutSlots: [],
+    // Every shield the game can build: one body, and a deflector or none.
+    combos: [
+      ["Shield1", "Deflector1"],
+      ["Shield1", "Deflector2"],
+      ["Shield1"],
+      ["Shield2", "Deflector1"],
+      ["Shield2", "Deflector2"],
+      ["Shield2"],
+      ["Shield3", "Deflector1"],
+      ["Shield3", "Deflector2"],
+      ["Shield3"],
+    ],
+  },
+  // A two-handed, double-bitted axe. Three heads, three collars where the
+  // handle meets the haft, two pommels, two sleeves (the langets up through the
+  // head) and two finials that cap them, and three cut-out plates: one above
+  // the head, one under it, one hanging off the pommel. Rod and Handle are the
+  // haft and the grip; every axe wears both.
+  //
+  // The file names all three heads `AxeHead` — `repeats` tells them apart.
+  greataxe: {
+    source: "MMO/3d/Weapons/GreatAxe.obj",
+    sourceScale: 100,
+    outMesh: "MMO/3d/Weapons/GreatAxe-unwrapped",
+    repeats: { AxeHead: ["AxeHead1", "AxeHead2", "AxeHead3"] },
+    metresPerUnit: 0.019, // the longsword's socket scale: 78 units is a 1.5 m axe
+    texelsPerMetre: HELD_GEAR_TEXELS_PER_M,
+    sheet: 1254,
+    gutter: 60,
+    margin: 22,
+    // Sized to the held-gear density: 15.76 px/unit on the sheet, so 164 puts
+    // it at the sword's 2.07 texels/unit (the greatsword ships at 164 too).
+    // Mirroring the double heads halved them; the first cut needed 202.
+    // 60 sheet px = 7.8 texels at 164, room for a bleed of 3.
+    atlas: { size: 164, bleed: 3, bgLum: 228 },
+    slots: {
+      axehead1: { color: "#1f00ff", fit: "contain" },
+      axehead2: { color: "#a900ff", fit: "contain" },
+      axehead3: { color: "#00a2ff", fit: "contain" },
+      guard1: { color: "#ff0000", fit: "contain" },
+      guard2: { color: "#a80000", fit: "contain" },
+      guard3: { color: "#ff7d00", fit: "contain" },
+      shoulder1: { color: "#00c08b", fit: "contain" },
+      shoulder2: { color: "#007a5a", fit: "contain" },
+      top1: { color: "#7ae0c0", fit: "contain" },
+      top2: { color: "#b35300", fit: "contain" },
+      pommel3: { color: "#3cff00", fit: "contain" },
+      pommel4: { color: "#0f3e00", fit: "contain" },
+      haft: { color: "#11008a", fit: "contain" },
+      grip: { color: "#6b1511", fit: "contain" },
+      // The cut-outs: the top plate grows up out of the head, the other two
+      // hang down. No `anchor`: it pins the art to the island's edge, which on
+      // these plates is the hidden part.
+      //
+      // Unlike the swords' plates, these stand INSIDE the head: most of each
+      // plate is behind the head, the sleeve or the haft. `hiddenBy` shades that
+      // on the labelled key, and `fit: "none"` registers the art exactly where it
+      // was drawn: a contain fit would stretch a design drawn only in the open
+      // part back over the hidden part, and the nudge search slid one 156 px there.
+      // For the double heads: the bearded head's spike side leaves more open.
+      "ornate-top": {
+        color: "#ff8b8b", transparency: true, cut: true, openEnclosed: true,
+        fitPadding: 0, sizeScale: 1.3, label: "top ornament", fit: "none",
+        hiddenBy: [["AxeHead1", "AxeHead2"], ["Shoulder1", "Shoulder2"], ["Top1", "Top2"], ["Rod"]],
+      },
+      "ornate-under": {
+        color: "#ffc76b", transparency: true, cut: true, openEnclosed: true,
+        fitPadding: 0, sizeScale: 1.3, label: "under ornament", fit: "none",
+        hiddenBy: [["AxeHead1", "AxeHead2"], ["Shoulder1", "Shoulder2"], ["Rod"]],
+      },
+      "ornate-bottom": {
+        color: "#ff6bd0", transparency: true, cut: true, openEnclosed: true,
+        fitPadding: 0, sizeScale: 1.3, label: "pommel ornament", fit: "none",
+        hiddenBy: [["Handle"], ["Pummel3", "Pummel4"]],
+      },
+    },
+    parts: {
+      // 95-97% of every head faces X: a straight projection off X, so front and
+      // back share one painting. The double heads are ALSO mirrored about the
+      // haft (z = -43.755): each island is ONE bit, painted once and worn four
+      // times, the eye block the haft runs through left whole at its left edge.
+      // The first cut gave the generator both bits in one island, and it painted
+      // them as two different halves (Derek: "the axeheads don't look good").
+      AxeHead1: { slot: "axehead1", method: "plane", u: "+z", v: "-y", mirror: "z", mirrorAt: -43.755, straddle: "keep" },
+      AxeHead2: { slot: "axehead2", method: "plane", u: "+z", v: "-y", mirror: "z", mirrorAt: -43.755, straddle: "keep" },
+      // The bearded head is NOT symmetric (a bit on one side, a spike on the
+      // other), so it keeps its whole silhouette — seen from -X so its bit is
+      // on the right like the others'.
+      AxeHead3: { slot: "axehead3", method: "plane", u: "-z", v: "-y" },
+      // Collars on the haft: a hexagon (2, with two spikes) and a square turned
+      // 45 degrees (1). No face looks along X squarely; peeled around the haft.
+      CrossGuard1: { slot: "guard1", method: "unroll", axis: "y", seam: "-z", u: "arc", v: "-y" },
+      CrossGuard2: { slot: "guard2", method: "unroll", axis: "y", seam: "-z", u: "arc", v: "-y" },
+      CrossGuard3: { slot: "guard3", method: "unroll", axis: "y", seam: "-z", u: "arc", v: "-y" },
+      // Sleeves up the haft into the head: a box and a diamond with a point.
+      Shoulder1: { slot: "shoulder1", method: "unroll", axis: "y", seam: "-z", u: "arc", v: "-y" },
+      Shoulder2: { slot: "shoulder2", method: "unroll", axis: "y", seam: "-z", u: "arc", v: "-y" },
+      // Finials on the sleeves: a pointed box and a pointed hexagon.
+      Top1: { slot: "top1", method: "unroll", axis: "y", seam: "-z", u: "arc", v: "-y" },
+      Top2: { slot: "top2", method: "unroll", axis: "y", seam: "-z", u: "arc", v: "-y" },
+      // A tall square bipyramid, every facet equally slanted: seen from above
+      // its eight facets tile one square, as the longsword's Pummel2.
+      Pummel3: { slot: "pommel3", method: "plane", u: "+z", v: "+x" },
+      // A hexagonal disc on edge: its two faces plus a rim.
+      Pummel4: { slot: "pommel4", method: "plane", u: "+z", v: "-y", rim: true },
+      // Six-sided haft and grip, unrolled, seam at the back of the hand.
+      Rod: { slot: "haft", method: "unroll", axis: "y", seam: "-z", u: "arc", v: "-y" },
+      Handle: { slot: "grip", method: "unroll", axis: "y", seam: "-z", u: "arc", v: "-y" },
+      OrnateAxeHeadTop: { slot: "ornate-top", method: "plane", u: "+z", v: "-y" },
+      OrnateAxeHeadBottom: { slot: "ornate-under", method: "plane", u: "+z", v: "-y" },
+      OrnateBottom: { slot: "ornate-bottom", method: "plane", u: "+z", v: "-y" },
+    },
+    // The three heads across the top, the peeled strips under them, and the
+    // plates with the small collars and caps on the right. Densest of nine
+    // layouts tried after the double heads were mirrored (8.1-15.3 px/unit
+    // against this one's 15.8).
+    layout: {
+      col: [
+        { row: ["axehead3", "axehead2", "axehead1"] },
+        {
+          row: [
+            "haft", "shoulder2", "grip",
+            { col: ["shoulder1", "ornate-bottom"] },
+            {
+              col: [
+                { row: ["ornate-top", "ornate-under"] },
+                { row: [{ col: ["guard1", "guard2", "guard3"] }, { col: ["pommel3", "pommel4"] }, { col: ["top1", "top2"] }] },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+    cutoutSlots: ["ornate-top", "ornate-under", "ornate-bottom"],
+    combos: [
+      ["AxeHead1", "Rod", "Handle", "CrossGuard1", "Pummel3", "Shoulder1", "Top1", "OrnateAxeHeadTop", "OrnateAxeHeadBottom", "OrnateBottom"],
+      ["AxeHead2", "Rod", "Handle", "CrossGuard2", "Pummel4", "Shoulder2", "Top2"],
+      ["AxeHead3", "Rod", "Handle", "CrossGuard3", "Pummel3", "Shoulder2", "Top1"],
+      ["AxeHead2", "Rod", "Handle", "CrossGuard2", "Pummel4", "Shoulder1", "Top2", "OrnateAxeHeadTop", "OrnateBottom"],
+    ],
+  },
+  // The longsword's build at two-handed length: four blades (60 units against
+  // the grip's 13), four crossguards, two collars, three pommels, a grip and
+  // the two cut-out plates. Blockbench exported two guards as `CrossGuard4`;
+  // the first is a short bar run ACROSS the blade's flat (quillons out of both
+  // faces, 6 units along X), the second the long swept guard — `repeats` names
+  // the first CrossGuard2.
+  greatsword: {
+    source: "MMO/3d/Weapons/GreatSword.obj",
+    sourceScale: 100,
+    outMesh: "MMO/3d/Weapons/GreatSword-unwrapped",
+    repeats: { CrossGuard4: ["CrossGuard2", "CrossGuard4"] },
+    metresPerUnit: 0.019, // the longsword's socket scale: 76.5 units is a 1.45 m sword
+    texelsPerMetre: HELD_GEAR_TEXELS_PER_M,
+    sheet: 1254,
+    gutter: 60,
+    margin: 22,
+    // Sized to the held-gear density: this layout is 2.42 texels/unit at 192,
+    // the sword 2.07, so 192 x 2.07 / 2.42 = 164. 60 sheet px = 7.8 texels at
+    // 164, room for a bleed of 3.
+    atlas: { size: 164, bleed: 3, bgLum: 228 },
+    slots: {
+      blade1: { color: "#1f00ff", fit: "contain" },
+      blade2: { color: "#a900ff", fit: "contain" },
+      blade3: { color: "#00a2ff", fit: "contain" },
+      blade4: { color: "#11008a", fit: "contain" },
+      guard1: { color: "#ff0000", fit: "contain" },
+      guard2: { color: "#a80000", fit: "contain" },
+      guard3: { color: "#ff7d00", fit: "contain" },
+      guard4: { color: "#b35300", fit: "contain" },
+      flavor1: { color: "#00c08b", fit: "contain" },
+      flavor2: { color: "#007a5a", fit: "contain" },
+      pommel1: { color: "#3cff00", fit: "contain" },
+      pommel2: { color: "#0f3e00", fit: "contain" },
+      pommel3: { color: "#9dffa8", fit: "contain" },
+      grip: { color: "#6b1511", fit: "contain" },
+      ornate: {
+        color: "#ff8b8b", transparency: true, cut: true, openEnclosed: true,
+        fit: "contain", anchor: "bottom", fitPadding: 0, sizeScale: 1.3,
+      },
+      "ornate-bottom": {
+        color: "#ffc76b", transparency: true, cut: true, openEnclosed: true,
+        fit: "contain", anchor: "top", fitPadding: 0, sizeScale: 1.3,
+      },
+    },
+    parts: {
+      // 98-100% of every blade faces X: a straight silhouette.
+      Blade1: { slot: "blade1", method: "plane", u: "+z", v: "-y" },
+      Blade2: { slot: "blade2", method: "plane", u: "+z", v: "-y" },
+      Blade3: { slot: "blade3", method: "plane", u: "+z", v: "-y" },
+      Blade4: { slot: "blade4", method: "plane", u: "+z", v: "-y" },
+      // Bars along Z, peeled around their length as on the longsword.
+      CrossGuard1: { slot: "guard1", method: "unroll", axis: "z", seam: "+y", u: "+z", v: "arc", fold: "x" },
+      CrossGuard3: { slot: "guard3", method: "unroll", axis: "z", seam: "+y", u: "+z", v: "arc", fold: "x" },
+      CrossGuard4: { slot: "guard4", method: "unroll", axis: "z", seam: "+y", u: "+z", v: "arc", fold: "x" },
+      // The bar across the flat runs along X, so it is peeled around X.
+      CrossGuard2: { slot: "guard2", method: "unroll", axis: "x", seam: "+y", u: "+x", v: "arc" },
+      CrossFlavor1: { slot: "flavor1", method: "plane", u: "+z", v: "-y", rim: true },
+      // A tall collar up the ricasso, square-sided (54% X, 46% Z): peeled round.
+      CrossFlavor2: { slot: "flavor2", method: "unroll", axis: "y", seam: "-z", u: "arc", v: "-y" },
+      Pummel1: { slot: "pommel1", method: "plane", u: "+z", v: "-y", rim: true },
+      // a bipyramid, seen from above as the longsword's
+      Pummel2: { slot: "pommel2", method: "plane", u: "+z", v: "+x" },
+      Pummel3: { slot: "pommel3", method: "plane", u: "+z", v: "-y", rim: true },
+      Handle: { slot: "grip", method: "unroll", axis: "y", seam: "-z", u: "arc", v: "-y" },
+      Ornate: { slot: "ornate", method: "plane", u: "+z", v: "-y" },
+      OrnateBottom: { slot: "ornate-bottom", method: "plane", u: "+z", v: "-y" },
+    },
+    // Blades across the left at full sheet height, the rest in a column beside
+    // them. Densest of eight arrangements tried (15.8 px/unit; the rest 9.2-15.1).
+    layout: {
+      row: [
+        { row: ["blade1", "blade2", "blade3", "blade4"] },
+        {
+          col: [
+            { row: ["ornate", { col: ["guard1", "guard3", "guard4"] }] },
+            { row: ["ornate-bottom", "guard2", "flavor1"] },
+            { row: ["flavor2", "grip"] },
+            { row: ["pommel1", "pommel2", "pommel3"] },
+          ],
+        },
+      ],
+    },
+    cutoutSlots: ["ornate", "ornate-bottom"],
+    combos: [
+      ["Blade1", "CrossGuard1", "CrossFlavor1", "Pummel1", "Handle", "Ornate", "OrnateBottom"],
+      ["Blade2", "CrossGuard2", "CrossFlavor2", "Pummel2", "Handle"],
+      ["Blade3", "CrossGuard3", "CrossFlavor1", "Pummel3", "Handle"],
+      ["Blade4", "CrossGuard4", "CrossFlavor2", "Pummel1", "Handle", "Ornate", "OrnateBottom"],
     ],
   },
   // A CREATURE, not a modular weapon — the same machinery, one difference worth
@@ -420,6 +727,482 @@ const RECIPES = {
       ],
     ],
   },
+  // The ratkin, unwrapped BY HAND in Blockbench and brought back with its UVs
+  // intact — so this recipe projects nothing. `uvSource: "file"` takes the
+  // islands exactly as the modeller laid them out and leaves this tool the jobs
+  // only it does: one slot colour per part, the `keyStroke` margin, the
+  // verification that every triangle samples its own island, the manifest the
+  // atlas importer registers against, and the seam blend at bake time.
+  //
+  // There are no `method`, `u`, `v`, `flare`, `split` or `layout` entries below
+  // and there must not be: every one of them answers "how should this part be
+  // flattened", and the file answers that already.
+  //
+  // TWENTY-THREE slots. The ears are their own islands now, which is what fixed
+  // them: an ear is a flat flap standing UP off the skull, so in the head's side
+  // profile it was nearly edge-on and the pink ear-interior paint smeared down
+  // over the cheek instead of landing on the ear. Also new since the projected
+  // version: a belt and buckle, a crown strip each for the head and the hood, a
+  // second shoulder lame, and a front and back tasset.
+  //
+  // `RatKin_Foot` appears TWICE in the file — the two feet, mirrored, sharing
+  // one island. The loader keeps the first and says so; the other side is the
+  // same mesh mirrored and wears the same paint by construction.
+  ratkin: {
+    source: "MMO/3d/Mobs/RatKin.obj",
+    sourceScale: 100,
+    outMesh: "MMO/3d/Mobs/RatKin-unwrapped",
+    uvSource: "file",
+    sheet: 1254,
+    keyStroke: 8,
+    // A body is not a set of facets. 48 keeps the jaw, the brow, the belt edge,
+    // the tasset edges and the rim of the shoulder pads as creases and smooths
+    // the rest; the head and its crown run wider — see `smooth` on those.
+    smooth: 48,
+    margin: 22,
+    gutter: 48, // unused while the file brings its own layout
+    atlas: {
+      size: 256,
+      // 2, not 3. This unwrap is packed by hand and tight — the closest real
+      // neighbours sit about 10px apart, where 3 would want 29. The pads still
+      // meet cleanly: padNearest gives each texel to the NEAREST island, so two
+      // bleeds that run into each other stop early rather than corrupting.
+      bleed: 2,
+      // Nothing needs pure white, so the ground bar sits high and teeth, claws
+      // and bare metal stay safe as warm cream or light grey.
+      bgLum: 236,
+    },
+    // ONE SLOT PER PART. Colours are LABELS: white is the ground and cyan
+    // #00ffff is the cut colour, so neither may be a slot. Twelve hues at two
+    // brightnesses, grouped by body area so the check render reads at a glance
+    // — reds the head, pinks the ears, magentas the hood, oranges the torso,
+    // yellows the robe and belt, greens the tassets and legs, teals the foot and
+    // tail, blues the shoulders and arm, purples the hands.
+    //
+    // `matchTo` only joins pieces that cannot be two materials: a crown is the
+    // same skull as the face under it, the two halves of an ear are one ear, the
+    // two tassets one garment, the second shoulder lame the same plate as the
+    // first, an inner arm the same arm. Everything else is deliberately left
+    // unmatched — the hood, the tail, the foot, the hands, the belt and the
+    // buckle are each free to be a different material from what they touch, and
+    // matching them clamps and drags one toward the other.
+    slots: {
+      head: { color: "#ff0000", fit: "contain" },
+      // matchColor, not matchTo: a crown strip is not a neighbouring piece whose
+      // brightness drifted, it is the SAME skull and the SAME cowl cut in two by
+      // the unwrap. Luminance-only matching left them the wrong material — the
+      // hood crown came back a shoulder plate in one layout and flesh-pink in
+      // another, following whatever island it happened to sit beside.
+      "head-crown": { color: "#8c0000", fit: "contain", matchColor: "head" },
+      "ear-front": { color: "#ff0080", fit: "contain" },
+      "ear-back": { color: "#8c0046", fit: "contain", matchTo: "ear-front" },
+      hood: { color: "#ff00ff", fit: "contain" },
+      "hood-crown": { color: "#8c008c", fit: "contain", matchColor: "hood" },
+      "body-front": { color: "#ff8000", fit: "contain" },
+      "body-back": { color: "#8c4600", fit: "contain" },
+      // The robe and the two tassets are the only alpha on the sheet.
+      // `cut: "bottom"` opens an island only where an unpainted run reaches its
+      // BOTTOM edge — a frayed hem and nothing else — so the cloth between the
+      // robe's two front panels, the connector that holds the garment together
+      // on the model, can never be punched out. `anchor: "top"` pins the waist,
+      // the edge that is actually attached, so the contain fit cannot slide the
+      // piece down and eat the hem it was asked for.
+      // `hem` cuts the fray procedurally at import instead of hoping the
+      // generator leaves white below the cloth — measured across four sheets it
+      // does not, and the hem came out dead straight every time. See the hem
+      // pass in import-atlas.mjs. The robe is the biggest of the three so it
+      // gets the deepest bite and the widest teeth.
+      robes: { color: "#ffff00", fit: "contain", transparency: true, cut: "bottom", anchor: "top", fitPadding: 0, hem: { depth: 2, jag: 5, wave: 4 } },
+      belt: { color: "#8c8c00", fit: "contain" },
+      buckle: { color: "#80ff00", fit: "contain" },
+      "tasset-front": { color: "#468c00", fit: "contain", transparency: true, cut: "bottom", anchor: "top", fitPadding: 0, hem: { depth: 2, jag: 4, wave: 3 } },
+      "tasset-back": {
+        color: "#008c8c",
+        fit: "contain",
+        transparency: true,
+        cut: "bottom",
+        anchor: "top",
+        fitPadding: 0,
+        hem: { depth: 2, jag: 4, wave: 3 },
+        matchTo: "tasset-front",
+      },
+      "legs-front": { color: "#00ff00", fit: "contain" },
+      "legs-back": { color: "#008c00", fit: "contain" },
+      foot: { color: "#00ff80", fit: "contain" },
+      tail: { color: "#008c46", fit: "contain" },
+      shoulder: { color: "#0080ff", fit: "contain" },
+      "shoulder-2": { color: "#00468c", fit: "contain", matchTo: "shoulder" },
+      "arm-top": { color: "#0000ff", fit: "contain" },
+      "arm-under": { color: "#00008c", fit: "contain", matchTo: "arm-top" },
+      "hand-top": { color: "#8000ff", fit: "contain" },
+      "hand-palm": { color: "#46008c", fit: "contain" },
+    },
+    // The model's own spelling is load-bearing: this file mixes `Ratkin_`,
+    // `RatKin_` and bare lower case. The recipe matches the FILE, not English.
+    parts: {
+      // 60 degrees against the body's 48: the head and its crown strip meet
+      // along the whole length of the skull, and at 48 part of that join stayed
+      // a hard edge, which the engine draws as a line over the head whatever the
+      // texture does. Normal accumulation stays global, so the two still shade
+      // as one surface where they meet.
+      Ratkin_Head: { slot: "head", smooth: 60 },
+      Ratkin_HeadCrown: { slot: "head-crown", smooth: 60 },
+      Ratkin_EarFront: { slot: "ear-front" },
+      Ratkin_EarBack: { slot: "ear-back" },
+      hood: { slot: "hood" },
+      // Slid from x892..990 y822..984 — where the file put it, wedged between
+      // the two shoulder lames and 898px from the hood — to x240..338 y214..376,
+      // in the gap between the chest blocks under the head. 255px from the hood
+      // and with no shoulder near it. It kept coming back painted as a third
+      // shoulder plate, and nothing in the prompt shifted it; its neighbours did.
+      HoodCrown: { slot: "hood-crown", move: [-652, -608] },
+      Ratkin_BodyFront: { slot: "body-front" },
+      Ratkin_BodyBack: { slot: "body-back" },
+      Robes: { slot: "robes" },
+      Belt: { slot: "belt" },
+      Buckle: { slot: "buckle" },
+      Tasset_Front: { slot: "tasset-front" },
+      Tasset: { slot: "tasset-back" },
+      RatKin_LegsFront: { slot: "legs-front" },
+      RatKin_LegsBack: { slot: "legs-back" },
+      RatKin_Foot: { slot: "foot" },
+      RatKin_Tail: { slot: "tail" },
+      ShoulderPad: { slot: "shoulder" },
+      ShoulderPad_2: { slot: "shoulder-2" },
+      Ratkin_ArmTop: { slot: "arm-top" },
+      Ratkin_ArmUnder: { slot: "arm-under" },
+      Ratkin_HandTop: { slot: "hand-top" },
+      Ratkin_HandPalm: { slot: "hand-palm" },
+    },
+    // The robe and the two tassets cut, and only along their hems.
+    cutoutSlots: ["robes", "tasset-front", "tasset-back"],
+    combos: [
+      [
+        "Ratkin_Head",
+        "Ratkin_HeadCrown",
+        "Ratkin_EarFront",
+        "Ratkin_EarBack",
+        "hood",
+        "HoodCrown",
+        "Ratkin_BodyFront",
+        "Ratkin_BodyBack",
+        "Robes",
+        "Belt",
+        "Buckle",
+        "Tasset_Front",
+        "Tasset",
+        "RatKin_LegsFront",
+        "RatKin_LegsBack",
+        "RatKin_Foot",
+        "RatKin_Tail",
+        "ShoulderPad",
+        "ShoulderPad_2",
+        "Ratkin_ArmTop",
+        "Ratkin_ArmUnder",
+        "Ratkin_HandTop",
+        "Ratkin_HandPalm",
+      ],
+    ],
+  },
+  // The lich ghoul. PROJECTED, not authored: the Blockbench file's UVs were
+  // unfinished (both ribs still on default whole-sheet UVs, the hip top and
+  // chest-cavity floor collapsed into a corner, strays on five other parts), so
+  // this tool unwraps every part itself — one connected island per part, flare
+  // opening the edges out so they do not warp. The ogre's process, with the
+  // ratkin's worn-kit settings: the robe halves and both tassets cut at the hem.
+  //
+  // Front is +X, like the ogre. One arm, one hand and one foot (on +Z) and one
+  // half of the ribcage (on -Z); the other side is the same mesh mirrored.
+  ghoul: {
+    source: "MMO/3d/Mobs/LitchGhoul.obj",
+    sourceScale: 100,
+    outMesh: "MMO/3d/Mobs/LitchGhoul-unwrapped",
+    sheet: 1254,
+    keyStroke: 8,
+    smooth: 48,
+    margin: 22,
+    gutter: 48,
+    atlas: { size: 256, bleed: 2, bgLum: 236 },
+    // Reds the head, magentas the hood, oranges the torso, pinks the skeleton,
+    // yellows the robe and belt, greens the tassets and legs, blues the
+    // shoulders and arm, purples the hands. White and cyan stay reserved.
+    slots: {
+      // 1.3x the body's density (the face sector 2x on top, see `face`) — against the "one density" rule, on purpose.
+      // At 1x the face is ~7 texels wide on a 256 sheet, and the generator
+      // could not place it: tiny on the cinder sheet, off to the side on the
+      // frost one. The crown gets the same scale so the two still match.
+      head: { color: "#ff0000", fit: "contain", sizeScale: 1.3, labelMax: 2 },
+      // The painted skin from the top band of the head strip, borrowed and
+      // lightly evened (import-atlas `borrow`): left to the generator it drew a
+      // second little face here, and a flat fill did not match the head.
+      "head-crown": { color: "#8c0000", fit: "contain", sizeScale: 1.3, solidFrom: "head:top", borrow: true, even: { detail: 1, shade: 0.7, radius: 12 } },
+      // `flush` (import-atlas): the generator draws the cowl's black opening
+      // into this flat profile on every sheet, which reads as a dark band round
+      // the rim; the importer cuts it out and stretches the cloth to the edge.
+      hood: { color: "#ff00ff", fit: "contain", flush: true },
+      // Borrowed from the top band of the hood block (import-atlas `borrow`), like
+      // the head crown: painted on its own it came back a different fabric from
+      // the hood (plague sheet).
+      "hood-crown": { color: "#8c008c", fit: "contain", solidFrom: "hood:top", borrow: true, even: { detail: 1, shade: 0.7, radius: 12 } },
+      "chest-front": { color: "#ff8000", fit: "contain" },
+      "chest-back": { color: "#8c4600", fit: "contain", matchTo: "chest-front" },
+      "chest-bottom": { color: "#c86400", fit: "contain", matchTo: "chest-front" },
+      // The ornate iron, treated exactly as the human armour sheet's ornament:
+      // a mostly-EMPTY block with one thin wrought-iron silhouette drawn on it,
+      // everything unpainted cut away — enclosed holes too (`openEnclosed`),
+      // because generators draw closed rings and a ring's hole never reaches
+      // the island edge.
+      ornament: { color: "#ffc080", fit: "contain", transparency: true, cut: true, openEnclosed: true, anchor: "bottom", fitPadding: 0, clearPaper: { edge: 10 } },
+      // Every bone ONE material: the spine and both ribs are recentred on the
+      // bone painted into the chest's ribcage and the back's spine (import-atlas
+      // `boneFrom`). The spine keeps nearly all its painted detail.
+      spine: { color: "#ff0080", fit: "contain", label: "spine bone", even: { detail: 0.95, shade: 0.8 }, solidBand: [0.6, 0.95], boneFrom: ["chest-front", "chest-back"], boneBand: [0.9, 0.99] },
+      // `even` (import-atlas): the painted bone texture kept, its big light/dark
+      // swings flattened toward one bone colour. Left alone the ribs came back
+      // banded like the spine; a flat solid fill looked like plastic. The lower
+      // rib centres on the upper rib's colour so the pair match, and borrows its
+      // artwork if the generator leaves it blank.
+      "rib-upper": { color: "#8c0046", fit: "contain", label: "rib-upper bone", even: { detail: 0.3, shade: 0.3, streak: "x" }, solidBand: [0.6, 0.95], boneFrom: ["chest-front", "chest-back"], boneBand: [0.9, 0.99] },
+      "rib-lower": { color: "#ff80c0", fit: "contain", label: "rib-lower bone", even: { detail: 0.3, shade: 0.3, streak: "x" }, solidFrom: "rib-upper", solidBand: [0.6, 0.95], boneFrom: ["chest-front", "chest-back"], boneBand: [0.9, 0.99] },
+      // The robe halves and the two tassets are the only alpha on the sheet —
+      // the same hem settings the ratkin's robe and tassets ship with.
+      "robes-front": { color: "#ffff00", fit: "contain", transparency: true, cut: "bottom", anchor: "top", fitPadding: 0, hem: { depth: 2, jag: 5, wave: 4 } },
+      "robes-back": { color: "#8c8c00", fit: "contain", transparency: true, cut: "bottom", anchor: "top", fitPadding: 0, hem: { depth: 2, jag: 5, wave: 4 }, matchTo: "robes-front" },
+      belt: { color: "#c0c060", fit: "contain" },
+      buckle: { color: "#80ff00", fit: "contain" },
+      "tasset-front": { color: "#468c00", fit: "contain", transparency: true, cut: "bottom", anchor: "top", fitPadding: 0, hem: { depth: 2, jag: 4, wave: 3 } },
+      "tasset-back": { color: "#008c8c", fit: "contain", transparency: true, cut: "bottom", anchor: "top", fitPadding: 0, hem: { depth: 2, jag: 4, wave: 3 }, matchTo: "tasset-front" },
+      "legs-front": { color: "#00ff00", fit: "contain", label: "bare legs-front" },
+      "legs-back": { color: "#008c00", fit: "contain", label: "bare legs-back" },
+      "legs-top": { color: "#00ff80", fit: "contain" },
+      foot: { color: "#008c46", fit: "contain" },
+      shoulder: { color: "#0080ff", fit: "contain" },
+      "shoulder-2": { color: "#00468c", fit: "contain", matchTo: "shoulder" },
+      "arm-outside": { color: "#0000ff", fit: "contain" },
+      "arm-inside": { color: "#00008c", fit: "contain", matchTo: "arm-outside" },
+      "arm-back": { color: "#4040c0", fit: "contain", matchTo: "arm-outside" },
+      "hand-outside": { color: "#8000ff", fit: "contain" },
+      "hand-palm": { color: "#46008c", fit: "contain" },
+    },
+    // Spelling matches the FILE: `Goul_RibLower` is the modeller's typo.
+    parts: {
+      // Profiles down Z, folded left onto right: one eye painted, two seen.
+      // The skull as ONE strip wrapped round it — face in the middle, the back
+      // of the head split across both ends — and the crown mapped with the
+      // head's own centre into the SAME slot, so it is the strip's top rows and
+      // joins the head edge to edge. Both earlier cuts failed Derek's eye: a
+      // front view put the face on the back of the skull, and a front + back
+      // split and a top-down crown never matched at their joins.
+      Ghoul_Head: { slot: "head", method: "sphere", front: "+x", v: "height", face: { half: 40, scale: 2, blend: 25 }, smooth: 60 },
+      // The crown on its OWN island above the head strip (Derek: mapped into the
+      // strip it wrecked the generator's stretching of the face). From above,
+      // FRONT at the BOTTOM so it sits over the face, left and right the same way
+      // round as the strip below it.
+      Ghoul_HeadCrown: { slot: "head-crown", method: "plane", u: "-z", v: "+x", flare: 0.15, smooth: 60 },
+      // A flat profile, all of it. The crown island is ONLY the modeller's
+      // hoodCrown mesh — the hood's own top faces stay here.
+      hood: { slot: "hood", method: "plane", u: "+x", v: "-y", flare: 0.3 },
+      // Crown strips from ABOVE, face to the right. Not mirrored.
+      hoodCrown: { slot: "hood-crown", method: "plane", u: "+x", v: "+z", flare: 0.15, mirror: "z" },
+      // Body shells seen squarely from the front / back.
+      Ghoul_ChestFront: { slot: "chest-front", method: "plane", u: "+z", v: "-y", flare: 0.3 },
+      Ghoul_ChestBack: { slot: "chest-back", method: "plane", u: "+z", v: "-y", flare: 0.3 },
+      Ghoul_LegsFront: { slot: "legs-front", method: "plane", u: "+z", v: "-y", flare: 0.28 },
+      Ghoul_LegsBack: { slot: "legs-back", method: "plane", u: "+z", v: "-y", flare: 0.2 },
+      RobesFront: { slot: "robes-front", method: "plane", u: "+z", v: "-y", flare: 0.3 },
+      RobesBack: { slot: "robes-back", method: "plane", u: "+z", v: "-y", flare: 0.3 },
+      Tasset: { slot: "tasset-front", method: "plane", u: "+z", v: "-y", flare: 0.1 },
+      Tasset_Back: { slot: "tasset-back", method: "plane", u: "+z", v: "-y", flare: 0.1 },
+      BeltBuckle: { slot: "buckle", method: "plane", u: "+z", v: "-y", flare: 0.3 },
+      // The open chest cavity: its floor under the pecs and the top of the hips,
+      // both seen from above, front of the body at the bottom of the island.
+      Ghoul_ChestBottom: { slot: "chest-bottom", method: "plane", u: "+z", v: "+x", flare: 0.2 },
+      Ghoul_LegsTop: { slot: "legs-top", method: "plane", u: "+z", v: "+x", flare: 0.2 },
+      // Inside the cavity: the spine in profile, the two ribs straightened.
+      Ghoul_spine: { slot: "spine", method: "plane", u: "+x", v: "-y", flare: 0.4 },
+      Ghoul_RibUpper: { slot: "rib-upper", method: "tube", seam: "+z", u: "along" },
+      Goul_RibLower: { slot: "rib-lower", method: "tube", seam: "+z", u: "along" },
+      // A tilted disc behind the shoulders: looked at down its own normal.
+      ChestHalo: { slot: "ornament", method: "plane", view: [0.89, 0.46, 0], flare: 0.2 },
+      // The belt is one closed strip round the waist — an outer face and a top
+      // face — so it straightens like a tube: seam at the back, round the
+      // waist across the island, its two faces as two rows.
+      Belt: { slot: "belt", method: "tube", seam: "-x" },
+      // Shoulder lames: domes with no good axis, viewed down their own normals.
+      ShoulderPad1: { slot: "shoulder", method: "plane", view: [0.2, 0.49, 0.85], flare: 0.2 },
+      ShoulderPad2: { slot: "shoulder-2", method: "plane", view: [0.95, 0.3, 0.05], flare: 0.2 },
+      // Arm, hand and foot as the ogre's: seen from outside the body.
+      Ghoul_ArmOutside: { slot: "arm-outside", method: "plane", view: [0.65, 0.1, 0.75], flare: 0.5 },
+      // The inner arm turns a corner: 9 faces point back (-X, normals ~-0.95),
+      // 7 point in at the body (-Z). One view makes the back-of-shoulder pair
+      // a tall sliver that overlaps and warps, so the back faces get their own
+      // island seen from behind — the ogre's arm-front fix, from the other side.
+      Ghoul_ArmInside: {
+        slot: "arm-inside", method: "plane", u: "+x", v: "-y", flare: 0.35,
+        split: [{ slot: "arm-back", facing: "-x", above: 0.6, u: "+z", v: "-y", flare: 0.2 }],
+      },
+      Ghoul_HandOutside: { slot: "hand-outside", method: "plane", view: [0.6, 0.2, 0.77], flare: 0.05 },
+      Ghoul_HandPalm: { slot: "hand-palm", method: "plane", view: [-0.3, 0.1, -0.95], flare: 0.1 },
+      Ghoul_Foot: { slot: "foot", method: "plane", u: "+x", v: "+z", flare: 0.45 },
+    },
+    layout: {
+      col: [
+        { row: [
+          { col: ["hood", "chest-front", "chest-back", "ornament"] },
+          { col: ["legs-front", "legs-back", "chest-bottom"] },
+          { col: ["robes-front", "robes-back", "legs-top", { row: ["hood-crown", "buckle"] }, "foot",
+            // The crown centred over the head strip, as it sits on the skull.
+            { col: ["head-crown", "head"], align: "center" }] },
+          { col: [
+            // The hands beside the arm they belong to: parked beside SPINE BONE and
+            // the ribs, the cinder sheet painted them as coiled bone.
+            { row: ["arm-outside", "arm-inside"] },
+            { row: ["arm-back", "hand-outside", "hand-palm"] },
+            { row: ["tasset-front", "tasset-back", "shoulder"] },
+            // The ribs beside the spine, away from the belt: two thin strips next
+            // to a belt came back painted as more belt on every sheet.
+            { row: ["shoulder-2", "spine", { col: ["rib-upper", "rib-lower"] }] },
+          ] },
+        ] },
+        // The head strip is wide and short, so it rides the bottom row with the
+        // belt instead of widening a column.
+        "belt",
+      ],
+    },
+    // Face landmarks drawn into key-labelled.png, from the model's own face:
+    // brow ring y 87.6, cheekbone ring 83.05, chin 78.1, face ±2.1 wide at x ~5.
+    // Percentages alone were not enough — one sheet drew the face tiny, one
+    // put it off to the side.
+    marks: [
+      { slot: "head", at: [6, 85.6, 1.15], shape: "eye", size: 5 },
+      { slot: "head", at: [6, 85.6, -1.15], shape: "eye", size: 5 },
+      { slot: "head", at: [6, 83.3, 0], shape: "dot", size: 5 },
+      { slot: "head", from: [6, 80.3, -1.0], to: [6, 80.3, 1.0], shape: "line" },
+    ],
+    cutoutSlots: ["robes-front", "robes-back", "tasset-front", "tasset-back", "ornament"],
+    combos: [
+      [
+        "Ghoul_Head", "Ghoul_HeadCrown", "hood", "hoodCrown",
+        "Ghoul_ChestFront", "Ghoul_ChestBack", "Ghoul_ChestBottom", "ChestHalo",
+        "Ghoul_spine", "Ghoul_RibUpper", "Goul_RibLower",
+        "RobesFront", "RobesBack", "Belt", "BeltBuckle", "Tasset", "Tasset_Back",
+        "Ghoul_LegsFront", "Ghoul_LegsBack", "Ghoul_LegsTop", "Ghoul_Foot",
+        "ShoulderPad1", "ShoulderPad2",
+        "Ghoul_ArmOutside", "Ghoul_ArmInside", "Ghoul_HandOutside", "Ghoul_HandPalm",
+      ],
+    ],
+  },
+
+  // The anansi: a hooded humanoid torso on a spider body. PROJECTED like the
+  // ghoul: the Blockbench file carries default whole-sheet UVs only. Its kit is
+  // the ghoul's (hood + crown, belt + buckle, a front tasset); below the waist
+  // it is one spider body shell and three legs.
+  //
+  // Front is +X. One arm, one hand, one half of the spider body and the three
+  // legs of ONE side (all on -Z); the other side is the same meshes mirrored.
+  anansi: {
+    source: "MMO/3d/Mobs/Anansi.obj",
+    sourceScale: 100,
+    outMesh: "MMO/3d/Mobs/Anansi-unwrapped",
+    sheet: 1254,
+    keyStroke: 8,
+    smooth: 48,
+    margin: 22,
+    gutter: 48,
+    atlas: { size: 256, bleed: 2, bgLum: 236 },
+    // Reds the head, magentas the hood, oranges the torso, yellows the belt,
+    // greens the spider body and legs, blues the arm, purples the hand.
+    slots: {
+      head: { color: "#ff0000", fit: "contain", sizeScale: 1.3, labelMax: 2 },
+      // The generator's OWN painted crown, not the ghoul's borrow of the head
+      // strip's top band: here that band was forehead skin between two sides
+      // of hair, and borrowed it put a bald stripe over the crown. Asked for
+      // hair from above, the anansi sheets paint it well.
+      "head-crown": { color: "#8c0000", fit: "contain", sizeScale: 1.3 },
+      "head-under": { color: "#c05050", fit: "contain", sizeScale: 1.3, label: "under jaw", matchTo: "head" },
+      hood: { color: "#ff00ff", fit: "contain", flush: true },
+      "hood-crown": { color: "#8c008c", fit: "contain", solidFrom: "hood:top", borrow: true, even: { detail: 1, shade: 0.7, radius: 12 } },
+      "chest-front": { color: "#ff8000", fit: "contain" },
+      "chest-back": { color: "#8c4600", fit: "contain", matchTo: "chest-front" },
+      belt: { color: "#c0c060", fit: "contain" },
+      buckle: { color: "#ffff00", fit: "contain" },
+      "tasset-front": { color: "#8c8c00", fit: "contain", transparency: true, cut: "bottom", anchor: "top", fitPadding: 0, hem: { depth: 2, jag: 4, wave: 3 } },
+      "spider-body": { color: "#00ff00", fit: "contain" },
+      "leg-front": { color: "#008c00", fit: "contain", label: "spider leg-front" },
+      "leg-middle": { color: "#00ff80", fit: "contain", label: "spider leg-middle", matchTo: "leg-front" },
+      "leg-back": { color: "#008c46", fit: "contain", label: "spider leg-back", matchTo: "leg-front" },
+      "arm-outside": { color: "#0000ff", fit: "contain" },
+      "arm-inside": { color: "#00008c", fit: "contain", matchTo: "arm-outside" },
+      "hand-outside": { color: "#8000ff", fit: "contain" },
+      "hand-palm": { color: "#46008c", fit: "contain" },
+    },
+    parts: {
+      // The ghoul's head cut: one strip round the skull, face widened, crown
+      // on its own island centred above it. The underside of the jaw is a flat
+      // cap fanned from the chin to the back of the skull; left in the strip it
+      // crushed to a sliver running out across half the island, so it is split
+      // off and seen from below, chin at the TOP to sit under the face.
+      Anansi_Head: {
+        slot: "head", method: "sphere", front: "+x", v: "height", face: { half: 40, scale: 2, blend: 25 }, smooth: 60,
+        split: [{ slot: "head-under", facing: "-y", above: 0.6, u: "+z", v: "-x", flare: 0.15 }],
+      },
+      Anansi_HeadCrown: { slot: "head-crown", method: "plane", u: "-z", v: "+x", flare: 0.15, smooth: 60 },
+      hood: { slot: "hood", method: "plane", u: "+x", v: "-y", flare: 0.3 },
+      hoodCrown: { slot: "hood-crown", method: "plane", u: "+x", v: "+z", flare: 0.15, mirror: "z" },
+      Anansi_ChestFront: { slot: "chest-front", method: "plane", u: "+z", v: "-y", flare: 0.3 },
+      Anansi_ChestBack: { slot: "chest-back", method: "plane", u: "+z", v: "-y", flare: 0.3 },
+      Belt: { slot: "belt", method: "tube", seam: "-x" },
+      buckle: { slot: "buckle", method: "plane", u: "+z", v: "-y", flare: 0.3 },
+      TassetFront: { slot: "tasset-front", method: "plane", u: "+z", v: "-y", flare: 0.1 },
+      // Half the spider body, open on the centre plane: seen from its side it
+      // is one height field, head of the spider to the right.
+      Anansi_Abdomen: { slot: "spider-body", method: "plane", u: "+x", v: "-y", flare: 0.4 },
+      // Bent tubes, straightened like the ghoul's ribs, each ring at its own
+      // width so the island narrows to the tip the way the leg does.
+      Anansi_SpiderLegFront: { slot: "leg-front", method: "tube", seam: "-y", u: "along", taper: true },
+      Anansi_SpiderLegMiddle: { slot: "leg-middle", method: "tube", seam: "-y", u: "along", taper: true },
+      Anansi_SpiderLegBack: { slot: "leg-back", method: "tube", seam: "-y", u: "along", taper: true },
+      // Arm and hand seen down their own mean normals, as the ghoul's.
+      Anansi_ArmFront: { slot: "arm-outside", method: "plane", view: [0.49, 0.31, -0.81], flare: 0.5 },
+      Anansi_ArmBack: { slot: "arm-inside", method: "plane", view: [-0.66, -0.35, 0.67], flare: 0.35 },
+      Anansi_HandOutside: { slot: "hand-outside", method: "plane", view: [0.62, 0.1, -0.78], flare: 0.05 },
+      Anansi_HandPalm: { slot: "hand-palm", method: "plane", view: [-0.6, -0.2, 0.77], flare: 0.1 },
+    },
+    layout: {
+      row: [
+        // The spider half: its body and legs together, one material.
+        { col: ["spider-body", "leg-front", "leg-middle", "leg-back", { row: ["belt", "buckle", "tasset-front"] }] },
+        { col: [
+          // The crown centred over the head strip, the jaw underside under it —
+          // and the hood at the far end of the column, away from the head,
+          // which a generator otherwise paints as one hooded face across both.
+          { col: ["head-crown", "head", "head-under"], align: "center" },
+          { row: ["chest-front", "chest-back"] },
+          // The hand beside the arm it belongs to.
+          { row: ["arm-outside", "arm-inside", { col: ["hand-outside", "hand-palm"] }] },
+          { row: ["hood", "hood-crown"] },
+        ] },
+      ],
+    },
+    // Face landmarks drawn into key-labelled.png, the ghoul's proportions on
+    // this head's rings: brow y 53.1, cheekbones 48.5, chin 43.6, face ±2.1
+    // wide at x ~10.5.
+    marks: [
+      { slot: "head", at: [11, 51.1, 1.2], shape: "eye", size: 5 },
+      { slot: "head", at: [11, 51.1, -1.2], shape: "eye", size: 5 },
+      { slot: "head", at: [11, 48.8, 0], shape: "dot", size: 5 },
+      { slot: "head", from: [11, 45.8, -1.0], to: [11, 45.8, 1.0], shape: "line" },
+    ],
+    cutoutSlots: ["tasset-front"],
+    combos: [
+      [
+        "Anansi_Head", "Anansi_HeadCrown", "hood", "hoodCrown",
+        "Anansi_ChestFront", "Anansi_ChestBack", "Belt", "buckle", "TassetFront",
+        "Anansi_Abdomen", "Anansi_SpiderLegFront", "Anansi_SpiderLegMiddle", "Anansi_SpiderLegBack",
+        "Anansi_ArmFront", "Anansi_ArmBack", "Anansi_HandOutside", "Anansi_HandPalm",
+      ],
+    ],
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -454,6 +1237,10 @@ if (SURVEY && !recipe && !args.in) {
   process.exit(1);
 }
 
+// `uvSource: "file"` takes the unwrap from the mesh instead of projecting one,
+// which needs the sheet size before the unwrap runs rather than after it.
+const AUTHORED = recipe?.uvSource === "file";
+const SHEET_PX = Number(args.sheet ?? recipe?.sheet ?? 1254);
 const srcPath = path.resolve(args.in ? String(args.in) : path.join(STUDIO, recipe.source));
 const outMesh = path.resolve(
   args["out-mesh"] ? String(args["out-mesh"]) : path.join(STUDIO, recipe?.outMesh ?? "survey"),
@@ -479,8 +1266,52 @@ const AXIS = { x: 0, y: 1, z: 2 };
 
 /** "+z" / "-y" -> { axis: 2, sign: 1 }. */
 function dir(spec) {
+  if (Array.isArray(spec)) {
+    return { axis: null, sign: 1, vec: new THREE.Vector3(...spec).normalize() };
+  }
   const sign = spec[0] === "-" ? -1 : 1;
-  return { axis: AXIS[spec[spec.length - 1]], sign };
+  const axis = AXIS[spec[spec.length - 1]];
+  const vec = new THREE.Vector3();
+  vec.setComponent(axis, sign);
+  return { axis, sign, vec };
+}
+
+/**
+ * The two in-plane directions of a plane projection, and the direction it
+ * looks down.
+ *
+ * `u`/`v` name world axes and the third axis is dropped, which is everything
+ * an axis-aligned SHELL needs. A DOME has no best axis: measured, the ratkin’s
+ * shoulder pad faces (0.24, 0.51, 0.83) on average, and a flat view keeps 57%
+ * of its area looked at down Z, 42% down Y and 66% down its own mean normal —
+ * so down either axis a third of it is edge-on and warps. `view: [x, y, z]`
+ * projects down an arbitrary direction instead and derives u and v from it, u
+ * across the sheet and v down it, so the pad lands square-on.
+ *
+ * For an axis-aligned spec the dropped direction is the POSITIVE unit axis,
+ * which is exactly what `getComponent(axis)` meant before, so no existing recipe
+ * moves by a texel.
+ */
+function basisOf(spec) {
+  if (spec.view) {
+    const f = new THREE.Vector3(...spec.view).normalize();
+    const up = Math.abs(f.y) > 0.99 ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(0, 1, 0);
+    const u = new THREE.Vector3().crossVectors(up, f).normalize();
+    const v = new THREE.Vector3().crossVectors(f, u).normalize();
+    if (v.y > 0) v.negate(); // V runs DOWN the sheet, the way "-y" does
+    return {
+      du: { axis: null, sign: 1, vec: u },
+      dv: { axis: null, sign: 1, vec: v },
+      drop: f,
+      axis: null,
+    };
+  }
+  const du = dir(spec.u);
+  const dv = dir(spec.v);
+  const axis = [0, 1, 2].find((a) => a !== du.axis && a !== dv.axis);
+  const drop = new THREE.Vector3();
+  drop.setComponent(axis, 1);
+  return { du, dv, drop, axis };
 }
 
 /**
@@ -792,7 +1623,10 @@ function loadParts(file, scale) {
       const world = [];
       for (let i = 0; i < pos.count; i++)
         world.push(new THREE.Vector3().fromBufferAttribute(pos, i).multiplyScalar(scale));
-      out.push({ name: o.name, world });
+      // The file may already carry a real unwrap — see `uvSource: "file"`.
+      const uvAttr = geo.attributes.uv;
+      const srcUv = uvAttr ? Array.from({ length: uvAttr.count }, (_, i) => [uvAttr.getX(i), uvAttr.getY(i)]) : null;
+      out.push({ name: o.name, world, srcUv });
     });
     return out;
   }
@@ -818,6 +1652,20 @@ const SOURCE_SCALE = Number(
   args["source-scale"] ?? recipe?.sourceScale ?? (/\.obj$/i.test(srcPath) ? 100 : 1),
 );
 const found = loadParts(srcPath, SOURCE_SCALE);
+
+// Blockbench lets several objects share ONE name: the great axe's three heads
+// are all `AxeHead`, copies of each other never renamed. `repeats` names them
+// by order of appearance (`{ AxeHead: ["AxeHead1", "AxeHead2", "AxeHead3"] }`)
+// so each gets its own slot and a family, and the unwrapped OBJ carries the new
+// names back to the modeller. Without it the later copies are "ignored".
+for (const [name, names] of Object.entries(recipe?.repeats ?? {})) {
+  const hits = found.filter((p) => p.name === name);
+  if (hits.length !== names.length)
+    console.warn(`! repeats: the file has ${hits.length} "${name}", the recipe names ${names.length}`);
+  hits.forEach((p, i) => {
+    if (names[i]) p.name = names[i];
+  });
+}
 
 // ---------------------------------------------------------------------------
 // --survey: what shape is each part, before any recipe exists
@@ -1071,28 +1919,28 @@ function surfaceNormals(parts) {
  *     themselves do not move, and the muzzle, the crown and the jaw — the
  *     surfaces the fold cannot see — unfold out past the profile.
  */
-function flareOf(part, spec, dropped, normals) {
+function flareOf(part, spec, drop, normals) {
   const flare = Number(spec.flare ?? 0);
   if (!flare) return null;
   let plus = 0;
   let minus = 0;
   for (let t = 0; t < part.world.length / 3; t++) {
     const { n, area } = normals.faces.get(part.name)[t];
-    const c = n.getComponent(dropped);
+    const c = n.dot(drop);
     if (c > 0) plus += area * c;
     else minus += area * -c;
   }
-  const vals = part.world.map((v) => v.getComponent(dropped));
+  const vals = part.world.map((v) => v.dot(drop));
   const lo = Math.min(...vals);
   const hi = Math.max(...vals);
   const mid = (lo + hi) / 2;
   const half = (hi - lo) / 2 || 1e-6;
   const twoSided = Math.min(plus, minus) / (plus + minus || 1) > 0.15;
   const depth = twoSided
-    ? (v) => half - Math.abs(v.getComponent(dropped) - mid)
+    ? (v) => half - Math.abs(v.dot(drop) - mid)
     : plus >= minus
-      ? (v) => hi - v.getComponent(dropped)
-      : (v) => v.getComponent(dropped) - lo;
+      ? (v) => hi - v.dot(drop)
+      : (v) => v.dot(drop) - lo;
   return { flare, depth, twoSided };
 }
 
@@ -1115,39 +1963,146 @@ function flareOf(part, spec, dropped, normals) {
  * Groups are tested in order and the first match wins, so put the narrow tests
  * first; anything unmatched stays with the part's own slot.
  */
+/**
+ * Take the unwrap the FILE already has, instead of projecting one.
+ *
+ * Every other method here answers "how should this part be flattened". Once a
+ * modeller has answered that by hand in Blockbench there is nothing to solve:
+ * the islands are laid out, packed and oriented the way they wanted, and the
+ * job left is the one only this tool does — give each part its own slot colour,
+ * grow the islands by `keyStroke`, verify that every triangle samples its own
+ * island, and write the key and the manifest the atlas importer registers
+ * against.
+ *
+ * The UVs are converted straight to SHEET PIXELS, and V is flipped: OBJ counts
+ * V from the bottom and a sheet counts rows from the top. After that the
+ * layout solver is skipped and every island sits exactly where the file put it.
+ */
+function authoredUnwrap(part, spec) {
+  if (!part.srcUv) {
+    console.error(`! ${part.name}: uvSource "file" but the mesh carries no UVs`);
+    process.exit(1);
+  }
+  // A mesh OBJECT and a slot are usually the same thing, but not always: a
+  // modeller may leave a handful of faces in one object whose UVs they have
+  // laid into ANOTHER part-s island, which is correct for the art and wrong
+  // for the colour key — the faces would be painted their object-s slot
+  // colour on top of the island they are sitting in, and the two parts then
+  // share texels. Measured on the ratkin: 4 crown facets of 0.3 square units,
+  // normals straight up, still in `Ratkin_Head` but UV-parked in the crown
+  // strip where they belong.
+  //
+  // `regions` says so explicitly: any face whose UV centroid falls inside the
+  // box goes to the named slot instead. Boxes are in SHEET PIXELS, read off
+  // `--islands`, and are tested in order.
+  const regions = (spec.regions ?? []).map((r) => ({ slot: slots.get(r.slot), name: r.slot, box: r.box }));
+  const home = slots.get(spec.slot);
+  const moved = new Map();
+  // `move: [dx, dy]` slides this part-s island across the sheet, in sheet
+  // pixels, after reading it from the file.
+  //
+  // WHERE AN ISLAND SITS IS PART OF WHAT IT SAYS. A generator paints a sheet as
+  // a picture, so an island reads partly from its NEIGHBOURS — and the ratkin-s
+  // hood crown sat 898px from the hood, wedged between the two shoulder lames,
+  // and came back painted as a third shoulder plate every time. Labelling it did
+  // not fix that; being next to the hood does.
+  //
+  // This diverges the shipped mesh from the modeller-s file by that offset, so
+  // it is for a layout fault worth fixing without a round trip. Say it out loud
+  // when it happens, and fold it back into the source when convenient.
+  const shift = spec.move ?? [0, 0];
+  for (let t = 0; t < part.world.length / 3; t++) {
+    const idx = [0, 1, 2].map((k) => t * 3 + k);
+    const uv = idx.map((i) => [part.srcUv[i][0] * SHEET_PX + shift[0], (1 - part.srcUv[i][1]) * SHEET_PX + shift[1]]);
+    const cx = (uv[0][0] + uv[1][0] + uv[2][0]) / 3;
+    const cy = (uv[0][1] + uv[1][1] + uv[2][1]) / 3;
+    const r = regions.find((q) => cx >= q.box[0] && cx <= q.box[2] && cy >= q.box[1] && cy <= q.box[3]);
+    (r ? r.slot : home).tris.push({ part: part.name, idx, uv, p: idx.map((i) => part.world[i]) });
+    if (r) moved.set(r.name, (moved.get(r.name) ?? 0) + 1);
+  }
+  for (const [to, n] of moved) console.log(`  ${part.name}: ${n} faces moved into ${to} by their UVs`);
+  if (shift[0] || shift[1])
+    console.log(`  ${part.name}: island slid ${shift[0]},${shift[1]}px from where the file put it`);
+}
+
+/**
+ * One projection group of a part: its own view, flare and slot. The base group
+ * (`g` = {}) is the part's own projection; the others are its `split` entries,
+ * each taking the faces that point along `facing`.
+ */
+function projectionGroup(part, spec, g, base) {
+  const view = g.view ?? (g.u || g.v ? null : spec.view);
+  const { du, dv, drop, axis } = basisOf(
+    view ? { view } : { u: g.u ?? spec.u, v: g.v ?? spec.v },
+  );
+  const flare = flareOf(part, { flare: g.flare ?? spec.flare }, drop, NORMALS);
+  const want = base ? null : dir(g.facing);
+  // `mirror: "z"` folds the part about the body's centre plane (world z = 0)
+  // before projecting, so its two halves share ONE half-island — painted once
+  // and worn on both sides, the way a profile is. For a strip that runs over
+  // the top of a mirrored piece: the ghoul's hood crown held both sides at once
+  // under a hood profile painted once for both, so the two never lined up.
+  //
+  // `mirrorAt` moves that plane off zero: the great axe's heads are modelled
+  // around the haft at z = -43.755, and each double head keeps ONE bit's island
+  // (both bits and both faces share it). With `straddle: "keep"` a face that
+  // CROSSES the plane (the eye block the haft runs through) is not folded:
+  // folded corner by corner it collapses onto the plane, so it keeps its own
+  // shape at the island's edge. Opt-in, so the hood crowns cut before it stay
+  // exactly as they are.
+  const fold = AXIS[g.mirror ?? (base ? spec.mirror : undefined)];
+  const at = g.mirrorAt ?? (base ? spec.mirrorAt ?? 0 : 0);
+  const keepStraddling = (g.straddle ?? (base ? spec.straddle : undefined)) === "keep";
+  const folded = (v) => {
+    if (fold === undefined || v.getComponent(fold) >= at) return v;
+    const w = v.clone();
+    w.setComponent(fold, 2 * at - w.getComponent(fold));
+    return w;
+  };
+  const straddles = (p) => {
+    if (fold === undefined || !keepStraddling) return false;
+    const c = p.map((v) => v.getComponent(fold) - at);
+    return Math.min(...c) < -1e-3 && Math.max(...c) > 1e-3;
+  };
+  return {
+    base,
+    slot: slots.get(g.slot ?? spec.slot),
+    name: g.slot ?? spec.slot,
+    du,
+    dv,
+    drop,
+    dropped: axis,
+    takes: (n) => base || n.dot(want.vec) > (g.above ?? 0.25),
+    straddles,
+    project: (v0, unfolded = false) => {
+      const v = unfolded ? v0 : folded(v0);
+      const iu = v.dot(du.vec);
+      const iv = v.dot(dv.vec);
+      if (!flare) return [iu, iv];
+      const n = NORMALS.at(v0).clone();
+      // the far half's normal flips with it
+      if (fold !== undefined && !unfolded && v0.getComponent(fold) < at) n.setComponent(fold, -n.getComponent(fold));
+      const nu = n.dot(du.vec);
+      const nv = n.dot(dv.vec);
+      const len = Math.hypot(nu, nv);
+      if (len < 1e-3) return [iu, iv]; // square-on to the view: nowhere to unfold to
+      const d = flare.flare * flare.depth(v);
+      return [iu + (nu / len) * d, iv + (nv / len) * d];
+    },
+  };
+}
+
 function planeUnwrap(part, spec) {
   /** Base group last: it is the fallback, and it owns the rim. */
-  const groups = [...(spec.split ?? []), {}].map((g, i, all) => {
-    const base = i === all.length - 1;
-    const du = dir(g.u ?? spec.u);
-    const dv = dir(g.v ?? spec.v);
-    const dropped = [0, 1, 2].find((a) => a !== du.axis && a !== dv.axis);
-    const flare = flareOf(part, { flare: g.flare ?? spec.flare }, dropped, NORMALS);
-    const want = base ? null : dir(g.facing);
-    return {
-      base,
-      slot: slots.get(g.slot ?? spec.slot),
-      name: g.slot ?? spec.slot,
-      du,
-      dv,
-      dropped,
-      takes: (n) => base || axisValue(n, want) > (g.above ?? 0.25),
-      project: (v) => {
-        const iu = axisValue(v, du);
-        const iv = axisValue(v, dv);
-        if (!flare) return [iu, iv];
-        const n = NORMALS.at(v);
-        const nu = n.getComponent(du.axis) * du.sign;
-        const nv = n.getComponent(dv.axis) * dv.sign;
-        const len = Math.hypot(nu, nv);
-        if (len < 1e-3) return [iu, iv]; // square-on to the view: nowhere to unfold to
-        const d = flare.flare * flare.depth(v);
-        return [iu + (nu / len) * d, iv + (nv / len) * d];
-      },
-    };
-  });
+  const groups = [...(spec.split ?? []), {}].map((g, i, all) => projectionGroup(part, spec, g, i === all.length - 1));
   const home = groups[groups.length - 1];
   const dropped = home.dropped;
+  const drop = home.drop;
+  // `rim` hangs a bar under the silhouette, and edgeBand walks it along a
+  // world axis. There is no axis to walk when the view is oblique.
+  if (spec.rim && dropped === undefined) {
+    console.warn(`! ${part.name}: rim is not available on an oblique view; no bar written`);
+  }
   const moved = new Map();
   const rimTris = [];
   const mine = [];
@@ -1160,7 +2115,7 @@ function planeUnwrap(part, spec) {
     // `rim: false` (or absent) means every face projects, however edge-on — the
     // right answer for a part with no flat-on view, such as a faceted pommel
     // seen from above, where every facet is equally slanted.
-    if (spec.rim && Math.abs(n.getComponent(dropped)) < (spec.rimBelow ?? 0.7)) {
+    if (spec.rim && dropped !== undefined && Math.abs(n.dot(drop)) < (spec.rimBelow ?? 0.7)) {
       rimTris.push({ t, p });
       continue;
     }
@@ -1168,8 +2123,8 @@ function planeUnwrap(part, spec) {
     const tri = {
       part: part.name,
       idx: [0, 1, 2].map((k) => t * 3 + k),
-      uv: p.map(g.project),
-      front: n.getComponent(g.dropped) > 0,
+      uv: p.map((v) => g.project(v, g.straddles(p))),
+      front: n.dot(g.drop) > 0,
       p,
     };
     g.slot.tris.push(tri);
@@ -1422,10 +2377,331 @@ function unrollUnwrap(part, spec) {
   }
 }
 
+/**
+ * Straighten a BENT open tube — a rib, a tentacle, a curled horn — into one
+ * rectangle: across the island goes around the tube, down it goes along it.
+ *
+ * `unroll` peels around ONE straight world axis, which is the wrong question
+ * for a rib: it curves half way round the chest, so no axis runs along it. A
+ * tube built as rings (every quad-strip cylinder a modeller extrudes) carries
+ * its own axis in its topology, so this walks that instead:
+ *
+ *  - the two open ends are the mesh's two boundary loops;
+ *  - a vertex's RING is its hop distance from one end, which is exact for a
+ *    strip whether or not its quads were triangulated;
+ *  - each ring is ordered by following the edges that join it to the one
+ *    before, so the columns run straight down the whole tube;
+ *  - arc length around each ring, normalised to the MEAN perimeter, gives
+ *    across; the mean distance from each vertex to its match on the ring
+ *    before gives along — the centreline length on a bent tube, and the only
+ *    right answer for a BAND (a belt: top face and outer face as two rows of
+ *    one closed strip), whose rings share a centre.
+ *
+ * Nothing here can overlap and every face is connected to its neighbours, so
+ * it needs no flare. The seam is cut at the vertex furthest along `seam` on
+ * the first ring — the side of the bone nobody looks at.
+ */
+/**
+ * A head as ONE strip wrapped round the skull: across the island is the way
+ * round the head (face in the middle, the back of the skull split across both
+ * ends), down it is top to bottom — latitude and longitude about the head's own
+ * centre, the globe's equirectangular map.
+ *
+ * Why not a plane: a front view folds the face onto the back of the skull, a
+ * profile squeezes the face to a sliver, and a front + back split puts a seam
+ * down each cheek. Why not `unroll`: it walks the outline's hull, which on a
+ * lumpy low-poly skull comes out ragged, with loose triangles off one end.
+ *
+ * `centerOf: "<part>"` measures the centre and radius from another part, so a
+ * crown strip mapped with the SAME numbers lands on the strip's top rows and
+ * joins the head edge to edge — give both the same slot. The poles stretch,
+ * which is where a skull is plainest.
+ */
+function sphereUnwrap(part, spec) {
+  const ref = spec.centerOf ? parts.find((p) => p.name === spec.centerOf) : part;
+  if (!ref) throw new Error(`${part.name}: centerOf ${spec.centerOf} is not a part`);
+  const box = new THREE.Box3();
+  for (const v of ref.world) box.expandByPoint(v);
+  const c = box.getCenter(new THREE.Vector3());
+  const R = ref.world.reduce((a, v) => a + v.distanceTo(c), 0) / ref.world.length;
+  const f = dir(spec.front ?? "+x");
+  const right = new THREE.Vector3().crossVectors(f.vec.clone().negate(), new THREE.Vector3(0, 1, 0)).normalize();
+  // `v: "height"` — the CYLINDER variant, and the one that paints well: down is
+  // plain height and across is true arc length round the head's own oval, so
+  // every vertical surface — the face, the temples, the back of the skull — is
+  // laid out at its real size. Latitude (the default) stretches toward the
+  // poles, and the ghoul's face came back visibly warped with it. Faces that
+  // point straight up or down compress; the crown belongs on its own island.
+  const height = spec.v === "height";
+  const size = box.getSize(new THREE.Vector3());
+  const semiF = Math.abs(size.dot(f.vec)) / 2 || 1;
+  const semiR = Math.abs(size.dot(right)) / 2 || 1;
+  const ARC = 1440;
+  const arcTable = new Float64Array(ARC + 1);
+  // `face: { half, scale, blend }` widens the FRONT of the strip: within `half`
+  // degrees of the front, arc counts `scale` times, easing back to 1 over
+  // `blend` degrees. The face then has `scale`x the texels and the sides and
+  // back stay at true size. Measured on the ghoul: told where the eyes go with
+  // marks on the key, the generator still painted every face about twice the
+  // real width, so its eyes wrapped round onto the sides of the head. Giving
+  // the face the room the generator wants is the fix that holds.
+  const faceW = spec.face;
+  const weight = (t) => {
+    if (!faceW) return 1;
+    const d = (Math.min(t, 2 * Math.PI - t) * 180) / Math.PI;
+    const half = faceW.half ?? 45;
+    const blend = faceW.blend ?? 20;
+    if (d <= half) return faceW.scale ?? 2;
+    if (d >= half + blend) return 1;
+    const k = (d - half) / blend;
+    const sm = k * k * (3 - 2 * k);
+    return (faceW.scale ?? 2) * (1 - sm) + sm;
+  };
+  for (let k = 1; k <= ARC; k++) {
+    const t0 = ((k - 1) / ARC) * 2 * Math.PI;
+    const t1 = (k / ARC) * 2 * Math.PI;
+    arcTable[k] =
+      arcTable[k - 1] +
+      weight((t0 + t1) / 2) * Math.hypot(semiF * (Math.cos(t1) - Math.cos(t0)), semiR * (Math.sin(t1) - Math.sin(t0)));
+  }
+  const arcAt = (t) => {
+    const sgn = t < 0 ? -1 : 1;
+    const x = (Math.abs(t) / (2 * Math.PI)) * ARC;
+    const k = Math.min(ARC - 1, Math.floor(x));
+    return sgn * (arcTable[k] + (arcTable[k + 1] - arcTable[k]) * (x - k));
+  };
+  const target = slots.get(spec.slot);
+  // `split` works as on a plane: a face pointing along a group's `facing` is
+  // projected flat into that group's slot. For the underside of a jaw, a flat
+  // cap the height strip can only crush into a sliver — on the anansi one
+  // such triangle ran out across half the strip.
+  const groups = (spec.split ?? []).map((g) => projectionGroup(part, spec, g, false));
+  const moved = new Map();
+  for (let t = 0; t < part.world.length / 3; t++) {
+    const idx = [0, 1, 2].map((k) => t * 3 + k);
+    const p = idx.map((i) => part.world[i]);
+    if (groups.length) {
+      const n = new THREE.Vector3().subVectors(p[1], p[0]).cross(new THREE.Vector3().subVectors(p[2], p[0])).normalize();
+      const g = groups.find((x) => x.takes(n));
+      if (g) {
+        g.slot.tris.push({ part: part.name, idx, uv: p.map(g.project), front: n.dot(g.drop) > 0, p });
+        moved.set(g.name, (moved.get(g.name) ?? 0) + 1);
+        continue;
+      }
+    }
+    const polar = p.map((v) => {
+      const d = new THREE.Vector3().subVectors(v, c);
+      const len = d.length() || 1;
+      const horiz = Math.hypot(d.dot(f.vec), d.dot(right));
+      return {
+        az: height ? Math.atan2(d.dot(right) / semiR, d.dot(f.vec) / semiF) : Math.atan2(d.dot(right), d.dot(f.vec)),
+        lat: height ? box.max.y - v.y : Math.acos(Math.max(-1, Math.min(1, d.y / len))) * R,
+        pole: horiz < 1e-3 * R,
+      };
+    });
+    // Straddling the seam at the back: bring the far side round.
+    const live = polar.filter((q) => !q.pole);
+    if (live.length && Math.max(...live.map((q) => q.az)) - Math.min(...live.map((q) => q.az)) > Math.PI)
+      for (const q of live) if (q.az < 0) q.az += 2 * Math.PI;
+    const mean = live.length ? live.reduce((a, q) => a + q.az, 0) / live.length : 0;
+    target.tris.push({
+      part: part.name,
+      idx,
+      p,
+      uv: polar.map((q) => {
+        const az = q.pole ? mean : q.az;
+        return [height ? arcAt(az) : az * R, q.lat];
+      }),
+    });
+  }
+  for (const [to, n] of moved) console.log(`  ${part.name}: ${n} faces split into ${to}`);
+}
+
+function tubeUnwrap(part, spec) {
+  const key = (v) => `${v.x.toFixed(5)},${v.y.toFixed(5)},${v.z.toFixed(5)}`;
+  const ids = new Map();
+  const pos = [];
+  const tris = [];
+  for (let t = 0; t < part.world.length / 3; t++) {
+    tris.push(
+      [0, 1, 2].map((k) => {
+        const v = part.world[t * 3 + k];
+        const kk = key(v);
+        if (!ids.has(kk)) {
+          ids.set(kk, pos.length);
+          pos.push(v);
+        }
+        return ids.get(kk);
+      }),
+    );
+  }
+  const edgeUse = new Map();
+  const nbr = pos.map(() => new Set());
+  for (const tri of tris)
+    for (let k = 0; k < 3; k++) {
+      const a = tri[k];
+      const b = tri[(k + 1) % 3];
+      if (a === b) continue;
+      nbr[a].add(b);
+      nbr[b].add(a);
+      const e = a < b ? `${a}_${b}` : `${b}_${a}`;
+      edgeUse.set(e, (edgeUse.get(e) ?? 0) + 1);
+    }
+  // Boundary loops: edges used by one face, chained.
+  const bnbr = new Map();
+  for (const [e, n] of edgeUse) {
+    if (n !== 1) continue;
+    const [a, b] = e.split("_").map(Number);
+    if (!bnbr.has(a)) bnbr.set(a, []);
+    if (!bnbr.has(b)) bnbr.set(b, []);
+    bnbr.get(a).push(b);
+    bnbr.get(b).push(a);
+  }
+  const loops = [];
+  const seen = new Set();
+  for (const start of bnbr.keys()) {
+    if (seen.has(start)) continue;
+    const loop = [start];
+    seen.add(start);
+    let prev = -1;
+    let cur = start;
+    for (;;) {
+      const next = bnbr.get(cur).find((x) => x !== prev && !seen.has(x));
+      if (next === undefined) break;
+      loop.push(next);
+      seen.add(next);
+      prev = cur;
+      cur = next;
+    }
+    loops.push(loop);
+  }
+  const fail = (why) => {
+    console.error(`! ${part.name}: tube unwrap needs an open tube built from rings — ${why}`);
+    process.exit(1);
+  };
+  // One open end is a tube CLOSED to a point at the other — the belt, whose
+  // inside is a fan up to one vertex. That apex is its last ring, handled below.
+  if (loops.length !== 2 && loops.length !== 1) fail(`found ${loops.length} open ends`);
+  const n = loops[0].length;
+  // Hop distance from the first end is the ring index.
+  const ring = new Array(pos.length).fill(-1);
+  let frontier = loops[0];
+  for (const v of frontier) ring[v] = 0;
+  for (let r = 1; frontier.length; r++) {
+    const next = [];
+    for (const v of frontier)
+      for (const w of nbr[v])
+        if (ring[w] < 0) {
+          ring[w] = r;
+          next.push(w);
+        }
+    frontier = next;
+  }
+  let R = Math.max(...ring) + 1;
+  const rings = Array.from({ length: R }, () => []);
+  for (let v = 0; v < pos.length; v++) rings[ring[v]].push(v);
+  // A closed end: its apex sits on the last row's edge, at zero height, so the
+  // fan collapses and the rescue pass patches it from the row beside it. It is
+  // the INSIDE of the thing — the lid of a belt, under the body.
+  let apex = -1;
+  if (loops.length === 1 && rings[R - 1].length === 1) {
+    apex = rings[R - 1][0];
+    R -= 1;
+    rings.pop();
+  }
+  if (rings.some((r) => r.length !== n)) fail(`rings of ${rings.map((r) => r.length).join("/")} vertices`);
+  const centre = (r) => r.reduce((a, v) => a.add(pos[v]), new THREE.Vector3()).divideScalar(r.length);
+  // Ring 0 in loop order, starting at the seam side.
+  const sd = dir(spec.seam ?? "-y");
+  const c0 = centre(rings[0]);
+  const lp = loops[0];
+  const s0 = lp.reduce((best, v, i) => (axisValue(new THREE.Vector3().subVectors(pos[v], c0), sd) > axisValue(new THREE.Vector3().subVectors(pos[lp[best]], c0), sd) ? i : best), 0);
+  const ordered = [lp.slice(s0).concat(lp.slice(0, s0))];
+  const centres = [c0];
+  for (let r = 1; r < R; r++) {
+    const c = centre(rings[r]);
+    centres.push(c);
+    const prevC = centres[r - 1];
+    ordered.push(
+      ordered[r - 1].map((pv) => {
+        const want = new THREE.Vector3().subVectors(pos[pv], prevC).normalize();
+        let best = -1;
+        let score = -Infinity;
+        for (const w of rings[r]) {
+          if (!nbr[pv].has(w)) continue;
+          const s = new THREE.Vector3().subVectors(pos[w], c).normalize().dot(want);
+          if (s > score) {
+            score = s;
+            best = w;
+          }
+        }
+        return best;
+      }),
+    );
+    if (new Set(ordered[r]).size !== n) fail(`ring ${r} does not follow ring ${r - 1} one-to-one`);
+  }
+  const perims = ordered.map((o) => o.map((v, i) => pos[v].distanceTo(pos[o[(i + 1) % n]])));
+  const meanP = perims.reduce((a, p) => a + p.reduce((x, y) => x + y, 0), 0) / R;
+  // `taper: true` lays each ring out at its OWN perimeter, centred on the
+  // strip, so a tube that narrows comes out the shape it is. Without it every
+  // ring is stretched to the mean, which is right for a belt and wrong for a
+  // spider leg: its thin tip was magnified to the full strip width, the
+  // generator painted a pointed leg into that rectangle anyway, and the empty
+  // corners smeared over the tip on the model.
+  const taper = spec.taper === true;
+  const across = new Map();
+  const ord = new Map();
+  const wrapAt = new Map(); // where the seam vertex sits at the FAR end of its ring
+  for (let r = 0; r < R; r++) {
+    const total = perims[r].reduce((x, y) => x + y, 0);
+    let acc = 0;
+    ordered[r].forEach((v, i) => {
+      across.set(v, taper ? meanP / 2 + acc - total / 2 : (acc / total) * meanP);
+      wrapAt.set(v, taper ? meanP / 2 + total / 2 : meanP);
+      ord.set(v, i);
+      acc += perims[r][i];
+    });
+  }
+  const along = [0];
+  for (let r = 1; r < R; r++)
+    along.push(along[r - 1] + ordered[r].reduce((a, v, i) => a + pos[v].distanceTo(pos[ordered[r - 1][i]]), 0) / n);
+  // A tapered tube's apex is a real TIP beyond its last ring, not a lid folded
+  // onto it: give it its true distance so the fan is a point, not a needle.
+  const apexAlong =
+    taper && apex >= 0
+      ? along[R - 1] + pos[apex].distanceTo(centres[R - 1])
+      : along[R - 1];
+  const target = slots.get(spec.slot);
+  const horizontal = spec.u === "along";
+  for (const [t, tri] of tris.entries()) {
+    const wraps = tri.some((v) => ord.get(v) === n - 1) && tri.some((v) => ord.get(v) === 0);
+    const rim = tri.filter((v) => v !== apex);
+    const uv = tri.map((v) => {
+      if (v === apex) {
+        const a = rim.map((w) => (wraps && ord.get(w) === 0 ? wrapAt.get(w) : across.get(w)));
+        const l = apexAlong;
+        // Tapered: ONE tip on the centre line for every face of the fan. Each
+        // at its own rim's midpoint split the tip into a comb of prongs.
+        const m = taper ? meanP / 2 : a.reduce((x, y) => x + y, 0) / a.length;
+        return horizontal ? [l, m] : [m, l];
+      }
+      const a = wraps && ord.get(v) === 0 ? wrapAt.get(v) : across.get(v);
+      const l = along[ring[v]];
+      return horizontal ? [l, a] : [a, l];
+    });
+    const idx = [0, 1, 2].map((k) => t * 3 + k);
+    target.tris.push({ part: part.name, idx, uv, p: idx.map((i) => part.world[i]) });
+  }
+  console.log(`  ${part.name}: tube of ${R} rings x ${n}${apex >= 0 ? ", closed at one end" : ""}, ${meanP.toFixed(1)} around, ${along[R - 1].toFixed(1)} long`);
+}
+
 for (const part of parts) {
   const spec = recipe.parts[part.name];
   if (!spec) continue;
-  if (spec.method === "plane") planeUnwrap(part, spec);
+  if (AUTHORED) authoredUnwrap(part, spec);
+  else if (spec.method === "tube") tubeUnwrap(part, spec);
+  else if (spec.method === "sphere") sphereUnwrap(part, spec);
+  else if (spec.method === "plane") planeUnwrap(part, spec);
   else if (spec.method === "band") bandUnwrap(part, spec);
   else if (spec.method === "unroll") unrollUnwrap(part, spec);
   else throw new Error(`unknown method ${spec.method}`);
@@ -1469,7 +2745,7 @@ function measure(node, scale) {
   const gaps = GUT * Math.max(0, kids.length - 1);
   return node.row
     ? { w: kids.reduce((a, k) => a + k.w, 0) + gaps, h: Math.max(...kids.map((k) => k.h)), kids, row: true }
-    : { w: Math.max(...kids.map((k) => k.w)), h: kids.reduce((a, k) => a + k.h, 0) + gaps, kids, row: false };
+    : { w: Math.max(...kids.map((k) => k.w)), h: kids.reduce((a, k) => a + k.h, 0) + gaps, kids, row: false, center: node.align === "center" };
 }
 
 function place(m, x, y, out) {
@@ -1480,7 +2756,9 @@ function place(m, x, y, out) {
   let cx = x;
   let cy = y;
   for (const k of m.kids) {
-    place(k, cx, cy, out);
+    // `align: "center"` on a col centres each child across it — a crown
+    // island over the middle of the head strip it caps.
+    place(k, m.center ? cx + (m.w - k.w) / 2 : cx, cy, out);
     if (m.row) cx += k.w + GUT;
     else cy += k.h + GUT;
   }
@@ -1488,22 +2766,80 @@ function place(m, x, y, out) {
 
 // Solve the largest scale that still fits the sheet — the blades are 50 units
 // long and set the ceiling, everything else follows at the same texel density.
-let lo = 0.1;
-let hi = 200;
-for (let i = 0; i < 60; i++) {
-  const mid = (lo + hi) / 2;
-  const m = measure(recipe.layout, mid);
-  if (m.w <= SHEET - 2 * MAR && m.h <= SHEET - 2 * MAR) lo = mid;
-  else hi = mid;
-}
-const SCALE = lo;
-const measured = measure(recipe.layout, SCALE);
+// Unless the file brought its own unwrap, in which case the islands are
+// already in sheet pixels exactly where the modeller put them and there is
+// nothing to solve: `boxes` are their extents, so each island is "placed" at
+// its own box and the remap below is the identity.
+let SCALE;
+/** Sheet px per model unit, from the solved layout or the authored UVs: the density report reads it. */
+let PX_PER_UNIT = 0;
 const placed = new Map();
-place(measured, MAR, MAR, placed);
-console.log(
-  `  layout ${measured.w.toFixed(0)}x${measured.h.toFixed(0)} of ${SHEET} at ${SCALE.toFixed(2)} px/unit ` +
-    `(${(SCALE * (recipe.atlas.size / SHEET)).toFixed(2)} texels/unit at ${recipe.atlas.size})`,
-);
+if (AUTHORED) {
+  SCALE = 1;
+  let ink = 0;
+  for (const [name, b] of boxes) {
+    placed.set(name, { x: b.x0, y: b.y0, w: b.w, h: b.h });
+    ink += b.w * b.h;
+  }
+  const density = [...slots.values()]
+    .flatMap((sl) => sl.tris)
+    .reduce((acc, t) => {
+      const [a, b2, c] = t.p ?? [];
+      if (!c) return acc;
+      const wa = new THREE.Vector3().subVectors(b2, a).cross(new THREE.Vector3().subVectors(c, a)).length() / 2;
+      const ua = Math.abs((t.uv[1][0] - t.uv[0][0]) * (t.uv[2][1] - t.uv[0][1]) - (t.uv[2][0] - t.uv[0][0]) * (t.uv[1][1] - t.uv[0][1])) / 2;
+      return { u: acc.u + ua, w: acc.w + wa };
+    }, { u: 0, w: 0 });
+  const px = Math.sqrt(density.u / (density.w || 1));
+  PX_PER_UNIT = px;
+  console.log(
+    `  authored UVs from the file: ${placed.size} islands, ` +
+      `${((ink / (SHEET * SHEET)) * 100).toFixed(0)}% of the sheet in island boxes, ` +
+      `${px.toFixed(2)} px/unit (${(px * (recipe.atlas.size / SHEET)).toFixed(2)} texels/unit at ${recipe.atlas.size})`,
+  );
+} else {
+  let lo = 0.1;
+  let hi = 200;
+  for (let i = 0; i < 60; i++) {
+    const mid = (lo + hi) / 2;
+    const m = measure(recipe.layout, mid);
+    if (m.w <= SHEET - 2 * MAR && m.h <= SHEET - 2 * MAR) lo = mid;
+    else hi = mid;
+  }
+  SCALE = lo;
+  PX_PER_UNIT = SCALE;
+  const measured = measure(recipe.layout, SCALE);
+  place(measured, MAR, MAR, placed);
+  console.log(
+    `  layout ${measured.w.toFixed(0)}x${measured.h.toFixed(0)} of ${SHEET} at ${SCALE.toFixed(2)} px/unit ` +
+      `(${(SCALE * (recipe.atlas.size / SHEET)).toFixed(2)} texels/unit at ${recipe.atlas.size})`,
+  );
+}
+
+// TEXEL DENSITY — texels per METRE in the world, the number that decides
+// whether two things seen side by side have the same pixel size. A shield at
+// 1.5x the sword's density read visibly finer-grained in the same hand. A
+// recipe that declares `metresPerUnit` (its model units -> metres, as placed
+// in the game) gets its density printed; one that also declares
+// `texelsPerMetre` (the target of its class, e.g. HELD_GEAR_TEXELS_PER_M) is
+// checked against it and told the atlas size that would hit it. See
+// docs/weapon-atlas.md -> "Texel density".
+if (recipe.metresPerUnit) {
+  const perUnit = PX_PER_UNIT * (recipe.atlas.size / SHEET_PX);
+  const perMetre = perUnit / recipe.metresPerUnit;
+  const target = recipe.texelsPerMetre;
+  if (!target) console.log(`  density ${perMetre.toFixed(0)} texels/m (no texelsPerMetre target declared)`);
+  else {
+    const ratio = perMetre / target;
+    const fit = Math.round((recipe.atlas.size / ratio) / 2) * 2;
+    if (Math.abs(ratio - 1) <= 0.08) console.log(`  density ${perMetre.toFixed(0)} texels/m — target ${target} ok`);
+    else
+      console.warn(
+        `! density ${perMetre.toFixed(0)} texels/m is ${ratio.toFixed(2)}x the ${target} target — atlas.size ${fit} would match ` +
+          `(or change the layout); things beside it in the game will show a different pixel size`,
+      );
+  }
+}
 
 // `--islands` prints where every island ended up, which is what the region key
 // in prompt-<recipe>.md has to be written from: a prompt that describes a block
@@ -1552,6 +2888,7 @@ const STROKE = Number(args.stroke ?? recipe.keyStroke ?? 0);
 // which is inside that triangle by construction and so is painted, and near
 // enough that it takes the colour of the part of the shell the face belongs to.
 let rescued = 0;
+const rescuedBy = {};
 for (const [name, slot] of slots) {
   const at = placed.get(name);
   if (!at) continue;
@@ -1590,9 +2927,13 @@ for (const [name, slot] of slots) {
     const [hx, hy] = centroid(host.px);
     t.px = host.px.map(([x, y]) => [hx + (x - hx) * 0.35, hy + (y - hy) * 0.35]);
     rescued++;
+    rescuedBy[name] = (rescuedBy[name] ?? 0) + 1;
   }
 }
-if (rescued) console.log(`  ${rescued} edge-on triangles given a patch cut out of a neighbour`);
+if (rescued) {
+  const by = Object.entries(rescuedBy).map(([n, c]) => `${n} ${c}`).join(", ");
+  console.log(`  ${rescued} edge-on triangles given a patch cut out of a neighbour (${by})`);
+}
 
 // OVERLAP: how much of an island is covered by more than one triangle.
 //
@@ -1656,15 +2997,29 @@ if (rescued) console.log(`  ${rescued} edge-on triangles given a patch cut out o
       // An unroll or a band asked to `fold` mirrors its far face onto its near
       // one deliberately — that is what makes a crossguard symmetric by
       // construction — so its island is doubled on purpose, same as a head's.
+      // No projection to reason from when the file brought the unwrap: a doubled
+      // island is then the modeller mirroring a part on purpose — a head, a
+      // tail, a foot whose sole is never seen — and the tool has no basis to
+      // call it a fault. Checked BEFORE the method test, because an authored
+      // part declares no method at all.
+      if (AUTHORED) {
+        mirrored = true;
+        break;
+      }
       if (ps.method !== "plane") {
         mirrored = !!ps.fold;
         break;
       }
-      const drop = [0, 1, 2].find((a) => a !== dir(ps.u).axis && a !== dir(ps.v).axis);
+      // `mirror` folds the two halves onto one another on purpose.
+      if (ps.mirror) {
+        mirrored = true;
+        break;
+      }
+      const { drop } = basisOf(ps.view ? { view: ps.view } : { u: ps.u, v: ps.v });
       let plus = 0;
       let minus = 0;
       for (const { n, area } of NORMALS.faces.get(t.part)) {
-        const c = n.getComponent(drop);
+        const c = n.dot(drop);
         if (c > 0) plus += area * c;
         else minus += area * -c;
       }
@@ -1677,7 +3032,9 @@ if (rescued) console.log(`  ${rescued} edge-on triangles given a patch cut out o
   for (const [name, pct, who, mirrored] of rows) {
     const bad = pct >= 5 && !mirrored;
     const line = mirrored
-      ? `    ${name}: ${pct.toFixed(0)}% doubled — mirrored, which is what this projection is for`
+      ? (AUTHORED
+          ? `    ${name}: ${pct.toFixed(0)}% doubled — the file-s own unwrap; mirroring here is the modeller-s call`
+          : `    ${name}: ${pct.toFixed(0)}% doubled — mirrored, which is what this projection is for`)
       : `  ${bad ? "!" : " "} ${name}: ${pct.toFixed(1)}% of the island is covered twice (${who})` +
         (bad ? " — split the faces a flat view cannot reach into their own group" : "");
     if (bad) console.error(line);
@@ -1766,7 +3123,10 @@ function fillTri(tri, rgb, id, clash) {
       const w2 = 1 - w0 - w1;
       if (w0 < 0 || w1 < 0 || w2 < 0) continue;
       const at = y * SHEET + x;
-      if (owner[at] >= 0 && owner[at] !== id) clash.add(`${slotIds[owner[at]]} / ${slotIds[id]}`);
+      if (owner[at] >= 0 && owner[at] !== id) {
+        const k = `${slotIds[owner[at]]} / ${slotIds[id]}`;
+        clash.set(k, (clash.get(k) ?? 0) + 1);
+      }
       owner[at] = id;
       key[at * 4] = rgb[0];
       key[at * 4 + 1] = rgb[1];
@@ -1775,7 +3135,7 @@ function fillTri(tri, rgb, id, clash) {
     }
 }
 
-const clash = new Set();
+const clash = new Map();
 for (const [i, name] of slotIds.entries()) {
   const slot = slots.get(name);
   const rgb = rgbOf(recipe.slots[name].color);
@@ -1826,14 +3186,273 @@ if (STROKE > 0) {
   }
   console.log(`  islands grown ${STROKE}px in their own colour, as a margin for the artwork`);
 }
+// TWO ISLANDS SHARING TEXELS is fatal for a solved layout — the packer should
+// never do it, so it means a bug, and whichever part loses the texels wears
+// the other one-s paint. For an AUTHORED layout it is the modeller-s file and
+// a few texels where two islands graze in a corner are not worth refusing the
+// whole cut over. So: always say how big it is, and fail only when it is big
+// enough to see. Measured on the ratkin, hood-crown and arm-top graze over 28
+// texels, which is 1.2 texels of the finished 256 atlas.
 if (clash.size) {
-  console.error(`! islands overlap: ${[...clash].join(", ")}`);
-  process.exit(1);
+  const total = [...clash.values()].reduce((a, b) => a + b, 0);
+  const worst = Math.max(...clash.values());
+  const detail = [...clash].map(([k, n]) => `${k} (${n}px)`).join(", ");
+  const atlasTexels = total * (recipe.atlas.size / SHEET) ** 2;
+  if (!AUTHORED || atlasTexels > 8) {
+    console.error(`! islands overlap: ${detail}`);
+    process.exit(1);
+  }
+  console.warn(
+    `! islands graze: ${detail} — ${total} sheet px, about ${atlasTexels.toFixed(1)} texels at ` +
+      `${recipe.atlas.size}. The file authored this layout, so it is left alone; nudge them apart ` +
+      "in the modeller if it shows.",
+  );
 }
 
 fs.mkdirSync(setDir, { recursive: true });
 fs.writeFileSync(keyPath, encodePng(SHEET, SHEET, key));
 console.log(`  wrote ${path.relative(STUDIO, keyPath)}`);
+
+// ---------------------------------------------------------------------------
+// the LABELLED key: the one a generator is actually shown
+// ---------------------------------------------------------------------------
+//
+// A generator reads a colour key as SHAPES and matches them against whatever
+// the prompt describes, so any block that happens to look like a distinctive
+// thing attracts that thing-s description. Measured on the ratkin: an EAR was
+// painted onto the top-of-hood block (a pointed pentagon) and onto the lower
+// shoulder lame (a rounded teardrop); the robe picked up the shoulder-s
+// material; the chest back picked up the shoulder-s bone. Every fix was another
+// paragraph of prose, and across five rounds the prompt grew from 19k to 27k
+// characters while the per-block assignments got LESS reliable, because the
+// instructions that mattered drowned in the warnings.
+//
+// Writing the slot name inside its island ends the argument: the block says
+// what it is, and the prompt no longer has to describe a shape at all. This is
+// the file to hand the generator. `key.png` stays flat and is what the importer
+// registers against, so the lettering never reaches the atlas.
+{
+  const { drawText, textWidth, GLYPH_H } = await import("./_font.mjs");
+  const label = Uint8Array.from(key);
+  const named = [];
+  // `hiddenBy` — on a cut-out plate that stands INSIDE another part, shade the
+  // stretch the part in front hides. The great axe's ornament plates run up
+  // through the head: the first sheet drew them the sword's way, growing out of
+  // the attach point, and nearly all of it ended up behind the head. The shaded
+  // area tells the generator where the ornament cannot be seen.
+  //   hiddenBy: [["AxeHead1", "AxeHead2"], ["Shoulder1", "Shoulder2"]]
+  // Each inner list is a FAMILY — one of them is always on the weapon — and a
+  // texel is hidden when EVERY member of some family covers it, so a design
+  // kept out of the shade shows whichever head is fitted.
+  const hiddenPx = new Uint8Array(SHEET * SHEET);
+  const worldOf = new Map(parts.map((p) => [p.name, p.world]));
+  for (const [si, name] of slotIds.entries()) {
+    const groups = recipe.slots[name].hiddenBy;
+    if (!groups) continue;
+    const ref = slots.get(name).tris.find((t) => t.p && t.px);
+    if (!ref) continue;
+    // world -> sheet px across the whole plane of the plate, not just its
+    // triangle: barycentrics extrapolate
+    const plate = new THREE.Triangle(...ref.p);
+    const nrm = plate.getNormal(new THREE.Vector3());
+    const bary = new THREE.Vector3();
+    const toPx = (w) => {
+      const q = w.clone().addScaledVector(nrm, -nrm.dot(w.clone().sub(ref.p[0])));
+      plate.getBarycoord(q, bary);
+      return [
+        bary.x * ref.px[0][0] + bary.y * ref.px[1][0] + bary.z * ref.px[2][0],
+        bary.x * ref.px[0][1] + bary.y * ref.px[1][1] + bary.z * ref.px[2][1],
+      ];
+    };
+    let x0 = SHEET, y0 = SHEET, x1 = 0, y1 = 0;
+    for (let y = 0; y < SHEET; y++)
+      for (let x = 0; x < SHEET; x++)
+        if (owner[y * SHEET + x] === si) {
+          x0 = Math.min(x0, x); x1 = Math.max(x1, x);
+          y0 = Math.min(y0, y); y1 = Math.max(y1, y);
+        }
+    const w = x1 - x0 + 1;
+    const h = y1 - y0 + 1;
+    const hidden = new Uint8Array(w * h);
+    for (const family of groups) {
+      const count = new Uint8Array(w * h);
+      for (const member of family) {
+        const world = worldOf.get(member);
+        if (!world) throw new Error(`hiddenBy: slot ${name} names "${member}", which is not in the recipe`);
+        const cover = new Uint8Array(w * h);
+        for (let t = 0; t < world.length; t += 3) {
+          const [a, b, c] = [world[t], world[t + 1], world[t + 2]].map(toPx);
+          const area = (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
+          if (Math.abs(area) < 1e-6) continue;
+          const lx = Math.max(x0, Math.floor(Math.min(a[0], b[0], c[0])));
+          const hx = Math.min(x1, Math.ceil(Math.max(a[0], b[0], c[0])));
+          const ly = Math.max(y0, Math.floor(Math.min(a[1], b[1], c[1])));
+          const hy = Math.min(y1, Math.ceil(Math.max(a[1], b[1], c[1])));
+          for (let y = ly; y <= hy; y++)
+            for (let x = lx; x <= hx; x++) {
+              const px = x + 0.5, py = y + 0.5;
+              const e0 = ((b[0] - a[0]) * (py - a[1]) - (b[1] - a[1]) * (px - a[0])) / area;
+              const e1 = ((c[0] - b[0]) * (py - b[1]) - (c[1] - b[1]) * (px - b[0])) / area;
+              const e2 = ((a[0] - c[0]) * (py - c[1]) - (a[1] - c[1]) * (px - c[0])) / area;
+              if (e0 >= 0 && e1 >= 0 && e2 >= 0) cover[(y - y0) * w + (x - x0)] = 1;
+            }
+        }
+        for (let i = 0; i < cover.length; i++) count[i] += cover[i];
+      }
+      for (let i = 0; i < count.length; i++) if (count[i] === family.length) hidden[i] = 1;
+    }
+    // shaded grey with dark diagonal hatching: reads as "something in front"
+    let n = 0;
+    for (let y = y0; y <= y1; y++)
+      for (let x = x0; x <= x1; x++) {
+        if (owner[y * SHEET + x] !== si || !hidden[(y - y0) * w + (x - x0)]) continue;
+        n++;
+        hiddenPx[y * SHEET + x] = 1;
+        const d = (y * SHEET + x) * 4;
+        const ink = (x + y) % 14 < 3 ? 70 : 150;
+        label[d] = ink;
+        label[d + 1] = ink;
+        label[d + 2] = ink;
+      }
+    const island = [...owner].filter((o) => o === si).length;
+    console.log(`  ${name}: ${((n / island) * 100).toFixed(0)}% hidden behind ${groups.map((g) => g.join("/")).join(" + ")} (shaded on the labelled key)`);
+  }
+  for (const [i, name] of slotIds.entries()) {
+    const at = placed.get(name);
+    if (!at) continue;
+    const rgb = rgbOf(recipe.slots[name].color);
+    // dark lettering on a light slot and the other way round, so it always reads
+    const lum = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2];
+    const ink = lum > 140 ? [0, 0, 0] : [255, 255, 255];
+    const on = (x, y) =>
+      x >= 0 && y >= 0 && x < SHEET && y < SHEET && owner[y * SHEET + x] === i && !hiddenPx[y * SHEET + x];
+    // biggest scale whose whole word sits on this island, tried around its middle.
+    // A tall narrow island — a tasset, a hand, a spine — gets its word turned on
+    // end, read bottom to top: measured on the ghoul, the five blocks too narrow
+    // for a horizontal word were exactly the five the generator got wrong (the
+    // tassets painted as hands, the hands as sleeves). Vertical wins whenever it
+    // fits at a larger scale and horizontal would be under scale 3.
+    // `label` on a slot overrides the word lettered into it — for a word that is
+    // an INSTRUCTION, not just a name: the ghoul's ribs came back as cloth on
+    // every sheet while lettered RIB-UPPER, and its legs as trousers.
+    const word = (recipe.slots[name].label ?? name).toUpperCase();
+    const plotAt = (put, fn) =>
+      drawText(word, 0, 0, put.scale, (x, y) =>
+        put.vertical ? fn(put.ox + y, put.oy + put.w - 1 - x) : fn(put.ox + x, put.oy + y),
+      );
+    // `labelMax` caps the lettering, so a word keeps clear of the `marks`
+    // drawn on the same island (the ghoul's HEAD ran into its left eye).
+    const fit = (vertical) => {
+      for (let scale = Math.min(6, recipe.slots[name].labelMax ?? 6); scale >= 1; scale--) {
+        const w = textWidth(word, scale);
+        const h = GLYPH_H * scale;
+        const bw = vertical ? h : w;
+        const bh = vertical ? w : h;
+        if (bw > at.w || bh > at.h) continue;
+        for (let ry = 0; ry <= 10; ry++)
+          for (let rx = 0; rx <= 10; rx++) {
+            const cand = {
+              ox: Math.round(at.x + (at.w - bw) * (rx / 10)),
+              oy: Math.round(at.y + (at.h - bh) * (ry / 10)),
+              scale,
+              vertical,
+              w,
+            };
+            let ok = true;
+            // every inked pixel, plus a one-pixel halo, must land on the island
+            plotAt(cand, (x, y) => {
+              if (!ok) return;
+              for (let dy = -1; dy <= 1 && ok; dy++)
+                for (let dx = -1; dx <= 1 && ok; dx++) if (!on(x + dx, y + dy)) ok = false;
+            });
+            if (ok) return cand;
+          }
+      }
+      return null;
+    };
+    // Horizontal reads best, so it wins unless it would be tiny.
+    const across = fit(false);
+    const upright = across && across.scale >= 3 ? null : fit(true);
+    const put = upright && (!across || upright.scale > across.scale) ? upright : across;
+    if (!put) {
+      named.push(`${name}?`);
+      continue;
+    }
+    plotAt(put, (x, y) => {
+      const d = (y * SHEET + x) * 4;
+      label[d] = ink[0];
+      label[d + 1] = ink[1];
+      label[d + 2] = ink[2];
+    });
+    named.push(name);
+  }
+  // `marks` — landmarks drawn into the LABELLED key only (key.png stays flat
+  // for the importer). Percentages in a prompt were not enough for the ghoul's
+  // face: one sheet drew it tiny, one drew it off to the side. So each mark is
+  // a point in WORLD space on the model — the eyes, the nose, the ends of the
+  // mouth — found on the part's surface and drawn where it actually lands:
+  //   { slot, at: [x, y, z], shape: "eye" | "dot" }  or
+  //   { slot, from: [x, y, z], to: [x, y, z], shape: "line" }
+  // An eye is a black disc ringed white, so it reads on any slot colour.
+  const markPx = (slotName, p) => {
+    const slot = slots.get(slotName);
+    const q = new THREE.Vector3(...p);
+    let best = null;
+    const tri = new THREE.Triangle();
+    const on = new THREE.Vector3();
+    const bary = new THREE.Vector3();
+    for (const t of slot?.tris ?? []) {
+      if (!t.p || !t.px) continue;
+      tri.set(t.p[0], t.p[1], t.p[2]);
+      tri.closestPointToPoint(q, on);
+      const d = on.distanceToSquared(q);
+      if (best && d >= best.d) continue;
+      tri.getBarycoord(on, bary);
+      best = {
+        d,
+        x: bary.x * t.px[0][0] + bary.y * t.px[1][0] + bary.z * t.px[2][0],
+        y: bary.x * t.px[0][1] + bary.y * t.px[1][1] + bary.z * t.px[2][1],
+      };
+    }
+    if (!best) throw new Error(`marks: slot ${slotName} has no geometry`);
+    return best;
+  };
+  const plot = (x, y, rgb) => {
+    x = Math.round(x);
+    y = Math.round(y);
+    if (x < 0 || y < 0 || x >= SHEET || y >= SHEET) return;
+    const d = (y * SHEET + x) * 4;
+    label[d] = rgb[0];
+    label[d + 1] = rgb[1];
+    label[d + 2] = rgb[2];
+  };
+  const disc = (cx, cy, r, rgb) => {
+    for (let y = -r; y <= r; y++) for (let x = -r; x <= r; x++) if (x * x + y * y <= r * r) plot(cx + x, cy + y, rgb);
+  };
+  for (const m of recipe.marks ?? []) {
+    const size = m.size ?? 7;
+    if (m.shape === "line") {
+      const a = markPx(m.slot, m.from);
+      const b = markPx(m.slot, m.to);
+      const n = Math.ceil(Math.hypot(b.x - a.x, b.y - a.y));
+      for (let k = 0; k <= n; k++) disc(a.x + ((b.x - a.x) * k) / n, a.y + ((b.y - a.y) * k) / n, 4, [255, 255, 255]);
+      for (let k = 0; k <= n; k++) disc(a.x + ((b.x - a.x) * k) / n, a.y + ((b.y - a.y) * k) / n, 2, [0, 0, 0]);
+      console.log(`  mark ${m.slot}: line ${a.x.toFixed(0)},${a.y.toFixed(0)} -> ${b.x.toFixed(0)},${b.y.toFixed(0)}`);
+      continue;
+    }
+    const at = markPx(m.slot, m.at);
+    disc(at.x, at.y, size + 3, [255, 255, 255]);
+    disc(at.x, at.y, m.shape === "dot" ? Math.max(2, size - 3) : size, [0, 0, 0]);
+    console.log(`  mark ${m.slot}: ${m.shape ?? "eye"} at ${at.x.toFixed(0)},${at.y.toFixed(0)} (${Math.sqrt(at.d).toFixed(2)} off the surface)`);
+  }
+  const labelPath = path.join(setDir, "key-labelled.png");
+  fs.writeFileSync(labelPath, encodePng(SHEET, SHEET, label));
+  const missed = named.filter((n) => n.endsWith("?"));
+  console.log(
+    `  wrote ${path.relative(STUDIO, labelPath)} — every island named` +
+      (missed.length ? `, except ${missed.map((n) => n.slice(0, -1)).join(", ")} (too small to letter)` : ""),
+  );
+}
 
 // ---------------------------------------------------------------------------
 // UVs onto the mesh
@@ -1968,7 +3587,7 @@ const manifest = {
   slots: {},
 };
 for (const [name, cfg] of Object.entries(recipe.slots)) {
-  const { color, sizeScale, ...rest } = cfg;
+  const { color, sizeScale, label, labelMax, ...rest } = cfg;
   manifest.slots[color] = {
     name,
     transparency: rest.transparency === true,
@@ -1990,13 +3609,128 @@ console.log(`  wrote ${path.relative(STUDIO, manifestPath)}`);
 // An engine material asset pointing at the same PNG would be flipped (and
 // would flatten the cutout material onto every part), so drive the sword from
 // the mesh's own materials unless you exported with --flip-v.
+// ---------------------------------------------------------------------------
+// seam blend: reconcile the two sides of a split
+// ---------------------------------------------------------------------------
+//
+// `split` cuts one continuous surface into two islands so each can be looked at
+// down its own axis. The generator then paints them as two separate drawings,
+// and where they rejoin on the model there is a hard line: measured on the
+// ratkin's crown, only 6% apart in MEAN value — which `matchTo` would have
+// nearly fixed — but visibly stepped at the border, because a flat gain moves
+// an island's level and cannot make its EDGE agree with the edge it meets.
+//
+// So find the edges that are adjacent in 3D but far apart in UV, and average
+// the two sides across them, feathering inward over a few texels. At the seam
+// itself both sides become the same colour, so there is nothing left to see.
+//
+// Only edges WITHIN one part are blended. That is exactly the set of splits,
+// and it is the only set where the two sides are guaranteed to be one surface
+// and one material — blending across two different meshes would smear a robe
+// into the body under it.
+async function blendSplitSeams(file, radius) {
+  const { decodePng } = await import("./_png.mjs");
+  const img = decodePng(fs.readFileSync(file));
+  const { width: W, height: H } = img;
+  const src = img.data;
+  const out = Uint8Array.from(src);
+
+  const at = (x, y) => (Math.min(H - 1, Math.max(0, y | 0)) * W + Math.min(W - 1, Math.max(0, x | 0))) * 4;
+  const seams = [];
+  for (const part of parts) {
+    const n = part.world.length;
+    // Weld by position: a split's two sides still share their border vertices
+    // in 3D, which is what makes them findable at all.
+    const wid = new Map();
+    const vid = new Int32Array(n);
+    for (let i = 0; i < n; i++) {
+      const v = part.world[i];
+      const k = `${v.x.toFixed(4)},${v.y.toFixed(4)},${v.z.toFixed(4)}`;
+      if (!wid.has(k)) wid.set(k, wid.size);
+      vid[i] = wid.get(k);
+    }
+    const uvOf = (i) => [part.uvKey[i * 2] * W, part.uvKey[i * 2 + 1] * H];
+    const edges = new Map();
+    for (let t = 0; t < n / 3; t++)
+      for (let e = 0; e < 3; e++) {
+        const i0 = t * 3 + e, i1 = t * 3 + ((e + 1) % 3), i2 = t * 3 + ((e + 2) % 3);
+        const k = vid[i0] < vid[i1] ? `${vid[i0]}:${vid[i1]}` : `${vid[i1]}:${vid[i0]}`;
+        if (!edges.has(k)) edges.set(k, []);
+        edges.get(k).push({ i0, i1, i2 });
+      }
+    for (const sides of edges.values()) {
+      if (sides.length !== 2) continue; // a border of the part, or non-manifold
+      const [A, B] = sides;
+      const a0 = uvOf(A.i0), a1 = uvOf(A.i1);
+      // B may walk the edge the other way round; match by welded id, not order.
+      const same = vid[B.i0] === vid[A.i0];
+      const b0 = uvOf(same ? B.i0 : B.i1), b1 = uvOf(same ? B.i1 : B.i0);
+      const apart = Math.hypot(a0[0] - b0[0], a0[1] - b0[1]) + Math.hypot(a1[0] - b1[0], a1[1] - b1[1]);
+      // Under a texel apart is the same place: a continuous unwrap, or the fold
+      // of a mirrored part where both halves legitimately share their texels.
+      if (apart < 1.5) continue;
+      seams.push({ a0, a1, b0, b1, aIn: uvOf(A.i2), bIn: uvOf(B.i2) });
+    }
+  }
+  if (!seams.length) return { file, seams: 0 };
+
+  const unit = (from, to) => {
+    const dx = to[0] - from[0], dy = to[1] - from[1];
+    const L = Math.hypot(dx, dy) || 1;
+    return [dx / L, dy / L];
+  };
+  for (const s of seams) {
+    // Inward is toward the triangle's third corner, so a sample never steps
+    // over the edge into whatever is painted on the other side of it.
+    const ia = unit([(s.a0[0] + s.a1[0]) / 2, (s.a0[1] + s.a1[1]) / 2], s.aIn);
+    const ib = unit([(s.b0[0] + s.b1[0]) / 2, (s.b0[1] + s.b1[1]) / 2], s.bIn);
+    const len = Math.max(Math.hypot(s.a1[0] - s.a0[0], s.a1[1] - s.a0[1]), Math.hypot(s.b1[0] - s.b0[0], s.b1[1] - s.b0[1]));
+    const steps = Math.max(2, Math.ceil(len * 2));
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      const pa = [s.a0[0] + (s.a1[0] - s.a0[0]) * t, s.a0[1] + (s.a1[1] - s.a0[1]) * t];
+      const pb = [s.b0[0] + (s.b1[0] - s.b0[0]) * t, s.b0[1] + (s.b1[1] - s.b0[1]) * t];
+      for (let d = 0; d <= radius; d++) {
+        // Full mix at the seam, nothing at the far end of the feather.
+        const w = 0.5 * (1 - d / (radius + 1));
+        const oa = at(pa[0] + ia[0] * (d + 0.5), pa[1] + ia[1] * (d + 0.5));
+        const ob = at(pb[0] + ib[0] * (d + 0.5), pb[1] + ib[1] * (d + 0.5));
+        // A cut hem is alpha 0 by design; averaging into it would drag the
+        // background through the seam.
+        if (src[oa + 3] < 128 || src[ob + 3] < 128) continue;
+        for (let c = 0; c < 3; c++) {
+          const ca = src[oa + c], cb = src[ob + c];
+          out[oa + c] = Math.round(ca * (1 - w) + cb * w);
+          out[ob + c] = Math.round(cb * (1 - w) + ca * w);
+        }
+      }
+    }
+  }
+  const dest = path.join(path.dirname(file), `${path.basename(file, ".png")}-seamblend.png`);
+  fs.writeFileSync(dest, encodePng(W, H, out));
+  return { file: dest, seams: seams.length };
+}
+
 let atlasTex = null;
+/** The atlas actually used, which is the seam-blended one when there was one. */
+let atlasUsed = null;
 if (args.atlas) {
-  const atlasFile = path.resolve(String(args.atlas));
+  let atlasFile = path.resolve(String(args.atlas));
   if (!fs.existsSync(atlasFile)) {
     console.error(`! --atlas ${atlasFile} does not exist`);
     process.exit(1);
   }
+  // A few texels is enough: at 256 the ratkin is 2 texels per model unit, so a
+  // radius of 2 feathers the join over about a centimetre of skull.
+  const SEAM = Number(args["seam-blend"] ?? recipe.seamBlend ?? 2);
+  if (SEAM > 0 && args["seam-blend"] !== false) {
+    const blended = await blendSplitSeams(atlasFile, SEAM);
+    if (blended.seams) {
+      console.log(`  blended ${blended.seams} split seam(s) over ${SEAM} texels -> ${path.basename(blended.file)}`);
+      atlasFile = blended.file;
+    }
+  }
+  atlasUsed = atlasFile;
   atlasTex = new THREE.TextureLoader().load(atlasFile);
   atlasTex.flipY = FLIP_V;
   atlasTex.colorSpace = THREE.SRGBColorSpace;
@@ -2060,6 +3794,15 @@ const isCutout = (part) => {
  * meet within `degrees` of each other, so a crease survives.
  */
 function creasedNormals(parts, degrees) {
+  // The threshold may be raised for ONE part. Accumulation stays global — every
+  // contribution at a shared position is still collected, which is what keeps
+  // the chest and the back from shading differently where they meet — but how
+  // wide a crease a part is willing to smooth over is its own business.
+  // Measured on the ratkin: at 48 degrees, 8 of the 34 edges where the crown
+  // island rejoins the profile stayed HARD, so the engine drew a lighting line
+  // along a quarter of the top of the skull whatever the texture did there. At
+  // 60 that is 2 of 34, and the jaw, the ear and the brow are still creases.
+  const cosOf = (part) => Math.cos(((part.smooth ?? degrees) * Math.PI) / 180);
   const cos = Math.cos((degrees * Math.PI) / 180);
   const q = (n) => Math.round(n * 1e3);
   const key = (v) => `${q(v.x)},${q(v.y)},${q(v.z)}`;
@@ -2085,19 +3828,26 @@ function creasedNormals(parts, degrees) {
   }
   for (const part of parts) {
     const out = new Float32Array(part.world.length * 3);
+    const partCos = cosOf(part);
     for (let t = 0; t < part.world.length / 3; t++) {
       const f = faceOf.get(part.name)[t].n;
       for (let k = 0; k < 3; k++) {
         const acc = new THREE.Vector3();
         for (const c of at.get(key(part.world[t * 3 + k])) ?? [])
-          if (c.n.dot(f) >= cos) acc.addScaledVector(c.n, c.area);
+          if (c.n.dot(f) >= partCos) acc.addScaledVector(c.n, c.area);
         (acc.lengthSq() > 1e-12 ? acc.normalize() : f).toArray(out, (t * 3 + k) * 3);
       }
     }
     part.normal = out;
   }
 }
-if (recipe.smooth) creasedNormals(parts, Number(recipe.smooth));
+if (recipe.smooth) {
+  for (const part of parts) {
+    const spec = recipe.parts[part.name];
+    if (spec?.smooth !== undefined) part.smooth = Number(spec.smooth);
+  }
+  creasedNormals(parts, Number(recipe.smooth));
+}
 
 const baked = new THREE.Group();
 baked.name = path.basename(outMesh);
@@ -2178,6 +3928,10 @@ console.log(
   });
   const mesh = new THREE.Mesh(geo, uber);
   mesh.name = recipeName;
+  // the part table rides in the glTF (node extras → userData.parts on load), so
+  // an item's `appearance` can name parts and ctx.setModelLook resolves them
+  // against the model it is actually drawing — never a mask gone stale
+  mesh.userData.parts = Object.fromEntries(order.map((nm, i) => [nm, i]));
   const wrap = new THREE.Group();
   wrap.name = `${path.basename(outMesh)}-uber`;
   wrap.add(mesh);
@@ -2311,7 +4065,7 @@ console.log(
   let sheetNote = "";
   if (args.atlas) {
     const beside = path.join(path.dirname(outMesh), `${recipeName}-atlas.png`);
-    fs.copyFileSync(path.resolve(String(args.atlas)), beside);
+    fs.copyFileSync(atlasUsed ?? path.resolve(String(args.atlas)), beside);
     sheetNote = ` + ${path.basename(beside)}`;
   }
   console.log(
@@ -2336,7 +4090,7 @@ if (args.check !== false) {
   const combos = (recipe.combos ?? [parts.map((p) => p.name)]).map((names) => names.filter((n) => byName.has(n)));
   let tex = { width: SHEET, height: SHEET, rgba: key };
   if (args.atlas) {
-    const img = decodePng(fs.readFileSync(path.resolve(String(args.atlas))));
+    const img = decodePng(fs.readFileSync(atlasUsed ?? path.resolve(String(args.atlas))));
     tex = { width: img.width, height: img.height, rgba: img.data };
   }
   const frames = combos.map((names) => ({

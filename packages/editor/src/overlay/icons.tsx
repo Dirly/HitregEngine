@@ -25,6 +25,8 @@ export type IconName =
   | "edge"
   | "face"
   | "snap"
+  | "space"
+  | "holster"
   | "settle"
   | "grid"
   | "gizmos"
@@ -88,6 +90,8 @@ const PATHS: Record<IconName, React.ReactNode> = {
     </>
   ),
   snap: <path d="M4 2v6a4 4 0 0 0 8 0V2M2.5 5H5.5M10.5 5h3" />,
+  holster: <path d="M5 1.5l6 13M11 1.5l-6 13M3.5 6h9" />,
+  space: <path d="M3 13V4M3 13h9M3 13l6-6M1.5 5.5L3 4l1.5 1.5M10.5 11.5L12 13l-1.5 1.5" />,
   settle: <path d="M8 1.5v7M5 5.5l3 3 3-3M2.5 12.5h11M4.5 15h7" />,
   grid: <path d="M2 2h12v12H2zM6 2v12M10 2v12M2 6h12M2 10h12" />,
   gizmos: (

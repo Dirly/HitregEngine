@@ -15,10 +15,17 @@ import type {
 } from "./state.js";
 import { selectSingle, toggleSelection } from "./state.js";
 import { setRayFromScreen } from "./screen-ray.js";
+import { findSocketBone, socketParamsFrom } from "@hitreg/render";
 import { applyMaterialToMany, deleteMany, duplicateMany, isLockedCascading } from "./selection-ops.js";
 import { isTypingTarget } from "./mesh-edit-tool.js";
 
 export interface ViewportOptions {
+  /**
+   * Where a held item is gripped, in its entity's local space (the host's
+   * MovingInstanceSystem.gripOf). A held item's gizmo pivots THERE — its model
+   * origin is wherever the modeller left it, often nowhere near the handle.
+   */
+  gripOf?: (entityId: string) => THREE.Vector3 | null;
   canvas: HTMLCanvasElement;
   camera: THREE.PerspectiveCamera;
   store: SceneStore;
@@ -61,6 +68,16 @@ export class ViewportTools {
   private pointerDown: { x: number; y: number } | null = null;
   private disposers: Array<() => void> = [];
   private altDown = false;
+  /** Shift held: the gizmo moves a TENTH as far — fine placement (a grip in a fist). */
+  private shiftDown = false;
+  /** The dragged object's transform when the drag began, for Shift's fine scaling. */
+  private dragStart: { position: THREE.Vector3; quaternion: THREE.Quaternion; scale: THREE.Vector3 } | null = null;
+  /**
+   * A held item's gizmo stand-in, sitting on its GRIP (see gripOf): the gizmo
+   * drags this, and the item follows it rigidly, so rotation turns the item
+   * about its handle rather than its model origin.
+   */
+  private gripProxy: { id: string; object: THREE.Object3D; proxy: THREE.Object3D; grip: THREE.Vector3; start: { proxyInverse: THREE.Matrix4; object: THREE.Matrix4 } | null } | null = null;
   private flyBtnDown = false;
   private flewDuringDrag = false;
   /** Alt-scale anchor: keep the object's lowest point fixed while scaling. */
@@ -88,6 +105,17 @@ export class ViewportTools {
     this.controls.addEventListener("dragging-changed", (event) => {
       const dragging = Boolean((event as { value: unknown }).value);
       opts.onDraggingChanged?.(dragging);
+      if (this.gripProxy) {
+        const g = this.gripProxy;
+        g.proxy.updateMatrixWorld(true);
+        g.object.updateMatrixWorld(true);
+        g.start = dragging ? { proxyInverse: g.proxy.matrixWorld.clone().invert(), object: g.object.matrixWorld.clone() } : null;
+      }
+      const dragged = this.controls.object;
+      this.dragStart =
+        dragging && !this.groupProxy && dragged
+          ? { position: dragged.position.clone(), quaternion: dragged.quaternion.clone(), scale: dragged.scale.clone() }
+          : null;
       if (dragging && this.groupProxy && this.groupIds) {
         this.snapshotGroupStart();
       } else if (dragging && this.controls.mode === "scale" && this.controls.object) {
@@ -115,6 +143,16 @@ export class ViewportTools {
         return;
       }
       const object = this.controls.object;
+      if (object && this.shiftDown && this.dragStart) {
+        // fine: a tenth of the drag. The gizmo sets the object from its drag
+        // start every move (it never accumulates), so scaling that result
+        // back toward the start is exact, not drifting.
+        const s = this.dragStart;
+        object.position.lerpVectors(s.position, object.position, 0.1);
+        object.quaternion.slerpQuaternions(s.quaternion, object.quaternion, 0.1);
+        object.scale.lerpVectors(s.scale, object.scale, 0.1);
+      }
+      if (this.gripProxy?.start) this.followGripProxy();
       if (!object || !this.altDown || this.controls.mode !== "scale" || !this.scaleAnchor) return;
       object.position.y = this.scaleAnchor.bottomY + this.scaleAnchor.k * object.scale.y;
     });
@@ -170,8 +208,10 @@ export class ViewportTools {
     const onPointerLeave = () => opts.hover?.set(null);
     const onKeyUp = (e: KeyboardEvent) => {
       if (e.key === "Alt") this.altDown = false;
+      if (e.key === "Shift") this.shiftDown = false;
     };
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Shift") this.shiftDown = true;
       if (e.key === "Alt") {
         this.altDown = true;
         e.preventDefault(); // keep browsers from stealing focus to the menu bar
@@ -187,6 +227,10 @@ export class ViewportTools {
       if (e.code === "KeyW") this.opts.gizmoMode.set("translate");
       if (e.code === "KeyE") this.opts.gizmoMode.set("rotate");
       if (e.code === "KeyR") this.opts.gizmoMode.set("scale");
+      if (e.code === "KeyX" && !e.ctrlKey) {
+        const s = this.opts.settings.get();
+        this.opts.settings.set({ ...s, gizmoSpace: s.gizmoSpace === "local" ? "world" : "local" });
+      }
       if (e.ctrlKey && e.code === "KeyZ") this.opts.store.undo();
       if (e.ctrlKey && e.code === "KeyY") this.opts.store.redo();
       // in an element mode, Delete/Ctrl+D belong to the mesh tool (elements, not entities)
@@ -294,9 +338,28 @@ export class ViewportTools {
 
   private applySnaps(): void {
     const s = this.opts.settings.get();
-    this.controls.setTranslationSnap(s.snap ? s.translateSnap : null);
-    this.controls.setRotationSnap(s.snap ? THREE.MathUtils.degToRad(s.rotateSnapDeg) : null);
-    this.controls.setScaleSnap(s.snap ? s.scaleSnap : null);
+    // a held item is placed at the scale of a fist: half-metre and 15° grid
+    // steps would make it unplaceable, so the grid never applies to one
+    const snap = s.snap && !this.selectedSocket();
+    this.controls.setTranslationSnap(snap ? s.translateSnap : null);
+    this.controls.setRotationSnap(snap ? THREE.MathUtils.degToRad(s.rotateSnapDeg) : null);
+    this.controls.setScaleSnap(snap ? s.scaleSnap : null);
+    this.controls.setSpace(s.gizmoSpace ?? "world");
+  }
+
+  /**
+   * The selected entity's `bone-socket` params, when it is a held item. Its
+   * transform is not its own — the socket derives it from a bone every frame —
+   * so a gizmo drag on it must be written back as the SOCKET's offset and
+   * rotation, or the next frame puts it straight back.
+   */
+  private selectedSocket(): { id: string; params: Record<string, unknown> } | null {
+    const id = this.opts.selection.get();
+    if (!id) return null;
+    const script = this.opts.store.doc.entities[id]?.components["script"] as
+      | { name?: string; params?: Record<string, unknown> }
+      | undefined;
+    return script?.name === "bone-socket" ? { id, params: script.params ?? {} } : null;
   }
 
   private refreshGrid(): void {
@@ -345,6 +408,46 @@ export class ViewportTools {
     this.assistSnap(newRoots);
   }
 
+  /** Sit the stand-in on the item's grip, in the item's orientation. */
+  private placeGripProxy(): void {
+    const g = this.gripProxy;
+    if (!g) return;
+    g.object.updateWorldMatrix(true, false);
+    g.proxy.position.copy(g.object.localToWorld(g.grip.clone()));
+    g.object.getWorldQuaternion(g.proxy.quaternion);
+    g.proxy.updateMatrixWorld(true);
+  }
+
+  /** Mid-drag: the item keeps its offset from the stand-in, rigidly. */
+  private followGripProxy(): void {
+    const g = this.gripProxy;
+    if (!g?.start || !g.object.parent) return;
+    g.proxy.updateMatrixWorld(true);
+    const world = g.proxy.matrixWorld.clone().multiply(g.start.proxyInverse).multiply(g.start.object);
+    const local = g.object.parent.matrixWorld.clone().invert().multiply(world);
+    local.decompose(g.object.position, g.object.quaternion, g.object.scale);
+    g.object.updateMatrixWorld(true);
+  }
+
+  /**
+   * Once per frame from the host: a held item moves on its own (the socket
+   * follows an animated bone; an inspector edit moves it), so the stand-in is
+   * re-seated on its grip whenever it is not being dragged. The grip itself
+   * may only become known once the model has loaded.
+   */
+  tick(): void {
+    const g = this.gripProxy;
+    if (!g || g.start) return;
+    const grip = this.opts.gripOf?.(g.id);
+    if (grip) g.grip.copy(grip);
+    this.placeGripProxy();
+  }
+
+  private teardownGripProxy(): void {
+    this.gripProxy?.proxy.removeFromParent();
+    this.gripProxy = null;
+  }
+
   private teardownGroupProxy(): void {
     this.groupProxy?.removeFromParent();
     this.groupProxy = null;
@@ -361,6 +464,7 @@ export class ViewportTools {
 
   private syncAttachment(): void {
     this.teardownGroupProxy();
+    this.teardownGripProxy();
     const enabled =
       this.opts.enabled.get() &&
       !this.opts.grayboxActive?.get() &&
@@ -378,7 +482,18 @@ export class ViewportTools {
     const scene = this.opts.getScene();
     if (helper.parent !== scene) scene.add(helper);
     if (ids.length === 1) {
-      this.controls.attach(this.opts.getObject(ids[0]!)!);
+      const object = this.opts.getObject(ids[0]!)!;
+      const grip = this.selectedSocket() ? this.opts.gripOf?.(ids[0]!) : null;
+      if (grip) {
+        const proxy = new THREE.Object3D();
+        scene.add(proxy);
+        this.gripProxy = { id: ids[0]!, object, proxy, grip: grip.clone(), start: null };
+        this.placeGripProxy();
+        this.controls.attach(proxy);
+      } else {
+        this.controls.attach(object);
+      }
+      this.applySnaps(); // a held item opts out of the grid
       return;
     }
     // group: pivot on the active selection (falling back to the last id) —
@@ -630,6 +745,12 @@ export class ViewportTools {
     const id = this.opts.selection.get();
     const object = this.controls.object;
     if (!id || !object) return;
+    const socket = this.selectedSocket();
+    if (socket) {
+      this.commitSocket(socket, this.gripProxy?.object ?? object);
+      if (this.gripProxy) this.gripProxy.start = null;
+      return;
+    }
     this.opts.store.apply([
       {
         op: "set-component",
@@ -643,6 +764,34 @@ export class ViewportTools {
       },
     ]);
     if (this.controls.mode === "translate") this.assistSnap([id]);
+  }
+
+  /**
+   * A dragged held item, written back as its socket: the offset and rotation
+   * that put it where it was dropped, in the bone's axes. When the socket was
+   * showing its second pose (a shield in a guard — the socket marks
+   * `userData.socketPose`), that pose is the one edited.
+   */
+  private commitSocket(socket: { id: string; params: Record<string, unknown> }, object: THREE.Object3D): void {
+    const p = socket.params;
+    const alt = object.userData["socketPose"] === "alt" && Array.isArray(p["altRotationDeg"]) && (p["altRotationDeg"] as unknown[]).length === 3;
+    const boneName = String((alt && p["altBone"]) || p["bone"] || "");
+    const bone = object.parent && boneName ? findSocketBone(object.parent, boneName) : null;
+    if (!bone) {
+      console.warn(`[editor] ${socket.id}: bone "${boneName}" not found on its parent's model — not written`);
+      return;
+    }
+    object.updateWorldMatrix(true, false);
+    const fitted = socketParamsFrom(
+      bone,
+      object.getWorldPosition(new THREE.Vector3()),
+      object.getWorldQuaternion(new THREE.Quaternion()),
+    );
+    const next = alt
+      ? { ...p, altOffset: fitted.offset, altRotationDeg: fitted.rotationDeg }
+      : { ...p, offset: fitted.offset, rotationDeg: fitted.rotationDeg };
+    const script = this.opts.store.doc.entities[socket.id]!.components["script"] as Record<string, unknown>;
+    this.opts.store.apply([{ op: "set-component", id: socket.id, component: "script", data: { ...script, params: next } }]);
   }
 
   /**

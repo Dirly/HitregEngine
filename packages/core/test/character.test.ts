@@ -20,6 +20,7 @@ import {
   splitStack,
   unequip,
   xpForLevel,
+  twoHanderOf,
   xpToNext,
   type CharacterSheet,
   type Item,
@@ -36,6 +37,8 @@ const ITEMS: Record<string, ItemInput> = {
   potion: { name: "Potion", stack: 5, weight: 0.5, kind: "consumable" },
   satchel: { name: "Satchel", slots: ["bag"], weight: 1, bag: { cols: 6, rows: 4 } },
   crate: { name: "Crate", slots: ["bag"], weight: 4, bag: { cols: 3, rows: 3 } },
+  greatsword: { name: "Greatsword", slots: ["primary"], twoHanded: true, weight: 3.4, modifiers: { strength: 2 } },
+  shield: { name: "Shield", slots: ["offhand"], weight: 4, modifiers: { armor: 3 } },
 };
 const parsed = Object.fromEntries(Object.entries(ITEMS).map(([id, doc]) => [id, itemSchema.parse(doc)])) as Record<
   string,
@@ -250,6 +253,37 @@ describe("equipment", () => {
     expect(s.equipment.helm).toBeUndefined();
     expect(s.items["i1"]).toMatchObject({ container: "pockets", x: 2, y: 0 });
     expect(unequip(s, "helm", undefined, env)).toMatchObject({ ok: false, error: /nothing is worn/ });
+  });
+});
+
+describe("two-handed items", () => {
+  it("a two-hander leaves the offhand item worn but inactive", () => {
+    let s = createSheet();
+    s = must(addItem(s, "shield", 1, env)).sheet; // i1
+    s = must(addItem(s, "greatsword", 1, env)).sheet; // i2
+    s = must(equip(s, "i1", undefined, env)).sheet;
+    expect(derivedStats(s, env).stats.armor).toBe(3);
+    s = must(equip(s, "i2", undefined, env)).sheet;
+    // nothing is taken off
+    expect(s.equipment).toMatchObject({ primary: "i2", offhand: "i1" });
+    expect(twoHanderOf(s, env)?.name).toBe("Greatsword");
+    const d = derivedStats(s, env);
+    expect(d.stats.armor).toBe(0); // the shield counts for nothing…
+    expect(d.attributes.strength).toBe(12); // …the greatsword does
+    expect(d.weight).toBeCloseTo(7.4); // but the shield is still carried
+  });
+
+  it("the offhand item comes back into play when the two-hander is put away", () => {
+    let s = createSheet();
+    s = must(addItem(s, "greatsword", 1, env)).sheet; // i1
+    s = must(addItem(s, "shield", 1, env)).sheet; // i2
+    s = must(equip(s, "i1", undefined, env)).sheet;
+    s = must(equip(s, "i2", undefined, env)).sheet; // allowed, inactive
+    expect(s.equipment).toMatchObject({ primary: "i1", offhand: "i2" });
+    expect(derivedStats(s, env).stats.armor).toBe(0);
+    s = must(unequip(s, "primary", undefined, env)).sheet;
+    expect(twoHanderOf(s, env)).toBeNull();
+    expect(derivedStats(s, env).stats.armor).toBe(3);
   });
 });
 

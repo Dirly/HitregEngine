@@ -181,8 +181,14 @@ export function materialMapKey(data: MaterialData): string {
  */
 const textureCache = new Map<string, Promise<THREE.Texture>>();
 
-/** Magnification style. Pixel art wants hard texel edges, photo art does not. */
-export type TextureFilter = "linear" | "nearest";
+/**
+ * Sampling style. Pixel art wants hard texel edges, photo art does not.
+ * "nearest" is hard up close but still mipmaps with distance; "pixel" is hard
+ * at EVERY distance (no mipmaps — how a PS1 drew), for small models such as a
+ * held weapon, where a thin blade is minified across its width even at arm's
+ * length and "nearest" would blur it between mip levels.
+ */
+export type TextureFilter = "linear" | "nearest" | "pixel";
 
 // Filtering is a property of the TEXTURE OBJECT, and the cache shares one
 // object per key — so it has to be part of the key, or the first material to
@@ -260,7 +266,11 @@ export function applyModelTextureFilter(root: THREE.Object3D, filter: TextureFil
         const texture = slots[slot];
         if (!texture || !texture.isTexture || seen.has(texture.uuid)) continue;
         seen.add(texture.uuid);
-        if (filter === "nearest") {
+        if (filter === "pixel") {
+          texture.magFilter = THREE.NearestFilter;
+          texture.minFilter = THREE.NearestFilter;
+          texture.generateMipmaps = false;
+        } else if (filter === "nearest") {
           texture.magFilter = THREE.NearestFilter;
           texture.minFilter = THREE.NearestMipmapLinearFilter;
         } else {
@@ -288,8 +298,12 @@ export function configureTexture(
   // the texture's own uv matrix stays identity for everyone sharing it
   texture.repeat.set(1, 1);
   texture.offset.set(0, 0);
-  texture.generateMipmaps = true;
-  if (filter === "nearest") {
+  texture.generateMipmaps = filter !== "pixel";
+  if (filter === "pixel") {
+    // hard at every distance, no mip chain at all (see TextureFilter)
+    texture.magFilter = THREE.NearestFilter;
+    texture.minFilter = THREE.NearestFilter;
+  } else if (filter === "nearest") {
     // Pixel art: magnify with hard texel edges so it reads chunky instead of
     // being smeared into mush the moment you stand near it.
     //

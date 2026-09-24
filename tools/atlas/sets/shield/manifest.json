@@ -1,0 +1,58 @@
+{
+  "size": 216,
+  "bleed": 3,
+  "bgLum": 228,
+  "keyColor": "#00ffff",
+  "groundFringe": 1,
+  "fitSearch": 1.6,
+  "slots": {
+    "#1f00ff": {
+      "name": "shield1-front",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#00a2ff": {
+      "name": "shield1-back",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#ff0000": {
+      "name": "shield2-front",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#ff7d00": {
+      "name": "shield2-back",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#a900ff": {
+      "name": "shield3-front",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#e0a0ff": {
+      "name": "shield3-back",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#3cff00": {
+      "name": "deflector1",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#0f3e00": {
+      "name": "deflector2",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    }
+  }
+}

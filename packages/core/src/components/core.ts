@@ -263,18 +263,22 @@ export const meshSchema = z.object({
             "unwrap-weapon). Parts whose bit is clear collapse to a degenerate triangle in the VERTEX stage, so " +
             "they cost no fragments — hiding them with alpha instead would rasterise every hidden part only to " +
             "discard it. This is what makes a modular weapon one mesh and one material: thirty different swords " +
-            "in a town draw as one instanced batch. Pairs with `atlasTile`; only honoured for `renderMode: " +
-            "\"instanced\"` asset meshes. NOTE that `uvRotation` also claims TEXCOORD_1 — a model may carry a " +
+            "in a town draw as one instanced batch. Pairs with `atlasTile` (instanced only). On a NON-instanced " +
+            "asset mesh (one held or worn model) the mask trims the model's index to the shown parts at load " +
+            "instead, and a script changes it live with `ctx.setModelLook` — the `equipment-look` builtin does " +
+            "that from an item's `appearance`. NOTE that `uvRotation` also claims TEXCOORD_1 — a model may carry a " +
             "rotation pivot or a part index there, never both. At most 24 PARTS per ubermesh: the bit test is float " +
             "arithmetic (exact below 2^24, and identical on both backends), so bit 24 and above never read.",
         ),
       textureFilter: z
-        .enum(["linear", "nearest"])
+        .enum(["linear", "nearest", "pixel"])
         .optional()
         .describe(
           "Override the model's own texture sampling. 'nearest' keeps hard texel edges — the pixel-art / PSX " +
             "look for a low-res character skin — where the linear filtering most exporters bake into the file " +
-            "smears it. Minification still mipmaps either way, so distant models stay stable. Applies to every " +
+            "smears it; minification still mipmaps, so distant models stay stable. 'pixel' is hard at EVERY " +
+            "distance, no mipmaps (the PS1 drew none): use it for small models like held weapons, whose thin " +
+            "blades are minified across their width even up close and blur between mips under 'nearest'. Applies to every " +
             "map of every material in the model, and the loaded model is SHARED by every entity using it, so " +
             "one entity's choice is the asset's choice.",
         ),
@@ -474,6 +478,18 @@ export const meshSchema = z.object({
     .describe(
       "instanced only: swap to a cheap distance proxy when far from camera. Turn off for props " +
         "already too small/cheap to benefit (grass, small clutter) — the proxy swap only hurts those visually.",
+    ),
+  moving: z
+    .boolean()
+    .default(false)
+    .describe(
+      'instanced only: this instance MOVES — a held weapon, a worn helm, a carried lantern. A plain instanced ' +
+        "entry is placed once when the scene builds; a moving one re-reads its entity's world transform every " +
+        "frame, so it follows a parent, a `bone-socket` or a script. Every moving instance of one asset in the " +
+        "scene is still ONE draw call (plus its shadow passes), which is the point: thirty players' swords cost " +
+        "what one does. No LOD tiers. `atlasTile`/`partMask` set the look, and `ctx.setModelLook` changes it " +
+        "live (the `equipment-look` builtin does that from an item's `appearance`). A host without the moving " +
+        "batch system draws it as an ordinary model.",
     ),
   static: z
     .boolean()

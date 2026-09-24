@@ -1,3 +1,4 @@
+import { z } from "zod";
 import type { AssetLibrary } from "../assets.js";
 import type { NetStateStore } from "../net-state.js";
 import { itemSchema } from "./items.js";
@@ -24,6 +25,16 @@ export function registerCharacterAssetTypes(assets: AssetLibrary): void {
  * and the namespace shows up in the AI-facing spec. Once per store.
  */
 export function registerCharacterNetState(store: NetStateStore): void {
+  store.define(
+    "holster",
+    z
+      .boolean()
+      .describe(
+        "Whether a body's weapons are HOLSTERED (on its back), keyed holster/<bodyId>. Authority-written by the " +
+          "weapon-stance script on a stance.holster request from the body's owner; every tab moves the held items " +
+          "to their back slots from it.",
+      ),
+  );
   store.define("quests", questJournalSchema.describe("Authority-owned quest journal keyed quests/<actorId>. Tracking requests validate body ownership; objective progress never accepts peer assertions."));
   store.define(
     CHARACTER_NETSTATE,

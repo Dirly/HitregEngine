@@ -7,6 +7,7 @@ import {
   firstFit,
   RARITY_TINT,
   slotKind,
+  twoHanderOf,
   type Attribute,
   type CharacterSheet,
   type Container,
@@ -396,6 +397,30 @@ export class CharacterUi extends Script {
         itemEl.dataset["slot"] = slot;
         itemEl.addEventListener("dblclick", () => this.emit(CHARACTER_EVENTS.unequip, { slot }));
         cellEl.append(itemEl);
+      }
+      // a two-hander fills the off hand too: the slot goes grey, marked "2H"
+      // (never colour alone). A worn off-hand item stays in it, inactive; an
+      // empty slot shows the two-hander ghosted.
+      const twoHander = slot === "offhand" ? twoHanderOf(sheet, { catalog: this.catalog }) : null;
+      if (twoHander) {
+        cellEl.classList.add("hr-blocked");
+        cellEl.title = stack
+          ? `${twoHander.name} is held in both hands — inactive until it is put away`
+          : `${twoHander.name} is held in both hands`;
+        if (!stack) {
+          const ghost = el("div", "hr-item hr-ghosted");
+          ghost.style.inset = "0";
+          const url = twoHander.icon ? this.iconUrl(twoHander.icon) : undefined;
+          if (url) {
+            const img = document.createElement("img");
+            img.src = url;
+            img.alt = "";
+            img.draggable = false;
+            ghost.append(img);
+          }
+          cellEl.append(ghost);
+        }
+        cellEl.append(el("span", "hr-2h", "2H"));
       }
       doll.append(cellEl);
     }
@@ -849,6 +874,8 @@ const CSS = `
   border:var(--hr-slot-border) solid transparent;border-image:var(--hr-slot-img) var(--hr-slot-slice) fill / var(--hr-slot-border) stretch}
 .hr-char .hr-slot .lbl{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:2px;font-size:7px;line-height:1.1;letter-spacing:.04em;text-transform:uppercase;color:#4d566a;text-align:center;word-break:break-all;pointer-events:none}
 .hr-char .hr-slot.over,.hr-char .hr-grid.over{filter:brightness(1.35)}
+.hr-char .hr-slot.hr-blocked .hr-item{opacity:.35;filter:grayscale(1)}.hr-char .hr-item.hr-ghosted{pointer-events:none}
+.hr-char .hr-slot .hr-2h{position:absolute;right:2px;bottom:1px;font-size:8px;font-weight:700;letter-spacing:.04em;color:#9aa3b5;pointer-events:none}
 .hr-char .hr-grid{position:relative}
 .hr-char .hr-overflow{display:flex;flex-wrap:wrap;gap:4px}
 .hr-char .hr-cell{position:absolute;width:var(--hr-cell);height:var(--hr-cell);box-sizing:border-box;

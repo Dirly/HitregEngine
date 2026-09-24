@@ -1,0 +1,157 @@
+{
+  "size": 164,
+  "bleed": 3,
+  "bgLum": 228,
+  "keyColor": "#00ffff",
+  "groundFringe": 1,
+  "fitSearch": 1.6,
+  "slots": {
+    "#1f00ff": {
+      "name": "axehead1",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#a900ff": {
+      "name": "axehead2",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#00a2ff": {
+      "name": "axehead3",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#ff0000": {
+      "name": "guard1",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#a80000": {
+      "name": "guard2",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#ff7d00": {
+      "name": "guard3",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#00c08b": {
+      "name": "shoulder1",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#007a5a": {
+      "name": "shoulder2",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#7ae0c0": {
+      "name": "top1",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#b35300": {
+      "name": "top2",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#3cff00": {
+      "name": "pommel3",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#0f3e00": {
+      "name": "pommel4",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#11008a": {
+      "name": "haft",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#6b1511": {
+      "name": "grip",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#ff8b8b": {
+      "name": "ornate-top",
+      "transparency": true,
+      "cut": true,
+      "openEnclosed": true,
+      "fitPadding": 0,
+      "fit": "none",
+      "hiddenBy": [
+        [
+          "AxeHead1",
+          "AxeHead2"
+        ],
+        [
+          "Shoulder1",
+          "Shoulder2"
+        ],
+        [
+          "Top1",
+          "Top2"
+        ],
+        [
+          "Rod"
+        ]
+      ]
+    },
+    "#ffc76b": {
+      "name": "ornate-under",
+      "transparency": true,
+      "cut": true,
+      "openEnclosed": true,
+      "fitPadding": 0,
+      "fit": "none",
+      "hiddenBy": [
+        [
+          "AxeHead1",
+          "AxeHead2"
+        ],
+        [
+          "Shoulder1",
+          "Shoulder2"
+        ],
+        [
+          "Rod"
+        ]
+      ]
+    },
+    "#ff6bd0": {
+      "name": "ornate-bottom",
+      "transparency": true,
+      "cut": true,
+      "openEnclosed": true,
+      "fitPadding": 0,
+      "fit": "none",
+      "hiddenBy": [
+        [
+          "Handle"
+        ],
+        [
+          "Pummel3",
+          "Pummel4"
+        ]
+      ]
+    }
+  }
+}

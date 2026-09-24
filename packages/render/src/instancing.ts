@@ -13,13 +13,17 @@ import {
   materialOpacity,
   materialRoughness,
   normalLocal,
+  positionGeometry,
   positionLocal,
   rotateUV,
+  time,
+  mx_fractal_noise_float,
   transformNormal,
   uv,
   vec2,
   vec3,
   vec4,
+  vertexStage,
 } from "three/tsl";
 
 /**
@@ -295,7 +299,10 @@ export function applyInstanceUber(material: THREE.Material): void {
   // The bit test is done in FLOAT arithmetic rather than with integer bitwise
   // ops, which keeps it identical on both backends and is exact: a mask below
   // 2^24 and a power-of-two divisor are both represented exactly by a float32,
-  // so `fract(mask / 2^i * 0.5) > 0.25` is true precisely when bit i is set.
+  // so `fract(floor(mask / 2^i) * 0.5) > 0.25` is true precisely when bit i
+  // is set. The FLOOR is load-bearing: without it the bits BELOW i survive as
+  // a fraction and push fract() past 0.25 — mask 0b1100 then "has" bit 1, and
+  // a sword with one guard drew three (2026-09-23).
   const inner = node.positionNode as THREE.Node | null | undefined;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   node.positionNode = (Fn as any)((_: unknown, builder: { hasGeometryAttribute(name: string): boolean }) => {
@@ -303,7 +310,7 @@ export function applyInstanceUber(material: THREE.Material): void {
     if (!builder.hasGeometryAttribute("uv1")) return placed;
     const index = vec2(uv(1)).x;
     const bit = float(2).pow(index);
-    const shown = props.w.div(bit).mul(0.5).fract().greaterThan(0.25);
+    const shown = props.w.div(bit).floor().mul(0.5).fract().greaterThan(0.25);
     // Every vertex of a hidden part lands on the same point, so its triangles
     // have zero area and never reach the rasteriser.
     positionLocal.assign(shown.select(placed, vec3(0, 0, 0)));
@@ -311,6 +318,109 @@ export function applyInstanceUber(material: THREE.Material): void {
   })();
 
   node.userData[UBER_FLAG] = true;
+  node.needsUpdate = true;
+}
+
+/**
+ * Per-instance GLOW, for batched items (a glowing sword among plain ones, all
+ * in ONE draw): `instanceGlow` is `(r, g, b, partMask)` with the intensity
+ * already multiplied into the colour, `instanceGlowPulse` is
+ * `(pulse speed Hz, pulse min, noise amount, noise scale)` — speed 0 holds
+ * it steady, amount 0 is a flat glow — and `instanceGlowFlow` is
+ * `(flow, threshold, fadeStart, fadeEnd)` — the noise, and a fade along the
+ * model's +Y (the item's length) between two heights; equal = no fade — and
+ * `instanceGlowTime` is `(churn, frameRate)`: how fast the pattern evolves
+ * in place, and how many steps a second it advances in.
+ *
+ * The noise is the fire overlay's recipe (material-maps.ts overlayNode):
+ * two copies of fractal noise scrolled against each other and evolving in
+ * time, sampled at cell centres (`scale` cells across the sheet), stepped at
+ * 12 fps and posterised into 4 bands — PSX heat. `flow` scrolls it along the
+ * sheet's V, which on a weapon sheet with its tips at the top runs toward the
+ * tip (positive) or the guard (negative). The colour is ADDED to
+ * the emissive term only on the parts whose bit is set (a blade glows, its grip
+ * does not), using the same part index in `uv1` and the same exact float bit
+ * test as {@link applyInstanceUber}.
+ */
+export const INSTANCE_GLOW_ATTRIBUTE = "instanceGlow";
+export const INSTANCE_GLOW_PULSE_ATTRIBUTE = "instanceGlowPulse";
+/** `(flow, threshold)` of the glow's moving noise (see applyInstanceGlow). */
+export const INSTANCE_GLOW_FLOW_ATTRIBUTE = "instanceGlowFlow";
+/** `(churn, frameRate)` of the noise — the 4th vec4 of the same interleaved buffer. */
+export const INSTANCE_GLOW_TIME_ATTRIBUTE = "instanceGlowTime";
+/** Floats per instance in the interleaved glow buffer: glow, pulse, flow, time — four vec4s. */
+const GLOW_STRIDE = 16;
+const GLOW_FLAG = "isInstanceGlowMaterial";
+
+/** Make an instanced material read the glow attributes. Idempotent; call after applyInstanceUber. */
+export function applyInstanceGlow(material: THREE.Material): void {
+  const node = material as THREE.NodeMaterial & Record<string, unknown>;
+  if (node.isNodeMaterial !== true) {
+    console.warn(`[render] applyInstanceGlow: ${material.type} is not a NodeMaterial; glow ignored`);
+    return;
+  }
+  if (node.userData[GLOW_FLAG] === true) return;
+  const glow = attribute<"vec4">(INSTANCE_GLOW_ATTRIBUTE, "vec4");
+  const pulse = attribute<"vec4">(INSTANCE_GLOW_PULSE_ATTRIBUTE, "vec4");
+  const flowAttr = attribute<"vec4">(INSTANCE_GLOW_FLOW_ATTRIBUTE, "vec4");
+  const timeAttr = attribute<"vec4">(INSTANCE_GLOW_TIME_ATTRIBUTE, "vec4");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const base = ((node.emissiveNode as THREE.Node | null | undefined) ?? materialEmissive) as any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  // Which parts glow is decided per VERTEX and handed to the fragment as a
+  // varying (0 or 1, constant across a part's triangles). Read in the
+  // fragment stage, the part index came back tracking the texture — the
+  // handle's leather bands glowed on every sword and blades speckled — while
+  // the same read in the vertex stage (the part mask) is exact.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const glowing = (Fn as any)((_: unknown, builder: { hasGeometryAttribute(name: string): boolean }) => {
+    if (!builder.hasGeometryAttribute("uv1")) return float(1);
+    const bit = float(2).pow(vec2(uv(1)).x.round());
+    return glow.w.div(bit).floor().mul(0.5).fract().greaterThan(0.25).select(float(1), float(0));
+  })();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const inMask = vertexStage(glowing) as any;
+  // the fade along the item's length: model-space +Y between (flow.z, flow.w);
+  // equal ends = no fade. The position along the fade is handed over
+  // UNCLAMPED — it is linear in height, so it interpolates exactly across a
+  // blade's long triangles — and clamped per fragment. Clamped per vertex, a
+  // blade with vertices only at its base and near its point smeared the fade
+  // over most of its length.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const alongNode = (Fn as any)(() => {
+    const span = flowAttr.w.sub(flowAttr.z);
+    const along = positionGeometry.y.sub(flowAttr.z).div(span.abs().max(1e-4).mul(span.sign()));
+    // no fade: a value well past 1, which the fragment clamp turns into full glow
+    return span.abs().lessThan(1e-6).select(float(2), along);
+  })();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const fade = (vertexStage(alongNode) as any).clamp(0, 1);
+  // the colour and pulse are per instance, so the vertex stage carries them too
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const colour = vertexStage(glow.xyz) as any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const pulseV = vertexStage(pulse) as any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const flowV = vertexStage(flowAttr) as any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const timeV = vertexStage(timeAttr) as any;
+  const wave = time.mul(pulseV.x).mul(Math.PI * 2).sin().mul(0.5).add(0.5);
+  const level = pulseV.x.greaterThan(0).select(pulseV.y.add(float(1).sub(pulseV.y).mul(wave)), float(1));
+  // the moving heat: cell-quantised, frame-stepped, banded (see the comment above)
+  const fps = timeV.y.max(1);
+  const tStep = time.mul(fps).floor().div(fps);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const tChurn = tStep.mul(timeV.x) as any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const sheet = (uv() as any).add(vec2(0, flowV.x.mul(tStep)));
+  const cell = sheet.mul(pulseV.w).floor().mul(0.22);
+  const n1 = mx_fractal_noise_float(vec3(cell.x, cell.y, tChurn.mul(0.6)), 2, 2, 0.5);
+  const n2 = mx_fractal_noise_float(vec3(cell.x.mul(1.7).add(3.1), cell.y.mul(1.7), tChurn.mul(-0.45).add(7.3)), 2, 2, 0.5);
+  const n = n1.add(n2).mul(0.25).add(0.5);
+  const heat = n.sub(flowV.y).div(float(1).sub(flowV.y).max(1e-3)).clamp(0, 1).mul(4).floor().div(4);
+  const moving = float(1).sub(pulseV.z).add(heat.mul(pulseV.z).mul(1.6));
+  node.emissiveNode = base.add(colour.mul(level).mul(moving).mul(inMask).mul(fade));
+  node.userData[GLOW_FLAG] = true;
   node.needsUpdate = true;
 }
 
@@ -376,6 +486,14 @@ export class InstancedProps extends THREE.Mesh {
   private uvRotation: THREE.InstancedBufferAttribute | null = null;
   /** Per-instance tile + part mask; null until {@link enableUber}. */
   private uber: THREE.InstancedBufferAttribute | null = null;
+  /**
+   * Per-instance glow — colour + part mask, pulse + noise, flow — as ONE
+   * interleaved buffer; null until {@link enableGlow}. One buffer, not three:
+   * WebGPU guarantees only 8 vertex buffers per pipeline, and position,
+   * normal, uv, uv1, the matrices and the uber mask already take six. Three
+   * separate glow buffers made nine and the pipeline failed to build.
+   */
+  private glow: THREE.InstancedInterleavedBuffer | null = null;
 
   constructor(base: THREE.BufferGeometry, material: THREE.Material | THREE.Material[], count: number) {
     const capacity = Math.max(count, 1);
@@ -455,6 +573,56 @@ export class InstancedProps extends THREE.Mesh {
     a[index * 4 + 2] = scale;
     a[index * 4 + 3] = mask;
     this.uber.needsUpdate = true;
+  }
+
+  /**
+   * Allocate the glow attributes (zero = no glow). Every batch drawn with an
+   * {@link applyInstanceGlow} material must have called this.
+   */
+  enableGlow(): void {
+    if (this.glow) return;
+    this.glow = new THREE.InstancedInterleavedBuffer(new Float32Array(this.capacity * GLOW_STRIDE), GLOW_STRIDE, 1);
+    this.geometry.setAttribute(INSTANCE_GLOW_ATTRIBUTE, new THREE.InterleavedBufferAttribute(this.glow, 4, 0));
+    this.geometry.setAttribute(INSTANCE_GLOW_PULSE_ATTRIBUTE, new THREE.InterleavedBufferAttribute(this.glow, 4, 4));
+    this.geometry.setAttribute(INSTANCE_GLOW_FLOW_ATTRIBUTE, new THREE.InterleavedBufferAttribute(this.glow, 4, 8));
+    this.geometry.setAttribute(INSTANCE_GLOW_TIME_ATTRIBUTE, new THREE.InterleavedBufferAttribute(this.glow, 4, 12));
+  }
+
+  /**
+   * Glow of one instance: colour already × intensity, the parts that glow, its
+   * pulse (speed 0 = steady), and its moving noise (amount 0 = flat).
+   */
+  setGlowAt(
+    index: number,
+    glow: {
+      rgb: readonly [number, number, number];
+      mask: number;
+      speed?: number;
+      min?: number;
+      amount?: number;
+      scale?: number;
+      flow?: number;
+      threshold?: number;
+      fadeStart?: number;
+      fadeEnd?: number;
+      churn?: number;
+      frameRate?: number;
+    },
+  ): void {
+    if (!this.glow) {
+      console.warn("[render] InstancedProps.setGlowAt before enableGlow(); ignored");
+      return;
+    }
+    (this.glow.array as Float32Array).set(
+      [
+        glow.rgb[0], glow.rgb[1], glow.rgb[2], glow.mask,
+        glow.speed ?? 0, glow.min ?? 1, glow.amount ?? 0, glow.scale ?? 128,
+        glow.flow ?? 0, glow.threshold ?? 0.35, glow.fadeStart ?? 0, glow.fadeEnd ?? 0,
+        glow.churn ?? 1, glow.frameRate ?? 12, 0, 0,
+      ],
+      index * GLOW_STRIDE,
+    );
+    this.glow.needsUpdate = true;
   }
 
   /** True once {@link enableUvRotation} has run. */

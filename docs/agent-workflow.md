@@ -218,7 +218,9 @@ The primary AI channel is **direct file editing** — no MCP required:
   manifest `import-atlas.mjs` registers against, and the mesh with UVs (a MERGED
   obj to re-import, a per-part one to look at, a GLB for the engine);
   `atlas-view --atlas <a.png> <b.png>` stands one finished weapon per atlas in
-  the playground so two generated sets can be compared. The unwrap and the key
+  the playground so two generated sets can be compared. A HELD weapon is an
+  item whose `appearance` names parts, a theme, a glow and anchored effects;
+  the `equipment-look` builtin shows it, one draw per model (docs/item-looks.md). The unwrap and the key
   MUST come out of one program: a Blockbench export has no usable UVs at all
   (every face on one texel), so a hand-drawn key puts the artwork next to the
   geometry rather than on it. One slot per part, never shared. Judgment + the

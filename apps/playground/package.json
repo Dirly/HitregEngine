@@ -17,6 +17,7 @@
     "unwrap-weapon": "node tools/unwrap-weapon.mjs",
     "atlas-view": "node tools/atlas-view.mjs",
     "atlas-pack": "node tools/atlas-pack.mjs",
+    "weapon-page": "node tools/weapon-page.mjs",
     "wfc": "node ../../tools/wfc-3d/kit.mjs",
     "dungeon": "tsx tools/dungeon.mts"
   },

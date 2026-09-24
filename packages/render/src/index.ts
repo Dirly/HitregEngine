@@ -44,6 +44,9 @@ export {
 } from "./billboards.js";
 export { applyFoliageNormals, foliageNormals, type FoliageNormalOptions } from "./foliage-normals.js";
 export { applyModelBrightness } from "./model-brightness.js";
+export { applyModelEmissive, applyModelMap, applyModelPartMask, modelPartIndex, partBounds, partMaskFromNames, partSize, resolvePartAnchor, type PartAnchor } from "./ubermesh.js";
+export { MovingInstanceSystem, type MovingInstanceEntry, type MovingInstanceGlow, type MovingInstanceLook } from "./moving-instances.js";
+export { findSocketBone, socketParamsFrom, socketWorldPose, type SocketParams } from "./socket-pose.js";
 export { applyFoliageWind, setFoliageWindScale, windMaterialMatches, FOLIAGE_WIND, type FoliageWindMode, type FoliageWindOptions } from "./foliage-wind.js";
 export { applyFoliageFade, setFoliageFade, FOLIAGE_FADE, type FoliageFadeState } from "./foliage-fade.js";
 export { asNodeMaterial, cloneMaterial, editMeshMaterials } from "./node-material.js";

@@ -421,17 +421,18 @@
                   ]
                 },
                 "partMask": {
-                  "description": "Which parts of an UBERMESH this instance is made of: bit i shows the part whose index is i, and the index of each vertex is carried in the model's SECOND UV set (glTF TEXCOORD_1, written by unwrap-weapon). Parts whose bit is clear collapse to a degenerate triangle in the VERTEX stage, so they cost no fragments — hiding them with alpha instead would rasterise every hidden part only to discard it. This is what makes a modular weapon one mesh and one material: thirty different swords in a town draw as one instanced batch. Pairs with `atlasTile`; only honoured for `renderMode: \"instanced\"` asset meshes. NOTE that `uvRotation` also claims TEXCOORD_1 — a model may carry a rotation pivot or a part index there, never both. At most 24 PARTS per ubermesh: the bit test is float arithmetic (exact below 2^24, and identical on both backends), so bit 24 and above never read.",
+                  "description": "Which parts of an UBERMESH this instance is made of: bit i shows the part whose index is i, and the index of each vertex is carried in the model's SECOND UV set (glTF TEXCOORD_1, written by unwrap-weapon). Parts whose bit is clear collapse to a degenerate triangle in the VERTEX stage, so they cost no fragments — hiding them with alpha instead would rasterise every hidden part only to discard it. This is what makes a modular weapon one mesh and one material: thirty different swords in a town draw as one instanced batch. Pairs with `atlasTile` (instanced only). On a NON-instanced asset mesh (one held or worn model) the mask trims the model's index to the shown parts at load instead, and a script changes it live with `ctx.setModelLook` — the `equipment-look` builtin does that from an item's `appearance`. NOTE that `uvRotation` also claims TEXCOORD_1 — a model may carry a rotation pivot or a part index there, never both. At most 24 PARTS per ubermesh: the bit test is float arithmetic (exact below 2^24, and identical on both backends), so bit 24 and above never read.",
                   "type": "integer",
                   "minimum": 0,
                   "maximum": 9007199254740991
                 },
                 "textureFilter": {
-                  "description": "Override the model's own texture sampling. 'nearest' keeps hard texel edges — the pixel-art / PSX look for a low-res character skin — where the linear filtering most exporters bake into the file smears it. Minification still mipmaps either way, so distant models stay stable. Applies to every map of every material in the model, and the loaded model is SHARED by every entity using it, so one entity's choice is the asset's choice.",
+                  "description": "Override the model's own texture sampling. 'nearest' keeps hard texel edges — the pixel-art / PSX look for a low-res character skin — where the linear filtering most exporters bake into the file smears it; minification still mipmaps, so distant models stay stable. 'pixel' is hard at EVERY distance, no mipmaps (the PS1 drew none): use it for small models like held weapons, whose thin blades are minified across their width even up close and blur between mips under 'nearest'. Applies to every map of every material in the model, and the loaded model is SHARED by every entity using it, so one entity's choice is the asset's choice.",
                   "type": "string",
                   "enum": [
                     "linear",
-                    "nearest"
+                    "nearest",
+                    "pixel"
                   ]
                 }
               },
@@ -1058,6 +1059,11 @@
         "lod": {
           "default": true,
           "description": "instanced only: swap to a cheap distance proxy when far from camera. Turn off for props already too small/cheap to benefit (grass, small clutter) — the proxy swap only hurts those visually.",
+          "type": "boolean"
+        },
+        "moving": {
+          "default": false,
+          "description": "instanced only: this instance MOVES — a held weapon, a worn helm, a carried lantern. A plain instanced entry is placed once when the scene builds; a moving one re-reads its entity's world transform every frame, so it follows a parent, a `bone-socket` or a script. Every moving instance of one asset in the scene is still ONE draw call (plus its shadow passes), which is the point: thirty players' swords cost what one does. No LOD tiers. `atlasTile`/`partMask` set the look, and `ctx.setModelLook` changes it live (the `equipment-look` builtin does that from an item's `appearance`). A host without the moving batch system draws it as an ordinary model.",
           "type": "boolean"
         },
         "static": {
@@ -3396,6 +3402,10 @@
           "default": 0.5,
           "type": "number",
           "minimum": 0
+        },
+        "surface": {
+          "description": "Footstep/landing surface override (grass, gravel, stone, wood, metal, rubble, etc.). Use this on a house, castle, path or prop collider when its material id does not say what it sounds like.",
+          "type": "string"
         },
         "restitution": {
           "default": 0,
@@ -14682,8 +14692,17 @@
         "bag": {
           "$ref": "#/$defs/__schema19"
         },
-        "tags": {
+        "twoHanded": {
           "$ref": "#/$defs/__schema21"
+        },
+        "stance": {
+          "$ref": "#/$defs/__schema23"
+        },
+        "appearance": {
+          "$ref": "#/$defs/__schema26"
+        },
+        "tags": {
+          "$ref": "#/$defs/__schema69"
         }
       },
       "required": [
@@ -14874,6 +14893,428 @@
           ]
         },
         "__schema21": {
+          "default": false,
+          "description": "Held in BOTH hands (a greatsword, a greataxe, a staff, a bow). While it is worn in `primary`, the `offhand` item stays equipped but INACTIVE: no modifiers, not drawn, no stance (it still counts toward weight). The offhand slot shows greyed out. Nothing is unequipped either way.",
+          "$ref": "#/$defs/__schema22"
+        },
+        "__schema22": {
+          "type": "boolean"
+        },
+        "__schema23": {
+          "default": [],
+          "description": "Animation STANCES this item puts its wielder in while held, most specific first — a greataxe: [\"Axe2H\", \"TwoHanded\"] borrows every two-handed clip it has no axe version of. The character then plays `<Stance>_<clip>` wherever its model has one (GreatSword_Run, Staff_Attack1, SwordShield_Death). An off-hand item's stance COMBINES with the main hand's: a Sword with a Shield is \"SwordShield\", then \"Sword\". Read by the `weapon-stance` script. Empty = no stance (a ring, a potion).",
+          "$ref": "#/$defs/__schema24"
+        },
+        "__schema24": {
+          "maxItems": 4,
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/__schema25"
+          }
+        },
+        "__schema25": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9]*$"
+        },
+        "__schema26": {
+          "description": "How this item LOOKS when worn: a choice of parts from a modular model plus a theme sheet. Presentation only — drawn by the `equipment-look` builtin on whatever entity holds the model (a sword in a hand socket), and absent for items with no visible form. Two items can share parts and differ by sheet, or share a sheet and differ by parts.",
+          "$ref": "#/$defs/__schema27"
+        },
+        "__schema27": {
+          "type": "object",
+          "properties": {
+            "model": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Model asset id of the UBERMESH this look is cut from (assets/models/…). The entity that shows it must already draw this model — a look changes parts and texture, never the model."
+            },
+            "parts": {
+              "default": [],
+              "description": "Part NAMES to show, as the model's own part table spells them (unwrap-weapon writes it into the glTF and beside it as <model>-parts.json): one of each family for a weapon — a blade, a guard, a collar, a pommel, the grip. Every other part is hidden. Empty = nothing shows.",
+              "$ref": "#/$defs/__schema28"
+            },
+            "texture": {
+              "description": "Texture asset id of the theme sheet (assets/textures/…) — an atlas registered against this model's key. Absent = the sheet baked into the model.",
+              "$ref": "#/$defs/__schema29"
+            },
+            "glow": {
+              "type": "object",
+              "properties": {
+                "color": {
+                  "$ref": "#/$defs/__schema30"
+                },
+                "intensity": {
+                  "$ref": "#/$defs/__schema31"
+                },
+                "parts": {
+                  "$ref": "#/$defs/__schema33"
+                },
+                "pulse": {
+                  "$ref": "#/$defs/__schema35"
+                },
+                "noise": {
+                  "$ref": "#/$defs/__schema39"
+                },
+                "fade": {
+                  "$ref": "#/$defs/__schema47"
+                }
+              },
+              "required": [
+                "color"
+              ],
+              "description": "Emissive glow on an item. Costs no draw call on a batched (`moving`) model: it is a per-instance value in the same batch as every other item of that model."
+            },
+            "effects": {
+              "default": [],
+              "description": "Standing effects this item carries while it is shown: embers off a blade, frost mist round a guard, a light at a staff's head. Each is a `vfx` asset played for as long as the item is equipped, at a point ON the item that follows it through every swing.",
+              "$ref": "#/$defs/__schema51"
+            }
+          },
+          "required": [
+            "model"
+          ]
+        },
+        "__schema28": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "__schema29": {
+          "type": "string",
+          "minLength": 1
+        },
+        "__schema30": {
+          "description": "Emissive colour added on top of the item's own texture.",
+          "$ref": "#/$defs/__schema14"
+        },
+        "__schema31": {
+          "default": 1,
+          "description": "Multiplier on `color`. Above ~1 it reads as light; with bloom on it blooms.",
+          "$ref": "#/$defs/__schema32"
+        },
+        "__schema32": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 20
+        },
+        "__schema33": {
+          "description": "Part NAMES that glow (a blade, not its grip). Omitted = every part the item shows.",
+          "$ref": "#/$defs/__schema34"
+        },
+        "__schema34": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "__schema35": {
+          "description": "Breathe the glow instead of holding it steady.",
+          "$ref": "#/$defs/__schema36"
+        },
+        "__schema36": {
+          "type": "object",
+          "properties": {
+            "speed": {
+              "default": 1,
+              "description": "Pulses per second.",
+              "$ref": "#/$defs/__schema37"
+            },
+            "min": {
+              "default": 0.4,
+              "description": "Fraction of full glow at the bottom of a pulse.",
+              "$ref": "#/$defs/__schema38"
+            }
+          }
+        },
+        "__schema37": {
+          "type": "number",
+          "minimum": 0
+        },
+        "__schema38": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "__schema39": {
+          "description": "Make the glow MOVE: pixelated noise scrolling over the glowing parts, stepped at 12 fps in 4 bands — the PSX look of the fire overlays. Omitted = a steady glow.",
+          "$ref": "#/$defs/__schema40"
+        },
+        "__schema40": {
+          "type": "object",
+          "properties": {
+            "amount": {
+              "default": 0.8,
+              "description": "0 = a flat, even glow; 1 = all moving noise (dark gaps between the hot licks). The overlay the fire's ember bed uses.",
+              "$ref": "#/$defs/__schema41"
+            },
+            "scale": {
+              "default": 128,
+              "description": "Noise cells across the WHOLE texture sheet — a blade is a thin strip of it, so this wants to be about the sheet's texel count (128 on a 128 px sheet = one cell per texel). Much lower and a blade gets one or two cells.",
+              "$ref": "#/$defs/__schema42"
+            },
+            "flow": {
+              "default": 0.3,
+              "description": "Sheet-heights per second the noise runs along the part. Positive runs toward the blade's TIP (fire climbing), negative toward the guard (poison creeping down); 0 churns in place.",
+              "$ref": "#/$defs/__schema43"
+            },
+            "threshold": {
+              "default": 0.35,
+              "description": "Noise below this adds nothing. High (0.7+) = sparse glints; low = a wash.",
+              "$ref": "#/$defs/__schema44"
+            },
+            "churn": {
+              "default": 1,
+              "description": "How fast the pattern EVOLVES in place, on top of `flow`. 1 = the fire overlay's boil; 0.2–0.4 = a slow, oily creep (poison); 0 = a frozen pattern that only scrolls.",
+              "$ref": "#/$defs/__schema45"
+            },
+            "frameRate": {
+              "default": 12,
+              "description": "Steps per second the noise advances in (PSX chop). Lower = choppier and slower-looking; 12 matches the fire.",
+              "$ref": "#/$defs/__schema46"
+            }
+          }
+        },
+        "__schema41": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "__schema42": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "__schema43": {
+          "type": "number"
+        },
+        "__schema44": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "__schema45": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 4
+        },
+        "__schema46": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 60
+        },
+        "__schema47": {
+          "description": "Fade the glow along the item's length (model +Y — a blade's base to its point): { from: 0.55, to: 0.85 } puts poison on only the last third of the blade, feathered in. With `noise` the edge dissolves through the moving heat rather than a straight line. Batched (`moving`) models only.",
+          "$ref": "#/$defs/__schema48"
+        },
+        "__schema48": {
+          "type": "object",
+          "properties": {
+            "from": {
+              "default": 0.5,
+              "description": "Where along the glowing parts' LENGTH (0 = base, 1 = tip) the glow starts from nothing.",
+              "$ref": "#/$defs/__schema49"
+            },
+            "to": {
+              "default": 1,
+              "description": "Where it reaches full strength. Set it below `from` to fade toward the tip instead.",
+              "$ref": "#/$defs/__schema50"
+            }
+          }
+        },
+        "__schema49": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "__schema50": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "__schema51": {
+          "maxItems": 8,
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/__schema52"
+          }
+        },
+        "__schema52": {
+          "type": "object",
+          "properties": {
+            "vfx": {
+              "$ref": "#/$defs/__schema53"
+            },
+            "material": {
+              "$ref": "#/$defs/__schema54"
+            },
+            "anchor": {
+              "$ref": "#/$defs/__schema56"
+            },
+            "orient": {
+              "$ref": "#/$defs/__schema63"
+            },
+            "fit": {
+              "$ref": "#/$defs/__schema65"
+            },
+            "cullDistance": {
+              "$ref": "#/$defs/__schema67"
+            }
+          },
+          "required": [
+            "vfx"
+          ],
+          "description": "A standing effect an item carries."
+        },
+        "__schema53": {
+          "type": "string",
+          "minLength": 1,
+          "description": "vfx data-asset id (assets/vfx/<id>.json) — WHAT plays: which particles, their sprite or texture, size, opacity, colour ramp, rate, lifetime, plus rings, shells, beams or a light. The same assets as torches and spells. Keep item effects in one folder (e.g. `items/embers`) so every item using one is ONE asset: particles are batched by look, so a hundred ember swords draw their embers in one call."
+        },
+        "__schema54": {
+          "description": "Material asset whose colours are the effect's palette (color → primary, emissive → glow, color darkened → secondary) — recolour an effect without copying it. Omitted = the effect's own element palette.",
+          "$ref": "#/$defs/__schema55"
+        },
+        "__schema55": {
+          "type": "string"
+        },
+        "__schema56": {
+          "default": {
+            "at": "center",
+            "offset": [
+              0,
+              0,
+              0
+            ]
+          },
+          "type": "object",
+          "properties": {
+            "part": {
+              "$ref": "#/$defs/__schema57"
+            },
+            "at": {
+              "$ref": "#/$defs/__schema59"
+            },
+            "offset": {
+              "$ref": "#/$defs/__schema61"
+            }
+          },
+          "description": "A point on an item's model."
+        },
+        "__schema57": {
+          "description": "Part NAME of the model (its part table). Omitted = the box of every part the item shows.",
+          "$ref": "#/$defs/__schema58"
+        },
+        "__schema58": {
+          "type": "string",
+          "minLength": 1
+        },
+        "__schema59": {
+          "default": "center",
+          "description": "Point in the part's bounding box. \"tip\"/\"base\" are the two ends of its LONGEST axis (a blade's point and its root; the ends of a guard's bar), \"center\" its middle. Or [x, y, z] fractions of the box in the model's own axes, 0..1 on each — [0.5, 0.9, 0.5] is nine tenths of the way up a blade. This is how an emitter is pinpointed.",
+          "$ref": "#/$defs/__schema60"
+        },
+        "__schema60": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "tip",
+                "base",
+                "center"
+              ]
+            },
+            {
+              "type": "array",
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                }
+              ]
+            }
+          ]
+        },
+        "__schema61": {
+          "default": [
+            0,
+            0,
+            0
+          ],
+          "description": "Nudge after `at`, in METRES along the model's own axes (they turn with the item).",
+          "$ref": "#/$defs/__schema62"
+        },
+        "__schema62": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ]
+        },
+        "__schema63": {
+          "default": "item",
+          "description": "item = the effect turns with the item: its modules' offsets, emitter volume and `direction` are in the MODEL's axes — on the longsword +Y runs up the blade toward the tip, ±Z out of the two edges, ±X off the flats — so \"up the blade\" stays up the blade through every swing. world = upright in the world (yaw only), like a torch. Gravity is always world-down either way, so drips fall and flames rise.",
+          "$ref": "#/$defs/__schema64"
+        },
+        "__schema64": {
+          "type": "string",
+          "enum": [
+            "item",
+            "world"
+          ]
+        },
+        "__schema65": {
+          "default": false,
+          "description": "Size every particle emitter's volume (box/sphere half-extents) to the anchor part's box, so particles are born along the WHOLE blade instead of at one point. [x, y, z] scales each axis — [1, 0.5, 1] is half the blade's length (pair it with anchor at [0.5, 0.75, 0.5] for the upper half); 0 on an axis flattens it. false = the effect's own shapeSize.",
+          "$ref": "#/$defs/__schema66"
+        },
+        "__schema66": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "array",
+              "prefixItems": [
+                {
+                  "type": "number",
+                  "minimum": 0
+                },
+                {
+                  "type": "number",
+                  "minimum": 0
+                },
+                {
+                  "type": "number",
+                  "minimum": 0
+                }
+              ]
+            }
+          ]
+        },
+        "__schema67": {
+          "default": 40,
+          "description": "Metres from the camera past which the effect stops simulating (fades out, and back in on approach).",
+          "$ref": "#/$defs/__schema68"
+        },
+        "__schema68": {
+          "type": "number",
+          "minimum": 0
+        },
+        "__schema69": {
           "default": [],
           "type": "array",
           "items": {

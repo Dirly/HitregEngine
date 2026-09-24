@@ -1,4 +1,4 @@
-import type { AnimationLayerOptions, LivePostFxOptions, LiveSkyOptions, LiveSkyBase, BiomeAt, WaterAt } from "./script.js";
+import type { AnimationLayerOptions, LivePostFxOptions, LiveSkyOptions, LiveSkyBase, BiomeAt, WaterAt, ModelLook } from "./script.js";
 import type * as THREE from "three";
 import type { NetStateStore, PlayerDataService, ProfilerLike, SceneDoc } from "@hitreg/core";
 import type {
@@ -28,8 +28,12 @@ export interface RuntimeOptions {
   viewForward?: () => [number, number];
   /** Host camera hook: the same aim in 3D, pitch included (see ScriptContext.viewDirection). */
   viewDirection?: () => [number, number, number];
+  /** Host camera hook: the local player acted, bring the view back behind the aim (see ScriptContext.recenterView). */
+  recenterView?: () => void;
   /** This tab's own player entity id (see ScriptContext.localPlayer). */
   localPlayer?: () => string | null;
+  /** Surface name under this point, resolved from water, voxel splats or an authored collider. */
+  surfaceAt?: (x: number, y: number, z: number) => string;
   /** Host animation hook: crossfade an entity's animator to a clip (loop:false = one-shot). */
   setAnimation?: (
     entityId: string,
@@ -50,7 +54,9 @@ export interface RuntimeOptions {
   /** Host animation hook: fade the layer out, restoring the full-body base. */
   clearAnimationLayer?: (entityId: string, fadeSeconds?: number) => void;
   /** Host audio hook: play an entity's audio component or a sound asset id. */
-  playSound?: (entityId: string, soundId?: string) => void;
+  playSound?: (entityId: string, soundId?: string, opts?: { volume?: number; positional?: boolean; refDistance?: number; playbackRate?: number; priority?: number }) => void;
+  /** Host audio hook: keep one named, script-owned loop playing at a chosen gain. */
+  setSoundLoop?: (entityId: string, slot: string, soundId: string | undefined, opts?: { volume?: number; positional?: boolean; refDistance?: number }) => void;
   /** Host billboard hook: mutate an entity's billboard (fill/text/visible). */
   setBillboard?: (
     entityId: string,
@@ -82,6 +88,8 @@ export interface RuntimeOptions {
     entityId: string,
     opts: { enabled?: boolean; intensity?: number; color?: string },
   ) => void;
+  /** Host ubermesh hook: runtime parts/theme of a model (see ScriptContext.setModelLook). */
+  setModelLook?: (entityId: string, look: ModelLook) => void;
   /** Host sky hook: live sky/sun/moon control (see ScriptContext.setSky). */
   setSky?: (opts: LiveSkyOptions) => void;
   getSky?: () => LiveSkyBase | null;
@@ -324,6 +332,51 @@ export class ScriptRuntime {
    * silently doing nothing), and reports a throw as the failure text — a
    * command implementation throws to reject an argument.
    */
+  /**
+   * Hand a RUNNING script new params in place, with no restart. For an edit
+   * that only tunes numbers — a socket's offset nudged in the inspector while
+   * the character holds a pose — restarting the play session would respawn
+   * everything and lose the very moment being tuned. Scripts that read
+   * `param()` as they run see the new values next tick; a value a script
+   * cached in onStart stays as it was until the next real restart.
+   *
+   * Returns false (and changes nothing) when the entity has no running script
+   * or runs a DIFFERENT one — the caller must restart for that.
+   */
+  /**
+   * After the host has animated the frame: every script's onLateUpdate (see
+   * Script.onLateUpdate). Hosts without animation never call it.
+   */
+  lateUpdate(dt: number): void {
+    for (const [id, script] of this.instances) {
+      if (!script.onLateUpdate) continue;
+      try {
+        script.onLateUpdate(dt);
+      } catch (error) {
+        console.error(`[scripts] ${id}: onLateUpdate threw`, error);
+      }
+    }
+  }
+
+  /** Whether `entityId` is running `scriptName` right now. */
+  hasInstance(entityId: string, scriptName: string): boolean {
+    return this.instances.has(entityId) && this.instanceNames.get(entityId) === scriptName;
+  }
+
+  updateParams(entityId: string, scriptName: string, params: Record<string, unknown>): boolean {
+    const script = this.instances.get(entityId);
+    if (!script || this.instanceNames.get(entityId) !== scriptName) return false;
+    const live = script.ctx.params;
+    for (const key of Object.keys(live)) delete live[key];
+    Object.assign(live, this.opts.registry.defaultParams(scriptName), params);
+    try {
+      script.onParamsChanged?.();
+    } catch (error) {
+      console.error(`[scripts] ${entityId}: onParamsChanged threw`, error);
+    }
+    return true;
+  }
+
   runConsoleCommand(name: string, args: string[]): { ok: boolean; text: string } | null {
     for (const script of this.instances.values()) {
       const type = script.constructor as ScriptClass;
@@ -414,6 +467,7 @@ export class ScriptRuntime {
         every: (seconds, cb) => this.scheduleTimer(id, seconds, cb, true),
         ...(this.opts.viewForward ? { viewForward: this.opts.viewForward } : {}),
         ...(this.opts.viewDirection ? { viewDirection: this.opts.viewDirection } : {}),
+        ...(this.opts.recenterView ? { recenterView: this.opts.recenterView } : {}),
         ...(this.opts.localPlayer ? { localPlayer: this.opts.localPlayer } : {}),
         setActiveCamera: (cameraId) => {
           this.activeCameraId = cameraId;
@@ -447,7 +501,19 @@ export class ScriptRuntime {
           ? { clearAnimationLayer: (fade?: number) => this.opts.clearAnimationLayer!(id, fade) }
           : {}),
         ...(this.opts.playSound
-          ? { playSound: (soundId?: string) => this.opts.playSound!(id, soundId) }
+          ? {
+              playSound: (soundId?: string, opts?: { volume?: number; positional?: boolean; refDistance?: number; playbackRate?: number; priority?: number }) =>
+                this.opts.playSound!(id, soundId, opts),
+            }
+          : {}),
+        ...(this.opts.surfaceAt
+          ? { surfaceAt: (x: number, y: number, z: number) => this.opts.surfaceAt!(x, y, z) }
+          : {}),
+        ...(this.opts.setSoundLoop
+          ? {
+              setSoundLoop: (slot: string, soundId?: string, opts?: { volume?: number; positional?: boolean; refDistance?: number }) =>
+                this.opts.setSoundLoop!(id, slot, soundId, opts),
+            }
           : {}),
         ...(this.opts.setBillboard
           ? {
@@ -478,6 +544,9 @@ export class ScriptRuntime {
                 opts: { enabled?: boolean; intensity?: number; color?: string },
               ) => this.opts.setLight!(entityId, opts),
             }
+          : {}),
+        ...(this.opts.setModelLook
+          ? { setModelLook: (entityId: string, look: ModelLook) => this.opts.setModelLook!(entityId, look) }
           : {}),
         ...(this.opts.setSky ? { setSky: (opts: LiveSkyOptions) => this.opts.setSky!(opts) } : {}),
         ...(this.opts.setPostFx ? { setPostFx: (opts: LivePostFxOptions) => this.opts.setPostFx!(opts) } : {}),

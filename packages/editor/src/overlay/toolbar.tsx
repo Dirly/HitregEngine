@@ -392,6 +392,24 @@ export function Toolbar(props: {
             <ToolButton key={g.key} icon={g.icon} tip={g.tip} keys={g.keys} shortcuts={g.shortcuts} active={mode === g.key} onClick={() => props.gizmoMode.set(g.key)} />
           ))}
         </Segment>
+        <ToolButton
+          icon="holster"
+          label="holstered"
+          tip={settings.previewHolstered ? "showing weapons holstered" : "showing weapons in hand"}
+          detail="Edit mode shows every held item in its holstered slot on the back, so that slot can be placed with the gizmo. Off: in the hand."
+          active={settings.previewHolstered === true}
+          onClick={() => set({ previewHolstered: !settings.previewHolstered })}
+        />
+        <ToolButton
+          icon="space"
+          label={settings.gizmoSpace === "local" ? "local" : "world"}
+          tip={settings.gizmoSpace === "local" ? "gizmo: local axes" : "gizmo: world axes"}
+          detail="Which axes the move/rotate gizmo drags along. Local follows the selected object — for a held item, the item's own axes, pivoting on its grip."
+          keys={["X"]}
+          shortcuts={[{ keys: ["Shift"], does: "held while dragging: a tenth of the motion, for fine placement" }]}
+          active={settings.gizmoSpace === "local"}
+          onClick={() => set({ gizmoSpace: settings.gizmoSpace === "local" ? "world" : "local" })}
+        />
 
         <Divider />
 

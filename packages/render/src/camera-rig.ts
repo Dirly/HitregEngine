@@ -137,6 +137,12 @@ export interface CameraRigConfig {
   lookAhead: number;
   /** Hide the followed body below this boom length (host-applied). */
   fadeTargetBelow: number;
+  /**
+   * How fast a free look swings back behind the aim once something asks for
+   * it ({@link ThirdPersonCameraRig.returnToAim}), per second — exponential,
+   * so about 3/rate seconds to settle. 0 cuts straight back.
+   */
+  freeLookReturn: number;
 }
 
 export const DEFAULT_CAMERA_RIG: CameraRigConfig = {
@@ -163,6 +169,7 @@ export const DEFAULT_CAMERA_RIG: CameraRigConfig = {
   recoverSpeed: 9,
   lookAhead: 0.4,
   fadeTargetBelow: 1,
+  freeLookReturn: 14,
 };
 
 /** Slowest the boom closes on a forecast at, m/s — a small gap still gets closed. */
@@ -239,8 +246,19 @@ export class ThirdPersonCameraRig {
   private readonly pivot = new THREE.Vector3();
   /** Where the pivot is headed this frame (target position + height/shoulder). */
   private readonly wanted = new THREE.Vector3();
+  /** The AIM: where gameplay faces and moves. The camera shows it plus any free look. */
   private yaw = 0;
   private pitch = -0.18;
+  /**
+   * Free-look offset from the aim (see {@link setFreeLook}). Held, the mouse
+   * moves this instead of the aim; released, it STAYS — players park the
+   * camera in front to look at their character — until {@link returnToAim}
+   * decays it to zero.
+   */
+  private freeLook = false;
+  private returning = false;
+  private freeYaw = 0;
+  private freePitch = 0;
   /** Where the wheel has asked the framing to go. */
   private zoomGoal: number;
   /** Framing distance in effect this frame — `zoomGoal`, smoothed. Before collision. */
@@ -297,8 +315,24 @@ export class ThirdPersonCameraRig {
    */
   addLook(dx: number, dy: number): void {
     if (this.config.mode === "chase") return;
-    this.yaw -= dx * this.config.lookSpeed;
     const sign = this.config.invertY ? -1 : 1;
+    if (this.freeLook) {
+      // the view pitch (aim + offset) stays inside the band; the aim is untouched
+      this.freeYaw -= dx * this.config.lookSpeed;
+      const view = this.pitch + this.freePitch + sign * dy * this.config.lookSpeed;
+      this.freePitch = clamp(view, this.bandMin(), this.bandMax()) - this.pitch;
+      return;
+    }
+    // Turning the AIM from a parked free look takes the view as the aim
+    // first (WoW's right-drag): the camera stays put, the character comes
+    // round to face where it points, and the turn continues from there.
+    if (this.freeYaw !== 0 || this.freePitch !== 0) {
+      this.yaw += this.freeYaw;
+      this.pitch += this.freePitch;
+      this.freeYaw = this.freePitch = 0;
+      this.returning = false;
+    }
+    this.yaw -= dx * this.config.lookSpeed;
     const next = this.pitch + sign * dy * this.config.lookSpeed;
     // A pitch still outside the band (it is eased back in after a zoom out of
     // first person) may move toward the band freely, never further out.
@@ -307,6 +341,47 @@ export class ThirdPersonCameraRig {
       Math.min(this.bandMin(), this.pitch),
       Math.max(this.bandMax(), this.pitch),
     );
+  }
+
+  /**
+   * Free look: while on, the mouse orbits the CAMERA only — the aim gameplay
+   * reads ({@link aimDirection}) stays where it was, so the character keeps
+   * its heading while the player looks around it. Turning it off leaves the
+   * camera where it was put, so a player can park it in front to admire their
+   * character; {@link returnToAim} brings it back. Follow mode only: a chase
+   * rig's yaw belongs to its target.
+   */
+  setFreeLook(on: boolean): void {
+    if (on && this.config.mode === "chase") return;
+    this.freeLook = on;
+    if (on) this.returning = false;
+  }
+
+  /**
+   * Swing a parked free look back behind the aim at `freeLookReturn`, the
+   * short way round however far the player spun. The host calls it when the
+   * player acts — moves, casts — because that is when they need to see ahead
+   * again. Ignored while free look is held, and free when there is none.
+   */
+  returnToAim(): void {
+    if (this.freeLook || (this.freeYaw === 0 && this.freePitch === 0)) return;
+    this.freeYaw = angleDelta(this.freeYaw, 0);
+    if (this.config.freeLookReturn <= 0) this.freeYaw = this.freePitch = 0;
+    else this.returning = true;
+  }
+
+  /** True while the view is off the aim — held, or still swinging back. */
+  get freeLooking(): boolean {
+    return this.freeLook || this.freeYaw !== 0 || this.freePitch !== 0;
+  }
+
+  /**
+   * Unit vector of the AIM, eye toward pivot — what movement and facing read
+   * in place of the camera's own direction, which a free look turns away from
+   * it. The same as the camera's direction whenever there is no free look.
+   */
+  aimDirection(out = new THREE.Vector3()): THREE.Vector3 {
+    return this.directionFor(this.yaw, this.pitch, out).negate();
   }
 
   /**
@@ -444,6 +519,9 @@ export class ThirdPersonCameraRig {
     this.velocity.set(0, 0, 0);
     this.yawRate = 0;
     this.lastYaw = this.yaw;
+    this.freeLook = false;
+    this.returning = false;
+    this.freeYaw = this.freePitch = 0;
   }
 
   /**
@@ -481,8 +559,20 @@ export class ThirdPersonCameraRig {
       this.targetForward.set(0, 0, -1).applyQuaternion(targetQuaternion);
       this.yaw = Math.atan2(-this.targetForward.x, -this.targetForward.z);
     }
+    // the orbit the CAMERA shows: the aim plus the free-look offset, which
+    // decays back to nothing once something has asked for it
+    if (this.returning) {
+      const k = approach(cfg.freeLookReturn, dt);
+      this.freeYaw -= this.freeYaw * k;
+      this.freePitch -= this.freePitch * k;
+      if (Math.abs(this.freeYaw) < 1e-3 && Math.abs(this.freePitch) < 1e-3) {
+        this.freeYaw = this.freePitch = 0;
+        this.returning = false;
+      }
+    }
+    const viewYaw = this.yaw + this.freeYaw;
     if (cfg.shoulder !== 0) {
-      this.right.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
+      this.right.set(Math.cos(viewYaw), 0, -Math.sin(viewYaw));
       this.wanted.addScaledVector(this.right, cfg.shoulder);
     }
     if (!this.seeded || this.pivot.distanceTo(this.wanted) > TELEPORT_SNAP) {
@@ -502,11 +592,11 @@ export class ThirdPersonCameraRig {
         this.velocity.x += ((targetPosition.x - this.lastTarget.x) / dt - this.velocity.x) * kv;
         this.velocity.y += ((targetPosition.y - this.lastTarget.y) / dt - this.velocity.y) * kv;
         this.velocity.z += ((targetPosition.z - this.lastTarget.z) / dt - this.velocity.z) * kv;
-        this.yawRate += (angleDelta(this.yaw, this.lastYaw) / dt - this.yawRate) * kv;
+        this.yawRate += (angleDelta(viewYaw, this.lastYaw) / dt - this.yawRate) * kv;
       }
     }
     this.lastTarget.set(targetPosition.x, targetPosition.y, targetPosition.z);
-    this.lastYaw = this.yaw;
+    this.lastYaw = viewYaw;
 
     // 2. keep the pivot out of geometry. Where the pivot is HEADED sits inside
     // the body's own collider (the host fits it there), so physics vouches
@@ -533,12 +623,13 @@ export class ThirdPersonCameraRig {
     if (this.pitch < this.bandMin()) this.pitch = Math.min(this.bandMin(), this.pitch + bandStep);
     else if (this.pitch > this.bandMax()) this.pitch = Math.max(this.bandMax(), this.pitch - bandStep);
     const wantedBoom = this.wantedDistance;
+    const viewPitch = this.pitch + this.freePitch;
 
     // 4. what the world allows. `hard` is the law: past it the eye is inside
     // something. The look-ahead asks the same question from where the target
     // and the orbit will be in `lookAhead` seconds, and is only ever a reason
     // to start closing early.
-    this.directionFor(this.yaw, this.pitch, this.dir);
+    this.directionFor(viewYaw, viewPitch, this.dir);
     const hard = this.castBoom(this.pivot, this.dir, wantedBoom, sweep);
     let limit = hard;
     if (sweep && cfg.lookAhead > 0) {
@@ -559,7 +650,7 @@ export class ThirdPersonCameraRig {
         for (let k = 1; k <= LOOKAHEAD_SAMPLES; k++) {
           const f = k / LOOKAHEAD_SAMPLES;
           this.ahead.copy(this.pivot).addScaledVector(this.velocity, cfg.lookAhead * Math.min(f, reach));
-          this.directionFor(this.yaw + turn * f, this.pitch, this.scratch);
+          this.directionFor(viewYaw + turn * f, viewPitch, this.scratch);
           limit = Math.min(limit, this.castBoom(this.ahead, this.scratch, wantedBoom, sweep));
         }
       }

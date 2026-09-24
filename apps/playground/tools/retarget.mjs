@@ -34,8 +34,9 @@ import { FBXLoader } from "three/examples/jsm/loaders/FBXLoader.js";
 import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
 import fs from "node:fs";
 import path from "node:path";
-import { RIG_MAPS, CLIP_PRESETS } from "./rig-map.mjs";
+import { RIG_MAPS, CLIP_PRESETS, detectRigMap } from "./rig-map.mjs";
 import { sanitizeFbx } from "./_fbx.mjs";
+import { normalizeLoop } from "./_clips.mjs";
 
 // ---------------------------------------------------------------- args
 
@@ -69,13 +70,21 @@ if (args.help || (!args.mesh && !args.list)) {
 retarget — bake an FBX animation library onto a differently-rigged character
 
   --mesh <file.fbx>     rigged character (skin + skeleton). Required.
-  --anim <file.fbx>     animation library. Repeat it (or comma-join) to merge
-                        several packs on the same rig; later files win a name
-                        collision. Omit to export the mesh alone.
+  --anim <file|folder>  animation library, or a folder of one-clip downloads
+                        (every .fbx directly inside). Repeat it (or comma-join)
+                        to merge packs — on one rig or on several: each file's
+                        rig is detected from its bone names and baked through
+                        its own map. Later files win a name collision. A file
+                        holding one generically-named clip ("mixamo.com") names
+                        it after the file. Omit to export the mesh alone.
   --out  <file.glb>     output. Default: alongside --mesh, same basename.
-  --rig  <id>           skeleton map id. Default: cc-base<-ue-mannequin
+  --rig  <id>           force one skeleton map for every file (default: detect).
   --clips <preset|list> preset name(s, joined with +), or Out=Source,Out2=Source2.
                         Default: locomotion. "all" takes every source clip.
+                        A source may carry modifiers: "Source@mirror" plays it
+                        with the other hand, "Source@0.4-1.6" trims to seconds.
+  --keep-root           keep root motion (default: horizontal hip drift is
+                        removed — the controller moves the body itself).
   --height <metres>     scale the character to this stature. Default 1.8.
                         Pass "none" to keep the file's own units.
   --fps <n>             resample rate for baked clips. Default 30.
@@ -246,8 +255,13 @@ function retargetClip({
   hipScale,
   fps,
   transferHips,
+  start = 0,
+  end = clip.duration,
+  mirror = null,
+  inPlace = true,
 }) {
-  const frames = Math.max(2, Math.round(clip.duration * fps) + 1);
+  const length = Math.max(1e-3, end - start);
+  const frames = Math.max(2, Math.round(length * fps) + 1);
   const times = new Float32Array(frames);
 
   const order = parentFirst(tgtRoot);
@@ -273,6 +287,12 @@ function retargetClip({
   restoreLocals(srcBones, srcBind);
   const mixer = new THREE.AnimationMixer(srcRoot);
   const action = mixer.clipAction(clip);
+  // Sampled as a CLAMPED one-shot. On the default repeat, the sample at
+  // t = duration wraps to 0, so every bake ended on a copy of its FIRST
+  // frame: invisible on a cycle, a death clip that stands back up on its last
+  // frame, and a root-motion run whose drift measured exactly zero.
+  action.setLoop(THREE.LoopOnce, 1);
+  action.clampWhenFinished = true;
   action.play();
 
   const srcWorld = new THREE.Quaternion();
@@ -283,10 +303,12 @@ function retargetClip({
   const worldByBone = new Map();
   const rootWorldQuat = new THREE.Quaternion();
 
+  const hipWorlds = hipValues ? [] : null;
+  const deltaQ = new THREE.Quaternion();
   for (let f = 0; f < frames; f++) {
-    const t = frames === 1 ? 0 : (f / (frames - 1)) * clip.duration;
+    const t = (f / (frames - 1)) * length;
     times[f] = t;
-    mixer.setTime(t);
+    mixer.setTime(start + t);
     srcRoot.updateMatrixWorld(true);
 
     tgtRoot.getWorldQuaternion(rootWorldQuat);
@@ -298,16 +320,17 @@ function retargetClip({
       if (pq) parentQ.copy(pq);
       else parentQ.copy(rootWorldQuat);
 
-      const srcName = rigMap.bones[bone.name];
+      // Mirrored, a left bone reads its RIGHT twin's motion, reflected.
+      const mapped = rigMap.bones[bone.name];
+      const srcName = mapped && mirror ? mirror.twin(mapped) : mapped;
       const srcBone = srcName ? srcBones.get(srcName) : null;
       if (srcBone) {
         srcBone.getWorldQuaternion(srcWorld);
         // delta = animated ∘ rest⁻¹, taken in world space so differing bone
         // axes between the two rigs cancel out
-        desired
-          .copy(srcWorld)
-          .multiply(srcRestQuat.get(srcName).clone().invert())
-          .multiply(tgtAlignedQuat.get(bone.name));
+        deltaQ.copy(srcWorld).multiply(srcRestQuat.get(srcName).clone().invert());
+        if (mirror) reflectQuat(deltaQ, mirror.normal);
+        desired.copy(deltaQ).multiply(tgtAlignedQuat.get(bone.name));
         localQ.copy(parentQ).invert().multiply(desired).normalize();
       } else {
         localQ.copy(tgtBind.get(bone.name).quaternion);
@@ -324,25 +347,42 @@ function retargetClip({
       }
     }
 
-    if (hipValues) {
+    if (hipWorlds) {
       srcBones.get(srcHipName).getWorldPosition(hipWorld);
-      hipWorld
-        .sub(srcHipRestWorld)
-        .multiplyScalar(hipScale)
-        .add(tgtHipRestWorld);
-      // The hip's parent is never a mapped bone, so its bind matrices still
-      // hold and worldToLocal is exact — rotation and any baked-in root scale
-      // included.
-      if (hipParent) hipParent.worldToLocal(hipWorld);
-      hipValues[f * 3 + 0] = hipWorld.x;
-      hipValues[f * 3 + 1] = hipWorld.y;
-      hipValues[f * 3 + 2] = hipWorld.z;
+      hipWorld.sub(srcHipRestWorld);
+      if (mirror) hipWorld.sub(mirror.normal.clone().multiplyScalar(2 * hipWorld.dot(mirror.normal)));
+      hipWorlds.push(hipWorld.multiplyScalar(hipScale).clone());
     }
   }
 
   action.stop();
   mixer.uncacheClip(clip);
   restoreLocals(srcBones, srcBind);
+
+  let travel = 0;
+  if (hipWorlds) {
+    // ROOT MOTION. The controller moves the body by physics velocity, so a
+    // clip that also carries the hips forward (every Mixamo download that was
+    // not ticked "in place") moves the character twice and snaps back on the
+    // loop. The horizontal drift start→end is removed linearly, which leaves
+    // a cycle's sway and a lunge's weight shift but not its distance.
+    const up = new THREE.Vector3(0, 1, 0);
+    const drift = hipWorlds[frames - 1].clone().sub(hipWorlds[0]);
+    drift.sub(up.clone().multiplyScalar(drift.dot(up)));
+    travel = drift.length();
+    for (let f = 0; f < frames; f++) {
+      const p = hipWorlds[f];
+      if (inPlace) p.sub(drift.clone().multiplyScalar(f / (frames - 1)));
+      p.add(tgtHipRestWorld);
+      // The hip's parent is never a mapped bone, so its bind matrices still
+      // hold and worldToLocal is exact — rotation and any baked-in root scale
+      // included.
+      if (hipParent) hipParent.worldToLocal(p);
+      hipValues[f * 3 + 0] = p.x;
+      hipValues[f * 3 + 1] = p.y;
+      hipValues[f * 3 + 2] = p.z;
+    }
+  }
 
   const outTracks = [];
   for (const [boneName, values] of tracks) {
@@ -351,7 +391,51 @@ function retargetClip({
   if (hipValues) {
     outTracks.push(new THREE.VectorKeyframeTrack(`${rigMap.hip}.position`, times, hipValues));
   }
-  return new THREE.AnimationClip(outName, clip.duration, outTracks);
+  const baked = new THREE.AnimationClip(outName, length, outTracks);
+  baked.userData = { travel };
+  return baked;
+}
+
+/**
+ * Reflect a rotation through the plane with unit normal `n` (the body's
+ * left-right axis). A rotation's axis is a PSEUDOvector: reflected, it flips
+ * the other way from a position, so the axis becomes 2(v·n)n − v.
+ */
+function reflectQuat(q, n) {
+  const d = 2 * (q.x * n.x + q.y * n.y + q.z * n.z);
+  q.set(d * n.x - q.x, d * n.y - q.y, d * n.z - q.z, q.w);
+  return q;
+}
+
+/** A bone's other-side twin, in the spellings the supported rigs use. */
+function twinBone(name) {
+  const swaps = [
+    [/Left/, "Right"], [/Right/, "Left"],
+    [/_l$/, "_r"], [/_r$/, "_l"],
+    [/_L_/, "_R_"], [/_R_/, "_L_"],
+  ];
+  for (const [re, to] of swaps) if (re.test(name)) return name.replace(re, to);
+  return name;
+}
+
+/**
+ * A clip selector: `source name`, optionally followed by modifiers —
+ * `@mirror` (play it with the other hand) and `@<from>-<to>` (seconds; trims a
+ * long lead-in or recovery). `great sword slash (3)@0.4-1.5`,
+ * `Standing Torch Melee Attack 01@mirror`.
+ */
+function parseSelector(spec) {
+  const [name, ...mods] = spec.split("@").map((s) => s.trim());
+  const out = { name, mirror: false, start: null, end: null };
+  for (const m of mods) {
+    if (m === "mirror") out.mirror = true;
+    else if (/^[\d.]*-[\d.]*$/.test(m)) {
+      const [a, b] = m.split("-");
+      if (a) out.start = Number(a);
+      if (b) out.end = Number(b);
+    } else throw new Error(`retarget: unknown clip modifier "@${m}" in "${spec}"`);
+  }
+  return out;
 }
 
 // -------------------------------------------------- authored ground speed
@@ -427,46 +511,98 @@ function measureClipSpeeds(root, bones, clips, rigMap, groundY) {
 
 // ---------------------------------------------------------------- main
 
-const rigId = args.rig || "cc-base<-ue-mannequin";
-const rigMap = RIG_MAPS[rigId];
-if (!rigMap) {
-  console.error(`retarget: unknown rig map "${rigId}". Known: ${Object.keys(RIG_MAPS).join(", ")}`);
-  process.exit(1);
+
+/**
+ * Source libraries, one entry per RIG. Libraries on one rig (UAL1 + UAL2, or
+ * seventy one-clip Mixamo downloads) share a skeleton, so their clips pool and
+ * are all measured against that rig's first file — preferring a file with a
+ * skinned mesh, whose bones certainly sit in the bind pose. Libraries on
+ * DIFFERENT rigs bake side by side in one run, each through its own map.
+ * @type {Map<string, { rigMap: any, root: THREE.Object3D, rank: number }>}
+ */
+const sources = new Map();
+/** Clip name -> { clip, rig id }. A later file wins a name collision. */
+const sourceClips = new Map();
+
+/**
+ * Exporters that write one clip per file give it a name that says nothing —
+ * every Mixamo download is "mixamo.com" — so such a clip takes its FILE's name
+ * ("great sword slash (2)"), which is what an author picked it by.
+ */
+const GENERIC_CLIP = /^(mixamo\.com|Take \d+|Scene|Armature\|?Action(\.\d+)?)$/i;
+
+/** `--anim` entries: files, or folders standing for every .fbx directly inside. */
+function animFiles(spec) {
+  return String(spec)
+    .split(",")
+    .map((f) => f.trim())
+    .filter(Boolean)
+    .flatMap((f) =>
+      fs.existsSync(f) && fs.statSync(f).isDirectory()
+        ? fs
+            .readdirSync(f)
+            .filter((n) => /\.fbx$/i.test(n))
+            .sort()
+            .map((n) => path.join(f, n))
+        : [f],
+    );
 }
 
-let animGroup = null;
 if (args.anim) {
-  const files = String(args.anim).split(",").map((f) => f.trim()).filter(Boolean);
-  for (const file of files) {
-    process.stdout.write(`reading ${path.basename(file)} … `);
-    const t0 = Date.now();
-    const group = loadFbx(file);
-    console.log(`${group.animations.length} clips (${Date.now() - t0}ms)`);
-    if (!animGroup) animGroup = group;
-    else {
-      // Only the CLIPS are merged. The first library's skeleton is the one
-      // everything is retargeted from, which is safe precisely because these
-      // packs share a rig — and if one ever does not, its clips would address
-      // bones this skeleton lacks and land in the skip list rather than
-      // silently deforming the character.
-      const have = new Set(animGroup.animations.map((c) => c.name));
-      for (const clip of group.animations) {
-        if (have.has(clip.name)) {
-          animGroup.animations = animGroup.animations.filter((c) => c.name !== clip.name);
-        }
-        animGroup.animations.push(clip);
-      }
-    }
+  const forced = args.rig ? RIG_MAPS[args.rig] : null;
+  if (args.rig && !forced) {
+    console.error(`retarget: unknown rig map "${args.rig}". Known: ${Object.keys(RIG_MAPS).join(", ")}`);
+    process.exit(1);
   }
+  const files = animFiles(args.anim);
+  const quiet = files.length > 8;
+  const t0 = Date.now();
+  for (const file of files) {
+    if (!quiet) process.stdout.write(`reading ${path.basename(file)} … `);
+    const t1 = Date.now();
+    const group = loadFbx(file);
+    const names = new Set();
+    let skinned = false;
+    let duplicated = false;
+    group.traverse((o) => {
+      if (o.isBone) {
+        if (names.has(o.name)) duplicated = true;
+        names.add(o.name);
+      }
+      if (o.isSkinnedMesh) skinned = true;
+    });
+    const rigMap = forced ?? detectRigMap(names);
+    if (!rigMap) {
+      console.log(`\n  ! ${path.basename(file)}: no rig map matches its bones — skipped`);
+      continue;
+    }
+    const have = sources.get(rigMap.id);
+    // Prefer a skinned file as the rig's reference skeleton (its bones are
+    // certainly at bind) — but never one with DUPLICATE bone names. three
+    // loads Mixamo's skinned "X Bot" with a second mixamorigHips nested under
+    // the first; the mixer then animates one copy while the bake reads the
+    // other, and every clip loses its hip travel without a word.
+    const rank = duplicated ? 0 : skinned ? 2 : 1;
+    if (!have || rank > have.rank) sources.set(rigMap.id, { rigMap, root: group, rank });
+    // a skinned CHARACTER file (Mixamo's "X Bot") carries a one-frame stub clip
+    const real = group.animations.filter((c) => c.duration > 0.05);
+    for (const clip of real) {
+      const name = real.length === 1 && GENERIC_CLIP.test(clip.name) ? path.basename(file, path.extname(file)) : clip.name;
+      clip.name = name;
+      sourceClips.set(name, { clip, rig: rigMap.id });
+    }
+    if (!quiet) console.log(`${real.length} clips, ${rigMap.id} (${Date.now() - t1}ms)`);
+  }
+  if (quiet) console.log(`read ${files.length} files, ${sourceClips.size} clips (${Date.now() - t0}ms)`);
 }
 
 if (args.list) {
-  if (!animGroup) {
+  if (!sourceClips.size) {
     console.error("retarget: --list needs --anim");
     process.exit(1);
   }
-  for (const c of [...animGroup.animations].sort((a, b) => a.name.localeCompare(b.name))) {
-    console.log(`${c.duration.toFixed(2).padStart(6)}s  ${c.name}`);
+  for (const [name, { clip, rig }] of [...sourceClips].sort((a, b) => a[0].localeCompare(b[0]))) {
+    console.log(`${clip.duration.toFixed(2).padStart(6)}s  ${name}${sources.size > 1 ? `   [${rig}]` : ""}`);
   }
   process.exit(0);
 }
@@ -536,60 +672,63 @@ if (args.height !== "none") {
 
 // ---- bake
 const outClips = [];
-if (animGroup) {
-  const srcBones = collectBones(animGroup);
-  const srcBind = snapshotLocals(srcBones);
-  const srcRestQuat = worldQuaternions(animGroup, srcBones);
-  const srcRestPos = worldPositions(animGroup, srcBones);
-
-  const missingT = Object.keys(rigMap.bones).filter((b) => !tgtBones.has(b));
-  const missingS = Object.values(rigMap.bones).filter((b) => !srcBones.has(b));
-  if (missingT.length) console.log(`  note: target lacks ${missingT.length} mapped bones: ${missingT.join(", ")}`);
-  if (missingS.length) console.log(`  note: source lacks ${missingS.length} mapped bones: ${missingS.join(", ")}`);
-
-  const drivenCount = Object.keys(rigMap.bones).filter((b) => tgtBones.has(b) && srcBones.has(rigMap.bones[b])).length;
-  console.log(`driving ${drivenCount}/${tgtBones.size} target bones; the rest hold their bind pose`);
-
-  // height ratio, so hip translation lands in proportion
-  const span = (bones, pos, m) => {
-    const top = pos.get(m.top);
-    const bottom = pos.get(m.bottom);
-    return top && bottom ? Math.abs(top.y - bottom.y) : 1;
-  };
+if (sourceClips.size) {
+  // Per source rig: its skeleton at rest, and the target posed into that rest.
+  // Two rigs means two reconciliations — a UAL clip and a Mixamo clip are each
+  // measured against the rest pose THEY were authored from.
   const tgtRestPos = worldPositions(meshGroup, tgtBones);
-  // Both spans are world-space, because that is the frame hip travel is
-  // measured and re-applied in (see retargetClip). The conversion down into
-  // the hip's local axes happens there, per frame.
-  const tgtSpan = span(tgtBones, tgtRestPos, rigMap.measure);
-  const srcSpan = span(srcBones, srcRestPos, rigMap.sourceMeasure);
-  const hipScale = tgtSpan / srcSpan;
-  console.log(`rig spans: target ${tgtSpan.toFixed(3)} / source ${srcSpan.toFixed(3)} -> hip x${hipScale.toFixed(3)}`);
+  const prepared = new Map();
+  for (const [rigId, { rigMap, root }] of sources) {
+    const srcBones = collectBones(root);
+    const srcBind = snapshotLocals(srcBones);
+    const srcRestQuat = worldQuaternions(root, srcBones);
+    const srcRestPos = worldPositions(root, srcBones);
 
-  const alignReport = [];
-  const tgtAlignedQuat = alignTargetRestToSource(meshGroup, tgtBones, rigMap, srcRestPos, alignReport);
-  restoreLocals(tgtBones, tgtBind);
-  meshGroup.updateMatrixWorld(true);
-  alignReport.sort((a, b) => b.deg - a.deg);
-  console.log(
-    `rest alignment: ${alignReport.length} bones corrected, largest ` +
-      alignReport.slice(0, 4).map((r) => `${r.bone} ${r.deg.toFixed(0)}°`).join(", "),
-  );
+    const missingT = Object.keys(rigMap.bones).filter((b) => !tgtBones.has(b));
+    const missingS = Object.values(rigMap.bones).filter((b) => !srcBones.has(b));
+    console.log(`[${rigId}]`);
+    if (missingT.length) console.log(`  note: target lacks ${missingT.length} mapped bones: ${missingT.join(", ")}`);
+    if (missingS.length) console.log(`  note: source lacks ${missingS.length} mapped bones: ${missingS.join(", ")}`);
+    const drivenCount = Object.keys(rigMap.bones).filter((b) => tgtBones.has(b) && srcBones.has(rigMap.bones[b])).length;
+    console.log(`  driving ${drivenCount}/${tgtBones.size} target bones; the rest hold their bind pose`);
+
+    // height ratio, so hip translation lands in proportion. Both spans are
+    // world-space, because that is the frame hip travel is measured and
+    // re-applied in (see retargetClip).
+    const span = (pos, m) => {
+      const top = pos.get(m.top);
+      const bottom = pos.get(m.bottom);
+      return top && bottom ? Math.abs(top.y - bottom.y) : 1;
+    };
+    const hipScale = span(tgtRestPos, rigMap.measure) / span(srcRestPos, rigMap.sourceMeasure);
+    console.log(`  hip x${hipScale.toFixed(4)}`);
+
+    const alignReport = [];
+    const tgtAlignedQuat = alignTargetRestToSource(meshGroup, tgtBones, rigMap, srcRestPos, alignReport);
+    restoreLocals(tgtBones, tgtBind);
+    meshGroup.updateMatrixWorld(true);
+    alignReport.sort((a, b) => b.deg - a.deg);
+    console.log(
+      `  rest alignment: ${alignReport.length} bones corrected, largest ` +
+        alignReport.slice(0, 4).map((r) => `${r.bone} ${r.deg.toFixed(0)}°`).join(", "),
+    );
+
+    // The body's left-right axis at rest, for mirroring: left shoulder minus
+    // right, measured rather than assumed to be X.
+    const l = srcRestPos.get(rigMap.bones.CC_Base_L_Upperarm);
+    const r = srcRestPos.get(rigMap.bones.CC_Base_R_Upperarm);
+    const normal = l && r ? l.clone().sub(r).normalize() : new THREE.Vector3(1, 0, 0);
+    prepared.set(rigId, { rigMap, root, srcBones, srcBind, srcRestQuat, srcRestPos, hipScale, tgtAlignedQuat, normal });
+  }
 
   // which clips
   let wanted;
   const preset = args.clips ?? "locomotion";
   if (preset === "all") {
-    wanted = Object.fromEntries(
-      animGroup.animations.map((c) => [c.name.replace(/^Armature\|/, ""), c.name]),
-    );
+    wanted = Object.fromEntries([...sourceClips.keys()].map((n) => [n.replace(/^Armature\|/, ""), n]));
   } else if (String(preset).split("+").every((n) => CLIP_PRESETS[n.trim()])) {
     // "locomotion+combat" merges presets left-to-right; later wins on collision.
-    wanted = Object.assign(
-      {},
-      ...String(preset)
-        .split("+")
-        .map((n) => CLIP_PRESETS[n.trim()]),
-    );
+    wanted = Object.assign({}, ...String(preset).split("+").map((n) => CLIP_PRESETS[n.trim()]));
   } else {
     wanted = Object.fromEntries(
       String(preset)
@@ -601,35 +740,72 @@ if (animGroup) {
     );
   }
 
-  const byName = new Map(animGroup.animations.map((c) => [c.name, c]));
   const fps = Number(args.fps ?? 30);
   const transferHips = !args["no-hips"];
-  for (const [outName, srcName] of Object.entries(wanted)) {
-    const clip = byName.get(srcName) ?? byName.get(`Armature|${srcName}`);
-    if (!clip) {
-      console.log(`  ! skipped "${outName}" — no source clip "${srcName}"`);
+  const inPlace = !args["keep-root"];
+  const drifted = [];
+  const loopKinds = { open: [], closed: [], once: [] };
+  for (const [outName, spec] of Object.entries(wanted)) {
+    const sel = parseSelector(spec);
+    const found = sourceClips.get(sel.name) ?? sourceClips.get(`Armature|${sel.name}`);
+    if (!found) {
+      console.log(`  ! skipped "${outName}" — no source clip "${sel.name}"`);
       continue;
     }
-    const baked = retargetClip({
+    const src = prepared.get(found.rig);
+    const clip = found.clip;
+    const start = Math.max(0, Math.min(sel.start ?? 0, clip.duration));
+    const end = Math.max(start, Math.min(sel.end ?? clip.duration, clip.duration));
+    let baked = retargetClip({
       clip,
       outName,
-      srcRoot: animGroup,
-      srcBones,
-      srcBind,
-      srcRestQuat,
-      srcRestPos,
+      srcRoot: src.root,
+      srcBones: src.srcBones,
+      srcBind: src.srcBind,
+      srcRestQuat: src.srcRestQuat,
+      srcRestPos: src.srcRestPos,
       tgtRoot: meshGroup,
       tgtBones,
       tgtBind,
-      tgtAlignedQuat,
-      rigMap,
-      hipScale,
+      tgtAlignedQuat: src.tgtAlignedQuat,
+      rigMap: src.rigMap,
+      hipScale: src.hipScale,
       fps,
       transferHips,
+      start,
+      end,
+      mirror: sel.mirror ? { normal: src.normal, twin: twinBone } : null,
+      inPlace,
     });
+    // Sampled clamped, a cycle authored "open" (last key one frame short of
+    // the repeat, as most are) would wrap from its last pose to its first in
+    // no time: a pop per loop. Close those with the opening pose one frame on,
+    // exactly as autorig does; a one-shot keeps its true last frame. Judged on
+    // the BAKED clip, after root motion is gone — a run still carrying its
+    // travel never looks like a cycle. A trimmed selection is a one-shot.
+    const trimmed = sel.start !== null || sel.end !== null;
+    if (!trimmed) {
+      const travelled = baked.userData.travel;
+      const closed = normalizeLoop(baked);
+      if (closed.kind === "open") {
+        baked = closed.clip;
+        baked.userData = { travel: travelled };
+      }
+      loopKinds[closed.kind].push(outName);
+    }
     outClips.push(baked);
+    // the drift is in the TARGET's world units, i.e. before --height scaling
+    const travel = baked.userData.travel * modelScale;
+    if (travel > 0.25) drifted.push(`${outName} ${travel.toFixed(1)}m`);
+    console.log(`  ${outName.padEnd(22)} ${baked.duration.toFixed(2)}s  ${baked.tracks.length} tracks  <- ${spec}`);
+  }
+  console.log(`
+loops: ${loopKinds.open.length} closed with their opening pose, ${loopKinds.closed.length} already closed, ${loopKinds.once.length} one-shots` +
+    (loopKinds.once.length ? ` (${loopKinds.once.join(", ")})` : ""));
+  if (drifted.length) {
     console.log(
-      `  ${outName.padEnd(18)} ${baked.duration.toFixed(2)}s  ${baked.tracks.length} tracks  <- ${srcName}`,
+      `\nroot motion ${inPlace ? "removed" : "KEPT (--keep-root)"} — these clips travelled: ${drifted.join(", ")}` +
+        (inPlace ? "\n  (a one-shot that travelled far reads as a lunge on the spot; pick another or trim it)" : ""),
     );
   }
   restoreLocals(tgtBones, tgtBind);
@@ -639,7 +815,8 @@ if (animGroup) {
   // play them at the right rate; without it the feet skate by exactly the
   // ratio between the clip and whatever the gait is tuned to.
   const groundY = new THREE.Box3().setFromObject(meshGroup).min.y + 0.06 * modelScale;
-  const speeds = measureClipSpeeds(meshGroup, tgtBones, outClips, rigMap, groundY);
+  const anyRig = prepared.values().next().value.rigMap;
+  const speeds = measureClipSpeeds(meshGroup, tgtBones, outClips, anyRig, groundY);
   restoreLocals(tgtBones, tgtBind);
   meshGroup.updateMatrixWorld(true);
   if (Object.keys(speeds).length) {

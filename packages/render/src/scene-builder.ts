@@ -1,7 +1,7 @@
 import * as THREE from "three/webgpu";
 import { buildPortalMaterial } from "./portal-material.js";
 import { STATIC_BATCH_FLAG } from "./static-batch.js";
-import { InstancedProps, applyInstanceUber, applyInstanceUvRotation, applyInstancedProps } from "./instancing.js";
+import { InstancedProps, applyInstanceGlow, applyInstanceUber, applyInstanceUvRotation, applyInstancedProps } from "./instancing.js";
 import { applyWorldUv } from "./primitive-uv.js";
 import {
   positionWorld,
@@ -85,6 +85,8 @@ import { polyMeshGeometry } from "./poly-mesh-geometry.js";
 import { horizonTint } from "./atmosphere.js";
 import { buildTerrainSplatMaterial, SPLAT_ATTRIBUTES, type MacroNoiseData } from "./terrain-splat.js";
 import { mergeModelSubmeshes } from "./static-batch.js";
+import { applyModelPartMask } from "./ubermesh.js";
+import type { MovingInstanceEntry } from "./moving-instances.js";
 import { voxelGeometry, csgGeometry, voxelColliderProxyGeometry } from "./voxel-geometry.js";
 import type { ParticlesData } from "./particles.js";
 import type { AmbientVfxData } from "./vfx/ambient.js";
@@ -273,6 +275,12 @@ export interface BuildOptions {
    * `group` is the entity's anchor group; the system parents its
    * InstancedMesh under it, then treats it as world-space (see GrassSystem). */
   onGrass?(entityId: string, group: THREE.Object3D, data: GrassData): void;
+  /**
+   * The host's batches for `mesh.moving` instanced entities (held weapons,
+   * worn gear) — see moving-instances.ts. Without one, a moving entity is
+   * drawn as an ordinary model.
+   */
+  movingInstances?: { add(assetId: string, entry: MovingInstanceEntry): void };
   /** Fired once per `renderMode: "instanced"` (assetId, node) group — the app
    * registers it with a FoliageLodSystem to drive near/far distance LOD. */
   onInstancedBatch?(batch: InstancedPropBatch): void;
@@ -454,6 +462,8 @@ interface MeshData {
   receiveShadow: boolean;
   renderMode?: "auto" | "instanced" | "clustered";
   lod?: boolean;
+  /** instanced only: follows its entity every frame (see MovingInstanceSystem). */
+  moving?: boolean;
   /** Authoring hint that this mesh never moves — drives static draw-call
    * batching (static-batch.ts). Read here only to tag the built mesh. */
   static?: boolean;
@@ -1882,7 +1892,29 @@ function populateEntityGroup(
       group.add(mesh);
     }
 
-    if (meshData && meshData.source.kind === "asset" && meshData.renderMode === "instanced") {
+    if (
+      meshData &&
+      meshData.source.kind === "asset" &&
+      meshData.renderMode === "instanced" &&
+      meshData.moving &&
+      options.movingInstances
+    ) {
+      // follows its entity every frame, one draw per asset (moving-instances.ts)
+      options.movingInstances.add(meshData.source.assetId, {
+        id,
+        group,
+        atlasTile: meshData.source.atlasTile,
+        partMask: meshData.source.partMask,
+        castShadow: meshData.castShadow,
+        receiveShadow: meshData.receiveShadow,
+        textureFilter: meshData.source.textureFilter,
+      });
+    } else if (
+      meshData &&
+      meshData.source.kind === "asset" &&
+      meshData.renderMode === "instanced" &&
+      !meshData.moving
+    ) {
       const assetId = meshData.source.assetId;
       // An instanced entry is parented to the SCENE (`anchor` below), because
       // every entry that shares an asset collapses into one batch that cannot
@@ -1974,6 +2006,10 @@ function populateEntityGroup(
             if (lift !== undefined) applyModelBrightness(instance, lift);
             const textureFilter = meshData.source.kind === "asset" ? meshData.source.textureFilter : undefined;
             if (textureFilter) applyModelTextureFilter(instance, textureFilter);
+            // an ubermesh drawn on its own: the mask trims the index instead
+            // of collapsing vertices (see ubermesh.ts)
+            const partMask = meshData.source.kind === "asset" ? meshData.source.partMask : undefined;
+            if (partMask !== undefined) applyModelPartMask(instance, partMask);
             if (meshData.material) {
               const override = resolveMaterialFor(meshData, options, materialCache);
               instance.traverse((node) => {
@@ -2490,7 +2526,7 @@ export function cachedMergedMaterial(
 export function cachedInstancedMaterial(
   cacheKey: string,
   source: THREE.Material | THREE.Material[],
-  options: { uvRotation?: boolean; uber?: boolean } = {},
+  options: { uvRotation?: boolean; uber?: boolean; glow?: boolean } = {},
 ): THREE.Material | THREE.Material[] {
   const cached = instancedMaterialCache.get(cacheKey);
   if (cached) return cached;
@@ -2507,6 +2543,8 @@ export function cachedInstancedMaterial(
     // Same contract as the rotation attribute: a material that binds the
     // ubermesh attribute is only ever handed to batches that allocate it.
     if (options.uber) applyInstanceUber(clone);
+    // per-instance item glow (moving batches), after the uber hook it wraps
+    if (options.glow) applyInstanceGlow(clone);
     return clone;
   };
   const cloned = Array.isArray(source) ? source.map(instancedClone) : instancedClone(source);

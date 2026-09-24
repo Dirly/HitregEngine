@@ -337,6 +337,18 @@ export interface EditorSettings {
    * everything else stays exactly where the gizmo put it.
    */
   placementAssist: boolean;
+  /**
+   * Which axes the move/rotate gizmo drags along: the world's, or the
+   * selected object's own (X toggles). For a held item, local is the BONE's
+   * frame — the same axes its socket offset and rotation are written in.
+   */
+  gizmoSpace: "world" | "local";
+  /**
+   * Edit mode shows every held item in its SECOND socket pose — for weapons,
+   * the holstered one on the back — so that pose can be placed with the gizmo
+   * (a drag then writes altOffset / altRotationDeg).
+   */
+  previewHolstered: boolean;
 }
 
 /** Selected asset in the Assets panel (mutually exclusive with entity selection). */
@@ -457,6 +469,8 @@ export const defaultEditorSettings: EditorSettings = {
   showLights: false,
   showStats: true,
   placementAssist: true,
+  gizmoSpace: "world",
+  previewHolstered: false,
 };
 
 const SETTINGS_KEY = "hitreg-editor-settings";

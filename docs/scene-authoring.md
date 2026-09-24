@@ -164,7 +164,11 @@ mesh is untouched. Fields → the spec; judgment:
 `scripts` lists every behavior and its params. Inside a script, `ctx` offers
 what the schema can't describe: `setAnimation(clip, fade, { loop })` —
 `loop: false` plays once then emits the local `animation.completed`
-`{ entityId, clip }` (attack/emote → idle chaining); `playSound(id?)`,
+`{ entityId, clip }` (attack/emote → idle chaining); `playSound(id?, { volume?,
+positional?, refDistance?, playbackRate? })`; and
+`setSoundLoop(slot, id?, { volume?, positional?, refDistance? })` for a
+script-owned loop whose gain changes without restarting it (omit `id` to stop
+that slot),
 `setActiveCamera(id)`, `viewForward()`, sim velocity APIs; `ctx.after(s, cb)` /
 `ctx.every(s, cb)` — deterministic sim-stepped timers (replay/multiplayer-safe,
 NOT setTimeout; return a cancel fn, auto-cancelled on dispose/suspend);

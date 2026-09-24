@@ -40,6 +40,7 @@ export const colliderSchema = z.object({
     .describe("Full extents (box) / diameter+height (sphere, capsule, cylinder use x,y). IGNORED for cooked shapes (heightmap/trimesh/convex)."),
   offset: vec3.default([0, 0, 0]).describe("Local offset from the entity origin."),
   friction: z.number().min(0).default(0.5),
+  surface: z.string().optional().describe("Footstep/landing surface override (grass, gravel, stone, wood, metal, rubble, etc.). Use this on a house, castle, path or prop collider when its material id does not say what it sounds like."),
   restitution: z.number().min(0).default(0),
   density: z.number().positive().default(1),
   isTrigger: z

@@ -63,6 +63,8 @@ function run(seconds: number, params: Record<string, unknown> = {}) {
   /** The last value written per emitter, and the whole history of rates. */
   const emitters = new Map<string, Emitter>();
   const rates = new Map<string, number[]>();
+  const loops = new Map<string, { sound: string; volume: number }>();
+  const sounds: Array<{ sound: string; playbackRate: number }> = [];
   const registry = new ScriptRegistry();
   registerBuiltinScripts(registry);
   const runtime = new ScriptRuntime({
@@ -91,6 +93,13 @@ function run(seconds: number, params: Record<string, unknown> = {}) {
         rates.set(id, list);
       }
     },
+    setSoundLoop: (_id, slot, sound, opts) => {
+      if (!sound) loops.delete(slot);
+      else loops.set(slot, { sound, volume: opts?.volume ?? 1 });
+    },
+    playSound: (_id, sound, opts) => {
+      if (sound) sounds.push({ sound, playbackRate: opts?.playbackRate ?? 1 });
+    },
     getSky: () => ({
       top: "#39598f",
       bottom: "#101522",
@@ -106,7 +115,7 @@ function run(seconds: number, params: Record<string, unknown> = {}) {
   runtime.start();
   const dt = 1 / 30;
   for (let t = 0; t < seconds * 30; t++) runtime.fixedUpdate(dt);
-  return { sky, emitters, rates, last: () => sky[sky.length - 1]! };
+  return { sky, emitters, rates, loops, sounds, last: () => sky[sky.length - 1]! };
 }
 
 /** Rain rate at roughly `at` seconds in, from the history of writes. */
@@ -283,11 +292,38 @@ describe("weather fronts", () => {
   });
 
   it("stays clear, silent and unlit when the weather is pinned clear", () => {
-    const { sky, rates } = run(60, { force: "clear", changeMinutes: 4 });
+    const { sky, rates, loops } = run(60, { force: "clear", changeMinutes: 4 });
     const last = sky[sky.length - 1]!.weather!;
     expect(last.gloom).toBeCloseTo(0, 3);
     expect(last.cloudDark).toBeCloseTo(0, 3);
     expect(last.flash).toBe(0);
     expect(Math.max(...(rates.get("weather-rain") ?? [0]))).toBeCloseTo(0, 3);
+    expect(loops.size).toBe(0);
+  });
+
+  it("keeps locally audible weather loops continuous and proportional to the front", () => {
+    const { loops } = run(150, {
+      force: "storm",
+      changeMinutes: 4,
+      fadeSeconds: 2,
+      rainSound: "weather/rain-steady.mp3",
+      rainSoundVolume: 0.4,
+    });
+    expect(loops.get("rain")).toEqual({ sound: "weather/rain-steady.mp3", volume: expect.any(Number) });
+    expect(loops.get("rain")!.volume).toBeGreaterThan(0.25);
+    expect(loops.has("snow")).toBe(false);
+    expect(loops.has("sand")).toBe(false);
+  });
+
+  it("varies thunder across the authored sound list", () => {
+    const { sounds } = run(120, {
+      force: "storm",
+      changeMinutes: 1,
+      lightning: 30,
+      thunder: "weather/thunder-a.mp3,weather/thunder-b.mp3,weather/thunder-c.mp3",
+    });
+    expect(new Set(sounds.map(({ sound }) => sound)).size).toBeGreaterThan(1);
+    expect(sounds.every(({ sound }) => sound.startsWith("weather/thunder-"))).toBe(true);
+    expect(sounds.every(({ playbackRate }) => playbackRate >= 0.94 && playbackRate <= 1.06)).toBe(true);
   });
 });

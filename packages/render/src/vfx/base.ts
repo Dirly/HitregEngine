@@ -44,6 +44,14 @@ export interface VfxFrame {
   /** Terrain height under (x, z), probing from `nearY`; null = unknown. */
   ground?(x: number, z: number, nearY: number): number | null;
   palette: Palette;
+  /**
+   * A full orientation for the play (an item's frame: a sword's blade axis,
+   * its edges). When set, `origin` anchors take it as their facing and their
+   * offsets are in its axes instead of the horizontal spell frame, so an
+   * emitter's volume and direction turn with the item. Unset = spells and
+   * torches, upright in the world.
+   */
+  basis?: THREE.Quaternion;
 }
 
 /** Per-play state shared by every module of one phase. */
@@ -128,6 +136,15 @@ export function resolveAnchor(anchor: Anchor, ctx: PlayContext, out: AnchorPose)
       out.velocity.copy(ctx.path.vel);
       if (ctx.path.vel.lengthSq() > 1e-4) tmpFwd.copy(ctx.path.vel).normalize();
       break;
+  }
+
+  // an item's frame: facing and offsets turn with it (see VfxFrame.basis)
+  if (f.basis && anchor.at === "origin") {
+    const [bx, by, bz] = anchor.offset;
+    if (bx !== 0 || by !== 0 || bz !== 0) out.position.add(tmpVec.set(bx, by, bz).applyQuaternion(f.basis));
+    out.forward.set(0, 0, 1).applyQuaternion(f.basis);
+    out.facing.copy(f.basis);
+    return;
   }
 
   // offset in the spell frame

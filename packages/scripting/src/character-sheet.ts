@@ -22,7 +22,7 @@ import {
   type SheetEnv,
   type SheetResult,
 } from "@hitreg/core";
-import { Script, type ScriptEventDecl } from "./script.js";
+import { Script, type ScriptCommandDecl, type ScriptEventDecl } from "./script.js";
 import {
   catalogOf,
   forgetLocalSheet,
@@ -86,6 +86,14 @@ export class CharacterSheetScript extends Script {
   };
 
   static override events: ScriptEventDecl[] = [...characterEventDecls];
+  static override commands: ScriptCommandDecl[] = [
+    {
+      name: "give",
+      args: "<itemId> [qty]",
+      description: "Put an item (an items/ asset id) into your own inventory — for trying gear without a drop.",
+      authority: true,
+    },
+  ];
 
   private store!: SheetStoreLike;
   private env!: SheetEnv;
@@ -190,6 +198,21 @@ export class CharacterSheetScript extends Script {
   private mayAct(meta?: { from?: string }): boolean {
     if (meta?.from === undefined) return true;
     return this.store.get(`owner/${this.actorId}`) === meta.from;
+  }
+
+  override onCommand(name: string, args: string[]): string | null {
+    if (name !== "give") return null;
+    const itemId = args[0];
+    if (!itemId) throw new Error("usage: /give <itemId> [qty]");
+    const qty = args[1] === undefined ? 1 : Number(args[1]);
+    if (!Number.isInteger(qty) || qty < 1) throw new Error(`/give: "${args[1]}" is not a quantity`);
+    if (!this.env.catalog(itemId)) throw new Error(`/give: no item "${itemId}" (assets/items/<id>.json)`);
+    // The console runs this on the FIRST sheet script, which on a server may
+    // be anybody's — so it names this tab's own body and lets that sheet's
+    // authority-side handler take it like any other grant.
+    const actorId = this.ctx.localPlayer?.() ?? this.actorId;
+    this.ctx.events?.emit(CHARACTER_EVENTS.give, { actorId, itemId, qty });
+    return `giving ${qty} ${itemId} to ${actorId}`;
   }
 
   private handle<T>(

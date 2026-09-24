@@ -1,3 +1,4 @@
+import type { ItemEffect, ItemGlow } from "@hitreg/core";
 import type * as THREE from "three";
 import type { z } from "zod";
 import type { EntityDoc, EventRegistrationOptions, PlayerDataService } from "@hitreg/core";
@@ -125,6 +126,20 @@ export interface ScriptParamSpec {
   description?: string;
 }
 
+/** An ubermesh look for {@link ScriptContext.setModelLook}. */
+export interface ModelLook {
+  /** Part names to show (the model's part table); wins over `partMask`. Every other part hides. */
+  parts?: readonly string[];
+  /** Raw part bit mask, for a model without a part table. */
+  partMask?: number;
+  /** Theme sheet texture asset id; null restores the model's own; undefined leaves it alone. */
+  texture?: string | null;
+  /** Emissive glow (an item's `appearance.glow`); null clears it; undefined leaves it alone. */
+  glow?: ItemGlow | null;
+  /** Standing effects anchored on the model (`appearance.effects`); replaces the previous set; undefined leaves it alone. */
+  effects?: readonly ItemEffect[];
+}
+
 /** What scripts may touch. Deliberately narrow; grows with the engine. */
 export interface ScriptContext {
   entityId: string;
@@ -172,6 +187,15 @@ export interface ScriptContext {
    * from "looking across it".
    */
   viewDirection?(): [number, number, number];
+  /**
+   * The local player just ACTED — moved, cast, attacked. A host whose camera
+   * has been parked somewhere else (a free look swung round to see the
+   * character's face) brings it back behind the aim. Cheap and idempotent:
+   * call it every tick the player is acting. Only for the local player's own
+   * actions; a host running other players' bodies must not have its camera
+   * pulled by them.
+   */
+  recenterView?(): void;
   /** Switch the render camera to another camera-component entity (runtime-only). */
   setActiveCamera?(entityId: string | null): void;
   /**
@@ -234,7 +258,11 @@ export interface ScriptContext {
   /** Fade the animation layer out and give the base clip the whole body back. */
   clearAnimationLayer?(fadeSeconds?: number): void;
   /** Play this entity's audio component, or any sound asset id, at this entity. */
-  playSound?(soundId?: string): void;
+  playSound?(soundId?: string, opts?: { volume?: number; positional?: boolean; refDistance?: number; playbackRate?: number; priority?: number }): void;
+  /** Material/surface name under a world point; hosts return a sensible fallback when unknown. */
+  surfaceAt?(x: number, y: number, z: number): string;
+  /** Keep a named script-owned loop alive; omit soundId to stop that slot. */
+  setSoundLoop?(slot: string, soundId?: string, opts?: { volume?: number; positional?: boolean; refDistance?: number }): void;
   /** Mutate this entity's billboard at runtime (HP bar fill, label text) — never the document. */
   setBillboard?(opts: { fill?: number; text?: string; visible?: boolean; play?: boolean; row?: number; tint?: string }): void;
   /**
@@ -264,6 +292,17 @@ export interface ScriptContext {
   }): void;
   /** Runtime-only control for this entity's light component. */
   setLight?(entityId: string, opts: { enabled?: boolean; intensity?: number; color?: string }): void;
+  /**
+   * Change what an entity's UBERMESH model shows, at runtime only (the
+   * document is untouched): which PARTS (by the model's own part names, or a
+   * raw bit mask) and which THEME sheet (a texture asset id; null = the one
+   * baked into the model). What equipping a sword or a helm looks like — see
+   * the `equipment-look` builtin, which drives this from an item's
+   * `appearance`. Safe to call before the model has loaded: the host keeps the
+   * latest look per entity and applies it on load and after every rebuild.
+   * Presentation only — absent on a dedicated server.
+   */
+  setModelLook?(entityId: string, look: ModelLook): void;
   /**
    * Drive the scene's sky per frame without a rebuild: gradient, fog, the
    * directional light's aim/colour/intensity, the dome's sun and moon discs,
@@ -787,6 +826,22 @@ export abstract class Script {
 
   onStart?(): void;
   onFixedUpdate?(dt: number): void;
+  /**
+   * Once per RENDERED frame, after animation has posed the skeletons — for
+   * scripts that attach something to a bone. On the fixed tick a bone is
+   * where the previous frame left it, so anything placed there trails a
+   * moving arm by a frame. Presentation only: never change gameplay state
+   * here (it runs at the display rate, and not at all headless).
+   */
+  onLateUpdate?(dt: number): void;
+  /**
+   * New params were patched into this running script (an inspector edit
+   * during play — see ScriptRuntime.updateParams). Optional: a script that
+   * reads param() every tick needs nothing. Runs even while the game is
+   * PAUSED, so a script whose params drive what is drawn (a bone socket) can
+   * re-pose on the spot instead of on the next unpaused tick.
+   */
+  onParamsChanged?(): void;
   /**
    * Run one of this script's declared console commands. Return the line to
    * print (or null for "nothing to say"); THROW to report a bad argument —

@@ -226,6 +226,312 @@ if (skipped.size) {
   console.log(`skipping ${[...skipped].join(", ")} — not present in this set`);
 }
 
+// ---------------------------------------------------------------------------
+// art pre-passes: slot options that rewrite the sheet before anything reads it
+// ---------------------------------------------------------------------------
+//
+// Both work in sheet space on the generator's artwork, under the key's own
+// island mask, so registration afterwards sees artwork that already fits.
+//
+// `flush: true` — take out a painted DARK INTERIOR and stretch what is left to
+// the island's edge, row by row. A generator asked for a hood draws a hood: a
+// cowl with a black opening where the face goes. The ghoul's hood island is a
+// flat profile, so that black lands on the model as a dark band round the rim,
+// on every sheet, whatever the prompt says. Each row keeps only the cloth —
+// not ground, and brighter than `flushCavity` (default 0.45) of the island's
+// median — and resamples it across the island's own span for that row.
+//
+// `solid: true` — one flat colour: the island's mean, with a whisper of grain.
+// For a piece that must read as ONE material and keeps coming back banded: the
+// ghoul's ribs were painted as rows of vertebrae, striped like the spine.
+// `solidFrom: "<slot>"` takes the colour from ANOTHER island instead
+// (`"<slot>:top"` — its top quarter only) — for a block the generator keeps
+// drawing something onto: the ghoul's head crown came back as a second little
+// face on two of three sheets, and it is only ever the skin at the top of the
+// head strip. A solid slot the generator left blank falls back to its
+// `solidFrom` too.
+{
+  const PRE_BG = Number(args["bg-lum"] ?? manifest.bgLum ?? 200);
+  const a = artImg.data;
+  const lumAt = (i) => 0.299 * a[i * 4] + 0.587 * a[i * 4 + 1] + 0.114 * a[i * 4 + 2];
+  const ground = (i) => lumAt(i) >= PRE_BG;
+  // `boneFrom: [slots]` — the colour of the bone the generator painted
+  // ELSEWHERE, so every bone on the model is one material. The ghoul's spine and
+  // ribs are their own blocks, but its chest carries a painted ribcage and its
+  // back a spine, and on the fire and grave sheets the separate bones came back a
+  // different colour from those. Reference = the brightest band (`boneBand`,
+  // default 80-97th percentile) of the UNSATURATED pixels (`boneSat`, default
+  // 0.35) across the named islands — saturation keeps out gold trim and ember
+  // glow, which are brighter than the bone.
+  const boneRefs = new Map();
+  const boneRef = (slot) => {
+    const names = [].concat(slot.boneFrom);
+    const key = JSON.stringify([names, slot.boneSat, slot.boneBand]);
+    if (boneRefs.has(key)) return boneRefs.get(key);
+    const maxSat = Number(slot.boneSat ?? 0.35);
+    const px = [];
+    for (const n of names) {
+      const src = islands.find((q) => q.name === n);
+      if (!src) throw new Error(`boneFrom: ${n} is not a slot`);
+      for (const i of src.px) {
+        if (ground(i)) continue;
+        const r = a[i * 4], g = a[i * 4 + 1], b = a[i * 4 + 2];
+        const mx = Math.max(r, g, b);
+        if (mx && (mx - Math.min(r, g, b)) / mx <= maxSat) px.push(i);
+      }
+    }
+    px.sort((p, q) => lumAt(p) - lumAt(q));
+    const [lo, hi] = slot.boneBand ?? [0.8, 0.97];
+    const band = px.slice(Math.floor(px.length * lo), Math.max(Math.floor(px.length * lo) + 1, Math.floor(px.length * hi)));
+    // No painted bone to match — a sheet whose chest is all skin (the plague
+    // ghoul) leaves a handful of highlight pixels in the band, and centring the
+    // bones on those turned them near-white. Too few, and the bones keep their
+    // own colour.
+    if (band.length < Number(slot.boneMin ?? 300)) {
+      console.log(`boneFrom ${names.join("+")}: no painted bone to match (${band.length} px) — bones keep their own colour`);
+      boneRefs.set(key, null);
+      return null;
+    }
+    const ref = [0, 1, 2].map((c) => band.reduce((t, i) => t + a[i * 4 + c], 0) / band.length);
+    console.log(`boneFrom ${names.join("+")}: bone is ${hex(...ref.map(Math.round))} (${band.length} px)`);
+    boneRefs.set(key, ref);
+    return ref;
+  };
+  for (const isl of islands) {
+    const slot = manifest.slots[isl.hex];
+    // `clearPaper: { edge }` — for a mostly-empty cut block (the ornament): a
+    // generator told to leave it white sometimes draws the iron on a sheet of
+    // off-white PAPER with a thin border, darker than the ground threshold, so
+    // the whole panel registered as a solid plate (0.6% cut on the frost
+    // ghoul). Turn the dominant light, unsaturated colour in the block white,
+    // and clear a band `edge` px wide inside the block's rim, where the
+    // panel's border line sits — the iron is told never to touch the edge.
+    if (slot?.clearPaper) {
+      const hsat = (i) => {
+        const r = a[i * 4], g = a[i * 4 + 1], b = a[i * 4 + 2];
+        const mx = Math.max(r, g, b);
+        return mx ? (mx - Math.min(r, g, b)) / mx : 0;
+      };
+      const light = isl.px.filter((i) => lumAt(i) > 160 && hsat(i) < 0.2);
+      let cleared = 0;
+      if (light.length > isl.px.length * 0.3) {
+        const med = (c) => light.map((i) => a[i * 4 + c]).sort((p, q) => p - q)[light.length >> 1];
+        const paper = [med(0), med(1), med(2)];
+        for (const i of isl.px) {
+          const d = Math.hypot(a[i * 4] - paper[0], a[i * 4 + 1] - paper[1], a[i * 4 + 2] - paper[2]);
+          if (d < 40 && hsat(i) < 0.25) {
+            a[i * 4] = a[i * 4 + 1] = a[i * 4 + 2] = 255;
+            cleared++;
+          }
+        }
+      }
+      const edge = Math.round(Number(slot.clearPaper.edge ?? 10));
+      const inside = new Set(isl.px);
+      let rim = 0;
+      for (const i of isl.px) {
+        const x = i % W;
+        const y = (i / W) | 0;
+        let near = false;
+        for (let d = 1; d <= edge && !near; d++)
+          if (!inside.has(i - d) || !inside.has(i + d) || !inside.has(i - d * W) || !inside.has(i + d * W)) near = true;
+        if (near) {
+          a[i * 4] = a[i * 4 + 1] = a[i * 4 + 2] = 255;
+          rim++;
+        }
+      }
+      // and the paper's border outside the island proper, in the gutter
+      console.log(`clearPaper: ${isl.name} — ${cleared} paper px and a ${edge}px rim (${rim} px) turned to ground`);
+      if (!slot.flush && !slot.solid && !slot.solidFrom && !slot.even) continue;
+    }
+    if (!slot?.flush && !slot?.solid && !slot?.solidFrom && !slot?.even) continue;
+    let inkPx = isl.px.filter((i) => !ground(i));
+    if (slot.solidFrom && ((!slot.solid && !slot.even) || slot.even || inkPx.length < 16)) {
+      const [srcName, band] = String(slot.solidFrom).split(":");
+      const src = islands.find((q) => q.name === srcName);
+      if (!src) throw new Error(`${isl.name}: solidFrom ${srcName} is not a slot`);
+      let from = src.px.filter((i) => !ground(i));
+      if (band === "top" && from.length) {
+        const ys = from.map((i) => (i / W) | 0);
+        const y0 = Math.min(...ys);
+        const y1 = Math.max(...ys);
+        from = from.filter((i) => ((i / W) | 0) <= y0 + (y1 - y0) / 4);
+      }
+      inkPx = from;
+    }
+    if (inkPx.length < 16) continue;
+    if (slot.solid || slot.solidFrom || slot.even) {
+      // The MATERIAL's colour, not the drawing's average: the mean of a banded
+      // rib is dragged brown by the dark gaps between bands (#67513d on the
+      // gravelord sheet). Average only the 40th-85th luminance percentiles,
+      // which drops cracks, gaps, outlines and specular glints.
+      const byLum = inkPx.slice().sort((p, q) => lumAt(p) - lumAt(q));
+      // `solidBand: [lo, hi]` overrides it — bone on a dark sheet wants the top
+      // of the range ([0.7, 0.95]); what lies between the bones is shadow.
+      const [lo, hi] = slot.solidBand ?? [0.4, 0.85];
+      const mid = byLum.slice(Math.floor(byLum.length * lo), Math.max(Math.floor(byLum.length * lo) + 1, Math.floor(byLum.length * hi)));
+      let mean = [0, 1, 2].map((c) => mid.reduce((s, i) => s + a[i * 4 + c], 0) / mid.length);
+      // A pair shares ONE centre colour: reuse the source's, recorded when it
+      // was evened, rather than re-measuring artwork that has already moved.
+      const srcIsl = slot.solidFrom && islands.find((q) => q.name === String(slot.solidFrom).split(":")[0]);
+      if (srcIsl?.materialMean) mean = srcIsl.materialMean;
+      isl.materialMean = mean;
+      // Where the result is CENTRED: the bone painted elsewhere, if asked.
+      const centre = mean;
+      const target = (slot.boneFrom && boneRef(slot)) || mean;
+      if (slot.even) {
+        // `even` — keep the TEXTURE, lose the swings. A flat fill reads as a
+        // plastic bone (Derek: "looks odd as hell"); what was wrong with the
+        // painted ribs was only the big light/dark banding. Split each texel
+        // into fine detail (texel minus a local blur) and broad shading (blur
+        // minus the material colour); keep `detail` of the first and only
+        // `shade` of the second, so the grain and cracks survive and the bands
+        // flatten toward one bone colour.
+        const box = isl.px.reduce(
+          (b, i) => {
+            const x = i % W;
+            const y = (i / W) | 0;
+            return [Math.min(b[0], x), Math.min(b[1], y), Math.max(b[2], x), Math.max(b[3], y)];
+          },
+          [W, H, 0, 0],
+        );
+        // A block the generator left blank takes its source's artwork,
+        // resampled box to box, before being evened.
+        const own = isl.px.filter((i) => !ground(i)).length;
+        // `borrow: true` takes the source's artwork ALWAYS — the ghoul's head
+        // crown, which the generator paints as a second face, gets the painted
+        // skin from the top band of the head strip instead.
+        if (slot.solidFrom && (slot.borrow || own < isl.px.length * 0.3)) {
+          const [srcName, band] = String(slot.solidFrom).split(":");
+          const src = islands.find((q) => q.name === srcName);
+          const sb = src.px.reduce(
+            (b, i) => {
+              const x = i % W;
+              const y = (i / W) | 0;
+              return [Math.min(b[0], x), Math.min(b[1], y), Math.max(b[2], x), Math.max(b[3], y)];
+            },
+            [W, H, 0, 0],
+          );
+          if (band === "top") sb[3] = sb[1] + Math.round((sb[3] - sb[1]) / 4);
+          for (const i of isl.px) {
+            const x = i % W;
+            const y = (i / W) | 0;
+            const sx = Math.round(sb[0] + ((x - box[0]) / Math.max(1, box[2] - box[0])) * (sb[2] - sb[0]));
+            const sy = Math.round(sb[1] + ((y - box[1]) / Math.max(1, box[3] - box[1])) * (sb[3] - sb[1]));
+            const j = sy * W + sx;
+            for (let c = 0; c < 4; c++) a[i * 4 + c] = a[j * 4 + c];
+          }
+          console.log(`even: ${isl.name} was blank — took ${src.name}'s artwork`);
+        }
+        // `streak: "x"` replaces the local blur with a COLUMN average: the
+        // texture keeps whatever runs along x (grain and cracks down the length
+        // of a straightened rib) and loses what runs across it — measured on the
+        // ghoul, the generator drew each rib block as a little ribcage of thin
+        // horizontal bands, fine enough to survive a box blur untouched.
+        const { detail = 0.8, shade = 0.2, radius = 10, streak } = slot.even === true ? {} : slot.even;
+        const bw = box[2] - box[0] + 1;
+        const bh = box[3] - box[1] + 1;
+        const mask = new Uint8Array(bw * bh);
+        for (const i of isl.px) if (!ground(i)) mask[((i / W) | 0) * 0 + (((i / W) | 0) - box[1]) * bw + (i % W) - box[0]] = 1;
+        const orig = new Float64Array(bw * bh * 3);
+        for (let y = 0; y < bh; y++)
+          for (let x = 0; x < bw; x++) {
+            const i = (y + box[1]) * W + x + box[0];
+            for (let c = 0; c < 3; c++) orig[(y * bw + x) * 3 + c] = a[i * 4 + c];
+          }
+        const colSum = streak === "x" ? new Float64Array(bw * 3) : null;
+        const colN = streak === "x" ? new Float64Array(bw) : null;
+        if (colSum)
+          for (let y = 0; y < bh; y++)
+            for (let x = 0; x < bw; x++) {
+              if (!mask[y * bw + x]) continue;
+              for (let c = 0; c < 3; c++) colSum[x * 3 + c] += orig[(y * bw + x) * 3 + c];
+              colN[x]++;
+            }
+        for (const i of isl.px) {
+          const x = (i % W) - box[0];
+          const y = ((i / W) | 0) - box[1];
+          const sum = [0, 0, 0];
+          let n = 0;
+          if (colSum) {
+            for (let dx = -2; dx <= 2; dx++) {
+              const xx = x + dx;
+              if (xx < 0 || xx >= bw) continue;
+              for (let c = 0; c < 3; c++) sum[c] += colSum[xx * 3 + c];
+              n += colN[xx];
+            }
+          } else
+          for (let dy = -radius; dy <= radius; dy += 2)
+            for (let dx = -radius; dx <= radius; dx += 2) {
+              const xx = x + dx;
+              const yy = y + dy;
+              if (xx < 0 || yy < 0 || xx >= bw || yy >= bh || !mask[yy * bw + xx]) continue;
+              for (let c = 0; c < 3; c++) sum[c] += orig[(yy * bw + xx) * 3 + c];
+              n++;
+            }
+          for (let c = 0; c < 3; c++) {
+            const px = mask[y * bw + x] ? orig[(y * bw + x) * 3 + c] : centre[c];
+            const blur = n ? sum[c] / n : centre[c];
+            a[i * 4 + c] = Math.max(0, Math.min(PRE_BG - 8, Math.round(target[c] + (px - blur) * detail + (blur - centre[c]) * shade)));
+          }
+          a[i * 4 + 3] = 255;
+        }
+        console.log(`even: ${isl.name} -> around ${hex(...target.map(Math.round))}, detail ${detail}, shade ${shade}`);
+        continue;
+      }
+      for (const i of isl.px) {
+        const h = ((Math.imul(i, 2654435761) >>> 0) % 9) - 4; // -4..4, fixed per texel
+        for (let c = 0; c < 3; c++) a[i * 4 + c] = Math.max(0, Math.min(PRE_BG - 8, Math.round(mean[c] + h)));
+        a[i * 4 + 3] = 255;
+      }
+      console.log(`solid: ${isl.name} -> ${hex(...mean.map(Math.round))}`);
+      continue;
+    }
+    const lums = inkPx.map(lumAt).sort((p, q) => p - q);
+    const cavity = lums[lums.length >> 1] * Number(slot.flushCavity ?? 0.45);
+    const pad = Math.round(Number(slot.flushPad ?? 24));
+    const rows = new Map();
+    for (const i of isl.px) {
+      const x = i % W;
+      const y = (i / W) | 0;
+      const r = rows.get(y);
+      if (!r) rows.set(y, [x, x]);
+      else {
+        if (x < r[0]) r[0] = x;
+        if (x > r[1]) r[1] = x;
+      }
+    }
+    let changed = 0;
+    let dropped = 0;
+    for (const [y, [x0, x1]] of rows) {
+      const cloth = [];
+      let dark = 0;
+      for (let x = Math.max(0, x0 - pad); x <= Math.min(W - 1, x1 + pad); x++) {
+        const i = y * W + x;
+        if (ground(i)) continue;
+        if (lumAt(i) < cavity) dark++;
+        else cloth.push([a[i * 4], a[i * 4 + 1], a[i * 4 + 2]]);
+      }
+      if (cloth.length < 3) continue;
+      for (let x = Math.max(0, x0 - pad); x <= Math.min(W - 1, x1 + pad); x++) {
+        const i = y * W + x;
+        if (x < x0 || x > x1) {
+          if (islandOf[i] < 0) a[i * 4] = a[i * 4 + 1] = a[i * 4 + 2] = 255;
+          continue;
+        }
+        const t = x1 > x0 ? (x - x0) / (x1 - x0) : 0;
+        const c = cloth[Math.min(cloth.length - 1, Math.round(t * (cloth.length - 1)))];
+        a[i * 4] = c[0];
+        a[i * 4 + 1] = c[1];
+        a[i * 4 + 2] = c[2];
+        a[i * 4 + 3] = 255;
+      }
+      changed++;
+      dropped += dark;
+    }
+    console.log(`flush: ${isl.name} — ${changed} rows stretched to the island edge, ${dropped} dark interior px removed`);
+  }
+}
+
 const unmapped = islands.filter((i) => !i.known);
 if (unmapped.length) {
   console.warn(`! island colours missing from the manifest: ${unmapped.map((i) => i.hex).join(", ")}`);
@@ -618,18 +924,28 @@ for (const isl of islands) {
   // against, and any fit the search finds is noise, so keep the identity.
   const paintFrac =
     sample.reduce((n, p) => n + (paintedCore[p] ? 1 : 0), 0) / sample.length;
-  if (cut && paintFrac < 0.25) {
-    isl.fit = { dx: 0, dy: 0, sx: 1, sy: 1 };
-    isl.lowSignal = true;
-    isl.uncovered = uncovered(sample, isl.cx, isl.cy, 0, 0, 1, 1, cut);
-    continue;
-  }
   const seed = {
     dx: global.dx + ((global.sx - 1) * (isl.cx - gcx)) / global.sx,
     dy: global.dy + ((global.sy - 1) * (isl.cy - gcy)) / global.sy,
     sx: global.sx,
     sy: global.sy,
   };
+  // `"fit": "none"` — no search for this island: it takes the SHEET-WIDE
+  // registration (the generator's overall drift) and nothing of its own. For a
+  // cut-out whose key marks part of it as hidden (the great axe's plates stand
+  // inside the head): a search chasing coverage slid a design drawn in the open
+  // part 156 px back into the hidden part.
+  if (manifest.slots[isl.hex]?.fit === "none") {
+    isl.fit = { dx: seed.dx, dy: seed.dy, sx: seed.sx, sy: seed.sy };
+    isl.uncovered = uncovered(sample, isl.cx, isl.cy, isl.fit.dx, isl.fit.dy, isl.fit.sx, isl.fit.sy, cut);
+    continue;
+  }
+  if (cut && paintFrac < 0.25) {
+    isl.fit = { dx: 0, dy: 0, sx: 1, sy: 1 };
+    isl.lowSignal = true;
+    isl.uncovered = uncovered(sample, isl.cx, isl.cy, 0, 0, 1, 1, cut);
+    continue;
+  }
   const T = Math.max(18, Math.round(MAX_SHIFT * 0.5));
   isl.fit = search(sample, isl.cx, isl.cy, seed, [
     { t: T, ts: Math.max(4, Math.round(T / 5)), s: 0.04, ss: 0.02 },
@@ -716,6 +1032,12 @@ function componentsUnder(isl, minFrac = 0.05) {
 
 /** Warnings raised before the report object exists; merged into it below. */
 const earlyWarnings = [];
+/** Islands gained to another island-s colour, for the run log. */
+const recoloured = [];
+
+/** Islands whose hem was cut procedurally, for the run log. */
+const hemCuts = [];
+
 /** matchTo gains applied, for the run log. */
 const matched = [];
 const containIslands = islands.filter((i) => manifest.slots[i.hex]?.fit?.startsWith("contain"));
@@ -1642,6 +1964,57 @@ for (const isl of islands) {
   for (let d = 0; d < SN; d++) if (island256[d] === isl.id && colorAuthored[d]) colorSeed[d] = 1;
 }
 // ---------------------------------------------------------------------------
+// matchColor: make a piece the same MATERIAL as the piece it continues
+// ---------------------------------------------------------------------------
+//
+// `matchTo` moves luminance only, on purpose: a palm IS pinker than a forearm
+// and that is not an error to correct. But some pairs are not two pieces of one
+// animal, they are ONE PIECE cut in two by the unwrap — the strip along the top
+// of a hood is the same cloth as the hood, with the same dye in it.
+//
+// Those keep coming back the wrong MATERIAL, not merely the wrong brightness,
+// and no amount of prompting fixes it because a generator paints an island
+// partly from its NEIGHBOURS. Measured on the ratkin hood crown: sat between
+// the two shoulder lames it came back as a third shoulder plate; moved next to
+// the head it came back flesh-pink. Two different wrong answers, same cause.
+//
+// So `matchColor` gains all three channels to the target-s mean, not just the
+// luminance. The gain is flat, so the weave, the dirt and the modelling inside
+// the island all survive — only the material it is made of moves. Clamped like
+// matchTo, and it runs BEFORE matchTo so a piece can do both.
+{
+  const meanRgbOf = new Map();
+  for (const isl of islands) {
+    const acc = [0, 0, 0];
+    let n = 0;
+    for (let d = 0; d < SN; d++) {
+      if (island256[d] !== isl.id || !colorAuthored[d]) continue;
+      for (let c = 0; c < 3; c++) acc[c] += rgb[d * 3 + c];
+      n++;
+    }
+    if (n) meanRgbOf.set(isl.name, acc.map((v) => v / n));
+  }
+  for (const isl of islands) {
+    const to = manifest.slots[isl.hex]?.matchColor;
+    if (!to) continue;
+    const mine = meanRgbOf.get(isl.name);
+    const theirs = meanRgbOf.get(to);
+    if (!mine || !theirs) {
+      earlyWarnings.push(`${isl.name}: matchColor "${to}" — no such island with paint in it, left alone`);
+      continue;
+    }
+    const gain = [0, 1, 2].map((c) => Math.min(1.6, Math.max(0.6, theirs[c] / (mine[c] || 1))));
+    if (gain.every((g) => Math.abs(g - 1) < 0.02)) continue;
+    for (let d = 0; d < SN; d++) {
+      if (island256[d] !== isl.id) continue;
+      for (let c = 0; c < 3; c++)
+        rgb[d * 3 + c] = Math.max(0, Math.min(255, Math.round(rgb[d * 3 + c] * gain[c])));
+    }
+    recoloured.push(`${isl.name} x${gain.map((g) => g.toFixed(2)).join("/")} to ${to}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // matchTo: make a piece the same VALUE as the piece it joins
 // ---------------------------------------------------------------------------
 //
@@ -1718,6 +2091,79 @@ const colorFilled = padNearest(rgb, 3, colorAuthored, (d) => colorSeed[d] === 1,
 const alphaAuthored = new Uint8Array(SN);
 for (let d = 0; d < SN; d++) alphaAuthored[d] = island256[d] >= 0 && alphaOk[d] ? 1 : 0;
 const alphaFilled = padNearest(alpha, 1, alphaAuthored, (d) => alphaAuthored[d] === 1);
+
+// ---------------------------------------------------------------------------
+// hem: cut the fray instead of asking for it
+// ---------------------------------------------------------------------------
+//
+// `cut: "bottom"` opens an island wherever the generator LEFT WHITE that runs off
+// the bottom edge. That is the right rule and it works — when the generator
+// leaves any. Measured across four ratkin sheets it almost never does: it paints
+// the cloth down to the edge of the block and the hem comes out dead straight,
+// 0.2-0.6% of the cut islands opened. Told about it in the prompt in as many
+// words, twice, it still paints to the edge.
+//
+// So stop asking. `hem` cuts the fray itself: for every column of the island,
+// walk up from its lowest texel and clear a few — how many decided by a smooth
+// value noise seeded from the slot name, so it is ragged, repeatable, and the
+// same every run. The artwork keeps its hem colour and loses its straight edge.
+//
+// This runs on `alpha` and not on the padded copy, because `alpha` is what is
+// written. It only touches islands that opted in, and only ones that cut.
+for (const isl of islands) {
+  const slot = manifest.slots[isl.hex];
+  const hem = slot?.hem;
+  if (!hem || !slot.transparency) continue;
+  const depth = Number(hem.depth ?? 3); // texels always taken
+  const jag = Number(hem.jag ?? 3); // texels of raggedness on top of that
+  const wave = Math.max(1, Number(hem.wave ?? 3)); // texels between teeth
+  let seed = 2166136261;
+  for (const ch of isl.name) seed = Math.imul(seed ^ ch.charCodeAt(0), 16777619);
+  const rand = (i) => {
+    let h = Math.imul(seed ^ i, 2246822519);
+    h = Math.imul(h ^ (h >>> 13), 3266489917);
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+  };
+  // value noise: random at every `wave` texels, smoothstepped between
+  const at = (x) => {
+    const a = Math.floor(x / wave);
+    const t = x / wave - a;
+    const u = t * t * (3 - 2 * t);
+    return rand(a) * (1 - u) + rand(a + 1) * u;
+  };
+  // EVERY free bottom edge in the column, not just the lowest one. An island
+  // can hold more than one piece of the same garment: the ratkin robe is one
+  // island carrying the two FRONT PANELS stacked above the BACK BELL, so
+  // taking only the column-s lowest texel frayed the bell and left the panels
+  // cut straight across — which is exactly what it did until this was fixed.
+  //
+  // A run-s bottom counts as a hem when there is real space under it: nothing
+  // below at all, or a gap of at least `gap` texels before the next piece. One
+  // texel of gap is a rasterisation artifact, not an edge, and biting at those
+  // would nibble holes through the middle of a part.
+  const gap = Math.max(1, Number(hem.gap ?? 2));
+  let cut = 0;
+  for (let x = 0; x < S; x++) {
+    const take = Math.round(depth + at(x) * jag);
+    let y = 0;
+    while (y < S) {
+      if (island256[y * S + x] !== isl.id) { y++; continue; }
+      const start = y;
+      while (y < S && island256[y * S + x] === isl.id) y++;
+      const end = y - 1; // last island texel of this run
+      let space = 0;
+      while (end + 1 + space < S && island256[(end + 1 + space) * S + x] !== isl.id) space++;
+      const free = end + 1 + space >= S || space >= gap;
+      if (!free) continue;
+      for (let k = 0, yy = end; k < take && yy >= start; k++, yy--) {
+        const d = yy * S + x;
+        if (alpha[d] !== 0) cut++;
+        alpha[d] = 0;
+      }
+    }
+  }
+  if (cut) hemCuts.push(`${isl.name} ${cut}px`);
+}
 
 // anything no island reached (far background) is never sampled by a UV, but
 // leave it a flat neutral rather than white so a stray sample is obvious
@@ -1916,5 +2362,7 @@ for (const [pair, gap] of gutters.slice(0, 5)) {
 fs.writeFileSync(path.join(OUT, "report.json"), JSON.stringify(report, null, 2));
 if (matched.length) console.log(`
 value matched: ${matched.join(", ")}`);
+if (recoloured.length) console.log(`colour matched: ${recoloured.join(", ")}`);
+if (hemCuts.length) console.log(`hem cut: ${hemCuts.join(", ")}`);
 console.log(`\n${report.warnings.length} warning(s). wrote atlas.png, atlas-preview.png, report.json to ${OUT}`);
 for (const w of report.warnings) console.log(`  ! ${w}`);

@@ -37,12 +37,13 @@ import {
   type ChunkStreamerData,
   type SpritesheetDoc,
 } from "@hitreg/core";
-import { EngineRenderer, buildScene, type PostFxData, makeMeshGeometryProvider, AnimationSystem, ParticleSystem, BillboardSystem, LightBudgetSystem, FoliageLodSystem, ClusterLodSystem, GrassSystem, PortraitView, ThirdPersonCameraRig, fitRigToBody, type RigBodyCollider, type BuildOptions, type RigVec3 } from "@hitreg/render";
+import { MovingInstanceSystem, EngineRenderer, buildScene, type PostFxData, makeMeshGeometryProvider, AnimationSystem, ParticleSystem, BillboardSystem, LightBudgetSystem, FoliageLodSystem, ClusterLodSystem, GrassSystem, PortraitView, ThirdPersonCameraRig, fitRigToBody, type RigBodyCollider, type BuildOptions, type RigVec3 } from "@hitreg/render";
 import { createAmbientVfx, createVfx, makeVfxHost, warmVfx } from "./vfx-host.js";
 
 /** The `camera` component, straight off the schema. */
 type CameraComponentData = ReturnType<typeof cameraSchema.parse>;
 import { ScriptRegistry, registerBuiltinScripts, ScriptRuntime, InputService, EventBus } from "@hitreg/scripting";
+import { createModelLooks } from "./model-looks.js";
 import { Layers, PhysicsSim, initPhysics } from "@hitreg/physics";
 import { applyBodyState } from "./physics-sync.js";
 import { initProjectScripts } from "./project-scripts.js";
@@ -175,7 +176,17 @@ async function main(): Promise<void> {
 
   // 7. build the scene
   const expanded = expandScene(doc, assets, registry);
+  // held weapons / worn gear: every moving instance of an asset is one draw
+  const movingInstances = new MovingInstanceSystem({ resolveModel: (id: string) => assets.getModel(id)?.url });
+  // ctx.setModelLook — an ubermesh's runtime parts + theme (equipped gear)
+  const modelLooks = createModelLooks({
+    objectOf: (entityId) => built.objects.get(entityId),
+    textureUrl: (assetId) => assets.getTexture(assetId)?.url,
+    moving: movingInstances,
+    effects: () => ambientVfx, // item effects are standing vfx plays, batched with every other
+  });
   const buildOptions: BuildOptions = {
+    movingInstances,
     resolveModel: (id: string) => assets.getModel(id)?.url,
     resolveMaterial: (id: string) => assets.getDataAsset(id)?.data,
     resolveTexture: (id: string) => assets.getTexture(id)?.url,
@@ -196,6 +207,7 @@ async function main(): Promise<void> {
     onClusteredMesh: (_entityId, mesh) => clusterLod.register(mesh),
     bakeImpostor: (object, bounds) => bakeImpostorAtlas(renderer, object, bounds),
     onModelLoaded: (entityId, root, clips) => {
+      modelLooks.modelLoaded(entityId, root);
       const entity = expanded.entities[entityId];
       const animator = entity?.components["animator"];
       // the parent id matters: a character's script sits on the physics body
@@ -211,6 +223,7 @@ async function main(): Promise<void> {
     },
   };
   const built = buildScene(expanded, buildOptions);
+  built.scene.add(movingInstances.root);
   vfx.attach(built.scene);
 
   // post-build: bloom + camera aspects + fallback background
@@ -237,8 +250,12 @@ async function main(): Promise<void> {
   const netState = new NetStateStore();
   registerCharacterNetState(netState);
   registerTransferLockNetState(netState);
+  // the rig's AIM, not the camera's direction: a middle-button free look turns
+  // the camera away from it and the character must keep its heading
   const viewForward = (): [number, number] => {
-    const d = camera.getWorldDirection(new THREE.Vector3());
+    const d = followId && rigMode === "follow"
+      ? cameraRig.aimDirection(new THREE.Vector3())
+      : camera.getWorldDirection(new THREE.Vector3());
     d.y = 0;
     d.normalize();
     return [d.x, d.z];
@@ -251,6 +268,7 @@ async function main(): Promise<void> {
     registry: scriptRegistry,
     input,
     viewForward,
+    recenterView: () => cameraRig.returnToAim(),
     renderPortrait: (entityId, canvas, opts) => {
       const object = built.objects.get(entityId);
       if (!object) return null;
@@ -280,6 +298,7 @@ async function main(): Promise<void> {
         }
       });
     },
+    setModelLook: (id, look) => modelLooks.set(id, look),
     playSound: () => {}, // v1: audio components/SFX via scripts' own WebAudio; AudioSystem is a later add
   });
   scripts.start();
@@ -423,7 +442,8 @@ async function main(): Promise<void> {
   // that Escape is the way back. Holding a button over the view turns it —
   // the MMO convention — and the cursor stays where it was left.
   const LOOK = 0.0025;
-  const LOOK_BUTTONS = 0b110; // right + middle
+  const LOOK_BUTTONS = 0b110; // right turns the aim; middle is a free look (parks; moving or casting brings it back)
+  const FREE_LOOK_BUTTON = 1;
   let heldButtons = 0;
   /**
    * Mouse mode, the same pair the editor host offers: CURSOR by default (the
@@ -446,10 +466,17 @@ async function main(): Promise<void> {
   const trackButton = (e: MouseEvent, down: boolean): void => {
     if (down) heldButtons |= 1 << e.button;
     else heldButtons &= ~(1 << e.button);
+    if (e.button === FREE_LOOK_BUTTON) {
+      if (down) e.preventDefault(); // no autoscroll cursor
+      cameraRig.setFreeLook(down);
+    }
   };
   canvas.addEventListener("mousedown", (e) => trackButton(e, true));
   window.addEventListener("mouseup", (e) => trackButton(e, false));
-  window.addEventListener("blur", () => { heldButtons = 0; });
+  window.addEventListener("blur", () => {
+    heldButtons = 0;
+    cameraRig.setFreeLook(false);
+  });
   canvas.addEventListener("contextmenu", (e) => e.preventDefault()); // right-drag is a turn
   controls.enabled = false; // the play rig owns the camera; nothing else drags it
   document.addEventListener("mousemove", (e) => {
@@ -581,6 +608,7 @@ async function main(): Promise<void> {
       const activeId = scripts.getActiveCameraId();
       const renderCam =
         (activeId && built.cameras.get(activeId)) || (!followId && built.activeCamera) || camera;
+      movingInstances.update(); // held weapons follow their sockets (after animation)
       particles.update(dt, renderCam);
       billboards.update(dt); // flipbook VFX frames
       if (!vfxWarmed) {
@@ -588,6 +616,7 @@ async function main(): Promise<void> {
         vfxWarmed = true;
         if (probe.precompile) void warmVfx(vfx, assets, (group) => renderer.precompileGroup(group, renderCam, built.scene), renderCam);
       }
+      modelLooks.update(); // item effects placed once their model has loaded
       ambientVfx.update(renderCam, built.scene); // before the plays step and the light budget re-aims
       vfx.update(dt, renderCam, built.scene);
       grass.update(renderCam, ground.sampleGround, ground.sampleCover);

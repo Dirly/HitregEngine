@@ -95,6 +95,7 @@ import {
   type MaterialData,
   type PathMeshSource,
   PortraitView,
+  MovingInstanceSystem,
   ThirdPersonCameraRig,
   fitRigToBody,
   type RigBodyCollider,
@@ -121,6 +122,7 @@ import {
   type SwimState,
   type SwimTuning,
 } from "@hitreg/scripting";
+import { createModelLooks } from "./model-looks.js";
 import {
   createAssetSelection,
   createContextMenu,
@@ -188,6 +190,7 @@ import {
 import { createPinStore } from "./pins.js";
 import { installCameraBridge, postContext, publishEngineSpec } from "./dev-bridge.js";
 import { openProfilerWindow } from "./profiler-window.js";
+import { createSocketPreview } from "./socket-preview.js";
 
 CameraControls.install({ THREE });
 
@@ -945,7 +948,38 @@ async function main(): Promise<void> {
   // -- render side -----------------------------------------------------------
 
   let built: BuiltScene;
+  // held weapons / worn gear: every moving instance of an asset is one draw
+  const movingInstances = new MovingInstanceSystem({ resolveModel: (assetId) => assets.getModel(assetId)?.url });
+  // ctx.setModelLook — an ubermesh's runtime parts + theme (equipped gear)
+  const modelLooks = createModelLooks({
+    objectOf: (entityId) => built?.objects.get(entityId),
+    textureUrl: (assetId) => assets.getTexture(assetId)?.url,
+    moving: movingInstances,
+    effects: () => ambientVfx, // item effects are standing vfx plays, batched with every other
+  });
   let lastExpanded: SceneDoc;
+  // held items in EDIT mode — resolved lazily: selection/manipulating are
+  // created further down, and the preview only runs from the frame loop
+  const socketPreview = createSocketPreview({
+    doc: () => lastExpanded,
+    objectOf: (entityId) => built?.objects.get(entityId),
+    dragging: () => manipulating.get()?.ids ?? [],
+    showAlt: () => settings.get().previewHolstered === true,
+    selected: () => selection.get(),
+    item: (itemId) => assets.getDataAsset(itemId)?.data as ReturnType<Parameters<typeof createSocketPreview>[0]["item"]>,
+    setLook: (entityId, look) => modelLooks.set(entityId, look),
+  });
+  // The play session's runtime state. Declared HERE, with the scene it
+  // belongs to, rather than further down beside the play functions: rebuild()
+  // reads `sim` to decide whether the running scripts have to be restarted
+  // onto its new objects, and rebuild() is reachable from subscriptions
+  // (assets, settings) registered long before that point. A `let` read before
+  // its declaration has been evaluated throws outright — which would abort
+  // main() and leave a black canvas — so the declaration goes above every
+  // caller rather than relying on the current call order staying that way.
+  let sim: PhysicsSim | null = null;
+  let scripts: ScriptRuntime | null = null;
+  let eventBus: EventBus | null = null;
   // the sky dome (scene-builder.ts's buildSkyDome) is a fixed-radius BackSide
   // sphere that only reads as an infinite background while the camera stays
   // inside it — re-found after every rebuild() (a fresh scene graph each
@@ -1596,6 +1630,7 @@ async function main(): Promise<void> {
   // shared by the full rebuild and per-entity reconcile: callbacks read
   // `built`/`lastExpanded` at call time, so one options object serves both
   const sceneBuildOptions: BuildOptions = {
+    movingInstances,
     resolveModel: (assetId) => assets.getModel(assetId)?.url,
     resolveMaterial: (assetId) => assets.getDataAsset(assetId)?.data,
     resolveTexture: (assetId) => assets.getTexture(assetId)?.url,
@@ -1618,6 +1653,7 @@ async function main(): Promise<void> {
     bakeImpostor: (object, bounds) => bakeImpostorAtlas(renderer, object, bounds),
     onClusteredMesh: (_entityId, mesh) => clusterLod.register(mesh),
     onModelLoaded: (entityId, root, clips) => {
+      modelLooks.modelLoaded(entityId, root);
       const entity = lastExpanded.entities[entityId] ?? netRuntimeDocs.get(entityId);
       const animator = entity?.components["animator"] as AnimatorData | undefined;
       animations.register(entityId, root, clips, animator ?? null, entity?.parent ?? null);
@@ -1692,6 +1728,7 @@ async function main(): Promise<void> {
     } finally {
       endBuild();
     }
+    built.scene.add(movingInstances.root);
     const endBatch = profiler.span("scene.batch", "static meshes");
     try {
       rebuildStaticBatch();
@@ -1818,6 +1855,7 @@ async function main(): Promise<void> {
     netPresence?.attach(built.scene); // remote-player avatars survive rebuilds
     rebuildNetRuntimeObjects(); // server-spawned bodies survive rebuilds too
     viewport?.onSceneRebuilt();
+    socketPreview.reset(); // fresh objects: every held item's look is re-sent
     meshEditTool?.onSceneRebuilt();
     // A rebuild replaces every runtime object in the scene, and a running
     // script HOLDS one — so during play the scripts are started again on the
@@ -2056,6 +2094,7 @@ async function main(): Promise<void> {
   });
 
   const viewport: ViewportTools = new ViewportTools({
+    gripOf: (entityId) => movingInstances.gripOf(entityId),
     canvas,
     camera,
     store,
@@ -2908,7 +2947,18 @@ async function main(): Promise<void> {
   function frameEntity(id: string, transition = true): boolean {
     const object = built.objects.get(id);
     if (!object) return false;
-    void controls.fitToBox(new THREE.Box3().setFromObject(object), transition, {
+    const box = new THREE.Box3().setFromObject(object);
+    // Right after a rebuild a model-backed entity has no geometry yet (GLBs
+    // load async) — an EMPTY box, whose infinities fit the camera to NaN and
+    // leave every later frame non-finite (the audio listener then throws each
+    // frame). Opening a character prefab did exactly that. Frame a
+    // person-sized box at the entity instead.
+    const finite = [box.min.x, box.min.y, box.min.z, box.max.x, box.max.y, box.max.z].every(Number.isFinite);
+    if (box.isEmpty() || !finite) {
+      const at = object.getWorldPosition(new THREE.Vector3());
+      box.set(at.clone().add(new THREE.Vector3(-0.6, 0, -0.6)), at.clone().add(new THREE.Vector3(0.6, 2, 0.6)));
+    }
+    void controls.fitToBox(box, transition, {
       paddingLeft: 1,
       paddingRight: 1,
       paddingTop: 1,
@@ -3111,8 +3161,16 @@ async function main(): Promise<void> {
   const input = new InputService();
 
   const viewDir = new THREE.Vector3();
+  /**
+   * Where the player is AIMING. That is the rig's aim, not the camera's own
+   * direction: a middle-button free look turns the camera away from it, and
+   * the character must keep running and facing the way it was.
+   */
+  function aimInto(out: THREE.Vector3): THREE.Vector3 {
+    return rigDrivesCamera ? cameraRig.aimDirection(out) : camera.getWorldDirection(out);
+  }
   function viewForward(): [number, number] {
-    camera.getWorldDirection(viewDir);
+    aimInto(viewDir);
     viewDir.y = 0;
     if (viewDir.lengthSq() < 1e-6) return [0, -1];
     viewDir.normalize();
@@ -3121,7 +3179,7 @@ async function main(): Promise<void> {
 
   /** The same aim with its PITCH kept — what swimming aims along (ctx.viewDirection). */
   function viewDirection(): [number, number, number] {
-    camera.getWorldDirection(viewDir);
+    aimInto(viewDir);
     if (viewDir.lengthSq() < 1e-6) return [0, 0, -1];
     viewDir.normalize();
     return [viewDir.x, viewDir.y, viewDir.z];
@@ -3130,9 +3188,6 @@ async function main(): Promise<void> {
   const audio = new AudioSystem(camera, (soundId) => assets.getSound(soundId)?.url);
   const playerDataBackend = new BridgePlayerDataBackend();
 
-  let sim: PhysicsSim | null = null;
-  let scripts: ScriptRuntime | null = null;
-  let eventBus: EventBus | null = null;
   let followTargetId: string | null = null;
   let followRigMode: "follow" | "chase" | null = null;
   /** The authored rig, as read off the active camera's `camera.rig`. */
@@ -3271,6 +3326,29 @@ async function main(): Promise<void> {
    * an asset landing on disk must not teleport the player back to the
    * authored spawn.
    */
+  const surfaceWeights = new Float32Array(32);
+  /** One surface label for local effects: water wins, then the voxel splat, then an authored collider's material. */
+  function surfaceAt(x: number, y: number, z: number): string {
+    const water = waterAt(x, y, z);
+    if (water && water.depth > 0) return "water";
+    const field = activeVoxelWorld ? getVoxelWorld(activeVoxelWorld) : null;
+    if (field) {
+      const ground = field.surfaceCast(x, z) ?? field.height(x, z);
+      if (ground !== null) {
+        if (surfaceWeights.length < field.surfaceCount) return "dirt";
+        field.splatAt(x, ground, z, 1, surfaceWeights, 0);
+        let best = 0;
+        for (let i = 1; i < field.surfaceCount; i++) if (surfaceWeights[i]! > surfaceWeights[best]!) best = i;
+        return field.recipe.surfaces[best]?.name ?? "dirt";
+      }
+    }
+    const hit = sim?.raycast([x, y + 0.2, z], [0, -1, 0], 4);
+    const entity = hit ? lastExpanded.entities[hit.entityId] : undefined;
+    const collider = entity?.components["collider"] as { surface?: string } | undefined;
+    const mesh = entity?.components["mesh"] as { material?: string } | undefined;
+    return collider?.surface ?? mesh?.material ?? "dirt";
+  }
+
   function startScripts(): void {
     if (!sim || !eventBus) return; // no play session to (re)start scripts in
     const bus = eventBus;
@@ -3290,6 +3368,7 @@ async function main(): Promise<void> {
       input,
       viewForward,
       viewDirection,
+      recenterView: () => cameraRig.returnToAim(),
       localPlayer: () => localPlayerId(),
       setAnimation: (entityId, clip, fade, opts) =>
         animations.play(entityId, clip, fade ?? 0.3, opts?.loop ?? true, opts?.restart ?? false),
@@ -3312,24 +3391,28 @@ async function main(): Promise<void> {
         return () => view.dispose();
       },
       setLight: setRuntimeLight,
+      setModelLook: (entityId, look) => modelLooks.set(entityId, look),
       setSky: setRuntimeSky,
       setPostFx: setRuntimePostFx,
       daylight: () => sceneLighting(built.scene)?.daylight() ?? 1,
       getSky: getRuntimeSky,
       biomeAt: runtimeBiomeAt,
       waterAt, // swimming, breath meters, "do not walk into the lake"
+      surfaceAt,
       setPathPoints,
       // replicated session state (ctx.netState) — facts every tab agrees on
       ...(netPresence ? { netState: netPresence.netState } : {}),
       chat: comms.chat, // ctx.chat — announce / react to chat commands
-      playSound: (entityId, soundId) => {
+      playSound: (entityId, soundId, opts) => {
         const comp = lastExpanded.entities[entityId]?.components["audio"] as
           | AudioComponentData
           | undefined;
         const src = soundId ?? comp?.src;
         if (!src) return;
-        void audio.play(built.objects.get(entityId) ?? null, src, soundId ? {} : (comp ?? {}));
+        void audio.play(built.objects.get(entityId) ?? null, src, soundId ? opts : { ...(comp ?? {}), ...opts });
       },
+      setSoundLoop: (entityId, slot, soundId, opts) =>
+        audio.setLoop(`${entityId}/${slot}`, built.objects.get(entityId) ?? null, soundId, opts),
     });
     scripts.start();
     chunkManager.forEachLoaded((doc, objects) => scripts?.addEntities(doc, objects));
@@ -3397,6 +3480,34 @@ async function main(): Promise<void> {
   // Anything structural (add/remove/reparent), prefab-shaped (props/overrides
   // change the expanded subtree), or scene-level (sky, cameras, postfx,
   // streaming) falls back to the full rebuild.
+  /**
+   * An edit during play that only changes the params of scripts already
+   * running (same script, same entity) goes straight into those instances
+   * instead of restarting the play session. Placing a held weapon is the case
+   * that demanded it: pause mid-swing, nudge a socket's offset in the
+   * inspector, see it move in the hand — where a restart respawned the
+   * character and threw the pose away on every keystroke.
+   */
+  function patchScriptParams(result: ApplyResult): boolean {
+    if (!scripts || result.addedEntities.size > 0 || result.removedEntities.size > 0) return false;
+    if (result.changedEntities.size === 0) return false;
+    const patches: Array<[string, string, Record<string, unknown>]> = [];
+    for (const id of result.changedEntities) {
+      const changed = result.changedComponents.get(id);
+      if (!changed || changed.size !== 1 || !changed.has("script")) return false;
+      const script = lastExpanded.entities[id]?.components["script"] as
+        | { name: string; params?: Record<string, unknown> }
+        | undefined;
+      if (!script) return false;
+      patches.push([id, script.name, script.params ?? {}]);
+    }
+    // all or nothing: a half-patched batch would be worse than a restart
+    const runtime = scripts;
+    if (!patches.every(([id, name]) => runtime.hasInstance(id, name))) return false;
+    for (const [id, name, params] of patches) runtime.updateParams(id, name, params);
+    return true;
+  }
+
   function tryReconcile(result: ApplyResult): boolean {
     if (!built) return false;
     if (result.addedEntities.size > 0 || result.removedEntities.size > 0) return false;
@@ -3465,8 +3576,9 @@ async function main(): Promise<void> {
       reconcileCount++;
       profiler.mark("scene.reconcile");
       // edits during play restart the session on the new doc (the rebuild
-      // path below restarts on its own — see the tail of rebuild())
-      if (sim) startPlaySession();
+      // path below restarts on its own — see the tail of rebuild()) — unless
+      // the batch only TUNED running scripts, which take the new params live
+      if (sim && !patchScriptParams(change.result)) startPlaySession();
       return;
     }
     rebuildCount++;
@@ -3513,6 +3625,8 @@ async function main(): Promise<void> {
 
   // stop restores the scene from the document — sim/script state is runtime-only
   playMode.subscribe(refreshPhysicsDebugVisibility);
+  // play hands held items back to the scripts; edit takes them back fresh
+  playMode.subscribe(() => socketPreview.reset());
   playMode.subscribe(refreshSkeletonDebugVisibility);
   playMode.subscribe(refreshLightDebugVisibility);
   settings.subscribe(refreshSkeletonDebugVisibility);
@@ -3535,8 +3649,14 @@ async function main(): Promise<void> {
   // button over the viewport looks around — the MMO convention — and the
   // cursor stays where the player left it.
   const MOUSE_LOOK_SPEED = 0.0025; // rad per px
-  /** Buttons that steer the view while held (right, middle: WoW's own pair). */
+  /**
+   * Buttons that steer the view while held. Right turns the aim; middle is a
+   * FREE LOOK — it orbits the camera alone and the character keeps its
+   * heading. Letting go leaves the camera parked (players swing it round to
+   * see their character); moving or casting brings it back (`recenterView`).
+   */
   const LOOK_BUTTONS = 0b110;
+  const FREE_LOOK_BUTTON = 1;
   /** Mouse buttons currently down, as a bitmask (bit n = button n). */
   let heldButtons = 0;
   /**
@@ -3574,11 +3694,13 @@ async function main(): Promise<void> {
     else heldButtons &= ~(1 << e.button);
     if (!down) {
       input.setMouseButton(e.button, false);
+      if (e.button === FREE_LOOK_BUTTON) cameraRig.setFreeLook(false);
       return;
     }
     if (playMode.get() !== "playing") return;
     if (!mouseLook && e.target !== canvas) return;
     input.setMouseButton(e.button, true);
+    if (e.button === FREE_LOOK_BUTTON) cameraRig.setFreeLook(true);
     e.preventDefault();
   };
   canvas.addEventListener("mousedown", (e) => mouseButton(e, true));
@@ -3588,7 +3710,10 @@ async function main(): Promise<void> {
     // every turn of the camera
     if (playMode.get() === "playing") e.preventDefault();
   });
-  window.addEventListener("blur", () => input.releaseMouse());
+  window.addEventListener("blur", () => {
+    input.releaseMouse();
+    cameraRig.setFreeLook(false);
+  });
   document.addEventListener("mousemove", (e) => {
     if (!looking()) return;
     // chase rig: the mouse steers the TARGET (e.g. a vehicle's nose) via
@@ -3675,6 +3800,7 @@ async function main(): Promise<void> {
         syncRigTargetVisibility();
       }
       heldButtons = 0;
+      cameraRig.setFreeLook(false);
       setMouseLook(false);
       input.releaseMouse();
       controls.enabled = true;
@@ -4040,6 +4166,12 @@ async function main(): Promise<void> {
       },
       playMode,
       scene: () => built.scene,
+      // submit an ops batch exactly as the inspector does — a probe can then
+      // test an edit's real path (live script-param patching during play)
+      apply: (ops: Parameters<typeof store.apply>[0]) => store.apply(ops),
+      // open a prefab alone / select an entity — what the inspector's "Edit prefab" and the hierarchy do
+      editPrefab: (id: string) => editPrefab(id),
+      select: (id: string | null) => selection.set(id),
       // animation + cloth state: which clip an entity is actually playing and at
       // what rate. Without this a headless session can see a character slide
       // but never tell a wrong clip from a wrong playback speed.
@@ -4313,9 +4445,20 @@ async function main(): Promise<void> {
         else setFoliageFade({ enabled: false });
       }
       profiler.end(); // follow-cam
+      if (playMode.get() === "edit") {
+        // held items in the editor: characters stand in their idle's first
+        // frame and every bone-socket is resolved, so a sword can be placed
+        // in the hand without pressing play (see socket-preview.ts)
+        animations.poseStill();
+        socketPreview.update();
+      }
+      if (playMode.get() !== "playing") {
+        viewport.tick(); // a held item's gizmo stays seated on its grip
+      }
       if (playMode.get() === "playing") {
         profiler.begin("animations");
         animations.update(dt);
+        scripts?.lateUpdate(dt); // bone-attached items follow THIS frame's pose
         try {
           cloth.update(dt);
         } catch (error) {
@@ -4411,6 +4554,7 @@ async function main(): Promise<void> {
       // each of these walks or rebuilds its own instanced/visibility set every
       // frame, and any one of them can dominate alone — the old lumped
       // "foliage" number could never say which
+      movingInstances.update(); // held weapons follow their sockets (after animation)
       profiler.begin("particles");
       particles.update(dt, renderCamera); // billboards face the camera actually used
       billboards.update(dt); // flipbook VFX frames
@@ -4422,6 +4566,7 @@ async function main(): Promise<void> {
       }
       // standing effects start/stop/follow before the plays step, and before
       // the light budget re-aims its slots at their lights
+      modelLooks.update(); // item effects placed once their model has loaded
       ambientVfx?.update(renderCamera, built.scene);
       vfx.update(dt, renderCamera, built.scene);
       profiler.end();

@@ -12,6 +12,8 @@ import {
 import type { DataTypeSink, ScriptRegistry } from "./registry.js";
 import { CharacterSheetScript } from "./character-sheet.js";
 import { CharacterUi } from "./character-ui.js";
+import { EquipmentLook } from "./equipment-look.js";
+import { WeaponStance } from "./weapon-stance.js";
 import { MobBrain } from "./mob-brain.js";
 import {
   damp,
@@ -118,6 +120,8 @@ class PlayerController extends Script {
     const len = Math.hypot(x, z);
     const speed = this.param<number>("speed");
     if (len > 0) {
+      const me = this.ctx.localPlayer?.();
+      if (me == null || me === this.entityId) this.ctx.recenterView?.(); // see the full controller
       x = (x / len) * speed;
       z = (z / len) * speed;
     }
@@ -433,10 +437,15 @@ class Damageable extends Script {
  * full walk/run/sprint gait ladder off its own velocity, so it needs no
  * game-specific wiring. Reads a few optional runtime channels other scripts
  * may set on object.userData: speedMult (upgrades), frozen (menus pause
- * movement), holdingWeapon (swaps to the *_Hold clips), actionClip/actionUntil
+ * movement), stance (weapon stances in force, most specific first: every clip
+ * played — gait and action — becomes `<Stance>_<clip>` where the model has one;
+ * see dress()), holdingWeapon (swaps to the *_Hold clips), actionClip/actionUntil
  * (a one-shot clip that takes over until the given time — on an upper-body
  * LAYER while the character is moving, so a cast or a swing does not stop the
- * legs, and full-body when standing still or when actionFullBody is set),
+ * legs, and full-body when standing still or when actionFullBody is set;
+ * actionHold marks it a HELD pose — a raised guard — looped at its authored
+ * pace instead of fitted to the window; actionUpperBody keeps it on the arms
+ * even standing still, so the legs walk whenever the body does),
  * impulseVel/impulseUntil (an external horizontal drive — dash, knockback —
  * that input cannot cancel while it lasts), liftUntil (a deadline until which
  * a script that LAUNCHED the body — a jump pad, an updraft, a vertical
@@ -650,6 +659,13 @@ class ThirdPersonController extends Script {
         "to, and any gap between the two shows up as skating feet. The `retarget` tool measures " +
         "these off the baked clips and prints them ready to paste.",
     },
+    footsteps: { default: false, description: "Emit gait-synchronised local movement sounds. The controller measures distance travelled, so steps stay in sync when speed changes." },
+    footstepSounds: { default: {}, description: "Surface-to-sound map. Keys: grass, sand, dirt, wood, stone, water, snow, metal, rubble. Each value may be a comma-separated variant list." },
+    footstepCadence: { default: 3.1, min: 1, max: 8, description: "Target foot contacts per second while moving. Distance per contact grows with speed, keeping a run from becoming a sped-up walk sound." },
+    footstepVolume: { default: 0.14, min: 0, max: 1, description: "Maximum local footstep volume. Kept quiet because these are close foley, not music." },
+    jumpSound: { default: "", description: "Optional takeoff sound asset id." },
+    landSound: { default: "", description: "Optional landing sound asset id; uses the current surface when footstepSounds has a matching key." },
+    swimSound: { default: "", description: "Optional swim-stroke and water-entry sound asset id." },
     swim: {
       default: true,
       description:
@@ -773,6 +789,14 @@ class ThirdPersonController extends Script {
     modelYaw: { default: 0, min: -3.1416, max: 3.1416, description: "extra yaw if the model faces backwards" },
     turnSpeed: { default: 14, min: 1, max: 40, description: "how snappily the character turns" },
     face: { default: "camera", description: "camera = always face the aim (strafe shooter); movement = face where you run" },
+    stanceGaits: {
+      default: "combat",
+      description:
+        "When a weapon stance also changes how the character STANDS AND MOVES (idle, walk, run, turns). " +
+        "Its actions — attacks, guard, hits, death — are always the stance's. combat = only while " +
+        "userData.combatUntil (seconds, ctx.now) is in the future, so a character walks and idles normally " +
+        "and takes the guarded stance around a fight; always = whenever the weapon is held; never = never.",
+    },
     actionBlend: {
       default: "auto",
       description:
@@ -835,6 +859,8 @@ class ThirdPersonController extends Script {
   /** This tick's swim aim: the body's pitch, and the vertical speed it asked for. */
   private swimPitchNow = 0;
   private swimVertical = 0;
+  /** Distance paid toward the next foot contact or swim stroke. */
+  private footstepDistance = 0;
 
   private play(clip: string, fade: number, loop = true, restart = false): void {
     if (this.lastClip === clip && !restart) return;
@@ -847,6 +873,42 @@ class ThirdPersonController extends Script {
    * publish a clip list we can't tell absent from present, so the first name
    * wins — exactly the behaviour before this list existed.
    */
+  /**
+   * The clip to actually play for `base`, dressed for what the character is
+   * holding. `userData.stance` names the weapon stances in force, most
+   * specific first (`["SwordShield", "Sword"]`): the first `<Stance>_<base>`
+   * the model HAS wins — `GreatSword_Run`, `SwordShield_Attack1`,
+   * `Staff_Death` — and a stance with no clip for this moment falls through
+   * to the plain one. Locomotion and actions alike, so a script that asks for
+   * "Attack1" or "Death" gets the version for the weapon in hand without
+   * knowing which it is. `holdingWeapon` and its `<base>_Hold` clips are the
+   * older, single-stance form of the same thing. A GAIT (`gait`) is dressed
+   * only as `stanceGaits` allows — by default only in combat.
+   */
+  private dress(base: string, gait = false): string {
+    const ud = this.object.userData as { stance?: string | string[]; holdingWeapon?: boolean; combatUntil?: number };
+    let stances = typeof ud.stance === "string" ? [ud.stance] : (ud.stance ?? []);
+    if (gait) {
+      // How a character stands and walks is not how it fights: out of combat
+      // the plain gait, with the weapon simply carried (see stanceGaits).
+      const mode = this.param<string>("stanceGaits");
+      const fighting = (ud.combatUntil ?? 0) > this.ctx.now() / 1000;
+      if (mode === "never" || (mode !== "always" && !fighting)) stances = [];
+    }
+    for (const s of stances) {
+      const name = `${s}_${base}`;
+      if (this.hasClip(name)) return name;
+    }
+    return ud.holdingWeapon === true ? this.pick(`${base}_Hold`, base) : base;
+  }
+
+  /** Whether the model has `name` — false while the clip list is still unknown. */
+  private hasClip(name: string): boolean {
+    if (!this.ctx.animationClips) return false;
+    this.pick(name); // loads the clip set once the model answers
+    return this.clips?.has(name) ?? false;
+  }
+
   private pick(...names: string[]): string {
     if (!this.ctx.animationClips) return names[0]!;
     if (!this.clips) {
@@ -909,6 +971,7 @@ class ThirdPersonController extends Script {
     this.wasSwimming = false;
     this.swimPitchNow = 0;
     this.swimVertical = 0;
+    this.footstepDistance = 0;
     this.jumpUntil = 0;
     this.landUntil = 0;
     this.wasAirborne = false;
@@ -937,6 +1000,8 @@ class ThirdPersonController extends Script {
       actionClip?: string;
       actionUntil?: number;
       actionFullBody?: boolean;
+      actionHold?: boolean;
+      actionUpperBody?: boolean;
       impulseVel?: [number, number];
       impulseUntil?: number;
       liftUntil?: number;
@@ -957,7 +1022,7 @@ class ThirdPersonController extends Script {
       // script that sets actionClip and frozen together (dying is the usual
       // pair) otherwise watches its death clip get replaced by idle.
       const frozenNow = this.ctx.now() / 1000;
-      const held = ud.actionClip && (ud.actionUntil ?? 0) > frozenNow ? ud.actionClip : null;
+      const held = ud.actionClip && (ud.actionUntil ?? 0) > frozenNow ? this.dress(ud.actionClip) : null;
       if (this.actionLayered) {
         this.ctx.clearAnimationLayer?.(0.15); // no gait left for it to sit on
         this.actionLayered = false;
@@ -967,9 +1032,10 @@ class ThirdPersonController extends Script {
       if (held && starting) {
         // fitted like any other action — a death clip that reaches its end and
         // starts again is the single most obvious animation bug there is
-        this.actionFit = this.param<boolean>("fitActionClip")
-          ? fitAction(this.clipLength(held), (ud.actionUntil ?? frozenNow) - frozenNow)
-          : { rate: 1, loop: true };
+        this.actionFit =
+          this.param<boolean>("fitActionClip") && ud.actionHold !== true
+            ? fitAction(this.clipLength(held), (ud.actionUntil ?? frozenNow) - frozenNow)
+            : { rate: 1, loop: true };
       }
       this.setRateRaw(held ? this.actionFit.rate : 1);
       this.play(held ?? this.param<string>("idleClip"), 0.25, !held || this.actionFit.loop, starting && held !== null);
@@ -1005,6 +1071,12 @@ class ThirdPersonController extends Script {
     let x = fx * forwardIn + rx * strafeIn;
     let z = fz * forwardIn + rz * strafeIn;
     const len = Math.hypot(x, z);
+    // moving off brings a parked free-look camera back behind the character —
+    // only for this tab's own body, never a peer's the host is simulating
+    if (len > 0) {
+      const me = this.ctx.localPlayer?.();
+      if (me == null || me === this.entityId) this.ctx.recenterView?.();
+    }
 
     // Water before speed: how deep the feet are decides which locomotion this
     // tick is, and a wade is a different speed from a run through air.
@@ -1021,6 +1093,7 @@ class ThirdPersonController extends Script {
     // below works off, so the hand-off is a body at the surface, not one
     // leaving it.
     if (this.wasSwimming && !isSwimming && vel[1] > 0) vel[1] = 0;
+    if (!this.wasSwimming && isSwimming) this.movementSound(this.param<string>("swimSound"), 3, 0.85);
     this.wasSwimming = isSwimming;
     // published for anything else that cares — a breath meter, a splash
     // emitter, an AI that will not follow you into the lake
@@ -1165,6 +1238,9 @@ class ThirdPersonController extends Script {
       // grounded" are both true — so it is read here, before any early return
       // can skip it.
       if (this.wasAirborne && grounded) {
+        // The first contact after a fall belongs to the floor just as much as
+        // an ordinary step: sand absorbs it, metal rings, rubble rattles.
+        this.contactSound(4, 1);
         // Skipped at speed on purpose: a character landing mid-run flows back
         // into the run, and stopping to absorb the landing reads as a stumble.
         if (this.airFor >= this.param<number>("landDrop") && planar < this.param<number>("speed") * 0.6) {
@@ -1173,6 +1249,7 @@ class ThirdPersonController extends Script {
       }
       this.wasAirborne = !grounded;
       if (input.isDown("Space") && grounded) {
+        this.movementSound(this.param<string>("jumpSound"), 3, 0.75);
         vy = this.param<number>("jump");
         this.lastJump = now; // and no re-jump inside the coyote window
         // the push-off owns the body until it has played out, then the air clip
@@ -1183,6 +1260,8 @@ class ThirdPersonController extends Script {
       vy = this.followGround(x, vy, z, grounded && !((ud.liftUntil ?? 0) > now), now, dt);
       sim.setLinvel(this.entityId, [x, vy, z]);
     }
+
+    this.updateFootsteps(planar, grounded, isSwimming, stroking, dt);
 
     const facingTarget = this.steerFacing(ud, x, z, faceCamera, backing, fx, fz, driven, len, now, dt);
     // sculling backwards plays the upright tread cycle, so it must not be laid
@@ -1204,7 +1283,7 @@ class ThirdPersonController extends Script {
     // ONCE, when the action starts: re-deciding per tick would flip a cast
     // between layered and full-body every time the character crossed the
     // walking threshold mid-animation.
-    const action = ud.actionClip && (ud.actionUntil ?? 0) > now ? ud.actionClip : null;
+    const action = ud.actionClip && (ud.actionUntil ?? 0) > now ? this.dress(ud.actionClip) : null;
     if (action !== this.action) {
       const blend = this.param<string>("actionBlend");
       const layered =
@@ -1217,7 +1296,13 @@ class ThirdPersonController extends Script {
         // standing to attention in the middle of a lake — and there is no
         // "standing still" in water to justify taking the whole body, which is
         // the reason the moving/standing split exists on land.
-        (isSwimming || blend === "layer" || planar > Math.max(0.2, this.param<number>("walkSpeed") * 0.5));
+        (isSwimming ||
+          blend === "layer" ||
+          // a raised guard, say, is ARMS: you walk behind a shield, and a
+          // full-body guard raised standing still would pin the legs in its
+          // pose for as long as it is held — the character slides, not walks
+          ud.actionUpperBody === true ||
+          planar > Math.max(0.2, this.param<number>("walkSpeed") * 0.5));
       if (this.actionLayered && !layered) this.ctx.clearAnimationLayer?.(0.15);
       this.action = action;
       this.actionLayered = layered;
@@ -1228,8 +1313,10 @@ class ThirdPersonController extends Script {
       // long for even the slowest playback to cover, it loops after all, and a
       // clip nobody can measure (model still loading, headless host) keeps the
       // old looping behaviour.
+      // A HELD pose (a raised guard) has no window to fit: it loops at its
+      // authored pace for as long as the caller keeps asserting it.
       this.actionFit =
-        action && this.param<boolean>("fitActionClip")
+        action && this.param<boolean>("fitActionClip") && ud.actionHold !== true
           ? fitAction(this.ctx.animationDuration?.(action) ?? null, (ud.actionUntil ?? now) - now)
           : { rate: 1, loop: true };
       if (action && layered) {
@@ -1252,10 +1339,9 @@ class ThirdPersonController extends Script {
       return;
     }
 
-    // A held-weapon pose is a variant of whatever gait we land on, so resolve
-    // the gait first and reach for the *_Hold variant second.
-    const holding = ud.holdingWeapon === true;
-    const variant = (base: string): string => (holding ? this.pick(`${base}_Hold`, base) : base);
+    // A weapon stance (or a held-weapon pose) is a variant of whatever gait we
+    // land on, so resolve the gait first and dress it second.
+    const variant = (base: string): string => this.dress(base, true);
 
     const idle = this.param<string>("idleClip");
     const run = this.param<string>("runClip");
@@ -1372,8 +1458,11 @@ class ThirdPersonController extends Script {
       return;
     }
 
-    this.setRate(moving, clip, nominal);
-    this.play(variant(clip), 0.15);
+    // paced by the clip actually SHOWN: a greatsword jog is not authored at
+    // the pace of the unarmed run it stands in for
+    const shown = variant(clip);
+    this.setRate(moving, shown, nominal);
+    this.play(shown, 0.15);
   }
 
   /**
@@ -1725,6 +1814,54 @@ class ThirdPersonController extends Script {
     // restFromCollider, which is where it comes from).
   }
 
+  private movementSound(raw: string, priority: number, gain = 1): void {
+    if (!this.param<boolean>("footsteps")) return;
+    const local = this.ctx.localPlayer?.();
+    if (local && local !== this.entityId) return;
+    const choices = raw.split(",").map((sound) => sound.trim()).filter(Boolean);
+    const sound = choices[Math.floor(Math.random() * choices.length)];
+    if (sound) this.ctx.playSound?.(sound, { volume: this.param<number>("footstepVolume") * gain, playbackRate: 0.95 + Math.random() * 0.1, priority });
+  }
+
+  private surfaceKey(raw: string): string {
+    const value = raw.toLowerCase();
+    if (value.includes("water")) return "water";
+    if (value.includes("snow") || value.includes("ice")) return "snow";
+    if (value.includes("sand")) return "sand";
+    if (value.includes("grass") || value.includes("moss")) return "grass";
+    if (value.includes("wood") || value.includes("timber")) return "wood";
+    if (value.includes("metal") || value.includes("iron")) return "metal";
+    if (value.includes("gravel")) return "gravel";
+    if (value.includes("bone") || value.includes("paper") || value.includes("rubble") || value.includes("debris")) return "rubble";
+    if (value.includes("stone") || value.includes("rock") || value.includes("brick")) return "stone";
+    return "dirt";
+  }
+
+  private updateFootsteps(planar: number, grounded: boolean, swimming: boolean, stroking: boolean, dt: number): void {
+    if (!this.param<boolean>("footsteps")) return;
+    const moving = swimming ? stroking : grounded && planar > 0.15;
+    if (!moving) {
+      this.footstepDistance = 0;
+      return;
+    }
+    this.footstepDistance += planar * dt;
+    const distance = swimming ? Math.max(0.65, planar / 1.8) : Math.max(0.55, planar / this.param<number>("footstepCadence"));
+    if (this.footstepDistance < distance) return;
+    this.footstepDistance %= distance;
+    if (swimming) {
+      this.movementSound(this.param<string>("swimSound"), 2, 0.65);
+      return;
+    }
+    this.contactSound(1, 1);
+  }
+
+  private contactSound(priority: number, gain: number): void {
+    const p = this.object.position;
+    const key = this.surfaceKey(this.ctx.surfaceAt?.(p.x, p.y, p.z) ?? "dirt");
+    const sounds = this.param<Record<string, string>>("footstepSounds") ?? {};
+    this.movementSound(sounds[key] ?? sounds.dirt ?? "", priority, gain);
+  }
+
   private probeGround(sim: SimLike, now: number, vy: number, planarSpeed: number): boolean | null {
     const interval = this.param<number>("groundProbe");
     if (!(interval > 0) || !sim.raycast) return null;
@@ -1886,7 +2023,32 @@ class BoneSocket extends Script {
     },
     offset: { default: [0, 0, 0], description: "position offset, bone-oriented world units" },
     rotationDeg: { default: [0, 90, 0], description: "rotation offset in degrees" },
+    altOffset: {
+      default: [],
+      description:
+        "A second pose for the held item, eased in while `altWhen` holds — [x, y, z]; empty = none. A shield is " +
+        "carried flat against the arm but held face-forward in a guard, and no one pose is right for both.",
+    },
+    altRotationDeg: { default: [], description: "rotation of the second pose, degrees; empty = none" },
+    altBone: {
+      default: "",
+      description:
+        "bone the second pose hangs off; empty = `bone`. A shield carried on the forearm is held in the FIST in a guard.",
+    },
+    altWhen: {
+      default: "",
+      description:
+        "userData key on the character (the nearest ancestor that carries it) that selects the second pose: " +
+        "true, or a time in the future in seconds (e.g. combatUntil).",
+    },
+    altBlend: { default: 0.25, min: 0, max: 5, description: "seconds to ease between the two poses" },
   };
+
+  private altQuat: THREE.Quaternion | null = null;
+  private altMix = 0;
+  private altBoneObj: THREE.Object3D | null = null;
+  private altPos!: THREE.Vector3;
+  private altBoneQuat!: THREE.Quaternion;
 
   /**
    * Mirror of three's `PropertyBinding.sanitizeNodeName`, kept local because
@@ -1904,22 +2066,81 @@ class BoneSocket extends Script {
   private parentQuat!: THREE.Quaternion;
   private shift!: THREE.Vector3;
 
+  /** The params the cached rotations and bone lookups were built from. */
+  private synced = "";
+
   override onStart(): void {
-    const deg = this.param<[number, number, number]>("rotationDeg");
-    const euler = this.object.rotation
-      .clone()
-      .set((deg[0] * Math.PI) / 180, (deg[1] * Math.PI) / 180, (deg[2] * Math.PI) / 180);
-    this.offsetQuat = this.object.quaternion.clone().setFromEuler(euler);
+    this.offsetQuat = this.object.quaternion.clone();
+    this.synced = "";
     this.bonePos = this.object.position.clone();
     this.shift = this.object.position.clone();
     this.boneQuat = this.object.quaternion.clone();
     this.parentQuat = this.object.quaternion.clone();
+    this.altPos = this.object.position.clone();
+    this.altBoneQuat = this.object.quaternion.clone();
+    this.altBoneObj = null;
     this.bone = null;
+    this.altMix = 0;
+    this.syncParams();
   }
 
-  override onFixedUpdate(): void {
+  /**
+   * Rebuild what is derived from the params whenever they change — they can
+   * change UNDER a running socket (an inspector edit during play is patched in
+   * live, not restarted), and placing a weapon by eye is exactly that loop.
+   */
+  private syncParams(): void {
+    const deg = this.param<[number, number, number]>("rotationDeg");
+    const alt = this.param<number[]>("altRotationDeg");
+    const bone = this.param<string>("bone");
+    const altBone = this.param<string>("altBone");
+    const key = JSON.stringify([deg, alt, bone, altBone]);
+    if (key === this.synced) return;
+    if (this.synced) {
+      const [, , prevBone, prevAlt] = JSON.parse(this.synced) as [unknown, unknown, string, string];
+      if (prevBone !== bone) this.bone = null;
+      if (prevAlt !== altBone) this.altBoneObj = null;
+    }
+    this.synced = key;
+    const toRad = (d: number): number => (d * Math.PI) / 180;
+    const euler = this.object.rotation.clone().set(toRad(deg[0]), toRad(deg[1]), toRad(deg[2]));
+    this.offsetQuat.setFromEuler(euler);
+    this.altQuat =
+      Array.isArray(alt) && alt.length === 3
+        ? this.object.quaternion.clone().setFromEuler(euler.clone().set(toRad(alt[0]!), toRad(alt[1]!), toRad(alt[2]!)))
+        : null;
+  }
+
+  /**
+   * After animation: place the item again on the bone as it is THIS frame. On
+   * the fixed tick alone it sat where the arm was a frame ago — a shield that
+   * visibly trailed a swinging forearm.
+   */
+  override onLateUpdate(): void {
+    this.onFixedUpdate(0);
+  }
+
+  /** A live edit: re-pose now, even paused — you are placing it by eye. */
+  override onParamsChanged(): void {
+    this.onFixedUpdate(0);
+  }
+
+  /** Whether the character asks for the second pose now (see `altWhen`). */
+  private altWanted(): boolean {
+    const key = this.param<string>("altWhen");
+    if (!key || !this.altQuat) return false;
+    for (let o = this.object.parent; o; o = o.parent) {
+      if (!(key in o.userData)) continue;
+      const v = o.userData[key];
+      return typeof v === "number" ? v > this.ctx.now() / 1000 : v === true;
+    }
+    return false;
+  }
+
+  override onFixedUpdate(dt: number): void {
     const parent = this.object.parent;
     if (!parent) return;
+    this.syncParams();
     if (!this.bone) {
       // the skinned model loads async — keep looking until it appears
       const wanted = this.param<string>("bone");
@@ -1940,17 +2161,43 @@ class BoneSocket extends Script {
     this.bone.updateWorldMatrix(true, false);
     this.bone.getWorldPosition(this.bonePos);
     this.bone.getWorldQuaternion(this.boneQuat);
-
     const off = this.param<[number, number, number]>("offset");
     this.shift.set(off[0], off[1], off[2]).applyQuaternion(this.boneQuat);
     this.bonePos.add(this.shift);
+    this.boneQuat.multiply(this.offsetQuat); // world pose of the MAIN socket
+
+    // ease toward whichever pose the character is asking for
+    const blend = this.param<number>("altBlend");
+    const target = this.altWanted() ? 1 : 0;
+    const step = blend > 0 ? dt / blend : 1;
+    this.altMix = target > this.altMix ? Math.min(target, this.altMix + step) : Math.max(target, this.altMix - step);
+    const m = this.altQuat ? this.altMix * this.altMix * (3 - 2 * this.altMix) : 0;
+    // which pose is on show — the editor's gizmo edits THAT one
+    this.object.userData["socketPose"] = m > 0.5 ? "alt" : "main";
+    if (m > 0 && this.altQuat) {
+      // the second pose, in world terms off its own bone, then blended — two
+      // bones cannot be blended in either one's local frame
+      const altName = this.param<string>("altBone");
+      if (altName && !this.altBoneObj) {
+        this.altBoneObj = parent.getObjectByName(altName) ?? parent.getObjectByName(BoneSocket.sanitizeBoneName(altName)) ?? null;
+      }
+      const altBone = altName ? this.altBoneObj : this.bone;
+      if (altBone) {
+        altBone.updateWorldMatrix(true, false);
+        altBone.getWorldPosition(this.altPos);
+        altBone.getWorldQuaternion(this.altBoneQuat);
+        const ao = this.param<number[]>("altOffset");
+        if (ao.length === 3) this.altPos.add(this.shift.set(ao[0]!, ao[1]!, ao[2]!).applyQuaternion(this.altBoneQuat));
+        this.altBoneQuat.multiply(this.altQuat);
+        this.bonePos.lerp(this.altPos, m);
+        this.boneQuat.slerp(this.altBoneQuat, m);
+      }
+    }
 
     parent.updateWorldMatrix(true, false);
     this.object.position.copy(parent.worldToLocal(this.bonePos));
     parent.getWorldQuaternion(this.parentQuat).invert();
-    this.object.quaternion.copy(
-      this.parentQuat.multiply(this.boneQuat).multiply(this.offsetQuat),
-    );
+    this.object.quaternion.copy(this.parentQuat.multiply(this.boneQuat));
   }
 }
 
@@ -2449,7 +2696,14 @@ class Weather extends Script {
     windTurnMinutes: { default: 5, min: 0.2, max: 120, description: "Roughly how long the wind takes to wander right round the compass." },
     gustSeconds: { default: 6, min: 0.5, max: 60, description: "Period of the gusting that rides on top of the wind. Short is chaotic — which is most of what separates a dust storm from a fog machine." },
     lightning: { default: 3, min: 0, max: 30, description: "Strikes per minute at the height of a storm; 0 for none. Each is a sky-wide flicker, not a bolt — no light is added, so it cannot stall the frame." },
-    thunder: { default: "", description: "Sound asset id played after a strike, delayed by the distance the sound had to travel. Empty = silent lightning." },
+    thunder: { default: "", description: "One or more comma-separated thunder sound asset ids, chosen at random after a strike and delayed by the distance the sound travelled. Empty = silent lightning." },
+    thunderVolume: { default: 0.55, min: 0, max: 1, description: "Volume of the non-positional thunder roll." },
+    rainSound: { default: "", description: "Looping rain ambience asset id. It fades with local rain intensity; empty keeps rain silent." },
+    snowSound: { default: "", description: "Looping wind ambience asset id for snow. It fades with local snow intensity; empty keeps snow silent." },
+    sandSound: { default: "", description: "Looping sandstorm ambience asset id. It fades with local sandstorm intensity; empty keeps sand silent." },
+    rainSoundVolume: { default: 0.38, min: 0, max: 1, description: "Maximum local volume for rain ambience." },
+    snowSoundVolume: { default: 0.24, min: 0, max: 1, description: "Maximum local volume for snow wind ambience." },
+    sandSoundVolume: { default: 0.42, min: 0, max: 1, description: "Maximum local volume for sandstorm ambience." },
     fogBoost: {
       default: 9,
       min: 0,
@@ -2607,6 +2861,7 @@ class Weather extends Script {
       if (id) this.ctx.setParticles?.(id, { emitting: false, rate: 0 });
     }
     if (this.dust) this.ctx.setParticles?.(this.dust, { emitting: false, rate: 0 });
+    for (const slot of KINDS) this.ctx.setSoundLoop?.(slot);
   }
 
   override onFixedUpdate(dt: number): void {
@@ -2646,11 +2901,32 @@ class Weather extends Script {
       this.thunderIn -= dt;
       if (this.thunderIn <= 0) {
         this.thunderIn = -1;
-        const sound = String(this.param<string>("thunder") ?? "").trim();
-        if (sound) this.ctx.playSound?.(sound);
+        const sounds = String(this.param<string>("thunder") ?? "")
+          .split(",")
+          .map((id) => id.trim())
+          .filter(Boolean);
+        const sound = sounds[Math.floor(Math.random() * sounds.length)];
+        // A small detune stops two close strikes using the same source from
+        // sounding copy-pasted; wider variation turns thunder into a cartoon.
+        if (sound)
+          this.ctx.playSound?.(sound, {
+            volume: this.param<number>("thunderVolume"),
+            positional: false,
+            playbackRate: 0.94 + Math.random() * 0.12,
+          });
       }
     }
+    this.syncSound("rain", this.local.rain, "rainSound", "rainSoundVolume");
+    this.syncSound("snow", this.local.snow, "snowSound", "snowSoundVolume");
+    this.syncSound("sand", this.local.sand, "sandSound", "sandSoundVolume");
     this.apply();
+  }
+
+  /** Keep the ambient bed continuous while the front and biome blend breathe. */
+  private syncSound(kind: WeatherKind, intensity: number, soundParam: string, volumeParam: string): void {
+    const sound = String(this.param<string>(soundParam) ?? "").trim();
+    const volume = Math.max(0, Math.min(1, intensity * this.param<number>(volumeParam)));
+    this.ctx.setSoundLoop?.(kind, volume > 0.003 ? sound : undefined, { volume, positional: false });
   }
 
   /**
@@ -3239,4 +3515,6 @@ export function registerBuiltinScripts(
   // RPG progression + grid inventory: the authority's sheet and its client view.
   add(CharacterSheetScript);
   add(CharacterUi);
+  add(EquipmentLook);
+  add(WeaponStance);
 }

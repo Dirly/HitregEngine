@@ -28,6 +28,7 @@ export {
   type BiomeAt,
   type WaterAt,
   type LiveSkyOptions,
+  type ModelLook,
   type LivePostFxOptions,
   type LiveSkyBase,
 } from "./script.js";

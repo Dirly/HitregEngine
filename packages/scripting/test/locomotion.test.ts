@@ -441,6 +441,100 @@ describe("auto-run", () => {
   });
 });
 
+describe("third-person-controller weapon stances", () => {
+  const clips = [...ALL_CLIPS, "Attack1", "TwoHanded_Idle", "TwoHanded_Run", "Axe2H_Attack1", "GreatSword_Attack1"];
+  const params = { walkSpeed: 2, speed: 6, sprintSpeed: 10, stanceGaits: "always" };
+
+  it("by default walks and idles normally, and takes the stance's gait only in combat", () => {
+    const h = harness({ clips, params: { ...params, stanceGaits: "combat" } });
+    h.ud["stance"] = ["TwoHanded"];
+    h.stepAt([0, 0, 0]);
+    expect(h.lastClip()).toBe("Idle"); // carried, not brandished
+    h.ud["combatUntil"] = h.now() + 1;
+    h.stepAt([0, 0, 0]);
+    expect(h.lastClip()).toBe("TwoHanded_Idle");
+    h.stepAt([0, 0, 0], 70); // the fight lapses
+    expect(h.lastClip()).toBe("Idle");
+    // actions are the stance's regardless
+    h.ud["actionClip"] = "Attack1";
+    h.ud["actionUntil"] = h.now() + 5;
+    h.stepAt([0, 0, 0]);
+    expect(h.lastClip()).toBe("Attack1"); // no TwoHanded_Attack1 in this model
+  });
+
+  it("keeps a held guard on the arms, so the legs walk under it", () => {
+    const h = harness({ clips: [...clips, "Block"], params, durations: { Block: 2.5 } });
+    h.ud["actionClip"] = "Block";
+    h.ud["actionUntil"] = 3600;
+    h.ud["actionHold"] = true;
+    h.ud["actionUpperBody"] = true;
+    h.stepAt([0, 0, 0]); // raised standing still
+    expect(h.lastLayer()).toBe("Block");
+    h.hold("KeyW");
+    h.stepAt([0, 0, -2], 30);
+    expect(h.lastClip()).toBe("Walk");
+    expect(h.lastLayer()).toBe("Block");
+  });
+
+  it("plays the first stance's clip the model has, and the plain clip where no stance has one", () => {
+    const h = harness({ clips, params });
+    h.ud["stance"] = ["Axe2H", "TwoHanded"];
+    h.setVelocity([0, 0, 0]);
+    h.step();
+    expect(h.lastClip()).toBe("TwoHanded_Idle"); // no axe idle: the two-handed one
+
+    h.hold("KeyW");
+    h.stepAt([0, 0, -6]);
+    expect(h.lastClip()).toBe("TwoHanded_Run");
+    h.stepAt([0, 0, -2], 30);
+    expect(h.lastClip()).toBe("Walk"); // no stance walk at all: plain
+
+    // actions are dressed too — the caster asks for "Attack1" whatever is held
+    h.release("KeyW");
+    h.ud["actionClip"] = "Attack1";
+    h.ud["actionUntil"] = 99;
+    h.stepAt([0, 0, 0]);
+    expect(h.lastClip()).toBe("Axe2H_Attack1");
+
+    // swapping weapons swaps the idle on the spot, no event needed
+    h.ud["actionClip"] = undefined;
+    h.ud["stance"] = ["GreatSword", "TwoHanded"];
+    h.stepAt([0, 0, 0]);
+    expect(h.lastClip()).toBe("TwoHanded_Idle");
+    delete h.ud["stance"];
+    h.stepAt([0, 0, 0]);
+    expect(h.lastClip()).toBe("Idle");
+  });
+
+  it("paces a stance's gait by that clip's own authored speed", () => {
+    const h = harness({ clips, params: { ...params, clipSpeeds: { Run: 6, TwoHanded_Run: 3 } } });
+    h.ud["stance"] = ["TwoHanded"];
+    h.hold("KeyW");
+    h.stepAt([0, 0, -6], 3);
+    expect(h.lastClip()).toBe("TwoHanded_Run");
+    expect(h.rate()).toBeCloseTo(2, 1); // a 3 m/s jog played at 6 m/s
+  });
+
+  it("holds a guard at its authored pace instead of fitting it to the window", () => {
+    const h = harness({ clips: [...clips, "Block"], params, durations: { Block: 2.5 } });
+    h.ud["actionClip"] = "Block";
+    h.ud["actionUntil"] = 3600; // held until let go
+    h.ud["actionHold"] = true;
+    h.stepAt([0, 0, 0]);
+    expect(h.lastClip()).toBe("Block");
+    expect(h.lastPlayed()?.loop).toBe(true);
+    expect(h.rate()).toBe(1); // unheld, a 2.5 s clip in an hour-long window would crawl
+  });
+
+  it("dresses nothing while the clip list is unknown (model loading, headless)", () => {
+    const h = harness({ params });
+    h.ud["stance"] = ["TwoHanded"];
+    h.step(5);
+    expect(h.played.length).toBeGreaterThan(0);
+    expect(h.played.some((p) => p.clip.startsWith("TwoHanded_"))).toBe(false);
+  });
+});
+
 describe("third-person-controller action clips", () => {
   const moving = { clips: ALL_CLIPS, params: { walkSpeed: 2, speed: 6, sprintSpeed: 10 } };
 

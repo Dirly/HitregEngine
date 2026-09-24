@@ -9,6 +9,17 @@ export interface AmbientVfxData {
   material?: string | undefined;
   playing: boolean;
   cullDistance: number;
+  /**
+   * "full" = the play takes the group's whole orientation (an item's frame:
+   * emitters turn with a sword); default "yaw" = upright, facing the group's
+   * heading (a torch).
+   */
+  orient?: "yaw" | "full";
+  /**
+   * Replace every particle emitter's volume half-extents (metres, in the
+   * play's frame) — an item effect sized to the blade it runs along.
+   */
+  shapeSize?: [number, number, number];
 }
 
 export interface AmbientVfxOptions {
@@ -90,7 +101,12 @@ export class AmbientVfx {
     this.entries.set(entityId, {
       group,
       data,
-      frame: { origin: [0, 0, 0], direction: [0, 0, 1], palette: this.paletteOf(data) },
+      frame: {
+        origin: [0, 0, 0],
+        direction: [0, 0, 1],
+        palette: this.paletteOf(data),
+        ...(data.orient === "full" ? { basis: new THREE.Quaternion() } : {}),
+      },
       handle: null,
     });
   }
@@ -142,6 +158,7 @@ export class AmbientVfx {
       frame.origin[1] = tmpPos.y;
       frame.origin[2] = tmpPos.z;
       entry.group.getWorldQuaternion(tmpQuat);
+      frame.basis?.copy(tmpQuat);
       tmpDir.set(0, 0, 1).applyQuaternion(tmpQuat);
       frame.direction[0] = tmpDir.x;
       frame.direction[1] = 0;
@@ -209,8 +226,18 @@ export class AmbientVfx {
   }
 
   private start(entry: Entry): VfxHandle | null {
-    const effect = this.effectOf(entry.data.effect);
-    if (!effect) return null;
+    const base = this.effectOf(entry.data.effect);
+    if (!base) return null;
+    const size = entry.data.shapeSize;
+    // sized to what it runs along: a copy with the emitters' volume replaced
+    const effect: VfxEffect = size
+      ? {
+          ...base,
+          modules: base.modules.map((m) =>
+            m.kind === "particles" ? { ...m, emitter: { ...m.emitter, shapeSize: [size[0], size[1], size[2]] } } : m,
+          ),
+        }
+      : base;
     const onLight = this.options.onLight;
     return this.vfx.play(effect, entry.frame, {
       phaseLength: Number.POSITIVE_INFINITY,

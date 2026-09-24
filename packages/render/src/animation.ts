@@ -65,6 +65,8 @@ interface Entry {
   speedMul: number;
   /** Resolved lazily; null once we have looked and found nothing. */
   maskRoot?: string | null;
+  /** Edit mode: already stood in its clip's first frame (see poseStill). */
+  posedStill?: boolean;
   fading: Array<{ action: THREE.AnimationAction; until: number }>;
   clock: number;
 }
@@ -561,9 +563,33 @@ export class AnimationSystem {
     if (entry.baseAction) entry.baseAction.timeScale = multiplier;
   }
 
+  /**
+   * EDIT mode: stand each animated model in the FIRST FRAME of its declared
+   * clip instead of its bind pose. An auto-rigged bind pose is a steep A-pose
+   * nobody animates in, and it is what the editor showed — so a sword placed
+   * in the hand there was placed in a pose the character never takes. One
+   * evaluation per model (the bones keep it once the action stops), so this
+   * is free to call every frame; a model that loads later is posed when it
+   * arrives. No-op while running.
+   */
+  poseStill(): void {
+    if (this.running) return;
+    for (const entry of this.entries.values()) {
+      if (entry.posedStill) continue;
+      entry.posedStill = true;
+      const clip = entry.animator?.play;
+      const action = clip ? entry.actions.get(clip) : undefined;
+      if (!action) continue;
+      action.reset().play();
+      entry.mixer.update(0);
+      action.stop();
+    }
+  }
+
   /** Play mode started: run every animator's declared clip. */
   setRunning(running: boolean): void {
     this.running = running;
+    for (const entry of this.entries.values()) entry.posedStill = false;
     for (const [id, entry] of this.entries) {
       if (running) {
         if (entry.animator?.play) this.play(id, entry.animator.play, 0);

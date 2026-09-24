@@ -589,3 +589,85 @@ describe("fitRigToBody", () => {
     expect(fitRigToBody(follow, undefined)).toBe(follow);
   });
 });
+
+describe("ThirdPersonCameraRig free look", () => {
+  it("orbits the camera while the aim holds, stays parked, and swings back when asked", () => {
+    const rig = new ThirdPersonCameraRig({ distance: 7, pitchMin: -0.5, pitchMax: 0.5 });
+    rig.setOrbit(0, 0);
+    const cam = camera();
+    settle(rig, cam, clear, 10);
+    const aim = rig.aimDirection();
+    expect(aim.z).toBeCloseTo(-1, 3);
+
+    rig.setFreeLook(true);
+    rig.addLook(600, 0); // ~86° to the right
+    settle(rig, cam, clear, 10);
+    expect(rig.freeLooking).toBe(true);
+    expect(cam.getWorldDirection(new THREE.Vector3()).x).toBeGreaterThan(0.9);
+    // the aim — what movement and facing read — never moved
+    expect(rig.aimDirection().distanceTo(aim)).toBeLessThan(1e-9);
+    expect(rig.orbit.yaw).toBe(0);
+
+    rig.setFreeLook(false);
+    settle(rig, cam, clear, 60);
+    // released: parked, so the player can keep looking at their character
+    expect(cam.getWorldDirection(new THREE.Vector3()).x).toBeGreaterThan(0.9);
+
+    rig.returnToAim(); // they moved or cast
+    settle(rig, cam, clear, 60); // one second
+    expect(rig.freeLooking).toBe(false);
+    expect(cam.getWorldDirection(new THREE.Vector3()).z).toBeCloseTo(-1, 3);
+  });
+
+  it("returns the short way round after a spin past half a turn", () => {
+    const rig = new ThirdPersonCameraRig({ distance: 7, pitchMin: 0, pitchMax: 0, freeLookReturn: 14 });
+    rig.setOrbit(0, 0);
+    const cam = camera();
+    rig.setFreeLook(true);
+    rig.addLook(-(Math.PI * 1.9) / 0.0025, 0); // 342° one way = 18° the other
+    rig.setFreeLook(false);
+    rig.returnToAim();
+    let maxTurn = 0;
+    for (let i = 0; i < 60; i++) {
+      rig.update(1 / 60, { x: 0, y: 0, z: 0 }, cam, clear);
+      maxTurn = Math.max(maxTurn, Math.abs(cam.getWorldDirection(new THREE.Vector3()).x));
+    }
+    expect(maxTurn).toBeLessThan(Math.sin(0.35)); // never swept through the long way
+    expect(cam.getWorldDirection(new THREE.Vector3()).z).toBeCloseTo(-1, 3);
+  });
+
+  it("keeps the free-look pitch inside the look band", () => {
+    const rig = new ThirdPersonCameraRig({ pitchMin: -0.4, pitchMax: 0.8 });
+    rig.setOrbit(0, 0);
+    rig.setFreeLook(true);
+    rig.addLook(0, 1e6);
+    const cam = camera();
+    settle(rig, cam, clear, 1);
+    expect(Math.asin(-cam.getWorldDirection(new THREE.Vector3()).y)).toBeCloseTo(0.8, 3);
+    expect(rig.orbit.pitch).toBe(0);
+  });
+
+  it("turning the aim from a parked view adopts the view first, without a cut", () => {
+    const rig = new ThirdPersonCameraRig({ distance: 7, pitchMin: 0, pitchMax: 0 });
+    rig.setOrbit(0, 0);
+    const cam = camera();
+    rig.setFreeLook(true);
+    rig.addLook(Math.PI / 0.0025, 0); // swung round to the front
+    rig.setFreeLook(false);
+    settle(rig, cam, clear, 5);
+    const parked = cam.getWorldDirection(new THREE.Vector3());
+
+    rig.addLook(0.001, 0); // a right-drag, as small as it gets
+    settle(rig, cam, clear, 5);
+    expect(cam.getWorldDirection(new THREE.Vector3()).distanceTo(parked)).toBeLessThan(1e-3);
+    expect(rig.freeLooking).toBe(false);
+    // and the aim now points where the camera does
+    expect(rig.aimDirection().distanceTo(parked)).toBeLessThan(1e-3);
+  });
+
+  it("is ignored by a chase rig, whose yaw belongs to its target", () => {
+    const rig = new ThirdPersonCameraRig({ mode: "chase" });
+    rig.setFreeLook(true);
+    expect(rig.freeLooking).toBe(false);
+  });
+});

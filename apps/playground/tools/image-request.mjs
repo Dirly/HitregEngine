@@ -57,6 +57,42 @@ function checkPng(f, { size, alpha }) {
   return null;
 }
 
+/**
+ * An opaque image asked for and handed back on TRANSPARENT.
+ *
+ * Measured on a ratkin atlas sheet: 59.5% of it fully transparent, every
+ * border pixel at alpha 0, the artwork itself complete. Downstream that is
+ * indistinguishable from a sheet drawn on black — the atlas importer finds its
+ * ground by flooding in from the border through BRIGHT pixels, so it found
+ * none and refused the sheet outright, costing a whole generation.
+ *
+ * Unlike a sheet on black this one is trivially recoverable: the ground is not
+ * the wrong colour, it is absent, so compositing over white puts back exactly
+ * what was asked for — including the soft edges, which composite correctly
+ * rather than being thresholded. Only done when the caller did NOT ask for
+ * alpha, and only when the border really is transparent; a mostly-opaque sheet
+ * with a few transparent pixels is left alone.
+ */
+async function flattenOntoWhite(file) {
+  const { decodePng, encodePng } = await import("./_png.mjs");
+  const img = decodePng(fs.readFileSync(file));
+  const { width: W, height: H, data } = img;
+  let border = 0;
+  let n = 0;
+  for (let x = 0; x < W; x++)
+    for (const y of [0, H - 1]) { border += data[(y * W + x) * 4 + 3]; n++; }
+  for (let y = 0; y < H; y++)
+    for (const x of [0, W - 1]) { border += data[(y * W + x) * 4 + 3]; n++; }
+  if (border / n > 8) return null; // the border is painted; not this failure
+  for (let i = 0; i < W * H; i++) {
+    const a = data[i * 4 + 3] / 255;
+    for (let c = 0; c < 3; c++) data[i * 4 + c] = Math.round(data[i * 4 + c] * a + 255 * (1 - a));
+    data[i * 4 + 3] = 255;
+  }
+  fs.writeFileSync(file, encodePng(W, H, data));
+  return `flattened a transparent background onto white (${W}x${H})`;
+}
+
 // One codex exec session. The prompt goes in on stdin so a variadic -i cannot swallow it.
 function runCodex(cwd, prompt, refs, timeoutSec) {
   const args = ["exec", "--cd", cwd, "-s", "workspace-write", "--skip-git-repo-check"];
@@ -131,9 +167,13 @@ async function generate(items, timeoutSec) {
     }
     fs.mkdirSync(path.dirname(it.target), { recursive: true });
     fs.copyFileSync(produced, it.target);
+    // A generator that was told "background must be pure white" and returned a
+    // transparent one has produced the right picture on the wrong ground.
+    let flattened = null;
+    if (!it.alpha) flattened = await flattenOntoWhite(it.target);
     const info = pngInfo(it.target);
     write(it.id, { ...read(it.id), status: "done", finishedAt: new Date().toISOString(), fulfiller: "codex", notes: `${secs}s` });
-    out.push({ id: it.id, status: "done", target: it.target, bytes: fs.statSync(it.target).size, size: `${info.w}x${info.h}`, alpha: info.alpha });
+    out.push({ id: it.id, status: "done", target: it.target, bytes: fs.statSync(it.target).size, size: `${info.w}x${info.h}`, alpha: info.alpha, ...(flattened ? { fixed: flattened } : {}) });
   }
   const strays = fs.readdirSync(stage).filter((f) => !items.some((it) => it.file === f));
   console.log(JSON.stringify({ seconds: secs, results: out, ...(strays.length ? { discardedStrays: strays } : {}) }, null, 2));

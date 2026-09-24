@@ -69,6 +69,7 @@ const list = (v) => (v === undefined || v === true ? [] : [].concat(v));
 
 const RECIPE_DEFAULTS = {
   longsword: { model: "MMO/3d/Weapons/LongSword-unwrapped.glb" },
+  greataxe: { model: "MMO/3d/Weapons/GreatAxe-unwrapped.glb" },
   // A creature has no families — every part of the ogre is the only one of its
   // kind — so the build is simply all ten shells, and `--variant` does nothing.
   // Give it `--height 3` unless you want it standing at a sword's 2.4 m.

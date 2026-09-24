@@ -88,6 +88,15 @@ Read the relevant sections once, and revisit them when the task or code changes.
   (the unwrap-to-atlas process, what each recipe setting is for, and the prompt
   rules that make artwork land) and `docs/weapon-atlas.md` for a modular
   weapon ubermesh. The `weapon-unwrap` skill wraps both for Claude sessions.
+- **Inventory icons:** read `docs/item-icons.md` (the `item-icons` skill wraps
+  it). An item with a model is rendered from it; only model-less loot is generated.
+- **Equipped items — parts, theme, glow, effects:** read `docs/item-looks.md`
+  (the `item-looks` skill wraps it). Every holder of a model is one draw;
+  never give an item its own material or mesh.
+- **Character clips, weapon stances, grips:** read `docs/character-animation.md`
+  (*Libraries on different rigs*, *Weapon stances*). A held item's socket is
+  computed with `tools/fit-grip.mjs` and checked with `tools/pose-sheet.mjs`,
+  never nudged by eye; a weapon's animations are `<Stance>_<clip>` clips.
 - **Scene/prefab/component edits:** read the opening ops rules and Pitfalls in
   `docs/scene-authoring.md`, then the sections for what is being changed. Look up
   only the needed component schemas in the live or committed spec.

@@ -59,6 +59,10 @@ per ubermesh:
 - `source` / `sourceScale` — the file, and what to multiply it by. **A
   Blockbench OBJ is 1/100 of the units its FBX export uses**, so a Blockbench
   OBJ wants `sourceScale: 100`.
+- `repeats` — when Blockbench left several objects under ONE name (the great
+  axe's three `AxeHead`s), names them by order of appearance:
+  `{ AxeHead: ["AxeHead1", "AxeHead2", "AxeHead3"] }`. Without it the later
+  copies are dropped as leftovers. The unwrapped OBJ carries the new names back.
 - `atlas: { size, bleed, bgLum }` — the finished texture. See *Sizes are in
   texels* below.
 - `slots` — **one per part**. Never share an island between two parts, however
@@ -76,6 +80,10 @@ per ubermesh:
   double-sided masked material in the exported mesh, and everything downstream
   reads that material to know which parts are decoration.
 - `combos` — sample assemblies for the check render.
+- `metresPerUnit` / `texelsPerMetre` — how big the model is in the game, and
+  the texel density its class is drawn at. Every recipe for something that
+  appears beside other atlas-textured things declares both; see *Texel
+  density* below.
 
 Then write `sets/<name>/prompt.md` beside the key, describing every region **by
 position and shape**. The prompt and the layout have to be changed together — a
@@ -111,6 +119,16 @@ guessing instead costs a whole round trip through a generator.
 own silhouette and its front and back land on the same texels — painted once,
 mirrored. That is what a symmetric weapon wants.
 
+**A double-bitted axe head is mirrored twice**: the X projection already puts
+front and back on the same texels, and `mirror: "z", mirrorAt: <haft z>,
+straddle: "keep"` folds the far bit onto the near one, so the island is ONE bit
+with the eye block at its edge. `straddle: "keep"` leaves faces that cross the
+fold plane (the eye block) unfolded; folded corner by corner they collapse onto
+the plane. Derek's call on the first great axe, where both bits sat in one
+island and came back as two different halves. An asymmetric head (bearded, a
+spike behind) keeps its whole outline; view it from whichever side puts its
+edge the same way as the others'.
+
 **`rim`** hangs a bar under that silhouette carrying the faces the view cannot
 see, in the same slot: as wide as the piece, as tall as the piece is thick.
 
@@ -138,8 +156,42 @@ A 60-pixel gutter on a 1254 sheet is 12 texels at a 256 atlas but only **6 at
 shows up as islands trading colours in the lower mips, not as an error.
 
 For scale: 17 parts on a 128 atlas is about 2 texels per model unit — a blade
-89 texels long, a pommel 6 across. If the small parts read too coarse, the
-answer is `--size 256`, not a tighter layout.
+89 texels long, a pommel 6 across. If the small parts read too coarse, raising
+the size raises the density of the WHOLE class. That is a decision for every
+held item at once (`HELD_GEAR_TEXELS_PER_M`), not for one set; see *Texel
+density* below.
+
+## Texel density: the same pixel size side by side
+
+**Pick the atlas size from a DENSITY, not from what feels big enough.** Density
+is texels per metre in the world: (texels per model unit) / (metres per model
+unit). Two things with different densities seen together show different pixel
+sizes, and in a PS1 look, where the pixels are the style, that reads as two
+art styles. Measured: the shield first shipped at 256, which was 1.47x the
+longsword's density, and a shield held beside a sword looked finer-grained.
+At 216 it matches to 1%.
+
+- **Held and worn gear is 109 texels/m** (`HELD_GEAR_TEXELS_PER_M` in
+  unwrap-weapon.mjs). The longsword set it: 2.07 texels per unit at 128,
+  placed at 0.019 m per unit. Swords, shields, axes, helms: all 109.
+- **Declare it in the recipe**, `metresPerUnit` (the scale the item is placed
+  at in the game, e.g. the `scale` its socket entity uses) and
+  `texelsPerMetre`. The unwrap then prints the density, and if it is more than
+  8% off it warns with the atlas size that would hit the target:
+
+      ! density 129 texels/m is 1.19x the 109 target — atlas.size 216 would match
+
+- **The density moves when the LAYOUT moves.** Adding a part re-solves the
+  scale: the tower shield took the shield from 3.05 to 2.46 texels per unit at
+  256. Re-read the density line after every layout change, not only for a new
+  recipe.
+- **Size follows density**, and nothing requires a power of two: 216 mips fine
+  on WebGPU and WebGL2. The page capacity table below still applies with the
+  sheet's actual size, e.g. 17x17 = 289 looks of 216 on a 4096 page.
+- **A different class may have a different target,** and then it is a deliberate
+  choice written down in the recipe (a mob seen at a distance, a giant
+  boss). What is never fine is two things of the SAME class at different
+  densities by accident.
 
 ## How many weapons fit, and how to bucket them
 
@@ -199,6 +251,14 @@ read a handful of draw calls for the whole rack, not one per sword. If every
 sword looks identical, the masks are not reaching the shader; if every sword
 wears every part at once, they are stacked on top of each other rather than
 unmasked (see the next trap).
+
+## Equipping it, and making it glow
+
+A weapon a character HOLDS or an item it wears, its parts and theme picked by
+the equipped item, plus glow, a moving overlay and particle effects anchored on
+the item: all in **docs/item-looks.md**. One rule carries over from above: every
+held longsword is ONE draw, so the page and the per-instance (tile, mask) are
+how a held weapon is drawn, too.
 
 ## Traps
 
@@ -356,6 +416,17 @@ of the sheet does not:
 - **The middle is hidden.** The blade or the grip runs up the middle of the
   plate, so the design lives in the left and right thirds and is mirror
   symmetric.
+- **An ornament that stands INSIDE another part** (the great axe's plates run up
+  through the head, so most of each plate is behind it) gets `hiddenBy` on its
+  slot: `[["AxeHead1", "AxeHead2"], ["Shoulder1", "Shoulder2"], ["Rod"]]`. Each
+  inner list is a family (one of them is always fitted); a texel covered by
+  EVERY member of some family is shaded grey-hatched on `key-labelled.png`, and
+  the prompt says to draw only outside it, attached to its edge. Give those
+  slots `fit: "none"` (the sheet-wide registration, no per-island search) and
+  NO `anchor`. The first axe sheet drew the plates the sword's way and they
+  vanished behind the head; then a nudge search slid the art 156 px back into
+  the hidden part, and `anchor: "top"` pinned it to the plate's top edge, which
+  is inside the head.
 - Plain gear does not wear filigree. Whatever picks parts for an item should
   leave the cut-out parts off common ones; the mesh says which those are, by
   their material.

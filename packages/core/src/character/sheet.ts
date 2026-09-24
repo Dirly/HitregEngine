@@ -225,7 +225,10 @@ export interface DerivedSheet {
 
 function wornItems(sheet: CharacterSheet, env: SheetEnv): Item[] {
   const out: Item[] = [];
+  // an offhand item under a two-hander stays worn but counts for nothing
+  const blocked = twoHanderOf(sheet, env) ? sheet.equipment.offhand : undefined;
   for (const uid of Object.values(sheet.equipment)) {
+    if (uid && uid === blocked) continue;
     const stack = uid ? sheet.items[uid] : undefined;
     const item = stack ? env.catalog(stack.itemId) : undefined;
     if (item) out.push(item);
@@ -487,6 +490,17 @@ export function equip(
     Object.assign(occupant, spot);
   }
   return { ok: true, sheet: next };
+}
+
+/**
+ * The two-handed item worn in `primary`, if there is one. While it is held,
+ * whatever is worn in `offhand` stays worn but INACTIVE: no stats, not drawn,
+ * no stance (it still weighs). Nothing is taken off for it.
+ */
+export function twoHanderOf(sheet: CharacterSheet, env: SheetEnv): Item | null {
+  const uid = sheet.equipment.primary;
+  const item = uid ? env.catalog(sheet.items[uid]?.itemId ?? "") : undefined;
+  return item?.twoHanded ? item : null;
 }
 
 /** Take off a worn item into a cell (`to`) or the first free one. */

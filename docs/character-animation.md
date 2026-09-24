@@ -36,15 +36,16 @@ pnpm -F playground retarget \
 
 **Libraries stack.** `--anim` may be repeated (or comma-joined) for packs that
 share a rig — an expansion is baked *beside* the base, not instead of it, and a
-later file wins a name collision. Only the clips merge; the first library's
-skeleton is what everything retargets from, which is safe precisely because
-they share it. The human in this repo is the two Quaternius universal libraries
-at once:
+later file wins a name collision. Packs on one rig share that rig's first
+file's skeleton; packs on a different rig get their own (see *Libraries on
+different rigs* below). The human in this repo is the two Quaternius universal
+libraries plus Mixamo's weapon packs, one folder per pack:
 
 ```
 pnpm -F playground retarget \
   --mesh HumanRigged.fbx --anim UAL1.fbx --anim UAL2.fbx \
-  --clips locomotion+combat+ual2 \
+  --anim mixamo/swordshield --anim mixamo/greatsword --anim mixamo/torch --anim mixamo/staff \
+  --clips locomotion+combat+ual2+weapons \
   --out projects/<game>/assets/models/mmo/human.glb
 ```
 
@@ -96,6 +97,157 @@ Two things worth checking on any freshly converted character:
   some other axis needs `modelYaw` to make up the difference — that param
   exists for exactly this, and a character that runs sideways or backwards is
   always this and never the clips.
+
+### Libraries on different rigs, and one-clip downloads
+
+`--anim` takes libraries on **different** skeletons in one run — the UE
+mannequin libraries and Mixamo downloads bake side by side. Each file's rig is
+detected from its bone names (`detectRigMap` in rig-map.mjs), every rig gets
+its own rest reconciliation, and each clip is measured against the rest pose it
+was authored from. A **folder** stands for every `.fbx` directly inside it,
+which is how Mixamo arrives: one clip per file, every clip named `mixamo.com`.
+A file holding one such generic clip names it after the file
+(`great sword slash (3)`).
+
+A clip selector may carry modifiers: `Source@mirror` plays it with the other
+hand (a left-handed torch swing becomes a right-handed staff swing — reflected
+through the body's measured left-right axis, left and right bones swapped), and
+`Source@0.4-1.6` trims to those seconds of the source. Trim attacks so the hit
+lands about half-way through: the caster fits an attack clip to its windup +
+recovery, and the hit happens at the end of the windup.
+
+Four things that went wrong silently on the way, all fixed, all worth knowing:
+
+- **Root motion is stripped by default.** A Mixamo download not ticked "in
+  place" carries the hips metres forward; the controller already moves the body,
+  so that is double movement and a snap back at the loop. The horizontal drift
+  start→end is removed linearly, which keeps a cycle's sway and a lunge's weight
+  shift. The bake lists every clip that travelled — a one-shot that lunged 5 m
+  will skate played in place; trim it or pick another. `--keep-root` opts out.
+- **A skinned Mixamo character file ("X Bot") loads with a duplicate
+  `mixamorigHips`** nested under the first. Used as the reference skeleton, the
+  mixer animated one copy while the bake read the other and every clip lost its
+  hip travel. Files with duplicate bone names are never picked as a rig's
+  reference; the skinless animation files share its true T-pose rest anyway.
+- **Source clips are sampled as clamped one-shots.** On the default repeat the
+  sample at `t = duration` wraps to 0, so every bake used to END ON A COPY OF
+  ITS FIRST FRAME: invisible on a cycle, a death clip that stands back up.
+  Cycles are then closed the way `autorig` closes them (see *The hitch at the
+  top of every cycle*), judged on the baked clip after root motion is gone; the
+  bake prints how many were open, closed and one-shots.
+- **About one Mixamo download in five would not load** ("Unknown property
+  type"). The file is fine: three finds where binary FBX node data ends by
+  guessing the footer's size from the file length. `_fbx.mjs` walks the
+  top-level records to the real end instead.
+
+### Weapon stances
+
+A character plays `<Stance>_<clip>` wherever its model has one, in place of
+`<clip>` — `GreatSword_Run` for `Run`, `Staff_Attack2` for `Attack2`,
+`SwordShield_Death` for `Death` — locomotion and actions alike, so a combat
+script asks for "Attack1" or "Block" without knowing what is held. The stance
+list lives in the body's `userData.stance`, most specific first, and the
+`weapon-stance` builtin fills it from the held items' `stance` field: an
+off-hand stance is a suffix on each main-hand stance, so a sword with a shield
+is `["SwordShield", "Sword"]`. A bake therefore only needs the clips that
+DIFFER: a greataxe (`["Axe2H", "TwoHanded"]`) is a few axe attacks over the
+shared two-handed set, and anything no stance has falls to the plain clip. The
+`weapons` preset in rig-map.mjs is the current set; `/stance GreatSword,TwoHanded`
+previews one without the item (on the local player's `weapon-stance`, `console: true`).
+
+**A weapon changes how a character FIGHTS, not how it walks.** Actions are
+always the stance's, but idle, walk, run and turns take the stance's clips only
+while `userData.combatUntil` is in the future (`stanceGaits: "combat"`, the
+default; `always` / `never` exist). Out of a fight the character stands and
+moves on the plain library with the weapon simply carried. That was Derek's
+call after seeing a shield-up run and a guarded idle all the time: it read as
+a different, stiffer character. The game sets `combatUntil` a few seconds past
+every swing, block and hit.
+
+A held pose — a raised guard — sets `actionHold` beside `actionClip`, and the
+controller loops it at its authored pace instead of fitting it to the window.
+It also sets `actionUpperBody`: a guard is ARMS, and one raised standing still
+would otherwise take the whole body for as long as it is held, so the
+character slides rather than walks when it moves behind the shield.
+
+**A shield can have two poses** (off for the MMO player: Derek places one pose and wants it to hold in every state — a second pose that took over in every fight read as "my placement doesn't stick"). Carried, it hangs flat against the outside of the
+forearm; in every guard clip in these libraries it is held like a centre-grip
+shield, square to a forearm pushed forward. No single socket is right for both
+— upright at the side sticks out like a plank in a guard, face-forward lies
+like a tray while walking. `bone-socket` takes a second pose (`altBone`,
+`altOffset`, `altRotationDeg`) eased in while `altWhen` holds (a userData key on
+the character — `combatUntil` for the shield); `fit-grip --grip center --bone
+<Hand> --as alt --when combatUntil` computes it, and `pose-sheet --alt` shows it.
+
+**Look at a bake with the weapons in hand before shipping it.**
+`tools/pose-sheet.mjs` renders clips as a contact sheet — one row per clip per
+view, one column per sampled frame — with the scene's own sockets and the
+equipped items' parts, so what it shows is what the game will draw.
+`--override` tries socket params without touching the scene, `--zoom <bone>`
+crops to a hand. (Its renderer, `_softrender.mjs`, draws mirror images; the
+sheet flips them back. Anything else using it for handedness must too.)
+
+**Fit a socket; don't nudge it.** `tools/fit-grip.mjs` computes a
+`bone-socket`'s offset and rotation from the hand's anatomy — palm centre from
+the vertices skinned to the hand, thumb side from the index knuckle, palm side
+from which way the index curls in a fist clip — and the item's own shape
+(handle centroid, handle→blade axis, the blade's thin direction). A handle
+leaves the fist over the thumb, its flat to the palm (`--tilt -35` tips it up
+with the arm hanging — how Derek wants a carried sword); a shield rides the
+forearm, face out from the back of the hand (`--lean 20` stands it upright at
+the side). Six numbers tuned against one
+pose are wrong the moment the wrist turns; this frame is right in every pose.
+`--write` applies them as an ops batch. Neither tool can close fingers the rig
+does not have: a character exported with only index and thumb holds everything
+in a mitten.
+
+**Placing one by hand.** Held items resolve in EDIT mode too: the editor
+stands every character in the first frame of its idle
+(`AnimationSystem.poseStill`) and does the socket's sums itself
+(apps/playground/src/socket-preview.ts, the math in @hitreg/render
+`socket-pose`), showing the item the character starts with equipped — or, while
+a slot is selected, the first starting item that fits it. So: open the
+character's prefab (in voxel-demo, the **Player rig** scene → select `player` →
+Edit prefab), select a weapon slot, and move it:
+
+- The gizmo on a held item writes the SOCKET (`offset`/`rotationDeg` in the
+  bone's axes, or the alt pose if that is what is showing), never a transform
+  the socket would override. Grid snap does not apply to held items.
+- **X** toggles world/local gizmo axes; local on a held item is the bone's frame.
+- **Shift** while dragging moves a tenth as far.
+- A held item's gizmo pivots on its GRIP (the part named handle/haft/grip/shaft,
+  else its centre — `MovingInstanceSystem.gripOf`), not its model origin: a
+  Blockbench export's origin is wherever the modeller left it (the greataxe's
+  sits 0.84 m from its haft). Local axes on a held item are the item's own.
+- Inspector edits during play or pause are patched into the running script
+  (`ScriptRuntime.updateParams` / `Script.onParamsChanged`) without restarting
+  the session; the socket re-poses at once, paused or not.
+
+Sockets re-seat after each frame's animation (`Script.onLateUpdate`), not only on the fixed tick, so an item never trails a moving arm by a frame. Edits save (the editor autosaves; a prefab edit saves to the prefab file and
+every scene using it picks it up). Editing a character that is NOT a prefab
+works the same in its own scene.
+
+**Holstering.** `weapon-stance` with a `holsterKey` (G on the MMO player)
+sheathes and draws. The state replicates (`holster/<actor>`, written by the
+authority on a `stance.holster` request from the body's owner) and shows as
+`userData.holstered`, which every weapon slot's `bone-socket` takes as its
+`altWhen`: the second pose is the BACK slot (`altBone` a spine bone). A
+`Sheathe`/`Draw` clip plays on the arms, and the weapons change slot
+`swapDelay` seconds in, when the hand reaches the back. A NEW fight after
+holstering (anything that pushes `combatUntil` later — a swing, a block, a
+hit) draws on its own; one still lingering when G went down does not.
+Place the back slots in the editor with the toolbar's **holstered** toggle on:
+every weapon shows in its back slot and the gizmo writes that pose.
+`fit-grip --grip back --bone CC_Base_Spine02 --as alt --when holstered`
+computes starting points (`--head-up` for axes, staves and maces). Derek's rule: greatswords, greataxes, great hammers, staves, bows, crossbows and shields go on the BACK (`--grip back`, `--head-up` for hafted heads); one-handers (sword, mace, wand, dagger, axe) go on the hip by HAND — the main hand's on the LEFT hip, the off hand's on the RIGHT (`--grip hip --bone CC_Base_Hip`, `--right`), each drawn across the body. Every one-hander has a slot in each hand (the off-hand ones watch the `offhand` equipment slot), and one-handed items list `offhand` among their slots. The grip tool reads each hand's palm from a clip where THAT hand makes a fist — `Sword_Idle` leaves the left hand open, so the left defaults to `SwordShield_Idle`.
+
+**Every weapon kind has its own slot.** `tools/placeholder-weapons.mjs` writes
+stand-in models (greatsword, staff, bow, crossbow, axe, mace, dagger) in one
+known frame — grip at the origin, +Y up the weapon, +Z the thin side — with
+part names unique per model, so a slot per kind can watch the same hand and only
+the one drawing the equipped item's model shows it (`equipment-look` hides a
+look for another model). `fit-grip --model-frame` fits them without measuring.
+Replace a placeholder by pointing its slot's mesh at the real model.
 
 ## Rigging a creature that has no skeleton
 
