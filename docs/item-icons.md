@@ -16,6 +16,48 @@ field at it (`--dry` writes only the PNG). `--sheet` writes a 6x zoomed strip
 of the icons it made on a slot-dark ground. Look at that; a 40 px PNG opened
 directly tells you nothing.
 
+## Adding an item: which icon route
+
+The ruling. `loot-sheet.mjs audit` enforces it.
+
+1. **An item with `appearance.model` gets a RENDERED icon** (`item-icon.mjs`),
+   never generated art. A model with no theme sheet renders in the texture
+   baked into its GLB (the training placeholders).
+2. **A model-less item gets its icon from a CATEGORY SHEET.** One generator
+   call draws 16 objects of one category (food-drink, travel-supplies,
+   trade-goods, documents, potions, herbs…) as a 4x4 grid in one style and one
+   light. The sheet is sliced, and each cell is shrunk to the 40 px icon size.
+   Never make one generator call per item. The one exception is a named
+   unique or legendary item that has to be one of a kind. Say so in its
+   description, and use `item-icon.mjs --from-image` (below).
+3. **Adding an item:** find its category sheet in
+   `projects/<p>/authoring/loot-sheets.json`. Reuse a sliced icon (`loot-sheet.mjs
+   list --tag <category>`) or a recolour `variant` if one fits. If none fits,
+   add the object to a sheet that still has room, or start `<category>-2`.
+   Then re-request that sheet, slice it, and LOOK at its zoomed contact sheet
+   (`authoring/loot-art/contact/<sheet>.png`) before any item points at it. If
+   a cell doesn't read at 40 px, reject it: fix its description (one object,
+   its material and colours, nothing near-white) and re-request.
+4. **Item JSON:** `"icon": "icons/loot/<id>.png"`, and `tags` include the
+   sheet's category.
+5. **Before a content drop ships**, `loot-sheet.mjs audit` reports nothing to fix:
+
+```
+cd apps/playground
+node tools/loot-sheet.mjs request --project <p> --sheets food-drink   # generate (one Codex session per call)
+node tools/loot-sheet.mjs slice   --project <p> --sheets food-drink   # icons + library.json + contact sheet
+node tools/loot-sheet.mjs audit   --project <p>                       # exit 1 while anything is left
+```
+
+`audit` lists every item whose `icon` is missing or points at a missing
+file. For each one it prints the route: a model gets the `item-icon.mjs`
+command. A model-less item gets its sliced icon if one exists, otherwise the
+sheet whose tags it shares. It also flags a modelled item wearing loot art, and
+a loot icon on an item that lacks the sheet's category tag. Sliced icons get
+the same seeded backdrop as rendered ones (`slice --no-backdrop` for the bare
+cut-out). The tool header in `tools/loot-sheet.mjs` documents the sheet format
+and recolour variants.
+
 ## Two routes, one output
 
 **An item with `appearance.model` is RENDERED, never drawn.** The tool loads
@@ -27,7 +69,8 @@ The renderer is a small software rasteriser inside the tool, so it runs in Node
 with no browser.
 
 **An item with no model** (trash loot, ore, potions, quest junk) has nothing to
-render. Generate ONE picture of it and pass it with `--from-image`. The same
+render. It takes a cell of a category sheet (above). Only a one-of-a-kind
+unique gets ONE picture of its own, passed with `--from-image`. The same
 crop, shrink and hard-alpha steps then apply, so a generated icon comes out the
 same size and edge style as a rendered one. Generating the picture:
 

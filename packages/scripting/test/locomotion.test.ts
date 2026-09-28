@@ -46,6 +46,8 @@ function harness(opts: {
 
   let velocity: [number, number, number] = [0, 0, 0];
   let ground = opts.ground ?? null;
+  /** Uneven flat ground: distance below the origin at a horizontal offset (a lip, a hole). Wins over `ground`. */
+  let groundAt: ((x: number, z: number) => { distance: number } | null) | null = null;
   const sim: SimLike = {
     getLinvel: () => velocity,
     setLinvel: (_id, v) => {
@@ -54,15 +56,26 @@ function harness(opts: {
     applyImpulse: () => {},
     ...(opts.ground !== undefined
       ? {
-          raycast: (origin: [number, number, number]) =>
-            ground
-              ? {
-                  entityId: "ground",
-                  point: [origin[0], origin[1] - ground.distance, origin[2]] as [number, number, number],
-                  normal: (ground.normal ?? [0, 1, 0]) as [number, number, number],
-                  distance: ground.distance,
-                }
-              : null,
+          // The body sits at the origin, so a ray offset by (x, z) — the
+          // controller's footprint ring and step ray — meets the same PLANE
+          // further down or nearer, the way real sloped ground would.
+          raycast: (origin: [number, number, number]) => {
+            if (groundAt) {
+              const g = groundAt(origin[0], origin[2]);
+              return g
+                ? { entityId: "ground", point: [origin[0], origin[1] - g.distance, origin[2]] as [number, number, number], normal: [0, 1, 0] as [number, number, number], distance: g.distance }
+                : null;
+            }
+            if (!ground) return null;
+            const n = (ground.normal ?? [0, 1, 0]) as [number, number, number];
+            const distance = ground.distance + (n[0] * origin[0] + n[2] * origin[2]) / n[1];
+            return {
+              entityId: "ground",
+              point: [origin[0], origin[1] - distance, origin[2]] as [number, number, number],
+              normal: n,
+              distance,
+            };
+          },
         }
       : {}),
   };
@@ -84,7 +97,13 @@ function harness(opts: {
     },
   ]);
 
-  const played: Array<{ clip: string; fade: number; loop: boolean; restart: boolean }> = [];
+  const played: Array<{ clip: string; fade: number; loop: boolean; restart: boolean; sync: boolean }> = [];
+  /** Animation calls in the order they were made — "play:<clip>" and "rate:<x>". */
+  const log: string[] = [];
+  // A stand-in playhead: seconds into the current base clip, reset by a new
+  // clip or a restart and advanced at the rate the controller asked for — so a
+  // test can see a clip that is being re-seeked every tick never get anywhere.
+  let playhead = 0;
   /** Layer calls in order; null is a clear. */
   const layers: Array<string | null> = [];
   /** Options each layer call carried (fade, loop, speed). */
@@ -104,12 +123,16 @@ function harness(opts: {
     registry: registry(),
     input,
     viewForward: () => view,
-    setAnimation: (_id, clip, fade, o) =>
-      played.push({ clip, fade: fade ?? 0, loop: o?.loop ?? true, restart: o?.restart ?? false }),
+    setAnimation: (_id, clip, fade, o) => {
+      if (o?.restart || played[played.length - 1]?.clip !== clip) playhead = 0;
+      played.push({ clip, fade: fade ?? 0, loop: o?.loop ?? true, restart: o?.restart ?? false, sync: o?.sync ?? false });
+      log.push(`play:${clip}`);
+    },
     ...(opts.clips ? { animationClips: () => opts.clips! } : {}),
     ...(opts.durations ? { animationDuration: (_id, clip) => opts.durations![clip] ?? null } : {}),
     setAnimationSpeed: (_id, multiplier) => {
       rates.push(multiplier);
+      log.push(`rate:${multiplier.toFixed(2)}`);
       effectiveRate = multiplier;
     },
     setAnimationLayer: (_id, clip, o) => {
@@ -123,12 +146,19 @@ function harness(opts: {
   return {
     runtime,
     played,
+    log,
+    /** Seconds into the current base clip, at the rates the controller set. */
+    playhead: () => playhead,
     rates,
     layers,
     layerOpts,
     /** Move the ground the ray finds (a step down, a slope, a cliff edge). */
     setGround: (g: { distance: number; normal?: [number, number, number] } | null) => {
       ground = g;
+    },
+    /** Replace the plane with flat ground whose height varies by offset (null = back to the plane). */
+    setGroundAt: (f: ((x: number, z: number) => { distance: number } | null) | null) => {
+      groundAt = f;
     },
     /** The controller's runtime channels — actionClip, frozen, impulseVel … */
     ud: obj.userData as Record<string, unknown>,
@@ -153,6 +183,7 @@ function harness(opts: {
       for (let i = 0; i < ticks; i++) {
         runtime.fixedUpdate(1 / 60);
         clock += 1 / 60;
+        playhead += effectiveRate / 60;
       }
     },
     /**
@@ -165,6 +196,7 @@ function harness(opts: {
         velocity = [...v] as [number, number, number];
         runtime.fixedUpdate(1 / 60);
         clock += 1 / 60;
+        playhead += effectiveRate / 60;
       }
     },
     lastClip: () => played[played.length - 1]?.clip,
@@ -477,7 +509,8 @@ describe("third-person-controller weapon stances", () => {
   });
 
   it("plays the first stance's clip the model has, and the plain clip where no stance has one", () => {
-    const h = harness({ clips, params });
+    // stanceCarry: full — the stance's gait takes the whole body (the carry is below)
+    const h = harness({ clips, params: { ...params, stanceCarry: "full" } });
     h.ud["stance"] = ["Axe2H", "TwoHanded"];
     h.setVelocity([0, 0, 0]);
     h.step();
@@ -507,7 +540,7 @@ describe("third-person-controller weapon stances", () => {
   });
 
   it("paces a stance's gait by that clip's own authored speed", () => {
-    const h = harness({ clips, params: { ...params, clipSpeeds: { Run: 6, TwoHanded_Run: 3 } } });
+    const h = harness({ clips, params: { ...params, stanceCarry: "full", clipSpeeds: { Run: 6, TwoHanded_Run: 3 } } });
     h.ud["stance"] = ["TwoHanded"];
     h.hold("KeyW");
     h.stepAt([0, 0, -6], 3);
@@ -515,15 +548,32 @@ describe("third-person-controller weapon stances", () => {
     expect(h.rate()).toBeCloseTo(2, 1); // a 3 m/s jog played at 6 m/s
   });
 
-  it("holds a guard at its authored pace instead of fitting it to the window", () => {
+  it("raises a guard once at its authored pace and HOLDS it, instead of fitting or looping it", () => {
     const h = harness({ clips: [...clips, "Block"], params, durations: { Block: 2.5 } });
     h.ud["actionClip"] = "Block";
     h.ud["actionUntil"] = 3600; // held until let go
     h.ud["actionHold"] = true;
     h.stepAt([0, 0, 0]);
     expect(h.lastClip()).toBe("Block");
-    expect(h.lastPlayed()?.loop).toBe(true);
+    // clamped on its last frame: a raise-and-hold clip that loops re-raises
+    // the shield every time it comes round
+    expect(h.lastPlayed()?.loop).toBe(false);
     expect(h.rate()).toBe(1); // unheld, a 2.5 s clip in an hour-long window would crawl
+    const plays = h.played.length;
+    h.stepAt([0, 0, 0], 300); // five seconds of holding it up
+    expect(h.played.length).toBe(plays); // never replayed
+  });
+
+  it("holds a layered guard the same way", () => {
+    const h = harness({ clips: [...clips, "Block"], params, durations: { Block: 1.37 } });
+    h.ud["actionClip"] = "Block";
+    h.ud["actionUntil"] = 3600;
+    h.ud["actionHold"] = true;
+    h.ud["actionUpperBody"] = true;
+    h.stepAt([0, 0, 0]);
+    expect(h.lastLayer()).toBe("Block");
+    expect(h.lastLayerOpts()!["loop"]).toBe(false);
+    expect(h.lastLayerOpts()!["speed"]).toBe(1);
   });
 
   it("dresses nothing while the clip list is unknown (model loading, headless)", () => {
@@ -532,6 +582,168 @@ describe("third-person-controller weapon stances", () => {
     h.step(5);
     expect(h.played.length).toBeGreaterThan(0);
     expect(h.played.some((p) => p.clip.startsWith("TwoHanded_"))).toBe(false);
+  });
+});
+
+describe("third-person-controller stance carry", () => {
+  const clips = [
+    ...ALL_CLIPS,
+    "TwoHanded_Idle",
+    "TwoHanded_Walk",
+    "TwoHanded_Run",
+    "TwoHanded_Run_Left",
+    "SwordShield_Idle",
+    "SwordShield_Block",
+    "Sword_Idle",
+  ];
+  // left foot's contact first, as retarget prints them
+  const clipFootfalls = { Walk: [0.983, 0.479], Run: [0, 0.5], TwoHanded_Run: [0.775, 0.254], TwoHanded_Walk: [0.217, 0.721] };
+  const params = { walkSpeed: 2, speed: 6, sprintSpeed: 10, stanceGaits: "always", clipFootfalls };
+
+  it("runs the plain legs and carries the stance's own run on the arms, phase-locked by the left foot", () => {
+    const h = harness({ clips, params });
+    h.ud["stance"] = ["TwoHanded"];
+    h.hold("KeyW");
+    h.stepAt([0, 0, -6], 3);
+    expect(h.lastClip()).toBe("Run");
+    expect(h.lastLayer()).toBe("TwoHanded_Run");
+    expect(h.lastLayerOpts()!["loop"]).toBe(true);
+    expect(h.lastLayerOpts()!["phaseLock"]).toBeCloseTo(0.775, 5);
+    // re-asserted only when it changes, not every tick
+    const calls = h.layers.length;
+    h.stepAt([0, 0, -6], 30);
+    expect(h.layers.length).toBe(calls);
+    // a walk carries the stance's walk, with its own offset
+    h.stepAt([0, 0, -2], 30);
+    expect(h.lastClip()).toBe("Walk");
+    expect(h.lastLayer()).toBe("TwoHanded_Walk");
+    expect(h.lastLayerOpts()!["phaseLock"]).toBeCloseTo(0.234, 5);
+  });
+
+  it("paces the legs by the PLAIN clip's authored speed", () => {
+    const h = harness({ clips, params: { ...params, clipSpeeds: { Run: 6, TwoHanded_Run: 3 } } });
+    h.ud["stance"] = ["TwoHanded"];
+    h.hold("KeyW");
+    h.stepAt([0, 0, -6], 3);
+    expect(h.lastClip()).toBe("Run");
+    expect(h.rate()).toBeCloseTo(1, 1);
+  });
+
+  it("holds a shield stance's idle on the arms where it has no clip for the gait, and a one-hander keeps the plain swing", () => {
+    const h = harness({ clips, params });
+    h.ud["stance"] = ["SwordShield", "Sword"];
+    h.hold("KeyW");
+    h.stepAt([0, 0, -2], 30);
+    expect(h.lastClip()).toBe("Walk");
+    expect(h.lastLayer()).toBe("SwordShield_Idle");
+    expect(h.lastLayerOpts()!["phaseLock"]).toBeUndefined();
+    expect(h.lastLayerOpts()!["loop"]).toBe(true);
+
+    h.ud["stance"] = ["Sword"]; // not in stanceCarryHold: the jog as it is
+    h.stepAt([0, 0, -6], 30);
+    expect(h.lastClip()).toBe("Run");
+    expect(h.lastLayer()).toBeNull();
+  });
+
+  it("takes the whole body for the stance idle, and hands the arms back when it stops", () => {
+    const h = harness({ clips, params });
+    h.ud["stance"] = ["TwoHanded"];
+    h.hold("KeyW");
+    h.stepAt([0, 0, -6], 3);
+    expect(h.lastLayer()).toBe("TwoHanded_Run");
+    h.release("KeyW");
+    h.stepAt([0, 0, 0], 30);
+    expect(h.lastClip()).toBe("TwoHanded_Idle");
+    expect(h.lastLayer()).toBeNull();
+  });
+
+  it("follows stanceGaits: out of combat there is nothing to carry", () => {
+    const h = harness({ clips, params: { ...params, stanceGaits: "combat" } });
+    h.ud["stance"] = ["TwoHanded"];
+    h.hold("KeyW");
+    h.stepAt([0, 0, -6], 3);
+    expect(h.lastClip()).toBe("Run");
+    expect(h.layers.filter((l) => l !== null)).toEqual([]);
+    h.ud["combatUntil"] = h.now() + 10;
+    h.stepAt([0, 0, -6], 1);
+    expect(h.lastLayer()).toBe("TwoHanded_Run");
+  });
+
+  it("an upper-body action overrides the carry and the carry comes back after it", () => {
+    const h = harness({ clips, params, durations: { SwordShield_Block: 1.37 } });
+    h.ud["stance"] = ["SwordShield", "Sword"];
+    h.hold("KeyW");
+    h.stepAt([0, 0, -2], 30);
+    expect(h.lastLayer()).toBe("SwordShield_Idle");
+    // block while walking: plain Walk legs, the guard held on the arms
+    h.ud["actionClip"] = "Block";
+    h.ud["actionUntil"] = h.now() + 3600;
+    h.ud["actionHold"] = true;
+    h.ud["actionUpperBody"] = true;
+    h.stepAt([0, 0, -2], 30);
+    expect(h.lastClip()).toBe("Walk");
+    expect(h.lastLayer()).toBe("SwordShield_Block");
+    expect(h.lastLayerOpts()!["loop"]).toBe(false);
+    // let go: the carry fades back in over the guard — no clear in between
+    const before = h.layers.length;
+    h.ud["actionUntil"] = 0;
+    h.stepAt([0, 0, -2], 2);
+    expect(h.layers.slice(before)).toEqual(["SwordShield_Idle"]);
+    expect(h.lastLayerOpts()!["fade"]).toBeCloseTo(0.2, 5);
+    expect(h.lastClip()).toBe("Walk");
+  });
+
+  it("a layered cast mid-run gives way to the phase-locked carry again", () => {
+    const h = harness({ clips, params });
+    h.ud["stance"] = ["TwoHanded"];
+    h.hold("KeyW");
+    h.stepAt([0, 0, -6], 3);
+    h.ud["actionClip"] = "Cast";
+    h.ud["actionUntil"] = h.now() + 0.5;
+    h.ud["actionHold"] = false;
+    h.ud["actionLoop"] = false;
+    h.stepAt([0, 0, -6], 2);
+    expect(h.lastLayer()).toBe("Cast");
+    expect(h.lastClip()).toBe("Run"); // legs never became the stance's run
+    h.stepAt([0, 0, -6], 40);
+    expect(h.lastLayer()).toBe("TwoHanded_Run");
+    expect(h.lastLayerOpts()!["phaseLock"]).toBeCloseTo(0.775, 5);
+  });
+
+  it("a full-body action clears the carry for its length", () => {
+    const h = harness({ clips, params });
+    h.ud["stance"] = ["TwoHanded"];
+    h.hold("KeyW");
+    h.stepAt([0, 0, -6], 3);
+    h.ud["actionClip"] = "Dodge";
+    h.ud["actionUntil"] = h.now() + 0.5;
+    h.ud["actionFullBody"] = true;
+    h.stepAt([0, 0, -6], 1);
+    expect(h.lastClip()).toBe("Dodge");
+    expect(h.lastLayer()).toBeNull();
+    h.ud["actionFullBody"] = false;
+    h.stepAt([0, 0, -6], 40);
+    expect(h.lastClip()).toBe("Run");
+    expect(h.lastLayer()).toBe("TwoHanded_Run");
+  });
+
+  it("stanceCarry: full keeps the whole-body stance gait", () => {
+    const h = harness({ clips, params: { ...params, stanceCarry: "full" } });
+    h.ud["stance"] = ["TwoHanded"];
+    h.hold("KeyW");
+    h.stepAt([0, 0, -6], 3);
+    expect(h.lastClip()).toBe("TwoHanded_Run");
+    expect(h.layers.filter((l) => l !== null)).toEqual([]);
+  });
+
+  it("clears the carry when the body is frozen", () => {
+    const h = harness({ clips, params });
+    h.ud["stance"] = ["TwoHanded"];
+    h.hold("KeyW");
+    h.stepAt([0, 0, -6], 3);
+    h.ud["frozen"] = true;
+    h.stepAt([0, 0, 0], 1);
+    expect(h.lastLayer()).toBeNull();
   });
 });
 
@@ -698,6 +910,75 @@ describe("gait stability", () => {
     expect(h.played.length - from).toBeLessThanOrEqual(1);
   });
 
+  it("keeps a sideways or diagonal RUN in the run gait, and a sideways walk in the walk", () => {
+    // the MMO's numbers: 6.5 × 0.65 = 4.2 m/s, under the 4.35 walk/run line
+    const tuned = { walkSpeed: 2.2, speed: 6.5, sprintSpeed: 9.5, face: "camera", sideSpeedMult: 0.65, walkKey: "AltLeft" };
+    const h = harness({ clips: [...ALL_CLIPS, "Walk_Left"], params: tuned });
+    h.hold("KeyW");
+    h.hold("KeyD");
+    h.step(30); // settle the facing
+    const diag = Math.hypot(h.velocity()[0], h.velocity()[2]);
+    expect(diag).toBeCloseTo(6.5 * 0.65, 2);
+    h.stepAt(h.velocity(), 10);
+    expect(h.lastClip()).toBe("Run"); // 45° is still forward — and a RUN, not a walk at 4×
+    expect(h.rate()).toBeCloseTo(diag / 6.5, 2);
+
+    // walking sideways: a walk, on the walk strafe the model has
+    h.release("KeyW");
+    h.release("KeyD");
+    h.hold("KeyA");
+    h.hold("AltLeft");
+    h.step(1);
+    h.stepAt(h.velocity(), 30);
+    expect(h.lastClip()).toBe("Walk_Left");
+  });
+
+  it("phase-matches a gait change and sets the new rate only after the switch", () => {
+    const h = harness({
+      clips: ALL_CLIPS,
+      params: { walkSpeed: 2, speed: 6, sprintSpeed: 10, clipSpeeds: { Walk: 1, Run: 6 } },
+    });
+    h.hold("KeyW");
+    h.stepAt([0, 0, -2], 5);
+    expect(h.lastClip()).toBe("Walk");
+    expect(h.rate()).toBeCloseTo(2, 2);
+    h.stepAt([0, 0, -6], 1);
+    expect(h.lastPlayed()).toMatchObject({ clip: "Run", sync: true, fade: 0.25 });
+    // the rate follows the play, so the walk fading out is not retimed to the run's pace
+    const at = h.log.lastIndexOf("play:Run");
+    expect(h.log[at - 1]).toBe("rate:2.00"); // still the walk's when the run starts
+    expect(h.log[at + 1]).toBe("rate:1.00");
+
+    // …but a cycle started from standing still starts at the top, snappily
+    const g = harness({ clips: ALL_CLIPS, params: { walkSpeed: 2, speed: 6, sprintSpeed: 10 } });
+    g.stepAt([0, 0, 0], 5);
+    g.hold("KeyW");
+    g.stepAt([0, 0, -6], 1);
+    expect(g.lastPlayed()).toMatchObject({ clip: "Run", sync: false });
+  });
+
+  it("holds a directional clip across its edge instead of flickering", () => {
+    const h = harness({ clips: ALL_CLIPS, params: { walkSpeed: 2, speed: 6, sprintSpeed: 10, face: "camera" } });
+    // the camera looks down -Z; an impulse at θ off the facing, θ > 0 to the left
+    const at = (deg: number): void => {
+      const t = (deg * Math.PI) / 180;
+      const v: [number, number] = [-Math.sin(t) * 6, -Math.cos(t) * 6];
+      h.ud["impulseVel"] = v;
+      h.ud["impulseUntil"] = h.now() + 1;
+      h.stepAt([v[0], 0, v[1]], 2);
+    };
+    at(0);
+    expect(h.lastClip()).toBe("Run");
+    at(52); // just past the 50° edge: still forward
+    expect(h.lastClip()).toBe("Run");
+    at(60);
+    expect(h.lastClip()).toBe("Run_Left");
+    at(48); // just back inside it: still the strafe
+    expect(h.lastClip()).toBe("Run_Left");
+    at(44);
+    expect(h.lastClip()).toBe("Run");
+  });
+
   it("still speeds up immediately — only reversals wait", () => {
     const h = harness({ clips: ALL_CLIPS, params });
     h.hold("KeyW");
@@ -754,16 +1035,81 @@ describe("action clips fit their window", () => {
     expect(h.lastPlayed()!.restart).toBe(true);
   });
 
-  it("loops a channel too long for even the slowest playback", () => {
+  it("plays a one-shot too short for its window once at the slowest rate, and holds it", () => {
+    const h = harness({ clips: [...ALL_CLIPS, "Swing"], params, durations: { Swing: 1 } });
+    h.hold("KeyW");
+    h.stepAt([0, 0, -6], 1);
+
+    h.ud["actionClip"] = "Swing";
+    h.ud["actionUntil"] = h.now() + 20;
+    h.stepAt([0, 0, -6], 1);
+    // a swing that comes round again is a second swing nobody asked for
+    expect(h.lastLayerOpts()!["loop"]).toBe(false);
+    expect(h.lastLayerOpts()!["speed"] as number).toBeCloseTo(0.35, 2);
+  });
+
+  it("loops an actionLoop pose at its authored pace, never fitted", () => {
     const h = harness({ clips: [...ALL_CLIPS, "Channel"], params, durations: { Channel: 1 } });
     h.hold("KeyW");
     h.stepAt([0, 0, -6], 1);
 
     h.ud["actionClip"] = "Channel";
-    h.ud["actionUntil"] = h.now() + 20;
+    h.ud["actionUntil"] = h.now() + 3; // a 3 s window would fit a 1 s clip to 0.33
+    h.ud["actionLoop"] = true;
     h.stepAt([0, 0, -6], 1);
+    expect(h.lastLayer()).toBe("Channel");
     expect(h.lastLayerOpts()!["loop"]).toBe(true);
-    expect(h.lastLayerOpts()!["speed"] as number).toBeCloseTo(0.35, 2);
+    expect(h.lastLayerOpts()!["speed"]).toBe(1);
+
+    // standing still, full-body: the same
+    const s = harness({ clips: [...ALL_CLIPS, "Channel"], params, durations: { Channel: 1 } });
+    s.ud["actionClip"] = "Channel";
+    s.ud["actionUntil"] = s.now() + 3;
+    s.ud["actionLoop"] = true;
+    s.stepAt([0, 0, 0], 1);
+    expect(s.lastClip()).toBe("Channel");
+    expect(s.lastPlayed()!.loop).toBe(true);
+    expect(s.rate()).toBe(1);
+  });
+
+  it("plays a standing swing THROUGH, instead of re-seeking it to frame 0 every tick", () => {
+    const h = harness({ clips: [...ALL_CLIPS, "Attack1"], params, durations: { Attack1: 1 } });
+    h.stepAt([0, 0, 0], 1);
+
+    h.ud["actionClip"] = "Attack1";
+    h.ud["actionUntil"] = h.now() + 1; // fitted at rate 1
+    h.stepAt([0, 0, 0], 45); // three quarters of the way through
+    expect(h.lastClip()).toBe("Attack1");
+    expect(h.played.filter((p) => p.clip === "Attack1")).toHaveLength(1); // started once
+    expect(h.lastPlayed()!.restart).toBe(true); // …and that once from the top
+    expect(h.playhead()).toBeGreaterThan(0.7);
+  });
+
+  it("replays the same clip asked for again the tick its window ends", () => {
+    const h = harness({ clips: [...ALL_CLIPS, "Attack1"], params, durations: { Attack1: 0.5 } });
+    h.stepAt([0, 0, 0], 1);
+    h.ud["actionClip"] = "Attack1";
+    h.ud["actionUntil"] = h.now() + 0.5;
+    h.stepAt([0, 0, 0], 29); // one tick short of the end
+    expect(h.played.filter((p) => p.clip === "Attack1")).toHaveLength(1);
+
+    // the caster chains the same swing without ever letting the action lapse
+    h.ud["actionUntil"] = h.now() + 0.5;
+    h.stepAt([0, 0, 0], 1);
+    expect(h.played.filter((p) => p.clip === "Attack1")).toHaveLength(2);
+    expect(h.lastPlayed()!.restart).toBe(true);
+    expect(h.playhead()).toBeLessThan(0.05);
+  });
+
+  it("carries on, not over, when a running action's window is pushed later", () => {
+    const h = harness({ clips: [...ALL_CLIPS, "Cast"], params, durations: { Cast: 1 } });
+    h.stepAt([0, 0, 0], 1);
+    h.ud["actionClip"] = "Cast";
+    h.ud["actionUntil"] = h.now() + 2;
+    h.stepAt([0, 0, 0], 30);
+    h.ud["actionUntil"] = h.now() + 3; // the channel got longer mid-flight
+    h.stepAt([0, 0, 0], 30);
+    expect(h.played.filter((p) => p.clip === "Cast")).toHaveLength(1);
   });
 
   it("keeps looping when nobody can say how long the clip is", () => {
@@ -941,7 +1287,8 @@ describe("following the ground", () => {
     h.stepAt([0, 0, -6], 10);
     h.setGround({ distance: 3 }); // ran off a ledge: nothing within reach
     h.stepAt([0, -5, -6], 20);
-    expect(h.velocity()[1]).toBeCloseTo(-5, 3); // gravity keeps it
+    // gravity keeps it — plus the controller's own extra fall gravity (2.2×)
+    expect(h.velocity()[1]).toBeCloseTo(-5 - (1.2 * 9.81) / 60, 3);
     expect(h.lastClip()).toBe("Jump_Loop");
   });
 
@@ -983,7 +1330,8 @@ describe("a body that was PUT somewhere", () => {
     h.setGround({ distance: 2.4 });
     h.stepAt([0, -3, -6], 20);
     expect(h.lastClip()).toBe("Jump_Loop");
-    expect(h.velocity()[1]).toBeCloseTo(-3, 3); // falling, not being held up
+    // falling, not being held up (and falling at fallGravity, not 1×)
+    expect(h.velocity()[1]).toBeCloseTo(-3 - (1.2 * 9.81) / 60, 3);
 
     // and the collider's own reach is what it stands on: 0.9 m, plus slack
     h.setGround({ distance: 0.9 });
@@ -1023,5 +1371,106 @@ describe("a body that was PUT somewhere", () => {
     h.setGround({ distance: 0.9 });
     h.stepAt([0, 0, 0], 10);
     expect(h.lastClip()).toBe("Idle");
+  });
+});
+
+describe("jump shaping and air control", () => {
+  const params = { walkSpeed: 2, speed: 6, sprintSpeed: 10 };
+  const G = 9.81 / 60; // one tick of world gravity
+
+  it("leaves at exactly `jump`, then rises, cuts and falls on its own gravities", () => {
+    const h = harness({ clips: ALL_CLIPS, params });
+    h.stepAt([0, 0, 0], 5);
+    h.hold("Space");
+    h.step();
+    expect(h.velocity()[1]).toBeCloseTo(6.2, 5); // take-off tick: plain gravity only
+
+    h.stepAt([0, 5, 0], 1); // still held: jumpGravity 1.6, so 0.6 extra
+    expect(h.velocity()[1]).toBeCloseTo(5 - 0.6 * G, 5);
+
+    h.release("Space");
+    h.stepAt([0, 4, 0], 1); // let go while rising: jumpCutGravity 3, so 2 extra
+    expect(h.velocity()[1]).toBeCloseTo(4 - 2 * G, 5);
+
+    h.stepAt([0, -2, 0], 1); // past the apex: fallGravity 2.2, so 1.2 extra
+    expect(h.velocity()[1]).toBeCloseTo(-2 - 1.2 * G, 5);
+  });
+
+  it("carries momentum through the air instead of steering like the ground", () => {
+    const h = harness({ clips: ALL_CLIPS, params });
+    h.hold("KeyW");
+    h.stepAt([0, 0, -6], 5);
+    h.hold("Space");
+    h.step();
+    h.release("Space");
+    h.release("KeyW");
+    h.stepAt([0, 3, -6], 1);
+    expect(h.velocity()[2]).toBeCloseTo(-6, 5); // no input: the run carries on
+
+    h.hold("KeyS"); // reverse mid-air
+    h.stepAt([0, 3, -6], 1);
+    const vz = h.velocity()[2];
+    expect(vz).toBeGreaterThan(-6); // nudged
+    expect(vz).toBeLessThan(-5); // not reversed in one tick
+  });
+
+  it("airControl 0 does not steer at all", () => {
+    const h = harness({ clips: ALL_CLIPS, params: { ...params, airControl: 0 } });
+    h.hold("Space");
+    h.step();
+    h.release("Space");
+    h.hold("KeyW");
+    h.stepAt([0, 3, 0], 1);
+    expect(h.velocity()[2]).toBeCloseTo(0, 5);
+  });
+});
+
+describe("climbing lips on uneven ground", () => {
+  const params = { walkSpeed: 2, speed: 6, sprintSpeed: 10 };
+  /** The MMO player's capsule: radius 0.4, feet 0.9 m below the origin. */
+  const CAPSULE = { shape: "capsule", size: [0.8, 1.8, 0.8] };
+
+  it("reads a body lifted over a lip as grounded, even with its axis over the lower cell", () => {
+    // The capsule's foot is on a 35 cm lip ahead (-Z) while the centre ray
+    // still falls to the cell it is climbing out of: 0.35 m past the resting
+    // distance, beyond the probe's slack. One ray called that airborne, and
+    // after coyoteTime the air clip played on a body sliding up the bump.
+    const h = harness({ clips: ALL_CLIPS, params, collider: CAPSULE, ground: { distance: 0.9 } });
+    h.hold("KeyW");
+    h.stepAt([0, 0, -6], 10);
+    h.setGroundAt((_x, z) => ({ distance: z < -0.2 ? 0.9 : 1.25 }));
+    h.stepAt([0, 1, -6], 30); // contact lifting it at 1 m/s
+    expect(h.lastClip()).toBe("Run");
+    expect(h.velocity()[1]).toBeGreaterThanOrEqual(1); // the climb is kept, not pulled back down
+  });
+
+  it("steps up onto a lip it sees ahead instead of running into it", () => {
+    const h = harness({ clips: ALL_CLIPS, params, collider: CAPSULE, ground: { distance: 0.9 } });
+    h.hold("KeyW");
+    h.stepAt([0, 0, -6], 10);
+    expect(h.velocity()[1]).toBeCloseTo(0, 3);
+    // a 30 cm lip just past the capsule's leading edge
+    h.setGroundAt((_x, z) => ({ distance: z < -0.5 ? 0.6 : 0.9 }));
+    h.stepAt([0, 0, -6], 1);
+    expect(h.velocity()[1]).toBeGreaterThan(2);
+    expect(h.lastClip()).toBe("Run");
+  });
+
+  it("does not step up a lip taller than stepHeight", () => {
+    const h = harness({ clips: ALL_CLIPS, params, collider: CAPSULE, ground: { distance: 0.9 } });
+    h.hold("KeyW");
+    h.stepAt([0, 0, -6], 10);
+    h.setGroundAt((_x, z) => ({ distance: z < -0.5 ? 0.3 : 0.9 })); // a 60 cm wall
+    h.stepAt([0, 0, -6], 1);
+    expect(h.velocity()[1]).toBeCloseTo(0, 3);
+  });
+
+  it("still falls off a real ledge", () => {
+    const h = harness({ clips: ALL_CLIPS, params, collider: CAPSULE, ground: { distance: 0.9 } });
+    h.hold("KeyW");
+    h.stepAt([0, 0, -6], 10);
+    h.setGroundAt(() => ({ distance: 3 }));
+    h.stepAt([0, -3, -6], 20);
+    expect(h.lastClip()).toBe("Jump_Loop");
   });
 });

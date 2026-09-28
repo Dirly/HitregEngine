@@ -16,7 +16,7 @@ import path from "node:path";
 import {
   AssetLibrary,
   registerCoreAssetTypes,
-  registerVoxelWorld,
+  registerVoxelRecipe,
   sceneDocSchema,
   type SceneDoc,
 } from "@hitreg/core";
@@ -27,6 +27,13 @@ export const ASSET_KINDS = [
   "materials",
   "terrain",
   "spritesheets",
+  "items",
+  "progression",
+  "creation",
+  "quests",
+  "dialogues",
+  "shops",
+  "places",
   "worlds",
   "models",
   "textures",
@@ -110,6 +117,15 @@ export function loadContent(roots: string[], assets = new AssetLibrary()): Loade
       ["materials", "material"],
       ["terrain", "terrain-heightfield"],
       ["spritesheets", "spritesheet"],
+      // the character scripts read these on the authority, which is here
+      ["items", "item"],
+      ["progression", "progression"],
+      ["creation", "creation"],
+      // townsfolk: the npc builtin decides conversations, trades and quests here
+      ["quests", "quest"],
+      ["dialogues", "dialogue"],
+      ["shops", "shop"],
+      ["places", "places"],
     ];
     for (const [kind, type] of dataKinds) {
       for (const file of files[kind] ?? []) {
@@ -124,7 +140,8 @@ export function loadContent(roots: string[], assets = new AssetLibrary()): Loade
       if (!file.endsWith(".json")) continue;
       const id = file.replace(/\.json$/, "");
       addOrWarn(`worlds/${file}`, () => {
-        registerVoxelWorld(id, readJson(fileOf("worlds", file)));
+        // built when the terrain host first asks for it (getVoxelWorld)
+        registerVoxelRecipe(id, readJson(fileOf("worlds", file)));
         worlds.push(id);
         worldFiles.set(id, fileOf("worlds", file));
       });

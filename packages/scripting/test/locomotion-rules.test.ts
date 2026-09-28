@@ -4,6 +4,7 @@ import {
   fallThreshold,
   fitAction,
   gaitFor,
+  gaitReadingSpeed,
   GaitTracker,
   groundFollowVy,
   risingByGround,
@@ -61,6 +62,17 @@ describe("the fall threshold", () => {
   });
 });
 
+describe("gait reading speed", () => {
+  it("takes a deliberate strafe slow-down back out, and nothing else", () => {
+    const mmo = { walkSpeed: 2.2, runSpeed: 6.5, sprintSpeed: 9.5 };
+    expect(gaitFor(6.5 * 0.65, mmo)).toBe("walk"); // the bug: a sideways run read raw
+    expect(gaitFor(gaitReadingSpeed(6.5 * 0.65, 0.65), mmo)).toBe("run");
+    expect(gaitFor(gaitReadingSpeed(2.2 * 0.65, 0.65), mmo)).toBe("walk");
+    expect(gaitReadingSpeed(3, 1)).toBe(3);
+    expect(gaitReadingSpeed(3, 0)).toBe(3);
+  });
+});
+
 describe("playback rate", () => {
   it("is travel over the speed the clip was authored at", () => {
     expect(playbackRate(3, 3)).toBeCloseTo(1, 3);
@@ -86,9 +98,9 @@ describe("fitting an action to its window", () => {
     expect(fit.rate).toBeCloseTo(2, 3);
   });
 
-  it("loops when the window is longer than the slowest playback covers", () => {
+  it("plays once at the slowest rate and holds, never loops, past the floor", () => {
     const fit = fitAction(1, 60);
-    expect(fit.loop).toBe(true);
+    expect(fit.loop).toBe(false);
     expect(fit.rate).toBeCloseTo(0.35, 3);
   });
 
@@ -134,7 +146,9 @@ describe("following the ground", () => {
     // an 18 cm threshold at a run leaves the solver with ~3.9 m/s of rise
     expect(groundFollowVy(0, -6.5, 3.9, flat, 0.05, opts)).toBeNull(); // old rule: a 0.78 m hop
     const guarded = { ...opts, popCap: 2 };
-    expect(groundFollowVy(0, -6.5, 3.9, flat, 0.05, guarded)!).toBeLessThanOrEqual(0); // back on the floor
+    // clipped to the cap, not zeroed: the body does have to rise the lip's
+    // height, and zeroing it stalled every voxel lip
+    expect(groundFollowVy(0, -6.5, 3.9, flat, 0.05, guarded)!).toBe(2);
     expect(groundFollowVy(0, -6.5, 1.5, flat, 0.05, guarded)).toBeNull(); // a lift rising gently: untouched
     expect(groundFollowVy(0, -6.5, 3.9, flat, 1.2, guarded)).toBeNull(); // already well clear: a real launch
   });

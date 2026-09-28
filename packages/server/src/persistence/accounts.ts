@@ -11,6 +11,7 @@
 
 import { randomBytes, scrypt as scryptCb, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
+import type { CharacterBuild } from "@hitreg/core";
 
 const scrypt = promisify(scryptCb) as (password: string, salt: string, keylen: number) => Promise<Buffer>;
 
@@ -18,6 +19,8 @@ export interface CharacterRecord {
   id: string;
   name: string;
   createdAt: string;
+  /** Character-creation choices (archetype, birth traits, appearance). Absent on characters made before creation existed. */
+  build?: CharacterBuild;
 }
 
 export interface AccountRecord {

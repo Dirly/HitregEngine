@@ -26,7 +26,7 @@ const sword = (name: string, parts: string[], texture: string) => ({
   appearance: { model: "weapons/longsword-uber.glb", parts, texture },
 });
 
-function harness() {
+function harness(fixedItem = "") {
   const events = new EventRegistry();
   registerCoreEvents(events);
   const assets = new AssetLibrary();
@@ -74,7 +74,7 @@ function harness() {
       }),
     },
     { op: "add-entity", id: "weapon", entity: entity("weapon", "player") },
-    { op: "add-entity", id: "weapon-look", entity: entity("look", "weapon", { name: "equipment-look", params: { actor: "player" } }) },
+    { op: "add-entity", id: "weapon-look", entity: entity("look", "weapon", { name: "equipment-look", params: fixedItem ? { item: fixedItem } : { actor: "player" } }) },
   ];
   const doc = applyOps(createScene("t"), ops, coreRegistry).doc;
   const objects = new Map(["player", "player-sheet", "weapon", "weapon-look"].map((id) => [id, new THREE.Object3D()]));
@@ -104,6 +104,17 @@ function harness() {
 }
 
 describe("equipment-look builtin", () => {
+  it("shows a FIXED item (a townsperson's sword) whatever the sheet holds", () => {
+    const h = harness("steel");
+    h.tick();
+    expect(h.looks.at(-1)).toEqual({ entityId: "weapon", look: { parts: ["Handle", "Blade4"], texture: "weapons/steel.png", glow: null, effects: [] } });
+    h.bus.emit("inventory.equip", { actorId: "player", uid: h.uidOf("iron"), slot: "primary" });
+    h.tick(120);
+    expect(h.looks.at(-1)?.look.parts).toEqual(["Handle", "Blade4"]);
+    h.runtime.dispose();
+  });
+
+
   it("shows the equipped item's parts and sheet on its parent's model, and follows every change", () => {
     const h = harness();
     h.tick();
@@ -211,6 +222,84 @@ describe("equipment-look builtin", () => {
     for (let i = 0; i < 120; i++) runtime.fixedUpdate(1 / 60);
     expect(latest.get("axe")).toMatchObject({ parts: ["Rod", "AxeHead1"] });
     expect(latest.get("sword")).toEqual({ partMask: 0, glow: null, effects: [] });
+    runtime.dispose();
+  });
+
+  it("merges several slots on ONE model into a per-part look (a chest over other legs)", () => {
+    const events = new EventRegistry();
+    registerCoreEvents(events);
+    const assets = new AssetLibrary();
+    registerCoreAssetTypes(assets);
+    const body = "mmo/human-body.glb";
+    const worn = (slot: string, parts: string[], texture: string) => ({ name: slot, slots: [slot], appearance: { model: body, parts, texture } });
+    assets.addDataAsset({ id: "vchest", type: "item", name: "vchest", data: worn("chest", ["ChestFront", "ChestBack"], "mmo/human-body-vanguard.png") });
+    assets.addDataAsset({ id: "rlegs", type: "item", name: "rlegs", data: worn("legs", ["LegsFront", "Belt"], "mmo/human-body-ranger.png") });
+    const registry = new ScriptRegistry();
+    registerBuiltinScripts(registry, events, assets);
+    const ops: Op[] = [
+      {
+        op: "add-entity",
+        id: "player",
+        entity: { name: "player", parent: null, tags: [], components: { transform: {}, mesh: { source: { kind: "asset", assetId: body } } } },
+      },
+      {
+        op: "add-entity",
+        id: "player-sheet",
+        entity: {
+          name: "sheet",
+          parent: "player",
+          tags: [],
+          components: {
+            transform: {},
+            script: {
+              name: "character-sheet",
+              params: { actor: "player", persist: false, startingItems: [{ itemId: "vchest", equip: true }, { itemId: "rlegs", equip: true }] },
+            },
+          },
+        },
+      },
+      {
+        op: "add-entity",
+        id: "body-look",
+        entity: {
+          name: "look",
+          parent: "player",
+          tags: [],
+          components: { transform: {}, script: { name: "equipment-look", params: { actor: "player", slot: "chest, legs, gloves" } } },
+        },
+      },
+    ];
+    const doc = applyOps(createScene("t"), ops, coreRegistry).doc;
+    const netState = new NetStateStore();
+    registerCharacterNetState(netState);
+    const bus = new EventBus(events);
+    const latest = new Map<string, ModelLook>();
+    const runtime = new ScriptRuntime({
+      doc,
+      objects: new Map(["player", "player-sheet", "body-look"].map((id) => [id, new THREE.Object3D()])),
+      sim: null,
+      registry,
+      input: noInput,
+      events: bus,
+      netState,
+      assets,
+      localPlayer: () => "player",
+      setModelLook: (entityId, look) => latest.set(entityId, look),
+    });
+    runtime.start();
+    runtime.fixedUpdate(1 / 60);
+    expect(latest.get("player")).toEqual({
+      parts: ["ChestFront", "ChestBack", "LegsFront", "Belt"],
+      groups: [
+        { parts: ["ChestFront", "ChestBack"], texture: "mmo/human-body-vanguard.png" },
+        { parts: ["LegsFront", "Belt"], texture: "mmo/human-body-ranger.png" },
+      ],
+      glow: null,
+      effects: [],
+    });
+    bus.emit("inventory.unequip", { actorId: "player", slot: "chest" });
+    for (let i = 0; i < 120; i++) runtime.fixedUpdate(1 / 60);
+    expect(latest.get("player")).toMatchObject({ parts: ["LegsFront", "Belt"] });
     runtime.dispose();
   });
 

@@ -1,0 +1,148 @@
+{
+  "size": 256,
+  "bleed": 8,
+  "keyColor": "#00ffff",
+  "groundFringe": 1,
+  "fitSearch": 1.6,
+  "slots": {
+    "#11008a": {
+      "name": "pants.back",
+      "transparency": true,
+      "cut": false
+    },
+    "#1f00ff": {
+      "name": "pants.front",
+      "transparency": true,
+      "cut": false
+    },
+    "#000000": {
+      "name": "hood",
+      "transparency": true,
+      "cut": false
+    },
+    "#9da8ff": {
+      "name": "shoulders",
+      "transparency": true,
+      "cut": false
+    },
+    "#420064": {
+      "name": "robe.back",
+      "transparency": true,
+      "fit": "contain",
+      "anchor": "top",
+      "fitPadding": 0,
+      "cut": "bottom"
+    },
+    "#a900ff": {
+      "name": "robe.front",
+      "transparency": true,
+      "fit": "contain",
+      "anchor": "top",
+      "fitPadding": 0,
+      "cut": "bottom"
+    },
+    "#ff0000": {
+      "name": "chest.front",
+      "transparency": true,
+      "cut": false
+    },
+    "#a80000": {
+      "name": "chest.back",
+      "transparency": true,
+      "cut": false
+    },
+    "#ff7d00": {
+      "name": "tasset",
+      "transparency": true,
+      "fit": "contain",
+      "anchor": "top",
+      "fitPadding": 0,
+      "cut": "bottom"
+    },
+    "#ff8b8b": {
+      "name": "ornament",
+      "transparency": true,
+      "fit": "contain",
+      "anchor": "bottom",
+      "cut": true,
+      "fitPadding": 0,
+      "openEnclosed": true
+    },
+    "#f800ff": {
+      "name": "arms.front",
+      "transparency": true,
+      "cut": false
+    },
+    "#760079": {
+      "name": "arms.back",
+      "transparency": true,
+      "cut": false
+    },
+    "#3cff00": {
+      "name": "hand.front",
+      "transparency": true,
+      "cut": false
+    },
+    "#0f3e00": {
+      "name": "hand.back",
+      "transparency": true,
+      "cut": false
+    },
+    "#eca5ff": {
+      "name": "shoe",
+      "transparency": true,
+      "cut": false
+    },
+    "#57100d": {
+      "name": "belt.buckle",
+      "transparency": false,
+      "fit": "contain",
+      "anchor": "center",
+      "fitPadding": 0,
+      "padLimit": 2,
+      "cut": false
+    },
+    "#6b1511": {
+      "name": "belt",
+      "transparency": true,
+      "fit": "contain",
+      "anchor": "center",
+      "cut": false
+    },
+    "#e1c78b": {
+      "name": "head",
+      "transparency": true,
+      "cut": true,
+      "symmetric": true
+    },
+    "#a78e55": {
+      "name": "face",
+      "transparency": true,
+      "cut": true,
+      "fitWith": "head"
+    }
+  },
+  "pairs": [
+    [
+      "pants.front",
+      "pants.back"
+    ],
+    [
+      "chest.front",
+      "chest.back"
+    ],
+    [
+      "arms.front",
+      "arms.back"
+    ],
+    [
+      "hand.front",
+      "hand.back"
+    ],
+    [
+      "robe.front",
+      "robe.back"
+    ]
+  ],
+  "solidGround": true
+}

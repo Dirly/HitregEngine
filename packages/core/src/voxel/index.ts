@@ -19,6 +19,16 @@
 
 export { mergeVoxelMeshes } from "./merge.js";
 export {
+  coverClumpKeep,
+  coverEdgeClearance,
+  coverClumpRejects,
+  coverKeepHash,
+  coverScratch,
+  coverWaterLevel,
+  coverWaterGate,
+  type CoverGateLayer,
+} from "./cover.js";
+export {
   hash3i,
   hash2i,
   hashUnit,
@@ -65,6 +75,8 @@ export {
   createVolume,
   buildVolumeMesh,
   registerVolume,
+  registerVolumeDoc,
+  isVolumeInUse,
   getVolume,
   volumeIds,
   invalidateVolume,
@@ -103,6 +115,8 @@ export {
   type PatchDoc,
   type ScatterDoc,
   type ScatterClumpDoc,
+  coverLayerSchema,
+  type CoverLayerDoc,
   type RiverDoc,
   type CanyonDoc,
   type RoadDoc,
@@ -166,6 +180,8 @@ export {
 export {
   createWorldField,
   type WorldField,
+  type RiverFall,
+  type SurfaceSample,
   type BiomeSample,
   type ZoneSample,
   type SampleBlockRequest,
@@ -178,7 +194,9 @@ export {
   primeVoxelMesh,
   registerVoxelWorld,
   registerVoxelField,
+  registerVoxelRecipe,
   getVoxelWorld,
+  isVoxelWorldInUse,
   voxelWorldIds,
   clearVoxelWorlds,
   invalidateVoxelWorld,
@@ -219,3 +237,6 @@ export {
   type FeatureKind,
   type Footprint,
 } from "./terraform.js";
+export { fallSiteSchema, applyFallSites, fallSiteLedge, FALL_SITE_MIN_TIER, type FallSiteDoc, type SolvedFallSite } from "./fall-sites.js";
+export { rockFormations, rockFormationSolid, type RockFormationSolid, type RockFormationSite, type RockFormationOptions, type RockFormationResult, type RockMass } from "./rock-formations.js";
+export { fallSiteRockInstances, meshDensity, type SiteRockInstance, type MeshDensity } from "./fall-site-rocks.js";

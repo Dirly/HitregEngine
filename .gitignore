@@ -19,6 +19,7 @@ coverage/
 
 # local dev player-data (never authoritative, never committed)
 .hitreg/
+.hitreg-live-freeze.json
 
 # binary art assets — kept out of the engine repo; installed separately.
 # see apps/playground/assets/README.md

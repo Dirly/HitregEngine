@@ -492,7 +492,7 @@ export const shakeModuleSchema = z.object({
 export const soundModuleSchema = z.object({
   kind: z.literal("sound"),
   ...moduleBase,
-  asset: z.string().describe("Sound asset id."),
+  asset: z.string().describe("Sound asset id, or a comma list of variants: one is picked at random per play."),
   volume: z.number().min(0).max(2).default(1),
 });
 

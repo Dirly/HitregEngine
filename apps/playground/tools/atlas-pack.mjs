@@ -26,6 +26,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { decodePng, encodePng } from "./_png.mjs";
+import { assertSquarePage, squareGrid } from "./_page.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const PLAYGROUND = path.resolve(here, "..");
@@ -97,8 +98,7 @@ if (odd.length) {
   process.exit(1);
 }
 
-const cols = Math.ceil(Math.sqrt(tiles.length));
-const rows = Math.ceil(tiles.length / cols);
+const { cols, rows } = squareGrid(tiles.length, size, PAD);
 const stride = size + PAD * 2;
 const W = cols * stride;
 const H = rows * stride;
@@ -127,6 +127,7 @@ for (const [i, t] of tiles.entries()) {
 
 fs.mkdirSync(path.join(PLAYGROUND, "assets", "textures"), { recursive: true });
 const sheetPath = path.join(PLAYGROUND, "assets", "textures", `${name}.png`);
+assertSquarePage(W, H, `atlas-pack ${name}`);
 fs.writeFileSync(sheetPath, encodePng(W, H, out));
 
 const manifest = {

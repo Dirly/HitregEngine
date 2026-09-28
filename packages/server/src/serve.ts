@@ -190,6 +190,7 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
               characterId: v.claims.chr,
               name: v.claims.name,
               ...(v.claims.rev ? { rev: v.claims.rev } : {}),
+              ...(v.claims.build ? { build: v.claims.build } : {}),
             });
             return { peerId: v.claims.chr, name: v.claims.name };
           },

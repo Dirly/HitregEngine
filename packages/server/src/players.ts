@@ -23,12 +23,20 @@ import type { EntityDoc, SceneDoc } from "@hitreg/core";
 import {
   actionIsLayered,
   GaitTracker,
+  gaitReadingSpeed,
   groundFollowVy,
   risingByGround,
+  readGround,
+  probeLeaving,
+  airGravityScale,
+  extraGravityDv,
+  airSteer,
   gaitSpeed,
   leavingGround,
   idleThreshold,
   playbackRate,
+  peakAdvanceSpeed,
+  ACTION_RATE_MAX,
   swimStateFor,
   swimVy,
   swimming,
@@ -181,15 +189,32 @@ export interface PlayerRecord {
   transferring: number | null;
   /** Gait state for the clip other clients see — created on first step. */
   gait?: GaitTracker;
+  /**
+   * The action other clients see, and whether it rides a layer — decided when
+   * it STARTS and held, as the controller does. Re-decided per tick off the
+   * claimed speed, a standing swing whose clip steps in (clipAdvance) would
+   * flip to a layer over a run the moment its own lunge crossed the walk line.
+   */
+  actionShown?: { clip: string; until: number; layered: boolean };
   /** Measured distance from this body's origin to the ground under its feet. */
   groundRest?: number;
   /** The vertical velocity ground-following wrote for it last tick. */
   stickVy?: number;
   /** Sim seconds of its last jump (the grace ground-following stands clear of). */
   jumpAt?: number;
+  /** Rising in its own jump (the controller's `jumping`): what jumpGravity / jumpCutGravity shape. */
+  jumping?: boolean;
+  /** Seconds of continuous airborne evidence — the controller's coyote counter, so both agree when a fall starts. */
+  airTime?: number;
   /** Whether this body is in water, and how deep — the swim rules need the last state to hold a mode. */
   swim?: SwimState;
 }
+
+/**
+ * Seconds after a full-body action ends in which the next one still counts as
+ * CHAINED off it (see gaitClip): a combo's next press lands inside it.
+ */
+const CHAIN_GRACE = 0.25;
 
 /** How far below a body's origin the ground ray looks, and the slack on contact. */
 const PROBE_REACH = 4;
@@ -225,6 +250,13 @@ export class PlayerDriver {
   private readonly sprintSpeed: number;
   private readonly walkSpeed: number;
   private readonly jumpVelocity: number;
+  /** The controller's jump shaping and air control — the same arc on both sides (see its params). */
+  private readonly jumpShape: { riseGravity: number; fallGravity: number; cutGravity: number };
+  private readonly airControl: number;
+  /** The controller's strafe/backpedal slow-down, taken back out when reading the gait. */
+  private readonly sideSpeedMult: number;
+  private readonly stepHeight: number;
+  private readonly coyoteTime: number;
   private readonly clips: {
     idle: string;
     walk: string;
@@ -239,6 +271,14 @@ export class PlayerDriver {
   };
   private readonly tuning: GaitTuning;
   private readonly clipSpeeds: Record<string, number>;
+  /**
+   * m/s added to a body's speed cap while it has an action playing: the
+   * fastest the controller's clipAdvance ever moves a body, at the fastest
+   * rate an action is fitted to. A lunge is claimed on top of the stick (see
+   * the controller), and a cap that did not know about it would clip every
+   * committed swing (speedMult well under 1) as a speed hack.
+   */
+  private readonly advanceAllowance: number;
   private readonly syncClipSpeed: boolean;
   private readonly gaitDwell: number;
   private readonly fallSpeed: number;
@@ -270,7 +310,17 @@ export class PlayerDriver {
     this.runSpeed = num("speed", 6.5);
     this.sprintSpeed = num("sprintSpeed", 9.5);
     this.walkSpeed = num("walkSpeed", 2.2);
-    this.jumpVelocity = num("jump", 8);
+    // defaults mirror the third-person-controller's own params
+    this.jumpVelocity = num("jump", 6.2);
+    this.jumpShape = {
+      riseGravity: num("jumpGravity", 1.6),
+      fallGravity: num("fallGravity", 2.2),
+      cutGravity: num("jumpCutGravity", 3),
+    };
+    this.airControl = num("airControl", 0.3);
+    this.sideSpeedMult = num("sideSpeedMult", 0.65);
+    this.stepHeight = num("stepHeight", 0.35);
+    this.coyoteTime = num("coyoteTime", 0.12);
     const str = (key: string, fallback: string): string =>
       typeof controller[key] === "string" ? (controller[key] as string) : fallback;
     this.clips = {
@@ -306,6 +356,12 @@ export class PlayerDriver {
         ? (controller["clipSpeeds"] as Record<string, number>)
         : {};
     this.syncClipSpeed = controller["syncClipSpeed"] !== false;
+    const advance =
+      controller["clipAdvance"] && typeof controller["clipAdvance"] === "object"
+        ? (controller["clipAdvance"] as Record<string, unknown>)
+        : {};
+    const advanceScale = Math.max(0, Math.min(2, num("advanceScale", 1)));
+    this.advanceAllowance = peakAdvanceSpeed(advance) * advanceScale * ACTION_RATE_MAX;
     // the client's own swim params, so the body the authority moves floats at
     // the same line as the body its owner predicts
     this.swimEnabled = controller["swim"] !== false;
@@ -357,7 +413,30 @@ export class PlayerDriver {
   ): { clip: string; layer?: string; rate: number; action?: number } {
     const planar = Math.hypot(vx, vz);
     const action = ud.actionClip && (ud.actionUntil ?? 0) > simNow ? ud.actionClip : null;
-    const layered = action !== null && actionIsLayered(planar, this.tuning, { fullBody: ud.actionFullBody });
+    // Layered or full-body is decided when the action STARTS (a new clip, or
+    // the same one asked for again after its window ran out) and held — the
+    // controller's rule, and the only one under which a swing's own lunge
+    // cannot flip it onto a layer mid-swing.
+    const shown = player.actionShown;
+    const until = ud.actionUntil ?? 0;
+    let layered: boolean;
+    if (action === null) {
+      // kept a moment past its end, for the chain rule below
+      if (shown && simNow - shown.until > CHAIN_GRACE) player.actionShown = undefined;
+      layered = false;
+    } else if (shown && shown.clip === action && (until === shown.until || shown.until > simNow)) {
+      shown.until = until;
+      layered = shown.layered;
+    } else {
+      // A swing chained straight off a full-body one stays full-body. The
+      // claimed speed still carries the last swing's lunge, which the
+      // controller takes back out before it asks "is it walking?" and this
+      // side cannot (the claim is one number) — read raw, every lunging
+      // combo would turn into a layer over a run from its second swing on.
+      const chained = shown !== undefined && !shown.layered && simNow - shown.until <= CHAIN_GRACE;
+      layered = chained ? false : actionIsLayered(planar, this.tuning, { fullBody: ud.actionFullBody });
+      player.actionShown = { clip: action, until, layered };
+    }
     // How long the action still has to run. The client fits the clip to it —
     // it is the only side that knows how long the clip is — so a three-second
     // cast is one slow cast there too, not the same second three times.
@@ -403,7 +482,19 @@ export class PlayerDriver {
       return { clip: this.clips.air, rate: 1, ...rest };
     }
     const tracker = (player.gait ??= new GaitTracker());
-    const gait = tracker.step(planar, this.tuning, simNow, this.gaitDwell);
+    // A strafe or backpedal travels at `sideSpeedMult` of its gait by design;
+    // read raw, a sideways run falls under the walk/run line and every other
+    // player sees a sped-up walk. Sideways = more than 30° off the facing
+    // (keyboard diagonals are 45°), the same correction the controller makes.
+    const yaw = this.world.objects.get(player.bodyId)?.rotation.y;
+    const sideways =
+      yaw !== undefined && planar > 0.2 && vx * Math.sin(yaw) + vz * Math.cos(yaw) < planar * Math.cos(Math.PI / 6);
+    const gait = tracker.step(
+      gaitReadingSpeed(planar, sideways ? this.sideSpeedMult : 1),
+      this.tuning,
+      simNow,
+      this.gaitDwell,
+    );
     if (gait === "idle") return { clip: this.clips.idle, rate: 1, ...rest };
     const clip = gait === "walk" ? this.clips.walk : gait === "sprint" ? this.clips.sprint : this.clips.run;
     // Rate off the distance actually covered (vertical included, capped), so a
@@ -435,17 +526,62 @@ export class PlayerDriver {
   private probeGround(
     player: PlayerRecord,
     vy: number,
-  ): { grounded: boolean; dist: number; rest: number | null; normal: [number, number, number] | null } {
+    vx: number,
+    vz: number,
+    launched: boolean,
+  ): {
+    grounded: boolean;
+    dist: number;
+    rest: number | null;
+    normal: [number, number, number] | null;
+    step: number;
+    reach: number;
+  } {
     const sim = this.world.sim;
     const p = this.world.positionOf(player.bodyId);
-    if (!sim.raycast || !p) return { grounded: Math.abs(vy) < 0.05, dist: Infinity, rest: null, normal: null };
-    const hit = sim.raycast(p, [0, -1, 0], PROBE_REACH, { exclude: [player.bodyId] });
-    const dist = hit ? hit.distance : Infinity;
+    if (!sim.raycast || !p) {
+      return { grounded: Math.abs(vy) < 0.05, dist: Infinity, rest: null, normal: null, step: 0, reach: 0 };
+    }
     if (player.groundRest === undefined) player.groundRest = this.restFromCollider(player) ?? undefined;
-    if (hit && player.groundRest === undefined && Math.abs(vy) < 1) player.groundRest = hit.distance;
+    const exclude = [player.bodyId];
+    // The controller's own reading — centre ray, footprint ring when the centre
+    // reports a gap, step ray ahead — so a lip reads the same on both sides.
+    const reading = readGround(
+      (dx, dz) => {
+        const hit = sim.raycast!([p[0] + dx, p[1], p[2] + dz], [0, -1, 0], PROBE_REACH, { exclude });
+        return hit ? { distance: hit.distance, normal: hit.normal } : null;
+      },
+      {
+        rest: player.groundRest ?? 0,
+        radius: this.footRadius(player),
+        dirX: vx,
+        dirZ: vz,
+        stepHeight: player.groundRest !== undefined && this.groundStick > 0 ? this.stepHeight : 0,
+        slack: PROBE_SLACK,
+      },
+    );
+    if (Number.isFinite(reading.centre) && player.groundRest === undefined && Math.abs(vy) < 1) {
+      player.groundRest = reading.centre;
+    }
     const rest = player.groundRest ?? null;
-    const grounded = rest !== null ? dist <= rest + PROBE_SLACK : Math.abs(vy) < 0.05;
-    return { grounded, dist, rest, normal: hit ? hit.normal : null };
+    const grounded =
+      rest !== null
+        ? !probeLeaving({ dist: reading.dist, rest, slack: PROBE_SLACK, stick: this.groundStick, vy, launched })
+        : Math.abs(vy) < 0.05;
+    return { grounded, dist: reading.dist, rest, normal: reading.normal, step: reading.step, reach: reading.reach };
+  }
+
+  /** Horizontal radius of the body's collider, 0 where it cannot say — the controller's footRadius. */
+  private footRadius(player: PlayerRecord): number {
+    const collider = this.world.entities.get(player.bodyId)?.components["collider"] as
+      | { shape?: string; size?: number[] }
+      | undefined;
+    const size = collider?.size;
+    if (!collider || !size) return 0;
+    const shape = collider.shape ?? "box";
+    if (shape !== "capsule" && shape !== "box" && shape !== "sphere" && shape !== "cylinder") return 0;
+    const across = Math.min(size[0] ?? 0, size[2] ?? size[0] ?? 0);
+    return across > 0 ? across / 2 : 0;
   }
 
   /**
@@ -522,8 +658,16 @@ export class PlayerDriver {
       if (fresh && !ud.frozen) {
         [vx, vz] = input!.v;
         const requested = Math.hypot(vx, vz);
-        // clamp: first the absolute trust cap, then what this body may do now
-        const cap = Math.min(this.maxSpeed, Math.max(this.runSpeed, this.sprintSpeed) * 1.05 * (ud.speedMult ?? 1));
+        // clamp: first the absolute trust cap, then what this body may do now —
+        // plus, while an action plays and the body is not rooted, the room a
+        // clip that steps in needs (advanceAllowance; the controller never
+        // advances a body whose speedMult is 0)
+        const mult = ud.speedMult ?? 1;
+        const acting = !!ud.actionClip && (ud.actionUntil ?? 0) > simNow && mult > 0;
+        const cap = Math.min(
+          this.maxSpeed,
+          Math.max(this.runSpeed, this.sprintSpeed) * 1.05 * mult + (acting ? this.advanceAllowance : 0),
+        );
         if (requested > cap && requested > 0) {
           vx = (vx / requested) * cap;
           vz = (vz / requested) * cap;
@@ -557,6 +701,8 @@ export class PlayerDriver {
         vx += water!.current[0];
         vz += water!.current[1];
         player.stickVy = undefined;
+        player.jumping = false;
+        player.airTime = 0;
         sim.setLinvel(player.bodyId, [vx, vy, vz]);
         // Peers see the PITCH too. A swimmer's body lies along its travel, and
         // that attitude is half of reading what another player is doing —
@@ -583,26 +729,50 @@ export class PlayerDriver {
       // asks the same question of its own copy of the body; if only one of the
       // two follows the ground, every slope is a fight between prediction and
       // authority that the authority wins by yanking the player back.
-      const ground = this.probeGround(player, vy);
-      if (fresh && input!.jump && ground.grounded) {
-        vy = this.jumpVelocity;
-        player.jumpAt = simNow;
-      }
       // a script that launched the body on purpose owns its rise until its deadline
       const lifted = (ud.liftUntil ?? 0) > simNow;
+      if (player.jumping && vy <= 0) player.jumping = false;
+      const ground = this.probeGround(player, vy, vx, vz, !!player.jumping || lifted);
+      // The controller's sustained-evidence rule, so a fall starts on the same
+      // tick on both sides (and with it the heavier fall gravity).
+      const dt = this.world.fixedDt;
+      player.airTime = ground.grounded ? 0 : (player.airTime ?? 0) + dt;
+      const sinceJump = simNow - (player.jumpAt ?? -999);
+      const grounded = !(player.airTime > this.coyoteTime || sinceJump < 0.25);
+      if (grounded && sinceJump >= 0.25) player.jumping = false;
+      const jumpHeld = fresh && input!.jump;
+      let tookOff = false;
+      if (jumpHeld && grounded) {
+        vy = this.jumpVelocity;
+        player.jumpAt = simNow;
+        player.jumping = true;
+        tookOff = true;
+      }
       if (!lifted && ground.normal && ground.rest !== null && simNow - (player.jumpAt ?? -999) > 0.25) {
         const follow = groundFollowVy(vx, vz, vy, ground.normal, ground.dist - ground.rest, {
           stick: this.groundStick,
           slopeTolerance: this.slopeTolerance,
-          dt: this.world.fixedDt,
+          dt,
           ours: risingByGround(vy, player.stickVy ?? null),
           // the same guard the client's controller runs, or a doorway is a
           // fight between a client that stays down and an authority that hops
           popCap: this.stepPopCap,
+          step: ground.step,
+          stepReach: ground.reach,
+          wrote: player.stickVy ?? null,
         });
         player.stickVy = follow ?? undefined;
         if (follow !== null) vy = follow;
       } else player.stickVy = undefined;
+      // Jump shaping and air control, exactly as the controller applies them —
+      // the client predicts this arc, so the authority has to fly it too.
+      // (a frozen body is pinned by the controller with plain gravity, so here too)
+      if (!tookOff && !lifted && !ud.frozen && (!grounded || player.jumping)) {
+        vy += extraGravityDv(airGravityScale(vy, !!player.jumping, jumpHeld, this.jumpShape), dt);
+      }
+      if (!grounded && !driven && !ud.frozen) {
+        [vx, vz] = airSteer(vel[0], vel[2], vx, vz, fresh && Math.hypot(vx, vz) > 0, this.airControl, dt);
+      }
       sim.setLinvel(player.bodyId, [vx, vy, vz]);
       if (object && fresh) object.rotation.set(0, input!.yaw, 0);
       const wadingDeep =

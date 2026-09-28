@@ -157,6 +157,7 @@ export class WeaponStance extends Script {
         body.userData["actionClip"] = holstered ? "Sheathe" : "Draw";
         body.userData["actionUntil"] = now + 0.8;
         body.userData["actionHold"] = false;
+        body.userData["actionLoop"] = false;
         body.userData["actionUpperBody"] = true; // you walk while you draw
       }
     }

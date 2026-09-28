@@ -23,6 +23,20 @@ import { cloneMaterial } from "./node-material.js";
  */
 
 const FULL_INDEX = "uberFullIndex";
+/** mesh.userData key: the geometry this mesh made its own (so a shared one is never edited). */
+const OWN_GEOMETRY = "uberOwnGeometry";
+
+/** A geometry sharing `source`'s vertex attributes (never written here) with room for an index of its own. */
+function ownIndexGeometry(source: THREE.BufferGeometry): THREE.BufferGeometry {
+  const g = new THREE.BufferGeometry();
+  for (const [name, attribute] of Object.entries(source.attributes)) g.setAttribute(name, attribute);
+  Object.assign(g.morphAttributes, source.morphAttributes);
+  g.morphTargetsRelative = source.morphTargetsRelative;
+  for (const group of source.groups) g.addGroup(group.start, group.count, group.materialIndex);
+  g.name = source.name;
+  g.userData = { ...source.userData };
+  return g;
+}
 const OWN_MATERIAL = "uberOwnMaterial";
 
 /** `{ partName: bitIndex }` from the first node that carries one, or null. */
@@ -60,8 +74,13 @@ export function partMaskFromNames(
  * part index (0 = this model is not an ubermesh and nothing changed).
  *
  * The loaded glTF is SHARED by every entity that uses it (the model cache
- * hands out clones that share geometry), so the first call gives each mesh
- * its own geometry before the index is touched.
+ * hands out clones that share geometry), so the first call gives each MESH
+ * its own geometry before the index is touched. Ownership is recorded on the
+ * mesh, not the geometry: a template whose geometry was already masked (and
+ * so carries the full index) is still shared by every clone made from it —
+ * with the check on the geometry, a town of NPCs all edited ONE index and the
+ * last one dressed chose every body's parts. The own geometry shares the
+ * vertex attributes (read-only here) and owns only its index.
  */
 export function applyModelPartMask(root: THREE.Object3D, mask: number): number {
   let touched = 0;
@@ -70,20 +89,22 @@ export function applyModelPartMask(root: THREE.Object3D, mask: number): number {
     if (!mesh.isMesh) return;
     const part = mesh.geometry.getAttribute("uv1");
     if (!part) return;
-    let full = mesh.geometry.userData[FULL_INDEX] as ArrayLike<number> | undefined;
-    if (!full) {
-      mesh.geometry = mesh.geometry.clone();
-      const index = mesh.geometry.getIndex();
-      full = index
-        ? Array.from(index.array as ArrayLike<number>)
-        : Array.from({ length: mesh.geometry.getAttribute("position").count }, (_, i) => i);
+    if (mesh.userData[OWN_GEOMETRY] !== mesh.geometry) {
+      const shared = mesh.geometry;
+      const index = shared.getIndex();
+      const full =
+        (shared.userData[FULL_INDEX] as ArrayLike<number> | undefined) ??
+        (index ? Array.from(index.array as ArrayLike<number>) : Array.from({ length: shared.getAttribute("position").count }, (_, i) => i));
+      mesh.geometry = ownIndexGeometry(shared);
       mesh.geometry.userData[FULL_INDEX] = full;
+      mesh.userData[OWN_GEOMETRY] = mesh.geometry;
     }
+    const full = mesh.geometry.userData[FULL_INDEX] as ArrayLike<number>;
     const kept: number[] = [];
     for (let t = 0; t + 2 < full.length; t += 3) {
       // a triangle belongs to one part, so its first vertex decides
       const bit = Math.round(part.getX(full[t]!));
-      if (bit >= 0 && bit < 31 && (mask & (1 << bit)) !== 0) kept.push(full[t]!, full[t + 1]!, full[t + 2]!);
+      if (bit >= 0 && bit < 32 && (mask & (1 << bit)) !== 0) kept.push(full[t]!, full[t + 1]!, full[t + 2]!);
     }
     mesh.geometry.setIndex(kept);
     // bounds of the parts actually shown, or a bare grip is culled by a blade

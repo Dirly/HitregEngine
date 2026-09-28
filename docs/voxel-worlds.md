@@ -918,6 +918,10 @@ navigate by, and it gets a `spire-field` POI so it is findable.
 
 ## 28. Ground cover: textured billboards on generated terrain
 
+> A world's own cover — per-biome flowers, wheat, reeds, lily pads, atlas
+> pages, water and clump gates — lives in `recipe.cover`; the procedure and the
+> rules are in [world-editing/ground-cover.md](world-editing/ground-cover.md).
+
 The `grass` component was already the right machine — a camera-relative
 InstancedMesh sliding over the terrain, wind sway anchored at the base,
 distance and camera-height fades. Two things were added rather than a second
@@ -2909,3 +2913,194 @@ empty ravines. The 2 % rule is right — a sheet on a 14 % slope is a wall of
 water — but the steep reaches currently render as *nothing*. They want to look
 like water: a cascade drawn as a short stack of flat steps would reuse the
 existing sheet rendering without ever tilting one.
+
+### River water is clipped from the terrain
+
+Added 2026-09-24, after six rounds of tuning a ribbon. Every earlier fix tuned
+one number (ribbon width, bank reach, levee height) against another, and the
+water still stopped short of the bank in one place and floated past it in the
+next. Measured on the mmo world before the change: 57 % of ribbon edges were
+more than a metre off the real shoreline, 21 bends folded the ribbon's inner
+edge over itself, and river texture ran 0.5–1.6× its size around bends, 3.4×
+off the lakes'. **The cause was structural.** The water was one mesh with a
+width from a formula; the shore was wherever marching cubes crossed the water
+height. Two sources of truth can't agree. Neither could the ribbon's spline
+and the carve's straight segments on a bend.
+
+**What replaced it** (Valheim's rule, per pool; Unreal's water and the
+Horizon river tool do the same thing):
+
+- **One water function.** `field.waterSurface(x, z)` returns the lake level
+  inside a lake's sheet, otherwise the level of the river channel the point
+  is in. The chunk samples it and the ground on the same 2 m lattice the
+  terrain uses. It keeps water wherever the water stands above the ground
+  and cuts the edge by marching squares at the crossing, 0.35 m under the
+  bank. The shore IS where the ground meets the water. Neighbouring cells
+  produce identical edge vertices, and lakes and rivers are one surface.
+  Draws: one `surface` mesh per material per wet cell, and HLOD merges them.
+- **Pools.** The field resamples every river to 8 m along a spline, the same
+  polyline for the carve, the paint and the water. The water is solved as
+  level pools stepping down in rapids (`POOL_STEP` 1.2 m). A tilted sheet
+  meets a bank along a slanted line that no lattice resolves. A level one
+  meets it along a contour, exactly as a lake does.
+- **Bed from water.** The bed is cut `MIN_WATER_VOXELS` (1.5 voxels) under
+  the level. The old 1.4-voxel channels could not survive meshing: the bed
+  poked through the water, and the water left gaps at the edges.
+- **Containment** (`containWater`, the last feature applied). At the edge of
+  a river's or lake's reach the ground is held a hand above its water, unless
+  another water owns the point, so a tributary never dams its trunk. Every
+  earlier failure was somewhere the levee was not built: a bed under sea
+  level, a road cut, the build cap, a lake inlet.
+- **Only real ends stop the water.** A river's water ends only at its head
+  and at a mouth with nothing to take it. Between the wet/dry pieces of one
+  river, the planes across both ends left a dry wedge on the outside of
+  every bend. Traced rivers are now all wet (`--wet-grade` defaults to
+  Infinity): a steep reach is a staircase of pools, not a dry ravine.
+- **The shader.** `flowMode: "field"`: world-space texture (one texel size
+  everywhere), advected in two phases along the current. The current rides
+  in the mesh's uv as m/s. Rapids froth by speed.
+
+Measured after, same world, 400 river cells: shoreline vertices sit at
+ground − water p10/p50/p90 = −0.04 / +0.35 / +0.35 m, against p10 −1.49 m
+in a first run of the same check. Outside three broken rivers, under 1 % of
+shore vertices hang more than 0.3 m. Field build 0.26 s; water adds ~3 ms
+per cell.
+
+Traps:
+
+- **Two meshes are not a shore.** Lake and river materials can differ, so a
+  cell may emit two meshes that share a seam. Weld by position before looking
+  for boundary edges (`_water-check.mts` does).
+- **Compare against the drawn terrain.** Check shorelines against the lattice
+  heights bilinearly, not against `height()` between lattice points. The mesh
+  is linear there, and the difference read as a 1 m hanging edge.
+- **A river beside a lake it does not reach** draws two touching water
+  bodies at different heights. The mesh skips any lattice square whose water
+  varies more than 2.5 m, or it drew a sheer wall between them.
+- **A bed far above its valley still cannot be watered.** Ground more than
+  3 m under the lowest bed that reaches a point gets no water (it would
+  float), so such a river shows a dry gap. That is a data fault; see
+  docs/world-editing/rivers.md.
+
+#### Round 2: banks, a network, and the build order
+
+Derek, the same day: roads ran under the rivers, there was still some geometry
+confusion, and the water should sit lower so a river has a bank. He also said a
+full rebuild of the mmo world was fine. What changed:
+
+- **Freeboard** (`RIVER_FREEBOARD`, 1.5 m). A pool may not stand higher than
+  the lower bank less the freeboard. The bank is sampled with no river carved,
+  on both sides and under the centre, and smoothed over seven samples. The
+  last part matters: a traced course riding along a canyon floor has its
+  banks on the rim. Where the cap bites, the level drops a whole pool step at
+  once.
+- **The channel is cut as a channel.** The wet carve is a flat bed, then one
+  bank slope past the waterline and on up to the land (a smooth minimum, never
+  a crease). The old blend toward the bed left the land 0.48 m over the water
+  three-quarters of a bank out. It is now ~2.0 m (p10 1.7).
+- **The network is solved as one.** A tributary runs INTO its trunk, so a
+  trunk standing higher at the confluence than the tributary arriving is
+  lowered from a little above the confluence to its mouth. That repeats until
+  nothing moves. The tributary's last points then take the trunk's level.
+- **Capture.** A river whose course crosses another's channel ends there,
+  joined to it, and the rest of its course is dropped. The one with the higher
+  bed at the crossing is captured. On the old mmo trace, river-132 zigzagged
+  across river-14.3 five times.
+- **Waterfalls.** A lattice square is skipped only when its water differs by
+  more than 10 m (two bodies that merely touch). A captured river's drop into
+  its trunk is drawn as falling water, not cut out.
+- `worldgen status` now looks at the built world. `rivers` fails on more than
+  100 m of river perched over its valley. `paths`/`trails` fail on any road
+  sample deeper under the water than a ford, which is what every old crossing
+  becomes when the water rules change.
+
+**The build order** (what `worldgen all` runs; nothing new, but every step
+matters now):
+
+1. `continents`, then `canyons`. Canyons come before rivers: the trace drains
+   through them.
+2. `rivers --trace` writes the course and a bed. The FIELD solves the water:
+   resample, capture, pools, freeboard, network. `--wet-grade` defaults to
+   Infinity, so every reach is wet.
+3. `towns`, then `terrace`. Towns are sited against the SOLVED water, so a
+   reach that turned wet moves them (6 towns stood in ex-dry gullies).
+4. `zones`, `paths`, `barriers`, `pois`, `trails`, `barriers`. Paths ford
+   under 6 m and bridge wider rivers, read from `field.rivers` (the solved,
+   captured list, not the recipe's).
+5. `caves`, `map`, then `spawn --scene` and `place-spawn.mts`.
+6. `worldgen status` until every procedural stage is ok, then
+   `_water-check.mts` for the shore fit.
+
+**Any change to the water rules in field.ts makes the world stale from step 3
+on.** Towns, paths and trails were solved against the old water, and
+`status` will say so. The mmo world was rebuilt this way in about 4 minutes:
+31 rivers, 0 crossings, 0 towns under water, 68 bridges, and 1.1 % of shore
+vertices hanging (mostly sea mouths under the ocean plane).
+
+#### Round 3: runs and waterfalls instead of pools
+
+Derek: the pooling looked odd, and on the very steep slopes the river's
+gradual stepping looked wrong. The level held flat and then dropped a 1.2 m
+ledge every few samples, so a gentle river showed small cliffs and a mountain
+river a staircase of ramps. Real water does neither. It slopes a little where
+the valley does, and on steep ground it drops the whole height at once.
+
+- **Runs.** The water may stand no higher than its TARGET (the old natural
+  surface, or the bank cap). It follows the target down at up to
+  `RIVER_RUN_GRADE` (3 %): level on the flat, a gentle slope where the valley
+  falls. The terrain-clipped mesh draws a gentle slope exactly, so the pools
+  are no longer needed for fit.
+- **Waterfalls.** Where the target falls faster than a run can follow, the
+  river drops to the lowest target in the next 48 m, at least
+  `RIVER_FALL_MIN` (2 m) and at most `RIVER_FALL_MAX` (12 m). One fall then
+  does the work of many steps.
+- **Carved falls.** Each fall gets a point `RIVER_FALL_LIP` (3 m) above the
+  next sample. The bed and the water hold their level to that point and drop
+  over it, so the fall is a cliff, not an 8 m ramp. The foot is cut into a
+  plunge pool, a quarter of the drop deep (at most 2.5 m). The lip is wider
+  than a lattice square on purpose: at 1.5 m, a fall running diagonally
+  across the lattice snapped to a zigzag of white teeth.
+- **The mesh.** A lattice square whose water spans more than 1.5 m (a fall
+  face) is drawn whole or not at all, never clipped corner by corner against
+  the gorge walls. Squares spanning up to 16 m are drawn, so a fall is a
+  falling sheet, and its speed turns it white.
+- **The audit** now checks that WATER never climbs. Beds do climb, out of
+  every plunge pool.
+
+On the rebuilt mmo world: 246 falls, height p10/p50/p90 1.8 / 7.0 / 10.2 m,
+spaced a median 48 m apart; 98 % of river length is running water. Open: one
+gate at (8066, 2541) where three paths meet 1 m under a pool. Mist or spray
+at the falls would be a VFX pass (standing-effect `vfx` component).
+
+**Trap:** the dev server's terrain WORKER can keep serving old core code after
+an edit to field.ts or chunk.ts. For screenshots, start a throwaway
+`npx vite --port 5199 --force` rather than trusting the running one.
+
+#### Round 4: lowland rivers, one fall each
+
+Derek: still too many waterfalls, and waterfalls should feel unique; rivers
+should be special, or keep to flatter land. Measured first: the traced rivers
+were short mountain streams (median ~0.9 km, 57 m of drop each, a quarter of
+their length steeper than 4 %). No fall rule fixes that. At that grade any
+river is a staircase. He chose lowland rivers with one signature fall each.
+
+- **Lowland heads** (`worldgen rivers`, `--lowland-grade` 0.04,
+  `--min-river` 300). A traced river begins where its bed falls less than 4 %
+  over the next 200 m, or where it leaves a lake. The steep headwater above is
+  left as land, and a channel with under 300 m of lowland is dropped.
+- **One fall per river** (field.ts, pass 3). The envelope (pass 1) is the
+  highest the water may stand. From the mouth up, the water rises at most
+  `RIVER_RUN_GRADE` (3 %) per metre, except across ONE fall: the sharpest drop
+  of the envelope within `RIVER_FALL_WINDOW` (60 m), if that is at least
+  `RIVER_FALL_MIN` (6 m). Everywhere else the channel is cut down under the
+  envelope. Trunks are solved before tributaries, so a tributary grades down
+  to its trunk's level instead of falling into it.
+- A fall square may span up to 64 m of water (`WATER_MAX_STEP`), so the tall
+  falls draw whole.
+
+The mmo world was rebuilt. It has 26 rivers and 30 falls (from 246). Falls
+are p10/p50/p90 2 / 23 / 41 m high, a median 470 m apart, and most are the
+river's plunge off the coastal scarp. River length steeper than 4 % fell from
+26 % to 6 %. Banks stand 2.0 m over the water, 1.2 % of shore vertices hang,
+0 towns and 0 road points are under water, and there are 49 bridges.
+lake-12 lost its river: the only channel through it was a mountain stream.

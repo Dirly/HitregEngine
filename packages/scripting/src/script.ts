@@ -72,6 +72,13 @@ export interface AnimationLayerOptions {
    * sprint underneath it.
    */
   speed?: number;
+  /**
+   * Hold the layer's playhead at the BASE clip's normalised phase plus this
+   * many cycles, paced to the base, every frame (`speed` is ignored while
+   * locked) — a stance's upper body swinging in time with another clip's legs.
+   * See `carryPhaseOffset`.
+   */
+  phaseLock?: number;
 }
 
 /** What `ctx.biomeAt` reports: the voxel world's biome blend at a point. */
@@ -85,6 +92,16 @@ export interface BiomeAt {
   temperature: number;
   moisture: number;
   slope: number;
+}
+
+/** What `ctx.regionAt` reports: the zone a point lies in. */
+export interface RegionAt {
+  id: string;
+  name: string;
+  /** Region tags — "town" marks a town zone, "safe" a sanctuary. */
+  tags: readonly string[];
+  /** World [x, z] of the zone's centre (a town's square), when it has one. */
+  hub?: readonly [number, number];
 }
 
 /**
@@ -138,6 +155,37 @@ export interface ModelLook {
   glow?: ItemGlow | null;
   /** Standing effects anchored on the model (`appearance.effects`); replaces the previous set; undefined leaves it alone. */
   effects?: readonly ItemEffect[];
+  /**
+   * Per-part sheets on ONE model (several worn items on the body — core
+   * `composeModelLook`): each group's parts wear its sheet, drawn in the shader
+   * with no material of its own. Null clears it (every part back on `texture`);
+   * undefined leaves it alone. Parts no group names hide when `parts` says so.
+   */
+  groups?: ReadonlyArray<{ parts: readonly string[]; texture?: string | null }> | null;
+  /** Skin tone (CSS hex) recolouring the model page's skin texels; null = the painted skin; undefined leaves it. */
+  skinTint?: string | null;
+  /**
+   * The model's sheets that paint bare skin (opt-in): `{ texture }` = the whole sheet, `{ texture, parts }` =
+   * only those parts' islands. Pass every sheet any wearer may show, the same list each time.
+   */
+  skinSheets?: ReadonlyArray<{ texture: string; parts?: readonly string[] }>;
+  /**
+   * `skinTint` recolours the WHOLE sheet instead of its skin texels (the hair
+   * ubermesh: every texel is hair). Fixed per model: pass the same value every time.
+   */
+  tintWhole?: boolean;
+  /** Uniform scale of the model (the whole skinned body: the female body is the male rig at 0.96); undefined leaves it. */
+  scale?: number;
+}
+
+/** A model's own tables, from its glTF extras (`parts`, `tiles`, `rules` — see unwrap-weapon / weapon-page / reskin). */
+export interface ModelTables {
+  /** Part name → part index; null = not an ubermesh. */
+  parts: Record<string, number> | null;
+  /** Sheet ids packed on the model's page (its `tiles` table). */
+  tiles: string[];
+  /** Which parts go together and what they cover on other models (core partRulesSchema); null = none. */
+  rules: unknown;
 }
 
 /** What scripts may touch. Deliberately narrow; grows with the engine. */
@@ -188,6 +236,13 @@ export interface ScriptContext {
    */
   viewDirection?(): [number, number, number];
   /**
+   * Where a world point lands on screen, in CSS pixels from the viewport's
+   * top-left, with its distance from the camera — or null when it is behind
+   * the camera or off screen. For DOM overlays that follow things in the world
+   * (name tags, markers) without a draw call each. Absent headless.
+   */
+  worldToScreen?(x: number, y: number, z: number): { x: number; y: number; distance: number } | null;
+  /**
    * The local player just ACTED — moved, cast, attacked. A host whose camera
    * has been parked somewhere else (a free look swung round to see the
    * character's face) brings it back behind the aim. Cheap and idempotent:
@@ -215,6 +270,12 @@ export interface ScriptContext {
        * no-op that reads as a frozen character.
        */
       restart?: boolean;
+      /**
+       * Start the new clip at the outgoing one's PHASE (normalised time)
+       * rather than at frame 0 — for a switch between two cycles, like walk
+       * to run, whose steps should carry on across the crossfade.
+       */
+      sync?: boolean;
     },
   ): void;
   /**
@@ -241,6 +302,14 @@ export interface ScriptContext {
    */
   animationDuration?(clip: string): number | null;
   /**
+   * Where this entity's BASE clip is in its cycle: which clip, and its playhead
+   * as a fraction of the clip (0..1). Read-only. For acting in time with the
+   * pose rather than with the clock — a footstep when the foot lands. During a
+   * held blend the heavier clip answers; during a crossfade the incoming one.
+   * Null with no model, or nothing playing (a headless host has no playhead).
+   */
+  animationPhase?(): { clip: string; t01: number } | null;
+  /**
    * Scale this entity's animation playback (1 = the authored rate). The cure
    * for foot-skate on in-place locomotion clips — see AnimationSystem.setSpeed.
    */
@@ -257,10 +326,19 @@ export interface ScriptContext {
   setAnimationLayer?(clip: string, opts?: AnimationLayerOptions): void;
   /** Fade the animation layer out and give the base clip the whole body back. */
   clearAnimationLayer?(fadeSeconds?: number): void;
-  /** Play this entity's audio component, or any sound asset id, at this entity. */
-  playSound?(soundId?: string, opts?: { volume?: number; positional?: boolean; refDistance?: number; playbackRate?: number; priority?: number }): void;
+  /**
+   * Play this entity's audio component, or any sound asset id, at this entity —
+   * or, with `at`, at that world point (an ambient bird call off in the trees).
+   */
+  playSound?(soundId?: string, opts?: { volume?: number; positional?: boolean; refDistance?: number; playbackRate?: number; priority?: number; at?: readonly [number, number, number] }): void;
   /** Material/surface name under a world point; hosts return a sensible fallback when unknown. */
   surfaceAt?(x: number, y: number, z: number): string;
+  /** True while the world around the player is still streaming in (a scene switch, a fresh spawn). */
+  worldLoading?(): boolean;
+  /** Whether a sound asset id exists in this project (a pattern-built id may not). */
+  hasSound?(soundId: string): boolean;
+  /** Seconds of a sound once it has been decoded; undefined before the first load (or for a missing sound). */
+  soundDuration?(soundId: string): number | undefined;
   /** Keep a named script-owned loop alive; omit soundId to stop that slot. */
   setSoundLoop?(slot: string, soundId?: string, opts?: { volume?: number; positional?: boolean; refDistance?: number }): void;
   /** Mutate this entity's billboard at runtime (HP bar fill, label text) — never the document. */
@@ -304,6 +382,13 @@ export interface ScriptContext {
    */
   setModelLook?(entityId: string, look: ModelLook): void;
   /**
+   * A model's part/tile/rule tables (its glTF extras), loaded once and shared.
+   * Resolves null for an unknown model or on a host that draws nothing (the
+   * dedicated server). What a look needs to know about OTHER models: which
+   * sheets a page has (a woman's `-f` chest), what a helm hides.
+   */
+  modelTables?(assetId: string): Promise<ModelTables | null>;
+  /**
    * Drive the scene's sky per frame without a rebuild: gradient, fog, the
    * directional light's aim/colour/intensity, the dome's sun and moon discs,
    * ambient and IBL intensity. Every field is a uniform or a light property;
@@ -335,6 +420,8 @@ export interface ScriptContext {
   setPostFx?(opts: LivePostFxOptions): void;
   /** The procedural world's biome blend under a point (voxel worlds only); null off-world or in a scene without one. */
   biomeAt?(x: number, z: number): BiomeAt | null;
+  /** The named zone (recipe `regions`) under a point, nested town zones first; null outside every zone. */
+  regionAt?(x: number, z: number): RegionAt | null;
   /**
    * The water over a world point, or null where there is none. `y` is what the
    * returned `depth` is measured against — pass the body's feet and `depth` is
@@ -809,6 +896,14 @@ export abstract class Script {
    * them; see `ScriptRegistry.register`.
    */
   static dataTypes: ScriptDataTypeDecl[] = [];
+  /**
+   * PRESENTATION only: it draws what replicated state says (a worn look, an
+   * item on a bone) and changes nothing anyone else reads. Such a script keeps
+   * running on bodies this tab does not simulate — another player's body, a
+   * host-simulated NPC — where every other script is suspended; otherwise a
+   * remote player would stand there without their face, armour or sword.
+   */
+  static presentation = false;
 
   ctx!: ScriptContext;
 

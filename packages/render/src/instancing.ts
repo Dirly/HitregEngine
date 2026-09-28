@@ -1,4 +1,5 @@
 import * as THREE from "three/webgpu";
+import { APPEARANCE_FLOATS, appearanceColorNode, appearanceTileNode, skinPageOf, tileTableOf, type SkinContext } from "./appearance.js";
 import {
   Fn,
   attribute,
@@ -424,6 +425,48 @@ export function applyInstanceGlow(material: THREE.Material): void {
   node.needsUpdate = true;
 }
 
+/**
+ * Per-instance APPEARANCE (appearance.ts): each part's tile and a skin tone,
+ * as ONE interleaved buffer of 16 floats — `instanceAppearance0..2` the
+ * part→tile codes, `instanceAppearance3` the tint (linear rgb, on). One
+ * buffer: a moving batch already binds seven (position, normal, uv, uv1, the
+ * matrices, uber, glow), and WebGPU guarantees eight. A model that brings a
+ * vertex colour or tangent attribute on top will not build with it.
+ */
+export const INSTANCE_APPEARANCE_ATTRIBUTES = [
+  "instanceAppearance0",
+  "instanceAppearance1",
+  "instanceAppearance2",
+  "instanceAppearance3",
+] as const;
+const APPEARANCE_FLAG = "isInstanceAppearanceMaterial";
+
+/**
+ * Make an {@link applyInstanceUber} material draw each part at its own tile
+ * (code 0 = the instance's uber tile, so an instance with no table draws as
+ * before) and tint skin. Call AFTER applyInstanceUber and applyInstanceGlow;
+ * the batch must {@link InstancedProps.enableAppearance}. Idempotent.
+ */
+export function applyInstanceAppearance(
+  material: THREE.Material,
+  tiles: Record<string, readonly number[]> | null | undefined,
+  opts: { skin?: SkinContext | null } = {},
+): void {
+  const node = material as THREE.NodeMaterial & { map?: THREE.Texture | null };
+  if (node.isNodeMaterial !== true || node.userData[APPEARANCE_FLAG] === true) return;
+  const map = node.map;
+  if (!map) return;
+  const page = opts.skin && (opts.skin.whole || opts.skin.sheets.length) ? skinPageOf(map, opts.skin, tiles) : null;
+  const [a0, a1, a2, a3] = INSTANCE_APPEARANCE_ATTRIBUTES.map((name) => attribute<"vec4">(name, "vec4")) as unknown as [
+    THREE.Node, THREE.Node, THREE.Node, THREE.Node,
+  ];
+  const uber = attribute<"vec4">(INSTANCE_UBER_ATTRIBUTE, "vec4");
+  const tile = appearanceTileNode([a0, a1, a2], tileTableOf(tiles, [0, 0, 1]), uber.xyz);
+  node.colorNode = appearanceColorNode(map, tile, vertexStage(a3), page, (node as unknown as { color?: THREE.Color }).color ?? null);
+  node.userData[APPEARANCE_FLAG] = true;
+  node.needsUpdate = true;
+}
+
 /** True when {@link applyInstanceUber} has been applied to the material. */
 export function isInstanceUberMaterial(material: THREE.Material): boolean {
   return material.userData[UBER_FLAG] === true;
@@ -494,6 +537,8 @@ export class InstancedProps extends THREE.Mesh {
    * separate glow buffers made nine and the pipeline failed to build.
    */
   private glow: THREE.InstancedInterleavedBuffer | null = null;
+  /** Per-instance part tiles + skin tint (16 floats); null until {@link enableAppearance}. */
+  private appearance: THREE.InstancedInterleavedBuffer | null = null;
 
   constructor(base: THREE.BufferGeometry, material: THREE.Material | THREE.Material[], count: number) {
     const capacity = Math.max(count, 1);
@@ -588,6 +633,11 @@ export class InstancedProps extends THREE.Mesh {
     this.geometry.setAttribute(INSTANCE_GLOW_TIME_ATTRIBUTE, new THREE.InterleavedBufferAttribute(this.glow, 4, 12));
   }
 
+  /** True once {@link enableGlow} has run. */
+  get hasGlow(): boolean {
+    return this.glow !== null;
+  }
+
   /**
    * Glow of one instance: colour already × intensity, the parts that glow, its
    * pulse (speed 0 = steady), and its moving noise (amount 0 = flat).
@@ -623,6 +673,39 @@ export class InstancedProps extends THREE.Mesh {
       index * GLOW_STRIDE,
     );
     this.glow.needsUpdate = true;
+  }
+
+  /**
+   * Allocate the appearance buffer (zeros = every part on the uber tile, no
+   * tint). Every batch drawn with an {@link applyInstanceAppearance} material
+   * must have called this.
+   */
+  enableAppearance(): void {
+    if (this.appearance) return;
+    this.appearance = new THREE.InstancedInterleavedBuffer(
+      new Float32Array(this.capacity * APPEARANCE_FLOATS),
+      APPEARANCE_FLOATS,
+      1,
+    );
+    INSTANCE_APPEARANCE_ATTRIBUTES.forEach((name, i) => {
+      this.geometry.setAttribute(name, new THREE.InterleavedBufferAttribute(this.appearance!, 4, i * 4));
+    });
+  }
+
+  /** One instance's 16 appearance floats (appearance.ts encodeAppearance). */
+  setAppearanceAt(index: number, data: ArrayLike<number>): void {
+    if (!this.appearance) {
+      console.warn("[render] InstancedProps.setAppearanceAt before enableAppearance(); ignored");
+      return;
+    }
+    const a = this.appearance.array as Float32Array;
+    for (let k = 0; k < APPEARANCE_FLOATS; k++) a[index * APPEARANCE_FLOATS + k] = data[k] ?? 0;
+    this.appearance.needsUpdate = true;
+  }
+
+  /** True once {@link enableAppearance} has run. */
+  get hasAppearance(): boolean {
+    return this.appearance !== null;
   }
 
   /** True once {@link enableUvRotation} has run. */

@@ -85,27 +85,67 @@ const EMPTY_MESH: VoxelMesh = {
 // library. The host (playground asset loader, worldgen CLI, a test) registers
 // worlds once; everything downstream resolves by id.
 
-const worlds = new Map<string, WorldField>();
+// A project can hold several recipes (the live world, older versions, test
+// fields) while a session streams one. A built field is large, so loaders
+// register recipes and the field is built the first time something asks for
+// it: building every recipe at load had five unused worlds holding ~200 MB of
+// the MMO tab's heap.
+interface WorldEntry {
+  recipe: WorldRecipe;
+  field: WorldField | null;
+  /** Building threw: warned once, and `getVoxelWorld` answers null until re-registered. */
+  failed: boolean;
+}
+const worlds = new Map<string, WorldEntry>();
 
 /** Register/replace a world recipe. Returns the built field. Throws on an invalid recipe. */
 export function registerVoxelWorld(id: string, recipe: unknown): WorldField {
-  const parsed = worldRecipeSchema.parse(recipe);
-  const field = createWorldField(parsed);
-  worlds.set(id, field);
-  invalidateVoxelWorld(id);
-  return field;
+  return registerVoxelField(id, worldRecipeSchema.parse(recipe));
 }
 
 /** Register an already-parsed recipe (the CLI path, which parses once itself). */
 export function registerVoxelField(id: string, recipe: WorldRecipe): WorldField {
   const field = createWorldField(recipe);
-  worlds.set(id, field);
+  worlds.set(id, { recipe, field, failed: false });
   invalidateVoxelWorld(id);
   return field;
 }
 
+/**
+ * Register/replace a world recipe WITHOUT building its field; the first
+ * `getVoxelWorld` builds it. For loaders that register every recipe in a
+ * project. Throws when the recipe does not parse; a field that fails to build
+ * warns at first use and resolves to null.
+ */
+export function registerVoxelRecipe(id: string, recipe: unknown): WorldRecipe {
+  const parsed = worldRecipeSchema.parse(recipe);
+  worlds.set(id, { recipe: parsed, field: null, failed: false });
+  invalidateVoxelWorld(id);
+  return parsed;
+}
+
 export function getVoxelWorld(id: string): WorldField | null {
-  return worlds.get(id) ?? null;
+  const entry = worlds.get(id);
+  if (!entry || entry.failed) return null;
+  if (!entry.field) {
+    try {
+      entry.field = createWorldField(entry.recipe);
+    } catch (error) {
+      entry.failed = true;
+      console.warn(`[voxel] world recipe "${id}" failed to build:`, error);
+      return null;
+    }
+  }
+  return entry.field;
+}
+
+/**
+ * Whether anything has asked for this world's field (built, or tried and
+ * failed). A recipe edit to a world nobody uses has nothing to re-stream.
+ */
+export function isVoxelWorldInUse(id: string): boolean {
+  const entry = worlds.get(id);
+  return !!entry && (entry.field !== null || entry.failed);
 }
 
 export function voxelWorldIds(): string[] {
@@ -211,7 +251,7 @@ export function voxelMesh(source: VoxelMeshSource): VoxelMesh {
     meshCache.set(key, hit);
     return hit;
   }
-  const field = worlds.get(source.world);
+  const field = getVoxelWorld(source.world);
   if (!field) return EMPTY_MESH;
   const mesh = buildVoxelMesh(field, source);
   meshCache.set(key, mesh);

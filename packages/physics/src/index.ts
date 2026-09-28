@@ -32,3 +32,4 @@ export {
   type ShapeHit,
   type ShapecastOptions,
 } from "./queries.js";
+export { gltfCollisionGeometry, type GltfGeometryOptions } from "./gltf-geometry.js";

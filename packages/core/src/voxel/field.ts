@@ -43,6 +43,7 @@ import {
   type WorldRecipe,
   type ZoneAnchorDoc,
 } from "./recipe.js";
+import { applyFallSites, fallSiteGorge, fallSiteLedge, type SolvedFallSite } from "./fall-sites.js";
 
 // ------------------------------------------------------------------ geometry
 
@@ -112,6 +113,158 @@ const BUCKET = 96;
 
 /** The most a river may RAISE the ground under its channel to reach its bed (field.ts applyFeatures). */
 export const RIVER_MAX_BUILD = 10;
+
+/**
+ * Most the ground BESIDE water is ever built up (m): a river's levee, a lake's
+ * or river's rim. Water sits IN the land. A rim that had to stand metres over
+ * the ground to hold a level was a wall — a grassy ridge between a lake and
+ * the meadow behind it — and it was built inside the water's own reach, so
+ * the water ended short of it. Where more than this would be needed the shore
+ * is simply lower. (The bed inside a channel may still be built up by
+ * RIVER_MAX_BUILD: that is under the water, sediment in a hollow.)
+ */
+export const SHORE_MAX_BUILD = 1.2;
+
+/** How near a fall's foot (m) the blade filter looks, the neighbour distance, and the height that makes a blade. */
+const BLADE_RADIUS = 70;
+const BLADE_STEP = 4;
+const BLADE_HEIGHT = 3;
+const BLADE_AXES: readonly (readonly [number, number])[] = [[1, 0], [0, 1], [Math.SQRT1_2, Math.SQRT1_2], [Math.SQRT1_2, -Math.SQRT1_2]];
+
+/**
+ * Steepness (sin of the slope angle) over which lake, river and road paint
+ * gives way to the ground's own surface: full paint below 40 degrees, none
+ * above 53 — inside the default cliff rule (cliffStart 0.57 / cliffEnd 0.82),
+ * so a steep face is always the biome's cliff rock, never bed gravel.
+ */
+export const PAINT_STEEP_START = 0.64;
+export const PAINT_STEEP_END = 0.8;
+
+/**
+ * Spacing (m) every river is resampled to when the field is created, along a
+ * centripetal Catmull-Rom through its control points. The carve, the water
+ * surface and the paint all read the SAME resampled polyline — the old water
+ * ribbon splined through the points while the carve ran straight between
+ * them, so on every bend the water swung onto the bank. It is also the
+ * length of a rapid between two pools.
+ */
+export const RIVER_SAMPLE = 8;
+
+/**
+ * The last reach to the sea: where a river's natural surface is within this
+ * of the sea it runs straight down to it, so no fall stands at the mouth.
+ */
+export const POOL_STEP = 1.2;
+
+/**
+ * Steepest a river RUNS (rise over run). Where the land falls more gently the
+ * water follows it, level on the flat and sloping a little where the valley
+ * does; where it falls faster the river cannot keep up and drops over a
+ * waterfall instead. A lowland river is well under this; 3 % already reads as
+ * a quick stream.
+ */
+export const RIVER_RUN_GRADE = 0.03;
+
+/**
+ * A river's ONE waterfall. Each river keeps at most one fall, at the sharpest
+ * drop along it (the most height lost within `RIVER_FALL_WINDOW` metres), and
+ * only when that drop is at least `RIVER_FALL_MIN` metres. Everywhere else
+ * the water runs, and the channel is cut down into the land as far as that
+ * takes. A fall every fifty metres was a staircase; one per river is a place.
+ */
+export const RIVER_FALL_MIN = 6;
+const RIVER_FALL_WINDOW = 60;
+
+/**
+ * How far into its taper a river's head carries water (0..1 of the taper's
+ * growth). The taper narrows a head into a stream; it used to also leave the
+ * first half of it DRY, which read as a carved trench with the water missing.
+ */
+const HEAD_WET = 0.02;
+
+/** How far (m) an outlet's descent from its lake may stand over the bank cap before it gives way. */
+const OUTLET_RAMP = 6;
+
+/** How far (m) above and below a fall's lip the water is held to the bed's width. */
+const FALL_NARROW = 1.5;
+/** How far (m) above the lip and past it the cliffs beside a fall stand. */
+const FALL_WALL_UP = 10;
+/**
+ * Wall steepness (rise over run) of the slot gorge under a fall. 1.6 is
+ * about 58°: steep enough to read as a gorge, shallow enough that a 2 m
+ * lattice draws it as a face and not a blade. At 3 (six metres of rise per
+ * voxel) two gorge walls, or a gorge wall and the sea cliff, met in knife
+ * ridges one voxel thick (measured: 34x the natural count around falls).
+ */
+const FALL_GORGE_RISE = 1.6;
+
+/** Steepest a river bank may be cut (rise over run) when the land is too high to reach at the normal slope. */
+const BANK_MAX_RISE = 1.6;
+
+/** Most the rock beside a fall may stand over the ground it is built on (m): a shoulder, never a tower. */
+const FALL_WALL_RAISE = 4;
+
+/** How long the lip of a fall is (m): the bed and the water drop over this, a cliff, not a ramp — but wider than a lattice square, or a fall running diagonally across the lattice snaps to a zigzag of teeth. */
+const RIVER_FALL_LIP = 3;
+
+/**
+ * Least water over a river bed, in voxels. A channel under about 1.5 voxels
+ * deep cannot survive marching cubes: the bed pokes through the water in one
+ * place and leaves a gap under the edge in the next (measured: the traced
+ * channels held 1.4 voxels of depth and ~1 of water).
+ */
+export const MIN_WATER_VOXELS = 1.5;
+
+/**
+ * How far a river's water stands BELOW the lower of its two banks (m). The
+ * level is capped by the ground beside the channel (sampled without any
+ * river carved), so every river runs in a cut with a visible bank above the
+ * water instead of brimming at the top of a levee, and a traced bed that
+ * rides over a hollow is cut down through the ground beyond it instead of
+ * hanging above the hollow.
+ */
+export const RIVER_FREEBOARD = 1.5;
+
+/**
+ * How far past the bed's edge a river's water may reach, in banks. The field
+ * builds the bank up to the levee (a hand over the pool) by 0.63 of a bank
+ * and holds it there to 0.7; the water stops inside that, so wherever the
+ * ground beyond the levee falls away the water cannot follow it out.
+ */
+export const RIVER_WATER_REACH = 0.68;
+
+/** A river's waterfall, as solved: where it lands, how far it drops, which way the water goes. */
+export interface RiverFall {
+  river: string;
+  /** The foot of the fall (the plunge pool), world XZ. */
+  x: number;
+  z: number;
+  /** Water level at the lip and in the pool below. */
+  top: number;
+  bottom: number;
+  /** Unit direction the water travels, world XZ. */
+  dirX: number;
+  dirZ: number;
+  /** Channel width at the fall. */
+  width: number;
+  /** How far across the channel (from its centreline) the lip line governs: water, carve and banks. */
+  reach: number;
+}
+
+/** What `WorldField.waterSurface` reports for one point. */
+export interface SurfaceSample {
+  /** Water surface height. */
+  y: number;
+  /** Current in m/s along world X and Z (0 for a lake). */
+  flowX: number;
+  flowZ: number;
+  /** "lake" inside a lake's sheet, "river" in a channel. */
+  kind: "lake" | "river";
+  /** A lake's own material, when it names one. */
+  material?: string;
+  /** The river bed (or lake shore level) under this point: how deep the water may reach before it is a pit, not a channel. */
+  floor: number;
+}
 
 interface FeatureBuckets<T> {
   size: number;
@@ -530,6 +683,8 @@ export interface WorldField {
    * needs a bed (the water ribbons, the audit) must read instead of the doc.
    */
   readonly rivers: readonly RiverDoc[];
+  /** Every waterfall the rivers were solved with (at most one per river): what the mist, the map and the audit read. */
+  readonly falls: readonly RiverFall[];
   /** Ground height at (x, z) with every 2D feature applied. */
   height(x: number, z: number): number;
   /** Ground height from the noise bands ALONE — what the land would be with no rivers/roads/towns. */
@@ -564,6 +719,16 @@ export interface WorldField {
    * water, not just the ocean.
    */
   waterY(x: number, z: number): number | null;
+  /**
+   * The water SURFACE over (x, z) — lake or river, not the sea — written into
+   * `out`; false where no lake sheet or river channel reaches. Unlike
+   * `waterY` it does not look at the ground: the caller clips the surface
+   * against the terrain, which is what makes the water fill the bed exactly
+   * (chunk.ts builds each cell's water mesh this way).
+   */
+  waterSurface(x: number, z: number, out: SurfaceSample): boolean;
+  /** Could any lake or wet river reach into this XZ rectangle? A cheap bucket test to skip dry cells. */
+  waterNear(x0: number, z0: number, x1: number, z1: number): boolean;
   /**
    * Signed distance to the nearest coastline in metres, positive inland, or
    * +Infinity for a recipe without `bounds`. Where the shore profile is on
@@ -835,6 +1000,13 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
   const roadDocs = recipe.features.roads;
   const canyonDocs = recipe.features.canyons;
   const lakeDocs = recipe.features.lakes;
+  /** Water surface per point: the solved pools, or (before they are solved) most of the depth over the bed. */
+  function surfaceOf(r: RiverDoc): readonly number[] | undefined {
+    if (r.surfaceY && r.surfaceY.length === r.points.length) return r.surfaceY;
+    if (!r.bedY || r.bedY.length !== r.points.length) return undefined;
+    const n = r.points.length;
+    return r.bedY.map((b, i) => b + Math.max(0.4, (r.depths && r.depths.length === n ? r.depths[i]! : r.depth) * 0.7));
+  }
   /** A river's widest point: the reach must cover the whole channel wherever its width varies. */
   const riverWidest = (r: RiverDoc): number => (r.widths && r.widths.length > 0 ? Math.max(r.width, ...r.widths) : r.width);
   // three banks: the cut band widens to that on a tall cut (applyFeatures)
@@ -851,8 +1023,13 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       segmentsOf(
         docs,
         (r) => r.bedY,
-        // per-point depths ride the side channel, the same on both sides
-        (r) => (r.depths && r.depths.length === r.points.length ? [r.depths, r.depths] : [undefined, undefined]),
+        // the per-point WATER SURFACE rides the side channel, the same on both
+        // sides: the pools are solved once (refineRivers) and every consumer —
+        // carve, levee, waterY, the water mesh — reads the one level
+        (r) => {
+          const surface = surfaceOf(r);
+          return surface ? [surface, surface] : [undefined, undefined];
+        },
         (r) => (r.widths && r.widths.length === r.points.length ? r.widths : undefined),
       ),
       (i) => riverReach(docs[i]!),
@@ -1115,21 +1292,26 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     }
   }
   // rivers paint their beds and banks the same way, so cover that gates on the
-  // grass surface (the grass billboards) stops at the water
-  for (const river of riverDocs) {
-    const target = surfaceIndex(river.surface);
-    if (target < 0) continue;
-    for (let i = 0; i + 1 < river.points.length; i++) {
-      const a = river.points[i]!;
-      const b = river.points[i + 1]!;
-      paintSegments.push({ ax: a[0], az: a[1], bx: b[0], bz: b[1], half: river.width / 2 + river.bank * 0.45, verge: river.surfaceEdge, target, targets: null });
+  // grass surface (the grass billboards) stops at the water. Rebuilt once the
+  // rivers are resampled (refineRivers), so the paint follows the carve.
+  const buildPaint = (): FeatureBuckets<RoadSegment> => {
+    const all = paintSegments.slice();
+    for (const river of riverDocs) {
+      const target = surfaceIndex(river.surface);
+      if (target < 0) continue;
+      for (let i = 0; i + 1 < river.points.length; i++) {
+        const a = river.points[i]!;
+        const b = river.points[i + 1]!;
+        all.push({ ax: a[0], az: a[1], bx: b[0], bz: b[1], half: river.width / 2 + river.bank * 0.45, verge: river.surfaceEdge, target, targets: null });
+      }
     }
-  }
-  const roadPaint = makeBuckets<RoadSegment>(paintSegments, (s) => {
-    const pad = s.half + s.verge + 2;
-    return [Math.min(s.ax, s.bx) - pad, Math.min(s.az, s.bz) - pad, Math.max(s.ax, s.bx) + pad, Math.max(s.az, s.bz) + pad];
-  });
-  const hasRoadPaint = paintSegments.length > 0;
+    return makeBuckets<RoadSegment>(all, (s) => {
+      const pad = s.half + s.verge + 2;
+      return [Math.min(s.ax, s.bx) - pad, Math.min(s.az, s.bz) - pad, Math.max(s.ax, s.bx) + pad, Math.max(s.az, s.bz) + pad];
+    });
+  };
+  let roadPaint = buildPaint();
+  let hasRoadPaint = roadPaint.map.size > 0;
   // fine noise on the verge, so the dirt does not end on a mathematically
   // perfect stripe — the single tell that a road was generated rather than worn
   const vergeSpec: FbmSpec = { frequency: 0.075, amplitude: 1, octaves: 2, lacunarity: 2.2, gain: 0.5, ridged: false, seed: 1471 };
@@ -1614,16 +1796,17 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
         // Only a SMALL lift: ground metres under the water outside the outline
         // is a shelf the sheet should simply cover, and a berm that tall would
         // be a wall round the lake.
-        const berm = lake.waterY + 0.4;
-        if (out < berm && berm - out < 3) {
-          const hold = smoothstep(lake.bank * 0.3, lake.bank * 0.6, sd) * (1 - smoothstep(lake.bank * 0.7, lake.bank, sd));
-          out = out + (berm - out) * hold;
-        }
+        // (The berm that stood here — ground in 0.3–0.7 of a bank lifted to
+        // the surface + 0.4 — was a ring of ground INSIDE the sheet's reach:
+        // a ridge standing in the lake with the water ending short of it.
+        // containWater holds the shore now, outside the sheet only.)
       }
     }
 
     // How much of this column is under a LAKE, before the rivers have their
     // say: a river builds its floor everywhere except through standing water.
+    // a crafted cascade's pools stand on a rock ledge the rivers then cut into
+    if (solvedSites.length > 0) out = fallSiteLedge(solvedSites, x, z, out, RIVER_FALL_LIP);
     const lakeWet = wet;
     count = nearestPerOwner(riverSegs, x, z, hits);
     // The river's floor: the lowest bed of every channel whose band covers
@@ -1639,6 +1822,8 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     // the river it joins.
     let floor = Infinity;
     let floorW = 0;
+    /** How far the floor may build up here: the bed a lot (sediment), the banks a hand. */
+    let floorCap = RIVER_MAX_BUILD;
     for (let k = 0; k < count; k++) {
       const hit = hits[k]!;
       const river = riverDocs[hit.owner]!;
@@ -1652,9 +1837,25 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       // becomes twenty kilometres on (`bank` on the doc is the widest reach)
       const bankFull = riverBank(river, hit.width);
       const bank = bankFull * (0.35 + 0.65 * grow);
-      const depth = Number.isNaN(hit.side) ? river.depth : hit.side;
-      const full = Number.isNaN(hit.value) ? out - depth : hit.value;
-      const bed = out + (full - out) * (0.15 + 0.85 * grow);
+      let surface = hit.side;
+      const full = Number.isNaN(hit.value) ? out - river.depth : hit.value;
+      // a wet head is cut to its solved bed: the taper narrows it, it does not
+      // make it shallower (the water is solved from that bed, and a shallow
+      // head left the ground metres over its own water — a dry trench)
+      let bed = river.water && !Number.isNaN(hit.value) ? full : out + (full - out) * (0.15 + 0.85 * grow);
+      // At a fall the LIP LINE picks the level, not the nearest segment: the
+      // lip segment interpolates between the two, so the lower gorge's bank
+      // slope used to eat back into the upper level beside the lip.
+      const lipNow = river.water ? lipAt(x, z) : null;
+      if (lipNow && lipNow.lip!.owner === hit.owner && hit.along >= lipNow.lip!.along - 0.5 && hit.along <= lipNow.lip!.along + RIVER_FALL_LIP + 30) {
+        if (lipNow.rel < 0) {
+          bed = lipNow.lip!.bedTop;
+          surface = lipNow.lip!.top;
+        } else if (hit.along <= lipNow.lip!.along + RIVER_FALL_LIP + 0.5) {
+          bed = lipNow.lip!.bedBottom;
+          surface = lipNow.lip!.bottom;
+        }
+      }
       // The cut eases at a SLOPE LIMIT, not over one bank width: a channel
       // cut six metres into a hillside used to climb back to the ground
       // over the same 17 m as a channel cut one metre into a meadow — a
@@ -1662,11 +1863,54 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       // height (capped at three banks, which is the bucket reach), so a deep
       // cut is a valley side at about 22°, not a wall.
       const cutHeight = Math.max(0, out - bed);
-      const cutBand = Math.max(bank, Math.min(bank * 3, cutHeight * 2.5));
-      if (hit.distance > half + cutBand) continue;
-      const w = 1 - smoothstep(half, half + cutBand, hit.distance);
-      if (w <= 0) continue;
-      out = out + (Math.min(bed, out) - out) * w;
+      /** How strongly the cut holds here — what a dry gully's floor build follows. */
+      let w = 0;
+      if (river.water && grow >= HEAD_WET && !Number.isNaN(surface) && surface > bed) {
+        // A wet channel is CUT as a channel: the flat bed, then one bank
+        // slope that passes the waterline about 0.45 of a bank out and keeps
+        // rising until it meets the land. The old blend pulled the whole
+        // band toward the bed, so three-quarters of a bank out the land
+        // stood half a metre over the water (measured, mmo) — a brimming
+        // ditch, not a river in its banks. The slope is steep enough to show
+        // a bank (the freeboard above the water) and never steeper than a
+        // voxel can draw.
+        let rise = Math.max(0.35, Math.min(0.9, (surface - bed) / Math.max(1, bank * 0.45)));
+        // Below a fall the channel is a SLOT: walls near vertical for a stretch
+        // as long as the drop, easing back to ordinary banks. With the ordinary
+        // bank slope the gorge under a 25 m fall was a V seventy metres wide,
+        // cut back into the cliff top on both sides of the lip.
+        if (lipNow && lipNow.rel >= 0 && lipNow.lip!.owner === hit.owner) {
+          const drop = lipNow.lip!.top - lipNow.lip!.bottom;
+          rise += (FALL_GORGE_RISE - rise) * (1 - smoothstep(drop * 0.5, drop + 20, lipNow.rel));
+        }
+        // A cut too deep to meet the land at this slope within the carve's
+        // reach (three banks) is steepened until it does, up to BANK_MAX_RISE,
+        // instead of stopping in a wall: the old reach faded the cut out over
+        // two metres, which stood the land back up as a one-voxel cliff at the
+        // edge of every deep cut.
+        const maxReach = bank * 3;
+        if (cutHeight / rise + 2 > maxReach) rise = Math.min(Math.max(rise, BANK_MAX_RISE), Math.max(rise, cutHeight / Math.max(1, maxReach - 2)));
+        const reach = Math.min(maxReach, cutHeight / rise + 2);
+        const target = bed + Math.max(0, hit.distance - half) * rise;
+        if (hit.distance > half + reach) continue;
+        // a smooth minimum, so the bank rolls over into the land instead of creasing
+        const k = 1.2;
+        const h = Math.max(0, Math.min(1, 0.5 + (0.5 * (target - out)) / k));
+        const cut = target + (out - target) * h - k * h * (1 - h);
+        // and faded out over the last metres of the reach, where a cut too
+        // deep to meet the land (a gorge wider than three banks) must stop
+        // (over at least three voxels, so what remains is a slope the lattice can draw)
+        const fadeSpan = Math.min(reach * 0.5, Math.max(2, voxelSize * 3));
+        const fade = 1 - smoothstep(half + reach - fadeSpan, half + reach, hit.distance);
+        w = fade;
+        if (cut < out) out = out + (cut - out) * fade;
+      } else {
+        const cutBand = Math.max(bank, Math.min(bank * 3, cutHeight * 2.5));
+        if (hit.distance > half + cutBand) continue;
+        w = 1 - smoothstep(half, half + cutBand, hit.distance);
+        if (w <= 0) continue;
+        out = out + (Math.min(bed, out) - out) * w;
+      }
       // The floor AND the banks. A channel on a side slope had its downhill
       // bank below its own water surface — the carve only ever cut — so the
       // sheet's outer edge hung in the air over dry ground. The build target
@@ -1676,20 +1920,26 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       // ended. Only built above the sea (a mouth's bed is under the ocean
       // plane) and only under wet reaches — a dry gully just gets its floor.
       if (!Number.isNaN(hit.value) && bed > recipe.seaLevel) {
-        const wetReach = river.water && grow >= 0.5;
-        const levee = bed + Math.max(0.4, depth * 0.7) + 0.4;
+        const wetReach = river.water && grow >= HEAD_WET;
+        // the levee stands a hand over the POOL, which holds level while the
+        // ground falls away under it: without a bank above the pool's
+        // downstream end the water would run out over the meadow
+        const levee = (Number.isNaN(surface) ? bed + Math.max(0.4, river.depth * 0.7) : surface) + 0.5;
         const profile = wetReach ? bed + (levee - bed) * smoothstep(half, half + bank * 0.63, hit.distance) : bed;
         const hold = wetReach ? 1 - smoothstep(half + bank * 0.7, half + bank, hit.distance) : w;
+        if (profile < floor) floorCap = hit.distance <= half + 0.5 ? RIVER_MAX_BUILD : SHORE_MAX_BUILD;
         floor = Math.min(floor, profile);
         floorW = Math.max(floorW, hold);
       }
       // the waterline sits about two thirds of the way up the bank profile
       // (see chunk.ts, where the ribbon is cut to the same rule)
-      if (grow >= 0.5 && river.water) wet = Math.max(wet, 1 - smoothstep(half + bank * 0.45, half + bank * 0.8, hit.distance));
+      if (grow >= HEAD_WET && river.water) wet = Math.max(wet, 1 - smoothstep(half + bank * 0.45, half + bank * 0.8, hit.distance));
     }
     // bounded: a bed metres above the ground is sediment filling a hollow;
     // a bed a hundred metres above it is bad data, and no river builds a dam
-    if (floorW > 0 && floor > out) out = out + (Math.min(floor, out + RIVER_MAX_BUILD) - out) * floorW * (1 - lakeWet);
+    if (floorW > 0 && floor > out) out = out + (Math.min(floor, out + floorCap) - out) * floorW * (1 - lakeWet);
+    // a crafted cascade's site-scale gorge: bowls, amphitheatre headwalls, stepped walls
+    if (siteGorges.length > 0) out = siteGorgeAt(x, z, out);
     if (waterStageOnly) return out;
 
     for (const town of bucketAt(towns, x, z) as readonly TownDoc[]) {
@@ -1756,7 +2006,192 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       out = out + (embankment - out) * w;
     }
 
-    return out;
+    return containWater(x, z, out);
+  }
+
+  /**
+   * The last word on every column near water: at the edge of a river's or a
+   * lake's reach the ground stands a hand above that water, whatever the
+   * features before it did. The water mesh (chunk.ts) is clipped against the
+   * ground, so this is what keeps a pool inside its banks: without it, every
+   * place the levee was not built — a bed below sea level, a road cut, the
+   * build cap, a lake's inlet — let the water run out to the edge of its
+   * reach and stop there in mid-air (measured: 14 % of shore vertices).
+   * Never inside the water of any other lake or river, so a tributary's bank
+   * cannot dam the trunk it joins.
+   */
+  /**
+   * Rock beside every waterfall. From a little above the lip to just past its
+   * foot, the ground beside the channel (off the bed, out to about a bank)
+   * stands over the UPPER water, so the fall pours through a notch between
+   * two cliffs instead of over a slope the water has to drape across. Built
+   * up to 30 m (a coastal plunge), never inside a lake.
+   */
+  function fallWalls(x: number, z: number): { target: number; weight: number } {
+    let target = -Infinity;
+    let weight = 0;
+    const count = nearestPerOwner(riverSegs, x, z, hits);
+    // the bed of ANY wet channel is never walled: a branch splitting off to
+    // fall beside the main one runs through the main fall's shoulder
+    for (let k = 0; k < count; k++) {
+      const hit = hits[k]!;
+      const river = riverDocs[hit.owner]!;
+      if (!river.water) continue;
+      const half = (Number.isNaN(hit.width) ? river.width : hit.width) / 2;
+      if (hit.distance < half + 1) return { target, weight: 0 };
+    }
+    for (let k = 0; k < count; k++) {
+      const hit = hits[k]!;
+      const river = riverDocs[hit.owner]!;
+      const g = riverGeom[hit.owner];
+      if (!river.water || !g || g.falls.length === 0) continue;
+      const half = (Number.isNaN(hit.width) ? river.width : hit.width) / 2;
+      const bank = riverBank(river, hit.width);
+      const inside = hit.distance - half;
+      if (inside < 0 || inside > bank * 2.2 + voxelSize * 3) continue;
+      const lipNow = lipAt(x, z);
+      for (const f of g.falls) {
+        if (!lipNow || lipNow.lip!.owner !== hit.owner || Math.abs(lipNow.lip!.along - f.along) > 0.5) continue;
+        // UPSTREAM of the lip line only: the banks that keep the upper water
+        // in its channel up to the edge. Past the line the water is the
+        // curtain and the pool below, and walls there stood out over the cliff
+        // face as towers of dirt at the lake's level.
+        const rel = lipNow.rel;
+        if (rel < -FALL_WALL_UP - 3 || rel > 0.5) continue;
+        // eased over at least three voxels at every edge (upstream start, the
+        // rise off the channel): over a metre or two the 4 m lift stood as a
+        // blade the lattice drew as a knife ridge beside every lip
+        const ease = voxelSize * 3;
+        const alongW = smoothstep(-FALL_WALL_UP - ease, -FALL_WALL_UP, rel) * (1 - smoothstep(-0.5, 0.5, rel));
+        const sideW = smoothstep(0.2, 0.2 + ease, inside) * (1 - smoothstep(bank * 0.8, bank * 2.2 + ease, inside));
+        const w = alongW * sideW;
+        if (w <= 0) continue;
+        weight = Math.max(weight, w);
+        // sloping back from the channel, a shoulder of rock rather than a mesa
+        target = Math.max(target, f.top + 1 - Math.max(0, inside - 2) * 0.55);
+      }
+    }
+    if (weight > 0) {
+      for (const lake of bucketAt(lakes, x, z) as readonly LakeDoc[]) if (lakeDistance(lake, x, z) <= lake.bank * 0.75) return { target, weight: 0 };
+    }
+    return { target, weight };
+  }
+
+  function containWater(x: number, z: number, out: number): number {
+    const wall = fallWalls(x, z);
+    const held = containWaterEdges(x, z, out);
+    const walled = wall.weight <= 0 || wall.target <= held ? held : held + (Math.min(wall.target, held + FALL_WALL_RAISE) - held) * wall.weight;
+    return unblade(x, z, walled);
+  }
+
+  /** Re-entry guard: unblade samples its neighbours through height(), which ends here again. */
+  let inBlade = false;
+  const bladeWater: SurfaceSample = { y: 0, flowX: 0, flowZ: 0, kind: "lake", floor: 0 };
+  /**
+   * No blades near a waterfall. Around a fall several cuts meet — the gorge,
+   * the channel below it, a lake's shore, the sea scarp — and where two of
+   * them passed each other a strip of the old ground a metre or two wide was
+   * left standing between them, several metres over both (111 such columns
+   * within 90 m of the mmo world's falls). Within BLADE_RADIUS of a fall's
+   * foot a column standing more than BLADE_HEIGHT over BOTH its neighbours
+   * BLADE_STEP away on any axis is cut down to a little over the higher of
+   * them. Never below the water beside it plus a hand: a strip holding back
+   * a lake or a river is lowered, never breached.
+   */
+  function unblade(x: number, z: number, out: number): number {
+    if (inBlade || riverFalls.length === 0) return out;
+    let near = false;
+    for (const f of riverFalls) {
+      if ((f.x - x) ** 2 + (f.z - z) ** 2 < BLADE_RADIUS * BLADE_RADIUS) {
+        near = true;
+        break;
+      }
+    }
+    if (!near) return out;
+    // and only beside a channel (within its cut band): blades are left
+    // between cuts, and the open hillside around a fall has none to check
+    let banked = false;
+    const count = nearestPerOwner(riverSegs, x, z, hits);
+    for (let k = 0; k < count && !banked; k++) {
+      const hit = hits[k]!;
+      const river = riverDocs[hit.owner]!;
+      const half = (Number.isNaN(hit.width) ? river.width : hit.width) / 2;
+      if (hit.distance < half + riverBank(river, hit.width) * 3 + BLADE_STEP) banked = true;
+    }
+    if (!banked) return out;
+    inBlade = true;
+    try {
+      let cap = Infinity;
+      for (const [ax, az] of BLADE_AXES) {
+        const lx = x + ax * BLADE_STEP;
+        const lz = z + az * BLADE_STEP;
+        const rx = x - ax * BLADE_STEP;
+        const rz = z - az * BLADE_STEP;
+        const l = height(lx, lz);
+        if (out - l <= BLADE_HEIGHT) continue;
+        const r = height(rx, rz);
+        if (out - r <= BLADE_HEIGHT) continue;
+        let floor = Math.max(l, r) + 1;
+        if (waterSurface(lx, lz, bladeWater)) floor = Math.max(floor, bladeWater.y + SHORE_MAX_BUILD);
+        if (waterSurface(rx, rz, bladeWater)) floor = Math.max(floor, bladeWater.y + SHORE_MAX_BUILD);
+        cap = Math.min(cap, floor);
+      }
+      return Math.min(out, cap);
+    } finally {
+      inBlade = false;
+    }
+  }
+
+  function containWaterEdges(x: number, z: number, out: number): number {
+    let target = -Infinity;
+    let weight = 0;
+    const lipNow = lipAt(x, z);
+    for (const lake of bucketAt(lakes, x, z) as readonly LakeDoc[]) {
+      // a lake spilling over a fall ends at the lip line: no rim past it
+      if (lipNow && lipNow.rel > 0 && lake.waterY >= lipNow.lip!.top - 0.5) continue;
+      const sd = lakeDistance(lake, x, z);
+      if (sd <= lake.bank * 0.6) return out;
+      if (sd >= lake.bank * 1.1) continue;
+      // only where the sheet ENDS (0.75 of a bank): nothing inside the
+      // water is ever lifted, and the lift is a hand at most
+      weight = Math.max(weight, smoothstep(lake.bank * 0.64, lake.bank * 0.74, sd) * (1 - smoothstep(lake.bank * 0.85, lake.bank * 1.1, sd)));
+      target = Math.max(target, lake.waterY + 0.3);
+    }
+    const count = nearestPerOwner(riverSegs, x, z, hits);
+    for (let k = 0; k < count; k++) {
+      const hit = hits[k]!;
+      const river = riverDocs[hit.owner]!;
+      const g = riverGeom[hit.owner];
+      if (!river.water || Number.isNaN(hit.side) || !g) continue;
+      const grow = river.taper > 0 ? smoothstep(0, river.taper, hit.along) : 1;
+      if (grow < HEAD_WET) continue;
+      // beyond an END only when the end is the nearest point of the river: a
+      // plane across the mouth tested on its own also cut away every stretch
+      // upstream that the river curled back past
+      const total = g.along[g.along.length - 1]!;
+      if (g.capEnd && hit.along >= total - 0.05 && (x - g.ex) * g.edx + (z - g.ez) * g.edz > 0) continue;
+      if (g.capStart && hit.along <= 0.05 && (x - g.sx) * g.sdx + (z - g.sz) * g.sdz > 0) continue;
+      let half = ((Number.isNaN(hit.width) ? river.width : hit.width) / 2) * (0.2 + 0.8 * grow);
+      const bank = riverBank(river, hit.width) * (0.35 + 0.65 * grow);
+      // in a crafted plunge pool the rim moves out with the water: the pool
+      // is a channel whose waterline is the bowl's (sitePoolReach)
+      if (siteGorges.length > 0 && hit.distance - half > bank * 0.56) {
+        const pool = sitePoolReach(x, z, hit.owner);
+        if (pool - bank * RIVER_WATER_REACH > half) half = pool - bank * RIVER_WATER_REACH;
+      }
+      const inside = hit.distance - half;
+      if (inside <= bank * 0.56) return out;
+      if (inside >= bank) continue;
+      // at a fall the rim holds the level of the side of the lip line it is on
+      let level = hit.side;
+      if (lipNow && lipNow.lip!.owner === hit.owner && hit.along >= lipNow.lip!.along - 0.5 && hit.along <= lipNow.lip!.along + RIVER_FALL_LIP + 30) {
+        level = lipNow.rel < 0 ? lipNow.lip!.top : Math.min(level, lipNow.lip!.bottom);
+      }
+      weight = Math.max(weight, smoothstep(bank * 0.58, bank * 0.68, inside) * (1 - smoothstep(bank * 0.76, bank, inside)));
+      target = Math.max(target, level + 0.3);
+    }
+    if (weight <= 0 || target <= out) return out;
+    return out + (Math.min(target, out + SHORE_MAX_BUILD) - out) * weight;
   }
 
   function height(x: number, z: number): number {
@@ -2001,7 +2436,8 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
    * through a town square should be graded but not painted, and a desert track
    * is painted without being graded at all.
    */
-  function paintRoads(x: number, z: number, membership: Float32Array, out: Float32Array, offset: number): void {
+  function paintRoads(x: number, z: number, membership: Float32Array, out: Float32Array, offset: number, flat = 1): void {
+    if (flat <= 0) return;
     const near = bucketAt(roadPaint, x, z);
     if (near.length === 0) return;
     // nearest point on the nearest segment, and the verge that segment carries
@@ -2031,7 +2467,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     // ragged verge: without this the dirt ends on a perfect offset curve,
     // which is the single clearest tell that a road was generated
     const d = best + fbm2(vergeSpec, x, z, seed) * Math.min(1.5, verge * 0.6 + 0.4);
-    const w = 1 - smoothstep(half - verge * 0.2, half + verge, d);
+    const w = (1 - smoothstep(half - verge * 0.2, half + verge, d)) * flat;
     if (w <= 0.002) return;
     if (targets === null) {
       for (let s = 0; s < surfaceCount; s++) {
@@ -2063,7 +2499,8 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
   /** Paint a lake's bed and a ragged shore band with its `surface`, the same way a road paints its verge. */
   const lakePaintTargets = lakeDocs.map((l) => (l.surface ? surfaceIndex(l.surface) : -1));
   const hasLakePaint = lakePaintTargets.some((t) => t >= 0);
-  function paintLakes(x: number, z: number, out: Float32Array, offset: number): void {
+  function paintLakes(x: number, z: number, out: Float32Array, offset: number, flat = 1): void {
+    if (flat <= 0) return;
     const near = bucketAt(lakes, x, z) as readonly LakeDoc[];
     for (let i = 0; i < near.length; i++) {
       const lake = near[i]!;
@@ -2072,12 +2509,49 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       const sd = lakeDistance(lake, x, z);
       if (sd > lake.shore + 2) continue;
       const d = sd + fbm2(vergeSpec, x, z, seed) * Math.min(2, lake.shore * 0.4 + 0.4);
-      const w = 1 - smoothstep(lake.shore * 0.35, lake.shore, d);
+      const w = (1 - smoothstep(lake.shore * 0.35, lake.shore, d)) * flat;
       if (w <= 0.002) continue;
       for (let s = 0; s < surfaceCount; s++) {
         const cur = out[offset + s]!;
         out[offset + s] = cur + ((s === target ? 1 : 0) - cur) * w;
       }
+    }
+  }
+
+  // Rock masses an agent built at a crafted site ("add" blobs whose id starts
+  // with a fall site's id) are STONE, whatever their slope: a buttress with a
+  // gentle top painted grass and dirt read as a dirt mound (judge: "bare
+  // dirt"), which is the opposite of what it was built for.
+  const siteIds = (recipe.features.fallSites ?? []).map((site) => site.id);
+  const siteRockBlobs = recipe.features.blobs.filter((b) => b.op === "add" && siteIds.some((id) => b.id.startsWith(id)));
+  // the cliff surface first: Derek prefers the cliff texture along rivers
+  // and gorges over the grey rock one
+  const siteRockTarget = surfaceIndex("cliff") >= 0 ? surfaceIndex("cliff") : surfaceIndex("rock");
+  const siteRocks = makeBuckets(siteRockBlobs, (b) => {
+    const r = Math.max(b.radius, b.topRadius ?? b.radius) * Math.max(b.scaleX, b.scaleZ) + b.falloff + 3;
+    return [b.center[0] - r, b.center[2] - r, b.center[0] + r, b.center[2] + r];
+  });
+  const craftedSites = recipe.features.fallSites ?? [];
+  function paintSiteRocks(x: number, z: number, steep: number, out: Float32Array, offset: number): void {
+    if (siteRockTarget < 0) return;
+    let w = 0;
+    // and every steep face of a crafted site's gorge is the same stone: the
+    // rock masses are small beside a 50 m gorge whose walls are the biome's
+    // cliff, and the judge saw only those walls
+    for (const site of craftedSites) {
+      const d = Math.hypot(x - site.at[0], z - site.at[1]);
+      if (d > 100) continue;
+      w = Math.max(w, (1 - smoothstep(70, 100, d)) * smoothstep(0.35, 0.6, steep));
+    }
+    for (const b of bucketAt(siteRocks, x, z) as readonly BlobDoc[]) {
+      const d = Math.hypot((x - b.center[0]) / b.scaleX, (z - b.center[2]) / b.scaleZ);
+      const r = Math.max(b.radius, b.topRadius ?? b.radius);
+      w = Math.max(w, 1 - smoothstep(r * 0.8, r + b.falloff + 1.5, d + fbm2(vergeSpec, x, z, seed) * 1.2));
+    }
+    if (w <= 0.002) return;
+    for (let k = 0; k < surfaceCount; k++) {
+      const cur = out[offset + k]!;
+      out[offset + k] = cur + ((k === siteRockTarget ? 1 : 0) - cur) * w;
     }
   }
 
@@ -2091,10 +2565,18 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     offset: number,
   ): void {
     if (hasPatches) applyPatches(x, z, steep, membership, out, offset);
-    if (hasLakePaint) paintLakes(x, z, out, offset);
+    // Feature paint (lake shores, river beds and banks, road treads) is for
+    // GROUND: it fades out between PAINT_STEEP_START and PAINT_STEEP_END so a
+    // near-vertical face keeps the biome's cliff rock. It used to paint by
+    // plan distance alone, so every fall wall, gorge side and cut bank inside
+    // a river's paint band came out gravel or sand (measured on mmo: 69 % of
+    // the >55 degree faces near water).
+    const flat = 1 - smoothstep(PAINT_STEEP_START, PAINT_STEEP_END, steep);
+    if (hasLakePaint) paintLakes(x, z, out, offset, flat);
     // roads last: a track worn through the ground wins over the mottling it
     // was worn through
-    if (hasRoadPaint) paintRoads(x, z, membership, out, offset);
+    if (hasRoadPaint) paintRoads(x, z, membership, out, offset, flat);
+    if (siteRockBlobs.length > 0 || craftedSites.length > 0) paintSiteRocks(x, z, steep, out, offset);
   }
 
   function zoneName(): string {
@@ -2629,8 +3111,8 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
   }
 
   /** Surface height of a river's water over its bed: most of the LOCAL channel depth, never above the banks. */
-  function riverSurface(river: RiverDoc, bed: number, depth: number): number {
-    return bed + Math.max(0.4, (Number.isNaN(depth) ? river.depth : depth) * 0.7);
+  function riverSurface(river: RiverDoc, bed: number, surface: number): number {
+    return Number.isNaN(surface) ? bed + Math.max(0.4, river.depth * 0.7) : surface;
   }
 
   /** The highest river water surface over (x, z), or null when no wet channel reaches it. */
@@ -2645,8 +3127,12 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       const width = Number.isNaN(hit.width) ? river.width : hit.width;
       // out to the waterline, not just the flat bed: the bank profile crosses
       // the surface about two thirds of the way out (the ribbon uses the same rule)
-      const reach = (width / 2) * (0.2 + 0.8 * grow) + riverBank(river, hit.width) * (0.35 + 0.65 * grow) * 0.63;
-      if (Number.isNaN(hit.value) || hit.distance > reach || grow < 0.5) continue;
+      let reach = (width / 2) * (0.2 + 0.8 * grow) + riverBank(river, hit.width) * (0.35 + 0.65 * grow) * RIVER_WATER_REACH;
+      if (siteGorges.length > 0 && hit.distance > reach) {
+        const pool = sitePoolReach(x, z, hit.owner);
+        if (pool > reach) reach = pool;
+      }
+      if (Number.isNaN(hit.value) || hit.distance > reach || grow < HEAD_WET) continue;
       const y = riverSurface(river, hit.value, hit.side);
       if (best === null || y > best) best = y;
     }
@@ -2777,19 +3263,19 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     riverDocs = solved;
     riverSegs = buildRiverSegs(riverDocs);
   }
-  solveRiverBeds();
 
   /** The doc with its points resampled along a centripetal Catmull-Rom spline through them. */
-  function splineRiver(river: RiverDoc): RiverDoc {
+  function splineRiver(river: RiverDoc, spacing = Math.max(6, river.width * 0.5)): RiverDoc {
     const pts = river.points;
     const n = pts.length;
     if (n < 3) return river;
-    const spacing = Math.max(6, river.width * 0.5);
     const widths = river.widths && river.widths.length === n ? river.widths : null;
     const depths = river.depths && river.depths.length === n ? river.depths : null;
+    const beds = river.bedY && river.bedY.length === n ? river.bedY : null;
     const outPts: [number, number][] = [];
     const outW: number[] = [];
     const outD: number[] = [];
+    const outB: number[] = [];
     const at = (i: number): readonly [number, number] => pts[Math.max(0, Math.min(n - 1, i))]!;
     const lerp = (arr: readonly number[], i: number, t: number): number => arr[i]! + (arr[Math.min(n - 1, i + 1)]! - arr[i]!) * t;
     for (let i = 0; i + 1 < n; i++) {
@@ -2819,17 +3305,1428 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
         outPts.push([Math.round(point[0] * 100) / 100, Math.round(point[1] * 100) / 100]);
         if (widths) outW.push(lerp(widths, i, u));
         if (depths) outD.push(lerp(depths, i, u));
+        // linear, not splined: a bed that only descends must stay that way
+        if (beds) outB.push(lerp(beds, i, u));
       }
     }
     outPts.push([pts[n - 1]![0], pts[n - 1]![1]]);
     if (widths) outW.push(widths[n - 1]!);
     if (depths) outD.push(depths[n - 1]!);
-    return { ...river, points: outPts, ...(widths ? { widths: outW } : {}), ...(depths ? { depths: outD } : {}) };
+    if (beds) outB.push(beds[n - 1]!);
+    return {
+      ...river,
+      points: outPts,
+      ...(widths ? { widths: outW } : {}),
+      ...(depths ? { depths: outD } : {}),
+      ...(beds ? { bedY: outB } : {}),
+    };
   }
+
+  /** A two-point river with its midpoint added, so the spline has something to resample. */
+  function withMidpoint(river: RiverDoc): RiverDoc {
+    if (river.points.length !== 2) return river;
+    const a = river.points[0]!;
+    const b = river.points[1]!;
+    const mid = <T extends readonly number[] | undefined>(arr: T): number[] | undefined =>
+      arr && arr.length === 2 ? [arr[0]!, (arr[0]! + arr[1]!) / 2, arr[1]!] : undefined;
+    const widths = mid(river.widths);
+    const depths = mid(river.depths);
+    const bedY = mid(river.bedY);
+    return {
+      ...river,
+      points: [[a[0], a[1]], [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], [b[0], b[1]]],
+      ...(widths ? { widths } : {}),
+      ...(depths ? { depths } : {}),
+      ...(bedY ? { bedY } : {}),
+    };
+  }
+
+  // ------------------------------------------------------------------ pools
+  /** Per river (index into riverDocs): cumulative length at each point, and both ends with their outward directions. */
+  let riverFalls: RiverFall[] = [];
+  /** Agent-crafted fall sites as solved (fall-sites.ts): the pools their ledges hold up. */
+  let solvedSites: SolvedFallSite[] = [];
+  /** Every crafted cascade's site-scale gorge (siteGorgeAt), built once the lips are known. */
+  let siteGorges: SiteGorge[] = [];
+  interface SiteGorgeTier {
+    lx: number;
+    lz: number;
+    dx: number;
+    dz: number;
+    /** Length of the lip segment (the drop happens over it). */
+    len: number;
+    top: number;
+    bottom: number;
+    half: number;
+    /** Widest half-width of this tier's pool bowl: its waterline, where the carved ground comes back up to the pool. */
+    bowlHalf: number;
+    /** Metres from this lip to the next one (the last: to the end of its bowl). */
+    poolLen: number;
+  }
+  interface SiteGorge {
+    /** The river (index into riverDocs) the site's lips are on: its water fills the bowls. */
+    owner: number;
+    minX: number;
+    minZ: number;
+    maxX: number;
+    maxZ: number;
+    /** The river's centreline through the site, with arc length. */
+    px: Float64Array;
+    pz: Float64Array;
+    ps: Float64Array;
+    tiers: SiteGorgeTier[];
+    cfg: ReturnType<typeof fallSiteGorge>;
+    seed: number;
+  }
+  /** Rise over run of a tier's headwall face (the curved cliff the fall pours off). */
+  const SITE_HEADWALL_RISE = 3;
+  /** Width (m) of the bowl's apron: from the waterline at the bowl edge up to the rim. */
+  const SITE_BOWL_APRON = 2.5;
+  /** Over how many metres (at the site's reach and past its last bowl) the shape eases out to the land. */
+  const SITE_GORGE_FADE = 15;
+
+  /**
+   * The site-scale shape of each crafted cascade, from its solved tiers: the
+   * lip lines on the river the site's path runs down, the channel width at
+   * each, and the river's centreline through the span.
+   */
+  function buildSiteGorges(): SiteGorge[] {
+    const out: SiteGorge[] = [];
+    for (const site of solvedSites) {
+      const doc = (recipe.features.fallSites ?? []).find((s) => s.id === site.id);
+      if (!doc || doc.template !== "cascade") continue;
+      const cfg = fallSiteGorge(doc);
+      if (!cfg.enabled || site.path.length < 2) continue;
+      const topLevel = site.path[0]!.level;
+      const lowLevel = site.path[site.path.length - 1]!.level;
+      const pathPts = site.path.map((p) => [p.x, p.z] as [number, number]);
+      const lips = lipList.filter((lip) => lip.top <= topLevel + 0.5 && lip.bottom >= lowLevel - 0.5 && distanceToPolyline(pathPts, lip.lx, lip.lz) <= 8);
+      if (lips.length === 0) continue;
+      // the river the site's lips are on: the owner of most of them
+      const tally = new Map<number, number>();
+      for (const lip of lips) tally.set(lip.owner, (tally.get(lip.owner) ?? 0) + 1);
+      const owner = [...tally.entries()].sort((a, b) => b[1] - a[1])[0]![0];
+      const own = lips.filter((lip) => lip.owner === owner).sort((a, b) => a.along - b.along);
+      const d = riverDocs[owner]!;
+      const along = riverGeom[owner]!.along;
+      const tiers: SiteGorgeTier[] = own.map((lip, i) => {
+        let k = 0;
+        while (k < along.length - 1 && along[k]! < lip.along - 1e-6) k++;
+        const len = k + 1 < along.length ? along[k + 1]! - along[k]! : RIVER_FALL_LIP;
+        const bank = (lip.reach - lip.half) / 2.5;
+        const next = own[i + 1];
+        return {
+          lx: lip.lx,
+          lz: lip.lz,
+          dx: lip.dx,
+          dz: lip.dz,
+          len,
+          top: lip.top,
+          bottom: lip.bottom,
+          half: lip.half,
+          // the channel with its bed widened `bowl` times: the bed out to
+          // bowl x half, then the channel's own bank reach to the waterline
+          // (bowl 1 is exactly the channel's water). The river's water follows
+          // the bowl out (sitePoolReach), so the pool fills it; bounded so the
+          // water, the apron and the containWater ring past it stay inside the
+          // river's segment index (half + 3 banks) and the lip's reach
+          bowlHalf: Math.max(lip.half, Math.min(cfg.bowl * lip.half + bank * RIVER_WATER_REACH, lip.half + bank * 2 - SITE_BOWL_APRON)),
+          poolLen: next ? next.along - lip.along : len + FALL_NARROW + 1 + cfg.lastPool,
+        };
+      });
+      const last = tiers[tiers.length - 1]!;
+      const a0 = own[0]!.along - 20;
+      const a1 = own[own.length - 1]!.along + last.poolLen + 2 * SITE_GORGE_FADE + 10;
+      const xs: number[] = [];
+      const zs: number[] = [];
+      const ss: number[] = [];
+      for (let k = 0; k < d.points.length; k++) {
+        const inRange = along[k]! >= a0 && along[k]! <= a1;
+        const edge = (k + 1 < d.points.length && along[k + 1]! >= a0 && along[k]! < a0) || (k > 0 && along[k - 1]! <= a1 && along[k]! > a1);
+        if (!inRange && !edge) continue;
+        xs.push(d.points[k]![0]);
+        zs.push(d.points[k]![1]);
+        ss.push(along[k]!);
+      }
+      if (xs.length < 2) continue;
+      let minX = Infinity;
+      let minZ = Infinity;
+      let maxX = -Infinity;
+      let maxZ = -Infinity;
+      for (let k = 0; k < xs.length; k++) {
+        minX = Math.min(minX, xs[k]! - cfg.reach);
+        maxX = Math.max(maxX, xs[k]! + cfg.reach);
+        minZ = Math.min(minZ, zs[k]! - cfg.reach);
+        maxZ = Math.max(maxZ, zs[k]! + cfg.reach);
+      }
+      let seedHash = seed | 0;
+      for (let i = 0; i < site.id.length; i++) seedHash = Math.imul(seedHash ^ site.id.charCodeAt(i), 0x01000193);
+      out.push({ owner, minX, minZ, maxX, maxZ, px: Float64Array.from(xs), pz: Float64Array.from(zs), ps: Float64Array.from(ss), tiers, cfg, seed: seedHash });
+    }
+    return out;
+  }
+
+  /**
+   * How open tier `t`'s bowl is at `rel` metres past its lip line, 0..1: 0
+   * at both necks (the water held to the channel at every lip, FALL_NARROW),
+   * 1 at the widest, a third of the way down. The ONE bowl shape: the carve
+   * (siteGorgeAt) and the pool's water (sitePoolReach) both read it. The far
+   * neck is measured from the NEXT lip's own line, not as poolLen down this
+   * one's: on a bend the two lines are not parallel, and a bowl measured
+   * from this lip alone stood open (and full) right up the next lip line
+   * beside the channel, widening that fall's curtain.
+   */
+  function siteBowlShape(g: SiteGorge, t: number, rel: number, x: number, z: number): number {
+    const tier = g.tiers[t]!;
+    const u0 = tier.len + FALL_NARROW + 1;
+    const next = g.tiers[t + 1];
+    let p: number;
+    if (next) {
+      // between the two lines: metres past this one's neck over the span
+      // to the next one's (on a straight channel exactly rel over the pool)
+      const fromTop = rel - u0;
+      const toNext = -((x - next.lx) * next.dx + (z - next.lz) * next.dz) - FALL_NARROW - 1;
+      p = fromTop > 0 && toNext > 0 ? fromTop / (fromTop + toNext) : -1;
+    } else p = tier.poolLen > u0 ? (rel - u0) / (tier.poolLen - u0) : -1;
+    return p > 0 && p < 1 ? Math.sin(Math.PI * Math.pow(p, 0.7)) : 0;
+  }
+
+  /**
+   * How far from the centreline a crafted pool's water reaches at (x, z) on
+   * river `owner`, or NaN where no crafted bowl is open. The pool is the last
+   * tier whose lip line the point is past (as in siteGorgeAt); its water runs
+   * out past the bowl's waterline over the apron, where the carve has already
+   * stood the ground `rim` over the pool, so the shore is where the bowl's
+   * ground rises out of it and the usual clip, foam and freeboard apply. Zero
+   * at the necks: at every lip the water is the channel's again.
+   */
+  function sitePoolReach(x: number, z: number, owner: number): number {
+    for (const g of siteGorges) {
+      if (g.owner !== owner || x < g.minX || x > g.maxX || z < g.minZ || z > g.maxZ) continue;
+      let t = -1;
+      let rel = 0;
+      for (let i = 0; i < g.tiers.length; i++) {
+        const tier = g.tiers[i]!;
+        const r = (x - tier.lx) * tier.dx + (z - tier.lz) * tier.dz;
+        if (r > 0) {
+          t = i;
+          rel = r;
+        }
+      }
+      if (t < 0) continue;
+      const shape = siteBowlShape(g, t, rel, x, z);
+      if (shape <= 0) continue;
+      const tier = g.tiers[t]!;
+      return tier.half + (tier.bowlHalf - tier.half) * shape + SITE_BOWL_APRON;
+    }
+    return NaN;
+  }
+
+  /** Smooth 1D value noise in [0, 1] along the channel (integer-hashed lattice, so every engine agrees). */
+  function siteNoise(s: number, channel: number, gorgeSeed: number): number {
+    const i = Math.floor(s);
+    const f = s - i;
+    const a = hashUnit(i, channel, 0, gorgeSeed);
+    const b = hashUnit(i + 1, channel, 0, gorgeSeed);
+    return a + (b - a) * f * f * (3 - 2 * f);
+  }
+
+  /**
+   * A crafted cascade's gorge, SITE-scale. The river carve alone makes a
+   * straight smooth slot under every fall; the shape here is built from the
+   * site's tiers instead and only ever cuts (a smooth minimum with the ground
+   * so far):
+   *
+   * - under each pool a rounded bowl, up to `bowl` x the channel wide, oval
+   *   and widest a third of the way down (a plunge pool), necked back to the
+   *   channel's own width wherever the water is held to it (FALL_NARROW);
+   *   its edge is the waterline, an apron then climbs to `rim` over the pool
+   *   so the banks hold it;
+   * - side walls that start a wandering distance out from the bowl (value
+   *   noise per side, `wavelength`) and step back in benches `step` high whose
+   *   levels are world heights, so they run on as strata from tier to tier;
+   * - at each lip the upper tier's shape carries on past the lip line and
+   *   falls away at SITE_HEADWALL_RISE from a curved line (`curve`·d² further
+   *   downstream at d across): a concave amphitheatre round the pool, not a
+   *   straight cut. Upstream of the first lip nothing changes.
+   *
+   * Everything eases out to the land over the last SITE_GORGE_FADE metres of
+   * `reach` and past the last bowl, and a bounding box keeps every other
+   * column to four comparisons.
+   */
+  function siteGorgeAt(x: number, z: number, out: number): number {
+    for (const g of siteGorges) {
+      if (x < g.minX || x > g.maxX || z < g.minZ || z > g.maxZ) continue;
+      const cfg = g.cfg;
+      // nearest point of the centreline: arc length, distance, side
+      let best = Infinity;
+      let s = 0;
+      let side = 1;
+      for (let k = 0; k + 1 < g.px.length; k++) {
+        const ax = g.px[k]!;
+        const az = g.pz[k]!;
+        const sx = g.px[k + 1]! - ax;
+        const sz = g.pz[k + 1]! - az;
+        const len2 = sx * sx + sz * sz;
+        const t = len2 < 1e-9 ? 0 : Math.max(0, Math.min(1, ((x - ax) * sx + (z - az) * sz) / len2));
+        const ex = x - (ax + sx * t);
+        const ez = z - (az + sz * t);
+        const d2 = ex * ex + ez * ez;
+        if (d2 >= best) continue;
+        best = d2;
+        s = g.ps[k]! + (g.ps[k + 1]! - g.ps[k]!) * t;
+        side = sx * ez - sz * ex >= 0 ? 1 : -1;
+      }
+      const dist = Math.sqrt(best);
+      if (dist >= cfg.reach) continue;
+      const last = g.tiers[g.tiers.length - 1]!;
+      const relLast = (x - last.lx) * last.dx + (z - last.lz) * last.dz;
+      // Past the last bowl the walls steepen back to the gorge slope the
+      // river carve makes and stop wandering, so the shape has already met
+      // the channel downstream by the time it is faded out: fading the
+      // HEIGHT of a wide terraced gorge closed it off in a pocket.
+      const exit = smoothstep(last.poolLen, last.poolLen + 2 * SITE_GORGE_FADE, relLast);
+      const w = (1 - smoothstep(cfg.reach - SITE_GORGE_FADE, cfg.reach, dist)) * (1 - smoothstep(last.poolLen + SITE_GORGE_FADE, last.poolLen + 2 * SITE_GORGE_FADE, relLast));
+      if (w <= 0) continue;
+      // per-side wander of the walls' foot, their mean slope, and a slow
+      // tilt of the bench levels: all low-frequency along the channel
+      const ch = side > 0 ? 1 : 2;
+      const lam = cfg.wavelength;
+      const wander = (1 - exit) * cfg.wander * (0.65 * siteNoise(s / lam, ch, g.seed) + 0.35 * siteNoise(s / (lam * 0.6), ch + 4, g.seed));
+      const slope = cfg.slope * (0.9 + 0.2 * siteNoise(s / (lam * 1.3), ch + 8, g.seed)) * (1 - exit) + FALL_GORGE_RISE * exit;
+      const tilt = cfg.step * 0.6 * siteNoise(s / (lam * 2), 12, g.seed);
+      let ground = out;
+      for (let t = 0; t < g.tiers.length; t++) {
+        const tier = g.tiers[t]!;
+        const rel = (x - tier.lx) * tier.dx + (z - tier.lz) * tier.dz;
+        if (rel <= 0) continue;
+        // this tier's pool shape at (rel, dist)
+        const level = tier.bottom;
+        const shape = siteBowlShape(g, t, rel, x, z);
+        const bowl = tier.half + (tier.bowlHalf - tier.half) * shape;
+        const apron = bowl + SITE_BOWL_APRON;
+        const rimY = level + cfg.rim;
+        let pool: number;
+        if (dist < bowl) pool = level - cfg.depth * shape * (1 - (dist / bowl) ** 4);
+        else if (dist < apron) pool = level + cfg.rim * smoothstep(bowl, apron, dist);
+        else if (dist < apron + wander) pool = rimY;
+        else {
+          // benches: a smooth staircase in world height, flat treads and
+          // risers about 2.1x the mean slope
+          const q = (rimY + slope * (dist - apron - wander) + tilt) / cfg.step;
+          const n = Math.floor(q);
+          const stepped = (n + smoothstep(0.3, 1, q - n)) * cfg.step - tilt;
+          pool = Math.max(rimY, stepped + (q * cfg.step - tilt - stepped) * exit);
+        }
+        // the upper tier's shape carries on past the lip and falls away as
+        // a curved headwall
+        // (over the distance to the curved face line, not along the lip: the
+        // curve bends the face out sideways, and it must stay this steep, no more)
+        const bend = 2 * cfg.curve * dist;
+        const ramp = (SITE_HEADWALL_RISE * Math.max(0, rel - cfg.curve * dist * dist)) / Math.sqrt(1 + bend * bend);
+        // a smooth maximum: where the face crosses the benches the edge is
+        // rounded over two metres, never a knife ridge
+        const upper = ground - ramp;
+        const hm = Math.max(0, Math.min(1, 0.5 + (0.5 * (upper - pool)) / 2));
+        const next = pool + (upper - pool) * hm + 2 * hm * (1 - hm);
+        ground += (next - ground) * smoothstep(0, 1.5, rel);
+      }
+      const depth = out - ground;
+      if (depth <= 0) continue;
+      // eased in over the first metre of depth, so the shape rolls into the
+      // land instead of creasing (C1, and exactly nothing where it does not
+      // cut: a symmetric smooth minimum dipped every untouched column)
+      const k = 1;
+      const cut = depth > k ? depth - k / 2 : (depth * depth) / (2 * k);
+      out -= cut * w;
+    }
+    return out;
+  }
+  /**
+   * Every fall's LIP LINE: the line across the channel at the lip point, the
+   * one place the upper water ends and the lower begins. Upstream of it within
+   * `reach` of the channel everything belongs to the upper level — the carve,
+   * the water, the banks — and downstream of it everything to the lower. The
+   * old rules asked "which segment is nearest", and a point beside the lip was
+   * nearest the lip SEGMENT, which interpolates between the two levels: the
+   * lower gorge's V ate back into the upper bank, the upper lake's reach hung
+   * out over the cliff, and walls and rims were built up to fight both.
+   */
+  interface Lip {
+    owner: number;
+    along: number;
+    lx: number;
+    lz: number;
+    dx: number;
+    dz: number;
+    top: number;
+    bottom: number;
+    bedTop: number;
+    bedBottom: number;
+    half: number;
+    reach: number;
+  }
+  let lipList: Lip[] = [];
+  let lipBuckets = makeBuckets<Lip>([], () => [0, 0, 0, 0]);
+  const lipHit = { lip: null as Lip | null, rel: 0, across: 0 };
+  /** The lip whose band (x, z) is in: `rel` metres past its line (negative upstream), `across` from the centreline. */
+  function lipAt(x: number, z: number): typeof lipHit | null {
+    if (lipList.length === 0) return null;
+    let found: Lip | null = null;
+    let bestAcross = Infinity;
+    let rel = 0;
+    for (const lip of bucketAt(lipBuckets, x, z) as readonly Lip[]) {
+      const px = x - lip.lx;
+      const pz = z - lip.lz;
+      const along = px * lip.dx + pz * lip.dz;
+      const across = Math.abs(-px * lip.dz + pz * lip.dx);
+      if (across > lip.reach || along < -(FALL_WALL_UP + 3) || along > lip.top - lip.bottom + 30) continue;
+      if (across < bestAcross) {
+        bestAcross = across;
+        found = lip;
+        rel = along;
+      }
+    }
+    if (!found) return null;
+    lipHit.lip = found;
+    lipHit.rel = rel;
+    lipHit.across = bestAcross;
+    return lipHit;
+  }
+  let riverGeom: {
+    along: Float64Array;
+    sx: number;
+    sz: number;
+    sdx: number;
+    sdz: number;
+    ex: number;
+    ez: number;
+    edx: number;
+    edz: number;
+    /** Does the water stop at this end? Only at a head and at a mouth that runs out on land. */
+    capStart: boolean;
+    capEnd: boolean;
+    /** This river's falls: arc length at the lip's top, and the water above and below. */
+    falls: { along: number; top: number; bottom: number }[];
+  }[] = [];
+
+  /**
+   * Every river resampled to RIVER_SAMPLE and its water solved as POOLS.
+   *
+   * A river is a chain of docs (a traced river is written as wet and dry
+   * pieces end to end); each chain is walked from its head carrying a level.
+   * At each point the "natural" surface is the old rule, most of the depth
+   * over the bed. The level holds while that falls less than POOL_STEP below
+   * it and then drops to it: level water stepping down in short rapids.
+   * Where a point lies in a lake's sheet the level IS the lake; where a
+   * chain ends in another river it takes that river's level, so chains are
+   * solved trunk before tributary. The bed is then cut to MIN_WATER_VOXELS
+   * under the level (never raised), so the carve and the water are one
+   * decision and cannot disagree.
+   */
+  /**
+   * A crafted site's `course` spliced into the river it sits on: the river's
+   * points from the one nearest the course's first point to the one nearest
+   * its last are replaced by the course, bed/width/depth interpolated by arc
+   * length between the kept ends. Before the resample, so the new bend is
+   * splined, carved and solved like any other reach.
+   */
+  function spliceCourses(river: RiverDoc): RiverDoc {
+    let out = river;
+    for (const site of recipe.features.fallSites ?? []) {
+      const course = site.course ?? [];
+      if (course.length < 2) continue;
+      const pts = out.points;
+      const nearest = (q: readonly [number, number]): { k: number; d: number } => {
+        let best = { k: -1, d: Infinity };
+        pts.forEach((p, k) => {
+          const d = Math.hypot(p[0] - q[0], p[1] - q[1]);
+          if (d < best.d) best = { k, d };
+        });
+        return best;
+      };
+      const a = nearest(course[0]!);
+      const b = nearest(course[course.length - 1]!);
+      const reach = out.width * 1.5 + 10;
+      if (a.d > reach || b.d > reach || b.k <= a.k) continue;
+      const n = pts.length;
+      const lerpAt = (arr: readonly number[] | undefined, t: number): number | undefined =>
+        arr && arr.length === n ? arr[a.k]! + (arr[b.k]! - arr[a.k]!) * t : undefined;
+      let total = 0;
+      for (let i = 1; i < course.length; i++) total += Math.hypot(course[i]![0] - course[i - 1]![0], course[i]![1] - course[i - 1]![1]);
+      const mid: { p: [number, number]; t: number }[] = [];
+      let run = 0;
+      course.forEach((q, i) => {
+        if (i > 0) run += Math.hypot(q[0] - course[i - 1]![0], q[1] - course[i - 1]![1]);
+        mid.push({ p: [q[0], q[1]], t: total > 0 ? run / total : 0 });
+      });
+      const pick = <T,>(arr: readonly T[] | undefined, fill: (t: number) => T | undefined): T[] | undefined => {
+        if (!arr || arr.length !== n) return undefined;
+        const middle = mid.map((m) => fill(m.t)!);
+        return [...arr.slice(0, a.k), ...middle, ...arr.slice(b.k + 1)];
+      };
+      const points = [...pts.slice(0, a.k), ...mid.map((m) => m.p), ...pts.slice(b.k + 1)];
+      out = {
+        ...out,
+        points,
+        ...(pick(out.bedY, (t) => lerpAt(out.bedY, t)) ? { bedY: pick(out.bedY, (t) => lerpAt(out.bedY, t)) } : {}),
+        ...(pick(out.widths, (t) => lerpAt(out.widths, t)) ? { widths: pick(out.widths, (t) => lerpAt(out.widths, t)) } : {}),
+        ...(pick(out.depths, (t) => lerpAt(out.depths, t)) ? { depths: pick(out.depths, (t) => lerpAt(out.depths, t)) } : {}),
+      };
+    }
+    return out;
+  }
+
+  function refineRivers(): void {
+    if (riverDocs.length === 0) return;
+    const hasBed = (r: RiverDoc): boolean => !!r.bedY && r.bedY.length === r.points.length;
+    // a doc that already carries its levels is taken as written
+    const open = (r: RiverDoc): boolean => hasBed(r) && !(r.surfaceY && r.surfaceY.length === r.points.length);
+    const docs: RiverDoc[] = riverDocs.map((r) => (open(r) ? splineRiver(withMidpoint(spliceCourses(r)), RIVER_SAMPLE) : r));
+    const minWater = MIN_WATER_VOXELS * voxelSize;
+    const lakeLevel = (x: number, z: number): number => {
+      let best = NaN;
+      for (const lake of bucketAt(lakes, x, z) as readonly LakeDoc[]) {
+        if (lakeDistance(lake, x, z) <= lake.bank * 0.75 && !(lake.waterY <= best)) best = lake.waterY;
+      }
+      return best;
+    };
+    // chains: a doc whose head sits on another's mouth continues it
+    const linkChains = () => {
+      const count = docs.length;
+      const key = (q: readonly [number, number]): string => `${Math.round(q[0])},${Math.round(q[1])}`;
+      const byHead = new Map<string, number>();
+      docs.forEach((d, i) => {
+        if (open(d)) byHead.set(key(d.points[0]!), i);
+      });
+      const next = new Array<number>(count).fill(-1);
+      const hasPrev = new Array<boolean>(count).fill(false);
+      docs.forEach((d, i) => {
+        if (!open(d)) return;
+        const j = byHead.get(key(d.points[d.points.length - 1]!));
+        if (j !== undefined && j !== i && !hasPrev[j]) {
+          next[i] = j;
+          hasPrev[j] = true;
+        }
+      });
+      const chains: number[][] = [];
+      docs.forEach((d, i) => {
+        if (!open(d) || hasPrev[i]) return;
+        const chain: number[] = [];
+        for (let k = i; k >= 0 && !chain.includes(k); k = next[k]!) chain.push(k);
+        chains.push(chain);
+      });
+      const chainOf = new Array<number>(count).fill(-1);
+      chains.forEach((c, ci) => c.forEach((i) => (chainOf[i] = ci)));
+      return { next, hasPrev, chains, chainOf };
+    };
+
+    // Capture. A course that CROSSES another river's channel (a traced
+    // meander swung into its neighbour, a hand-drawn line drawn over one)
+    // cannot pass it: two channels at different levels meeting at an angle
+    // are a hole in one and a wall in the other. The river with the higher
+    // bed at the crossing is captured: it ends there, joined to the other,
+    // and the rest of its course is dropped. A tributary's own join at its
+    // mouth and an outlet's start are not crossings.
+    {
+      const first = linkChains();
+      interface Seg { chain: number; i: number; k: number; ax: number; az: number; bx: number; bz: number }
+      const CELL = 64;
+      const grid = new Map<number, Seg[]>();
+      const segsOf: Seg[][] = first.chains.map(() => []);
+      first.chains.forEach((chain, ci) => {
+        for (const i of chain) {
+          const d = docs[i]!;
+          if (!d.water) continue;
+          for (let k = 0; k + 1 < d.points.length; k++) {
+            const a = d.points[k]!;
+            const b = d.points[k + 1]!;
+            const seg: Seg = { chain: ci, i, k, ax: a[0], az: a[1], bx: b[0], bz: b[1] };
+            segsOf[ci]!.push(seg);
+            for (let gz = Math.floor(Math.min(a[1], b[1]) / CELL); gz <= Math.floor(Math.max(a[1], b[1]) / CELL); gz++) {
+              for (let gx = Math.floor(Math.min(a[0], b[0]) / CELL); gx <= Math.floor(Math.max(a[0], b[0]) / CELL); gx++) {
+                const g = bucketKey(gx, gz);
+                const list = grid.get(g);
+                if (list) list.push(seg);
+                else grid.set(g, [seg]);
+              }
+            }
+          }
+        }
+      });
+      const cross = (p: Seg, q: Seg): number => {
+        const rx = p.bx - p.ax;
+        const rz = p.bz - p.az;
+        const sx = q.bx - q.ax;
+        const sz = q.bz - q.az;
+        const den = rx * sz - rz * sx;
+        if (Math.abs(den) < 1e-9) return -1;
+        const t = ((q.ax - p.ax) * sz - (q.az - p.az) * sx) / den;
+        const u = ((q.ax - p.ax) * rz - (q.az - p.az) * rx) / den;
+        return t >= 0 && t <= 1 && u >= 0 && u <= 1 ? t : -1;
+      };
+      const bedAt = (seg: Seg, t: number): number => {
+        const bed = docs[seg.i]!.bedY!;
+        return bed[seg.k]! + (bed[seg.k + 1]! - bed[seg.k]!) * t;
+      };
+      /** Is this segment within the first or last two of its chain — the head leaving, or the mouth joining? */
+      const atEnd = (seg: Seg): boolean => {
+        const list = segsOf[seg.chain]!;
+        const idx = list.indexOf(seg);
+        return idx < 2 || idx >= list.length - 2;
+      };
+      const cutAt = new Map<number, { seg: Seg; t: number }>();
+      segsOf.forEach((list) => {
+        for (const seg of list) {
+          if (atEnd(seg)) continue;
+          const near = new Set<Seg>();
+          for (let gz = Math.floor(Math.min(seg.az, seg.bz) / CELL); gz <= Math.floor(Math.max(seg.az, seg.bz) / CELL); gz++) {
+            for (let gx = Math.floor(Math.min(seg.ax, seg.bx) / CELL); gx <= Math.floor(Math.max(seg.ax, seg.bx) / CELL); gx++) {
+              for (const o of grid.get(bucketKey(gx, gz)) ?? []) near.add(o);
+            }
+          }
+          for (const other of near) {
+            if (other.chain === seg.chain || atEnd(other)) continue;
+            const t = cross(seg, other);
+            if (t < 0) continue;
+            const u = cross(other, seg);
+            // the higher bed is captured by the lower
+            const loser = bedAt(seg, t) >= bedAt(other, u) ? { seg, t } : { seg: other, t: u };
+            const known = cutAt.get(loser.seg.chain);
+            const order = (x: { seg: Seg; t: number }): number => segsOf[x.seg.chain]!.indexOf(x.seg) + x.t;
+            if (!known || order(loser) < order(known)) cutAt.set(loser.seg.chain, loser);
+          }
+        }
+      });
+      if (cutAt.size > 0) {
+        const drop = new Set<number>();
+        for (const [ci, { seg, t }] of cutAt) {
+          const chain = first.chains[ci]!;
+          const d = docs[seg.i]!;
+          const m = d.points.length;
+          const lerp = (arr: readonly number[] | undefined): number[] | undefined =>
+            arr && arr.length === m ? [...arr.slice(0, seg.k + 1), arr[seg.k]! + (arr[seg.k + 1]! - arr[seg.k]!) * t] : undefined;
+          const points = [...d.points.slice(0, seg.k + 1), [seg.ax + (seg.bx - seg.ax) * t, seg.az + (seg.bz - seg.az) * t] as [number, number]];
+          const widths = lerp(d.widths);
+          const depths = lerp(d.depths);
+          docs[seg.i] = { ...d, points, bedY: lerp(d.bedY)!, ...(widths ? { widths } : {}), ...(depths ? { depths } : {}) };
+          for (const i of chain.slice(chain.indexOf(seg.i) + 1)) drop.add(i);
+        }
+        const kept = docs.filter((_, i) => !drop.has(i));
+        docs.length = 0;
+        docs.push(...kept);
+      }
+    }
+    const { next, hasPrev, chains, chainOf } = linkChains();
+    const n = docs.length;
+    const halfAt = (d: RiverDoc, k: number): number => (d.widths && d.widths.length === d.points.length ? d.widths[k]! : d.width) / 2;
+    /** The nearest point of ANOTHER chain's wet river whose bed and half a bank reach (x, z). */
+    const parentHit = (x: number, z: number, self: number): { i: number; k: number } | null => {
+      let best: { i: number; k: number } | null = null;
+      let bestD = Infinity;
+      for (let i = 0; i < n; i++) {
+        const d = docs[i]!;
+        if (chainOf[i] === self || chainOf[i]! < 0 || !d.water) continue;
+        const reach = riverBank(d, NaN) * 0.5;
+        for (let k = 0; k < d.points.length; k++) {
+          const q = d.points[k]!;
+          const dist = Math.hypot(q[0] - x, q[1] - z) - halfAt(d, k);
+          if (dist > reach || dist >= bestD) continue;
+          bestD = dist;
+          best = { i, k };
+        }
+      }
+      return best;
+    };
+    const parentOf = chains.map((c, ci) => {
+      const last = docs[c[c.length - 1]!]!;
+      const [mx, mz] = last.points[last.points.length - 1]!;
+      const hit = parentHit(mx, mz, ci);
+      return hit ? chainOf[hit.i]! : -1;
+    });
+    // The bank each point may not brim over: the lower side's ground (the
+    // world with no river carved, so a levee never lifts its own cap), less
+    // the freeboard. A side standing in a lake does not count — that water
+    // is the lake's.
+    const savedDocs = riverDocs;
+    const savedSegs = riverSegs;
+    riverDocs = [];
+    riverSegs = buildRiverSegs([]);
+    waterStageOnly = true;
+    const bankCap: (Float64Array | null)[] = docs.map((d) => {
+      if (!open(d) || !d.water) return null;
+      const m = d.points.length;
+      const out = new Float64Array(m);
+      for (let k = 0; k < m; k++) {
+        const a = d.points[Math.max(0, k - 1)]!;
+        const b = d.points[Math.min(m - 1, k + 1)]!;
+        const len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+        const nx = -(b[1] - a[1]) / len;
+        const nz = (b[0] - a[0]) / len;
+        const width = d.widths && d.widths.length === m ? d.widths[k]! : d.width;
+        const reach = width / 2 + riverBank(d, d.widths && d.widths.length === m ? width : NaN) * 0.7;
+        const [x, z] = d.points[k]!;
+        const side = (sign: number): number => {
+          let low = Infinity;
+          for (const o of [reach, reach + 4]) {
+            const sx = x + nx * o * sign;
+            const sz = z + nz * o * sign;
+            if (!Number.isNaN(lakeLevel(sx, sz))) return Infinity;
+            low = Math.min(low, height(sx, sz));
+          }
+          return low;
+        };
+        // the ground UNDER the channel too: a traced course that rides along a
+        // canyon floor has its banks on the rim, and only the middle sees it
+        const under = Number.isNaN(lakeLevel(x, z)) ? height(x, z) : Infinity;
+        out[k] = Math.min(side(1), side(-1), under) - RIVER_FREEBOARD;
+      }
+      // Smoothed along the river (a mean over seven samples, never more than
+      // half a metre over the true bank): the pools follow the lie of the
+      // land, not every lump in the bank, which cut them into tiny steps.
+      const smooth = new Float64Array(m);
+      for (let k = 0; k < m; k++) {
+        let sum = 0;
+        let count = 0;
+        for (let j = Math.max(0, k - 3); j <= Math.min(m - 1, k + 3); j++) {
+          if (!Number.isFinite(out[j]!)) continue;
+          sum += out[j]!;
+          count++;
+        }
+        smooth[k] = count > 0 ? Math.min(sum / count, out[k]! + 0.5) : out[k]!;
+      }
+      return smooth;
+    });
+    riverDocs = savedDocs;
+    riverSegs = savedSegs;
+    waterStageOnly = false;
+    // Every chain as one run of (doc, point) references, head to mouth.
+    const refs = chains.map((c) => c.flatMap((i) => docs[i]!.points.map((_, k) => [i, k] as [number, number])));
+    const levels = docs.map((d) => new Float64Array(d.points.length).fill(NaN));
+    const inLake = docs.map((d) => new Uint8Array(d.points.length));
+    const depthOf = (d: RiverDoc, k: number): number => (d.depths && d.depths.length === d.points.length ? d.depths[k]! : d.depth);
+
+    // Pass 1 — the ENVELOPE: the highest each point's water may stand. It is
+    // the old natural surface (most of the depth over the traced bed) or the
+    // bank cap, whichever is lower, and it never rises downstream. A lake is
+    // its level; the last reach to the sea runs down to it.
+    const gapOf = (run: [number, number][], idx: number): number => {
+      if (idx === 0) return 0;
+      const [pi, pk] = run[idx - 1]!;
+      const [i, k] = run[idx]!;
+      const a = docs[pi]!.points[pk]!;
+      const b = docs[i]!.points[k]!;
+      return Math.hypot(b[0] - a[0], b[1] - a[1]);
+    };
+    refs.forEach((run) => {
+      let level = Infinity;
+      for (const [i, k] of run) {
+        const d = docs[i]!;
+        const natural = d.bedY![k]! + Math.max(0.4, depthOf(d, k) * 0.7);
+        const [x, z] = d.points[k]!;
+        const lake = lakeLevel(x, z);
+        if (!Number.isNaN(lake)) {
+          level = lake;
+          inLake[i]![k] = 1;
+        } else if (natural <= recipe.seaLevel + POOL_STEP) {
+          level = Math.min(level, natural);
+        } else {
+          const cap = bankCap[i] ? bankCap[i]![k]! : Infinity;
+          level = Math.min(level, natural, cap);
+        }
+        levels[i]![k] = level;
+      }
+    });
+
+    // Where each tributary enters its trunk: the first of its points inside
+    // the trunk's channel, and the trunk point there.
+    const where = new Map<string, number>();
+    refs.forEach((run) => run.forEach(([i, k], idx) => where.set(`${i}:${k}`, idx)));
+    const joins = chains.map((_, ci) => {
+      if (parentOf[ci]! < 0) return null;
+      const run = refs[ci]!;
+      let from = run.length;
+      let trunk: { i: number; k: number } | null = null;
+      for (let idx = run.length - 1; idx >= 0; idx--) {
+        const [i, k] = run[idx]!;
+        const hit = parentHit(docs[i]!.points[k]![0], docs[i]!.points[k]![1], ci);
+        if (!hit || chainOf[hit.i] !== parentOf[ci]) break;
+        from = idx;
+        trunk = hit;
+      }
+      if (!trunk) {
+        const [i, k] = run[run.length - 1]!;
+        trunk = parentHit(docs[i]!.points[k]![0], docs[i]!.points[k]![1], ci);
+      }
+      return trunk ? { from, trunk: where.get(`${trunk.i}:${trunk.k}`)!, chain: chainOf[trunk.i]! } : null;
+    });
+
+    // Pass 2 — the network. A tributary runs INTO its trunk, so the trunk
+    // may not stand higher at the confluence than the tributary arriving
+    // there; where it does (a trunk perched on its traced bed, a tributary
+    // cut down under its banks) the trunk is lowered from the confluence to
+    // its mouth, never through a lake. That can lower the trunk's own
+    // arrival at ITS trunk, so repeat until nothing moves.
+    for (let pass = 0; pass < 32; pass++) {
+      let moved = false;
+      joins.forEach((join, ci) => {
+        if (!join || join.from === 0) return;
+        const [ai, ak] = refs[ci]![join.from - 1]!;
+        const arriving = levels[ai]![ak]!;
+        const trunk = refs[join.chain]!;
+        const [ti, tk] = trunk[join.trunk]!;
+        if (!(levels[ti]![tk]! > arriving + 0.01)) return;
+        // from a little UPSTREAM of the confluence: the trunk's drop is then a
+        // rapid on the trunk itself, not a step where the two channels overlap
+        const [ax, az] = docs[ai]!.points[ak]!;
+        const near = halfAt(docs[ti]!, tk) + halfAt(docs[ai]!, ak) + riverBank(docs[ai]!, NaN) + RIVER_SAMPLE;
+        let start = join.trunk;
+        while (start > 0) {
+          const [pi, pk] = trunk[start - 1]!;
+          const q = docs[pi]!.points[pk]!;
+          if (inLake[pi]![pk] || Math.hypot(q[0] - ax, q[1] - az) > near) break;
+          start--;
+        }
+        for (let idx = start; idx < trunk.length; idx++) {
+          const [i, k] = trunk[idx]!;
+          if (inLake[i]![k]) break;
+          if (levels[i]![k]! > arriving) levels[i]![k] = arriving;
+        }
+        moved = true;
+      });
+      if (!moved) break;
+    }
+    // Pass 3 — the water, trunk before tributary. A tributary's last points
+    // (inside its trunk's channel) ARE the trunk's water, and lakes are their
+    // level. Then, from the mouth up, the water may rise no faster than the
+    // run grade — except across the river's one fall, at the sharpest drop of
+    // its envelope. Wherever the envelope falls faster the water stays under
+    // it, so the channel is cut down: a gorge above a scarp, not a stair.
+    const order: number[] = [];
+    const placed = new Array<boolean>(chains.length).fill(false);
+    // a river whose HEAD is inside another's channel (a branch splitting off
+    // above a fall) takes that river's level there, so it is solved after it
+    const headParent = chains.map((c, ci) => {
+      const [hx, hz] = docs[c[0]!]!.points[0]!;
+      const hit = parentHit(hx, hz, ci);
+      return hit ? chainOf[hit.i]! : -1;
+    });
+    const visit = (ci: number, depth: number): void => {
+      if (placed[ci] || depth > chains.length) return;
+      const parent = joins[ci]?.chain ?? -1;
+      if (parent >= 0) visit(parent, depth + 1);
+      if (headParent[ci]! >= 0) visit(headParent[ci]!, depth + 1);
+      if (!placed[ci]) {
+        placed[ci] = true;
+        order.push(ci);
+      }
+    };
+    chains.forEach((_, ci) => visit(ci, 0));
+    for (const ci of order) {
+      const run = refs[ci]!;
+      const n = run.length;
+      const join = joins[ci];
+      const env = run.map(([i, k]) => levels[i]![k]!);
+      const rampFrom = new Uint8Array(run.length);
+      const fixed = new Array<number>(n).fill(NaN);
+      run.forEach(([i, k], idx) => {
+        if (inLake[i]![k]) fixed[idx] = levels[i]![k]!;
+      });
+      if (join) {
+        for (let idx = join.from; idx < n; idx++) {
+          const [i, k] = run[idx]!;
+          const hit = parentHit(docs[i]!.points[k]![0], docs[i]!.points[k]![1], ci);
+          if (hit) fixed[idx] = levels[hit.i]![hit.k]!;
+        }
+      }
+      if (headParent[ci]! >= 0) {
+        for (let idx = 0; idx < n; idx++) {
+          if (!Number.isNaN(fixed[idx]!)) break;
+          const [i, k] = run[idx]!;
+          const hit = parentHit(docs[i]!.points[k]![0], docs[i]!.points[k]![1], ci);
+          if (!hit) break;
+          fixed[idx] = levels[hit.i]![hit.k]!;
+        }
+      }
+      for (let idx = 0; idx < n; idx++) if (!Number.isNaN(fixed[idx]!)) env[idx] = fixed[idx]!;
+      const gaps = run.map((_, idx) => gapOf(run, idx));
+      // Leaving a lake the water may not step down at the shore: the bank cap
+      // beside an outlet is under the lake's level, and the water dropped a
+      // metre or two right at the shoreline — a small step with no lip, a
+      // hard seam between the still sheet and the river. It descends from the
+      // lake's level at the run grade instead (up to OUTLET_RAMP over the
+      // cap; the levee pass holds banks up to it).
+      for (let idx = 1; idx < n; idx++) {
+        if (!Number.isNaN(fixed[idx]!)) continue;
+        const [pi, pk] = run[idx - 1]!;
+        const fromLake = inLake[pi]![pk] === 1 || rampFrom[idx - 1] === 1;
+        if (!fromLake) continue;
+        const want = env[idx - 1]! - RIVER_RUN_GRADE * gaps[idx]!;
+        if (want <= env[idx]!) continue;
+        if (want - env[idx]! > OUTLET_RAMP) break;
+        env[idx] = want;
+        rampFrom[idx] = 1;
+      }
+      // the fall: the most the envelope loses inside the window, never inside a lake
+      let fallAt = -1;
+      let best = RIVER_FALL_MIN;
+      for (let a = 0; a + 1 < n; a++) {
+        if (!Number.isNaN(fixed[a]!) && !Number.isNaN(fixed[a + 1]!)) continue;
+        // never within a few samples of a lake: a lake spilling straight over a
+        // cliff made the calm sheet and the falling one meet at a hard seam
+        let byLake = false;
+        for (let j = Math.max(0, a - 3); j <= Math.min(n - 1, a + 3); j++) {
+          const [ji, jk] = run[j]!;
+          if (inLake[ji]![jk]) byLake = true;
+        }
+        if (byLake) continue;
+        let reach = 0;
+        for (let b = a + 1; b < n; b++) {
+          reach += gaps[b]!;
+          if (reach > RIVER_FALL_WINDOW) break;
+          if (env[a]! - env[b]! > best) {
+            best = env[a]! - env[b]!;
+            fallAt = a;
+          }
+        }
+      }
+      const water = new Array<number>(n);
+      water[n - 1] = env[n - 1]!;
+      for (let idx = n - 2; idx >= 0; idx--) {
+        if (!Number.isNaN(fixed[idx]!)) {
+          water[idx] = fixed[idx]!;
+          continue;
+        }
+        const limit = idx === fallAt ? Infinity : water[idx + 1]! + RIVER_RUN_GRADE * gaps[idx + 1]!;
+        water[idx] = Math.min(env[idx]!, limit);
+      }
+      run.forEach(([i, k], idx) => {
+        levels[i]![k] = water[idx]!;
+      });
+    }
+    // Agent-crafted fall sites re-shape their falls' levels (fall-sites.ts):
+    // the points they raise take their bed up with the water.
+    const crafted = applyFallSites(
+      recipe.features.fallSites ?? [],
+      docs,
+      refs,
+      levels,
+      (run, idx) => gapOf(run as [number, number][], idx),
+      (d, k) => (d.widths && d.widths.length === d.points.length ? d.widths[k]! : d.width) / 2 + riverBank(d, NaN) * 0.7,
+    );
+    solvedSites = crafted.solved;
+    // The bed is cut the minimum water depth under the level, never raised.
+    // Every drop worth a cliff gets a point RIVER_FALL_LIP above the next
+    // sample: the water and the bed hold their level to the lip and fall
+    // over it, instead of ramping down the whole sample — and the foot is
+    // cut into a plunge pool, deeper the higher the fall.
+    const round = (v: number): number => Math.round(v * 100) / 100;
+    chains.forEach((c) =>
+      c.forEach((i) => {
+        const d = docs[i]!;
+        const m = d.points.length;
+        const lv = levels[i]!;
+        const underOf = (level: number, k: number): number => level - Math.max(minWater, depthOf(d, k) * 0.7);
+        const points: [number, number][] = [];
+        const bedY: number[] = [];
+        const surfaceY: number[] = [];
+        const widths: number[] = [];
+        const depths: number[] = [];
+        const hasW = !!d.widths && d.widths.length === m;
+        const hasD = !!d.depths && d.depths.length === m;
+        for (let k = 0; k < m; k++) {
+          const q = d.points[k]!;
+          const drop = k > 0 ? lv[k - 1]! - lv[k]! : 0;
+          if (d.water && k > 0 && drop >= 1) {
+            const a = d.points[k - 1]!;
+            const len = Math.hypot(q[0] - a[0], q[1] - a[1]);
+            // every drop gets its lip when its step is longer than one: a
+            // 54 m drop over a 5.5 m step once slipped between the old
+            // threshold (twice the lip) and findFalls, and had no curtain
+            if (len > RIVER_FALL_LIP + 0.5) {
+              const t = (len - RIVER_FALL_LIP) / len;
+              points.push([round(a[0] + (q[0] - a[0]) * t), round(a[1] + (q[1] - a[1]) * t)]);
+              // the lip holds the level above it: the fall walls (fallWalls) stand
+              // over it either side. Clamping it to the bank beside the lip — which
+              // at a cliff edge falls away — put a sloped step before every fall.
+              const lip = lv[k - 1]!;
+              surfaceY.push(round(lip));
+              const b0 = d.bedY![k - 1]! + (d.bedY![k]! - d.bedY![k - 1]!) * t;
+              bedY.push(round(Math.min(b0, underOf(lip, k))));
+              if (hasW) widths.push(d.widths![k - 1]! + (d.widths![k]! - d.widths![k - 1]!) * t);
+              if (hasD) depths.push(d.depths![k - 1]! + (d.depths![k]! - d.depths![k - 1]!) * t);
+            }
+          }
+          points.push([q[0], q[1]]);
+          surfaceY.push(round(lv[k]!));
+          const plunge = drop >= 1 ? Math.min(2.5, drop * 0.25) : 0;
+          const lifted = crafted.raised.has(`${i}:${k}`);
+          bedY.push(d.water ? round(lifted ? underOf(lv[k]!, k) - plunge : Math.min(d.bedY![k]!, underOf(lv[k]!, k) - plunge)) : d.bedY![k]!);
+          if (hasW) widths.push(d.widths![k]!);
+          if (hasD) depths.push(d.depths![k]!);
+        }
+        docs[i] = { ...d, points, bedY, surfaceY, ...(hasW ? { widths } : {}), ...(hasD ? { depths } : {}) };
+      }),
+    );
+    // Where the water stops: a plane across the end of the polyline. Only at
+    // a chain's head and at a mouth with nothing to take it (no lake, no
+    // river, above the sea). Between two pieces of one river the planes of
+    // both ends would leave a wedge dry on the outside of the bend, and at a
+    // lake, a trunk or the sea the receiving water covers the end anyway.
+    const capStart = docs.map((_, i) => !hasPrev[i]);
+    const capEnd = docs.map((d, i) => {
+      if (!open(d)) return true;
+      if (next[i]! >= 0) return false;
+      const [mx, mz] = d.points[d.points.length - 1]!;
+      if (!Number.isNaN(lakeLevel(mx, mz))) return false;
+      if (d.surfaceY && d.surfaceY[d.surfaceY.length - 1]! <= recipe.seaLevel + POOL_STEP) return false;
+      return parentOf[chainOf[i]!]! < 0;
+    });
+    riverDocs = docs;
+    riverSegs = buildRiverSegs(riverDocs);
+    riverGeom = riverDocs.map((d, index) => {
+      const pts = d.points;
+      const m = pts.length;
+      const along = new Float64Array(m);
+      for (let k = 1; k < m; k++) along[k] = along[k - 1]! + Math.hypot(pts[k]![0] - pts[k - 1]![0], pts[k]![1] - pts[k - 1]![1]);
+      const unit = (a: readonly [number, number], b: readonly [number, number]): [number, number] => {
+        const l = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+        return [(b[0] - a[0]) / l, (b[1] - a[1]) / l];
+      };
+      const [sdx, sdz] = m > 1 ? unit(pts[1]!, pts[0]!) : [0, 0];
+      const [edx, edz] = m > 1 ? unit(pts[m - 2]!, pts[m - 1]!) : [0, 0];
+      const falls: { along: number; top: number; bottom: number }[] = [];
+      if (d.water && d.surfaceY && d.surfaceY.length === m) {
+        for (let k = 1; k < m; k++) {
+          const drop = d.surfaceY[k - 1]! - d.surfaceY[k]!;
+          if (drop >= 2 && along[k]! - along[k - 1]! <= RIVER_FALL_LIP + 0.5) falls.push({ along: along[k - 1]!, top: d.surfaceY[k - 1]!, bottom: d.surfaceY[k]! });
+        }
+      }
+      return { along, sx: pts[0]![0], sz: pts[0]![1], sdx, sdz, ex: pts[m - 1]![0], ez: pts[m - 1]![1], edx, edz, capStart: capStart[index]!, capEnd: capEnd[index]!, falls };
+    });
+    lipList = [];
+    riverDocs.forEach((d, owner) => {
+      if (!d.water || !d.surfaceY || d.surfaceY.length !== d.points.length || !d.bedY) return;
+      const m = d.points.length;
+      for (let k = 1; k < m; k++) {
+        const a = d.points[k - 1]!;
+        const b = d.points[k]!;
+        const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+        if (len > RIVER_FALL_LIP + 0.5 || d.surfaceY[k - 1]! - d.surfaceY[k]! < 2) continue;
+        const width = d.widths && d.widths.length === m ? d.widths[k - 1]! : d.width;
+        lipList.push({
+          owner,
+          along: riverGeom[owner]!.along[k - 1]!,
+          lx: a[0],
+          lz: a[1],
+          dx: (b[0] - a[0]) / (len || 1),
+          dz: (b[1] - a[1]) / (len || 1),
+          top: d.surfaceY[k - 1]!,
+          bottom: d.surfaceY[k]!,
+          bedTop: d.bedY[k - 1]!,
+          bedBottom: d.bedY[k]!,
+          half: width / 2,
+          reach: width / 2 + riverBank(d, d.widths && d.widths.length === m ? width : NaN) * 2.5,
+        });
+      }
+    });
+    lipBuckets = makeBuckets<Lip>(lipList, (lip) => {
+      const r = lip.reach + lip.top - lip.bottom + 32;
+      return [lip.lx - r, lip.lz - r, lip.lx + r, lip.lz + r];
+    });
+    siteGorges = buildSiteGorges();
+  }
+
+  /** The falls in the solved rivers: a drop of at least a metre over a lip (a short segment). */
+  function findFalls(): RiverFall[] {
+    const out: RiverFall[] = [];
+    for (const d of riverDocs) {
+      if (!d.water || !d.surfaceY || d.surfaceY.length !== d.points.length) continue;
+      for (let k = 1; k < d.points.length; k++) {
+        const a = d.points[k - 1]!;
+        const b = d.points[k]!;
+        const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+        const drop = d.surfaceY[k - 1]! - d.surfaceY[k]!;
+        if (len > RIVER_FALL_LIP + 0.5 || drop < 2) continue;
+        out.push({
+          river: d.id,
+          x: b[0],
+          z: b[1],
+          top: d.surfaceY[k - 1]!,
+          bottom: d.surfaceY[k]!,
+          dirX: (b[0] - a[0]) / (len || 1),
+          dirZ: (b[1] - a[1]) / (len || 1),
+          width: d.widths && d.widths.length === d.points.length ? d.widths[k]! : d.width,
+          reach:
+            (d.widths && d.widths.length === d.points.length ? d.widths[k - 1]! : d.width) / 2 +
+            riverBank(d, d.widths && d.widths.length === d.points.length ? d.widths[k - 1]! : NaN) * 2.5,
+        });
+      }
+    }
+    return out;
+  }
+
+  /** Index k of the segment [k, k+1] of river `owner` that holds arc length `s`. */
+  function segmentAt(owner: number, s: number): number {
+    const along = riverGeom[owner]!.along;
+    let lo = 0;
+    let hi = along.length - 1;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (along[mid]! <= s) lo = mid;
+      else hi = mid;
+    }
+    return lo;
+  }
+
+  // ------------------------------------------------------------ lake floods
+  /**
+   * The water a lake really covers, beyond its traced outline. The outline is
+   * traced on a 16 m grid and simplified, and in places it runs far inside
+   * the basin (measured: 18 m under the lake's level at the outline, the
+   * ground only rising out of the water 28 m further on). A fixed reach past
+   * the outline then stopped the sheet in the middle of the lake bed — a
+   * strip of exposed bed, a water edge standing over nothing. Instead each
+   * lake is FLOODED on a 4 m raster from its reach outward, through every cell
+   * whose ground is under its level, to at most LAKE_FLOOD_BANKS banks; never
+   * past a waterfall's lip line, nor into a river channel running lower than
+   * the lake (the outlet belongs to the river). The flood stops where the
+   * ground rises out of the water: the true shore. Built lazily per lake,
+   * dilated one cell (a sheet over dry ground is hidden under it), and read by
+   * waterSurface; the mesh still clips against the ground.
+   */
+  interface LakeFlood {
+    x0: number;
+    z0: number;
+    nx: number;
+    nz: number;
+    wet: Uint8Array;
+  }
+  const LAKE_FLOOD_CELL = 4;
+  const LAKE_FLOOD_BANKS = 2;
+  /**
+   * How far under the lake a river beside it may run before the lake cedes
+   * it the ground. It was 0.3 m: an outlet ramping down off the lake stays
+   * within that for its first ~10 m, and the flood ran on beside it — at the
+   * river-15 cascade an arm of the lake 20 m down the outlet valley, its end
+   * standing 0.4–1.1 m over the dry slope beyond, and a 0.3 m step face
+   * where the lake's sheet met the river's (6 hanging edges, 25 step
+   * triangles in the mesh; with this 0: none and 12, all under 0.25 m).
+   */
+  const LAKE_OUTLET_TOL = 0.02;
+  const lakeFloods = new Map<LakeDoc, LakeFlood>();
+  function lakeFlood(lake: LakeDoc): LakeFlood {
+    const known = lakeFloods.get(lake);
+    if (known) return known;
+    const band = lake.bank * LAKE_FLOOD_BANKS;
+    let minX = lake.center[0] - lake.radius;
+    let minZ = lake.center[1] - lake.radius;
+    let maxX = lake.center[0] + lake.radius;
+    let maxZ = lake.center[1] + lake.radius;
+    for (const q of lake.polygon ?? []) {
+      minX = Math.min(minX, q[0]);
+      minZ = Math.min(minZ, q[1]);
+      maxX = Math.max(maxX, q[0]);
+      maxZ = Math.max(maxZ, q[1]);
+    }
+    const x0 = minX - band - LAKE_FLOOD_CELL;
+    const z0 = minZ - band - LAKE_FLOOD_CELL;
+    const nx = Math.ceil((maxX + band + LAKE_FLOOD_CELL - x0) / LAKE_FLOOD_CELL) + 1;
+    const nz = Math.ceil((maxZ + band + LAKE_FLOOD_CELL - z0) / LAKE_FLOOD_CELL) + 1;
+    const wet = new Uint8Array(nx * nz);
+    const flood: LakeFlood = { x0, z0, nx, nz, wet };
+    // set before filling: height() may ask waterSurface-free questions only,
+    // but a re-entrant call must see an (empty) flood, not recurse
+    lakeFloods.set(lake, flood);
+    const queue: number[] = [];
+    const cx = (i: number): number => x0 + (i % nx) * LAKE_FLOOD_CELL;
+    const cz = (i: number): number => z0 + Math.floor(i / nx) * LAKE_FLOOD_CELL;
+    const blocked = (x: number, z: number, tol = LAKE_OUTLET_TOL, margin = LAKE_FLOOD_CELL * 2): boolean => {
+      const lip = lipAt(x, z);
+      if (lip && lip.rel > 0 && lake.waterY >= lip.lip!.top - 0.5) return true;
+      const count = nearestPerOwner(riverSegs, x, z, hits);
+      for (let k = 0; k < count; k++) {
+        const hit = hits[k]!;
+        const river = riverDocs[hit.owner]!;
+        if (!river.water || Number.isNaN(hit.side)) continue;
+        const half = (Number.isNaN(hit.width) ? river.width : hit.width) / 2;
+        // not into a lower river's water, nor within two cells of it: the
+        // bank beside an outlet river is under the lake's level all the way
+        // down its valley, and the flood ran on beside the river to 14 m
+        // from the fall's lip, the lake's sheet standing up to 0.9 m over
+        // the river's beside it (a sloped step face along the whole reach).
+        // A river even a little lower (LAKE_OUTLET_TOL) is an outlet leaving
+        // the lake: past the reach the lake stops before it
+        const reach = half + riverBank(river, hit.width) * RIVER_WATER_REACH + margin;
+        if (hit.distance <= reach && hit.side < lake.waterY - tol) return true;
+      }
+      return false;
+    };
+    for (let i = 0; i < nx * nz; i++) {
+      const sd = lakeDistance(lake, cx(i), cz(i));
+      // the reach past the traced outline obeys the same stops as the flood:
+      // the outline often runs beside an outlet river, and the reach alone
+      // stood the lake's sheet over the river's lower water there. Inside
+      // the reach only a river well under the lake (0.3 m) clears the two
+      // cells beside it; one only a little under takes just what its own
+      // water covers — cleared wider, the lake's bed stood dry beside the
+      // outlet of lakes whose river ramps off them gently
+      if (sd <= lake.bank * 0.75 && (sd <= 0 || !(blocked(cx(i), cz(i), 0.3) || blocked(cx(i), cz(i), LAKE_OUTLET_TOL, 0)))) {
+        wet[i] = 1;
+        // only the rim of the reach grows; the inside needs no neighbours
+        if (sd > lake.bank * 0.75 - LAKE_FLOOD_CELL * 1.5) queue.push(i);
+      }
+    }
+    while (queue.length > 0) {
+      const i = queue.pop()!;
+      const ix = i % nx;
+      const iz = Math.floor(i / nx);
+      for (const [ox, oz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+        const jx = ix + ox;
+        const jz = iz + oz;
+        if (jx < 0 || jz < 0 || jx >= nx || jz >= nz) continue;
+        const j = jz * nx + jx;
+        if (wet[j]) continue;
+        const x = cx(j);
+        const z = cz(j);
+        if (lakeDistance(lake, x, z) > band) continue;
+        if (height(x, z) >= lake.waterY - 0.05) continue;
+        if (blocked(x, z)) continue;
+        wet[j] = 1;
+        queue.push(j);
+      }
+    }
+    // dilate one cell, marked 2 so the dilation itself does not grow
+    for (let i = 0; i < nx * nz; i++) {
+      if (wet[i] !== 1) continue;
+      const ix = i % nx;
+      const iz = Math.floor(i / nx);
+      for (const [ox, oz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]] as const) {
+        const jx = ix + ox;
+        const jz = iz + oz;
+        if (jx < 0 || jz < 0 || jx >= nx || jz >= nz) continue;
+        const j = jz * nx + jx;
+        if (!wet[j] && !blocked(cx(j), cz(j))) wet[j] = 2;
+      }
+    }
+    return flood;
+  }
+  /** Is (x, z) under this lake's flooded water? Nearest raster cell. */
+  function inLakeFlood(lake: LakeDoc, x: number, z: number): boolean {
+    const f = lakeFlood(lake);
+    const ix = Math.round((x - f.x0) / LAKE_FLOOD_CELL);
+    const iz = Math.round((z - f.z0) / LAKE_FLOOD_CELL);
+    if (ix < 0 || iz < 0 || ix >= f.nx || iz >= f.nz) return false;
+    return f.wet[iz * f.nx + ix]! > 0;
+  }
+
+  const flowA: [number, number] = [0, 0];
+  const flowB: [number, number] = [0, 0];
+  /** Unit tangent of a polyline at point i: the mean of the segment directions meeting there. */
+  function cornerTangent(points: readonly (readonly [number, number])[], i: number, out: [number, number]): void {
+    const last = points.length - 1;
+    const p = points[i]!;
+    const prev = points[Math.max(0, i - 1)]!;
+    const next = points[Math.min(last, i + 1)]!;
+    const l0 = Math.hypot(p[0] - prev[0], p[1] - prev[1]);
+    const l1 = Math.hypot(next[0] - p[0], next[1] - p[1]);
+    let tx = (l0 > 1e-6 ? (p[0] - prev[0]) / l0 : 0) + (l1 > 1e-6 ? (next[0] - p[0]) / l1 : 0);
+    let tz = (l0 > 1e-6 ? (p[1] - prev[1]) / l0 : 0) + (l1 > 1e-6 ? (next[1] - p[1]) / l1 : 0);
+    const l = Math.hypot(tx, tz);
+    if (l > 1e-6) {
+      tx /= l;
+      tz /= l;
+    }
+    out[0] = tx;
+    out[1] = tz;
+  }
+
+  function waterSurface(x: number, z: number, out: SurfaceSample): boolean {
+    let lakeY = -Infinity;
+    let lakeMaterial: string | undefined;
+    let lakeOutside = false;
+    for (const lake of bucketAt(lakes, x, z) as readonly LakeDoc[]) {
+      const sd = lakeDistance(lake, x, z);
+      // inside the traced outline always; past it only where the flood (its
+      // reach included, dilated a cell) says the lake's water is
+      if (lake.waterY > lakeY && (sd <= 0 || (sd <= lake.bank * LAKE_FLOOD_BANKS + LAKE_FLOOD_CELL && inLakeFlood(lake, x, z)))) {
+        lakeOutside = sd > 0;
+        lakeY = lake.waterY;
+        lakeMaterial = lake.material;
+      }
+    }
+    // a lake spilling over a fall ends exactly at the lip line
+    const lipW = lakeY > -Infinity ? lipAt(x, z) : null;
+    // (only its reach PAST the traced outline: the lake itself may curve on
+    // beside the lip, and cutting it made a straight gash across open water)
+    if (lipW && lipW.rel > 0 && lakeOutside && lakeY >= lipW.lip!.top - 0.5) lakeY = -Infinity;
+    if (lakeY > -Infinity) {
+      // a river through a lake is flush with it: the lake is the surface
+      out.y = lakeY;
+      out.material = lakeMaterial;
+      out.flowX = 0;
+      out.flowZ = 0;
+      out.kind = "lake";
+      out.floor = -Infinity;
+      return true;
+    }
+    const count = nearestPerOwner(riverSegs, x, z, hits);
+    let best = -1;
+    let bestInside = Infinity;
+    /** The upper level a point held beside a lip stands at (NaN: the channel's own). */
+    let bestHeld = NaN;
+    // the LOWEST bed of every channel reaching here: at a confluence the
+    // tributary's bed stands over the trunk's, and the trunk is still water
+    let floor = Infinity;
+    for (let k = 0; k < count; k++) {
+      const hit = hits[k]!;
+      const river = riverDocs[hit.owner]!;
+      const g = riverGeom[hit.owner];
+      if (!river.water || Number.isNaN(hit.side) || !g) continue;
+      const grow = river.taper > 0 ? smoothstep(0, river.taper, hit.along) : 1;
+      if (grow < HEAD_WET) continue;
+      const width = Number.isNaN(hit.width) ? river.width : hit.width;
+      const half = (width / 2) * (0.2 + 0.8 * grow);
+      let reach = half + riverBank(river, hit.width) * (0.35 + 0.65 * grow) * RIVER_WATER_REACH;
+      // a crafted plunge pool fills its bowl (the carve and this read one shape)
+      if (siteGorges.length > 0 && hit.distance > reach) {
+        const pool = sitePoolReach(x, z, hit.owner);
+        if (pool > reach) reach = pool;
+      }
+      if (hit.distance > reach) continue;
+      // At a fall the water is the channel bed's width and no wider: the bank
+      // reach there drapes the upper pool over whatever the ground beside the
+      // lip does (on a scarp, falls away under it) in sloping sheets.
+      // Either side of the lip line the water still stands where the ground
+      // HOLDS it (no lower than that side's bed): a pool carved wider than
+      // its channel (a crafted site's ledge, a plunge pool) was cut back to
+      // the channel for 1.5 m before the lip and 4.5 m after it, and its sheet
+      // ended in the air a metre or more over its own bed on both steps.
+      // (THIS fall's lip, not lipAt's: the fall above's band reaches down
+      // over this one and can be the nearer line across.) Such a point stands
+      // at its side's level whichever segment is nearest (beside a bend the
+      // lip segment itself is, and its level slopes).
+      const narrowAt = g.falls.find((f) => hit.along > f.along - FALL_NARROW && hit.along < f.along + RIVER_FALL_LIP + FALL_NARROW);
+      let held = NaN;
+      if (hit.distance > half + 0.5 && narrowAt) {
+        const lip = lipList.find((l) => l.owner === hit.owner && Math.abs(l.along - narrowAt.along) < 1e-6);
+        if (!lip) continue;
+        const upper = (x - lip.lx) * lip.dx + (z - lip.lz) * lip.dz < 0;
+        if (height(x, z) < (upper ? lip.bedTop : lip.bedBottom) - 0.5) continue;
+        held = upper ? lip.top : lip.bottom;
+      }
+      // past either END of the polyline is not this river's water: the next
+      // piece, the lake, the sea or the parent river takes over there, and a
+      // round cap at pool level would hang out over the drop beyond the end
+      // beyond an END only when the end is the nearest point of the river: a
+      // plane across the mouth tested on its own also cut away every stretch
+      // upstream that the river curled back past
+      const total = g.along[g.along.length - 1]!;
+      if (g.capEnd && hit.along >= total - 0.05 && (x - g.ex) * g.edx + (z - g.ez) * g.edz > 0) continue;
+      if (g.capStart && hit.along <= 0.05 && (x - g.sx) * g.sdx + (z - g.sz) * g.sdz > 0) continue;
+      const inside = hit.distance - half;
+      if (!Number.isNaN(hit.value) && hit.value < floor) floor = hit.value;
+      if (inside < bestInside) {
+        bestInside = inside;
+        best = k;
+        bestHeld = held;
+      }
+    }
+    if (best < 0) return false;
+    const hit = hits[best]!;
+    const river = riverDocs[hit.owner]!;
+    const seg = segmentAt(hit.owner, hit.along);
+    const last = river.points.length - 1;
+    const a = river.points[seg]!;
+    const b = river.points[Math.min(seg + 1, last)]!;
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+    const surf = river.surfaceY!;
+    const drop = Math.max(0, surf[seg]! - surf[Math.min(seg + 1, last)]!);
+    // a still pool drifts, a rapid runs: speed from the local fall of the surface
+    let speed = Math.min(3.5, 0.45 + 18 * (drop / len));
+    // still off a lake, gathering pace over the first 40 m of the river: the
+    // shader fades the still texture into the flowing one by this speed
+    for (const lake of bucketAt(lakes, x, z) as readonly LakeDoc[]) {
+      const d = lakeDistance(lake, x, z) - lake.bank * 0.75;
+      speed *= smoothstep(0, 40, d);
+    }
+    // and quickening toward a fall's lip, so the water runs into the drop
+    for (const f of riverGeom[hit.owner]!.falls) {
+      const ahead = f.along - hit.along;
+      if (ahead >= 0 && ahead < 30) speed = Math.max(speed, 0.6 + 2.6 * (1 - ahead / 30));
+      // ...but not the last metre and a half: over 1.2 m/s the water material
+      // froths (rapids), and that froth seen edge-on was a pale line along the
+      // top of every curtain
+      if (ahead >= 0 && ahead < 1.5) speed = Math.min(speed, 1.1);
+    }
+    // and CHURNING at the foot: the plunge pool runs white around where the
+    // curtain lands (its foot is ~3 m past the lip line, the curtain's throw)
+    // and for ~3 m on, broken up by the material's rapids froth, so the
+    // dissolving sheet ends in whitewater instead of clear water
+    for (const f of riverGeom[hit.owner]!.falls) {
+      const past = hit.along - f.along;
+      if (past > 0 && past < 3 + RIVER_FALL_LIP + 3.5) speed = Math.max(speed, 3.4 * (1 - smoothstep(RIVER_FALL_LIP + 3.5, RIVER_FALL_LIP + 7, past)));
+    }
+    out.y = hit.side;
+    // a step at the lip line, not a slope across the lip segment — the line
+    // of the lip this point is nearest along its OWN river: lipAt answers
+    // the nearest line across, and on a cascade the band of the fall above
+    // reaches down over this one, so the step failed there and the sloped
+    // level of the lip segment hung a sheet metres over the plunge pool
+    const stepAt = riverGeom[hit.owner]!.falls.find((f) => hit.along >= f.along - 0.5 && hit.along <= f.along + RIVER_FALL_LIP + 0.5);
+    const lipS = stepAt ? lipList.find((l) => l.owner === hit.owner && Math.abs(l.along - stepAt.along) < 1e-6) : undefined;
+    if (lipS) out.y = (x - lipS.lx) * lipS.dx + (z - lipS.lz) * lipS.dz < 0 ? lipS.top : lipS.bottom;
+    if (!Number.isNaN(bestHeld)) out.y = bestHeld;
+    // the heading turns smoothly through a bend: each segment's own direction
+    // jumped 10-15 degrees at every sample point, and the water material's
+    // scroll drew that as a hard diagonal seam down the river (a pale wedge
+    // off the river-15 lake). Blend the corner tangents across the segment.
+    const along = riverGeom[hit.owner]!.along;
+    const span = seg + 1 <= last ? along[seg + 1]! - along[seg]! : 0;
+    const t = span > 1e-6 ? Math.min(1, Math.max(0, (hit.along - along[seg]!) / span)) : 0;
+    cornerTangent(river.points, seg, flowA);
+    cornerTangent(river.points, Math.min(seg + 1, last), flowB);
+    let hx = flowA[0] + (flowB[0] - flowA[0]) * t;
+    let hz = flowA[1] + (flowB[1] - flowA[1]) * t;
+    const hl = Math.hypot(hx, hz);
+    if (hl > 1e-6) {
+      hx /= hl;
+      hz /= hl;
+    } else {
+      hx = (b[0] - a[0]) / len;
+      hz = (b[1] - a[1]) / len;
+    }
+    out.flowX = hx * speed;
+    out.flowZ = hz * speed;
+    out.kind = "river";
+    out.material = undefined;
+    out.floor = floor === Infinity ? -Infinity : floor;
+    return true;
+  }
+
+  function waterNear(x0: number, z0: number, x1: number, z1: number): boolean {
+    if (lakes.all.length > 0 || riverSegs.all.length > 0) return true;
+    for (let bz = Math.floor(z0 / BUCKET); bz <= Math.floor(z1 / BUCKET); bz++) {
+      for (let bx = Math.floor(x0 / BUCKET); bx <= Math.floor(x1 / BUCKET); bx++) {
+        const k = bucketKey(bx, bz);
+        if (lakes.map.has(k)) return true;
+        const segs = riverSegs.map.get(k);
+        if (segs && segs.some((sg) => riverDocs[sg.owner]!.water)) return true;
+      }
+    }
+    return false;
+  }
+
+  solveRiverBeds();
+  refineRivers();
+  riverFalls = findFalls();
+  roadPaint = buildPaint();
+  hasRoadPaint = roadPaint.map.size > 0;
 
   return {
     recipe,
     rivers: riverDocs,
+    falls: riverFalls,
     voxelSize,
     surfaceCount,
     worldLimit,
@@ -2855,6 +4752,8 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     surfaceCast,
     featureClearance,
     waterY,
+    waterSurface,
+    waterNear,
     shoreDistance: (x, z) => (hasBounds ? shoreAt(x, z).distance : Infinity),
   };
 }

@@ -6,6 +6,7 @@ import {
   derivedStats,
   firstFit,
   RARITY_TINT,
+  formatCoins,
   slotKind,
   twoHanderOf,
   type Attribute,
@@ -47,6 +48,15 @@ import { catalogOf, progressionOf, readSheet, sheetKey, sheetStoreOf, type Sheet
  * PNG frame in assets/textures and name it, no code. Without a skin a
  * generated SVG frame stands in. Everything else is plain CSS under
  * `.hr-char`, meant to be overridden by a game's own stylesheet.
+ *
+ * Stashes (a bank vault, later a guild bank or a mailbox) dock beside the
+ * bags: another script dispatches `hitreg:inventory-stash` on window with a
+ * {@link StashLink} (or `{ owner, closed: true }`). While one is linked the
+ * screen opens as a bags-only window next to it (no scrim, no keyboard
+ * capture); right-click or double-click a stack sends it across
+ * (`quickMove`, shift = one), and dragging it onto an element marked
+ * `data-drop="external"` fires a bubbling `hr-item-drop` DOM event there
+ * with `{ uid, actorId }` — the stash decides what that means.
  *
  * While open, the script captures the keyboard (`ctx.input.captureKeyboard`)
  * so WASD and ability keys go nowhere, and exits pointer lock so the mouse
@@ -96,6 +106,8 @@ export class CharacterUi extends Script {
   private toast!: HTMLDivElement;
   private portrait!: HTMLCanvasElement;
   private portraitDispose: (() => void) | null = null;
+  /** {@link lookSignature} of the sheet the portrait was cloned from. */
+  private portraitLook = "";
   private cancelToast: (() => void) | null = null;
   private store!: SheetStoreLike;
   private actorId = "";
@@ -108,6 +120,10 @@ export class CharacterUi extends Script {
   private search = "";
   private category = "all";
   private renderedContent = "";
+  /** A linked stash (bank vault …): bags dock beside it and quick-move into it. */
+  private stash: StashLink | null = null;
+  /** The screen was opened by the stash, so it closes with it. */
+  private openedByStash = false;
 
   override onStart(): void {
     if (typeof document === "undefined") return;
@@ -173,6 +189,9 @@ export class CharacterUi extends Script {
     const toggle = (): void => this.setOpen(!this.open);
     window.addEventListener("hitreg:character-toggle", toggle);
     this.offs.push(() => window.removeEventListener("hitreg:character-toggle", toggle));
+    const onStash = (e: Event): void => this.linkStash((e as CustomEvent<StashLink | { owner: string; closed: true }>).detail);
+    window.addEventListener("hitreg:inventory-stash", onStash);
+    this.offs.push(() => window.removeEventListener("hitreg:inventory-stash", onStash));
     const onMove = (e: PointerEvent): void => this.dragMove(e);
     const onUp = (e: PointerEvent): void => this.dragEnd(e);
     const onCancel = (): void => this.cancelDrag();
@@ -210,7 +229,21 @@ export class CharacterUi extends Script {
       const progress = this.body.querySelector<HTMLElement>(".hr-action");
       if (sheet && progress && signature === this.renderedContent) this.renderAction(progress, sheet);
       else this.render();
+      // The portrait is a CLONE of the body taken when it mounted (plus copies of
+      // the helm and pads): equipping while the screen is open changes the body
+      // in the world, not the clone. Re-clone on a change of what is worn — by
+      // now character-look has dressed the body (it reacts to the same change).
+      if (this.portraitDispose && this.lookSignature(sheet) !== this.portraitLook) {
+        this.portraitDispose();
+        this.portraitDispose = null;
+        this.mountPortrait();
+      }
     }
+  }
+
+  /** What the portrait shows: the worn items and the build's looks. */
+  private lookSignature(sheet: CharacterSheet | null): string {
+    return sheet ? JSON.stringify([sheet.equipment, sheet.build?.appearance ?? null]) : "";
   }
 
   override onDispose(): void {
@@ -225,12 +258,43 @@ export class CharacterUi extends Script {
 
   // -- state -------------------------------------------------------------------
 
+  private linkStash(detail: StashLink | { owner: string; closed: true } | null | undefined): void {
+    if (!detail || !this.root) return;
+    if ("closed" in detail) {
+      if (this.stash?.owner !== detail.owner) return;
+      this.stash = null;
+      this.applyDock();
+      if (this.openedByStash) this.setOpen(false);
+      else if (this.open) this.render();
+      this.openedByStash = false;
+      return;
+    }
+    this.stash = detail;
+    this.applyDock();
+    if (!this.open) {
+      this.openedByStash = true;
+      this.setOpen(true);
+    } else this.render();
+  }
+
+  /** Docked = a stash is linked: bags only, beside it, no scrim, the keyboard left alone. */
+  private applyDock(): void {
+    if (!this.root) return;
+    const docked = !!this.stash;
+    this.root.classList.toggle("hr-docked", docked);
+    const scrim = this.root.querySelector<HTMLElement>(".hr-scrim");
+    if (scrim) scrim.hidden = docked || !this.param<boolean>("modal");
+    this.panel.setAttribute("aria-modal", String(!docked && this.param<boolean>("modal")));
+    if (this.open) this.ctx.input.captureKeyboard?.(this.entityId, !docked && this.param<boolean>("modal"));
+  }
+
   private setOpen(open: boolean): void {
     if (!this.root || open === this.open) return;
     this.open = open;
+    if (!open) this.openedByStash = false;
     this.root.hidden = !open;
     window.dispatchEvent(new CustomEvent("hitreg:character-visibility", { detail: { open } }));
-    this.ctx.input.captureKeyboard?.(this.entityId, open && this.param<boolean>("modal"));
+    this.ctx.input.captureKeyboard?.(this.entityId, open && !this.stash && this.param<boolean>("modal"));
     if (open) {
       if (document.pointerLockElement) document.exitPointerLock();
       this.render();
@@ -245,6 +309,7 @@ export class CharacterUi extends Script {
 
   private mountPortrait(): void {
     if (this.portraitDispose || !this.actorId) return;
+    this.portraitLook = this.lookSignature(this.sheet());
     this.portraitDispose =
       this.ctx.renderPortrait?.(this.actorId, this.portrait, {
         spin: this.param<number>("portraitSpin"),
@@ -299,6 +364,15 @@ export class CharacterUi extends Script {
       return;
     }
     const { derived, env } = this.derived(sheet);
+    if (this.stash) {
+      // docked beside a stash: the bags and the purse, nothing else
+      head.querySelector(".hr-title")!.textContent = "Bags";
+      head.append(el("div", "hr-purse", formatCoins(sheet.coins)));
+      head.append(this.closeButton());
+      this.panel.prepend(head);
+      body.append(this.renderGrids(sheet, derived, env));
+      return;
+    }
     if (!this.selectedUid || !sheet.items[this.selectedUid]) this.selectedUid = Object.keys(sheet.items).find(uid => sheet.items[uid]?.container !== undefined) ?? "";
 
     head.append(el("div", "hr-level", `Lv ${sheet.level}`));
@@ -314,19 +388,23 @@ export class CharacterUi extends Script {
         : `${sheet.xp - derived.levelXp} / ${span} xp to level ${sheet.level + 1}`;
     head.append(xp);
     head.append(el("div", "hr-hint", `${keyLabel(this.param<string>("toggleKey"))} / Esc to close`));
-    const close = document.createElement("button");
-    close.type = "button";
-    close.className = "hr-close";
-    close.textContent = "×";
-    close.setAttribute("aria-label", "Close inventory");
-    close.onclick = () => this.setOpen(false);
-    head.append(close);
+    head.append(this.closeButton());
     this.panel.prepend(head);
 
     const character = el("div", "hr-character-column");
     character.append(this.renderDoll(sheet), this.renderStats(sheet, derived));
     body.append(character, this.renderGrids(sheet, derived, env));
     if (this.param<boolean>("showDetails")) body.append(this.renderDetails(sheet, derived, env));
+  }
+
+  private closeButton(): HTMLButtonElement {
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "hr-close";
+    close.textContent = "×";
+    close.setAttribute("aria-label", "Close inventory");
+    close.onclick = () => this.setOpen(false);
+    return close;
   }
 
   private renderStats(sheet: CharacterSheet, derived: DerivedSheet): HTMLElement {
@@ -362,6 +440,7 @@ export class CharacterUi extends Script {
     list.append(
       el("span", derived.encumbrance > 1 ? "over" : "", `${fmt(derived.weight)} / ${fmt(derived.stats.capacity)} kg`),
     );
+    list.append(el("span", "", "purse"), el("span", "hr-purse", formatCoins(sheet.coins)));
     section.append(list);
     return section;
   }
@@ -451,8 +530,11 @@ export class CharacterUi extends Script {
         item.classList.toggle("hr-filtered", !this.matches(def));
       }
     };
-    section.append(filters);
-    if (this.param<boolean>("showSearch")) section.append(search);
+    // docked beside a stash the bags stay plain, like a bank bag: no filters, no search
+    if (!this.stash) {
+      section.append(filters);
+      if (this.param<boolean>("showSearch")) section.append(search);
+    }
     const progress = el("div", "hr-action");
     progress.setAttribute("role", "progressbar"); progress.setAttribute("aria-label", "Inventory action");
     progress.setAttribute("aria-valuemin", "0"); progress.setAttribute("aria-valuemax", "100");
@@ -470,6 +552,8 @@ export class CharacterUi extends Script {
       const gridEl = el("div", "hr-grid");
       gridEl.dataset["drop"] = "grid";
       gridEl.dataset["container"] = container;
+      gridEl.dataset["cols"] = String(grid.cols);
+      gridEl.dataset["rows"] = String(grid.rows);
       gridEl.style.width = `${grid.cols * cell}px`;
       gridEl.style.height = `${grid.rows * cell}px`;
       for (let y = 0; y < grid.rows; y++) {
@@ -493,11 +577,13 @@ export class CharacterUi extends Script {
         itemEl.style.top = `${(stack.y ?? 0) * cell}px`;
         itemEl.style.width = `${cell}px`;
         itemEl.style.height = `${cell}px`;
-        if (item && item.slots.length > 0) {
-          itemEl.addEventListener("dblclick", () => this.emit(CHARACTER_EVENTS.equip, { uid }));
-        }
+        itemEl.addEventListener("dblclick", (e) => {
+          if (this.stash) this.stash.quickMove(uid, e.shiftKey && stack.qty > 1 ? 1 : undefined);
+          else if (item && item.slots.length > 0) this.emit(CHARACTER_EVENTS.equip, { uid });
+        });
         itemEl.addEventListener("contextmenu", (e) => {
           e.preventDefault();
+          if (this.stash) return this.stash.quickMove(uid, e.shiftKey && stack.qty > 1 ? 1 : undefined);
           if (stack.qty < 2 || !item) return;
           const half = Math.floor(stack.qty / 2);
           const to = (derived.grids.bag && spotIn(sheet, "bag", env)) ?? spotIn(sheet, "pockets", env);
@@ -514,6 +600,7 @@ export class CharacterUi extends Script {
       itemEl.style.width = itemEl.style.height = `${cell}px`; itemEl.style.position = "relative"; overflow.append(itemEl);
     }
     if (overflow.childElementCount) section.append(el("h4", "", "Overflow · drag to a free slot"), overflow);
+    if (this.stash) section.append(el("p", "hr-hint hr-stash-hint", `Right-click or double-click: ${this.stash.label} · Shift: just one · Drag to place`));
     const trash = el("div", "hr-trash", "drop here to discard");
     trash.dataset["drop"] = "trash";
     section.append(trash);
@@ -542,7 +629,7 @@ export class CharacterUi extends Script {
     panel.append(name, el("p", "hr-item-kind", `${item.rarity} · ${item.kind}`));
     for (const [key, value] of Object.entries(item.modifiers)) panel.append(el("p", "hr-modifier", `${value > 0 ? "+" : ""}${value} ${STAT_LABEL[key] ?? key}`));
     if (item.bag) panel.append(el("p", "", `${item.bag.cols * item.bag.rows} bag slots · ${item.bag.cols} × ${item.bag.rows}`));
-    panel.append(el("p", "hr-description", item.description || "A trusty companion on the road."), el("p", "hr-muted", `${item.weight} kg · ${stack.qty} owned`));
+    panel.append(el("p", "hr-description", item.description || "A trusty companion on the road."), el("p", "hr-muted", `${item.weight} kg · ${stack.qty} owned${item.value > 0 ? ` · worth ${formatCoins(item.value)}` : ""}`));
     for (const [key, value] of Object.entries(item.requires)) panel.append(el("p", "hr-requirement", `Requires ${key} ${value}`));
     const slot = EQUIPMENT_SLOTS.find(s => sheet.equipment[s] === this.selectedUid);
     const action = (label: string, run: () => void): void => {
@@ -632,7 +719,7 @@ export class CharacterUi extends Script {
       if (item.description) tip.append(el("div", "desc", item.description));
     }
     if (this.drag?.moved) return;
-    tip.append(el("div", "meta", "Drag to move · Double-click to equip / unequip · Right-click to split"));
+    tip.append(el("div", "meta", this.stash ? `Right-click: ${this.stash.label} · Drag to move` : "Drag to move · Double-click to equip / unequip · Right-click to split"));
     tip.hidden = false;
     this.placeTip(e);
   }
@@ -714,7 +801,9 @@ export class CharacterUi extends Script {
     const target = this.dropTarget(e);
     this.cancelDrag();
     if (!target || !d.moved) return;
-    if (target.kind === "trash") {
+    if (target.kind === "external") {
+      target.el.dispatchEvent(new CustomEvent("hr-item-drop", { bubbles: true, detail: { uid: d.uid, actorId: this.actorId, fromSlot: d.fromSlot } }));
+    } else if (target.kind === "trash") {
       this.emit(CHARACTER_EVENTS.drop, { uid: d.uid });
     } else if (target.kind === "slot") {
       this.emit(CHARACTER_EVENTS.equip, { uid: d.uid, slot: target.slot });
@@ -744,6 +833,7 @@ export class CharacterUi extends Script {
       if (!(node instanceof HTMLElement)) continue;
       const kind = node.dataset["drop"];
       if (kind === "trash") return { kind, el: node };
+      if (kind === "external") return { kind, el: node };
       if (kind === "slot") return { kind, el: node, slot: node.dataset["slot"] as EquipmentSlot };
       if (kind === "grid") {
         const cell = this.cellPixels();
@@ -789,8 +879,19 @@ interface DragState {
   over: HTMLElement | null;
 }
 
+/** What a stash script hands the bags through `hitreg:inventory-stash`. */
+export interface StashLink {
+  /** Who linked it — only the same owner can unlink. */
+  owner: string;
+  /** Verb for the hints, e.g. "store in the vault". */
+  label: string;
+  /** Send a carried stack across (`qty` undefined = the whole stack). */
+  quickMove(uid: string, qty?: number): void;
+}
+
 type DropTarget =
   | { kind: "trash"; el: HTMLElement }
+  | { kind: "external"; el: HTMLElement }
   | { kind: "slot"; el: HTMLElement; slot: EquipmentSlot }
   | { kind: "grid"; el: HTMLElement; to: { container: Container; x: number; y: number } };
 
@@ -895,5 +996,12 @@ const CSS = `
 .hr-char .hr-tip .mods{color:#5fd07a}
 .hr-char .hr-tip .req{color:#ffb454}
 .hr-char .hr-tip .desc{color:#b9c0d0;margin-top:4px;font-style:italic}
+.hr-char.hr-docked{pointer-events:none}
+.hr-char.hr-docked .hr-panel{pointer-events:auto;left:calc(50% + 8px);top:50%;transform:translateY(-50%);max-width:calc(50vw - 16px)}
+.hr-char.hr-docked .hr-head{min-width:0}
+.hr-char.hr-docked .hr-body{grid-template-columns:auto}
+.hr-char.hr-docked .hr-purse{margin-left:auto;color:#d8c38e;font-variant-numeric:tabular-nums}
+.hr-char .hr-stash-hint{margin:8px 0 0;white-space:normal;max-width:360px}
+@media(max-width:760px){.hr-char.hr-docked .hr-panel{left:50%;top:auto;bottom:8px;transform:translateX(-50%);max-width:96vw;max-height:48vh}}
 .hr-char .hr-toast{position:fixed;left:50%;bottom:12%;transform:translateX(-50%);padding:6px 12px;background:rgba(80,20,20,.92);border:1px solid #ff5a5a;border-radius:6px;color:#ffd6d6;font-size:11px;z-index:85;pointer-events:none}
 `;

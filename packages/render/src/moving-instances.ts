@@ -2,6 +2,7 @@ import * as THREE from "three/webgpu";
 import { InstancedProps } from "./instancing.js";
 import { applyModelTextureFilter, type TextureFilter } from "./material-maps.js";
 import { cachedInstancedMaterial, extractGltfSubmeshes, loadGltf, type GltfSubmesh } from "./scene-builder.js";
+import { APPEARANCE_FLOATS, encodeAppearance, tileCodes, type AppearanceGroup, type SkinSheet } from "./appearance.js";
 import { modelPartIndex, partBounds, partMaskFromNames, partSize, resolvePartAnchor, type PartAnchor } from "./ubermesh.js";
 
 /**
@@ -49,6 +50,28 @@ export interface MovingInstanceLook {
   atlasTile?: [number, number, number];
   /** Emissive glow; null clears it. Parts by name; omitted parts = every shown part. */
   glow?: MovingInstanceGlow | null;
+  /**
+   * Per-part tiles (appearance.ts): each group's parts wear its sheet, later
+   * groups win; the shown parts become their union. Null clears it (every part
+   * back on `texture`'s tile). The first look that carries groups or a tint
+   * switches the batch to its appearance material (one rebuild, once) — which
+   * carries NO glow: the vertex-input locations cannot hold both.
+   */
+  groups?: readonly AppearanceGroup[] | null;
+  /** Skin tone (CSS hex) for the page's skin texels; null = the painted skin. */
+  skinTint?: string | null;
+  /**
+   * The sheets of this model that paint bare skin (opt-in; appearance.ts SkinSheet).
+   * The batch's material is built with the FIRST list it is given: pass every
+   * sheet any holder may wear, the same list each time.
+   */
+  skinSheets?: readonly SkinSheet[];
+  /**
+   * `skinTint` recolours the WHOLE sheet (the hair ubermesh: every texel is hair)
+   * instead of opted-in skin texels. Per batch, like `skinSheets`: the first look
+   * that says so builds the batch's material that way.
+   */
+  tintWhole?: boolean;
 }
 
 export interface MovingInstanceGlow {
@@ -91,6 +114,10 @@ interface Slot {
   glow: SlotGlow;
   /** A look asked for before the model loaded (names need the model's tables). */
   pending: MovingInstanceLook | null;
+  /** Part tiles + tint (16 floats), or null = every part on `tile`, no tint. */
+  appearance: Float32Array | null;
+  groups: readonly AppearanceGroup[] | null;
+  skinTint: string | null;
   /** What the GPU holds for this slot's mask: `mask`, or 0 while hidden. */
   uploadedMask: number;
   dirty: boolean;
@@ -105,8 +132,11 @@ interface Batch {
   tiles: Record<string, [number, number, number]> | null;
   castShadow: boolean;
   receiveShadow: boolean;
+  /** Drawn with the appearance material (per-part tiles; `skinSheets` = the page's opted-in skin). */
+  appearance: { skinSheets: readonly SkinSheet[]; whole: boolean } | null;
 }
 
+const NO_APPEARANCE = new Float32Array(APPEARANCE_FLOATS);
 const WHOLE_MASK = 0xffffff;
 const _matrix = new THREE.Matrix4();
 
@@ -137,6 +167,7 @@ export class MovingInstanceSystem {
         tiles: null,
         castShadow: entry.castShadow,
         receiveShadow: entry.receiveShadow,
+        appearance: null,
       };
       this.batches.set(assetId, batch);
       this.load(batch, entry.textureFilter);
@@ -147,6 +178,9 @@ export class MovingInstanceSystem {
       tile: entry.atlasTile ?? [0, 0, 1],
       mask: entry.partMask ?? WHOLE_MASK,
       glow: NO_GLOW,
+      appearance: null,
+      groups: null,
+      skinTint: null,
       pending: null,
       uploadedMask: -1,
       dirty: true,
@@ -204,9 +238,11 @@ export class MovingInstanceSystem {
       if (!batch.submeshes || batch.meshes.length === 0) continue;
       if (batch.slots.length > batch.meshes[0]!.capacity) this.grow(batch);
       const count = batch.slots.length;
+      let anyShown = false;
       for (let i = 0; i < count; i++) {
         const slot = batch.slots[i]!;
         const shownMask = visibleInTree(slot.group) ? slot.mask : 0;
+        if (shownMask !== 0) anyShown = true;
         if (shownMask !== slot.uploadedMask) slot.dirty = true;
         slot.group.updateWorldMatrix(true, false);
         for (let s = 0; s < batch.meshes.length; s++) {
@@ -215,7 +251,8 @@ export class MovingInstanceSystem {
           mesh.setMatrixAt(i, _matrix);
           if (slot.dirty) {
             mesh.setUberAt(i, slot.tile[0], slot.tile[1], slot.tile[2], shownMask);
-            mesh.setGlowAt(i, slot.glow);
+            if (mesh.hasGlow) mesh.setGlowAt(i, slot.glow);
+            if (mesh.hasAppearance) mesh.setAppearanceAt(i, slot.appearance ?? NO_APPEARANCE);
           }
         }
         slot.uploadedMask = shownMask;
@@ -224,7 +261,8 @@ export class MovingInstanceSystem {
       for (const mesh of batch.meshes) {
         mesh.instanceCount = count;
         mesh.instanceMatrix.needsUpdate = true;
-        mesh.visible = count > 0;
+        // every instance collapsed (nobody wears a helm): skip the draw, not just its triangles
+        mesh.visible = count > 0 && anyShown;
       }
     }
   }
@@ -235,7 +273,7 @@ export class MovingInstanceSystem {
     let draws = 0;
     for (const batch of this.batches.values()) {
       instances += batch.slots.length;
-      if (batch.slots.length > 0) draws += batch.meshes.length;
+      if (batch.slots.length > 0) for (const mesh of batch.meshes) if (mesh.visible) draws++;
     }
     return { batches: this.batches.size, instances, draws };
   }
@@ -274,7 +312,28 @@ export class MovingInstanceSystem {
     batch.meshes = (batch.submeshes ?? []).map((sub, index) => {
       const mesh = new InstancedProps(
         sub.geometry,
-        cachedInstancedMaterial(`${batch.assetId}#moving#${index}`, sub.material, { uber: true, glow: true }),
+        batch.appearance
+          ? cachedInstancedMaterial(
+              `${batch.assetId}#moving-look${batch.appearance.whole ? "#whole" : JSON.stringify(batch.appearance.skinSheets)}#${index}`,
+              sub.material,
+              {
+                uber: true,
+                // A worn look carries no glow: WebGPU guarantees 16 vertex input
+                // LOCATIONS, and position/normal/uv/uv1 + the matrix (4) + uber +
+                // glow (4) + appearance (4) is 17 — the pipeline fails and takes
+                // the whole frame's command buffer with it (a black screen).
+                glow: false,
+                appearance: {
+                  tiles: batch.tiles,
+                  skin: batch.appearance.whole
+                    ? { sheets: [], whole: true }
+                    : batch.appearance.skinSheets.length
+                      ? { sheets: batch.appearance.skinSheets, geometry: sub.geometry, partIndex: batch.partIndex }
+                      : null,
+                },
+              },
+            )
+          : cachedInstancedMaterial(`${batch.assetId}#moving#${index}`, sub.material, { uber: true, glow: true }),
         capacity,
       );
       // capacity is fixed per InstancedProps, so the batch is rebuilt larger
@@ -287,7 +346,8 @@ export class MovingInstanceSystem {
       // the next one, and a handful of held items is cheaper to draw than to cull
       mesh.frustumCulled = false;
       mesh.enableUber();
-      mesh.enableGlow();
+      if (!batch.appearance) mesh.enableGlow();
+      if (batch.appearance) mesh.enableAppearance();
       this.root.add(mesh);
       return mesh;
     });
@@ -321,6 +381,9 @@ export class MovingInstanceSystem {
           `[moving-instances] "${look.texture}" is not on "${batch.assetId}"'s page — pack it (atlas-pack) and re-bake the model`,
         );
     }
+    if (look.groups !== undefined || look.skinTint !== undefined || look.skinSheets !== undefined || look.tintWhole !== undefined) {
+      this.resolveAppearance(batch, slot, look);
+    }
     if (look.glow === null) {
       slot.glow = NO_GLOW;
     } else if (look.glow) {
@@ -343,6 +406,32 @@ export class MovingInstanceSystem {
       };
     }
     slot.dirty = true;
+  }
+
+  /** Per-part tiles + tint for one slot; switches the batch to its appearance material the first time. */
+  private resolveAppearance(batch: Batch, slot: Slot, look: MovingInstanceLook): void {
+    if (look.groups !== undefined) slot.groups = look.groups;
+    if (look.skinTint !== undefined) slot.skinTint = look.skinTint;
+    if (!slot.groups && !slot.skinTint) {
+      slot.appearance = null;
+      return;
+    }
+    // groups name every part shown; a tint alone keeps the slot's mask and tile
+    const groups = slot.groups ?? [];
+    const encoded = encodeAppearance(batch.partIndex, tileCodes(batch.tiles), { groups, skinTint: slot.skinTint });
+    if (encoded.missingParts.length) this.warnOnce(`miss:${batch.assetId}:${encoded.missingParts.join()}`, `[moving-instances] no part(s) ${encoded.missingParts.join(", ")} in "${batch.assetId}"`);
+    for (const t of encoded.missingTextures) this.warnOnce(`tile:${batch.assetId}:${t}`, `[moving-instances] "${t}" is not on "${batch.assetId}"'s page`);
+    if (slot.groups) slot.mask = encoded.shown.reduce((m, p) => (p < 24 ? m | (1 << p) : m), 0);
+    slot.appearance = encoded.data;
+    const skinSheets = batch.appearance?.skinSheets.length ? batch.appearance.skinSheets : (look.skinSheets ?? []);
+    const whole = batch.appearance?.whole || look.tintWhole === true;
+    // By content: every look arrives with its own skinSheets array (a fresh [] for
+    // a helm), and a rebuild per look change threw the batch away on every equip —
+    // after a few, worn pieces stopped drawing.
+    if (!batch.appearance || !sameSkinSheets(batch.appearance.skinSheets, skinSheets) || batch.appearance.whole !== whole) {
+      batch.appearance = { skinSheets, whole };
+      if (batch.meshes.length > 0) this.build(batch, batch.meshes[0]!.capacity);
+    }
   }
 
   /** The fade as a model-space +Y range over the glowing parts' box (equal ends = no fade). */
@@ -411,6 +500,10 @@ export class MovingInstanceSystem {
     this.warned.add(key);
     console.warn(message);
   }
+}
+
+function sameSkinSheets(a: readonly SkinSheet[], b: readonly SkinSheet[]): boolean {
+  return a === b || JSON.stringify(a) === JSON.stringify(b);
 }
 
 function nextPow2(n: number): number {

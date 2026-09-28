@@ -84,10 +84,25 @@ Read the relevant sections once, and revisit them when the task or code changes.
   `apps/playground/tools/image-request.mjs gen` drives the Codex CLI headlessly
   and verifies size/alpha before installing the PNG, so an agent gets its own
   art inside one turn. Never run `codex exec` by hand in a project folder.
+- **Any sound or music** — generating with ElevenLabs, restyling, or wiring beds/
+  music/spots: read `docs/audio.md`. Prompts are composed from the project's
+  `authoring/audio/template.json` (the house style) + a catalog entry; never write
+  a one-off prompt around it. `tools/sfx-request.mjs status` says what is stale.
 - **Texturing a mob or a weapon:** read `docs/mob-atlas.md` for a creature
   (the unwrap-to-atlas process, what each recipe setting is for, and the prompt
   rules that make artwork land) and `docs/weapon-atlas.md` for a modular
   weapon ubermesh. The `weapon-unwrap` skill wraps both for Claude sessions.
+- **Player armor sets** (body + helm + shoulder art, then items per slot): read
+  `docs/armor-sets.md` (the `armor-sets` skill wraps it). Ornaments only on rare+ gear.
+- **Town NPCs — story, residents, dialogue, shops, the bank vault, quest givers:**
+  read `docs/town-npcs.md` (the `town-npcs` skill wraps it). Residents are data in
+  `authoring/towns/<name>.json`, generated and linted by `tools/town-npcs.mts`;
+  every outcome is decided by the `npc` builtin on the server. Quest/NPC text never
+  contains a hand-written compass word: it names places (`{dir:id}`) resolved
+  from the world (north is -Z); the tool's lint refuses anything else.
+- **Texture pages (weapon, armor, helm, shoulder, body, head) are always SQUARE:**
+  a tile is `[u, v, scale]` with one scale; every packer goes through
+  `apps/playground/tools/_page.mjs`, which refuses anything else.
 - **Inventory icons:** read `docs/item-icons.md` (the `item-icons` skill wraps
   it). An item with a model is rendered from it; only model-less loot is generated.
 - **Equipped items — parts, theme, glow, effects:** read `docs/item-looks.md`
@@ -102,6 +117,10 @@ Read the relevant sections once, and revisit them when the task or code changes.
   only the needed component schemas in the live or committed spec.
 - **Engine architecture:** read `ARCHITECTURE.md` before structural engine changes.
   Read `VISION.md` for product direction and roadmap decisions.
+- **Rivers, lakes, waterfalls, or regenerating a voxel world:** read
+  `docs/world-editing/rivers-and-falls.md` — the rules (lowland rivers, one
+  waterfall per river, banks, the network) and the rebuild order. Crafting one
+  fall into a place: `docs/world-editing/fall-crafting.md` (the `fall-crafting` skill).
 - **Voxel worlds, streaming, or voxel extraction changes:** read the relevant
   parts of `docs/voxel-worlds.md`, including the render/physics/placement source,
   seam, and closed-volume invariants. Routine use of the existing dungeon kit

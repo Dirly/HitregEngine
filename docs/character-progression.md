@@ -41,6 +41,15 @@ armor, weight, capacity, encumbrance, and the grids currently present.
   replica and turns every drag, double-click and "+" into a request event.
   It never writes the sheet, so the same script is correct on a peer, a P2P
   host, and a client of the dedicated server.
+- **Stashes** (a bank vault now; a guild bank or mailbox later) dock beside the
+  bags. The stash script dispatches `hitreg:inventory-stash` on `window` with
+  `{ owner, label, quickMove(uid, qty?) }` (and `{ owner, closed: true }` when
+  it closes). While linked, `character-ui` shows a bags-only window beside it
+  (no scrim, no keyboard capture, no filters), right-click / double-click call
+  `quickMove` (shift = one), and a drag onto any element marked
+  `data-drop="external"` fires a bubbling `hr-item-drop` DOM event there with
+  `{ uid, actorId, fromSlot }`. The bag grids carry `data-container/cols/rows`
+  so a stash can drop into a specific cell. `npc-ui`'s vault is the reference.
 - Requests (`inventory.move/equip/unequip/drop/split`, `character.allocate`)
   are `to-authority`; a request arriving over the wire must come from the
   peer that owns the body (`owner/<bodyId>` in netState, written by the
@@ -130,3 +139,58 @@ grid to land in; the pockets alone are small by design. A kill/quest script
 grants with `ctx.events.emit("character.xp", { actorId, amount })`, a pickup
 with `inventory.give`; listen for `inventory.dropped` to spawn a world item
 where something was thrown away.
+
+## Character creation
+
+One more data asset, `assets/creation/<id>.json` (type `creation`,
+`characterCreationSchema`): **archetypes** (a small attribute lean plus the
+paths it can grow into — a lean, not a class), **birth traits** (each names
+an ability id; `traitPicks` of them), and **appearance slots** (ordered;
+each option may name a `model` and the `socket` bone it rides on, and may
+`require` choices in slots above it). What a player picks is a **build**
+(`characterBuildSchema`: archetype, traits, appearance).
+
+The path a build takes, and the one rule that keeps it honest — only the
+sheet authority turns a build into points:
+
+1. The gateway panel asks main `GET /creation` (else the game's local asset)
+   and, when there are rules, "New character…" opens the creation screen
+   (`apps/playground/src/character-creation.ts`, preview in
+   `creation-preview.ts`). `?creator[=<id>]` opens it alone, no gateway.
+2. `POST /characters { name, build }` — main validates against its rules
+   (`--creation <id>`, default the only `creation` asset) and stores the build
+   on the character. With rules loaded, a character without a build is refused.
+3. `/play` signs the build into the ticket; the layer writes
+   `build/<bodyId>` before the body spawns.
+4. `character-sheet` with a `creation` param re-validates it and, on a FRESH
+   sheet only, applies it (`applyBuild`: archetype lean + `sheet.build`). A
+   saved sheet already carries its build, so a later ticket changes nothing.
+
+**Traits per archetype:** a trait's `archetypes` list says which archetypes
+offer it (absent = all); `traitsFor` / `settleTraits` keep a build's picks
+legal when the archetype changes, and `validateBuild` refuses a trait from
+another archetype.
+
+**The game's look:** the asset's optional `ui` block names the game's own UI
+pieces — 9-slice `panel`/`button`/`buttonActive`/`card`/`cardActive`
+frames, `backdrop`, `divider`, `crest`, `close`, stepper `arrow`
+(points right; mirrored for left), `font`, `colors`. The creation screen AND
+the gateway's sign-in/character card wear it; archetype and trait `icon`s sit
+in the card frame at 64 px. Without `ui` both draw the engine's plain look.
+Generated UI art is drawn at 2× and halved nearest-neighbour so its pixels
+match the rest of the kit. Choices are 9-slice buttons (frame EDGES only — a
+stretched `fill` centre warps the art) with the icon centred and the chosen
+one's details underneath. Both screens are laid out for 1080p and scaled up by
+CSS zoom on bigger monitors (`watchUiScale`), never down; short screens get
+compact rules instead.
+
+**Preview rows** (`preview: true` on a slot) are the creator's art-viewing rows;
+`validateBuild` drops them, so a saved build never carries them and the game
+never draws them. **Archetype kits** (`archetypes[].startingItems`) are worn
+first on a fresh sheet, before the script's own `startingItems`, which never
+displace a worn kit piece. **Mounts** (`mounts`) place every socketed model
+(head, hair, helm, pads) once, per sex where they differ; the in-game
+`character-look` builtin and the creator both read them (docs/armor-sets.md).
+
+Every peer reads appearance and traits from `sheet.build`. Options without a
+model are valid choices that draw nothing yet — appearance is late-bound.

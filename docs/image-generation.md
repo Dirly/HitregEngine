@@ -45,7 +45,9 @@ which is how a texture set keeps one theme across eleven tiles:
 ```
 
 Per-image keys: `id`, `target`, `prompt` (required), plus `size`, `alpha`, `ref`, `purpose`. `target` and `ref`
-resolve against `apps/playground`.
+resolve against `apps/playground`. `ref` may be a LIST (an atlas key plus a sheet whose face placement to copy):
+the set attaches every distinct reference once, in first-seen order, so the prompts name them by position
+("the FIRST attached image is the key, the SECOND is ...").
 
 ## What it verifies
 
@@ -76,6 +78,51 @@ folder. Project manifests reference request ids.
 - **Alpha needs demanding.** Pass `--alpha` (or `"alpha": true`) and say "fully transparent background, real PNG
   alpha, not white, not a checkerboard" — the flag also makes the tool reject an opaque result.
 - **Nearest-neighbour on the downsample** is in the shared brief already; it is what keeps pixel art crisp.
+
+## Skin: the tint contract
+
+Characters pick a skin tone in the creator, and the engine recolours painted skin on the head and body pages in
+the shader (render `appearance.ts`; one extra R8 mask per page, no extra draw). That only works if every sheet
+that shows bare skin paints it in ONE palette, and says so:
+
+- **Paint skin as the existing faces do**: warm tan, hue 16–26°, saturation 0.46–0.64, value 0.45–0.90 for the
+  lit skin; shadows may go down to value 0.26 and hue 14–28.5° as long as they touch lit skin. Measured
+  2026-09-25: faces mean #9A6043, the unequipped body mean #A76D4B, both with their shading intact. Don't paint
+  skin pink, grey or yellow for "variety": the tone comes from the player's pick, the sheet only supplies shading.
+- **Features are carved out of the skin by contrast, not colour** (render `carveSkinFeatures`): the faces paint
+  lash lines, brows, nostrils and the mouth in skin's own hue, only darker. A texel more than 0.10 OKLab L below
+  the skin around it is a feature LINE: it takes the painted or the toned colour, whichever is darker, so it stays
+  a line on porcelain and never becomes a pale speck on ebony. A texel more than 5.5° hue or 0.085 saturation off
+  its neighbourhood is KEPT as painted (eye whites, irises, lips), unless it is a lighter texel on skin's hue (a
+  highlight, which follows the tone). So paint eye whites and irises visibly OFF skin's hue/saturation and lips
+  toward red, or they tone. The heads' eye whites are painted a warm dull tan ("nothing painted may be white"):
+  kept as painted, they read as bright tan on the darkest tones.
+- **The mouth is kept whole** on a head sheet (option `skin: "face"`, render `protectMouth`): the lowest row of
+  carved features at least 4 texels wide near the face's centre column (45–85% down the tile) is the mouth; its
+  lines and everything between them keep the painted lip colour, and the ring of texels around them is half
+  toned, so lips never take the tone and never sit in a hard ring. Found on all 16 MMO faces. Keep painting the
+  mouth as a closed horizontal shape under the nose, as the key's mouth bar asks.
+- **How the tone lands**: in OKLab. Each skin texel's step in lightness from the page's mean skin is carried onto
+  the tone (highlights scaled into the headroom the tone has left, shadows part-way with its lightness), hue from
+  the tone, chroma easing off in deep shadow and up to 1.3× in highlights. A dark tone keeps warm highlights and
+  readable shadows. The creator lights its preview neutral-warm (`PortraitView` `lights`): the default cool fill
+  turned dark skin grey-violet.
+- **Keep cloth out of it by saturation**: the base sheets' linen reads hue 27–36°, saturation 0.2–0.35 and is
+  never taken; leather is value ~0.28 (dark) and is only ever judged inside a sheet that opted in.
+- **Hair colour is the same path on a WHOLE sheet**: a colour slot with `tintModels: ["mmo/human-hair.glb"]` tints
+  every opaque texel of that model (styles, beards and moustache are one ubermesh, so one choice colours them all).
+  The painted strand contrast is carried 1:1 in OKLab and compressed only where the colour lacks the room
+  (render `TONE_FIT`: the sheet's 97th/3rd-percentile strands kept within L 0.05–0.95), so blond and grey keep
+  their strands and black keeps its sheen. Paint the hair sheet as ONE neutral-ish hair with real strand
+  contrast; its colour does not matter.
+- **Opt the sheet in.** Nothing is tinted unless the option drawing it says `skin` (creation asset
+  `appearance[].options[].skin`): `true` for a face or the unequipped body, a list of PART names (the hands) for
+  a gloved set whose fingers show. Armour that never opted in is never touched, whatever its colours.
+
+Measured on the live pages with that setup: every face 97.9–98.5% toned skin plus 62–81 feature-line texels, with
+eye whites, irises and lips kept; unequipped body 32% (male) / 42% (female) of opaque texels, linen untouched; ranger 1.3% and magus 0.3% (fingers only, inside the
+hand islands); vanguard, cleric and every armour sheet not opted in 0%. Re-measure after regenerating a sheet —
+the mask is derived from the pixels at load, never stored.
 
 ## Cost and shape of a run
 

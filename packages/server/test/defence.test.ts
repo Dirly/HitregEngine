@@ -20,7 +20,9 @@ import { WORLD_MODULE, type WorldModuleMessage } from "../src/index.js";
  *   - a guard raised inside `parryWindow` negates the hit ENTIRELY and staggers
  *     the attacker instead;
  *   - blocking with an empty bar breaks the guard: full damage AND a stagger;
- *   - i-frames beat everything, and swinging drops your own guard.
+ *   - i-frames beat everything, and swinging drops your own guard;
+ *   - only a SHIELD blocks: without one the key is a press that opens the
+ *     parry window alone, drops itself, and has a recovery.
  */
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -87,6 +89,16 @@ describe.skipIf(!layer)("guard, parry and dodge", { timeout: 60_000 }, () => {
   const settle = () => wait(220);
 
   const body = "player:dana";
+  /**
+   * What `body` holds, as its stance list. On a real client weapon-stance
+   * derives it from the equipped items; set here every step so the test does
+   * not depend on the scene's starting kit. Blocking needs a shield.
+   */
+  let stance: string[] = ["SwordShield", "Sword"];
+  layer?.world.beforeStep.add(() => {
+    const obj = layer!.world.objects.get(body);
+    if (obj) obj.userData["stance"] = stance;
+  });
 
   it("takes a clean hit with no guard up", async () => {
     const a = join("dana");
@@ -180,6 +192,36 @@ describe.skipIf(!layer)("guard, parry and dodge", { timeout: 60_000 }, () => {
     expect(numOf(`combat/${body}.staggerUntil`)).toBeGreaterThan(layer!.world.timeMs / 1000);
     // and being staggered drops the guard, so you cannot turtle through it
     expect(guard(body)).toBe(0);
+  });
+
+  it("without a shield, the key is a timed parry: no block, a recovery, and a miss lands in full", async () => {
+    stance = ["GreatSword", "TwoHanded"];
+    await until(() => numOf(`combat/${body}.staggerUntil`) < layer!.world.timeMs / 1000, 6000, "stagger over");
+    net().set(`combat/${body}.stamina`, 100);
+    // A press opens the window and it closes by itself, key held or not.
+    raise(body, true);
+    await until(() => guard(body) > 0, 3000, "parry up");
+    await until(() => guard(body) === 0, 3000, "parry closes itself");
+    // Pressing again inside the recovery does nothing: no mashing a wall of windows.
+    raise(body, true);
+    await settle();
+    expect(guard(body)).toBe(0);
+    // Nothing up, nothing absorbed: the whole hit, and no "blocked" verdict.
+    const beforeHp = hp(body);
+    const seen = defends().length;
+    hit(body, "hero0", 30);
+    await settle();
+    expect(hp(body)).toBe(beforeHp - 30);
+    expect(defends().length).toBe(seen);
+    // Past the recovery a press parries, as a shield's opening beat does.
+    await wait(700);
+    raise(body, true);
+    await until(() => guard(body) > 0, 3000, "parry up again");
+    hit(body, "hero0", 60);
+    await settle();
+    expect(hp(body)).toBe(beforeHp - 30);
+    expect(defends().at(-1)).toMatchObject({ actorId: body, outcome: "parried" });
+    stance = ["SwordShield", "Sword"];
   });
 
   it("ignores damage entirely during a roll's i-frames", async () => {

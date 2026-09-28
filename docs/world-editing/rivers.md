@@ -1,5 +1,9 @@
 # Rivers, by hand
 
+**The rules every river follows — lowland rivers, one waterfall each, banks,
+the network — are in [rivers-and-falls.md](rivers-and-falls.md). Read them
+first; this file is the procedure for writing one river by hand.**
+
 You are carving a river into a live voxel world by writing one entry into
 the recipe's `features.rivers`. The field solves the bed, cuts the channel,
 builds the banks and lays the water; paths get bridges when their stage is
@@ -73,10 +77,18 @@ adding one; if there are four, you are replacing or extending, not adding.
 5. Under the sea: target is `seaLevel − 0.7·depth − 0.3`, the same for every
    under-sea point. (First version chased the seabed 16 m down at an
    offshore tail and cut the whole river into a trench. Fixed; keep the
-   offshore tail anyway, it is where the ribbon slips under the ocean.)
+   offshore tail anyway, it is where the water slips under the ocean.)
 6. Running MIN from the head — a drawn river cuts a ridge, never climbs it —
    then the mouth rule, then `maxGrade` mouth-up: the reach above a
    too-steep drop is cut down to the limit, never under a lake.
+7. Then EVERY river (drawn or traced) is resampled every 8 m and its water
+   solved as **pools**. The level holds until the natural surface (bed +
+   0.7·depth) has fallen `POOL_STEP` (1.2 m) below it, then drops over one
+   sample, which is a rapid. Inside a lake's sheet the level is the lake. A
+   tributary's last points take its trunk's level. The last reach to the sea
+   runs straight down to it. The bed is then cut at least
+   `MIN_WATER_VOXELS` (1.5 voxels, 3 m) under the level. The solved levels
+   are `surfaceY` on `field.rivers`. Never write `surfaceY` yourself.
 
 Consequences worth knowing: a hollow along the route is FILLED to the bed
 (bounded, 10 m) so the water is not a pond; a sill or ridge is cut into a
@@ -111,8 +123,8 @@ Below, `W="voxel-demo --project voxel-demo"`.
    the bends where the ground is flat both sides (amplitude 30–60 m, one
    bend every 200–300 m for a 15 m river), and where `side slope` flagged a
    hillside, move 20–40 m toward the LOWER side. Start the head 60–100 m
-   INSIDE the lake polygon (the ribbon is cut at the lake sheet; a head at
-   the shore leaves a gap). End 40–60 m past the shoreline for a sea mouth,
+   INSIDE the lake polygon (the head is flush with the lake only inside its
+   sheet; a head at the shore starts as a step above it). End 40–60 m past the shoreline for a sea mouth,
    or exactly ON a control point of the trunk for a tributary. Write the
    doc into `features.rivers` (a small node script is fine; keep `widths`
    and `depths` the same length as `points`).
@@ -154,27 +166,27 @@ any other single decision.
 Derek's review of river-a/b/c, 2026-09-04 — fix these in the engine or route
 around them, and delete each line when it is fixed:
 
-- **Water not quite touching the banks** in places: the ribbon's edge stops
-  short of the cut's waterline, so a strip of bare bed shows between the
-  sheet and the bank. The ribbon width is `bed + 0.75·bank·(0.35+0.65·grow)`
-  per point and the field's waterline is at 0.63 of the bank — they agree on
-  paper, so look at bends (a spline's inner bank) and at reaches where
-  `widths` change quickly.
 - **A path running into the river and under its water near the confluence.**
   Paths are split only at rivers ≥ 6 m wide by the `paths` stage; a path
   piece that ends AT a bank without a bridge, or a path whose ford surface
   was pinned before the river was cut, does this. Check `features.bridges`
   around the spot and re-run `paths`; if it persists, the split needs to
-  happen where the path meets the levee, not the ribbon.
-- **The head not quite connected to the lake** on one river: the ribbon is
-  cut at the lake sheet's edge and the lake's berm holds ground at
-  `waterY + 0.4` outside the outline; a head that starts too close to the
-  shore leaves that berm between sheet and ribbon. Start deeper inside the
-  polygon (step 4) and check the outlet view (step 8).
-- **The confluence looks disjointed.** The tributary arrives flush in
-  height, but two ribbons overlapping at an angle draw two wave patterns
-  and a hard edge. Wants: the tributary's last 1–2 widths trimmed to the
-  trunk's waterline, or the two ribbons merged.
+  happen where the path meets the levee.
+
+Fixed on 2026-09-24 by the terrain-clipped water (docs/voxel-worlds.md,
+"River water is clipped from the terrain"): water not touching the banks,
+a head not joined to its lake, and the disjointed confluence. There is no
+ribbon any more. A river's water is level pools, clipped against the ground
+cell by cell, and it is one surface with the lakes and the rivers it meets.
+
+**What still breaks it: a bed far above its valley.** Where a solved or
+traced bed runs more than `RIVER_MAX_BUILD` (10 m) over the ground, the field
+cannot build the channel up to it. The water there is dropped (it would
+float), so the river shows a dry gap with a hanging edge at each end. On the
+mmo world, rivers 14, 27 and 132 cross ravines 30–40 m under their beds.
+Re-route them or re-solve their beds. Find them with
+`apps/playground/tools/_water-check.mts`, whose "deep by river" line lists
+them.
 
 Report these to whoever asked for the river; do not paper over them with
 extra points.

@@ -4,6 +4,7 @@ import { createWorldMapOverlay } from "./world-map.js";
 import CameraControls from "camera-controls";
 import * as THREE from "three/webgpu";
 import {
+  findCreation,
   AssetLibrary,
   chunkDocSchema,
   chunkFileName,
@@ -159,6 +160,8 @@ import { SubsceneManager, type SubsceneInstance } from "./subscene-manager.js";
 import { BridgePlayerDataBackend } from "./player-data-bridge.js";
 import { NetPresence, type NetReplica } from "./net-presence.js";
 import { GatewayClient, mountGatewayPanel, resolveGateway, type GatewayPanel } from "./gateway.js";
+import { mountCreationScreen } from "./character-creation.js";
+import { createCreationPreview } from "./creation-preview.js";
 import {
   clientLink,
   createComms,
@@ -191,6 +194,7 @@ import { createPinStore } from "./pins.js";
 import { installCameraBridge, postContext, publishEngineSpec } from "./dev-bridge.js";
 import { openProfilerWindow } from "./profiler-window.js";
 import { createSocketPreview } from "./socket-preview.js";
+import { foliageSink, syncWorldCover, voxelGroundProbes } from "./voxel-ground.js";
 
 CameraControls.install({ THREE });
 
@@ -322,6 +326,8 @@ async function main(): Promise<void> {
     onInstancedBatch: (batch) => foliageLod.register(batch),
     instancePool: propPool,
     onLight: (_entityId, light, importance) => lightBudget.register(light, importance),
+    // particles in streamed cells (waterfall mist): registered like the scene's, dropped on unload
+    onParticles: (entityId, group, data) => particles.register(entityId, group, data, (id: string) => assets.getTexture(id)?.url),
     onVfx: (entityId, group, data) => ambientVfx?.register(entityId, group, data),
     bakeImpostor: (object, bounds) => bakeImpostorAtlas(renderer, object, bounds),
     onClusteredMesh: (_entityId, mesh) => clusterLod.register(mesh),
@@ -341,7 +347,10 @@ async function main(): Promise<void> {
       for (const [id, object] of objects) built.objects.set(id, object);
     },
     onUnloaded: (ids) => {
-      for (const id of ids) built.objects.delete(id);
+      for (const id of ids) {
+        built.objects.delete(id);
+        particles.unregister(id);
+      }
       scripts?.removeEntities(ids);
       publishLoadedChunkCells();
     },
@@ -954,6 +963,7 @@ async function main(): Promise<void> {
   const modelLooks = createModelLooks({
     objectOf: (entityId) => built?.objects.get(entityId),
     textureUrl: (assetId) => assets.getTexture(assetId)?.url,
+    resolveModel: (assetId) => assets.getModel(assetId)?.url,
     moving: movingInstances,
     effects: () => ambientVfx, // item effects are standing vfx plays, batched with every other
   });
@@ -1106,168 +1116,14 @@ async function main(): Promise<void> {
   // without shrinking to just the sliver right at the band's exact peak
   const GRASS_BLEND_THRESHOLD = 0.5;
   /**
-   * Terrain properties for the cover gate, on a COARSE lattice.
-   *
-   * The gate below asks the world field three questions per blade: `slope`,
-   * `height` and `splatAt`. Measured on this project's world, that is 25.4us
-   * per blade, and `slope` alone is 18 of them because it is FOUR height
-   * evaluations around the point. A grass layer at density 2.8 over a 42 m
-   * disc is ~20,000 of those, so one full re-place was 386ms of sampling
-   * amortised at 2ms a frame: over three seconds to place a field, and half a
-   * second for a mere recenter. That is the "the grass follows me a moment
-   * late" everybody sees while running.
-   *
-   * SLOPE and the SURFACE MIX are low-frequency by construction: they come
-   * from noise bands and patch blotches tens of metres across, and the
-   * terrain itself is a 2 m voxel isosurface, so there is nothing under 2 m
-   * for them to resolve. Sampling them on a 2 m lattice and bilinearly
-   * interpolating gives the same answer a hundred times cheaper — bilinear
-   * rather than nearest so the gate's edge around a dirt patch is still a
-   * curve, not a 2 m staircase.
-   *
-   * HEIGHT comes off the same lattice. It used to stay exact, on the theory
-   * that an interpolated blade floats — but the ground that is DRAWN is the
-   * 2 m lattice interpolated (marching cubes), so the exact field height is
-   * the one that floats. Measured against the terrain collider on the MMO:
-   * exact height is 3.3 cm off the rendered ground on average and 107 cm at
-   * worst; bilinear on the 2 m lattice is 1.1 cm and 28.8 cm. It is also free:
-   * the probe computes that height anyway, and the exact per-blade call was
-   * the largest source of garbage while streaming.
-   *
-   * Net: 25.4us -> ~7us per blade, and the placement that was three seconds
-   * is well under one.
+   * The voxel half of the cover gate: one shared sampler (voxel-ground.ts)
+   * with a cached 2 m probe lattice and the biome / clump / water gates, the
+   * same one the published runtime uses, so a layer grows in the same places
+   * in the editor and in a shipped game.
    */
-  const FOLIAGE_PROBE = 2;
-  /**
-   * Fixed-size probe cache: ~9 discs' worth at the radii cover is authored
-   * with, in ONE flat buffer rather than a Float32Array per probe. Small
-   * allocations at this rate are what shows up in a profile as `off-loop`
-   * time, which is exactly the instrument that would not explain why.
-   */
-  const FOLIAGE_PROBE_LIMIT = 16384;
-  /** Probe slot per lattice cell, and the key each slot currently holds. */
-  const foliageProbeSlot = new Map<number, number>();
-  const foliageProbeKey = new Float64Array(FOLIAGE_PROBE_LIMIT).fill(NaN);
-  /** slope per slot, and the splat mix per slot (stride = the field's surface count). */
-  const foliageProbeSlope = new Float32Array(FOLIAGE_PROBE_LIMIT);
-  /** ground height per slot (Float64: world heights need the precision). */
-  const foliageProbeHeight = new Float64Array(FOLIAGE_PROBE_LIMIT);
-  /** 1 when the ground at that probe is above water and its splat mix is meaningful. */
-  const foliageProbeDry = new Uint8Array(FOLIAGE_PROBE_LIMIT);
-  let foliageProbeSplat = new Float32Array(0);
-  let foliageProbeStride = 0;
-  let foliageProbeNext = 0;
-  /** Surface names resolved to palette indices ONCE per layer, not per blade. */
-  const foliageSurfaceIndex = new WeakMap<GrassData, Int32Array>();
-
-  /**
-   * Field height per lattice point, shared between neighbouring probes. A
-   * probe's slope is a central difference over its four lattice neighbours
-   * (when the probe spacing is the field's voxel size, as `slope()` uses), so
-   * without this every height was evaluated five times over.
-   */
-  const latticeHeights = new Map<number, number>();
-  function latticeHeight(field: NonNullable<ReturnType<typeof getVoxelWorld>>, gx: number, gz: number): number {
-    const key = gx * 4294967296 + (gz >>> 0);
-    let y = latticeHeights.get(key);
-    if (y === undefined) {
-      if (latticeHeights.size >= 65536) latticeHeights.clear();
-      y = field.height(gx * FOLIAGE_PROBE, gz * FOLIAGE_PROBE);
-      latticeHeights.set(key, y);
-    }
-    return y;
-  }
-
-  /** Drop every cached probe — the ground under them is not the ground any more. */
+  const voxelCover = voxelGroundProbes(() => (activeVoxelWorld ? getVoxelWorld(activeVoxelWorld) : null));
   function invalidateFoliageProbes(): void {
-    latticeHeights.clear();
-    foliageProbeSlot.clear();
-    foliageProbeKey.fill(NaN);
-    foliageProbeNext = 0;
-  }
-
-  /** Slot holding the probe at lattice point (gx, gz), sampling it if absent. */
-  function foliageProbeAt(field: NonNullable<ReturnType<typeof getVoxelWorld>>, gx: number, gz: number): number {
-    // same exact-in-float64 packing of two int32s the cover cache uses
-    // stride FIRST: a cached slot indexes a buffer laid out for the palette
-    // it was sampled with, so a world with a different one invalidates it
-    if (foliageProbeStride !== field.surfaceCount) {
-      foliageProbeStride = field.surfaceCount;
-      foliageProbeSplat = new Float32Array(FOLIAGE_PROBE_LIMIT * foliageProbeStride);
-      invalidateFoliageProbes();
-    }
-    const key = gx * 4294967296 + (gz >>> 0);
-    const found = foliageProbeSlot.get(key);
-    if (found !== undefined) return found;
-    // FIFO over the slots: the working set is the disc around the camera, so
-    // the oldest slot is the ground furthest behind it, and a miss only costs
-    // a resample
-    const slot = foliageProbeNext;
-    foliageProbeNext = (foliageProbeNext + 1) % FOLIAGE_PROBE_LIMIT;
-    const evicted = foliageProbeKey[slot]!;
-    if (!Number.isNaN(evicted)) foliageProbeSlot.delete(evicted);
-    const x = gx * FOLIAGE_PROBE;
-    const z = gz * FOLIAGE_PROBE;
-    let steep: number;
-    let y: number;
-    if (Math.max(field.voxelSize, 0.5) === FOLIAGE_PROBE) {
-      // exactly field.slope(x, z): the same four heights, the same formula
-      y = latticeHeight(field, gx, gz);
-      const dx = (latticeHeight(field, gx + 1, gz) - latticeHeight(field, gx - 1, gz)) / (2 * FOLIAGE_PROBE);
-      const dz = (latticeHeight(field, gx, gz + 1) - latticeHeight(field, gx, gz - 1)) / (2 * FOLIAGE_PROBE);
-      const g = Math.sqrt(dx * dx + dz * dz);
-      steep = g / Math.sqrt(1 + g * g);
-    } else {
-      steep = field.slope(x, z);
-      y = field.height(x, z);
-    }
-    foliageProbeSlope[slot] = steep;
-    foliageProbeHeight[slot] = y;
-    const dry = y > field.recipe.seaLevel;
-    foliageProbeDry[slot] = dry ? 1 : 0;
-    if (dry) {
-      // the vertex path's own normal convention, so the gate sees exactly the
-      // weights the terrain shader is blending at that point
-      field.splatAt(x, y, z, Math.sqrt(Math.max(0, 1 - steep * steep)), foliageProbeSplat, slot * foliageProbeStride);
-    }
-    foliageProbeKey[slot] = key;
-    foliageProbeSlot.set(key, slot);
-    return slot;
-  }
-
-  /** How much of one layer's named surfaces this probe's ground is, in [0, 1]. */
-  function foliageProbeWeight(slot: number, index: Int32Array): number {
-    if (foliageProbeDry[slot] === 0) return 0; // under water: no cover, and the mix means nothing
-    const base = slot * foliageProbeStride;
-    let weight = 0;
-    for (let i = 0; i < index.length; i++) {
-      const s = index[i]!;
-      if (s >= 0) weight += foliageProbeSplat[base + s] ?? 0;
-    }
-    return weight;
-  }
-  /**
-   * How far to sink a cover instance below the ground height at its centre.
-   *
-   * A billboard is a VERTICAL card standing on one sampled point, but it has
-   * width: on a gradient its downhill edge lifts off the terrain and the tuft
-   * appears to hover, which is the classic tell of scattered foliage. Sinking
-   * it by the drop across its own half-width — `halfWidth * tan(angle)` —
-   * buries the uphill edge instead, which nobody can see.
-   *
-   * The half-width uses the LARGEST scale `regenerate` jitters to (1.3), since
-   * the sampler is not told which instance is asking. Over-sinking a small
-   * tuft costs a centimetre of its base; under-sinking a large one floats it,
-   * and only one of those is visible.
-   *
-   * `steep` is sin(angle), so tan is sin/sqrt(1-sin^2) — clamped, because it
-   * runs away toward vertical and no cover grows there anyway.
-   */
-  function foliageSink(data: GrassData, steep: number): number {
-    const halfWidth = (data.bladeWidth / 2) * 1.3;
-    const tan = Math.min(2, steep / Math.sqrt(Math.max(1e-4, 1 - steep * steep)));
-    // plus a small constant bite so the base is always in the ground, not on it
-    return halfWidth * tan + data.bladeHeight * 0.04;
+    voxelCover.invalidate();
   }
   /**
    * Where a ground-cover LAYER may grow, in world units, or null for "not
@@ -1276,12 +1132,7 @@ async function main(): Promise<void> {
    * - Heightmap tiles keep the original rule: the layer flagged `grassy` in
    *   the terrain-splat material has to be the majority blended colour.
    * - A generated voxel world is asked what the ground there actually IS —
-   *   the layer names surfaces (`grass`, `sand`, …) and their combined weight
-   *   has to reach `minSurface`.
-   *
-   * Gating on the SURFACE rather than on the biome is what makes cover agree
-   * with what you can see: a worn dirt patch inside a meadow grows no grass,
-   * because the ground there is not grass, and no rule had to say so.
+   *   see voxel-ground.ts.
    */
   function sampleFoliageGround(x: number, z: number, data: GrassData): number | null {
     for (const tile of terrainTiles) {
@@ -1299,55 +1150,13 @@ async function main(): Promise<void> {
       return tile.y + h - foliageSink(data, g / Math.sqrt(1 + g * g));
     }
     if (!activeVoxelWorld) return null;
-    const field = getVoxelWorld(activeVoxelWorld);
-    if (!field) return null;
-    // slope and the surface mix off the coarse probe lattice, bilinear; the
-    // ground height itself still exact — see FOLIAGE_PROBE
-    const px = x / FOLIAGE_PROBE;
-    const pz = z / FOLIAGE_PROBE;
-    const gx = Math.floor(px);
-    const gz = Math.floor(pz);
-    const fx = px - gx;
-    const fz = pz - gz;
-    const s00 = foliageProbeAt(field, gx, gz);
-    const s10 = foliageProbeAt(field, gx + 1, gz);
-    const s01 = foliageProbeAt(field, gx, gz + 1);
-    const s11 = foliageProbeAt(field, gx + 1, gz + 1);
-    const w00 = (1 - fx) * (1 - fz);
-    const w10 = fx * (1 - fz);
-    const w01 = (1 - fx) * fz;
-    const w11 = fx * fz;
-    const steep =
-      foliageProbeSlope[s00]! * w00 +
-      foliageProbeSlope[s10]! * w10 +
-      foliageProbeSlope[s01]! * w01 +
-      foliageProbeSlope[s11]! * w11;
-    if (steep > data.slopeMax) return null;
-    const height =
-      foliageProbeHeight[s00]! * w00 +
-      foliageProbeHeight[s10]! * w10 +
-      foliageProbeHeight[s01]! * w01 +
-      foliageProbeHeight[s11]! * w11;
-    const ground = height - foliageSink(data, steep);
-    if (ground <= field.recipe.seaLevel) return null; // nothing grows in the sea
-    // Cover must respect the same town/road clearance as chunk scatter.
-    // Include the widest randomized card so its edge cannot enter a foundation.
-    if (field.featureClearance(x, z) < Math.max(0.5, data.bladeWidth * 0.65)) return null;
-    if (data.surfaces.length === 0) return ground;
-    let index = foliageSurfaceIndex.get(data);
-    if (!index || index.length !== data.surfaces.length) {
-      index = Int32Array.from(data.surfaces, (name) =>
-        field.recipe.surfaces.findIndex((s) => s.name.toLowerCase() === name.toLowerCase()),
-      );
-      foliageSurfaceIndex.set(data, index);
-    }
-    const weight =
-      foliageProbeWeight(s00, index) * w00 +
-      foliageProbeWeight(s10, index) * w10 +
-      foliageProbeWeight(s01, index) * w01 +
-      foliageProbeWeight(s11, index) * w11;
-    return weight >= data.minSurface ? ground : null;
+    return voxelCover.sampleCover(x, z, data);
   }
+  /** World cover (`recipe.cover`) registered on `grass`, as `cover:<id>`. */
+  const worldCoverIds = new Set<string>();
+  /** Identity-transform parent for world cover: the layers are world-space. */
+  const worldCoverRoot = new THREE.Group();
+  worldCoverRoot.name = "world-cover";
   // doc-change telemetry for the context bridge: in-place patches vs full rebuilds
   let reconcileCount = 0;
   let rebuildCount = 0;
@@ -1385,6 +1194,28 @@ async function main(): Promise<void> {
   /** Our own body's id on the server, once the `world` module told us. */
   let netSelfId: string | null = null;
   const animations = new AnimationSystem();
+  /**
+   * A replicated layer played the way the authority plays it: a held guard
+   * once and clamped, a channel looped at rate 1, a one-shot fitted to the
+   * window it had when it STARTED here — the window shrinks every snapshot,
+   * and refitting each frame would speed the clip up as it plays.
+   */
+  const remoteLayerOptions = (
+    id: string,
+    layer: string,
+    opts?: { action?: number; mode?: "hold" | "loop"; lock?: number },
+  ) => {
+    // a stance carry: looped, held in step with the legs like the owner's
+    if (typeof opts?.lock === "number") return { fade: 0.2, loop: true, phaseLock: opts.lock };
+    if (opts?.mode === "loop") return { fade: 0.08, loop: true, speed: 1 };
+    if (opts?.mode === "hold") return { fade: 0.08, loop: false, speed: 1 };
+    if (opts?.action === undefined) return { fade: 0.08, loop: true };
+    if (animations.layerClip(id) === layer) {
+      return { fade: 0.08, loop: false, speed: animations.layerSpeedOf(id) };
+    }
+    const fit = fitAction(animations.clipDuration(id, layer), opts.action);
+    return { fade: 0.08, loop: fit.loop, speed: fit.rate };
+  };
   const cloth = new ClothSwaySystem();
   /** tag -> the entity id `entityByTag` last found for it (re-checked on use), null for a miss. */
   const tagLookup = new Map<string, string | null>();
@@ -1436,6 +1267,9 @@ async function main(): Promise<void> {
   ambientVfx = createAmbientVfx(vfx, assets, lightBudget);
   let vfxWarmed = false;
   const grass = new GrassSystem();
+  // only a generated world can say "not here" for a whole disc; heightmap
+  // tiles keep walking theirs
+  grass.regionTest = (x0, z0, x1, z1, data) => !activeVoxelWorld || voxelCover.regionTest(x0, z0, x1, z1, data);
   const pathPointsInverse = new THREE.Matrix4();
   const pathPointScratch = new THREE.Vector3();
   /** entity id -> its last-applied LOCAL points, so a near-static rope (the
@@ -1490,6 +1324,14 @@ async function main(): Promise<void> {
   // ctx.biomeAt — the weather script's "what is the ground here" question,
   // answered from the recipe's own biome rules (the same blend the terrain
   // texture and the grass use), so zone edges fade exactly where the ground does
+  // ctx.regionAt — which named zone (town zones nested first) a point is in;
+  // the soundscape's "am I in town" question
+  function runtimeRegionAt(x: number, z: number): { id: string; name: string; tags: readonly string[]; hub?: readonly [number, number] } | null {
+    if (!activeVoxelWorld) return null;
+    const field = getVoxelWorld(activeVoxelWorld);
+    const region = field ? regionAt(field.recipe.regions, x, z) : null;
+    return region ? { id: region.id, name: region.name, tags: region.tags, ...(region.hub ? { hub: region.hub } : {}) } : null;
+  }
   function runtimeBiomeAt(x: number, z: number): BiomeAt | null {
     if (!activeVoxelWorld) return null;
     const field = getVoxelWorld(activeVoxelWorld);
@@ -1796,6 +1638,11 @@ async function main(): Promise<void> {
       endBuild();
     }
     built.scene.add(movingInstances.root);
+    // grass.clear() above dropped the world cover layers too; parent their
+    // group in the new scene and let the frame loop re-register them
+    built.scene.add(worldCoverRoot);
+    worldCoverIds.clear();
+    foliageField = null;
     const endBatch = profiler.span("scene.batch", "static meshes");
     try {
       rebuildStaticBatch();
@@ -2660,6 +2507,7 @@ async function main(): Promise<void> {
         frozen?: boolean;
         swimming?: string;
         swimVelocity?: [number, number, number];
+        advanceVel?: [number, number];
       };
       if (ud.frozen) return { v: [0, 0], jump: false };
       // Swimming: the controller already solved where this body is pointed
@@ -2693,6 +2541,13 @@ async function main(): Promise<void> {
       if (len > 0) {
         x = (x / len) * speed;
         z = (z / len) * speed;
+      }
+      // A swing that steps in moves the body with its feet (the controller's
+      // clipAdvance). The authority only moves what is claimed, so the lunge is
+      // part of the claim — without it the server pins the swinger in place.
+      if (ud.advanceVel) {
+        x += ud.advanceVel[0];
+        z += ud.advanceVel[1];
       }
       // Vertical intent is only meaningful in water; out of it, Space is the
       // jump the authority already reads.
@@ -2754,8 +2609,28 @@ async function main(): Promise<void> {
         const animL = syncAnim ? (animations.layerClip(id) ?? undefined) : undefined;
         const animR = syncAnim ? animations.speedOf(id) : undefined;
         // seconds left of a one-shot action, so a peer can fit the clip to it
-        const until = (object.userData as { actionUntil?: number }).actionUntil;
+        const ud = object.userData as { actionUntil?: number; actionHold?: boolean; actionLoop?: boolean };
+        const until = ud.actionUntil;
         const nowSeconds = (scripts?.now() ?? 0) / 1000;
+        // A layer with no live action under it is a stance CARRY (see the
+        // controller's stanceCarry): a loop, phase-locked to the gait when it
+        // is a stance's own clip for it. Only a live action's layer reads the
+        // action flags — they are sticky userData, and a stale actionHold
+        // would replay a carry as a one-shot clamped on its last frame.
+        const actionLive = typeof until === "number" && until > nowSeconds;
+        const animO = animL && !actionLive ? (animations.layerPhaseLock(id) ?? undefined) : undefined;
+        // a held guard or a channel loop must not replay as a fitted one-shot
+        const animM = !animL
+          ? undefined
+          : actionLive
+            ? ud.actionLoop
+              ? "loop"
+              : ud.actionHold
+                ? "hold"
+                : undefined
+            : animO === undefined
+              ? "loop"
+              : undefined;
         const animD =
           syncAnim && typeof until === "number" && until > nowSeconds
             ? r3(until - nowSeconds)
@@ -2773,6 +2648,8 @@ async function main(): Promise<void> {
           ...(animL ? { animL } : {}),
           ...(animR !== undefined ? { animR } : {}),
           ...(animD !== undefined ? { animD } : {}),
+          ...(animM ? { animM } : {}),
+          ...(animO !== undefined ? { animO: r3(animO) } : {}),
           relevancy: netObj?.relevancy ?? "always",
           radius: netObj?.radius ?? 50,
           sendEvery: netObj?.sendEvery ?? 1,
@@ -2784,9 +2661,11 @@ async function main(): Promise<void> {
     onWorldEntities: (ids) => suspendForHost(ids),
     getEntityObject: (id) =>
       playMode.get() === "playing" ? (built.objects.get(id) ?? null) : null,
-    setEntityAnim: (id, clip, layer) => {
+    setEntityAnim: (id, clip, layer, opts) => {
       animations.play(id, clip, 0.25);
-      if (layer) animations.playLayer(id, layer, { fade: 0.08, loop: true });
+      // the authority's gait rate, or every remote body skates
+      animations.setSpeed(id, opts?.rate ?? 1);
+      if (layer) animations.playLayer(id, layer, remoteLayerOptions(id, layer, opts));
       else animations.clearLayer(id, 0.15);
     },
     // replicated gameplay events ride the session event bus in both directions
@@ -2807,6 +2686,24 @@ async function main(): Promise<void> {
   netPresence.onSession((session) => {
     if (session?.role === "peer" && netServerUrl) session.client.onModule("world", onWorldModule);
   });
+  // ?creator — the character creation screen on its own (design iteration,
+  // no gateway needed): Create logs the build instead of making a character
+  if (new URLSearchParams(location.search).has("creator")) {
+    const creation = findCreation(assets, new URLSearchParams(location.search).get("creator") || undefined);
+    if (!creation) console.warn("[creation] ?creator: no creation asset (assets/creation/<id>.json) — pass ?creator=<id> if there are several");
+    else {
+      const screen = mountCreationScreen({
+        creation,
+        textureUrl: (id) => assets.getTexture(id)?.url,
+        preview: (canvas) => createCreationPreview(canvas, creation, (id) => assets.getModel(id)?.url),
+        onCreate: (name, build) => {
+          console.log("[creation] would create", name, JSON.stringify(build));
+          return Promise.resolve();
+        },
+        onCancel: () => screen.close(),
+      });
+    }
+  }
   // gateway mode: sign in, pick a character, and Play dials the layer main chose
   let socialPanel: SocialPanel | null = null;
   if (netGateway) {
@@ -2814,6 +2711,9 @@ async function main(): Promise<void> {
     let playing: { id: string; name: string } | null = null;
     gatewayPanel = mountGatewayPanel({
       client: gatewayClient,
+      localCreation: () => findCreation(assets),
+      textureUrl: (id) => assets.getTexture(id)?.url,
+      preview: (canvas, creation) => createCreationPreview(canvas, creation, (id) => assets.getModel(id)?.url),
       onPlay: (grant, character) => {
         netGrant = grant;
         playing = { id: character.id, name: character.name };
@@ -3251,6 +3151,19 @@ async function main(): Promise<void> {
     return [viewDir.x, viewDir.z];
   }
 
+  /** A world point on screen for DOM overlays (ctx.worldToScreen): CSS px from the viewport corner, or null. */
+  const screenPoint = new THREE.Vector3();
+  function worldToScreen(x: number, y: number, z: number): { x: number; y: number; distance: number } | null {
+    screenPoint.set(x, y, z).project(camera);
+    if (screenPoint.z < -1 || screenPoint.z > 1 || Math.abs(screenPoint.x) > 1.1 || Math.abs(screenPoint.y) > 1.1) return null;
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: rect.left + ((screenPoint.x + 1) / 2) * rect.width,
+      y: rect.top + ((1 - screenPoint.y) / 2) * rect.height,
+      distance: camera.position.distanceTo(screenPoint.set(x, y, z)),
+    };
+  }
+
   /** The same aim with its PITCH kept — what swimming aims along (ctx.viewDirection). */
   function viewDirection(): [number, number, number] {
     aimInto(viewDir);
@@ -3260,6 +3173,8 @@ async function main(): Promise<void> {
   }
 
   const audio = new AudioSystem(camera, (soundId) => assets.getSound(soundId)?.url);
+  // spell/effect `sound` modules: a one-shot at the module's anchor, in whatever scene is built now
+  vfx.resolvers.playSound = (soundId, at, volume) => void audio.playAt(built.scene, at, soundId, { volume });
   const playerDataBackend = new BridgePlayerDataBackend();
 
   let followTargetId: string | null = null;
@@ -3442,12 +3357,14 @@ async function main(): Promise<void> {
       input,
       viewForward,
       viewDirection,
+      worldToScreen,
       recenterView: () => cameraRig.returnToAim(),
       localPlayer: () => localPlayerId(),
       setAnimation: (entityId, clip, fade, opts) =>
-        animations.play(entityId, clip, fade ?? 0.3, opts?.loop ?? true, opts?.restart ?? false),
+        animations.play(entityId, clip, fade ?? 0.3, opts?.loop ?? true, opts?.restart ?? false, opts?.sync ?? false),
       animationClips: (entityId) => animations.clipNames(entityId),
       animationDuration: (entityId, clip) => animations.clipDuration(entityId, clip),
+      animationPhase: (entityId) => animations.baseClipPhase(entityId),
       setAnimationSpeed: (entityId, multiplier) => animations.setSpeed(entityId, multiplier),
       setAnimationBlend: (entityId, from, to, weight, fade) => animations.playBlend(entityId, from, to, weight, fade),
       setAnimationLayer: (entityId, clip, opts) => animations.playLayer(entityId, clip, opts),
@@ -3462,10 +3379,13 @@ async function main(): Promise<void> {
         const object = built.objects.get(entityId);
         if (!object) return null;
         const view = new PortraitView(object, canvas, { ...opts, clips: animations.clipsOf(entityId) });
+        // the head, hair, helm and pads are drawn by moving batches, not under the body: seat copies on the clone's bones
+        modelLooks.dressPortrait(object, view.model, () => view.refit());
         return () => view.dispose();
       },
       setLight: setRuntimeLight,
       setModelLook: (entityId, look) => modelLooks.set(entityId, look),
+      modelTables: (assetId) => modelLooks.tables(assetId),
       setSky: setRuntimeSky,
       setPostFx: setRuntimePostFx,
       daylight: () => sceneLighting(built.scene)?.daylight() ?? 1,
@@ -3483,8 +3403,20 @@ async function main(): Promise<void> {
           | undefined;
         const src = soundId ?? comp?.src;
         if (!src) return;
+        if (opts?.at) {
+          void audio.playAt(built.scene, opts.at, src, opts);
+          return;
+        }
         void audio.play(built.objects.get(entityId) ?? null, src, soundId ? opts : { ...(comp ?? {}), ...opts });
       },
+      hasSound: (soundId) => assets.getSound(soundId) !== undefined,
+      worldLoading: () => sceneSwitchPending || chunkManager.stats.loading + subsceneManager.stats.loading > 0,
+      soundDuration: (soundId) => {
+        const seconds = audio.duration(soundId);
+        if (seconds === undefined && assets.getSound(soundId)) audio.preload(soundId);
+        return seconds;
+      },
+      regionAt: runtimeRegionAt,
       setSoundLoop: (entityId, slot, soundId, opts) =>
         audio.setLoop(`${entityId}/${slot}`, built.objects.get(entityId) ?? null, soundId, opts),
     });
@@ -4652,6 +4584,8 @@ async function main(): Promise<void> {
         foliageField = field;
         grass.invalidateGround();
         invalidateFoliageProbes();
+        // the world carries its own cover: re-register it from the new recipe
+        syncWorldCover(grass, worldCoverRoot, field, worldCoverIds, (assetId) => assets.getTexture(assetId)?.url);
       }
       grass.update(renderCamera, sampleTerrainHeight, sampleFoliageGround);
       profiler.end();

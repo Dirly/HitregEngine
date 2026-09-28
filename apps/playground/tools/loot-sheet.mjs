@@ -7,6 +7,7 @@
  *   node tools/loot-sheet.mjs request --project voxel-demo [--sheets potions gems …] [--timeout 3000]
  *   node tools/loot-sheet.mjs slice   --project voxel-demo [--sheets …] [--contact <png>]
  *   node tools/loot-sheet.mjs list    --project voxel-demo [--tag potion]
+ *   node tools/loot-sheet.mjs audit   --project voxel-demo
  *
  * Why sheets: an icon ends up ~40 px, and a generator call makes a 1024 image.
  * One call per item throws almost all of it away; a 4x4 sheet gets sixteen
@@ -30,14 +31,24 @@
  * hard-alpha steps as a rendered item icon. Output:
  *   assets/textures/icons/loot/<id>.png
  *   assets/textures/icons/loot/library.json   id → { icon, sheet, tags, desc, from? }
- * An item uses one by `"icon": "icons/loot/<id>.png"`.
+ * An item uses one by `"icon": "icons/loot/<id>.png"`. Each icon is put on
+ * the same seeded backdrop a rendered item icon gets (`--no-backdrop` for the
+ * bare cut-out), and every sliced sheet leaves a 6x zoomed contact sheet at
+ * authoring/loot-art/contact/<sheet>.png: LOOK at it before pointing an item
+ * at a cell.
+ *
+ * `audit` lists every item whose icon is missing or broken, and how to get
+ * one: a model → tools/item-icon.mjs; no model → the category sheet whose
+ * tags it shares. It also flags a modelled item wearing loot art, and a loot
+ * icon on an item that lacks its sheet's category tag. Exit 1 when anything
+ * needs fixing; a content drop ships only on a clean audit.
  */
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { decodePng, encodePng } from "./_png.mjs";
-import { groundMask, iconFromPixels, recolor, writeContactSheet } from "./_icon.mjs";
+import { groundMask, iconFromPixels, recolor, writeContactSheet, backdrop, contrastTint, seedOf } from "./_icon.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const PLAYGROUND = path.resolve(here, "..");
@@ -54,8 +65,8 @@ const args = {};
   }
 }
 const project = typeof args.project === "string" ? args.project : null;
-if (!["request", "slice", "list"].includes(cmd) || !project) {
-  console.error("usage: loot-sheet.mjs request|slice|list --project <p> [--sheets a b …] [--contact out.png] [--tag t]");
+if (!["request", "slice", "list", "audit"].includes(cmd) || !project) {
+  console.error("usage: loot-sheet.mjs request|slice|list|audit --project <p> [--sheets a b …] [--contact out.png] [--tag t] [--no-backdrop]");
   process.exit(1);
 }
 const projectDir = path.join(PLAYGROUND, "projects", project);
@@ -115,6 +126,68 @@ if (cmd === "request") {
 
 // ---------------------------------------------------------------- slice
 
+/**
+ * Peel the pale anti-aliased rim the generator paints where an object meets
+ * the white ground (min channel > `lum`, touching ground): left in, it
+ * shrinks to a light halo round the icon. A few passes; light objects lose a
+ * source pixel or two, which is nothing at 40 px.
+ */
+function peelHalo(img, ground, { lum = 190, passes = 3 } = {}) {
+  const { width: w, height: h, data } = img;
+  for (let p = 0; p < passes; p++) {
+    const peel = [];
+    for (let i = 0; i < w * h; i++) {
+      if (ground[i] || Math.min(data[i * 4], data[i * 4 + 1], data[i * 4 + 2]) <= lum) continue;
+      const x = i % w, y = (i / w) | 0;
+      if ((x > 0 && ground[i - 1]) || (x < w - 1 && ground[i + 1]) || (y > 0 && ground[i - w]) || (y < h - 1 && ground[i + w])) peel.push(i);
+    }
+    if (!peel.length) break;
+    for (const i of peel) ground[i] = 1;
+  }
+  return ground;
+}
+
+/**
+ * White ground the border flood can't reach: the hole in a coiled rope, a
+ * sausage ring, a pot's bail or a flask handle. An enclosed near-white region
+ * of at least `minArea` pixels whose surroundings (a ring 4 px out) are DARK
+ * is a hole: the style outlines every silhouette dark. A highlight fades into
+ * light paint (ring luminance ~170-240 on gems and glass, holes ~50-150), so it
+ * stays paint.
+ */
+function openHoles(img, ground, minArea, lum = 240, holeLum = 160) {
+  const { width: w, height: h, data } = img;
+  const white = (i) => !ground[i] && Math.min(data[i * 4], data[i * 4 + 1], data[i * 4 + 2]) > lum;
+  const seen = new Uint8Array(w * h);
+  for (let s = 0; s < w * h; s++) {
+    if (seen[s] || !white(s)) continue;
+    const region = [s];
+    seen[s] = 1;
+    for (let k = 0; k < region.length; k++) {
+      const i = region[k], x = i % w, y = (i / w) | 0;
+      for (const j of [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, y > 0 ? i - w : -1, y < h - 1 ? i + w : -1])
+        if (j >= 0 && !seen[j] && white(j)) (seen[j] = 1), region.push(j);
+    }
+    if (region.length < minArea) continue;
+    const inRegion = new Set(region);
+    const ring = new Set();
+    let front = region;
+    for (let d = 0; d < 4; d++) {
+      const next = [];
+      for (const i of front) {
+        const x = i % w, y = (i / w) | 0;
+        for (const j of [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, y > 0 ? i - w : -1, y < h - 1 ? i + w : -1])
+          if (j >= 0 && !inRegion.has(j) && !ring.has(j)) (ring.add(j), next.push(j));
+      }
+      front = next;
+    }
+    let lum = 0;
+    for (const j of ring) lum += (data[j * 4] + data[j * 4 + 1] + data[j * 4 + 2]) / 3;
+    if (lum / ring.size < holeLum) for (const i of region) ground[i] = 1;
+  }
+  return ground;
+}
+
 /** Connected components of non-ground pixels (4-neighbour). */
 function components(img, ground) {
   const { width: w, height: h } = img;
@@ -150,11 +223,12 @@ function sliceSheet(name) {
   }
   const img = decodePng(fs.readFileSync(file));
   const [cols, rows] = gridOf(sheet);
-  const ground = groundMask(img);
+  const cellArea = (img.width * img.height) / (cols * rows);
+  const ground = peelHalo(img, openHoles(img, groundMask(img), cellArea / 800));
   const { label, comps } = components(img, ground);
   // specks (jpeg-ish noise, a stray dot) are dropped; everything else goes to
   // the cell its centre is in
-  const minArea = (img.width * img.height) / (cols * rows) / 400;
+  const minArea = cellArea / 200; // ~1 icon pixel
   const cellOf = new Map();
   for (const c of comps) {
     if (c.n < minArea) continue;
@@ -191,23 +265,35 @@ if (cmd === "slice") {
   const byId = new Map(made.map((m) => [m.id, m]));
   let variants = 0;
   for (const v of spec.variants ?? []) {
-    let base = byId.get(v.from);
-    if (!base && library[v.from]) {
-      const icon = decodePng(fs.readFileSync(path.join(outDir, path.basename(library[v.from].icon))));
-      base = { ...library[v.from], id: v.from, icon: { width: icon.width, height: icon.height, data: icon.data } };
-    }
+    // only re-tint what this run sliced: the written icons carry a backdrop,
+    // so a variant is always cut from the bare cell
+    const base = byId.get(v.from);
     if (!base) continue;
-    if (!byId.has(v.from) && !wanted.includes(library[v.from]?.sheet)) continue; // only re-tint what this run touched
     made.push({ id: v.id, icon: recolor(base.icon, v), sheet: base.sheet, tags: base.tags, desc: base.desc, from: v.from });
     variants++;
   }
+  const BACKDROP = args["no-backdrop"] !== true;
   for (const m of made) {
+    if (BACKDROP) {
+      const seed = seedOf(m.id);
+      m.icon = backdrop(m.icon, { seed, tint: contrastTint(m.icon, seed) });
+    }
     fs.writeFileSync(path.join(outDir, `${m.id}.png`), encodePng(m.icon.width, m.icon.height, m.icon.data));
     library[m.id] = { icon: `icons/loot/${m.id}.png`, sheet: m.sheet, tags: m.tags, desc: m.desc, ...(m.from ? { from: m.from } : {}) };
   }
   const sorted = Object.fromEntries(Object.entries(library).sort(([a], [b]) => a.localeCompare(b)));
   fs.writeFileSync(libraryFile, JSON.stringify(sorted, null, 2) + "\n");
   console.log(`  ${made.length - variants} sliced + ${variants} variants -> ${path.relative(PLAYGROUND, outDir)} (library: ${Object.keys(sorted).length})`);
+  // one zoomed contact sheet per sheet (its cells in grid order, then its variants)
+  const contactDir = path.join(artDir, "contact");
+  fs.mkdirSync(contactDir, { recursive: true });
+  for (const name of wanted) {
+    const icons = made.filter((m) => m.sheet === name).map((m) => m.icon);
+    if (!icons.length) continue;
+    const file = path.join(contactDir, `${name}.png`);
+    writeContactSheet(file, icons, { cols: gridOf(spec.sheets[name])[0] });
+    console.log(`  contact ${name.padEnd(14)} -> ${path.relative(PLAYGROUND, file)}`);
+  }
   if (typeof args.contact === "string") {
     writeContactSheet(path.resolve(args.contact), made.map((m) => m.icon), { cols: 16 });
     console.log(`  contact -> ${args.contact}`);
@@ -223,4 +309,50 @@ if (cmd === "list") {
     if (tag && !e.tags.includes(tag)) continue;
     console.log(`${id.padEnd(26)} ${e.icon.padEnd(40)} ${e.tags.join(",")}  ${e.desc}`);
   }
+}
+
+// ---------------------------------------------------------------- audit
+
+if (cmd === "audit") {
+  const library = fs.existsSync(libraryFile) ? JSON.parse(fs.readFileSync(libraryFile, "utf8")) : {};
+  const itemsDir = path.join(projectDir, "assets", "items");
+  const texDir = path.join(projectDir, "assets", "textures");
+  const fixes = [];
+  for (const f of fs.readdirSync(itemsDir).filter((f) => f.endsWith(".json")).sort()) {
+    const id = f.slice(0, -5);
+    const item = JSON.parse(fs.readFileSync(path.join(itemsDir, f), "utf8"));
+    const model = item.appearance?.model;
+    const tags = item.tags ?? [];
+    const icon = typeof item.icon === "string" ? item.icon : null;
+    const exists = icon && fs.existsSync(path.join(texDir, icon));
+    const isLoot = icon?.startsWith("icons/loot/");
+    if (exists && !(isLoot && model)) {
+      if (isLoot) {
+        const e = library[path.basename(icon, ".png")];
+        const cat = e ? spec.sheets[e.sheet]?.tags ?? e.tags : [];
+        if (e && cat.length && !cat.some((t) => tags.includes(t)))
+          fixes.push(`${id.padEnd(24)} tags lack the category of sheet "${e.sheet}" — add one of: ${cat.join(", ")}`);
+      }
+      continue;
+    }
+    const why = !icon ? "no icon" : !exists ? `icon missing: ${icon}` : "has a model but wears loot art";
+    if (model) {
+      fixes.push(`${id.padEnd(24)} ${why} -> RENDER: node tools/item-icon.mjs --project ${project} --item ${id}`);
+      continue;
+    }
+    if (library[id]) {
+      fixes.push(`${id.padEnd(24)} ${why} -> sliced icon exists: "icon": "${library[id].icon}"`);
+      continue;
+    }
+    const sheets = Object.entries(spec.sheets)
+      .filter(([, sh]) => (sh.tags ?? []).some((t) => tags.includes(t)))
+      .map(([n]) => n);
+    fixes.push(
+      `${id.padEnd(24)} ${why} -> ${sheets.length ? `sheet ${sheets.join(" | ")}: reuse a cell/variant or add the object and re-request` : "no sheet shares its tags: tag it with a category, or start a <category> sheet"}`,
+    );
+  }
+  for (const l of fixes) console.log(l);
+  console.log(fixes.length ? `
+${fixes.length} item(s) to fix (docs/item-icons.md "Adding an item: which icon route")` : "audit: every item has a working icon on the right route");
+  process.exit(fixes.length ? 1 : 0);
 }

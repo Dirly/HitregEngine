@@ -596,7 +596,7 @@ describe("terrain features", () => {
     expect(edge).toBeLessThanOrEqual(Math.max(bare.height(0, 20), bed + 6 * 0.7 + 0.4) + 1e-6);
   });
 
-  it("builds land up to a river bed by a bounded amount, never a dam", () => {
+  it("cuts a channel under a bed written far above the land, never a dam", () => {
     const bare = createWorldField(testRecipe());
     const carved = createWorldField(
       testRecipe({
@@ -614,11 +614,9 @@ describe("terrain features", () => {
         },
       }),
     );
-    // rivers-first: a river fills the hollow it crosses (up to RIVER_MAX_BUILD
-    // metres), so the ground rises toward the bed — but a bed at 9000 is not
-    // a reason to build a mountain
-    expect(carved.height(0, 500)).toBeGreaterThan(bare.height(0, 500) + 5);
-    expect(carved.height(0, 500)).toBeLessThanOrEqual(bare.height(0, 500) + 10 + 1e-6);
+    // a bed at 9000 is not a reason to build a mountain: the water may not
+    // stand over its banks, so the channel is cut into the ground instead
+    expect(carved.height(0, 500)).toBeLessThan(bare.height(0, 500));
     expect(carved.height(0, 560)).toBeCloseTo(bare.height(0, 560), 5); // outside the bank
   });
 
@@ -643,8 +641,9 @@ describe("terrain features", () => {
     expect(field.waterY(0, 390)).not.toBeNull();
     // the tributary's mouth surface is flush with the trunk's surface there
     const trunkSurface = field.waterY(0, 380)!;
-    const mouthSurface = b!.bedY![b!.bedY!.length - 1]! + Math.max(0.4, 2 * 0.7);
-    expect(Math.abs(mouthSurface - trunkSurface)).toBeLessThan(0.5);
+    // (the solved water level rides on the doc: the tributary takes the trunk's pool where it enters it)
+    const mouthSurface = b!.surfaceY![b!.surfaceY!.length - 1]!;
+    expect(Math.abs(mouthSurface - trunkSurface)).toBeLessThan(0.05);
   });
 
   it("flattens a town pad to its target height", () => {

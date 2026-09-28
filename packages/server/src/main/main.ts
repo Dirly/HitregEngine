@@ -25,7 +25,7 @@ import fs from "node:fs";
 import http from "node:http";
 import { randomBytes } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
-import { regionAt, type PlayerDataBackend, type RegionDoc, type WorldRecipe } from "@hitreg/core";
+import { characterBuildSchema, regionAt, validateBuild, type CharacterBuild, type CharacterCreation, type PlayerDataBackend, type RegionDoc, type WorldRecipe } from "@hitreg/core";
 import { ServerRegistry, type ServerEntry } from "./registry.js";
 import { SocialError, SocialStore, isBlocked, type FriendRef } from "./social.js";
 import { GuildStore, rankAbove, type GuildRank, type GuildRecord } from "./guilds.js";
@@ -88,6 +88,13 @@ export interface MainOptions {
   };
   /** Starts layers/instances on this box; null = they are started externally and register. */
   supervisor?: Supervisor | null;
+  /**
+   * Character-creation rules (a `creation` data asset). With them, a new
+   * character's build is validated here and a bad one refused with the reason;
+   * without them the build is only shape-checked and the layer's sheet
+   * authority is the one that validates it (it always re-checks).
+   */
+  creation?: CharacterCreation;
   /** Recipe files by world id, so main can persist a terraformed recipe (from `loadContent().worldFiles`). */
   worldFiles?: Map<string, string>;
   /**
@@ -747,19 +754,35 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
       if (!account || !(await checkPassword(account, password))) throw new HttpError(401, "wrong name or password");
       return send(res, 200, sessionFor(account));
     }
+    // the rules the creation screen draws and /characters validates against — one source for both
+    if (p === "/creation" && method === "GET") return send(res, 200, { creation: opts.creation ?? null });
     if (p === "/characters" && method === "GET") {
       const account = await requireAccount(req);
       return send(res, 200, { characters: account.characters });
     }
     if (p === "/characters" && method === "POST") {
       const account = await requireAccount(req);
-      const body = (await readJson(req)) as { name?: unknown } | null;
+      const body = (await readJson(req)) as { name?: unknown; build?: unknown } | null;
       const name = typeof body?.name === "string" ? body.name.trim() : "";
       if (!CHARACTER_NAME.test(name)) throw new HttpError(400, "character name: 3-20 letters");
+      let build: CharacterBuild | undefined;
+      if (body?.build !== undefined) {
+        if (opts.creation) {
+          const v = validateBuild(opts.creation, body.build);
+          if (!v.ok) throw new HttpError(400, v.error);
+          build = v.build;
+        } else {
+          const v = characterBuildSchema.safeParse(body.build);
+          if (!v.success) throw new HttpError(400, `build: ${v.error.issues[0]?.message ?? "invalid"}`);
+          build = v.data;
+        }
+      } else if (opts.creation) {
+        throw new HttpError(400, "choose an archetype, a birth trait and a look first");
+      }
       if (account.characters.length >= MAX_CHARACTERS) throw new HttpError(400, `at most ${MAX_CHARACTERS} characters`);
       // names are how players find each other (/friend, /invite): one character per name, world-wide
       if (await opts.accounts.findCharacter(name)) throw new HttpError(409, `a character called "${name}" already exists — pick another name`);
-      const character: CharacterRecord = { id: newId("chr"), name, createdAt: new Date().toISOString() };
+      const character: CharacterRecord = { id: newId("chr"), name, createdAt: new Date().toISOString(), ...(build ? { build } : {}) };
       account.characters.push(character);
       await opts.accounts.update(account);
       return send(res, 200, { character, characters: account.characters });
@@ -772,7 +795,7 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
       const zone = await zoneForCharacter(account.id);
       const server = await placeOrGrow(character.id, zone);
       registry.reserve(server.id, character.id, account.id, character.name, Date.now(), zone);
-      const ticket = signTicket(opts.secret, { sub: account.id, chr: character.id, name: character.name, srv: server.id, reason: "join", ttlSeconds: ticketTtl });
+      const ticket = signTicket(opts.secret, { sub: account.id, chr: character.id, name: character.name, srv: server.id, reason: "join", ...(character.build ? { build: character.build } : {}), ttlSeconds: ticketTtl });
       return send(res, 200, { url: server.url, ticket, server: server.id, scene: server.scene });
     }
     if (p.startsWith("/party") || p.startsWith("/social") || p.startsWith("/guild")) {

@@ -296,6 +296,34 @@ export const meshSchema = z.object({
         })
         .optional(),
     }),
+    z
+      .object({
+        kind: z.literal("surface"),
+        positions: z.array(z.number()).describe("Vertex positions as flat x, y, z triples in entity-local space."),
+        indices: z
+          .array(z.number().int().min(0))
+          .describe("Triangles as vertex-index triples, counter-clockwise seen from the side the surface faces."),
+        uvs: z
+          .array(z.number())
+          .optional()
+          .describe(
+            "Optional flat u, v pairs, one per vertex. Generated water puts the CURRENT here (m/s along world X " +
+              "and Z), which a water material in `flowMode: \"field\"` reads.",
+          ),
+        uv1s: z
+          .array(z.number())
+          .optional()
+          .describe(
+            "Optional second u, v pairs, one per vertex (the geometry's uv1). A waterfall curtain writes (across " +
+              "0..1, down 0..1 from lip to foot) here, and the water material dissolves its sides and foot by it; " +
+              "the upper water beside a lip writes (across the curtain's span 0..1, -1 - t, t 0 on the lip line " +
+              "to 1 a few metres upstream) and fades its side bands with the curtain's top.",
+          ),
+      })
+      .describe(
+        "Raw triangle mesh written by a generator, never by hand: the water a voxel world clips from its " +
+          "terrain per streamed cell (voxel/chunk.ts). Merges into HLOD proxies like a single-material poly.",
+      ),
     polyMeshSourceSchema.describe(
       "Editable polygon mesh (ProBuilder-class): shared `vertices` + n-gon `faces` (CCW from outside) with per-face " +
         "material slot / smoothing group / UV settings. The graybox shape tools create these; edit them with the " +
@@ -1186,6 +1214,23 @@ export const materialSchema = z.object({
       /** World units of water depth within which the surface blends toward
        * foamColor — the shoreline-foam band. */
       foamWidth: z.number().min(0).default(0.5),
+      foamBand: z
+        .number()
+        .positive()
+        .optional()
+        .describe("Widest the shoreline foam runs across the surface, metres (default 0.9). The band is measured as distance to the shore, so a gentle beach no longer widens it; foamWidth still fades it out by depth."),
+      fresnelMax: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe("Cap on the fresnel sky rim, 0-1 (default 0.12; waterfall curtains get a tenth of it). Uncapped, water seen from eye level turns one flat sky colour."),
+      specular: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe("Sun glint / sheen, 0-1 (default 0.3). 0 is matte, 1 the old glassy surface (roughness 0.35); waterfall curtains are always matte."),
       /** Camera distance (world units) where the surface starts fading toward
        * fully transparent — should end well before the mesh's own physical
        * edge so a large-but-finite water plane never shows a hard cutoff, no
@@ -1207,6 +1252,26 @@ export const materialSchema = z.object({
         .positive()
         .default(24)
         .describe("World units per texture tile. Sampled in WORLD XZ, not UV, so tiling is continuous across a huge plane and independent of how the mesh happens to be unwrapped."),
+      fallTexture: z
+        .string()
+        .optional()
+        .describe(
+          "flowMode \"field\" only: the texture of FALLING water, used where the surface is steep (a waterfall's " +
+            "face). World XZ cannot texture a vertical sheet — it smears one texel down the whole drop — so a steep " +
+            "face is sampled across the current and down world Y instead, and scrolls downward at `fallSpeed`. " +
+            "Paint it as vertical streaks; it blends in over a slope of about 20 to 50 degrees.",
+        ),
+      fallTextureScale: z.number().positive().default(4).describe("World units per fall-texture tile, across and down the fall."),
+      stillTexture: z
+        .string()
+        .optional()
+        .describe(
+          "flowMode \"field\" only: the texture of STILL water (a lake, the start of a river leaving one), laid out " +
+            "in world XZ and drifting by `flow` like the sea. It fades into the flowing `texture` as the current " +
+            "picks up, so a lake runs into its river instead of meeting it at a seam.",
+        ),
+      stillTextureScale: z.number().positive().default(26).describe("World units per still-texture tile."),
+      fallSpeed: z.number().min(0).default(7).describe("How fast the fall texture runs down the face, m/s."),
       textureStrength: z
         .number()
         .min(0)
@@ -1236,14 +1301,18 @@ export const materialSchema = z.object({
             "roughly perpendicular, which is what stops the eye locking onto a single repeating direction.",
         ),
       flowMode: z
-        .enum(["drift", "channel"])
+        .enum(["drift", "channel", "field"])
         .default("drift")
         .describe(
           "drift: standing water — waves and texture are laid out in WORLD space (so sheets streamed cell by " +
             "cell agree along their shared edges) and drift by `flow`. channel: moving water — the geometry " +
             "carries a per-vertex `flow` vector and metre uvs (a `path` ribbon with `flowSpeed` and " +
             "`uvMetres`), and waves, texture and foam all travel along it at that speed: a river runs " +
-            "downstream and over its falls. Only use channel on geometry that has the attribute.",
+            "downstream and over its falls. Only use channel on geometry that has the attribute. field: moving " +
+            "water laid out in WORLD space (one texel size everywhere, seams agree) whose current is the " +
+            "geometry's uv, in m/s along world X and Z: the water a voxel world clips from its terrain (a " +
+            "`surface` mesh). The texture is advected along the current in two phases, so rapids run and pools " +
+            "barely move; a zero current still drifts by `flow`.",
         ),
       displace: z
         .boolean()
@@ -2208,7 +2277,9 @@ export type VfxComponentData = z.infer<typeof vfxComponentSchema>;
  *
  * MULTIPLE LAYERS are the intended use: one entity per cover type, each with
  * its own texture, density and `surfaces` gate, so dense grass and sparse
- * bramble are two rows of JSON rather than one compromise.
+ * bramble are two rows of JSON rather than one compromise. On a generated
+ * world the same layers are authored in the recipe's `cover` list instead, so
+ * every world the pipeline produces carries its own cover.
  */
 export const grassSchema = z.object({
   bladeColor: hexColor.default("#3f7d34"),
@@ -2274,7 +2345,144 @@ export const grassSchema = z.object({
    * helicopter flying low), not wastefully from altitude. */
   heightFadeStart: z.number().positive().default(12),
   heightFadeEnd: z.number().positive().default(30),
+  atlas: z
+    .object({
+      columns: z.number().int().min(1).max(16).default(4),
+      rows: z.number().int().min(1).max(16).default(4),
+    })
+    .optional()
+    .describe(
+      "Textured layers only: `texture` is a PAGE of equal tiles, `columns` x `rows`, tile 0 top-left, row-major. " +
+        "Each instance draws one tile (see `tiles`), so poppies, daisies and lupins are ONE layer and ONE draw " +
+        "call instead of three. Keep a transparent gutter inside every tile: minification mips bleed across tile edges.",
+    ),
+  tiles: z
+    .array(z.number().int().min(0))
+    .default([])
+    .describe(
+      "Atlas tiles this layer draws, picked per instance. Empty = every tile on the page. Repeat an index to " +
+        "weight it: [0, 0, 0, 1] is three parts tile 0 to one part tile 1.",
+    ),
+  tilePatch: z
+    .number()
+    .min(0)
+    .default(0)
+    .describe(
+      "How the tile is picked. 0 = independently per instance (a mixed meadow). > 0 = from smooth world-space " +
+        "noise at this many cycles per metre, so neighbours share a tile and the ground reads as DRIFTS — a " +
+        "patch of poppies beside a patch of daisies. 0.03 ~ 30 m drifts.",
+    ),
+  cap: z
+    .object({
+      tiles: z
+        .array(z.number().int().min(-1))
+        .default([])
+        .describe(
+          "Cap tile for each entry of `tiles`, same order (-1 = no cap for that one). The cap is drawn from the SAME " +
+            "page as the body, so put the top-down flower heads on the body's page.",
+        ),
+      height: z.number().min(0).max(1.5).default(0.8).describe("Where the cap sits, as a fraction of bladeHeight."),
+      size: z.number().positive().default(0.35).describe("Cap card size in metres (square), before the instance scale."),
+      tilt: z
+        .number()
+        .min(0)
+        .max(90)
+        .default(35)
+        .describe("Degrees the cap leans from horizontal. 0 = lying flat (only seen from above), 90 = another upright card."),
+    })
+    .optional()
+    .describe(
+      "Textured upright layers only: one extra TILTED card on top of each tuft carrying a top-down view of the " +
+        "flower heads, so a meadow still shows petals when looked down on — crossed upright cards go thin from " +
+        "above. Costs one quad per instance.",
+    ),
+  orient: z
+    .enum(["upright", "flat"])
+    .default("upright")
+    .describe(
+      "`upright` = crossed vertical cards (tufts, reeds, flowers). `flat` = one horizontal card lying on the " +
+        "ground or water, yawed per instance — lily pads, duckweed. `bladeWidth` is then its size in both axes.",
+    ),
+  scaleRange: z
+    .tuple([z.number().positive(), z.number().positive()])
+    .default([0.7, 1.3])
+    .describe("Per-instance size jitter [min, max], a multiplier on bladeWidth/bladeHeight."),
+  biomes: z
+    .array(z.string())
+    .default([])
+    .describe(
+      "Voxel worlds only: biome ids this layer may grow in (the same ids `scatter[].biomes` names). Empty = any. " +
+        "Combine with `surfaces`: the biome says which PLACE (wheat in grassland, not jungle), the surface says " +
+        "which GROUND inside it (not on the dirt path through that grassland).",
+    ),
+  clump: z
+    .object({
+      frequency: z
+        .number()
+        .positive()
+        .default(0.02)
+        .describe("Cycles per metre — the size of one patch. 0.02 ~ 50 m fields, 0.08 ~ 12 m drifts."),
+      octaves: z.number().int().min(1).max(4).default(2),
+      threshold: z
+        .number()
+        .min(-1)
+        .max(1)
+        .default(0.1)
+        .describe("Noise level (-1..1) at which the patch starts. Higher = rarer, smaller patches."),
+      blend: z.number().min(0).default(0.25).describe("Noise range over which the patch edge fades in."),
+      floor: z
+        .number()
+        .min(0)
+        .max(1)
+        .default(0)
+        .describe("Fraction of the density that survives OUTSIDE the patches. 0 = bare between them."),
+      seed: z.number().int().default(0).describe("Offsets the noise so two layers patch in different places."),
+    })
+    .optional()
+    .describe(
+      "Gather the layer into patches with open ground between — a wheat field, a drift of flowers — instead " +
+        "of an even carpet. `density` stays the PEAK inside a patch. Same model as `scatter[].clump`.",
+    ),
+  water: z
+    .object({
+      mode: z
+        .enum(["shore", "surface", "bed"])
+        .default("shore")
+        .describe(
+          "`shore` = grow on ground near water, in the band `level` relative to the water line (cattails, reeds). " +
+            "`surface` = float ON the water where the depth is inside `depth` (lily pads, duckweed; use orient flat). " +
+            "`bed` = grow on the lake/river BED under water where the depth is inside `depth` (eelgrass, pondweed).",
+        ),
+      level: z
+        .tuple([z.number(), z.number()])
+        .default([-0.5, 1.2])
+        .describe(
+          "`shore` only: ground height relative to the nearest water surface, [min, max] metres. A negative min " +
+            "lets emergent plants stand in the shallows.",
+        ),
+      reach: z
+        .number()
+        .positive()
+        .default(6)
+        .describe("`shore` only: how far from a point to look for that water, metres."),
+      depth: z
+        .tuple([z.number().min(0), z.number().min(0)])
+        .default([0.25, 2.5])
+        .describe("`surface` / `bed`: water depth [min, max] metres the layer floats on or grows under."),
+      kinds: z
+        .array(z.enum(["lake", "river", "sea"]))
+        .default(["lake", "river"])
+        .describe("Which water counts. Rivers flowing faster than `maxFlow` never carry `surface` layers."),
+      maxFlow: z.number().min(0).default(0.6).describe("`surface` / `bed`: fastest current (m/s) the layer tolerates."),
+    })
+    .optional()
+    .describe(
+      "Voxel worlds only: tie the layer to water. Without this, cover never grows in or under water; with it, " +
+        "the layer grows ONLY where the water rule holds.",
+    ),
 });
+
+export type GrassComponentData = z.infer<typeof grassSchema>;
 
 /**
  * World-space, always-camera-facing UI attached to an entity: HP bars, name

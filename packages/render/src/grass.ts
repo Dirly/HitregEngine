@@ -23,6 +23,8 @@ import { sqrt,
   length,
   vec3,
   uniform,
+  vec2,
+  step,
 } from "three/tsl";
 
 /** Validated `grass` component data (schema lives in @hitreg/core). */
@@ -45,6 +47,22 @@ export interface GrassData {
   windSpeed: number;
   heightFadeStart: number;
   heightFadeEnd: number;
+  /** `texture` is a page of `columns` x `rows` tiles; each instance draws one. */
+  atlas?: { columns: number; rows: number };
+  /** Tiles this layer draws (repeat to weight); empty = all. */
+  tiles?: number[];
+  /** 0 = tile per instance; > 0 = tile from world noise at this frequency (drifts). */
+  tilePatch?: number;
+  /** One tilted flower-head card on top of each tuft; cap tile per `tiles` entry. */
+  cap?: { tiles: number[]; height: number; size: number; tilt: number };
+  /** "flat" = one horizontal card (lily pads); default upright crossed cards. */
+  orient?: "upright" | "flat";
+  /** Per-instance size jitter, default [0.7, 1.3]. */
+  scaleRange?: [number, number];
+  /** Opaque to the renderer: gates the HOST sampler answers (biome, clump, water). */
+  biomes?: string[];
+  clump?: unknown;
+  water?: unknown;
 }
 
 /** World (x, z) -> ground height, or null when nothing is loaded there. */
@@ -57,6 +75,16 @@ export type GroundSampler = (x: number, z: number) => number | null;
  * what a biome or a splat weight is, and should not.
  */
 export type FoliageSampler = (x: number, z: number, data: GrassData) => number | null;
+
+/**
+ * Could this LAYER grow anywhere in the rectangle [x0, x1] x [z0, z1]? A
+ * cheap, conservative answer (false only when it certainly cannot), asked
+ * once per placement before the disc is walked. A world carries dozens of
+ * biome- and water-gated layers and most are nowhere near the camera; without
+ * this each would walk its whole disc cell by cell on every recenter just to
+ * place nothing.
+ */
+export type CoverRegionTest = (x0: number, z0: number, x1: number, z1: number, data: GrassData) => boolean;
 
 /** Resolve a texture asset id to a URL. */
 export type GrassTextureResolver = (assetId: string) => string | undefined;
@@ -89,6 +117,120 @@ export function crossQuadGeometry(width: number, height: number, quads: number):
   geometry.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(uvs), 2));
   geometry.setIndex(indices);
   return geometry;
+}
+
+/**
+ * One horizontal card lying on the origin, `size` square — lily pads,
+ * duckweed. The per-instance yaw spins it, so which way up the page reads
+ * does not matter.
+ */
+export function flatQuadGeometry(size: number): THREE.BufferGeometry {
+  const h = size / 2;
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array([-h, 0, h, h, 0, h, h, 0, -h, -h, 0, -h]), 3));
+  geometry.setAttribute("uv", new THREE.BufferAttribute(new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]), 2));
+  geometry.setIndex([0, 1, 2, 0, 2, 3]);
+  return geometry;
+}
+
+/**
+ * Add one TILTED cap card to an upright tuft's geometry: a `size` square
+ * centred at `height`, leaning `tilt` degrees from horizontal (so it faces
+ * up and a little sideways — petals you can see from a third-person camera
+ * looking down, where crossed upright cards have gone edge-on and thin).
+ * Every vertex gets a `coverCap` flag: 0 on the body, 1 on the cap, which
+ * is how the shader gives the cap its own atlas tile.
+ */
+export function addCapQuad(geometry: THREE.BufferGeometry, height: number, size: number, tiltDeg: number): THREE.BufferGeometry {
+  const pos = geometry.getAttribute("position");
+  const uvs = geometry.getAttribute("uv");
+  const index = geometry.getIndex()!;
+  const base = pos.count;
+  const h = size / 2;
+  const t = (tiltDeg * Math.PI) / 180;
+  const positions = Array.from(pos.array as Float32Array);
+  const uv = Array.from(uvs.array as Float32Array);
+  const indices = Array.from(index.array as ArrayLike<number>);
+  // near edge (z = -h) low, far edge (z = +h) high: a card leaning back
+  const corners: [number, number, number, number][] = [
+    [-h, -h, 0, 0],
+    [h, -h, 1, 0],
+    [h, h, 1, 1],
+    [-h, h, 0, 1],
+  ];
+  for (const [x, z, u, v] of corners) {
+    positions.push(x, height + z * Math.sin(t), z * Math.cos(t));
+    uv.push(u, v);
+  }
+  indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  const flag = new Float32Array(base + 4);
+  flag.fill(1, base);
+  const out = new THREE.BufferGeometry();
+  out.setAttribute("position", new THREE.BufferAttribute(new Float32Array(positions), 3));
+  out.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(uv), 2));
+  out.setAttribute("coverCap", new THREE.BufferAttribute(flag, 1));
+  out.setIndex(indices);
+  geometry.dispose();
+  return out;
+}
+
+/** Smooth [0, 1) value noise over the world, for drift-style tile picks. */
+function valueNoise2(x: number, z: number, salt: number): number {
+  const x0 = Math.floor(x);
+  const z0 = Math.floor(z);
+  const fx = x - x0;
+  const fz = z - z0;
+  const u = fx * fx * (3 - 2 * fx);
+  const v = fz * fz * (3 - 2 * fz);
+  const a = hashCell(x0, z0, salt);
+  const b = hashCell(x0 + 1, z0, salt);
+  const c = hashCell(x0, z0 + 1, salt);
+  const d = hashCell(x0 + 1, z0 + 1, salt);
+  return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+}
+
+/**
+ * Which atlas tile the instance in grid cell (gx, gz) draws.
+ *
+ * With `tilePatch` the pick comes from two octaves of smooth noise at the
+ * instance's world position, so neighbours agree and a meadow reads as drifts
+ * of one flower beside drifts of another. A little per-cell noise goes in too,
+ * so a drift's edge interleaves over a few metres instead of stopping on a
+ * contour line. Value noise clusters around the middle, so the result is
+ * stretched before it indexes, or the first and last tiles would be rare.
+ */
+export function pickGrassTile(
+  tiles: readonly number[],
+  patch: number,
+  gx: number,
+  gz: number,
+  worldX: number,
+  worldZ: number,
+): number {
+  return tiles[pickGrassTileIndex(tiles.length, patch, gx, gz, worldX, worldZ)] ?? 0;
+}
+
+/** As pickGrassTile, but the INDEX into the layer's tile list (so a cap can follow its body). */
+export function pickGrassTileIndex(
+  count: number,
+  patch: number,
+  gx: number,
+  gz: number,
+  worldX: number,
+  worldZ: number,
+): number {
+  if (count <= 1) return 0;
+  let t: number;
+  if (patch > 0) {
+    const n =
+      valueNoise2(worldX * patch, worldZ * patch, 11) * 0.65 +
+      valueNoise2(worldX * patch * 2.3, worldZ * patch * 2.3, 12) * 0.25 +
+      hashCell(gx, gz, 13) * 0.1;
+    t = Math.min(0.999999, Math.max(0, (n - 0.5) * 1.9 + 0.5));
+  } else {
+    t = hashCell(gx, gz, 7);
+  }
+  return Math.floor(t * count);
 }
 
 const MAX_BLADES = 65000;
@@ -354,6 +496,15 @@ class GrassPatch {
   /** The disc actually SAMPLED — the authored radius padded, see PLACEMENT_PAD. */
   private readonly placeRadius: number;
   private readonly Y_AXIS = new THREE.Vector3(0, 1, 0);
+  private readonly scaleMin: number;
+  private readonly scaleSpan: number;
+  /** Atlas tiles this layer draws, already filtered to the page. */
+  private readonly tiles: number[];
+  private readonly tilePatch: number;
+  /** Cap tile per entry of `tiles` (-1 = none). */
+  private readonly capTiles: number[];
+  /** The host region test the last update carried, for a re-place between updates. */
+  private regionTest: CoverRegionTest | undefined;
 
   constructor(
     private readonly group: THREE.Object3D,
@@ -374,10 +525,29 @@ class GrassPatch {
     // cannot quietly grow a cache bigger than the mesh it feeds
     this.sampleLimit = Math.min(120_000, Math.max(4096, Math.ceil(this.count * 2.5)));
     const textured = Boolean(data.texture);
+    const flat = textured && data.orient === "flat";
+    this.scaleMin = data.scaleRange?.[0] ?? 0.7;
+    this.scaleSpan = (data.scaleRange?.[1] ?? 1.3) - this.scaleMin;
+    const columns = Math.max(1, data.atlas?.columns ?? 1);
+    const rows = Math.max(1, data.atlas?.rows ?? 1);
+    const tileCount = columns * rows;
+    const wanted = (data.tiles ?? []).filter((t) => t >= 0 && t < tileCount);
+    this.tiles = wanted.length > 0 ? wanted : Array.from({ length: tileCount }, (_, i) => i);
+    this.tilePatch = data.tilePatch ?? 0;
+    // cap tile per ENTRY of the unfiltered list, re-aligned to the filtered one
+    const capList = data.cap?.tiles ?? [];
+    const rawTiles = data.tiles ?? [];
+    this.capTiles = wanted.length > 0
+      ? rawTiles.map((t, i) => ({ t, cap: capList[i] ?? -1 })).filter(({ t }) => t >= 0 && t < tileCount).map(({ cap }) => (cap >= 0 && cap < tileCount ? cap : -1))
+      : this.tiles.map((_, i) => { const cap = capList[i] ?? -1; return cap >= 0 && cap < tileCount ? cap : -1; });
+    const capped = textured && !flat && data.cap !== undefined && this.capTiles.some((c) => c >= 0);
 
     let geometry: THREE.BufferGeometry;
-    if (textured) {
+    if (flat) {
+      geometry = flatQuadGeometry(data.bladeWidth);
+    } else if (textured) {
       geometry = crossQuadGeometry(data.bladeWidth, data.bladeHeight, Math.max(1, Math.round(data.crossQuads)));
+      if (capped) geometry = addCapQuad(geometry, data.bladeHeight * data.cap!.height, data.cap!.size, data.cap!.tilt);
     } else {
       const w = data.bladeWidth / 2;
       geometry = new THREE.BufferGeometry();
@@ -421,13 +591,14 @@ class GrassPatch {
     // the post-instance-matrix (world-scale) position before this node runs,
     // which would blow the [0,1] fraction up to the blade's actual world
     // height and send both the wind sway and the color mix wildly out of range.
-    this.instanceRandom = new THREE.InstancedBufferAttribute(new Float32Array(this.count * 2), 2);
+    // (wind phase, tint, atlas tile, cap tile or -1)
+    this.instanceRandom = new THREE.InstancedBufferAttribute(new Float32Array(this.count * 4), 4);
     // In Three's common renderer DynamicDrawUsage forces an upload on every
     // use, even without a version change (including repeated shadow passes).
     // Placement commits already mark these buffers dirty explicitly.
     this.instanceRandom.name = "grass-random";
     geometry.setAttribute("instanceRandom", this.instanceRandom);
-    const perInstance: N = attribute("instanceRandom", "vec2");
+    const perInstance: N = attribute("instanceRandom", "vec4");
     const bend = positionGeometry.y.div(float(Math.max(0.001, data.bladeHeight)));
     const bendEased = mul(bend, bend);
     const phase = mul(perInstance.x, float(Math.PI * 2));
@@ -441,10 +612,13 @@ class GrassPatch {
     // square root: 3x the wind is ~1.7x the rate and 3x the bend.
     const rate = mul(float(data.windSpeed), sqrt(foliageWindScale));
     const sway = mul(sin(add(mul(time, rate), phase)), mul(float(data.windStrength), foliageWindScale));
-    this.material.positionNode = add(
-      positionLocal,
-      vec3(mul(sway, bendEased), 0, mul(mul(sway, bendEased), float(0.3))),
-    );
+    // a flat card has no height to bend over; it rides the water still
+    if (!flat) {
+      this.material.positionNode = add(
+        positionLocal,
+        vec3(mul(sway, bendEased), 0, mul(mul(sway, bendEased), float(0.3))),
+      );
+    }
     // fake "mostly up" normal (no real geometry normal — a thin blade's true
     // face normal points sideways, not up) — reads as soft, ground-matching
     // diffuse shading regardless of the blade's random yaw, the standard trick
@@ -480,11 +654,35 @@ class GrassPatch {
       this.mapTexture = map;
       // method form, not the free functions: TSL's overloads resolve the free
       // `mul(colorNode, colorNode)` to the mat4 signature and fail to typecheck
-      const sampled = tslTexture(map, uv());
+      // atlas: the instance's tile index -> (column, row from the TOP), and
+      // the card's own 0..1 UV squeezed into that tile. Row 0 is the top of
+      // the page and textures load flipY, so v counts rows from the bottom.
+      let cardUv: N = uv();
+      if (tileCount > 1) {
+        // Row FIRST, with a half-tile bias before the floor. `tile mod
+        // columns` looks exact for integer floats and is not: the GPU divides
+        // through an approximate reciprocal, so 8 / 4 can come out 1.9999999,
+        // floor to 1, and put tile 8 in COLUMN 4 — off the page, where clamp
+        // -to-edge smears the page's last texel column into a curtain of
+        // vertical speckle. Every tile index that is a multiple of `columns`
+        // (0 aside) rendered as noise that way.
+        // the cap card draws its own tile; the body, the tuft's
+        const tile: N = capped ? mix(perInstance.z, perInstance.w, attribute("coverCap", "float")) : perInstance.z;
+        const row: N = tile.add(float(0.5)).div(float(columns)).floor();
+        const col: N = tile.sub(row.mul(float(columns)));
+        cardUv = uv()
+          .add(vec2(col, sub(float(rows - 1), row)))
+          .div(vec2(columns, rows));
+      }
+      const sampled = tslTexture(map, cardUv);
       this.material.colorNode = sampled.xyz.mul(tslColor(data.bladeColor)).mul(tint);
       // the texture's own alpha times the fades, so the fades dissolve the
       // layer through the same alphaTest instead of needing a sorted blend
-      this.material.opacityNode = sampled.w.mul(fade);
+      // an instance whose tile has no cap discards its cap card (cap tile -1)
+      const capHidden: N = capped
+        ? (attribute("coverCap", "float") as N).mul(step(float(0.5), perInstance.w.negate()))
+        : float(0);
+      this.material.opacityNode = sampled.w.mul(fade).mul(float(1).sub(capHidden));
       this.loadTexture(resolveTexture);
     } else {
       this.material.colorNode = mul(mix(tslColor(data.bladeColor), tslColor(data.tipColor), bend), tint);
@@ -493,6 +691,7 @@ class GrassPatch {
 
     this.mesh = new THREE.InstancedMesh(geometry, this.material, this.count);
     this.mesh.count = 0; // populated on the first recenter, once ground heights are known
+    this.mesh.visible = false;
     this.mesh.frustumCulled = false;
     this.mesh.matrixAutoUpdate = false; // world-space instances; see class doc
     this.mesh.instanceMatrix.name = "grass-matrices";
@@ -505,15 +704,17 @@ class GrassPatch {
    * Start placing the disc centred on (centerX, centerZ). Nothing on screen
    * changes until `stepPlacement` finishes the walk and commits.
    */
-  private beginPlacement(centerX: number, centerZ: number): void {
+  private beginPlacement(centerX: number, centerZ: number, regionTest?: CoverRegionTest): void {
     const radius = this.placeRadius;
     const spacing = this.spacing;
+    const empty =
+      regionTest !== undefined && !regionTest(centerX - radius, centerZ - radius, centerX + radius, centerZ + radius, this.data);
     const gx0 = Math.floor((centerX - radius) / spacing);
     const gx1 = Math.ceil((centerX + radius) / spacing);
     const gz0 = Math.floor((centerZ - radius) / spacing);
     const gz1 = Math.ceil((centerZ + radius) / spacing);
     this.scratchMatrix ??= new Float32Array(this.count * 16);
-    this.scratchRandom ??= new Float32Array(this.count * 2);
+    this.scratchRandom ??= new Float32Array(this.count * 4);
     this.pending = {
       centerX,
       centerZ,
@@ -529,7 +730,9 @@ class GrassPatch {
       // is already dissolving it.
       gzMid: Math.round((gz0 + gz1) / 2),
       rows: gz1 - gz0 + 1,
-      n: 0,
+      // a layer that cannot grow here starts FINISHED: the next step commits
+      // an empty field without sampling a single cell
+      n: empty ? gz1 - gz0 + 1 : 0,
       gx: gx0,
       gz: gz0,
       rowActive: false,
@@ -597,14 +800,17 @@ class GrassPatch {
           this.remember(key, ground);
         }
         if (Number.isNaN(ground)) continue;
-        const scale = 0.7 + 0.6 * hashCell(gx, gz, 3);
+        const scale = this.scaleMin + this.scaleSpan * hashCell(gx, gz, 3);
         this.tmpPos.set(worldX, ground, worldZ);
         this.tmpQuat.setFromAxisAngle(this.Y_AXIS, hashCell(gx, gz, 4) * Math.PI * 2);
         this.tmpScale.set(scale, scale, scale);
         this.tmpMat.compose(this.tmpPos, this.tmpQuat, this.tmpScale);
         this.tmpMat.toArray(matrices, p.visible * 16);
-        random[p.visible * 2] = hashCell(gx, gz, 5);
-        random[p.visible * 2 + 1] = hashCell(gx, gz, 6);
+        const pick = pickGrassTileIndex(this.tiles.length, this.tilePatch, gx, gz, worldX, worldZ);
+        random[p.visible * 4] = hashCell(gx, gz, 5);
+        random[p.visible * 4 + 1] = hashCell(gx, gz, 6);
+        random[p.visible * 4 + 2] = this.tiles[pick] ?? 0;
+        random[p.visible * 4 + 3] = this.capTiles[pick] ?? -1;
         p.visible++;
       }
       p.rowActive = false;
@@ -617,13 +823,17 @@ class GrassPatch {
   /** Swap a finished placement onto the mesh — one memcpy, atomic to the eye. */
   private commit(p: PendingPlacement): void {
     (this.mesh.instanceMatrix.array as Float32Array).set(this.scratchMatrix!.subarray(0, p.visible * 16));
-    (this.instanceRandom.array as Float32Array).set(this.scratchRandom!.subarray(0, p.visible * 2));
+    (this.instanceRandom.array as Float32Array).set(this.scratchRandom!.subarray(0, p.visible * 4));
     this.mesh.count = p.visible;
+    // an empty layer is not drawn at all: a world carries dozens of biome
+    // -gated layers and only the few growing near the camera should cost a
+    // draw call
+    this.mesh.visible = p.visible > 0;
     this.mesh.instanceMatrix.clearUpdateRanges();
     this.instanceRandom.clearUpdateRanges();
     if (p.visible > 0) {
       this.mesh.instanceMatrix.addUpdateRange(0, p.visible * 16);
-      this.instanceRandom.addUpdateRange(0, p.visible * 2);
+      this.instanceRandom.addUpdateRange(0, p.visible * 4);
     }
     this.mesh.instanceMatrix.needsUpdate = true;
     this.instanceRandom.needsUpdate = true;
@@ -667,7 +877,7 @@ class GrassPatch {
     this.samples.clear();
     // an in-flight placement is now half-sampled from the OLD terrain, and a
     // field already on screen is entirely from it — both have to be redone
-    if (this.pending) this.beginPlacement(this.pending.centerX, this.pending.centerZ);
+    if (this.pending) this.beginPlacement(this.pending.centerX, this.pending.centerZ, this.regionTest);
     else if (this.placed) this.stale = true;
   }
 
@@ -679,7 +889,9 @@ class GrassPatch {
     sampleGround: GroundSampler,
     sampleGrassy: FoliageSampler,
     budgetMs = Number.POSITIVE_INFINITY,
+    regionTest?: CoverRegionTest,
   ): number {
+    this.regionTest = regionTest;
     this.group.updateWorldMatrix(true, false);
     this.mesh.matrix.copy(this.group.matrixWorld).invert();
 
@@ -724,8 +936,8 @@ class GrassPatch {
           leadX = (dx / jump) * lead;
           leadZ = (dz / jump) * lead;
         }
-        this.beginPlacement(nextX + leadX, nextZ + leadZ);
-      } else if (this.stale) this.beginPlacement(this.center.x, this.center.y);
+        this.beginPlacement(nextX + leadX, nextZ + leadZ, regionTest);
+      } else if (this.stale) this.beginPlacement(this.center.x, this.center.y, regionTest);
     }
     let spentMs = 0;
     // The FIRST placement runs to completion regardless of the budget: there
@@ -821,6 +1033,8 @@ export class GrassSystem {
   private order: GrassPatch[] = [];
   /** rotating start index, so one patch mid-placement cannot starve the rest */
   private turn = 0;
+  /** Optional host pre-test that lets a layer skip a whole placement; see CoverRegionTest. */
+  regionTest: CoverRegionTest | undefined;
 
   register(
     entityId: string,
@@ -849,7 +1063,7 @@ export class GrassSystem {
     this.turn = (this.turn + 1) % patches.length;
     for (let i = 0; i < patches.length; i++) {
       const patch = patches[(this.turn + i) % patches.length]!;
-      left -= patch.update(camera, sampleGround, sampleGrassy, Math.max(0, left));
+      left -= patch.update(camera, sampleGround, sampleGrassy, Math.max(0, left), this.regionTest);
     }
   }
 

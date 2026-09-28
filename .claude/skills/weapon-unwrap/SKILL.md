@@ -227,7 +227,9 @@ while both are in frame — rather than shrinking the sheet, which costs detail 
 every weapon forever. Two silent limits: **24 parts** per ubermesh (the mask is
 float-exact only below 2^24), and **one sheet size per page** (the tile carries a
 single `scale`; `atlas-pack` prints `! skipped` for each mismatch — read
-those lines, they are how a theme vanishes). Full table and reasoning:
+those lines, they are how a theme vanishes).
+
+**Pages are SQUARE — a rule, not a preference.** A tile is `[u, v, scale]` with ONE scale, so a page with fewer rows than columns squeezes every tile vertically and every island samples off, worse the lower it sits (12 helm themes packed 4×3 broke hood tops, crowns and all ornaments; a 2-theme greataxe packed 2×1 was wrong from its first bake). Every packer shares `tools/_page.mjs` (`squareGrid`, `assertSquarePage`) and refuses to write a non-square page; the renderer warns if it ever loads one. Never pack a page by any other code. Full table and reasoning:
 docs/weapon-atlas.md → *How many weapons fit, and how to bucket them*.
 
 ## When the atlas lands wrong

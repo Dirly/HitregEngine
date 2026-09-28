@@ -1,7 +1,7 @@
 import * as THREE from "three/webgpu";
 import { buildPortalMaterial } from "./portal-material.js";
 import { STATIC_BATCH_FLAG } from "./static-batch.js";
-import { InstancedProps, applyInstanceGlow, applyInstanceUber, applyInstanceUvRotation, applyInstancedProps } from "./instancing.js";
+import { InstancedProps, applyInstanceAppearance, applyInstanceGlow, applyInstanceUber, applyInstanceUvRotation, applyInstancedProps } from "./instancing.js";
 import { applyWorldUv } from "./primitive-uv.js";
 import {
   positionWorld,
@@ -49,6 +49,9 @@ import {
   uniform,
   viewportDepthTexture,
   perspectiveDepthToViewZ,
+  fwidth,
+  min,
+  Fn,
 } from "three/tsl";
 import { GLTFLoader, type GLTF } from "three/addons/loaders/GLTFLoader.js";
 import { applyFoliageNormals } from "./foliage-normals.js";
@@ -82,6 +85,7 @@ import {
 import { clusterDagReady, type ClusterDag } from "./cluster-dag.js";
 import { ClusteredMesh, clusterDagFromGeometry } from "./clustered-mesh.js";
 import { polyMeshGeometry } from "./poly-mesh-geometry.js";
+import { surfaceGeometry, type SurfaceMeshSource } from "./surface-mesh.js";
 import { horizonTint } from "./atmosphere.js";
 import { buildTerrainSplatMaterial, SPLAT_ATTRIBUTES, type MacroNoiseData } from "./terrain-splat.js";
 import { mergeModelSubmeshes } from "./static-batch.js";
@@ -394,17 +398,28 @@ export interface MaterialData {
     fresnelPower: number;
     depthFadeDistance: number;
     foamWidth: number;
+    /** Widest the shore foam band may run across the surface, metres (a gentle shore no longer widens it). */
+    foamBand?: number;
+    /** Cap on the fresnel sky rim (0..1): at eye level it otherwise paints the whole surface one flat colour. */
+    fresnelMax?: number;
+    /** Sun glint, 0..1 (0 = matte, 1 = the old glassy look). */
+    specular?: number;
     edgeFadeStart: number;
     edgeFadeEnd: number;
     /** Scrolling surface texture added over the procedural water. */
     texture?: string;
     textureScale?: number;
+    fallTexture?: string;
+    stillTexture?: string;
+    stillTextureScale?: number;
+    fallTextureScale?: number;
+    fallSpeed?: number;
     textureStrength?: number;
     foamPixel?: number;
     foamSteps?: number;
     flow?: [number, number];
     /** drift = standing water laid out in world space; channel = the geometry's `flow` attribute + metre uvs carry the current. */
-    flowMode?: "drift" | "channel";
+    flowMode?: "drift" | "channel" | "field";
     /** false: wave normals only, no vertex motion (lake sheets, ribbons). */
     displace?: boolean;
     /** Metres of surface relief a full-strength wake pushes into the water. */
@@ -456,6 +471,7 @@ interface MeshData {
     | VoxelMeshSource
     | CsgMeshSource
     | ({ kind: "path" } & PathMeshSource)
+    | SurfaceMeshSource
     | PolyMeshSource;
   material?: string;
   castShadow: boolean;
@@ -1075,6 +1091,33 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
   const wakeLift = wakeRaw.mul(wakeMetres);
 
   const channel = w.flowMode === "channel";
+  /** 0 on a pool, 1 on a waterfall's face — set where the fall texture is (field mode). */
+  let steepness: THREE.Node<"float"> = float(0);
+  /** The fall texture's colour where there is one (field mode), painted over a steep face at the end. */
+  let fallColour: THREE.Node<"vec3"> | null = null;
+  /** The fall texture's luminance (field mode with a fall texture): the froth pattern of a curtain's sides. */
+  let fallLum: THREE.Node<"float"> | null = null;
+  // generated water: world-space layout, the current in the geometry's uv (m/s along world X, Z)
+  const fieldFlow = w.flowMode === "field";
+  /**
+   * 1 on a fall curtain, else 0. The curtain carries a second uv whose v is
+   * its down 0..1 (chunk.ts fallCurtain); the upper water next to a lip
+   * carries one too, with v <= -1 (its side fade, sheetShape), so it is the
+   * sign of v, not the attribute alone, that says which.
+   */
+  const isCurtain = (Fn as unknown as (f: (a: unknown, b: { hasGeometryAttribute(name: string): boolean }) => THREE.Node<"float">) => () => THREE.Node<"float">)((_, builder) =>
+    fieldFlow && builder.hasGeometryAttribute("uv1") ? step(float(-0.5), vec2(uv(1)).y) : float(0),
+  )();
+  /**
+   * How much of a curtain is FALLING water: 0 on its level top rows, which
+   * continue the upper water (same vertices, same current) and so must shade
+   * exactly as it does, rising to 1 over the roll by the surface's own slope.
+   * Everything that differs between the two — the fall texture, its colour,
+   * the missing fresnel and sheen — blends in by this, so there is no step at
+   * the join. (It used to be 1 over the whole curtain: a hard edge in texture,
+   * colour and sheen along every lip.)
+   */
+  const curtainRoll = mul(isCurtain, smoothstep(float(0.03), float(0.55), sub(float(1), abs(normalWorld.y))));
   const worldXZ = vec2(positionWorld.x, positionWorld.z);
   const flowAttribute = attribute("flow", "vec3") as unknown as THREE.Node<"vec3">;
   const flowWorld = channel ? modelWorldMatrix.mul(vec4(flowAttribute, float(0))).xyz : null;
@@ -1146,6 +1189,8 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
   // set by the texture block below and read by the foam; null when this water
   // has no surface texture, in which case the foam keeps its plain band
   let foamBreakup: THREE.Node<"float"> | null = null;
+  /** The surface texture's luminance here (null without a texture): breaks up the fresnel rim. */
+  let detailLum: THREE.Node<"float"> | null = null;
 
   // -- scrolling surface texture: the SURFACE, not a tint over it -----------
   //
@@ -1171,7 +1216,77 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
     const world = worldXZ;
     let uvA: THREE.Node<"vec2">;
     let uvB: THREE.Node<"vec2">;
-    if (channel && flowSpeed) {
+    let advected: THREE.Node<"vec3"> | null = null;
+    if (fieldFlow) {
+      // Two-phase flow-map advection (Vlachos, "Water Flow in Portal 2"): the
+      // tile is dragged along the vertex's current for a period, then cross-
+      // faded into a copy that restarts half a period later, so it runs
+      // forever without stretching. World XZ keeps one texel size across
+      // rivers, lakes and cell seams; the plain drift keeps pools alive.
+      const current = uv();
+      const period = float(2.4);
+      const p0 = fract(div(time, period));
+      const p1 = fract(add(div(time, period), float(0.5)));
+      const fade = abs(sub(float(1), mul(p0, float(2))));
+      const drift = vec2(mul(time, float(flow[0])), mul(time, float(flow[1])));
+      const layer = (s: THREE.Node<"float">, jump: THREE.Node<"vec2">): THREE.Node<"vec3"> => {
+        const a = tslTexture(map, add(mul(sub(world, mul(current, mul(p0, period))), s), drift)).xyz;
+        const b = tslTexture(map, add(add(mul(sub(world, mul(current, mul(p1, period))), s), drift), jump)).xyz;
+        return mix(a, b, fade) as unknown as THREE.Node<"vec3">;
+      };
+      advected = mul(
+        add(layer(scale, vec2(float(0.5), float(0.25))), layer(mul(scale, float(1.59)), vec2(float(0.25), float(0.5)))),
+        float(0.5),
+      ) as unknown as THREE.Node<"vec3">;
+      if (w.stillTexture) {
+        // Still water (a lake, a pool leaving it) keeps the standing-water
+        // look: its own tile, drifting in world space like the sea. The two
+        // fade by the current, which the field ramps up over the first 40 m
+        // out of a lake — so a lake runs into its river instead of meeting it.
+        const stillMap = new THREE.Texture();
+        stillMap.wrapS = THREE.RepeatWrapping;
+        stillMap.wrapT = THREE.RepeatWrapping;
+        const stillScale = float(1 / Math.max(0.01, w.stillTextureScale ?? 26));
+        const sA = add(mul(world, stillScale), vec2(mul(time, float(flow[0])), mul(time, float(flow[1]))));
+        const sB = add(mul(world, mul(stillScale, float(1.59))), vec2(mul(time, float(-flow[1] * 1.4)), mul(time, float(flow[0] * 1.4))));
+        const still = mul(add(tslTexture(stillMap, sA).xyz, tslTexture(stillMap, sB).xyz), float(0.5));
+        const stillness = sub(float(1), smoothstep(float(0.1), float(0.8), length(current)));
+        advected = mix(advected, still, stillness) as unknown as THREE.Node<"vec3">;
+        void loadWaterTexture(stillMap, data, options, w.stillTexture);
+      }
+      if (w.fallTexture) {
+        // A waterfall's face: sampled ACROSS the current and DOWN world Y,
+        // scrolling downward, and blended in by steepness — world XZ smears
+        // one texel down a vertical sheet.
+        const fallMap = new THREE.Texture();
+        fallMap.wrapS = THREE.RepeatWrapping;
+        fallMap.wrapT = THREE.RepeatWrapping;
+        const dir = normalize(add(current, vec2(float(1e-4), float(0))));
+        const acrossFall = add(mul(world.x, mul(dir.y, float(-1))), mul(world.y, dir.x));
+        const fallScale = float(1 / Math.max(0.01, w.fallTextureScale ?? 4));
+        const geomSteep = smoothstep(float(0.35), float(0.75), sub(float(1), normalWorld.y));
+        // down the face is down world Y; over a curtain's rolled lip (flat
+        // enough that Y barely moves) it is the distance downstream instead,
+        // so the fall's streaks run on over the brink and the lip reads as
+        // falling water, not a dark flat band
+        // (two lookups blended by the slope: scaling one coordinate by the
+        // slope instead stretches the texture wildly across the brink)
+        const alongFall = add(mul(world.x, dir.x), mul(world.y, dir.y));
+        const scroll = mul(time, float(w.fallSpeed ?? 7));
+        const faceSample = tslTexture(fallMap, mul(vec2(acrossFall, add(positionWorld.y, scroll)), fallScale)).xyz;
+        const brinkSample = tslTexture(fallMap, mul(vec2(acrossFall, add(mul(alongFall, float(-1)), scroll)), fallScale)).xyz;
+        const fallSample = mix(faceSample, brinkSample, mul(sub(float(1), geomSteep), isCurtain)) as unknown as THREE.Node<"vec3">;
+        // a curtain is fall water from its roll down (its level top rows are
+        // the upper water's, and shade as it does)
+        steepness = max(geomSteep, curtainRoll);
+        advected = mix(advected, fallSample, steepness) as unknown as THREE.Node<"vec3">;
+        fallColour = mul(fallSample, float(1.15)) as unknown as THREE.Node<"vec3">;
+        fallLum = fallSample.dot(vec3(0.2126, 0.7152, 0.0722));
+        void loadWaterTexture(fallMap, data, options, w.fallTexture);
+      }
+      uvA = mul(world, scale);
+      uvB = uvA;
+    } else if (channel && flowSpeed) {
       // A channel samples on the ribbon's METRE uv — x across the centreline,
       // y along the river — so the tile follows the bends and runs down a
       // fall instead of being smeared onto a vertical face by a world-XZ
@@ -1192,7 +1307,7 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
         vec2(mul(time, float(-flow[1] * 1.4)), mul(time, float(flow[0] * 1.4))),
       );
     }
-    const detail = tslTexture(map, uvA).xyz.add(tslTexture(map, uvB).xyz).mul(float(0.5));
+    const detail = advected ?? tslTexture(map, uvA).xyz.add(tslTexture(map, uvB).xyz).mul(float(0.5));
     // Depth reads as a BRIGHTNESS ramp only — no hue shift.
     //
     // Two earlier attempts got this wrong in different ways. Multiplying the
@@ -1205,6 +1320,7 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
     const surfaceDetail = w.textureTint
       ? mul(tslColor(w.textureTint) as unknown as THREE.Node<'vec3'>, detail.dot(vec3(0.2126, 0.7152, 0.0722)))
       : detail;
+    detailLum = detail.dot(vec3(0.2126, 0.7152, 0.0722));
     const litByDepth = mul(surfaceDetail, mix(float(1.35), float(1.05), t2));
     base = mix(base as THREE.Node<"vec3">, litByDepth, float(w.textureStrength ?? 0.35));
     // A SNAPPED sample for the foam edge. Sampling the same continuous tile
@@ -1236,25 +1352,117 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
   //    airbrushed gradient, which is exactly wrong next to nearest-filtered
   //    pixel-art terrain; stepping it produces chunky bands that sit with the
   //    rest of the world's resolution.
+  //
+  // Measured in METRES ACROSS THE SURFACE, not in depth. A band "this deep"
+  // is as wide as the shore is gentle: on a 3 % beach a 0.6 m depth band ran
+  // 20 m out, a thick white ring round every lake. The VERTICAL depth under
+  // the surface (the view-ray depth times the ray's slope: exact for a flat
+  // bed at any angle, where the raw ray depth grows without bound at a low
+  // view) over its own slope across the screen is the distance to the shore;
+  // the foam is a band `foamBand` metres wide on that, and it also fades
+  // out by depth, so a steep bank keeps it narrow and a deep one has none.
   const foamWidth = float(Math.max(w.foamWidth, 0.001));
+  const foamBandM = float(Math.max(0.05, w.foamBand ?? 0.9));
+  const viewToFrag = normalize(sub(positionWorld, cameraPosition));
+  const verticalDepth = mul(waterDepth, max(abs(viewToFrag.y), float(0.02)));
+  // slope of the bed under the water: depth change per metre across the surface
+  const metresPerPixel = max(add(fwidth(positionWorld.x), fwidth(positionWorld.z)), float(1e-4));
+  const bedSlope = max(div(fwidth(verticalDepth), metresPerPixel), float(0.05));
+  const shoreDistance = div(verticalDepth, bedSlope);
   const foamJitter = foamBreakup
-    ? mul(sub(foamBreakup, float(0.42)), mul(foamWidth, float(2.6)))
+    ? mul(sub(foamBreakup, float(0.42)), mul(foamBandM, float(1.6)))
     : float(0);
-  const foamDepth = add(waterDepth, foamJitter);
-  const foamRaw = sub(float(1), smoothstep(mul(foamWidth, float(0.15)), foamWidth, foamDepth));
+  const foamRaw = mul(
+    sub(float(1), smoothstep(mul(foamBandM, float(0.1)), foamBandM, add(shoreDistance, foamJitter))),
+    sub(float(1), smoothstep(mul(foamWidth, float(0.5)), mul(foamWidth, float(2.5)), verticalDepth)),
+  ).mul(foamBreakup ? saturate(add(mul(sub(foamBreakup, float(0.3)), float(2.5)), float(0.35))) : float(1));
   const foamSteps = float(Math.max(1, Math.round(w.foamSteps ?? 3)));
   // top step deliberately short of 1: solid white froth reads as a painted
   // ring, and the shore should still show water through the foam
   // `foamSteps` levels, top step short of solid white so water still shows
   // through the froth rather than a painted ring
-  const foamEdge = saturate(mul(floor(mul(foamRaw, foamSteps)), float(0.8).div(max(sub(foamSteps, float(1)), float(1)))));
+  // soft: the top step is well short of white, so it reads as froth on water
+  const foamEdge = saturate(mul(floor(mul(foamRaw, foamSteps)), float(0.5).div(max(sub(foamSteps, float(1)), float(1)))));
   // A wake's CRESTS break into froth — a thin highlight riding the tops of the
   // ripples, which is a different thing from the wake itself: the wake is the
   // relief above, and this is the little the water spills doing it. Keep it
   // small. Painting the whole disturbed patch white is what made every earlier
   // version read as a trail decal, and `wakeFoam: 0` is pure water motion.
   const wakeFroth = saturate(mul(sub(wakeRaw, float(0.22)), float(3.4))).mul(float(Math.min(1, Math.max(0, w.wakeFoam ?? 0.1))));
-  base = mix(base as THREE.Node<"vec3">, tslColor(w.foamColor), max(foamEdge, wakeFroth));
+  // A rapid runs white: froth from the current itself, broken up by the
+  // texture so it streams in patches instead of painting the step solid.
+  // (never on a curtain: its rolled lip is flat enough to froth, and that
+  // froth read as a white bar along every fall's top)
+  const rapids = fieldFlow
+    ? mul(sub(float(1), isCurtain), mul(
+        smoothstep(float(1.2), float(3.2), length(uv())),
+        foamBreakup ? saturate(mul(sub(foamBreakup, float(0.3)), float(2.5))) : float(0.6),
+      ))
+    : float(0);
+  // (on a fall face the fall texture carries the white water; the froth only tops it up)
+  // (a fall face stands a hand in front of its rock, so the depth-based shore
+  // foam would paint all of it white: steep faces keep their fall texture)
+  base = mix(base as THREE.Node<"vec3">, tslColor(w.foamColor), max(max(mul(foamEdge, sub(float(1), steepness)), wakeFroth), mul(mul(rapids, float(0.75)), sub(float(1), mul(steepness, float(0.7))))));
+  // A fall's face is the fall texture, not water tinted by depth: the rock is
+  // a metre behind it, so the depth bands and foam turned it into stripes
+  if (fallColour) base = mix(base as THREE.Node<"vec3">, fallColour, mul(steepness, float(0.9)));
+  // PLUNGE whitewater: the field writes 3.4 m/s on the pool where a curtain
+  // lands (waterSurface, field.ts), over anything a river runs at; there the
+  // flat water churns nearly white, broken by the moving texture, so the
+  // dissolving sheet ends in whitewater, not clear water
+  if (fieldFlow) {
+    // soft at its outer edge (the field eases the speed back down past the
+    // band), broken up by the CONTINUOUS texture luminance, not the snapped
+    // foam grid (that read as beige blocks), and brighter than the albedo cap
+    const plunge = mul(mul(smoothstep(float(2.4), float(3.4), length(uv())), sub(float(1), steepness)), sub(float(1), isCurtain));
+    const churn = detailLum ? saturate(add(mul(sub(detailLum, float(0.3)), float(3)), float(0.55))) : float(0.85);
+    base = mix(base as THREE.Node<"vec3">, mul(tslColor(w.foamColor) as unknown as THREE.Node<"vec3">, float(1.35)), mul(plunge, churn));
+  }
+  // A fall CURTAIN fades out at its sides and foot: its second uv (fallCurtain
+  // in core/voxel/chunk.ts) is (across 0..1, down 0..1 from the lip to the
+  // foot). The middle of the top is fully opaque — the sheet's top row IS the
+  // upper water's lip edge — and the side bands are soft all the way up: 12 %
+  // of the width either side at the lip (Derek: bring the transparency "to
+  // the top edges too"), widening to 42 % at the foot, and the last stretch
+  // fades into the plunge pool. The upper water beside a lip carries a second
+  // uv too (chunk.ts sheetShape: across the same span, v = -1 - t, t from 0 on
+  // the lip line to 1 a few metres upstream) and fades the SAME 12 % bands,
+  // tapering out upstream, so the sheet's corners at the brink soften with the
+  // curtain's instead of standing as a hard corner over a faded one. A SMOOTH ramp (Derek:
+  // "a gradual faded transparency on the edges, not the hard cut"), its edge
+  // wobbled by a slow strand noise (~1.4 m streams whose weight eases down the
+  // run) so it is not a ruled gradient. The curtain keeps the material's depth
+  // write: a depth-write-free copy was tried and the upper pool's underside
+  // (seen through the open lip face, drawn after the sheet) painted a dark
+  // band over every curtain's top; with depth written, what shows through a
+  // faded edge is at worst the opaque world behind it. A mesh without the
+  // second uv (every other water surface, HLOD merges) never fades.
+  const curtainCut = (Fn as unknown as (f: (a: unknown, b: { hasGeometryAttribute(name: string): boolean }) => THREE.Node<"float">) => () => THREE.Node<"float">)((_, builder) => {
+    if (!fieldFlow || !builder.hasGeometryAttribute("uv1")) return float(0);
+    const shape = vec2(uv(1));
+    const acrossU = shape.x;
+    const down = saturate(shape.y);
+    const fdir = normalize(add(uv(), vec2(float(1e-4), float(0))));
+    const acrossM = add(mul(positionWorld.x, mul(fdir.y, float(-1))), mul(positionWorld.z, fdir.x));
+    const run = add(positionWorld.y, mul(time, float((w.fallSpeed ?? 7) * 0.6)));
+    const strandId = floor(div(add(acrossM, mul(sin(mul(run, float(0.45))), float(0.35))), float(1.4)));
+    const strandAlong = div(add(run, mul(hash(strandId), float(9))), float(4.5));
+    const rowA = floor(strandAlong);
+    const strandAt = (r: THREE.Node<"float">): THREE.Node<"float"> => hash(add(mul(strandId, float(17.13)), mul(r, float(3.71))));
+    const strand = mix(strandAt(rowA), strandAt(add(rowA, float(1))), smoothstep(float(0), float(1), fract(strandAlong)));
+    // the same strand noise also smooths across (a 1.4 m step would show as a seam)
+    const wobble = sub(strand, float(0.5));
+    const fromSide = add(min(acrossU, sub(float(1), acrossU)), mul(wobble, mul(float(0.1), down)));
+    const sideBand = add(float(0.12), mul(float(0.3), pow(down, float(0.8))));
+    const sideFade = sub(float(1), smoothstep(float(0), sideBand, fromSide));
+    const bottomFade = smoothstep(float(0.8), float(1), add(down, mul(wobble, float(0.06))));
+    // 0 = the sheet, 1 = gone. On the upper water (v <= -1) down is 0, so this
+    // is exactly the curtain's top-row side fade, eased out upstream by t
+    const sheet = sub(float(1), step(float(-0.5), shape.y));
+    const taper = sub(float(1), smoothstep(float(0), float(1), saturate(sub(float(-1), shape.y))));
+    return mix(saturate(max(sideFade, bottomFade)), mul(saturate(sideFade), taper), sheet);
+  })();
+  const curtainBody = pow(sub(float(1), curtainCut), float(1.6));
 
   // gentle shimmer driven by the SAME wave phases, so the color motion reads
   // as coming from the same waves that are actually moving the geometry
@@ -1263,7 +1471,13 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
   const shaded: THREE.Node<"vec3"> = mul(base as THREE.Node<"vec3">, shimmer);
 
   const viewDir = normalize(sub(cameraPosition, positionWorld));
-  const fresnel = pow(saturate(sub(float(1), saturate(dot(normalWorld, viewDir)))), float(w.fresnelPower));
+  // on the wave-bent normal, capped, and broken up by the surface texture: an
+  // uncapped rim on the flat normal went to ~0.8 at eye level and painted a
+  // whole pool one flat off-white (the "solid pale" foot pool)
+  const fresnelRaw = pow(saturate(sub(float(1), saturate(dot(bumpedWorld, viewDir)))), float(w.fresnelPower));
+  const fresnelBreak = detailLum ? saturate(add(float(0.35), mul(detailLum, float(0.8)))) : float(1);
+  // (almost none on a curtain: its rolled lip faces the sky at a grazing angle)
+  const fresnel = mul(mul(min(fresnelRaw, float(Math.min(1, Math.max(0, w.fresnelMax ?? 0.12)))), fresnelBreak), sub(float(1), mul(curtainRoll, float(0.9))));
   // the rim is the sky reflected at a grazing angle, so it takes the sky's
   // colour at the horizon: bright by day, dark at dusk like the land around
   // it, instead of a constant near-white that floated over a fogged-out hill
@@ -1287,7 +1501,10 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
     (tslColor(w.rimColor) as unknown as THREE.Node<"vec3">).mul(horizonTint as unknown as THREE.Node<"vec3">),
     pow(skyward, float(1.6)),
   );
-  material.colorNode = mix(underside, lit as unknown as THREE.Node<"vec3">, frontFacing as unknown as THREE.Node<"float">);
+  // a steep face (a fall's curtain, one sheet) is its own front from both
+  // sides: the underside look is for a ceiling of water, not a falling sheet
+  const facing = max(float(frontFacing as unknown as THREE.Node<"float">), steepness);
+  material.colorNode = mix(underside, lit as unknown as THREE.Node<"vec3">, facing);
 
   // -- edge fade: opacity to 0 well before the mesh's own physical boundary --
   const camDist = length(sub(cameraPosition, positionWorld));
@@ -1295,11 +1512,19 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
   // The underside is also more OPAQUE: from below the surface is a ceiling,
   // and a half-transparent ceiling shows the sky through it at every angle,
   // which is the "I cannot see the top of the water" report.
-  const faceOpacity = mix(float(Math.min(1, data.opacity + 0.35)), float(data.opacity), frontFacing as unknown as THREE.Node<"float">);
-  material.opacityNode = mul(faceOpacity, edgeFade);
+  const faceOpacity = mix(float(Math.min(1, data.opacity + 0.35)), float(data.opacity), facing);
+  material.opacityNode = mul(mul(faceOpacity, edgeFade), curtainBody);
+  // fully faded fragments (a curtain's edge, the far fade) are dropped outright
+  material.alphaTestNode = float(0.01);
   // drawn from both sides now (a scene may still force one with material.side)
   material.side = THREE.DoubleSide;
-  if (material instanceof THREE.MeshStandardNodeMaterial) material.roughnessNode = float(0.35);
+  // SHEEN: the sun glint is the standard material's specular, so `specular`
+  // (0 none, 1 the old glassy 0.35 roughness) sets how rough the surface
+  // reads; a curtain has none (Derek: the sheen "looks a little strange")
+  if (material instanceof THREE.MeshStandardNodeMaterial) {
+    const specular = Math.min(1, Math.max(0, w.specular ?? 0.3));
+    material.roughnessNode = mix(float(1 - 0.65 * specular), float(1), curtainRoll);
+  }
   return material;
 }
 
@@ -1321,8 +1546,8 @@ async function loadWaterTexture(
   map: THREE.Texture,
   data: MaterialData,
   options: TextureResolver | undefined,
+  assetId: string | undefined = waterTextureId(data),
 ): Promise<void> {
-  const assetId = waterTextureId(data);
   if (!assetId) return;
   const url = options?.resolveTexture?.(assetId);
   if (!url) {
@@ -1799,6 +2024,15 @@ function populateEntityGroup(
       mesh.userData["entityId"] = id;
       mesh.userData[STATIC_BATCH_FLAG] = meshData.static === true;
       mesh.userData["polyMesh"] = true;
+      group.add(mesh);
+    }
+
+    if (meshData && meshData.source.kind === "surface") {
+      const mesh = new THREE.Mesh(surfaceGeometry(meshData.source), resolveMaterialFor(meshData, options, materialCache));
+      mesh.castShadow = meshData.castShadow;
+      mesh.receiveShadow = meshData.receiveShadow;
+      mesh.userData["entityId"] = id;
+      mesh.userData[STATIC_BATCH_FLAG] = meshData.static === true;
       group.add(mesh);
     }
 
@@ -2526,7 +2760,13 @@ export function cachedMergedMaterial(
 export function cachedInstancedMaterial(
   cacheKey: string,
   source: THREE.Material | THREE.Material[],
-  options: { uvRotation?: boolean; uber?: boolean; glow?: boolean } = {},
+  options: {
+    uvRotation?: boolean;
+    uber?: boolean;
+    glow?: boolean;
+    /** Per-instance part tiles + skin tint (appearance.ts); needs `uber`. The cache key must say so too. */
+    appearance?: { tiles: Record<string, readonly number[]> | null; skin?: import("./appearance.js").SkinContext | null };
+  } = {},
 ): THREE.Material | THREE.Material[] {
   const cached = instancedMaterialCache.get(cacheKey);
   if (cached) return cached;
@@ -2545,6 +2785,8 @@ export function cachedInstancedMaterial(
     if (options.uber) applyInstanceUber(clone);
     // per-instance item glow (moving batches), after the uber hook it wraps
     if (options.glow) applyInstanceGlow(clone);
+    // per-part tiles and skin tint, replacing the colour node the uber hook set
+    if (options.appearance && options.uber) applyInstanceAppearance(clone, options.appearance.tiles, { skin: options.appearance.skin });
     return clone;
   };
   const cloned = Array.isArray(source) ? source.map(instancedClone) : instancedClone(source);

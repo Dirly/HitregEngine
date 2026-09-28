@@ -57,7 +57,11 @@ pose-sheet — render a character's clips with its held items, as one PNG
   --actor <entity>       the entity carrying the character model (e.g. player-visual)
   --model <asset>        character GLB instead of the actor's mesh (e.g. a test bake)
   --equip slot=item,...  items to hold, by the slot their socket's equipment-look shows
-  --clips a,b,c          clips to show (default: every clip)
+  --clips a,b,c          clips to show (default: every clip). "Legs+Upper" shows a stance
+                         CARRY: Legs below the waist, Upper from it up, phase-locked the way
+                         the controller locks it (left-foot contacts from the doc's
+                         clipFootfalls; "Legs+Upper@0.25" forces the offset)
+  --upper <bone>         where a carry splits (default CC_Base_Waist, else the first spine bone)
   --frames <n>           samples per clip, first to last frame (default 6)
   --views front,side,3q  one row per view per clip (default 3q)
   --zoom <bone>          crop to what is within --radius (default 0.4 m) of a bone
@@ -96,6 +100,8 @@ function loadGlb(file) {
 
 // ---- the actor and its sockets, out of the scene
 const overrides = args.override ? JSON.parse(String(args.override)) : {};
+/** The controller's clipFootfalls, if the doc has one — what a carry row locks by. */
+let footfalls = {};
 let modelId = args.model ?? null;
 const sockets = [];
 if (args.scene || args.prefab) {
@@ -110,6 +116,11 @@ if (args.scene || args.prefab) {
     ),
   );
   const ents = scene.entities ?? {};
+  for (const e of Object.values(ents)) {
+    const sc = e.components?.script;
+    const list = Array.isArray(sc) ? sc : sc ? [sc] : [];
+    for (const one of list) if (one?.name === "third-person-controller" && one.params?.clipFootfalls) footfalls = one.params.clipFootfalls;
+  }
   const actor = ents[args.actor];
   if (!actor) {
     console.error(`pose-sheet: no entity "${args.actor}" in ${args.prefab ?? args.scene}`);
@@ -279,7 +290,65 @@ const radius = Number(args.radius ?? 0.4);
 const wantedClips = args.clips ? String(args.clips).split(",").map((s) => s.trim()) : character.animations.map((c) => c.name);
 const mixer = new THREE.AnimationMixer(root);
 const rows = []; // { label, img }
+/** Every node name at or under the carry split (the controller's upper-body mask). */
+function upperNodes() {
+  let split = root.getObjectByName(String(args.upper ?? "CC_Base_Waist"));
+  if (!split) root.traverse((o) => (split ??= /(spine|waist|chest|torso|abdomen)/i.test(o.name) ? o : undefined));
+  const names = new Set();
+  split?.traverse((o) => names.add(THREE.PropertyBinding.sanitizeNodeName(o.name)));
+  return names;
+}
+const nodeOf = (t) => THREE.PropertyBinding.parseTrackName(t.name).nodeName ?? "";
+/** A carry: the legs' clip masked below the split, the upper clip above it, locked by the left-foot contacts. */
+function carryRow(spec) {
+  const [pair, forced] = spec.split("@");
+  const [legsName, upperName] = pair.split("+");
+  const legs = character.animations.find((c) => c.name === legsName);
+  const upper = character.animations.find((c) => c.name === upperName);
+  if (!legs || !upper) return null;
+  const up = upperNodes();
+  const legsOnly = new THREE.AnimationClip(`${legsName} (legs)`, legs.duration, legs.tracks.filter((t) => !up.has(nodeOf(t))));
+  const upperOnly = new THREE.AnimationClip(`${upperName} (upper)`, upper.duration, upper.tracks.filter((t) => up.has(nodeOf(t))));
+  const a = footfalls[legsName]?.[0];
+  const b = footfalls[upperName]?.[0];
+  const offset = forced !== undefined ? Number(forced) : typeof a === "number" && typeof b === "number" ? (((b - a) % 1) + 1) % 1 : 0;
+  return { legs: legsOnly, upper: upperOnly, offset };
+}
 for (const name of wantedClips) {
+  if (name.includes("+")) {
+    const carry = carryRow(name);
+    if (!carry) {
+      console.log(`  ! no clips for carry "${name}"`);
+      continue;
+    }
+    const la = mixer.clipAction(carry.legs);
+    const ua = mixer.clipAction(carry.upper);
+    la.play();
+    ua.play();
+    const frames = [];
+    const times = [];
+    for (let f = 0; f < frameCount; f++) {
+      const p = frameCount === 1 ? 0 : (f / (frameCount - 1)) * 0.999;
+      la.time = p * carry.legs.duration;
+      ua.time = (((p + carry.offset) % 1) + 1) % 1 * carry.upper.duration;
+      mixer.update(0);
+      root.updateMatrixWorld(true);
+      const tris = [];
+      bodyTris(tris);
+      for (const h of held) heldTris(h, tris);
+      frames.push({ tris });
+      times.push(la.time);
+    }
+    la.stop();
+    ua.stop();
+    mixer.uncacheClip(carry.legs);
+    mixer.uncacheClip(carry.upper);
+    console.log(`  carry ${name}: upper held ${carry.offset.toFixed(3)} cycles ahead of the legs`);
+    for (const [vi, view] of views.entries()) {
+      rows.push({ label: `${name.split("@")[0]} ${viewNames[vi]}`, times, img: unmirror(renderStrip(frames, [view], null, tile), tile) });
+    }
+    continue;
+  }
   const clip = character.animations.find((c) => c.name === name);
   if (!clip) {
     console.log(`  ! no clip "${name}"`);

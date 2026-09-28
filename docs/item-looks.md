@@ -63,6 +63,20 @@ Every field's range, default and meaning is in the item schema
 - **One of each family, plus the grip.** Nothing enforces which blade fits
   which guard yet. The recipe's `combos` are the only vetted assemblies; a free
   mix can clip.
+- **Worn gear carries RULES.** A recipe's `rules` (`oneOf`, `requires`,
+  `excludes`) ride in the model's extras beside `parts`, and core's
+  `partProblems(rules, parts)` names every rule a look breaks. The player's
+  headgear (`human-helm`) is the worked example: three helms of which one shows,
+  a cheek guard that exists only on its own helm, a nose guard that needs a helm
+  or the hood to hang from, a headband that takes the side ornament and no nose
+  guard. unwrap-weapon warns when one of the recipe's own `combos` breaks them.
+- **`hides` says what a part covers on OTHER models.** A helm hides the hair
+  ubermesh's styles, a mouth plate the beards, the full face cover the head's
+  skin (it lies ON the head's surface and would z-fight with it). Core's
+  `partsHiddenBy(rules, parts)` returns those names; whoever draws the pieces
+  (the creation preview today) drops them from the other models' part masks.
+  The body carries its own table (`reskin --rules`): a robe rules out the back
+  tasset, never the front one.
 
 ## Baking the model: `weapon-page`
 
@@ -177,6 +191,8 @@ length. The flame-lick art fills only the middle of its cell, so its quads
 need ~0.3 m to show a flame at all; at 0.11 m it was invisible.
 
 ## Traps (each cost a round trip)
+
+- **Pages are SQUARE — a rule, not a preference.** A tile is `[u, v, scale]` with ONE scale, so a page with fewer rows than columns squeezes every tile vertically and every island samples off, worse the lower it sits (12 helm themes packed 4×3 broke hood tops, crowns and all ornaments; a 2-theme greataxe packed 2×1 was wrong from its first bake). Every packer shares `tools/_page.mjs` (`squareGrid`, `assertSquarePage`) and refuses to write a non-square page; the renderer warns if it ever loads one. Never pack a page by any other code.
 
 - **The part-mask bit test needs `floor`**: `fract(floor(mask / 2^i) * 0.5) >
   0.25`. Without it the lower bits leak in and a sword with one guard draws

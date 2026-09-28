@@ -1,0 +1,80 @@
+{
+  "size": 112,
+  "bleed": 2,
+  "bgLum": 236,
+  "filter": "nearest",
+  "solidGround": true,
+  "keyColor": "#00ffff",
+  "groundFringe": 1,
+  "fitSearch": 1.6,
+  "slots": {
+    "#ff0000": {
+      "name": "base1",
+      "transparency": false,
+      "cut": false
+    },
+    "#0040ff": {
+      "name": "base2",
+      "transparency": false,
+      "cut": false
+    },
+    "#00c000": {
+      "name": "base3",
+      "transparency": false,
+      "cut": false
+    },
+    "#6a00c0": {
+      "name": "base4",
+      "transparency": false,
+      "cut": false
+    },
+    "#ff8000": {
+      "name": "rim",
+      "transparency": false,
+      "cut": false
+    },
+    "#c00060": {
+      "name": "accent",
+      "transparency": false,
+      "cut": false
+    },
+    "#a06020": {
+      "name": "planer-rim",
+      "transparency": true,
+      "cut": true,
+      "openEnclosed": 0.01,
+      "fit": "contain-uniform",
+      "fitPadding": 3
+    },
+    "#008080": {
+      "name": "planer-accent",
+      "transparency": true,
+      "cut": true,
+      "openEnclosed": 0.01,
+      "fit": "contain-uniform",
+      "fitPadding": 3
+    },
+    "#c08040": {
+      "name": "ornate",
+      "transparency": true,
+      "cut": true,
+      "openEnclosed": 0.01,
+      "keepFit": true,
+      "fit": "contain-uniform",
+      "fitPadding": 4,
+      "anchorPad": 0,
+      "anchor": "bottom"
+    },
+    "#804000": {
+      "name": "ornate2",
+      "transparency": true,
+      "cut": true,
+      "openEnclosed": 0.01,
+      "keepFit": true,
+      "fit": "contain-uniform",
+      "fitPadding": 4,
+      "anchorPad": 0,
+      "anchor": "bottom"
+    }
+  }
+}

@@ -19,8 +19,12 @@ export interface AudioComponentData {
 export class AudioSystem {
   private readonly listener = new THREE.AudioListener();
   private readonly buffers = new Map<string, Promise<AudioBuffer | null>>();
-  private live: Array<{ audio: THREE.Audio | THREE.PositionalAudio; priority: number }> = [];
+  private live: Array<{ audio: THREE.Audio | THREE.PositionalAudio; priority: number; anchor?: THREE.Object3D }> = [];
+  /** Decoded lengths, for scripts that schedule around a track's end (music with silence between). */
+  private readonly durations = new Map<string, number>();
   private readonly maxVoices = 24;
+  /** A one-shot that took longer than this to load/decode is skipped (see play). */
+  private readonly maxLateMs = 900;
   /** Long-lived, script-driven loops (weather, machinery, local ambience). */
   private loops = new Map<
     string,
@@ -50,6 +54,10 @@ export class AudioSystem {
       pending = url
         ? new THREE.AudioLoader()
             .loadAsync(url)
+            .then((buffer) => {
+              this.durations.set(soundId, buffer.duration);
+              return buffer;
+            })
             .catch((error) => {
               console.warn(`[audio] failed to load ${soundId}:`, error);
               return null;
@@ -60,21 +68,56 @@ export class AudioSystem {
     return pending;
   }
 
+  /** Seconds of a decoded sound; undefined until it has loaded once. */
+  duration(soundId: string): number | undefined {
+    return this.durations.get(soundId);
+  }
+
+  /** Warm a sound so its duration is known before it is needed. */
+  preload(soundId: string): void {
+    void this.load(soundId);
+  }
+
+  /**
+   * A positional one-shot at a world point: an anchor is parked under `parent`
+   * (the scene root) for the sound's life and removed with it.
+   */
+  async playAt(
+    parent: THREE.Object3D,
+    at: readonly [number, number, number],
+    soundId: string,
+    opts: Partial<AudioComponentData> = {},
+  ): Promise<void> {
+    const anchor = new THREE.Object3D();
+    anchor.position.set(at[0], at[1], at[2]);
+    parent.add(anchor);
+    anchor.updateMatrixWorld();
+    const started = await this.play(anchor, soundId, { ...opts, positional: true }, anchor);
+    if (!started) anchor.removeFromParent();
+  }
+
   async play(
     object: THREE.Object3D | null,
     soundId: string,
     opts: Partial<AudioComponentData> = {},
-  ): Promise<void> {
+    anchor?: THREE.Object3D,
+  ): Promise<boolean> {
+    const asked = performance.now();
     const buffer = await this.load(soundId);
-    if (!buffer) return;
+    if (!buffer) return false;
+    // A one-shot is tied to its moment. One whose file only decoded after a
+    // hitch (terrain streaming in, a first load) would play out of time, and
+    // a stall releases them all at once: drop it instead.
+    if (!opts.loop && performance.now() - asked > this.maxLateMs) return false;
     const priority = opts.priority ?? 0;
     if (this.live.length >= this.maxVoices) {
       let quietest = 0;
       for (let i = 1; i < this.live.length; i++) if (this.live[i]!.priority < this.live[quietest]!.priority) quietest = i;
-      if (this.live[quietest]!.priority > priority) return;
+      if (this.live[quietest]!.priority > priority) return false;
       const [evicted] = this.live.splice(quietest, 1);
       if (evicted!.audio.isPlaying) evicted!.audio.stop();
       evicted!.audio.removeFromParent();
+      evicted!.anchor?.removeFromParent();
     }
     const positional = (opts.positional ?? true) && object !== null;
     const audio = positional
@@ -88,7 +131,7 @@ export class AudioSystem {
     audio.setVolume(opts.volume ?? 1);
     audio.setPlaybackRate(opts.playbackRate ?? 1);
     audio.setLoop(opts.loop ?? false);
-    const voice = { audio, priority };
+    const voice = { audio, priority, anchor };
     // Three binds this callback when play() creates its AudioBufferSourceNode.
     // Releasing naturally ended foley is essential: otherwise a long session
     // fills the priority budget with already-silent footsteps.
@@ -96,9 +139,11 @@ export class AudioSystem {
       const index = this.live.indexOf(voice);
       if (index >= 0) this.live.splice(index, 1);
       audio.removeFromParent();
+      anchor?.removeFromParent();
     };
     audio.play();
     this.live.push(voice);
+    return true;
   }
 
   /** Keep one named loop alive and adjust its gain without restarting it. */
@@ -143,13 +188,14 @@ export class AudioSystem {
   }
 
   stopAll(): void {
-    for (const { audio } of this.live) {
+    for (const { audio, anchor } of this.live) {
       try {
         if (audio.isPlaying) audio.stop();
       } catch {
         /* already ended */
       }
       audio.removeFromParent();
+      anchor?.removeFromParent();
     }
     this.live = [];
     for (const loop of this.loops.values()) {

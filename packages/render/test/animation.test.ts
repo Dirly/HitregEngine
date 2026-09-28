@@ -159,6 +159,71 @@ describe("AnimationSystem layers", () => {
     expect(node(root, "thigh_l").position.x).toBeCloseTo(0.5, 1);
   });
 
+  it("splits a CC rig at the waist: the hip and the pelvis's legs stay the gait's", () => {
+    // CC_Base_Hip > { CC_Base_Pelvis > thigh, CC_Base_Waist > Spine01 > arm } —
+    // the MMO human's layout, where the legs hang off a SIBLING of the spine
+    const root = new THREE.Object3D();
+    const names = ["CC_Base_Hip", "CC_Base_Pelvis", "CC_Base_L_Thigh", "CC_Base_Waist", "CC_Base_Spine01", "CC_Base_L_Upperarm"];
+    const [hip, pelvis, thigh, waist, spine, arm] = names.map((n) => Object.assign(new THREE.Object3D(), { name: n }));
+    root.add(hip!);
+    hip!.add(pelvis!, waist!);
+    pelvis!.add(thigh!);
+    waist!.add(spine!);
+    spine!.add(arm!);
+    const system = new AnimationSystem();
+    const all = Object.fromEntries(names.map((n) => [n, [0, 4] as [number, number]]));
+    const block = Object.fromEntries(names.map((n) => [n, [10, 10] as [number, number]]));
+    system.register("hero", root, [poseClip("Walk", 4, all), poseClip("Block", 4, block)], { fade: 0, speed: 1 });
+    system.setRunning(true);
+    system.play("hero", "Walk", 0);
+    system.playLayer("hero", "Block", { fade: 0 });
+    for (let i = 0; i < 60; i++) system.update(1 / 60);
+    for (const legs of ["CC_Base_Hip", "CC_Base_Pelvis", "CC_Base_L_Thigh"]) {
+      expect(node(root, legs).position.x).toBeCloseTo(1, 1);
+    }
+    for (const arms of ["CC_Base_Waist", "CC_Base_Spine01", "CC_Base_L_Upperarm"]) {
+      expect(node(root, arms).position.x).toBeCloseTo(10, 1);
+    }
+  });
+
+  it("keeps a layer's torso on the clip's hips, not the gait's (a bladed guard over a walk)", () => {
+    // Hip > Waist > Spine01 > Spine02 > Head. The guard stands bladed: hips
+    // turned -60 degrees, spine twisted +60 back so the chest faces ahead. The
+    // walk's hips are square — the guard's local spine alone would face +60.
+    const root = new THREE.Object3D();
+    const names = ["CC_Base_Hip", "CC_Base_Waist", "CC_Base_Spine01", "CC_Base_Spine02", "CC_Base_Head"];
+    const bones = names.map((n) => Object.assign(new THREE.Object3D(), { name: n }));
+    root.add(bones[0]!);
+    for (let i = 1; i < bones.length; i++) bones[i - 1]!.add(bones[i]!);
+    const yawQ = (deg: number) => new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), (deg * Math.PI) / 180);
+    const rot = (bone: string, deg: number) =>
+      new THREE.QuaternionKeyframeTrack(`${bone}.quaternion`, [0, 1], [...yawQ(deg).toArray(), ...yawQ(deg).toArray()]);
+    const walk = new THREE.AnimationClip("Walk", 1, [rot("CC_Base_Hip", 0), rot("CC_Base_Waist", 0)]);
+    const guard = new THREE.AnimationClip("Guard", 1, [rot("CC_Base_Hip", -60), rot("CC_Base_Waist", 20), rot("CC_Base_Spine01", 20), rot("CC_Base_Spine02", 20)]);
+    const system = new AnimationSystem();
+    system.register("hero", root, [walk, guard], { fade: 0, speed: 1 });
+    system.setRunning(true);
+    system.play("hero", "Walk", 0);
+    // held like a real guard: played once, clamped on its last frame — the
+    // mixer stops rewriting the bones then, and a turn that stacked on itself
+    // spun the character (so run well past the clip's end)
+    system.playLayer("hero", "Guard", { fade: 0, loop: false });
+    for (let i = 0; i < 180; i++) system.update(1 / 60);
+    const facing = (name: string) => {
+      root.updateMatrixWorld(true);
+      const f = new THREE.Vector3(0, 0, 1).applyQuaternion(node(root, name).getWorldQuaternion(new THREE.Quaternion()));
+      return (Math.atan2(f.x, f.z) * 180) / Math.PI;
+    };
+    expect(facing("CC_Base_Hip")).toBeCloseTo(0, 3); // legs still the walk's
+    expect(facing("CC_Base_Head")).toBeCloseTo(0, 3); // eyes ahead, as the guard authored
+    // the turn is shared along the spine, not all at the waist
+    expect(facing("CC_Base_Waist")).toBeCloseTo(0, 3);
+    expect(facing("CC_Base_Spine01")).toBeCloseTo(0, 3);
+    system.clearLayer("hero", 0);
+    system.update(1 / 60);
+    expect(facing("CC_Base_Head")).toBeCloseTo(0, 3); // walk's own square spine
+  });
+
   it("falls back to a full-body play when the rig has no mask bone", () => {
     const root = new THREE.Object3D();
     const limb = new THREE.Object3D();
@@ -250,6 +315,41 @@ describe("AnimationSystem clip fitting", () => {
     system.play("hero", "cast", 0, false, true);
     for (let i = 0; i < 70; i++) system.update(1 / 60);
     expect(done).toEqual(["cast", "cast"]);
+  });
+});
+
+describe("AnimationSystem gait changes", () => {
+  function actionOf(system: AnimationSystem, name: string): THREE.AnimationAction {
+    const entry = (system as unknown as { entries: Map<string, { actions: Map<string, THREE.AnimationAction> }> })
+      .entries.get("hero")!;
+    return entry.actions.get(name)!;
+  }
+
+  it("carries the stride's phase into the next cycle when asked to", () => {
+    const system = systemWith([clip("walk", 1), clip("run", 2)]);
+    system.play("hero", "walk", 0);
+    for (let i = 0; i < 15; i++) system.update(1 / 60); // a quarter of the way through
+    system.play("hero", "run", 0.25, true, false, true);
+    // a quarter of a 2 s cycle, not frame 0 and not the walk's 0.25 s
+    expect(actionOf(system, "run").time).toBeCloseTo(0.5, 2);
+  });
+
+  it("starts at the top without it", () => {
+    const system = systemWith([clip("walk", 1), clip("run", 2)]);
+    system.play("hero", "walk", 0);
+    for (let i = 0; i < 15; i++) system.update(1 / 60);
+    system.play("hero", "run", 0.25);
+    expect(actionOf(system, "run").time).toBe(0);
+  });
+
+  it("leaves the outgoing clip at its own rate when the new rate is set after the play", () => {
+    const system = systemWith([clip("walk", 1), clip("run", 2)]);
+    system.play("hero", "walk", 0);
+    system.setSpeed("hero", 2);
+    system.play("hero", "run", 0.25, true, false, true);
+    system.setSpeed("hero", 0.8);
+    expect(actionOf(system, "walk").timeScale).toBe(2);
+    expect(actionOf(system, "run").timeScale).toBe(0.8);
   });
 });
 

@@ -1,5 +1,6 @@
 export { ASSET_KINDS, loadContent, playgroundRoots, type LoadedContent } from "./assets.js";
 export { loadProjectScripts, isClientOnlyScript, type ScriptLoadReport } from "./scripts.js";
+export { fileMeshGeometry } from "./mesh-geometry.js";
 export {
   HeadlessWorld,
   NULL_INPUT,

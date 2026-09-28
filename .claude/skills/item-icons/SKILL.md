@@ -1,6 +1,6 @@
 ---
 name: item-icons
-description: Make the small inventory icon for an item (~40 px, cropped, hard alpha, matched to the existing mmo-ui icons). Renders items that have a model (weapons, shields, any ubermesh gear) straight from their own mesh, parts and theme, with no image generator; generates one picture and shrinks it for items with no model (trash loot, ore, potions, quest junk). Use when an item is added, when its theme, parts or model change, or when an item shows a placeholder or someone else's icon.
+description: Make the small inventory icon for an item (~40 px, cropped, hard alpha, matched to the existing mmo-ui icons). Renders items that have a model (weapons, shields, any ubermesh gear) straight from their own mesh, parts and theme, with no image generator; gives items with no model (food, supplies, trade goods, documents, trash loot, ore, potions) a cell of a 16-object CATEGORY sprite sheet, sliced to 40 px, and audits that every item has a working icon. Use when an item is added, when its theme, parts or model change, or when an item shows a placeholder or someone else's icon.
 ---
 
 # Item icons
@@ -21,10 +21,16 @@ then follow this order.
    Same size and angle as its neighbours?
 3. **Write it for real** (drop `--dry`). The item's `icon` now points at
    `icons/<id>.png`; the inventory live-syncs.
-4. **No model?** Generate ONE picture: 512x512, pure white ground, one object
-   centred, three-quarter view, lit from the upper left, no text
-   (`image-request.mjs gen`, prompt rules in the doc). Then
-   `--item <id> --from-image <that.png>`. Look at the sheet the same way.
+4. **No model?** It takes a cell of a CATEGORY SHEET (doc: "Adding an item:
+   which icon route"). Reuse a sliced icon or variant (`loot-sheet.mjs list
+   --tag <category>`). Otherwise add the object to a sheet with room in
+   `authoring/loot-sheets.json`, then `loot-sheet.mjs request` and `slice`
+   that sheet, and look at `authoring/loot-art/contact/<sheet>.png`. Point the
+   item at `icons/loot/<id>.png` and give it the category tag. Never one
+   generator call per item, except for a one-of-a-kind unique
+   (`--from-image`).
+5. **`node tools/loot-sheet.mjs audit --project <p>`** must print nothing to
+   fix before the content ships.
 
 ## What not to skip
 

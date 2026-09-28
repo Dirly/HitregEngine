@@ -264,6 +264,8 @@ how a held weapon is drawn, too.
 
 Every one of these was paid for once.
 
+**Pages are SQUARE — a rule, not a preference.** A tile is `[u, v, scale]` with ONE scale, so a page with fewer rows than columns squeezes every tile vertically and every island samples off, worse the lower it sits (12 helm themes packed 4×3 broke hood tops, crowns and all ornaments; a 2-theme greataxe packed 2×1 was wrong from its first bake). Every packer shares `tools/_page.mjs` (`squareGrid`, `assertSquarePage`) and refuses to write a non-square page; the renderer warns if it ever loads one. Never pack a page by any other code.
+
 **A Blockbench export has no usable UVs.** Every face of every part is mapped
 onto the same single texel — measured on LongSword.fbx, the whole model occupied
 u 0..0.004. The unwrap and the key must be produced together, by one program,

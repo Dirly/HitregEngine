@@ -135,13 +135,13 @@ export function installLiveSync(deps: LiveSyncDeps): void {
           if (assets.getPrefab(id)) assets.updatePrefab(id, doc);
           else assets.addPrefab(id, doc);
           assetsVersion.set(assetsVersion.get() + 1);
-        } else if (file.startsWith("items/") || file.startsWith("progression/")) {
+        } else if (/^(items|progression|creation|quests|dialogues|shops|places)\//.test(file)) {
           // Item definitions and levelling rules are read live by the
           // character scripts (ctx.getDataAsset on every reducer call), so
           // updating the asset is the whole hot-reload — no scene rebuild.
           // An invalid file is rejected by the schema and the old values stay.
           const kind = file.slice(0, file.indexOf("/"));
-          const type = kind === "items" ? "item" : "progression";
+          const type = ({ items: "item", quests: "quest", dialogues: "dialogue", shops: "shop" } as Record<string, string>)[kind] ?? kind;
           const id = file.slice(kind.length + 1).replace(/\.json$/, "");
           const asset = { id, type, name: id, data: JSON.parse(content) };
           if (assets.getDataAsset(id)) assets.updateDataAsset(asset);

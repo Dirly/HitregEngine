@@ -92,6 +92,12 @@ const STUDIO = path.resolve(ENGINE, "..");
  */
 const HELD_GEAR_TEXELS_PER_M = 109;
 
+// Part names of the player's hair and head models (carry-mesh's human-hair,
+// the merged human-head), for the headgear's `hides` table.
+const HAIR = ["HairBase1", "HairBase2", "HairStyle1", "HairStyle2"];
+const BEARDS = ["BeardBase1", "BeardBase2", "Mustache"];
+const HEAD_SKIN = ["HeadFace", "HeadSides/Back", "HeadBottom", "HeadCrown", "F_HeadFace", "F_HeadSides/Back", "F_HeadBottom", "F_HeadCrown"];
+
 const RECIPES = {
   longsword: {
     // Blockbench is where this model is actually edited, so the OBJ it exports
@@ -1203,6 +1209,404 @@ const RECIPES = {
       ],
     ],
   },
+  // The player's HEAD, one module worn by every human character. Its skin is
+  // four shells: a face panel, a band round the sides and back, a flat crown
+  // and a jaw piece under the chin that wraps to the nape. The hair, beard
+  // and moustache pieces in the same file wear a tiling hair swatch
+  // (pasted.png) on their own UVs and are not unwrapped here.
+  //
+  // Face panel, sides and jaw are ONE strip round the head (the ghoul and
+  // anansi cut), measured from all three shells so they meet edge to edge;
+  // the jaw's underside splits off below the strip, the crown sits above it.
+  // Each skin is ONE tile of a shared page (see heads.mjs), so every head a
+  // character can pick is the same mesh and the same draw.
+  "human-head": {
+    source: "MMO/3d/HumanRig/Head/Face.obj",
+    matte: true,
+    sourceScale: 100,
+    outMesh: "MMO/3d/HumanRig/Head/Face-unwrapped",
+    sheet: 1254,
+    keyStroke: 8,
+    smooth: 60,
+    margin: 22,
+    gutter: 48,
+    metresPerUnit: 0.019, // the human rig's scale: the longsword's socket scale
+    texelsPerMetre: HELD_GEAR_TEXELS_PER_M,
+    // 72 texels hits the body's own density (human.glb: 104/m on 256): a head
+    // is ~0.7 m round. Bleed 1: the 48px gutter is under 3 texels here.
+    // Nearest, not the box average: the body's texels are hard pixels and an
+    // averaged face reads as a softer, different art style beside them.
+    atlas: { size: 72, bleed: 1, bgLum: 236, filter: "nearest" },
+    slots: {
+      // A face is symmetric; a generator's never is. `symmetric` finds the
+      // axis it painted and moves it onto the island's centre column (the
+      // front of the face, with `centered`); `mirror` then copies the left
+      // half onto the right. The crown and jaw are symmetric about theirs.
+      head: { color: "#ff0000", fit: "contain", labelMax: 2, symmetric: true, mirror: true },
+      "head-crown": { color: "#8c0000", fit: "contain", label: "scalp from above", mirror: true },
+      "head-under": { color: "#c05050", fit: "contain", label: "under jaw", matchTo: "head", mirror: true },
+    },
+    parts: {
+      HeadFace: {
+        slot: "head", method: "sphere", front: "+x", v: "height", centered: true,
+        centerOf: ["HeadFace", "HeadSides/Back", "HeadBottom"],
+      },
+      "HeadSides/Back": {
+        slot: "head", method: "sphere", front: "+x", v: "height", centered: true,
+        centerOf: ["HeadFace", "HeadSides/Back", "HeadBottom"],
+      },
+      HeadBottom: {
+        slot: "head", method: "sphere", front: "+x", v: "height", centered: true,
+        centerOf: ["HeadFace", "HeadSides/Back", "HeadBottom"],
+        split: [{ slot: "head-under", facing: "-y", above: 0.6, u: "+z", v: "-x", flare: 0.15 }],
+      },
+      HeadCrown: { slot: "head-crown", method: "plane", u: "-z", v: "+x", flare: 0.15 },
+    },
+    layout: { col: ["head-crown", "head", "head-under"], align: "center" },
+    // Read off the face panel's rings: panel top (hairline) y 89.5, chin
+    // 78.1, the moustache sits on the upper lip at 81-82.3, face ±3.9 wide.
+    // Face thirds put the brow at ~85.7 and the nose base at ~82.3, so the
+    // eyes go at 85.0 — at 85.5 the eye-to-mouth gap came out long and every
+    // face read as a long nose.
+    marks: [
+      { slot: "head", at: [5.2, 85.0, 1.7], shape: "eye", size: 5 },
+      { slot: "head", at: [5.2, 85.0, -1.7], shape: "eye", size: 5 },
+      { slot: "head", at: [5.6, 82.6, 0], shape: "dot", size: 5 },
+      { slot: "head", from: [5.4, 80.9, -1.3], to: [5.4, 80.9, 1.3], shape: "line" },
+    ],
+    cutoutSlots: [],
+    combos: [["HeadFace", "HeadSides/Back", "HeadBottom", "HeadCrown"]],
+  },
+  // The FEMALE head: Derek's second head in HumanBase.obj (the first of the
+  // two same-named sets; the second is Face.obj's male head). Same cut as the
+  // male one; the jaw is narrower (±2.7 at y 80 against ±3.4) and the crown
+  // sits 0.3 lower, the nose line is shared. Its parts carry an `F_` prefix so
+  // they can join the male head in ONE mesh (heads.mjs): a face tile of either
+  // sex lands on the same page, and every head is still one draw.
+  "human-head-female": {
+    // HumanBase.obj no longer carries the heads: Derek's own export of her head
+    // (the same pieces as the first set in the old HumanBase.obj)
+    source: "MMO/3d/HumanRig/Head/FaceFemale.obj",
+    matte: true,
+    sourceScale: 100,
+    outMesh: "MMO/3d/HumanRig/Head/FaceFemale-unwrapped",
+    repeats: {
+      HeadFace: ["F_HeadFace", "HeadFace"],
+      "HeadSides/Back": ["F_HeadSides/Back", "HeadSides/Back"],
+      HeadBottom: ["F_HeadBottom", "HeadBottom"],
+      HeadCrown: ["F_HeadCrown", "HeadCrown"],
+    },
+    sheet: 1254,
+    keyStroke: 8,
+    smooth: 60,
+    margin: 22,
+    gutter: 48,
+    metresPerUnit: 0.019,
+    texelsPerMetre: HELD_GEAR_TEXELS_PER_M,
+    atlas: { size: 72, bleed: 1, bgLum: 236, filter: "nearest" },
+    slots: {
+      head: { color: "#ff0000", fit: "contain", labelMax: 2, symmetric: true, mirror: true },
+      "head-crown": { color: "#8c0000", fit: "contain", label: "scalp from above", mirror: true },
+      "head-under": { color: "#c05050", fit: "contain", label: "under jaw", matchTo: "head", mirror: true },
+    },
+    parts: {
+      F_HeadFace: {
+        slot: "head", method: "sphere", front: "+x", v: "height", centered: true,
+        centerOf: ["F_HeadFace", "F_HeadSides/Back", "F_HeadBottom"],
+      },
+      "F_HeadSides/Back": {
+        slot: "head", method: "sphere", front: "+x", v: "height", centered: true,
+        centerOf: ["F_HeadFace", "F_HeadSides/Back", "F_HeadBottom"],
+      },
+      F_HeadBottom: {
+        slot: "head", method: "sphere", front: "+x", v: "height", centered: true,
+        centerOf: ["F_HeadFace", "F_HeadSides/Back", "F_HeadBottom"],
+        split: [{ slot: "head-under", facing: "-y", above: 0.6, u: "+z", v: "-x", flare: 0.15 }],
+      },
+      F_HeadCrown: { slot: "head-crown", method: "plane", u: "-z", v: "+x", flare: 0.15 },
+    },
+    layout: { col: ["head-crown", "head", "head-under"], align: "center" },
+    // the male marks, the mouth a little narrower for the narrower jaw
+    marks: [
+      { slot: "head", at: [5.2, 85.0, 1.7], shape: "eye", size: 5 },
+      { slot: "head", at: [5.2, 85.0, -1.7], shape: "eye", size: 5 },
+      { slot: "head", at: [5.6, 82.6, 0], shape: "dot", size: 5 },
+      { slot: "head", from: [5.4, 80.9, -1.1], to: [5.4, 80.9, 1.1], shape: "line" },
+    ],
+    cutoutSlots: [],
+    combos: [["F_HeadFace", "F_HeadSides/Back", "F_HeadBottom", "F_HeadCrown"]],
+  },
+  // The player's HEADGEAR, one ubermesh sitting on the head module's socket:
+  // three exclusive helms (each with its own optional pieces), two nose
+  // guards, three ornaments, and the hood, crown, headband, bandana and face
+  // cover that combine with them. Which pieces may be worn together is the
+  // `rules` table below, baked into the model beside `parts`.
+  //
+  // Front is +X. Most pieces were modelled as the +Z half only; `mirrorCopy`
+  // builds the -Z half from it, sharing the paint. A half shell is unwrapped
+  // as its side profile (the ghoul hood's cut), so both halves wear one
+  // painting. The nose guards straddle the middle and fold onto themselves.
+  "human-helm": {
+    // HumanBase.obj no longer carries the headgear: Helm-source.obj is the
+    // modeller's halves, rebuilt from Helm-unwrapped-parts.obj (mirror copies dropped)
+    source: "MMO/3d/HumanRig/Helm-source.obj",
+    matte: true,
+    sourceScale: 100,
+    outMesh: "MMO/3d/HumanRig/Helm-unwrapped",
+    sheet: 1254,
+    keyStroke: 8,
+    // smooth (Derek: the creased shading read too hard), but under 90 degrees so
+    // a double-walled piece (the hood's inside) never averages with its own
+    // back face: at 180 the rim normals cancelled and the hood shaded oddly
+    smooth: 88,
+    margin: 22,
+    gutter: 40,
+    metresPerUnit: 0.019,
+    texelsPerMetre: HELD_GEAR_TEXELS_PER_M,
+    // solidGround: only the cut-out pieces may have a transparent gutter (see
+    // import-atlas); the backs of the shells showed holes at a distance
+    atlas: { size: 132, bleed: 2, bgLum: 236, filter: "nearest", solidGround: true },
+    mirrorCopy: {
+      axis: "z",
+      parts: [
+        "Helm1_Base", "Helm1_Flair", "Helm1_NoBeard", "Helm2_Base", "Helm2_NoBeard", "Helm3_base",
+        "Hood", "Crown", "HeadBand1", "Bandana", "FacecoverTotal", "OrnateSide",
+      ],
+    },
+    slots: {
+      helm1: { color: "#ff0000" },
+      "helm1-back": { color: "#a00000", label: "back", labelMax: 1 },
+      "helm2-back": { color: "#002090", label: "back", labelMax: 1 },
+      "helm3-back": { color: "#007000", label: "back", labelMax: 1 },
+      "hood-back": { color: "#400080", label: "back", labelMax: 1 },
+      "facecover-back": { color: "#005050", label: "back", labelMax: 1 },
+      "helm1-flair": { color: "#ff8000" },
+      "helm1-nobeard": { color: "#ffd000", label: "plate", labelMax: 1 },
+      helm2: { color: "#0040ff" },
+      "helm2-front": { color: "#6080ff", label: "front", labelMax: 1 },
+      "helm2-nobeard": { color: "#00a0ff", label: "cheek" },
+      helm3: { color: "#00c000" },
+      noseguard1: { color: "#808080", label: "nose1" },
+      noseguard2: { color: "#404040", label: "nose2" },
+      hood: { color: "#6a00c0" },
+      // the crown's points are cut from the white the art leaves above them
+      crown: { color: "#e0c000", transparency: true, cut: "top" },
+      headband: { color: "#c00060", label: "band" },
+      bandana: { color: "#ff60c0" },
+      facecover: { color: "#008080", label: "face cover" },
+      // Ornaments are silhouettes on a plane (Derek: plumes, feathers, horns,
+      // antlers, never a square) whose BASE sits on the block's bottom edge,
+      // where the plane meets the helm. The art is scaled UNIFORMLY to fit
+      // inside the block with a margin on the free sides (no feather cropped
+      // straight by the island border) and none at the base (anchorPad 0), so
+      // it stands on the helm instead of floating beside it.
+      "ornate-side": { color: "#a06020", label: "orn side", transparency: true, cut: true, fit: "contain-uniform", fitPadding: 4, anchorPad: 0, anchor: "bottom" },
+      "ornate-top": { color: "#c08040", label: "orn top", transparency: true, cut: true, fit: "contain-uniform", fitPadding: 4, anchorPad: 0, anchor: "bottom" },
+      "ornate-top2": { color: "#804000", label: "orn top2", transparency: true, cut: true, fit: "contain-uniform", fitPadding: 4, anchorPad: 0, anchor: "bottom" },
+    },
+    parts: {
+      // Each shell's BACK faces point away from the side view and got almost
+      // no texels (smeared, and holes at a distance): they get their own
+      // island seen from behind.
+      Helm1_Base: {
+        slot: "helm1", method: "plane", u: "+x", v: "-y", flare: 0.3,
+        split: [
+          { slot: "helm1-back", facing: "-x", above: 0.6, u: "-z", v: "-y", flare: 0.2 },
+          { slot: "helm1-nobeard", facing: "+x", above: 0.6, u: "+z", v: "-y", flare: 0.2 },
+        ],
+      },
+      Helm1_Flair: { slot: "helm1-flair", method: "plane", u: "+x", v: "-y", flare: 0.3 },
+      Helm1_NoBeard: { slot: "helm1-nobeard", method: "plane", u: "+z", v: "-y", flare: 0.2 },
+      // The drum helm closes over the eyes: its forward faces get their own
+      // FRONT-view island, or the eye slit is a sliver at the profile's edge.
+      Helm2_Base: {
+        slot: "helm2", method: "plane", u: "+x", v: "-y", flare: 0.3,
+        split: [{ slot: "helm2-front", facing: "+x", above: 0.6, u: "+z", v: "-y", flare: 0.2 }, { slot: "helm2-back", facing: "-x", above: 0.6, u: "-z", v: "-y", flare: 0.2 }],
+      },
+      // A piece that closes the face joins its helm's FRONT island: the face
+      // plate / jaw guard and the helm's forward faces are projected in ONE
+      // front view into one slot, so they are painted as one surface and the
+      // bands meet (Derek: two islands never matched where they connect).
+      Helm2_NoBeard: {
+        slot: "helm2-nobeard", method: "plane", u: "+x", v: "-y", flare: 0.3,
+        split: [{ slot: "helm2-front", facing: "+x", above: 0.6, u: "+z", v: "-y", flare: 0.2 }],
+      },
+      Helm3_base: { slot: "helm3", method: "plane", u: "+x", v: "-y", flare: 0.3, split: [{ slot: "helm3-back", facing: "-x", above: 0.6, u: "-z", v: "-y", flare: 0.2 }] },
+      NoseGuard1: { slot: "noseguard1", method: "plane", u: "+x", v: "-y", mirror: "z", flare: 0.2 },
+      NoseGuard2: { slot: "noseguard2", method: "plane", u: "+x", v: "-y", mirror: "z", flare: 0.2 },
+      Hood: { slot: "hood", method: "plane", u: "+x", v: "-y", flare: 0.3, split: [{ slot: "hood-back", facing: "-x", above: 0.6, u: "-z", v: "-y", flare: 0.2 }] },
+      Crown: { slot: "crown", method: "plane", u: "+x", v: "-y", flare: 0.3 },
+      HeadBand1: { slot: "headband", method: "plane", u: "+x", v: "-y", flare: 0.3 },
+      Bandana: { slot: "bandana", method: "plane", u: "+x", v: "-y", flare: 0.3 },
+      FacecoverTotal: { slot: "facecover", method: "plane", u: "+x", v: "-y", flare: 0.3, split: [{ slot: "facecover-back", facing: "-x", above: 0.6, u: "-z", v: "-y", flare: 0.2 }] },
+      OrnateSide: { slot: "ornate-side", method: "plane", u: "+x", v: "-y" },
+      OrnateTop: { slot: "ornate-top", method: "plane", u: "+z", v: "-y" },
+      OrnateTop2: { slot: "ornate-top2", method: "plane", u: "+z", v: "-y" },
+    },
+    // each back island beside its shell, the neighbour that tells the
+    // generator which helm's back it is
+    layout: {
+      col: [
+        { row: ["helm1", "helm1-back", "helm2", "helm2-back", "helm3", "helm3-back"] },
+        { row: ["hood", "hood-back", "facecover", "facecover-back", "bandana"] },
+        { row: [{ col: ["helm2-nobeard", "helm1-flair"] }, "helm1-nobeard", "helm2-front", "noseguard1", "noseguard2", { col: ["crown", "headband"] }] },
+        { row: ["ornate-side", "ornate-top", "ornate-top2"] },
+      ],
+    },
+    // Derek's rules (2026-09-25). A helm and its own pieces: Helm1 may add its
+    // flair and cheek guard, Helm2 its cheek guard; choosing one helm rules out
+    // the others. Any helm takes any ornament, a nose guard, the hood and the
+    // crown. Hood and crown go with everything, alone or together, ornaments
+    // included; a nose guard hangs from a helm or the hood. The headband takes
+    // the side ornament only, and no nose guard. The bandana goes with anything.
+    // The face cover has no rule yet.
+    rules: {
+      oneOf: [
+        ["Helm1_Base", "Helm2_Base", "Helm3_base", "HeadBand1"],
+        ["NoseGuard1", "NoseGuard2"],
+      ],
+      requires: {
+        Helm1_Flair: ["Helm1_Base"],
+        Helm1_NoBeard: ["Helm1_Base"],
+        Helm2_NoBeard: ["Helm2_Base"],
+        NoseGuard1: ["Helm1_Base", "Helm2_Base", "Helm3_base", "Hood"],
+        NoseGuard2: ["Helm1_Base", "Helm2_Base", "Helm3_base", "Hood"],
+        // the face cover counts as a helm here: in a plate outfit it IS one
+        OrnateTop: ["Helm1_Base", "Helm2_Base", "Helm3_base", "Hood", "Crown", "FacecoverTotal"],
+        OrnateTop2: ["Helm1_Base", "Helm2_Base", "Helm3_base", "Hood", "Crown", "FacecoverTotal"],
+        OrnateSide: ["Helm1_Base", "Helm2_Base", "Helm3_base", "Hood", "Crown", "HeadBand1", "FacecoverTotal"],
+      },
+      excludes: {
+        HeadBand1: ["NoseGuard1", "NoseGuard2", "OrnateTop", "OrnateTop2"],
+      },
+      // What each piece covers on the OTHER models worn with it (human-hair,
+      // human-head). Helms and the hood hide every hair style; the NoBeard
+      // plates and the bandana hide the beards; the face cover sits ON the
+      // head's own surface (it would z-fight with the skin), so it hides the
+      // whole head, both sexes, and the hair and beards with it.
+      hides: {
+        Helm1_Base: HAIR, Helm2_Base: HAIR, Helm3_base: HAIR, Hood: HAIR,
+        Helm1_NoBeard: BEARDS, Helm2_NoBeard: BEARDS, Bandana: BEARDS,
+        FacecoverTotal: [...HAIR, ...BEARDS, ...HEAD_SKIN],
+        // tall styles poke through a crown (Derek): the mohawk and the spiked crest
+        Crown: ["HairStyle1", "HairStyle2"],
+      },
+    },
+    // Where the eyes are behind the pieces that close over them (the head's eye
+    // marks, pushed out onto the helm): the prompt paints an eye slit there.
+    marks: [
+      { slot: "helm1-nobeard", at: [6.0, 85.0, 1.7], shape: "eye", size: 5 },
+      { slot: "helm2-front", at: [6.0, 85.0, 1.7], shape: "eye", size: 5 },
+      { slot: "facecover", at: [6.0, 85.0, 1.7], shape: "eye", size: 5 },
+    ],
+    cutoutSlots: ["ornate-side", "ornate-top", "ornate-top2", "crown"],
+    combos: [
+      ["Helm1_Base", "Helm1_Flair", "Helm1_NoBeard", "NoseGuard1", "OrnateTop"],
+      ["Helm2_Base", "Helm2_NoBeard", "NoseGuard2", "OrnateSide"],
+      ["Helm3_base", "Crown", "OrnateTop2"],
+      ["Hood", "Crown", "NoseGuard1"],
+      ["HeadBand1", "OrnateSide", "Bandana"],
+      ["FacecoverTotal", "Hood"],
+    ],
+  },
+  // The player's SHOULDER PAD, one ubermesh on the shoulder socket: four
+  // exclusive bases (one shows), an optional raised rim plate and an optional
+  // leaning accent plate at the pad's inner (neck) edge, a mess of crossed
+  // cut-out planes along each of those plates (leaves, spikes, feathers, fur)
+  // and two plume ornaments. Only the -Z shoulder is modelled; the game mounts
+  // a mirrored copy on the other arm, so there is no mirrorCopy here.
+  //
+  // The 24 `plane` objects lost their Blockbench folders (PlanerRim /
+  // PlanerAccent) in the OBJ. Geometry puts them back: the first twelve in the
+  // file sit in six crossed pairs centred on z -7.5 (-6.9 for the last pair),
+  // on the rim plate (z -7.5..-6.6); the last twelve in six pairs at z -9.7 to
+  // -12.5, 1-2 units outside the leaning accent plate. Each group is merged into
+  // ONE part (24 separate parts would blow the 24-part mask on their own) and
+  // every plane of a group is stacked on ONE square (`method: "square"`), so the
+  // whole fringe samples one motif painted from the square's centre.
+  "human-shoulder": {
+    source: "MMO/3d/HumanRig/HumanBase.obj",
+    matte: true,
+    sourceScale: 100,
+    outMesh: "MMO/3d/HumanRig/Shoulder-unwrapped",
+    // grouped by where each plane sits, not by file order: the 12:32 re-export
+    // reordered the objects (it still comes out 12 + 12)
+    merge: {
+      PlanerRim: { of: "plane", nearest: "Rim1" },
+      PlanerAccent: { of: "plane", nearest: "Accent1" },
+    },
+    sheet: 1254,
+    keyStroke: 8,
+    smooth: 50,
+    margin: 22,
+    // 48 sheet px = 4.2 texels at 110: the 2-texel bleed on both sides
+    gutter: 48,
+    metresPerUnit: 0.019,
+    texelsPerMetre: HELD_GEAR_TEXELS_PER_M,
+    atlas: { size: 112, bleed: 2, bgLum: 236, filter: "nearest", solidGround: true },
+    slots: {
+      base1: { color: "#ff0000" },
+      base2: { color: "#0040ff" },
+      base3: { color: "#00c000" },
+      base4: { color: "#6a00c0" },
+      rim: { color: "#ff8000" },
+      accent: { color: "#c00060" },
+      // one motif radiating from the square's centre, transparent margin on all
+      // four sides (Derek: a centre pixel, nothing on the edges of the plane)
+      "planer-rim": { color: "#a06020", label: "rim fringe", transparency: true, cut: true, openEnclosed: 0.01, fit: "contain-uniform", fitPadding: 3 },
+      "planer-accent": { color: "#008080", label: "accent fringe", transparency: true, cut: true, openEnclosed: 0.01, fit: "contain-uniform", fitPadding: 3 },
+      ornate: { color: "#c08040", label: "orn", transparency: true, cut: true, openEnclosed: 0.01, keepFit: true, fit: "contain-uniform", fitPadding: 4, anchorPad: 0, anchor: "bottom" },
+      ornate2: { color: "#804000", label: "orn2", transparency: true, cut: true, openEnclosed: 0.01, keepFit: true, fit: "contain-uniform", fitPadding: 4, anchorPad: 0, anchor: "bottom" },
+    },
+    parts: {
+      // A base is a thick arch over the shoulder whose front and back flanks
+      // are ~10 units tall: seen from above they were crushed ~3x (Derek: "clear
+      // warping"). Folded front-onto-back about its middle (x -1.2) and looked
+      // at from up-and-forward, no face is steeper than ~45 degrees; flare opens
+      // the rest. Area-weighted log2 stretch spread (outer faces) went from
+      // 1.27-1.72 to 0.31-0.81. The front and back are painted once, alike.
+      ShoulderBase1: { slot: "base1", method: "plane", view: [1, 0.7, -0.2], mirror: "x", mirrorAt: -1.2, flare: 0.5 },
+      ShoulderBase2: { slot: "base2", method: "plane", view: [1, 1, 0], mirror: "x", mirrorAt: -1.2, flare: 0.5 },
+      ShoulderBase3: { slot: "base3", method: "plane", view: [1, 0.7, -0.2], mirror: "x", mirrorAt: -1.2, flare: 0.5 },
+      ShoulderBase4: { slot: "base4", method: "plane", view: [1, 0.7, -0.2], mirror: "x", mirrorAt: -1.2, flare: 0.2 },
+      Rim1: { slot: "rim", method: "plane", u: "+x", v: "-y" },
+      Accent1: { slot: "accent", method: "plane", view: [0, 0.47, 0.88] },
+      PlanerRim: { slot: "planer-rim", method: "square", smooth: 0 },
+      PlanerAccent: { slot: "planer-accent", method: "square", smooth: 0 },
+      Ornate: { slot: "ornate", method: "plane", view: [0.7, 0, -0.7], viewUp: [-5.5, 20.6, -4.1] },
+      Ornate2: { slot: "ornate2", method: "plane", view: [0.68, 0, -0.73], viewUp: [-12.2, 14.1, -10.9] },
+    },
+    layout: {row: [{col: [{row: ["base1", "base2"]}, {row: ["base3", "base4"]}, {row: ["rim", "accent"]}]}, {col: [{row: ["ornate", "ornate2"]}, {row: ["planer-rim", "planer-accent"]}]}]},
+    rules: {
+      // Derek: a pad can be just the base; pick at most ONE rim-type (the plate
+      // or its fringe) and ONE accent-type, never several of either.
+      oneOf: [
+        ["ShoulderBase1", "ShoulderBase2", "ShoulderBase3", "ShoulderBase4"],
+        ["Rim1", "PlanerRim"],
+        ["Accent1", "PlanerAccent"],
+      ],
+      requires: {
+        Rim1: ["ShoulderBase1", "ShoulderBase2", "ShoulderBase3", "ShoulderBase4"],
+        Accent1: ["ShoulderBase1", "ShoulderBase2", "ShoulderBase3", "ShoulderBase4"],
+        Ornate: ["ShoulderBase1", "ShoulderBase2", "ShoulderBase3", "ShoulderBase4"],
+        Ornate2: ["ShoulderBase1", "ShoulderBase2", "ShoulderBase3", "ShoulderBase4"],
+        // Derek: not every pad needs a rim. Both fringes cross every base's own
+        // surface (plane centres 0-1.8 units from each base, the planes 5 wide),
+        // so they stand on a bare base as well as on their plates.
+        PlanerRim: ["ShoulderBase1", "ShoulderBase2", "ShoulderBase3", "ShoulderBase4"],
+        PlanerAccent: ["ShoulderBase1", "ShoulderBase2", "ShoulderBase3", "ShoulderBase4"],
+      },
+    },
+    cutoutSlots: ["planer-rim", "planer-accent", "ornate", "ornate2"],
+    combos: [
+      ["ShoulderBase1"],
+      ["ShoulderBase2", "PlanerRim"],
+      ["ShoulderBase3", "Accent1"],
+      ["ShoulderBase4", "PlanerAccent", "Ornate"],
+      ["ShoulderBase1", "Rim1", "PlanerAccent"],
+      ["ShoulderBase2", "PlanerRim", "Accent1", "Ornate2"],
+    ],
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -1295,10 +1699,15 @@ function dir(spec) {
 function basisOf(spec) {
   if (spec.view) {
     const f = new THREE.Vector3(...spec.view).normalize();
-    const up = Math.abs(f.y) > 0.99 ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(0, 1, 0);
+    // `viewUp` stands a LEANING piece upright in its island: a plume that tilts
+    // off vertical otherwise lands as a slanted strip, and an ornament's base
+    // has to be the island's bottom edge. Opt-in; without it nothing moves.
+    const up = spec.viewUp
+      ? new THREE.Vector3(...spec.viewUp).normalize()
+      : Math.abs(f.y) > 0.99 ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(0, 1, 0);
     const u = new THREE.Vector3().crossVectors(up, f).normalize();
     const v = new THREE.Vector3().crossVectors(f, u).normalize();
-    if (v.y > 0) v.negate(); // V runs DOWN the sheet, the way "-y" does
+    if (spec.viewUp ? v.dot(up) > 0 : v.y > 0) v.negate(); // V runs DOWN the sheet, the way "-y" does
     return {
       du: { axis: null, sign: 1, vec: u },
       dv: { axis: null, sign: 1, vec: v },
@@ -1664,6 +2073,62 @@ for (const [name, names] of Object.entries(recipe?.repeats ?? {})) {
     console.warn(`! repeats: the file has ${hits.length} "${name}", the recipe names ${names.length}`);
   hits.forEach((p, i) => {
     if (names[i]) p.name = names[i];
+  });
+}
+
+// `merge` makes ONE part out of several objects (`{ PlanerRim: ["PlaneRim1",
+// ...] }`): a Blockbench folder of loose planes that is shown or hidden as one
+// piece. The merged part sits where its first member was; its members are gone
+// from the file as far as the rest of the tool is concerned. The part mask is
+// float-exact below 24 parts, so two dozen fringe planes cannot each be one.
+//
+// A member list can instead be `{ of: "plane", nearest: "Rim1" }`: every object
+// named `of` joins whichever such entry's `nearest` part its centre lies
+// closest to (distance to that part's surface). An export that reorders its
+// objects then cannot swap two groups the way an order-based `repeats` would.
+const nearestOf = new Map();
+for (const [name, spec] of Object.entries(recipe?.merge ?? {})) {
+  if (Array.isArray(spec)) continue;
+  const anchor = found.find((p) => p.name === spec.nearest);
+  if (!anchor) console.warn(`! merge ${name}: no part ${spec.nearest} to group by`);
+  else nearestOf.set(name, { of: spec.of, anchor });
+}
+const groupedBy = new Map();
+if (nearestOf.size) {
+  const tri = new THREE.Triangle();
+  const hit = new THREE.Vector3();
+  const dist = (pt, part) => {
+    let best = Infinity;
+    for (let t = 0; t < part.world.length / 3; t++) {
+      tri.set(part.world[t * 3], part.world[t * 3 + 1], part.world[t * 3 + 2]);
+      best = Math.min(best, tri.closestPointToPoint(pt, hit).distanceTo(pt));
+    }
+    return best;
+  };
+  for (const p of found) {
+    const cands = [...nearestOf].filter(([, g]) => g.of === p.name);
+    if (!cands.length) continue;
+    const c = p.world.reduce((a, v) => a.add(v), new THREE.Vector3()).divideScalar(p.world.length);
+    const [name] = cands.reduce((a, b) => (dist(c, a[1].anchor) <= dist(c, b[1].anchor) ? a : b));
+    if (!groupedBy.has(name)) groupedBy.set(name, []);
+    groupedBy.get(name).push(p);
+  }
+  for (const [name, { of, anchor }] of nearestOf)
+    console.log(`  merge ${name}: ${groupedBy.get(name)?.length ?? 0} "${of}" nearest ${anchor.name}`);
+}
+for (const [name, spec] of Object.entries(recipe?.merge ?? {})) {
+  const members = Array.isArray(spec) ? spec : [];
+  const got = Array.isArray(spec) ? members.map((m) => found.find((p) => p.name === m)).filter(Boolean) : groupedBy.get(name) ?? [];
+  if (!Array.isArray(spec)) members.length = got.length;
+  if (got.length !== members.length)
+    console.warn(`! merge ${name}: the file has ${got.length} of its ${members.length} members`);
+  if (!got.length) continue;
+  const at = found.indexOf(got[0]);
+  for (const p of got) found.splice(found.indexOf(p), 1);
+  found.splice(Math.min(at, found.length), 0, {
+    name,
+    world: got.flatMap((p) => p.world),
+    srcUv: got.every((p) => p.srcUv) ? got.flatMap((p) => p.srcUv) : null,
   });
 }
 
@@ -2033,7 +2498,7 @@ function authoredUnwrap(part, spec) {
 function projectionGroup(part, spec, g, base) {
   const view = g.view ?? (g.u || g.v ? null : spec.view);
   const { du, dv, drop, axis } = basisOf(
-    view ? { view } : { u: g.u ?? spec.u, v: g.v ?? spec.v },
+    view ? { view, viewUp: g.viewUp ?? spec.viewUp } : { u: g.u ?? spec.u, v: g.v ?? spec.v },
   );
   const flare = flareOf(part, { flare: g.flare ?? spec.flare }, drop, NORMALS);
   const want = base ? null : dir(g.facing);
@@ -2418,8 +2883,14 @@ function unrollUnwrap(part, spec) {
  * which is where a skull is plainest.
  */
 function sphereUnwrap(part, spec) {
-  const ref = spec.centerOf ? parts.find((p) => p.name === spec.centerOf) : part;
-  if (!ref) throw new Error(`${part.name}: centerOf ${spec.centerOf} is not a part`);
+  // `centerOf` may also be a LIST: a head modelled as several shells (face
+  // panel, sides, jaw) measures its centre and oval from all of them, so every
+  // shell given the same list lands on one strip, edge to edge.
+  const refNames = spec.centerOf ? [spec.centerOf].flat() : [part.name];
+  const refs = refNames.map((n) => parts.find((p) => p.name === n));
+  const bad = refNames.filter((_, i) => !refs[i]);
+  if (bad.length) throw new Error(`${part.name}: centerOf ${bad.join(", ")} is not a part`);
+  const ref = { world: refs.flatMap((r) => r.world) };
   const box = new THREE.Box3();
   for (const v of ref.world) box.expandByPoint(v);
   const c = box.getCenter(new THREE.Vector3());
@@ -2499,10 +2970,26 @@ function sphereUnwrap(part, spec) {
         pole: horiz < 1e-3 * R,
       };
     });
-    // Straddling the seam at the back: bring the far side round.
+    // Straddling the seam at the back: bring the far side round. With
+    // `centered: true` the MINORITY comes round to the side the triangle
+    // mostly sits on (corners ON the seam follow the others). The old rule
+    // always moved the negative corners, which put every seam triangle of one
+    // side on the far end, so the strip came out longer on the right and its
+    // middle was no longer the front of the face — a generator centres a face
+    // on the block, and every human-head face landed off to one side. Opt-in,
+    // because recipes cut before it (ghoul, anansi) have art painted on the
+    // old strip.
     const live = polar.filter((q) => !q.pole);
-    if (live.length && Math.max(...live.map((q) => q.az)) - Math.min(...live.map((q) => q.az)) > Math.PI)
-      for (const q of live) if (q.az < 0) q.az += 2 * Math.PI;
+    if (live.length && Math.max(...live.map((q) => q.az)) - Math.min(...live.map((q) => q.az)) > Math.PI) {
+      const off = live.filter((q) => Math.abs(q.az) < Math.PI - 1e-4);
+      const vote = spec.centered && off.length ? off : live;
+      const neg = vote.filter((q) => q.az < 0).length;
+      if (spec.centered && neg * 2 > vote.length) {
+        for (const q of live) if (q.az > 0) q.az -= 2 * Math.PI;
+      } else {
+        for (const q of live) if (q.az < 0) q.az += 2 * Math.PI;
+      }
+    }
     const mean = live.length ? live.reduce((a, q) => a + q.az, 0) / live.length : 0;
     target.tris.push({
       part: part.name,
@@ -2695,10 +3182,104 @@ function tubeUnwrap(part, spec) {
   console.log(`  ${part.name}: tube of ${R} rings x ${n}${apex >= 0 ? ", closed at one end" : ""}, ${meanP.toFixed(1)} around, ${along[R - 1].toFixed(1)} long`);
 }
 
+/**
+ * Every flat PIECE of a part stacked onto ONE square — a fringe of crossed
+ * cut-out planes (leaves, spikes, feathers, fur) that all wear one painted
+ * motif. A piece is a run of triangles joined by shared corners (one Blockbench
+ * plane is a quad). Each is mapped by its own frame, not a world projection:
+ * of its boundary edges, the one closest to `up` (default "+y"; `upAlt`,
+ * default "-z", for a plane lying flat to it) is the square's up, right is up
+ * x normal, and the piece's extent along the two is stretched onto the whole
+ * square — corners to corners, centre to centre — so every plane samples the
+ * same texels the right way up and a motif painted from the square's centre
+ * radiates from every plane's centre. The island is the size of the largest
+ * piece, so it keeps the sheet's density.
+ */
+function squareUnwrap(part, spec) {
+  const target = slots.get(spec.slot);
+  const upW = dir(spec.up ?? "+y").vec;
+  const altW = dir(spec.upAlt ?? "-z").vec;
+  const q = (n) => Math.round(n * 1e3);
+  const key = (v) => `${q(v.x)},${q(v.y)},${q(v.z)}`;
+  const T = part.world.length / 3;
+  const parent = Array.from({ length: T }, (_, i) => i);
+  const find = (i) => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+  const firstAt = new Map();
+  for (let t = 0; t < T; t++)
+    for (let k = 0; k < 3; k++) {
+      const kk = key(part.world[t * 3 + k]);
+      if (firstAt.has(kk)) parent[find(t)] = find(firstAt.get(kk));
+      else firstAt.set(kk, t);
+    }
+  const pieces = new Map();
+  for (let t = 0; t < T; t++) {
+    const r = find(t);
+    if (!pieces.has(r)) pieces.set(r, []);
+    pieces.get(r).push(t);
+  }
+  const mapped = [];
+  let size = 0;
+  for (const tris of pieces.values()) {
+    const n = new THREE.Vector3();
+    const edges = new Map();
+    for (const t of tris) {
+      const p = [0, 1, 2].map((k) => part.world[t * 3 + k]);
+      n.add(new THREE.Vector3().subVectors(p[1], p[0]).cross(new THREE.Vector3().subVectors(p[2], p[0])));
+      for (let k = 0; k < 3; k++) {
+        const a = p[k], b = p[(k + 1) % 3];
+        const ek = [key(a), key(b)].sort().join("|");
+        const e = edges.get(ek) ?? { a, b, uses: 0 };
+        e.uses++;
+        edges.set(ek, e);
+      }
+    }
+    n.normalize();
+    // `up` as it lies in this plane; `upAlt` when the plane is flat to it
+    const inPlane = (w) => w.clone().addScaledVector(n, -w.dot(n));
+    let want = inPlane(upW);
+    if (want.length() < 0.2) want = inPlane(altW);
+    want.normalize();
+    // boundary edges only: a quad's diagonal is shared by its two triangles
+    let upDir = null;
+    let best = -1;
+    for (const e of edges.values()) {
+      if (e.uses !== 1) continue;
+      const d = inPlane(new THREE.Vector3().subVectors(e.b, e.a));
+      if (d.length() < 1e-9) continue;
+      d.normalize();
+      const s = Math.abs(d.dot(want));
+      if (s > best + 1e-6) { best = s; upDir = d.dot(want) < 0 ? d.negate() : d; }
+    }
+    if (!upDir) upDir = want;
+    const right = new THREE.Vector3().crossVectors(upDir, n).normalize();
+    let a0 = Infinity, a1 = -Infinity, b0 = Infinity, b1 = -Infinity;
+    for (const t of tris)
+      for (let k = 0; k < 3; k++) {
+        const v = part.world[t * 3 + k];
+        a0 = Math.min(a0, v.dot(right)); a1 = Math.max(a1, v.dot(right));
+        b0 = Math.min(b0, v.dot(upDir)); b1 = Math.max(b1, v.dot(upDir));
+      }
+    size = Math.max(size, a1 - a0, b1 - b0);
+    mapped.push({ tris, right, upDir, a0, a1, b0, b1 });
+  }
+  for (const { tris, right, upDir, a0, a1, b0, b1 } of mapped)
+    for (const t of tris) {
+      const idx = [0, 1, 2].map((k) => t * 3 + k);
+      const p = idx.map((i) => part.world[i]);
+      const uv = p.map((v) => [
+        ((v.dot(right) - a0) / (a1 - a0 || 1)) * size,
+        ((b1 - v.dot(upDir)) / (b1 - b0 || 1)) * size,
+      ]);
+      target.tris.push({ part: part.name, idx, uv, p });
+    }
+  console.log(`  ${part.name}: ${pieces.size} planes stacked on one square (${size.toFixed(1)} units)`);
+}
+
 for (const part of parts) {
   const spec = recipe.parts[part.name];
   if (!spec) continue;
   if (AUTHORED) authoredUnwrap(part, spec);
+  else if (spec.method === "square") squareUnwrap(part, spec);
   else if (spec.method === "tube") tubeUnwrap(part, spec);
   else if (spec.method === "sphere") sphereUnwrap(part, spec);
   else if (spec.method === "plane") planeUnwrap(part, spec);
@@ -3006,8 +3587,9 @@ if (rescued) {
         mirrored = true;
         break;
       }
+      // `square` stacks every plane of the part on one island on purpose.
       if (ps.method !== "plane") {
-        mirrored = !!ps.fold;
+        mirrored = ps.method === "square" || !!ps.fold;
         break;
       }
       // `mirror` folds the two halves onto one another on purpose.
@@ -3581,6 +4163,8 @@ const manifest = {
   bleed: recipe.atlas.bleed,
   ...(recipe.atlas.bgLum === undefined ? {} : { bgLum: recipe.atlas.bgLum }),
   ...(recipe.atlas.bgSat === undefined ? {} : { bgSat: recipe.atlas.bgSat }),
+  ...(recipe.atlas.filter === undefined ? {} : { filter: recipe.atlas.filter }),
+  ...(recipe.atlas.solidGround ? { solidGround: true } : {}),
   keyColor: "#00ffff",
   groundFringe: 1,
   fitSearch: 1.6,
@@ -3841,6 +4425,83 @@ function creasedNormals(parts, degrees) {
     part.normal = out;
   }
 }
+// `mirrorCopy` builds the OTHER half of a piece the modeller made once: a helm
+// shell, an arm, an ornament on one side. The copy is reflected about the plane
+// and keeps the UVs of the half it came from, so it is painted once and appears
+// twice, symmetric by construction; winding is reversed so it still faces out.
+// A part that already crosses the plane (a nose guard) is skipped with a
+// warning, since reflecting it would stack a second copy on itself.
+// A recipe's `combos` are its vetted looks, so each must obey its own `rules`
+// (the same checks as core's partProblems).
+if (recipe.rules) {
+  const { oneOf = [], requires = {}, excludes = {} } = recipe.rules;
+  const unknown = [...oneOf.flat(), ...Object.keys(requires), ...Object.values(requires).flat(),
+    ...Object.keys(excludes), ...Object.values(excludes).flat()].filter((n) => !recipe.parts[n]);
+  if (unknown.length) console.warn(`! rules name parts the recipe does not have: ${[...new Set(unknown)].join(", ")}`);
+  for (const combo of recipe.combos ?? []) {
+    const on = new Set(combo);
+    const bad = [
+      ...oneOf.filter((g) => g.filter((p) => on.has(p)).length > 1).map((g) => `only one of ${g.join("/")}`),
+      ...Object.entries(requires).filter(([p, n]) => on.has(p) && !n.some((x) => on.has(x))).map(([p]) => `${p} lacks what it needs`),
+      ...Object.entries(excludes).flatMap(([p, n]) => (on.has(p) ? n.filter((x) => on.has(x)).map((x) => `${p} with ${x}`) : [])),
+    ];
+    if (bad.length) console.warn(`! combo ${combo.join(" + ")} breaks the rules: ${bad.join("; ")}`);
+  }
+}
+
+if (recipe.mirrorCopy) {
+  const { axis = "z", at: plane = 0, parts: names } = recipe.mirrorCopy;
+  const k = { x: "x", y: "y", z: "z" }[axis];
+  for (const part of parts) {
+    if (!names.includes(part.name)) continue;
+    // a half modelled against the plane dips a hair past it; only a real
+    // straddle (5% of the part's depth on both sides) counts
+    const side = part.world.map((v) => v[k] - plane);
+    const lo = Math.min(...side), hi = Math.max(...side), tol = 0.05 * (hi - lo);
+    if (lo < -tol && hi > tol) {
+      console.warn(`! mirrorCopy: ${part.name} crosses ${axis} = ${plane}, not copied`);
+      continue;
+    }
+    // WELD the seam: the half's OPEN edge (edges only one triangle uses) is
+    // the seam; its vertices near the plane go onto it, so the half and its
+    // copy share positions there (one smooth normal, no gap down the back or
+    // front of a helm). A modeller's seam can stop ~10% of the depth short.
+    const pkey = (v) => `${Math.round(v.x * 1e3)},${Math.round(v.y * 1e3)},${Math.round(v.z * 1e3)}`;
+    const edgeUse = new Map();
+    for (let t = 0; t < part.world.length; t += 3)
+      for (const [x, y] of [[0, 1], [1, 2], [2, 0]]) {
+        const e = [pkey(part.world[t + x]), pkey(part.world[t + y])].sort().join("|");
+        edgeUse.set(e, (edgeUse.get(e) ?? 0) + 1);
+      }
+    const open = new Set();
+    for (const [e, uses] of edgeUse) if (uses === 1) for (const p of e.split("|")) open.add(p);
+    const weld = Math.max(1e-3, 0.12 * (hi - lo));
+    for (const v of part.world) if (Math.abs(v[k] - plane) < weld && open.has(pkey(v))) v[k] = plane;
+    const n = part.world.length;
+    const grow = (a) => {
+      const out = new Float32Array(n * 4);
+      out.set(a);
+      return out;
+    };
+    const uv = grow(part.uv);
+    const uvKey = part.uvKey ? grow(part.uvKey) : null;
+    for (let t = 0; t < n / 3; t++)
+      for (const [dst, src] of [[0, 0], [1, 2], [2, 1]].map(([d, s]) => [t * 3 + d, t * 3 + s])) {
+        const v = part.world[src].clone();
+        v[k] = 2 * plane - v[k];
+        part.world.push(v);
+        uv[(n + dst) * 2] = part.uv[src * 2];
+        uv[(n + dst) * 2 + 1] = part.uv[src * 2 + 1];
+        if (uvKey) {
+          uvKey[(n + dst) * 2] = part.uvKey[src * 2];
+          uvKey[(n + dst) * 2 + 1] = part.uvKey[src * 2 + 1];
+        }
+      }
+    part.uv = uv;
+    if (uvKey) part.uvKey = uvKey;
+  }
+}
+
 if (recipe.smooth) {
   for (const part of parts) {
     const spec = recipe.parts[part.name];
@@ -3921,8 +4582,10 @@ console.log(
     name: `${recipeName}-uber`,
     color: 0xffffff,
     map: atlasTex,
-    roughness: 0.6,
-    metalness: 0.1,
+    // `matte`: worn character pieces (head, helm, shoulders) have no
+    // specular — the PSX look, and a sheen read wrong beside the matte body
+    roughness: recipe.matte ? 1 : 0.6,
+    metalness: recipe.matte ? 0 : 0.1,
     side: THREE.DoubleSide,
     alphaTest: 0.5,
   });
@@ -3932,6 +4595,8 @@ console.log(
   // an item's `appearance` can name parts and ctx.setModelLook resolves them
   // against the model it is actually drawing — never a mask gone stale
   mesh.userData.parts = Object.fromEntries(order.map((nm, i) => [nm, i]));
+  // which parts may show together (core partRulesSchema), beside the table
+  if (recipe.rules) mesh.userData.rules = recipe.rules;
   const wrap = new THREE.Group();
   wrap.name = `${path.basename(outMesh)}-uber`;
   wrap.add(mesh);
@@ -3947,6 +4612,7 @@ console.log(
         // their trailing number removed.
         parts: Object.fromEntries(order.map((nm, i) => [nm, i])),
         cutouts: order.filter((nm) => recipe.cutoutSlots.includes(recipe.parts[nm]?.slot)),
+        ...(recipe.rules ? { rules: recipe.rules } : {}),
       },
       null,
       2,

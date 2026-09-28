@@ -124,6 +124,10 @@ export interface NetPresenceOptions {
       rate?: number;
       /** Seconds left of a one-shot action, so the clip can be fitted to it. */
       action?: number;
+      /** How the layer plays: once and hold its last pose, or loop at rate 1. */
+      mode?: "hold" | "loop";
+      /** The layer is phase-locked to the base this many cycles ahead (a stance carry). */
+      lock?: number;
     },
   ): void;
 
@@ -168,6 +172,17 @@ export interface NetReplica {
   animR?: number;
   /** Seconds left of a one-shot action, so the client can fit the clip to it. */
   animD?: number;
+  /**
+   * How the layer clip plays: "hold" = once, then keep its last pose (a
+   * raised guard); "loop" = repeat at rate 1 (a channel). Absent = a one-shot
+   * fitted to `animD`, or a plain loop when there is no window.
+   */
+  animM?: "hold" | "loop";
+  /**
+   * The layer is a stance CARRY phase-locked to the base clip, this many
+   * cycles ahead (loops; follows the base's rate). Absent for any other layer.
+   */
+  animO?: number;
   relevancy: "always" | "proximity";
   radius: number;
   sendEvery: number;
@@ -183,6 +198,8 @@ export interface NetWorldEntity {
   animL?: string;
   animR?: number;
   animD?: number;
+  animM?: "hold" | "loop";
+  animO?: number;
 }
 
 interface PresencePlayer {
@@ -559,7 +576,7 @@ export class NetPresence {
       object.position.set(s.p[0], s.p[1], s.p[2]);
       if (s.q) object.quaternion.set(s.q[0], s.q[1], s.q[2], s.q[3]);
       const state = s.data as
-        | { anim?: string; animL?: string; animR?: number; animD?: number }
+        | { anim?: string; animL?: string; animR?: number; animD?: number; animM?: "hold" | "loop"; animO?: number }
         | undefined;
       // applied every frame, NOT cached here: the animation system is the
       // source of truth (its play() and playLayer() no-op on the clip already
@@ -569,6 +586,8 @@ export class NetPresence {
         this.opts.setEntityAnim?.(id, state.anim, state.animL ?? null, {
           ...(typeof state.animR === "number" ? { rate: state.animR } : {}),
           ...(typeof state.animD === "number" ? { action: state.animD } : {}),
+          ...(state.animM ? { mode: state.animM } : {}),
+          ...(typeof state.animO === "number" ? { lock: state.animO } : {}),
         });
       }
     }
@@ -814,6 +833,8 @@ export class NetPresence {
         ...(r.animL ? { animL: r.animL } : {}),
         ...(r.animR !== undefined && r.animR !== 1 ? { animR: r.animR } : {}),
         ...(r.animD !== undefined ? { animD: r.animD } : {}),
+        ...(r.animM ? { animM: r.animM } : {}),
+        ...(r.animO !== undefined ? { animO: r.animO } : {}),
       };
     }
     state["entities"] = { managed: replicas.map((r) => r.id), updates, removed: left };
@@ -1108,7 +1129,7 @@ export class NetPresence {
     const entitySnaps: Record<string, TransformSnap> = {};
     for (const [id, raw] of Object.entries(updates)) {
       const e = raw as
-        | { p?: unknown; q?: unknown; anim?: unknown; animL?: unknown; animR?: unknown; animD?: unknown }
+        | { p?: unknown; q?: unknown; anim?: unknown; animL?: unknown; animR?: unknown; animD?: unknown; animM?: unknown; animO?: unknown }
         | null;
       if (!isFiniteVec(e?.p, 3) || !isFiniteVec(e?.q, 4)) continue;
       const p = e!.p as number[];
@@ -1127,6 +1148,8 @@ export class NetPresence {
                 ...(typeof e!.animD === "number" && Number.isFinite(e!.animD)
                   ? { animD: e!.animD }
                   : {}),
+                ...(e!.animM === "hold" || e!.animM === "loop" ? { animM: e!.animM } : {}),
+                ...(typeof e!.animO === "number" && Number.isFinite(e!.animO) ? { animO: e!.animO } : {}),
               }
             : undefined,
       };

@@ -1187,3 +1187,89 @@ Measuring traps from this pass:
   vite reloads every open probe page on each change (count `framenavigated`).
 - Check for stray background processes before timing anything. A forgotten
   `find /` had used 10,000 CPU-seconds.
+
+## Resident memory: the tab built every world and volume in the index (2026-09-26)
+
+Chrome showed the MMO editor tab at 2.6 GB. A headless load (1600x900, 20 s
+after streaming settled) measured the game's renderer process at 1.42 GB
+private; a V8 heap snapshot and a Chrome memory-infra dump (see
+"Measuring" below) split it:
+
+- **Six world fields for one world.** `loadWorldRecipes` built a field for
+  every `assets/worlds/*.json`, and voxel-demo ships six (older versions,
+  a preview, a test field). The unused five held about 110 MB of the main
+  heap. `registerVoxelRecipe` now stores the parsed recipe and
+  `getVoxelWorld` builds on first use. The dev-server and live-sync paths
+  use it; a recipe edit to a world nothing streams no longer re-streams.
+- **Every project's volumes, compiled.** The asset index lists volumes from
+  every project folder: 187 dungeon rooms and passages. Parsing a volume
+  compiles its triangle solids (the schema's `superRefine` builds the BVH),
+  so the MMO tab held ~130 MB of triangle objects for dungeons it never
+  draws. `registerVolumeDoc` defers the compile to the first
+  `getVolume`/`csgMesh`.
+- **One Int32Array per shore cell.** `PolygonIndex` kept each band cell's
+  segment list as its own typed array, about 140 bytes of object overhead
+  per cell, 100 MB over the six fields. The lists are now packed into a
+  single offsets + segments pair: 2.9 MB.
+
+Result, same probe: main heap 386 → ~155 MB, each voxel worker 54 → 42 MB
+(they hold the same field, packed now), 300 MB less JS in total.
+
+Still resident and deliberate: six workers at ~42 MB each (one field per
+worker); the core mesh cache (128 MB budget); `buffer`-partition strings, most
+of which are dev-mode module sources and inline source maps (~135 MB, gone in
+a published build). The CSG triangle compiler still stores a JS object per
+triangle, so a dungeon scene pays ~1 KB per triangle it uses; packing it into
+typed arrays is the next lever there.
+
+Measuring:
+
+- The OS "private bytes" of the renderer swings ±100 MB between identical
+  runs, because freed V8 pages are not returned promptly. Compare
+  `Runtime.getHeapUsage` per target (main + each worker via
+  `Target.setAutoAttach`), not the process total.
+- **Playwright enables the Network domain on every page**, and Chrome then
+  keeps response bodies (up to ~200 MB) for the inspector. That inflated the
+  `partition_alloc/buffer` partition by ~90 MB. An open DevTools window does
+  the same thing to a real tab. For allocator-level numbers, launch Chrome
+  with `--remote-debugging-port` and use raw CDP: `Tracing.start` with
+  `disabled-by-default-memory-infra`, then `Tracing.requestMemoryDump`.
+- A 400 MB heap makes a 1 GB `.heapsnapshot`; `JSON.parse` cannot take it.
+  Parse the `nodes`/`edges` arrays as numbers straight from the buffer.
+
+## Ground cover at 25 layers: pay per layer that grows, not per layer that exists (2026-09-27)
+
+Adding 23 biome- and water-gated cover layers (`recipe.cover`, see
+`docs/world-editing/ground-cover.md`) to the MMO world's two scene layers. The
+render side was never the problem — an A/B inside one page session (world
+cover group hidden in alternate 2.5 s windows) measured the same median frame
+at every spot, jungle 20.8 ms both ways, for +4-5 draw calls. The cost is
+CPU PLACEMENT on each recenter, amortised at 2 ms a frame, so it shows up as
+cover arriving late while running, never as fps. Three findings, measured with
+`projects/voxel-demo/tools/cover-bench.mts` (median of nine recenters):
+
+- **`field.waterY` costs a whole height evaluation (6 us).** It answers the
+  sea question by computing the ground, which the gate had already done. The
+  shared sampler called it per blade to keep grass out of lakes; that made
+  the scene's EXISTING grass layer ~2.5x slower per recenter. Now a 0.15 us
+  `waterNear` bucket test rejects dry country and only candidates near water
+  ask `waterSurface`. Anything per-blade that says "water" deserves this
+  check: the expensive answer is almost never needed.
+- **A layer outside its place still walked its whole disc.** A gated layer
+  pays per CELL, not per blade placed: a wheat layer walked 50,000-130,000
+  cells per recenter in grassland with no wheat patch in reach and placed
+  none. `GrassSystem.regionTest` asks the host once per placement whether the
+  layer can grow ANYWHERE in the disc (biome weights on a 32 m lattice, a
+  16 m clump-mask lattice for `floor: 0` layers, lake/river buckets for water
+  layers); a "no" commits an empty field without sampling, and an empty layer
+  sets `mesh.visible = false` so it costs no draw either. 93 -> 60 ms per
+  recenter at the jungle spot, and without it 175.
+- **Ring searches belong on the probe lattice.** A shore layer's water line is
+  a 13-query ring; per blade that was 3 us and 40,000 blades beside a lake the
+  reeds never reached. Cached per 2 m probe (reach widened by the probe's
+  half-diagonal so nothing the exact test accepts is lost): 1.6 us.
+
+Net at the worst spots: all 25 layers ~52-69 ms per recenter against ~26-38
+for the two base layers alone — which is what the two base layers cost before
+this pass. The bench is noisy between runs on a loaded machine (±40%); compare
+configurations inside one run.

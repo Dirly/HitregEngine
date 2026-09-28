@@ -1,0 +1,34 @@
+{
+  "size": 72,
+  "bleed": 1,
+  "bgLum": 236,
+  "filter": "nearest",
+  "keyColor": "#00ffff",
+  "groundFringe": 1,
+  "fitSearch": 1.6,
+  "slots": {
+    "#ff0000": {
+      "name": "head",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "symmetric": true,
+      "mirror": true
+    },
+    "#8c0000": {
+      "name": "head-crown",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "mirror": true
+    },
+    "#c05050": {
+      "name": "head-under",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "head",
+      "mirror": true
+    }
+  }
+}

@@ -38,6 +38,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
+import { voxelGroundProbes } from "../src/voxel-ground.ts";
 import {
   createWorldField,
   defaultWorldRecipe,
@@ -190,7 +191,7 @@ const HELP = `worldgen — procedural world pipeline
   rivers <world>   HYDROLOGY: fill depressions, accumulate rain, trace the channel network,
                    fill the LAKES (--lakes 16) and the hollows on the network; rivers are AUTHORED
                    (write { points, width } into features.rivers — the field solves the bed) unless
-                   --trace carves the traced network (--catchment 0.12 km² --step 16 --wet-grade 0.02)
+                   --trace carves the traced network (--catchment 0.12 km² --step 16 --wet-grade Infinity: every reach wet, steep ones as cascading pools)
   descend <world>  --from x,z: follow the water downhill from a point to the sea, a lake or a pit,
                    and print the valley-floor polyline as --points (--simplify 30 m)
   profile <world>  --points "x,z;…" [--width 14]: ground, grade and bank heights along a route —
@@ -231,7 +232,7 @@ const HELP = `worldgen — procedural world pipeline
                    town is built: --town town-1 --from-road <the stub the builder drew> (or --at "x,z"
                    --facing "dx,dz"); --id --width 6 --approach 30 --back 12 --remove <id|all>.
                    A town with gates is entered ONLY through them — re-run paths/trails after
-  paths  <world>   footpaths between the towns that FOLLOW the ground (--width 2.4 --max-grade 0.18, cut-only,
+  paths  <world>   footpaths between the towns that FOLLOW the ground (--width 3.4 --max-grade 0.18, cut-only,
                    --max-cross 1.0 keeps them off hillsides steeper than 45° — the cut bank would be a wall;
                    --turn-weight 24 --max-turn 1 give them a turning radius, --smooth-passes 2 rounds the corners;
                    --surface dirt, gravel across every snow biome — --surface-by-biome alpine=gravel,… to say which)
@@ -263,6 +264,10 @@ const HELP = `worldgen — procedural world pipeline
   scatter <world>  check every scatter rule against its MODEL: collider vs the real bounds (an origin the
                    collider misses, a collider bigger than the prop, one too short to stand on), the wind
                    filter against the model's texture names, and props/km² per rule (exit 1 on findings)
+  cover  <world>   check every ground-cover layer (recipe.cover): textures and atlas pages exist, biome and
+                   surface names are real, then sample the world (--points 1500) and print, per biome, which
+                   layers grow there and how thick, how many layers are drawn at once (draw calls) and
+                   what share of lake/river shore and water carries water cover (exit 1 on findings)
   river-path <world> add a DRAWN river centreline the rivers stage will solve (--id r1 --points "x,z;x,z;…"
                    --width 18, or --from-scene <scene> --entity <id> to import a path-tool entity; --remove <id>)
   audit  <world>   water & paths: every river ends somewhere, every lake has a river, beds descend,
@@ -525,9 +530,9 @@ function writeSwampWaterMaterial(recipe: WorldRecipe, id: string): void {
 }
 
 /**
- * The river ribbons' material: the standing-water material with
- * `flowMode: "channel"`, so waves, texture and foam run along the ribbon at
- * the speed the chunk emitter wrote into its `flow` attribute. Copies the
+ * The rivers' material: the standing-water material with `flowMode: "field"`,
+ * so the texture runs along the current the chunk emitter wrote into each
+ * vertex of the clipped water (fast on a rapid, a drift in a pool). Copies the
  * base material's texture, preferring a `<Name>Flowing` sibling when the
  * project has one (a moving-water tile beside a still one), at a tighter
  * tile because a channel is metres wide, not kilometres. Rewritten whenever
@@ -570,6 +575,9 @@ function writeRiverWaterMaterial(baseId: string, id: string): void {
     const flowing = texture.replace(/(\.[a-z0-9]+)$/i, "Flowing$1");
     if (flowing !== texture && fs.existsSync(path.join(root, "textures", flowing))) texture = flowing;
   }
+  const baseTexture = base.water?.["texture"] as string | undefined;
+  const fallName = baseTexture ? baseTexture.replace(/(\.[a-z0-9]+)$/i, "Fall$1") : undefined;
+  const fallTexture = fallName && fallName !== baseTexture && fs.existsSync(path.join(root, "textures", fallName)) ? fallName : undefined;
   const doc = {
     shader: "water",
     color: base.color ?? "#2f7fa8",
@@ -577,10 +585,10 @@ function writeRiverWaterMaterial(baseId: string, id: string): void {
     opacity: base.opacity ?? 0.9,
     water: {
       ...(base.water ?? {}),
-      flowMode: "channel",
+      flowMode: "field",
       // a river is a few metres deep at most: the depth ramp must turn
       // over inside it or every channel reads as the shallowest band
-      depthFadeDistance: 4,
+      depthFadeDistance: 10,
       foamWidth: 0.6,
       // the current itself makes the motion; big standing waves on a
       // narrow channel look like a shaken tray, and a crisp two-step foam
@@ -591,7 +599,12 @@ function writeRiverWaterMaterial(baseId: string, id: string): void {
       foamSteps: 3,
       foamPixel: 0.7,
       displace: false,
-      ...(texture ? { texture, textureScale: 7 } : {}),
+      // one tile size for rivers AND plain lakes: they share this material
+      ...(texture ? { texture, textureScale: 10 } : {}),
+      // the falling-water tile for waterfall faces: a `<Name>Fall` sibling of the base texture
+      ...(fallTexture ? { fallTexture, fallTextureScale: 4, fallSpeed: 7 } : {}),
+      // still water (lakes, and a river leaving one) keeps the standing-water tile, faded by the current
+      ...(baseTexture ? { stillTexture: baseTexture, stillTextureScale: (base.water?.["textureScale"] as number | undefined) ?? 26 } : {}),
     },
   };
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -1053,7 +1066,8 @@ function commandRivers(): void {
   const traceRivers = flag("trace");
   // hand-written rivers (no bedY: the field solves them) are the author's,
   // and survive every re-run of this stage; drawn paths are re-solved
-  const handRivers = recipe.features.rivers.filter((r) => !r.bedY || r.bedY.length !== r.points.length);
+  // (split-fall branches are rewritten against the new falls every run, never kept)
+  const handRivers = recipe.features.rivers.filter((r) => (!r.bedY || r.bedY.length !== r.points.length) && !r.id.endsWith("-split"));
   // this stage replaces its own features: sample the world WITHOUT them
   recipe.features.rivers = [];
   recipe.features.lakes = [];
@@ -1328,7 +1342,16 @@ function commandRivers(): void {
    * under or beside a lake are always wet so the water visibly leaves and
    * arrives. A wet run away from any lake must be at least three points long.
    */
-  const wetGrade = option("wet-grade", 0.02);
+  // every reach is wet by default: the field solves water as level pools, so a
+  // steep reach is a staircase of pools and rapids rather than a tilted sheet
+  const wetGrade = option("wet-grade", Infinity);
+  // rivers are LOWLAND rivers: each begins where its valley flattens (see the trim below)
+  const lowlandGrade = option("lowland-grade", 0.04);
+  const minRiver = option("min-river", 300);
+  // a head starts where its bed is within this of the ground
+  const headDepth = option("head-depth", 6);
+  // rivers start at a lake (on by default; --lake-heads 0 keeps every traced channel)
+  const lakeHeads = option("lake-heads", 1) > 0;
   let dryPieces = 0;
   let wetPieces = 0;
   let outlets = 0;
@@ -1347,6 +1370,21 @@ function commandRivers(): void {
     const depth = round(depthFor(baseWidth));
     let cells = channel.cells;
     let taper = headTaper;
+    // Every traced river STARTS AT A LAKE (Derek, 2026-09-26): the channel
+    // above the first lake it runs through is land, and a channel that never
+    // runs through a kept lake is not a river at all. A tributary answers to
+    // the same rule — it must pass through a lake of its own — so the network
+    // is lakes draining to the sea, not springs on every hillside. The outlet
+    // block below then trims the head to that lake's shore.
+    if (!authored && lakeHeads) {
+      let k = 0;
+      while (k < cells.length && wetOrRing[cells[k]!]! < 0 && !inLake[cells[k]!]) k++;
+      if (k >= cells.length - 1) {
+        channelFate.set(channelIndex, "does not start at a lake (runs through none)");
+        return;
+      }
+      if (k > 0) cells = cells.slice(k);
+    }
     // A channel whose source lies under a lake is that lake's OUTLET. It
     // used to begin as a tapered trickle somewhere out in the water and
     // reach full size 220 m downstream — the lake ended at a wall of shore
@@ -1562,7 +1600,7 @@ function commandRivers(): void {
       widths.push(Math.max(2.5, Math.min(baseWidth * 1.2, catchWidth[i]! * swell * wander)));
     }
     const width = round(Math.max(...widths));
-    const keep = simplify3(
+    let keep = simplify3(
       points.map((p) => [p[0] / grid.step, p[1] / grid.step] as [number, number]),
       bed,
       0.45,
@@ -1577,6 +1615,37 @@ function commandRivers(): void {
     if (length < 12) {
       channelFate.set(channelIndex, `${length.toFixed(0)} m stub`);
       return;
+    }
+    // LOWLAND rivers. A traced channel is a mountain stream for its first
+    // stretch, and a river that begins high on the slope carries its whole
+    // descent as falls — eight to a river, 234 across the mmo world. The
+    // river begins where its valley flattens: the first point from which the
+    // bed falls less than `--lowland-grade` over the next 200 m, or where it
+    // leaves a lake. The steep headwater above is left as land. What remains
+    // must still be a river (`--min-river` metres) or the channel is dropped.
+    {
+      const flatAhead = (k: number): boolean => {
+        const i = keep[k]!;
+        let j = k;
+        while (j + 1 < keep.length && along[keep[j]!]! - along[i]! < 200) j++;
+        const run = along[keep[j]!]! - along[i]!;
+        if (run < 60) return true;
+        return (bed[i]! - bed[keep[j]!]!) / run <= lowlandGrade;
+      };
+      let head = 0;
+      while (head < keep.length - 1 && !(wetOrRing[cells[keep[head]!]!]! >= 0 || inLake[cells[keep[head]!]!] || flatAhead(head))) head++;
+      // …and where its bed is near the ground. A traced bed can run many metres
+      // under the land at a flattening (the corridor was cut through a rise),
+      // and a head there was a dry trench: the taper carves a shallow start
+      // while the water, solved from that deep bed, stood far below it.
+      while (head < keep.length - 1 && !(wetOrRing[cells[keep[head]!]!]! >= 0 || inLake[cells[keep[head]!]!]) && grid.height[cells[keep[head]!]!]! - bed[keep[head]!]! > headDepth) head++;
+      if (head > 0) keep = keep.slice(head);
+      let lowland = 0;
+      for (let i = 1; i < keep.length; i++) lowland += Math.hypot(points[keep[i]!]![0] - points[keep[i - 1]!]![0], points[keep[i]!]![1] - points[keep[i - 1]!]![1]);
+      if (keep.length < 2 || lowland < minRiver) {
+        channelFate.set(channelIndex, `a mountain stream (${lowland.toFixed(0)} m of lowland)`);
+        return;
+      }
     }
     const riverNo = rivers.length + 1;
     channelFate.set(channelIndex, `river-${riverNo}`);
@@ -1701,6 +1770,8 @@ function commandRivers(): void {
     writeRiverWaterMaterial(baseWater, riverMaterialId);
     recipe.riverMaterial = riverMaterialId;
   }
+  const splits = splitFalls(recipe, option("split-falls", 0.4), option("split-min", 12));
+  if (splits > 0) console.log(`  ${splits} falls split: a branch leaves above the lip and pours beside the main fall`);
   writeRecipe(recipe, file);
   console.log(
     `  ${outlets} lake outlets start at their shore, ${snapped} mouths moved onto their swung parent ` +
@@ -1921,6 +1992,131 @@ function commandDescend(): void {
  * that would give a canal cliff. Read it before writing a river; read the
  * river's own solved bed after (`--river <id>`).
  */
+/**
+ * `worldgen fall-site <world>` — the agent's handle on ONE waterfall.
+ *
+ *   --list                         every solved fall, by index
+ *   --fall <i> --snapshot          the compact context an agent reads to craft it:
+ *                                  the fall, and a 32 x 32 grid (2 m) of ground
+ *                                  height relative to the lip, water marked
+ *   --fall <i> --template cascade --tiers 3 [--pool 16] [--rocks 1]
+ *                                  write (or replace) a fall site: the drop split
+ *                                  into even tiers with level pools, rocks on the
+ *                                  pool rims from the world's rock scatter rule
+ *
+ * Writes `features.fallSites`; the field re-solves it live, so no other stage
+ * needs re-running unless a path crosses the site.
+ */
+function commandFallSite(): void {
+  const { recipe, file } = loadRecipe();
+  const field = createWorldField(recipe);
+  const falls = field.falls;
+  if (flag("list")) {
+    falls.forEach((f, i) =>
+      console.log(`${String(i).padStart(3)}  ${f.river.padEnd(16)} drop ${(f.top - f.bottom).toFixed(1).padStart(5)} m  foot [${f.x.toFixed(0)}, ${f.z.toFixed(0)}]  width ${f.width.toFixed(1)}`),
+    );
+    return;
+  }
+  const index = option("fall", -1);
+  const fall = falls[index];
+  if (!fall) fail(`no fall ${index}: ${falls.length} falls (--list)`);
+  const drop = fall.top - fall.bottom;
+  if (flag("snapshot")) {
+    // centred a little downstream of the foot: the lip upstream, the pools below
+    const cx = fall.x + fall.dirX * 12;
+    const cz = fall.z + fall.dirZ * 12;
+    const ws = { y: 0, flowX: 0, flowZ: 0, kind: "lake" as "lake" | "river", floor: 0 };
+    console.log(`fall ${index} on ${fall.river}: lip water ${fall.top.toFixed(1)}, pool ${fall.bottom.toFixed(1)} (drop ${drop.toFixed(1)} m), flows toward (${fall.dirX.toFixed(2)}, ${fall.dirZ.toFixed(2)}), channel ${fall.width.toFixed(1)} m`);
+    // the biome covering most of the site, not the one at the foot: a low
+    // plunge pool reads as "beach" while the gorge around it is foothills
+    const biomeCount = new Map<string, number>();
+    for (let bj = -10; bj <= 10; bj++)
+      for (let bi = -10; bi <= 10; bi++) {
+        const id = field.biome(fall.x + fall.dirX * 12 + bi * 3, fall.z + fall.dirZ * 12 + bj * 3).id;
+        biomeCount.set(id, (biomeCount.get(id) ?? 0) + 1);
+      }
+    const biomeHere = [...biomeCount].sort((p, q) => q[1] - p[1])[0]![0];
+    const biomeRocks = recipe.scatter.filter((r) => /rock|stone|boulder/i.test(r.id) && (!r.biomes || r.biomes.length === 0 || r.biomes.includes(biomeHere))).map((r) => r.id);
+    console.log(`biome: ${biomeHere}; rock rules it scatters: ${biomeRocks.join(", ") || "(none)"}`);
+    console.log(`grid: 32 x 32, 2 m, centre [${cx.toFixed(0)}, ${cz.toFixed(0)}], row 0 = north (-z), col 0 = west (-x)`);
+    console.log("ground height relative to the lip water (m); rows follow as tokens:");
+    const water: string[] = [];
+    for (let j = 0; j < 32; j++) {
+      const row: string[] = [];
+      let wrow = "";
+      for (let i = 0; i < 32; i++) {
+        const x = cx + (i - 15.5) * 2;
+        const z = cz + (j - 15.5) * 2;
+        const g = field.height(x, z);
+        row.push(String(Math.round(g - fall.top)));
+        wrow += field.waterSurface(x, z, ws) && ws.y > g ? (ws.kind === "lake" ? "L" : "~") : ".";
+      }
+      console.log(row.join(" "));
+      water.push(wrow);
+    }
+    console.log("water (~ river, L lake, . dry):");
+    console.log(water.join("\n"));
+    const rocks = recipe.scatter.filter((r) => /rock|stone|boulder/i.test(r.id)).map((r) => r.id);
+    console.log(`rock rules: ${rocks.join(", ") || "(none)"}`);
+    return;
+  }
+  const template = stringOption("template", "cascade") as "single" | "cascade";
+  const tiers = Math.max(1, Math.round(option("tiers", 3)));
+  const pool = option("pool", 16);
+  if (template === "cascade" && drop / tiers < 3) fail(`a ${drop.toFixed(1)} m fall cannot make ${tiers} tiers of at least 3 m`);
+  const rockRule =
+    recipe.scatter.find((r) => r.id === stringOption("rock", ""))?.id ??
+    recipe.scatter.find((r) => /rock-big|boulder/i.test(r.id))?.id ??
+    recipe.scatter.find((r) => /rock|stone/i.test(r.id))?.id;
+  // rocks on both rims at every lip, and two in the last plunge pool
+  const rocks: { rule: string; at: [number, number]; lift: number; yaw: number; scale: number }[] = [];
+  if (rockRule && option("rocks", 1) > 0) {
+    const px = -fall.dirZ;
+    const pz = fall.dirX;
+    const hash = (n: number): number => {
+      const h = Math.sin(n * 127.1 + index * 311.7) * 43758.5453;
+      return h - Math.floor(h);
+    };
+    const lipsAlong = template === "cascade" ? Array.from({ length: tiers }, (_, t) => -3 + t * pool) : [-3];
+    lipsAlong.forEach((a, t) => {
+      for (const side of [1, -1]) {
+        const off = fall.width / 2 + 1.5 + hash(t * 2 + side) * 1.5;
+        rocks.push({
+          rule: rockRule,
+          at: [Math.round((fall.x + fall.dirX * a + px * side * off) * 10) / 10, Math.round((fall.z + fall.dirZ * a + pz * side * off) * 10) / 10],
+          lift: -0.4,
+          yaw: Math.round(hash(t * 7 + side) * 628) / 100,
+          scale: Math.round((0.7 + hash(t * 3 + side) * 0.6) * 100) / 100,
+        });
+      }
+    });
+    const last = template === "cascade" ? (tiers - 1) * pool + 6 : 6;
+    for (const side of [1, -1]) {
+      rocks.push({
+        rule: rockRule,
+        at: [Math.round((fall.x + fall.dirX * last + px * side * fall.width * 0.3) * 10) / 10, Math.round((fall.z + fall.dirZ * last + pz * side * fall.width * 0.3) * 10) / 10],
+        lift: -1.2,
+        yaw: Math.round(hash(90 + side) * 628) / 100,
+        scale: 0.6,
+      });
+    }
+  }
+  const id = `site-${fall.river}-${index}`;
+  const site = {
+    id,
+    at: [Math.round(fall.x * 100) / 100, Math.round(fall.z * 100) / 100] as [number, number],
+    template,
+    tiers: template === "cascade" ? Array.from({ length: tiers }, () => ({ share: 1, pool })) : [],
+    rocks,
+  };
+  const sites = (recipe.features.fallSites ?? []).filter((x) => Math.hypot(x.at[0] - site.at[0], x.at[1] - site.at[1]) > 25);
+  recipe.features.fallSites = [...sites, site];
+  writeRecipe(recipe, file);
+  const after = createWorldField(recipe);
+  const near = after.falls.filter((f) => f.river === fall.river && Math.hypot(f.x - fall.x, f.z - fall.z) < tiers * pool + 40);
+  console.log(`wrote ${id}: ${template}, ${near.length} fall(s) now at the site: ${near.map((f) => `${(f.top - f.bottom).toFixed(1)} m`).join(", ")}; ${rocks.length} rocks (${rockRule ?? "no rock rule"})`);
+}
+
 function commandProfile(): void {
   const { recipe } = loadRecipe();
   const field = createWorldField(recipe);
@@ -4780,7 +4976,8 @@ function roadFrom(
   // height are the contract it builds to.
   const bridgeMin = options.bridgeMin ?? 6;
   const clearance = options.bridgeClearance ?? 1.2;
-  const rivers = field.recipe.features.rivers;
+  // the field's SOLVED rivers: resampled as carved, captured where they cross, and wet
+  const rivers = field.rivers.filter((r) => r.water);
   const crossing = points.map((p) => {
     const near = nearestRiverAt(rivers, p);
     if (!near || near.width < bridgeMin || near.along < near.river.taper * 0.5) return -1;
@@ -4935,6 +5132,91 @@ function roadFrom(
  * (the same rule as the field's riverBank): what a route needs to know to
  * tell a brook it can ford from a river it must bridge.
  */
+/**
+ * Split falls: at some of the taller waterfalls a branch leaves the river a
+ * few dozen metres above the lip, runs along the cliff top beside it, pours
+ * over the same cliff as a second fall and rejoins the pool below — the
+ * horsetail look of a river breaking over a wide scarp. Written as a hand
+ * river (points only, `maxGrade` 0 so no gorge is cut back from the cliff):
+ * the field solves its bed flush with the river at both ends, and its one
+ * fall comes from the same rule as every river's. Seeded, so a re-run of the
+ * same world splits the same falls. Returns how many were written.
+ */
+function splitFalls(recipe: WorldRecipe, chance: number, minDrop: number): number {
+  if (chance <= 0) return 0;
+  const field = createWorldField(recipe);
+  const natural = createWorldField({ ...recipe, features: { ...recipe.features, rivers: [], roads: [], bridges: [], towns: [] } });
+  const hash = (n: number): number => {
+    let h = (Math.imul(n + 1, 2654435761) ^ Math.imul(recipe.seed | 0, 2246822519)) >>> 0;
+    h = Math.imul(h ^ (h >>> 15), 2246822507) >>> 0;
+    return ((h ^ (h >>> 13)) >>> 0) / 4294967296;
+  };
+  const branches: RiverDoc[] = [];
+  field.falls.forEach((f, index) => {
+    const drop = f.top - f.bottom;
+    if (drop < minDrop || hash(index) >= chance) return;
+    const parent = field.rivers.find((d) => d.id === f.river);
+    if (!parent) return;
+    // the parent's own points ~40 m above the lip and ~40 m below the foot
+    const along: number[] = [0];
+    for (let k = 1; k < parent.points.length; k++) along.push(along[k - 1]! + Math.hypot(parent.points[k]![0] - parent.points[k - 1]![0], parent.points[k]![1] - parent.points[k - 1]![1]));
+    let foot = 0;
+    for (let k = 0; k < parent.points.length; k++) if (Math.hypot(parent.points[k]![0] - f.x, parent.points[k]![1] - f.z) < 0.5) foot = k;
+    const at = (s: number): [number, number] => {
+      let k = 0;
+      while (k + 1 < along.length - 1 && along[k + 1]! < s) k++;
+      const t = Math.max(0, Math.min(1, (s - along[k]!) / Math.max(1e-6, along[k + 1]! - along[k]!)));
+      return [parent.points[k]![0] + (parent.points[k + 1]![0] - parent.points[k]![0]) * t, parent.points[k]![1] + (parent.points[k + 1]![1] - parent.points[k]![1]) * t];
+    };
+    const sFoot = along[foot]!;
+    if (sFoot < 60 || along[along.length - 1]! - sFoot < 50) return;
+    const head = at(sFoot - 45);
+    const mouth = at(sFoot + 40);
+    const lip: [number, number] = [f.x - f.dirX * 3, f.z - f.dirZ * 3];
+    const px = -f.dirZ;
+    const pz = f.dirX;
+    const width = Math.max(3, Math.round(f.width * 0.35 * 10) / 10);
+    // a side and an offset where the cliff top carries on beside the lip and
+    // the ground falls away below it
+    for (const side of hash(index + 7919) < 0.5 ? [1, -1] : [-1, 1]) {
+      for (const off of [f.width / 2 + 14, f.width / 2 + 22, f.width / 2 + 30]) {
+        const ox = px * side * off;
+        const oz = pz * side * off;
+        const top = natural.height(lip[0] + ox, lip[1] + oz);
+        // the land beside the lip is about the upper water, and within 40 m
+        // past it has fallen a good part of the drop: a scarp the branch can
+        // pour over (the field cuts the actual cliff)
+        const below = natural.height(lip[0] + ox + f.dirX * 40, lip[1] + oz + f.dirZ * 40);
+        if (top < f.top - 1.5 || top > f.top + 10 || below > f.top - drop * 0.4) continue;
+        const pts: [number, number][] = [
+          head,
+          [lip[0] - f.dirX * 30 + ox * 0.45, lip[1] - f.dirZ * 30 + oz * 0.45],
+          [lip[0] - f.dirX * 14 + ox * 0.9, lip[1] - f.dirZ * 14 + oz * 0.9],
+          [lip[0] + ox, lip[1] + oz],
+          [lip[0] + f.dirX * 10 + ox, lip[1] + f.dirZ * 10 + oz],
+          [f.x + f.dirX * 24 + ox * 0.45, f.z + f.dirZ * 24 + oz * 0.45],
+          mouth,
+        ];
+        branches.push({
+          id: `${f.river}-split`,
+          points: pts.map((q) => [Math.round(q[0] * 100) / 100, Math.round(q[1] * 100) / 100] as [number, number]),
+          width,
+          depth: 2,
+          bank: Math.round((0.7 * width + 3) * 10) / 10,
+          maxGrade: 0,
+          water: true,
+          surface: parent.surface,
+          surfaceEdge: 2,
+          taper: 0,
+        } as RiverDoc);
+        return;
+      }
+    }
+  });
+  recipe.features.rivers = [...recipe.features.rivers, ...branches];
+  return branches.length;
+}
+
 function nearestRiverAt(
   rivers: readonly RiverDoc[],
   p: readonly [number, number],
@@ -5088,7 +5370,7 @@ function commandPaths(): void {
       continue;
     }
     const built = roadFrom(`path-${towns[a]!.id}-${towns[b]!.id}`, route, grid, field, routeGrid, {
-      width: option("width", 2.4),
+      width: option("width", 3.4),
       maxGrade,
       // a footpath follows the ground: the cut/fill clamp wins over the
       // grade clamp, so it steepens on a spur instead of trenching through it
@@ -5248,7 +5530,7 @@ function commandTrails(): void {
         : `, ends level with the summit ${away.toFixed(0)} m out`;
     }
     const builtTrail = roadFrom(`trail-${poi.id}`, route, grid, field, routeGrid, {
-      width: option("width", 2.4),
+      width: option("width", 3.4),
       // a footpath may steepen into a scramble where the ground does; a
       // trench dug into the summit so the last leg stays at 22 % is what it
       // must never do (every trail in the demo ended in a 100-300 m cut)
@@ -5494,6 +5776,98 @@ interface PipelineStage {
 const GENERIC_ZONE = /^Zone \d+$/;
 const GENERIC_TOWN = /^Town \d+$/;
 
+
+
+/** One field per recipe for the status checks that have to look at the built world, not just the doc. */
+const statusFields = new WeakMap<WorldRecipe, WorldField>();
+function statusField(recipe: WorldRecipe): WorldField {
+  let field = statusFields.get(recipe);
+  if (!field) {
+    field = createWorldField(recipe);
+    statusFields.set(recipe, field);
+  }
+  return field;
+}
+
+/**
+ * Metres of river whose water stands far over the ground under it: a traced
+ * bed perched across a hollow deeper than the field can build up to. The
+ * water there is dropped, so the river shows a dry gap — re-trace it.
+ */
+function perchedRiverMetres(recipe: WorldRecipe): { metres: number; rivers: string[] } {
+  const field = statusField(recipe);
+  let metres = 0;
+  const rivers = new Set<string>();
+  const sample = { y: 0, flowX: 0, flowZ: 0, kind: "lake" as "lake" | "river", floor: 0 };
+  for (const river of field.rivers) {
+    if (!river.water || !river.surfaceY || !river.bedY) continue;
+    for (let k = 1; k < river.points.length; k++) {
+      const [x, z] = river.points[k]!;
+      if (field.height(x, z) >= river.bedY[k]! - 3) continue;
+      // at a waterfall the ground beside the lip is the gorge below: not perched
+      if (field.falls.some((f) => Math.hypot(f.x - x, f.z - z) < 14)) continue;
+      // inside a lake the ground is the lake floor, deeper than any river bed
+      if (field.waterSurface(x, z, sample) && sample.kind === "lake") continue;
+      metres += Math.hypot(x - river.points[k - 1]![0], z - river.points[k - 1]![1]);
+      rivers.add(river.id.split(".")[0]!);
+    }
+  }
+  return { metres, rivers: [...rivers] };
+}
+
+/**
+ * Traced rivers whose head is not at a lake: every river starts at a lake
+ * (docs/world-editing/rivers-and-falls.md rule 1). A piece continuing another
+ * (head on its mouth), a split-fall branch and a hand-written river (no bedY in
+ * the recipe) are exempt — a hand river may run coast to coast.
+ */
+function riversNotFromLakes(recipe: WorldRecipe): string[] {
+  const field = statusField(recipe);
+  const sample = { y: 0, flowX: 0, flowZ: 0, kind: "lake" as "lake" | "river", floor: 0 };
+  const key = (p: readonly [number, number]): string => `${Math.round(p[0])},${Math.round(p[1])}`;
+  const mouths = new Set(recipe.features.rivers.map((d) => key(d.points[d.points.length - 1]!)));
+  const out: string[] = [];
+  for (const d of recipe.features.rivers) {
+    if (d.id.endsWith("-split") || !d.bedY || d.bedY.length !== d.points.length || mouths.has(key(d.points[0]!))) continue;
+    const [x, z] = d.points[0]!;
+    let atLake = false;
+    for (const [dx, dz] of [[0, 0], [16, 0], [-16, 0], [0, 16], [0, -16], [32, 0], [-32, 0], [0, 32], [0, -32]] as const) {
+      if (field.waterSurface(x + dx, z + dz, sample) && sample.kind === "lake") atLake = true;
+    }
+    if (!atLake) out.push(d.id);
+  }
+  return out;
+}
+
+/**
+ * Road points (paths or trails) standing deeper under the water than a ford,
+ * sampled every 4 m. The paths stage pins a crossing just under the water the
+ * field reports AT THE TIME IT RUNS: after the rivers change, or after the
+ * engine's water rules change, every old crossing is a road under a river.
+ */
+function roadsUnderWater(recipe: WorldRecipe, prefix: string): number {
+  const field = statusField(recipe);
+  let under = 0;
+  for (const road of recipe.features.roads) {
+    if (!road.id.startsWith(prefix) || !road.surfaceY) continue;
+    for (let i = 0; i + 1 < road.points.length; i++) {
+      const a = road.points[i]!;
+      const b = road.points[i + 1]!;
+      const steps = Math.max(1, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) / 4));
+      for (let k = 0; k < steps; k++) {
+        const t = k / steps;
+        const x = a[0] + (b[0] - a[0]) * t;
+        const z = a[1] + (b[1] - a[1]) * t;
+        const water = field.waterY(x, z);
+        if (water === null || water <= recipe.seaLevel + 0.05) continue;
+        const y = road.surfaceY[i]! + (road.surfaceY[i + 1]! - road.surfaceY[i]!) * t;
+        if (y < water - 0.8) under++;
+      }
+    }
+  }
+  return under;
+}
+
 /**
  * The plan for building a world, procedural AND agentic in one list.
  *
@@ -5522,7 +5896,15 @@ function pipelineStages(): PipelineStage[] {
       after: ["continents", "canyons"],
       by: "procedural",
       how: "worldgen rivers <world> --trace --catchment 0.6 --lakes 14",
-      check: (r) => (r.features.rivers.length > 0 || r.features.lakes.length > 0 ? null : "no rivers and no lakes"),
+      check: (r) => {
+        if (r.features.rivers.length === 0 && r.features.lakes.length === 0) return "no rivers and no lakes";
+        const headless = riversNotFromLakes(r);
+        if (headless.length > 0) return `${headless.length} river(s) do not start at a lake (${headless.slice(0, 5).join(", ")}): re-run rivers`;
+        const perched = perchedRiverMetres(r);
+        return perched.metres > 100
+          ? `${Math.round(perched.metres)} m of river perched over its valley (${perched.rivers.slice(0, 5).join(", ")}): re-trace`
+          : null;
+      },
     },
     { name: "towns", after: ["rivers"], by: "procedural", how: "worldgen towns <world>", check: (r) => has(r.features.towns.length) },
     {
@@ -5533,6 +5915,17 @@ function pipelineStages(): PipelineStage[] {
       check: (r) => (r.features.towns.some((t) => t.terraces.length > 0) ? null : "no town has been stepped — has it run?"),
     },
     { name: "zones", after: ["towns", "terrace"], by: "procedural", how: "worldgen zones <world>", check: (r) => has(r.regions.length) },
+    {
+      // cover is RULES (biome / surface / water gates evaluated at runtime),
+      // so it depends on nothing the other stages carve — only on the biome
+      // ids and the palette init wrote
+      name: "cover",
+      after: ["init"],
+      by: "procedural",
+      how: "worldgen cover <world> --apply <project>/authoring/cover-rules.json",
+      optional: true,
+      check: (r) => (r.cover.length > 0 ? null : "no ground-cover layers: only scatter props grow"),
+    },
     {
       name: "paths",
       after: ["towns", "terrace", "zones"],
@@ -5553,7 +5946,9 @@ function pipelineStages(): PipelineStage[] {
             ),
           );
         const lonely = settlementTowns(r.features.towns).filter((t) => !arrives(t));
-        return lonely.length > 0 ? `${lonely.length} town(s) with no road: ${lonely.slice(0, 5).map((t) => t.id).join(", ")}` : null;
+        if (lonely.length > 0) return `${lonely.length} town(s) with no road: ${lonely.slice(0, 5).map((t) => t.id).join(", ")}`;
+        const under = roadsUnderWater(r, "path-");
+        return under > 0 ? `${under} path sample(s) under the water deeper than a ford — solved against older water; re-run paths` : null;
       },
     },
     {
@@ -5564,7 +5959,17 @@ function pipelineStages(): PipelineStage[] {
       check: (r) => (r.regions.length === 0 ? "no zones to wall" : r.features.ridges.length > 0 || r.features.pois.some((p) => p.tags.includes("pass")) ? null : "no ridges or passes"),
     },
     { name: "pois", after: ["towns", "paths"], by: "procedural", how: "worldgen pois <world>", check: (r) => has(r.features.pois.length) },
-    { name: "trails", after: ["pois", "paths"], by: "procedural", how: "worldgen trails <world>", check: (r) => (r.features.roads.some((x) => x.id.startsWith("trail-")) ? null : "no trails") },
+    {
+      name: "trails",
+      after: ["pois", "paths"],
+      by: "procedural",
+      how: "worldgen trails <world>",
+      check: (r) => {
+        if (!r.features.roads.some((x) => x.id.startsWith("trail-"))) return "no trails";
+        const under = roadsUnderWater(r, "trail-");
+        return under > 0 ? `${under} trail sample(s) under the water deeper than a ford — re-run trails` : null;
+      },
+    },
     { name: "caves", after: ["continents"], by: "procedural", how: "worldgen caves <world>", optional: true, check: (r) => has(r.features.tunnels.length) },
     { name: "spawn", after: ["zones", "paths"], by: "procedural", how: "worldgen spawn <world> --scene <scene>", check: (r) => has(r.features.camps.length) },
     {
@@ -8029,6 +8434,195 @@ function commandScatter(): void {
   if (findings.length > 0) process.exit(1);
 }
 
+/**
+ * `worldgen cover <world>`: the ground-cover layers, checked and measured.
+ *
+ * Cover is not in the chunk data, so nothing else ever reports what it does:
+ * a layer naming a biome the recipe does not have, or a surface the palette
+ * dropped, is silently empty forever. The sampler used here is the SAME one
+ * the editor and the runtime use (src/voxel-ground.ts), so a number printed
+ * here is the number the game grows.
+ */
+function commandCover(): void {
+  const { recipe, file } = loadRecipe();
+  const apply = stringOption("apply", "");
+  if (apply) {
+    // the rule set is project content (it names the project's own atlas
+    // pages); the recipe carries a validated copy so every world the pipeline
+    // produces from it grows the same cover, and `--from` passes it on
+    const raw = JSON.parse(fs.readFileSync(path.resolve(apply), "utf8")) as unknown;
+    const layers = Array.isArray(raw) ? raw : (raw as { layers?: unknown[] }).layers;
+    if (!Array.isArray(layers)) fail(`${apply}: expected an array of layers, or { "layers": [...] }`);
+    recipe.cover = layers as WorldRecipe["cover"];
+    writeRecipe(recipe, file);
+    Object.assign(recipe, worldRecipeSchema.parse(recipe));
+  }
+  const findings: string[] = [];
+  const layers = recipe.cover;
+  console.log(`cover: ${layers.length} layers in ${recipe.name}`);
+  if (layers.length === 0) {
+    console.log("  no cover layers — the world grows nothing but its scatter props");
+    return;
+  }
+  const biomeIds = new Set(recipe.biomes.map((b) => b.id));
+  const surfaceNames = new Set(recipe.surfaces.map((s) => s.name.toLowerCase()));
+  const textures = path.join(assetsRoot(), "textures");
+  for (const layer of layers) {
+    const bits: string[] = [];
+    if (layer.texture) {
+      const file = path.join(textures, layer.texture);
+      if (!fs.existsSync(file)) findings.push(`${layer.id}: texture ${layer.texture} does not exist (the layer draws NOTHING — cutout of an empty placeholder)`);
+      else if (layer.atlas) {
+        const buf = fs.readFileSync(file);
+        const w = buf.readUInt32BE(16);
+        const h = buf.readUInt32BE(20);
+        if (w % layer.atlas.columns || h % layer.atlas.rows)
+          findings.push(`${layer.id}: ${layer.texture} is ${w}x${h}, not a whole number of ${layer.atlas.columns}x${layer.atlas.rows} tiles`);
+        const count = layer.atlas.columns * layer.atlas.rows;
+        for (const t of layer.tiles) if (t >= count) findings.push(`${layer.id}: tile ${t} is off the ${count}-tile page`);
+        const names = file.replace(/\.png$/, ".tiles.json");
+        if (fs.existsSync(names)) {
+          const listed = (JSON.parse(fs.readFileSync(names, "utf8")) as { tiles: (string | null)[] }).tiles;
+          const used = (layer.tiles.length ? layer.tiles : listed.map((_, i) => i)).map((t) => listed[t] ?? `#${t}(empty)`);
+          if (used.some((n) => n.endsWith("(empty)"))) findings.push(`${layer.id}: draws an EMPTY atlas slot (${used.join(", ")})`);
+          bits.push([...new Set(used)].join("/"));
+        }
+      }
+    }
+    for (const b of layer.biomes) if (!biomeIds.has(b)) findings.push(`${layer.id}: biome "${b}" is not in this recipe (${[...biomeIds].join(", ")})`);
+    for (const n of layer.surfaces) if (!surfaceNames.has(n.toLowerCase())) findings.push(`${layer.id}: surface "${n}" is not in this palette`);
+    if (layer.water?.mode === "surface" && layer.orient !== "flat") findings.push(`${layer.id}: floats on water but is not orient "flat" — upright cards standing in a lake`);
+    if (layer.biomes.length === 0 && layer.surfaces.length === 0 && !layer.water) findings.push(`${layer.id}: no biome, surface or water gate — it grows on every dry slope in the world`);
+    const perDisc = Math.round(Math.PI * layer.radius * layer.radius * layer.density);
+    console.log(
+      `  ${layer.id.padEnd(18)} ${(layer.orient === "flat" ? "flat" : "up").padEnd(4)} ${String(layer.density).padStart(5)}/m² r${layer.radius}  ` +
+        `${layer.bladeWidth}x${layer.bladeHeight}m  <=${perDisc} blades  ${layer.biomes.length ? layer.biomes.join(",") : "any biome"}` +
+        `${layer.water ? `  water:${layer.water.mode}` : ""}${layer.clump ? "  clumped" : ""}${bits.length ? `  [${bits.join(" ")}]` : ""}`,
+    );
+  }
+
+  const points = option("points", 1500);
+  if (points > 0) {
+    const t0 = Date.now();
+    const field = createWorldField(recipe);
+    const probes = voxelGroundProbes(() => field);
+    const random = mulberry32((recipe.seed ^ 0xc0fe) >>> 0);
+    const limit = Number.isFinite(field.worldLimit) ? field.worldLimit : 4000;
+    /** biome -> { points, per-layer hits } */
+    const byBiome = new Map<string, { points: number; hits: number[] }>();
+    const drawCounts: number[] = [];
+    let tried = 0;
+    let land = 0;
+    const DISC = 16; // candidates per point, spread over each layer's own disc
+    while (land < points && tried < points * 40) {
+      tried++;
+      const r = Math.sqrt(random()) * limit;
+      const a = random() * Math.PI * 2;
+      const x = Math.cos(a) * r;
+      const z = Math.sin(a) * r;
+      const ground = field.height(x, z);
+      if (ground <= recipe.seaLevel + 0.5) continue;
+      land++;
+      const biome = field.biome(x, z).id;
+      let entry = byBiome.get(biome);
+      if (!entry) byBiome.set(biome, (entry = { points: 0, hits: layers.map(() => 0) }));
+      entry.points++;
+      let drawn = 0;
+      layers.forEach((layer, i) => {
+        if (probes.sampleCover(x, z, layer as never) !== null) entry!.hits[i]!++;
+        // is ANY of this layer's disc populated around here? -> it costs a draw
+        for (let k = 0; k < DISC; k++) {
+          const rr = Math.sqrt(random()) * layer.radius;
+          const aa = random() * Math.PI * 2;
+          if (probes.sampleCover(x + Math.cos(aa) * rr, z + Math.sin(aa) * rr, layer as never) !== null) {
+            drawn++;
+            break;
+          }
+        }
+      });
+      drawCounts.push(drawn);
+    }
+    const rows = [...byBiome].sort((a, b) => b[1].points - a[1].points);
+    console.log(`\n  realized (${land} land points, ${((Date.now() - t0) / 1000).toFixed(1)}s) — per biome, layer: share of ground it grows on, blades/m²:`);
+    for (const [biome, e] of rows) {
+      const grow = layers
+        .map((layer, i) => ({ id: layer.id, share: e.hits[i]! / e.points, perM2: (e.hits[i]! / e.points) * layer.density }))
+        .filter((g) => g.share > 0)
+        .sort((a, b) => b.perM2 - a.perM2);
+      const total = grow.reduce((sum, g) => sum + g.perM2, 0);
+      console.log(
+        `    ${biome.padEnd(10)} ${String(e.points).padStart(4)} pts  ${total.toFixed(2)}/m²  ` +
+          (grow.length ? grow.map((g) => `${g.id} ${Math.round(g.share * 100)}%`).join(", ") : "BARE — no layer grows here"),
+      );
+      if (grow.length === 0 && e.points >= 20 && biome !== "seabed" && biome !== "crag") findings.push(`biome ${biome}: ${e.points} sample points and no cover layer grows on any of them`);
+    }
+    for (let i = 0; i < layers.length; i++) {
+      const hits = rows.reduce((sum, [, e]) => sum + e.hits[i]!, 0);
+      if (hits === 0 && !layers[i]!.water) findings.push(`${layers[i]!.id}: grew on none of ${land} land points — gated out everywhere?`);
+    }
+    drawCounts.sort((a, b) => a - b);
+    const mean = drawCounts.reduce((a, b) => a + b, 0) / Math.max(1, drawCounts.length);
+    const pct = (q: number) => drawCounts[Math.min(drawCounts.length - 1, Math.floor(q * drawCounts.length))] ?? 0;
+    console.log(`\n  cover draw calls where a player stands: mean ${mean.toFixed(1)}, p50 ${pct(0.5)}, p95 ${pct(0.95)}, max ${pct(1)} (of ${layers.length} layers)`);
+
+    // water cover: walk lake outlines and river centrelines, and ask how
+    // much of the shore / the water carries the layers meant for it
+    const waterLayers = layers.filter((l) => l.water);
+    if (waterLayers.length > 0) {
+      const lakes = recipe.features.lakes ?? [];
+      const riverDocs = recipe.features.rivers ?? [];
+      const shorePts: [number, number][] = [];
+      const waterPts: [number, number][] = [];
+      for (const lake of lakes) {
+        const outline = lake.polygon ?? [];
+        const [cx, cz] = lake.center;
+        for (let i = 0; i < outline.length; i += Math.max(1, Math.floor(outline.length / 24))) {
+          const [ox, oz] = outline[i]!;
+          shorePts.push([ox, oz]);
+          // a few metres in from the traced outline: the shallows
+          const len = Math.hypot(cx - ox, cz - oz) || 1;
+          const inset = Math.min(len * 0.5, 8);
+          waterPts.push([ox + ((cx - ox) / len) * inset, oz + ((cz - oz) / len) * inset]);
+        }
+      }
+      for (const river of riverDocs) {
+        const pts = (river as { points?: [number, number][] }).points ?? [];
+        for (let i = 0; i < pts.length; i += Math.max(1, Math.floor(pts.length / 12))) {
+          const [px, pz] = pts[i]!;
+          const next = pts[Math.min(pts.length - 1, i + 1)]!;
+          const dx = next[0] - px;
+          const dz = next[1] - pz;
+          const len = Math.hypot(dx, dz) || 1;
+          const half = ((river as { width?: number }).width ?? 10) / 2 + 2;
+          shorePts.push([px - (dz / len) * half, pz + (dx / len) * half]);
+          waterPts.push([px, pz]);
+        }
+      }
+      console.log(`\n  water cover (${lakes.length} lakes, ${riverDocs.length} rivers; ${shorePts.length} shore / ${waterPts.length} water probes, each a 6 m neighbourhood):`);
+      for (const layer of waterLayers) {
+        const set = layer.water!.mode === "shore" ? shorePts : waterPts;
+        let hit = 0;
+        for (const [px, pz] of set) {
+          for (let k = 0; k < 24; k++) {
+            const rr = Math.sqrt(random()) * 6;
+            const aa = random() * Math.PI * 2;
+            if (probes.sampleCover(px + Math.cos(aa) * rr, pz + Math.sin(aa) * rr, layer as never) !== null) {
+              hit++;
+              break;
+            }
+          }
+        }
+        const share = set.length ? hit / set.length : 0;
+        console.log(`    ${layer.id.padEnd(18)} ${layer.water!.mode.padEnd(7)} ${Math.round(share * 100)}% of ${layer.water!.mode === "shore" ? "shore" : "water"} probes`);
+        if (set.length >= 10 && share === 0) findings.push(`${layer.id}: water layer found on none of ${set.length} ${layer.water!.mode} probes`);
+      }
+    }
+  }
+  for (const finding of findings) console.log(`  ! ${finding}`);
+  console.log(findings.length === 0 ? "  no findings" : `  ${findings.length} finding${findings.length === 1 ? "" : "s"}`);
+  if (findings.length > 0) process.exit(1);
+}
+
 // ---------------------------------------------------------------- entry
 
 switch (command) {
@@ -8102,6 +8696,9 @@ switch (command) {
   case "profile":
     commandProfile();
     break;
+  case "fall-site":
+    commandFallSite();
+    break;
   case "descend":
     commandDescend();
     break;
@@ -8113,6 +8710,9 @@ switch (command) {
     break;
   case "scatter":
     commandScatter();
+    break;
+  case "cover":
+    commandCover();
     break;
   case "stats":
     commandStats();

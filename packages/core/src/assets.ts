@@ -15,6 +15,7 @@ import { volumeDocSchema } from "./voxel/csg.js";
 import { vfxEffectSchema } from "./vfx/modules.js";
 import { spellSchema } from "./vfx/spell.js";
 import { registerCharacterAssetTypes } from "./character/index.js";
+import { registerNpcAssetTypes } from "./npc/index.js";
 import { gameHudSchema, questSchema, tooltipSchema } from "./game-ui.js";
 
 export const terrainHeightfieldSchema = z.object({
@@ -46,6 +47,7 @@ export function registerCoreAssetTypes(assets: AssetLibrary): void {
   registerCharacterAssetTypes(assets);
   assets.defineDataType("game-hud", gameHudSchema);
   assets.defineDataType("quest", questSchema);
+  registerNpcAssetTypes(assets);
   assets.defineDataType("tooltip", tooltipSchema);
   registerThemeAssetType(assets);
 }

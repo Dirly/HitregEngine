@@ -31,6 +31,7 @@ export {
   particlesSchema,
   billboardSchema,
   grassSchema,
+  type GrassComponentData,
   waterSchema,
   type WaterData,
   netObjectSchema,
@@ -354,3 +355,4 @@ export {
   type ProjectToolStatus,
 } from "./project.js";
 export * from "./game-ui.js";
+export * from "./npc/index.js";

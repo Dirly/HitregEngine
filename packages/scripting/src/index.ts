@@ -26,9 +26,11 @@ export {
   type SimShapecastOptions,
   type AnimationLayerOptions,
   type BiomeAt,
+  type RegionAt,
   type WaterAt,
   type LiveSkyOptions,
   type ModelLook,
+  type ModelTables,
   type LivePostFxOptions,
   type LiveSkyBase,
 } from "./script.js";
@@ -37,17 +39,37 @@ export { ScriptRegistry, type DataTypeSink } from "./registry.js";
 export { InputService } from "./input.js";
 export { ScriptRuntime, type RuntimeOptions, type RuntimeVfxFrame, type RuntimeVfxHost, type ScriptChatHost } from "./runtime.js";
 export { registerBuiltinScripts } from "./builtin.js";
+export { CharacterLook } from "./character-look.js";
+export { NpcScript } from "./npc.js";
+export { NpcUi, parseCoins } from "./npc-ui.js";
+export { Nameplates } from "./nameplates.js";
+export { QuestLog } from "./quest-log.js";
+export { PlayerRecords } from "./player-records.js";
 export {
   actionIsLayered,
   damp,
   fallThreshold,
   fitAction,
   gaitFor,
+  gaitReadingSpeed,
   gaitSpeed,
   GaitTracker,
   gaitTier,
   groundFollowVy,
   risingByGround,
+  readGround,
+  probeLeaving,
+  airGravityScale,
+  extraGravityDv,
+  airSteer,
+  jumpArc,
+  STANDARD_GRAVITY,
+  AIR_RESPONSE,
+  UPHILL_RATIO,
+  STEP_RATE_MAX,
+  type GroundCast,
+  type GroundReading,
+  type JumpTuning,
   idleThreshold,
   leavingGround,
   playbackRate,
@@ -97,3 +119,15 @@ export {
 } from "./easing.js";
 
 export type { ScriptVfx, ScriptVfxFrame, ScriptVfxHandle, ScriptSpellHandle } from "./script.js";
+export { footfallsCrossed, FootfallTracker, type FootfallStep } from "./footfalls.js";
+export {
+  advanceBetween,
+  advanceVelocity,
+  isClipAdvance,
+  peakAdvanceSpeed,
+  sampleAdvance,
+  type AdvanceStep,
+  type ClipAdvance,
+} from "./advance.js";
+export { carryPhaseOffset, stanceCarryFor, type StanceCarry } from "./stance-carry.js";
+export { inHours, SettleLatch, SoundEmitter, Soundscape, SoundZone, worldClock } from "./soundscape.js";

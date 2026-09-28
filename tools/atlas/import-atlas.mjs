@@ -671,6 +671,12 @@ for (let i = 0; i < N; i++) painted[i] = bg[i] ? 0 : 1;
 // bright region as a hole. Asking the generator for the key colour there does
 // not work — measured across four sheets, it has produced zero cyan pixels.
 const enclosed = new Uint8Array(N);
+// Area (sheet px) of the enclosed bright pocket each pixel belongs to, for a
+// slot whose `openEnclosed` is a NUMBER: the smallest pocket, in texels, that
+// opens. A fringe motif ten texels across (the shoulder's spike bursts, a
+// feather spray's socket) leaves slits between its points far under the
+// default area, and a nearest shrink lands on them as opaque white.
+const enclosedArea = new Uint32Array(N);
 {
   const MIN_AREA = Math.max(16, Math.round((4 * scale) ** 2));
   const seen = new Uint8Array(N);
@@ -690,6 +696,7 @@ const enclosed = new Uint8Array(N);
       if (y < H - 1 && !seen[i + W] && bgCandidate[i + W] && !bg[i + W]) { seen[i + W] = 1; stack.push(i + W); }
     }
     if (comp.length >= MIN_AREA) for (const i of comp) enclosed[i] = 1;
+    for (const i of comp) enclosedArea[i] = comp.length;
   }
 }
 
@@ -1132,8 +1139,15 @@ const containIslands = islands.filter((i) => manifest.slots[i.hex]?.fit?.startsW
     const want = Number(slot.fitPadding ?? manifest.fitPadding ?? (isl.transparency ? 3 : 0)) * scale;
     const insetX = Math.min(want, 0.15 * (ix1 - ix0));
     const insetY = Math.min(want, 0.15 * (iy1 - iy0));
-    const iw = Math.max(1, ix1 - ix0 - 2 * insetX);
-    const ih = Math.max(1, iy1 - iy0 - 2 * insetY);
+    // `anchorPad`: the inset on the ANCHORED edge alone. An ornament standing
+    // on a helm is fixed along its bottom edge: margin on the free sides so
+    // no silhouette is cropped straight by the island's border, none at the
+    // base or it floats off the helm (anchorPad: 0).
+    const anchorWord = String(slot.anchor ?? "center").toLowerCase();
+    const anchorInset = slot.anchorPad === undefined ? null : Number(slot.anchorPad) * scale;
+    const padAt = (edge, inset) => (anchorInset !== null && anchorWord.includes(edge) ? anchorInset : inset);
+    const iw = Math.max(1, ix1 - ix0 - padAt("left", insetX) - padAt("right", insetX));
+    const ih = Math.max(1, iy1 - iy0 - padAt("top", insetY) - padAt("bottom", insetY));
     const bw = Math.max(1, bx1 - bx0);
     const bh = Math.max(1, by1 - by0);
     let sx = iw / bw;
@@ -1152,8 +1166,8 @@ const containIslands = islands.filter((i) => manifest.slots[i.hex]?.fit?.startsW
     const has = (t) => anchor.includes(t);
     const pick = (lo, hi, artLo, artHi, low, high, pad) =>
       low ? [lo + pad, artLo] : high ? [hi - pad, artHi] : [(lo + hi) / 2, (artLo + artHi) / 2];
-    const [iax, bax] = pick(ix0, ix1, bx0, bx1, has("left"), has("right"), insetX);
-    const [iay, bay] = pick(iy0, iy1, by0, by1, has("top"), has("bottom"), insetY);
+    const [iax, bax] = pick(ix0, ix1, bx0, bx1, has("left"), has("right"), anchorInset ?? insetX);
+    const [iay, bay] = pick(iy0, iy1, by0, by1, has("top"), has("bottom"), anchorInset ?? insetY);
 
     isl.fit = {
       sx,
@@ -1193,7 +1207,10 @@ const containIslands = islands.filter((i) => manifest.slots[i.hex]?.fit?.startsW
     // bare. Only a fit that is both half again as bare AND three points worse
     // is the pathological case above — measured, that keeps the five honest
     // sub-pixel corrections on the desert sheet and rejects the one disaster.
-    if (isl.uncovered > isl.baseUncovered * 1.5 + 0.03) {
+    // `keepFit: true` opts a slot out: a cut-out ornament is mostly empty by
+    // design, so "more of the island bare" is no evidence against the fit, and
+    // the fallback leaves a plume drawn to the block's top edge cropped there.
+    if (!slot.keepFit && isl.uncovered > isl.baseUncovered * 1.5 + 0.03) {
       earlyWarnings.push(
         `${isl.name}: contain fit left ${(100 * isl.uncovered).toFixed(1)}% of the island unpainted ` +
           `against ${(100 * isl.baseUncovered).toFixed(1)}% unfitted — kept the artwork where it was drawn ` +
@@ -1463,10 +1480,16 @@ const srcRGB = new Uint8Array(N * 3);
 // which for the head band is the centre line of the face by construction.
 for (const isl of islands) {
   if (manifest.slots[isl.hex]?.symmetric !== true) continue;
-  const xs = isl.px.map((p) => p % W);
-  const ys = isl.px.map((p) => (p / W) | 0);
-  const ix0 = Math.min(...xs), ix1 = Math.max(...xs);
-  const iy0 = Math.min(...ys), iy1 = Math.max(...ys);
+  // a loop, not Math.min(...px): a head strip is ~400k pixels, past the
+  // argument limit of a spread
+  let ix0 = Infinity, ix1 = -Infinity, iy0 = Infinity, iy1 = -Infinity;
+  for (const p of isl.px) {
+    const x = p % W, y = (p / W) | 0;
+    if (x < ix0) ix0 = x;
+    if (x > ix1) ix1 = x;
+    if (y < iy0) iy0 = y;
+    if (y > iy1) iy1 = y;
+  }
   const mid = (ix0 + ix1) / 2;
   const span = Math.round((ix1 - ix0) * 0.06);
   const lumAt = (ax, ay) => {
@@ -1544,6 +1567,24 @@ function reachesIslandBottom(isl, j) {
   return out;
 }
 
+/** The same walk upward: `cut: "top"` opens a crown's points and nothing lower. */
+const topReach = new Map();
+function reachesIslandTop(isl, j) {
+  const cached = topReach.get(j);
+  if (cached !== undefined) return cached;
+  const x = j % W;
+  const y0 = (j / W) | 0;
+  let out = false;
+  for (let y = y0; y >= 0; y--) {
+    const k = y * W + x;
+    if (islandOf[k] === isl.id && !(cyan[k] || bg[k])) { out = false; break; }
+    if (islandOf[k] !== isl.id && islandOf[k] >= 0) { out = false; break; }
+    if (y === 0 || (islandOf[k] < 0 && y < y0)) { out = true; break; }
+  }
+  topReach.set(j, out);
+  return out;
+}
+
 const srcAlpha = new Uint8Array(N);
 const srcColorOk = new Uint8Array(N); // usable colour — kept as authored art
 const srcColorClean = new Uint8Array(N); // uncontaminated — may seed the padding
@@ -1606,11 +1647,14 @@ for (let i = 0; i < N; i++) {
   //   false   nowhere; unpainted area is filled by the bleed instead
   //   "bottom" only where the empty run reaches the island's BOTTOM edge, which
   //           is a frayed hem and nothing else
+  //   "top"   only where it reaches the TOP edge: a crown's points
   const hole = (j) => {
     if (!isl.transparency || cutPolicy === false) return 0;
-    const openEnclosed = manifest.slots[isl.hex]?.openEnclosed === true;
-    if (!(cyan[j] || bg[j] || (openEnclosed && enclosed[j]))) return 0;
+    const oe = manifest.slots[isl.hex]?.openEnclosed;
+    const openEnclosed = oe === true ? enclosed[j] : typeof oe === "number" ? enclosedArea[j] >= oe * scale * scale : 0;
+    if (!(cyan[j] || bg[j] || openEnclosed)) return 0;
     if (cutPolicy === "bottom" && !reachesIslandBottom(isl, j)) return 0;
+    if (cutPolicy === "top" && !reachesIslandTop(isl, j)) return 0;
     return 1;
   };
 
@@ -1682,6 +1726,43 @@ for (let i = 0; i < N; i++) {
 }
 for (const isl of islands) isl.cyanPct = isl.area ? (100 * isl.cyanHits) / isl.area : 0;
 
+// `mirror: true` — the island is bilaterally symmetric about its own centre
+// column (a head strip whose middle is the front of the face, a crown or jaw
+// seen straight on), so the LEFT half is copied onto the right. A generator
+// never paints a face symmetric: one eye higher, the nose leaning, the whole
+// face a few texels to one side, which on a low-poly head reads as a crooked
+// face. Pair it with `symmetric: true`, which first moves the painted axis onto
+// that column. Anything one-sided the SUBJECT asks for (a scar, a mole) is
+// doubled, so ask for none.
+for (const isl of islands) {
+  if (manifest.slots[isl.hex]?.mirror !== true) continue;
+  let ix0 = Infinity, ix1 = -Infinity;
+  for (const p of isl.px) {
+    const x = p % W;
+    if (x < ix0) ix0 = x;
+    if (x > ix1) ix1 = x;
+  }
+  const mid2 = ix0 + ix1; // twice the centre column: the mirror of x is mid2 - x
+  let copied = 0;
+  for (let i = 0; i < N; i++) {
+    if (grownOf[i] !== isl.id) continue;
+    const x = i % W;
+    if (2 * x <= mid2) continue;
+    const mx = mid2 - x;
+    if (mx < 0) continue;
+    const j = i - x + mx;
+    if (grownOf[j] !== isl.id) continue;
+    srcRGB[i * 3] = srcRGB[j * 3];
+    srcRGB[i * 3 + 1] = srcRGB[j * 3 + 1];
+    srcRGB[i * 3 + 2] = srcRGB[j * 3 + 2];
+    srcAlpha[i] = srcAlpha[j];
+    srcColorOk[i] = srcColorOk[j];
+    srcColorClean[i] = srcColorClean[j];
+    copied++;
+  }
+  isl.mirrored = copied;
+}
+
 // ---------------------------------------------------------------------------
 // 5. area-average downsample
 // ---------------------------------------------------------------------------
@@ -1701,7 +1782,9 @@ const texelArea = (W / S) * (H / S);
 // the pixels and aliases hard. `--filter nearest` is there to compare — the
 // chunky look comes from the target resolution and the palette, not the filter.
 // The island map is always a majority vote; it is geometry, not colour.
-const NEAREST = args.filter === "nearest";
+// A set can ask for it in its manifest (`atlas.filter` in the recipe): the
+// player head does, to match the body's hard, un-averaged pixels.
+const NEAREST = (args.filter ?? manifest.filter) === "nearest";
 
 for (let dy = 0; dy < S; dy++) {
   const y0 = (dy * H) / S;
@@ -1787,6 +1870,39 @@ for (let d = 0; d < SN; d++) {
     alpha[d] = Math.round(accAlpha[d] / accAlphaW[d]);
     alphaOk[d] = 1;
   }
+}
+
+// `mirror` again at the TARGET size. The pre-downsample mirror is exact in key
+// pixels, but the island's centre column rarely lands on a texel edge here, so
+// the texels either side sample different key pixels — with the nearest filter
+// one eye kept its catchlight and the other lost it. Mirror the texels about
+// the nearest texel boundary instead: pixel-exact symmetry, at most half a texel
+// off the geometry's own centre line.
+for (const isl of islands) {
+  if (manifest.slots[isl.hex]?.mirror !== true) continue;
+  let ix0 = Infinity, ix1 = -Infinity;
+  for (const p of isl.px) {
+    const x = p % W;
+    if (x < ix0) ix0 = x;
+    if (x > ix1) ix1 = x;
+  }
+  const edge = Math.round((((ix0 + ix1 + 1) / 2) * S) / W); // texel boundary nearest the centre
+  for (let y = 0; y < S; y++)
+    for (let x = edge; x < S; x++) {
+      const d = y * S + x;
+      if (island256[d] !== isl.id) continue;
+      const mx = 2 * edge - 1 - x;
+      if (mx < 0) continue;
+      const m = y * S + mx;
+      if (island256[m] !== isl.id) continue;
+      rgb[d * 3] = rgb[m * 3];
+      rgb[d * 3 + 1] = rgb[m * 3 + 1];
+      rgb[d * 3 + 2] = rgb[m * 3 + 2];
+      alpha[d] = alpha[m];
+      colorOk[d] = colorOk[m];
+      colorClean[d] = colorClean[m];
+      alphaOk[d] = alphaOk[m];
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2171,6 +2287,19 @@ for (let d = 0; d < SN; d++) {
   if (owner[d] >= 0) continue;
   rgb[d * 3] = rgb[d * 3 + 1] = rgb[d * 3 + 2] = 0;
   alpha[d] = 0;
+}
+
+// `solidGround`: every texel owned by a SOLID island — its gutter included — is
+// opaque. A masked material mips its alpha, so a thin or foreshortened face at
+// the edge of a solid island (the back of a helm seen side-on) blends with the
+// transparent gutter a mip down and drops under the cutoff: holes you can see
+// through at a distance. Only the cut-out islands (ornaments, a crown's
+// points) keep a transparent gutter, which is what their silhouettes need.
+if (manifest.solidGround) {
+  for (let d = 0; d < SN; d++) {
+    if (owner[d] < 0 || byId[owner[d]].transparency) continue;
+    alpha[d] = 255;
+  }
 }
 
 // ---------------------------------------------------------------------------

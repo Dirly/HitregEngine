@@ -32,6 +32,15 @@ export interface LayerOptions {
    * the sprint the legs are doing underneath.
    */
   speed?: number;
+  /**
+   * Lock the layer's playhead to the BASE clip's, offset by this many cycles
+   * (0..1): every frame the layer is put at the base's normalised phase plus
+   * the offset and paced to the base's rate, so a stance's upper body swings
+   * in time with a different clip's legs (`stanceCarry`). `speed` is ignored
+   * while locked. The offset is the caller's to measure — see
+   * `carryPhaseOffset` in @hitreg/scripting.
+   */
+  phaseLock?: number;
 }
 
 interface Layer {
@@ -41,6 +50,52 @@ interface Layer {
   additive: boolean;
   /** Playback rate asked for, kept so an idempotent re-assert can change it. */
   speed: number;
+  /** Cycles ahead of the base's phase this layer is held at, or null when it runs free. */
+  phaseLock: number | null;
+  /** Mesh-space correction for an override layer, or null (additive, or no hip track). */
+  anchor: Anchor | null;
+}
+
+/**
+ * What an override layer needs to keep its torso where its clip put it.
+ *
+ * A masked layer hands the spine the clip's LOCAL rotations, but the hips
+ * under them belong to the base. A stance clip that stands bladed — hips
+ * turned 55 degrees, spine and neck twisted back so the chest, shield and
+ * eyes face forward — lands that counter-twist on a walk's square hips, and
+ * the whole upper body looks off to the side. So every frame the spine is
+ * turned by the difference between the live hips and the clip's own: the
+ * torso keeps the orientation the clip authored relative to the character
+ * (a mesh-space blend), whatever the legs are doing. The turn is spread
+ * over the spine chain so a big twist does not pinch at one joint.
+ */
+interface Anchor {
+  /** The mask root's parent — the hips whose rotation the base owns. */
+  hips: THREE.Object3D;
+  /** The layer clip's own rotation for `hips`, sampled at the layer's playhead. */
+  authored: THREE.Interpolant;
+  /** Mask root and the spine bones above it that share the correction. */
+  chain: THREE.Object3D[];
+  /**
+   * Each chain bone's rotation as the mixer left it, before the turn — put
+   * back before the next mixer pass. The mixer only writes a bone whose value
+   * CHANGED since its last write, so a held pose (a clamped guard) is never
+   * rewritten, and a turn left in place would be turned again every frame:
+   * the character spun like a rotor a second after raising a shield.
+   */
+  raw: THREE.Quaternion[];
+  /**
+   * What the turn wrote. A bone that no longer holds it was rewritten by
+   * someone else since (a stopped action restoring the bind pose) and is left.
+   */
+  written: THREE.Quaternion[];
+  /** Whether the turn is currently applied to the bones. */
+  applied: boolean;
+}
+
+interface Anchored {
+  anchor: Anchor;
+  action: THREE.AnimationAction;
 }
 
 interface Entry {
@@ -68,6 +123,8 @@ interface Entry {
   /** Edit mode: already stood in its clip's first frame (see poseStill). */
   posedStill?: boolean;
   fading: Array<{ action: THREE.AnimationAction; until: number }>;
+  /** Override layers still showing (the current one, and any fading out) and their anchors. */
+  anchored: Anchored[];
   clock: number;
 }
 
@@ -113,6 +170,92 @@ function subtreeNames(root: THREE.Object3D, name: string): Set<string> | null {
 }
 
 const SPINE = /(spine|waist|chest|torso|abdomen)/i;
+
+/** How many spine bones, from the mask root up, share an anchor's turn. */
+const ANCHOR_CHAIN = 3;
+
+function findNode(root: THREE.Object3D, name: string): THREE.Object3D | null {
+  const wanted = THREE.PropertyBinding.sanitizeNodeName(name);
+  let found: THREE.Object3D | null = null;
+  root.traverse((o) => {
+    if (!found && THREE.PropertyBinding.sanitizeNodeName(o.name) === wanted) found = o;
+  });
+  return found;
+}
+
+/**
+ * The anchor for an override layer masked at `maskRoot`, or null when the
+ * clip has no rotation for the bone under the mask (nothing to keep).
+ */
+function layerAnchor(root: THREE.Object3D, maskRoot: string, clip: THREE.AnimationClip): Anchor | null {
+  const top = findNode(root, maskRoot);
+  const hips = top?.parent;
+  if (!top || !hips || hips === root) return null;
+  const hipsName = THREE.PropertyBinding.sanitizeNodeName(hips.name);
+  const track = clip.tracks.find((t) => {
+    const parsed = THREE.PropertyBinding.parseTrackName(t.name);
+    return parsed.nodeName === hipsName && parsed.propertyName === "quaternion";
+  });
+  if (!track) return null;
+  const chain = [top];
+  for (let bone = top; chain.length < ANCHOR_CHAIN; ) {
+    const next = bone.children.find((c) => SPINE.test(c.name));
+    if (!next) break;
+    chain.push(next);
+    bone = next;
+  }
+  // untyped in @types/three, but every KeyframeTrack has it: its own interpolation mode, own buffer
+  const authored = (track as unknown as { createInterpolant(): THREE.Interpolant }).createInterpolant();
+  return {
+    hips,
+    authored,
+    chain,
+    raw: chain.map(() => new THREE.Quaternion()),
+    written: chain.map(() => new THREE.Quaternion()),
+    applied: false,
+  };
+}
+
+const _authored = new THREE.Quaternion();
+const _turn = new THREE.Quaternion();
+const _step = new THREE.Quaternion();
+const _prefix = new THREE.Quaternion();
+const _prefixInv = new THREE.Quaternion();
+const _local = new THREE.Quaternion();
+const _identity = new THREE.Quaternion();
+
+/** Put the chain back to the rotations the mixer left, if a turn is on it. */
+function unanchor(anchor: Anchor): void {
+  if (!anchor.applied) return;
+  anchor.chain.forEach((bone, i) => {
+    if (bone.quaternion.equals(anchor.written[i]!)) bone.quaternion.copy(anchor.raw[i]!);
+  });
+  anchor.applied = false;
+}
+
+/**
+ * Turn the spine so the torso sits on the clip's hips instead of the live
+ * ones, by `weight` (the layer's fade). With the turn C = hips⁻¹·authored
+ * split into n equal steps A, bone k is premultiplied by P⁻¹·A·P, P the
+ * product of the chain's local rotations below it — which composes to C
+ * applied at the mask root, so the chest ends exactly where the clip had it.
+ */
+function applyAnchor(anchor: Anchor, time: number, weight: number): void {
+  anchor.chain.forEach((bone, i) => anchor.raw[i]!.copy(bone.quaternion));
+  anchor.applied = true;
+  const v = anchor.authored.evaluate(time);
+  _authored.set(v[0]!, v[1]!, v[2]!, v[3]!).normalize();
+  _turn.copy(anchor.hips.quaternion).invert().multiply(_authored);
+  _step.copy(_identity).slerp(_turn, weight / anchor.chain.length);
+  _prefix.identity();
+  for (const bone of anchor.chain) {
+    _local.copy(bone.quaternion);
+    _prefixInv.copy(_prefix).invert();
+    bone.quaternion.premultiply(_prefixInv.multiply(_step).multiply(_prefix));
+    _prefix.multiply(_local);
+  }
+  anchor.chain.forEach((bone, i) => anchor.written[i]!.copy(bone.quaternion));
+}
 
 /**
  * Where to split a humanoid when nobody said. The SHALLOWEST spine-ish bone is
@@ -196,6 +339,7 @@ export class AnimationSystem {
       animator,
       speedMul: 1,
       fading: [],
+      anchored: [],
       clock: 0,
     };
     // LoopOnce actions raise "finished" here; LoopRepeat ones never do. A
@@ -261,13 +405,48 @@ export class AnimationSystem {
     return this.entryFor(entityId)?.layer?.speed ?? 1;
   }
 
+  /** The layer's phase lock to the base (cycles), or null when it runs free — replicated with it. */
+  layerPhaseLock(entityId: string): number | null {
+    return this.entryFor(entityId)?.layer?.phaseLock ?? null;
+  }
+
+  /**
+   * Where the base clip's playhead is, as a fraction of the clip (0..1) —
+   * read-only, for a caller that has to act IN TIME with the pose, like a
+   * footstep landing when the foot does. During a held blend the heavier of
+   * the two clips answers (the pair is phase-matched, so both are at the same
+   * point of the stride); during a crossfade the incoming clip answers, since
+   * it is the one `current` names. Null with no model or nothing playing.
+   */
+  baseClipPhase(entityId: string): { clip: string; t01: number } | null {
+    const entry = this.entryFor(entityId);
+    const base = entry?.baseAction;
+    if (!entry || !base || !entry.current) return null;
+    let clip = entry.current;
+    let action = base;
+    const blend = entry.blend;
+    if (blend && blend.action.getEffectiveWeight() > base.getEffectiveWeight()) {
+      clip = blend.clip;
+      action = blend.action;
+    }
+    const duration = action.getClip().duration;
+    if (!(duration > 0)) return null;
+    const t01 = (((action.time / duration) % 1) + 1) % 1;
+    return { clip, t01 };
+  }
+
   /**
    * Crossfade to a clip (fade seconds). The core blending primitive.
    * `loop: false` plays the clip once, holds the final pose, and raises the
    * mixer's "finished" event → {@link onClipFinished} (drives
    * "animation.completed"); the default loops forever and never finishes.
+   *
+   * `sync` carries the outgoing clip's PHASE into the new one (normalised
+   * time, so a 1.1 s walk and a 0.7 s run land on the same step). That is
+   * what a gait change wants: a walk→run crossfade that restarts the run at
+   * frame 0 swaps the feet mid-stride, a visible pop at every threshold.
    */
-  play(entityId: string, clip: string, fade = 0.3, loop = true, restart = false): void {
+  play(entityId: string, clip: string, fade = 0.3, loop = true, restart = false, sync = false): void {
     const entry = this.entryFor(entityId);
     if (!entry) return;
     // asking for one clip ends a held blend (see playBlend)
@@ -289,7 +468,7 @@ export class AnimationSystem {
     if (entry.current === clip && !restart) return;
     entry.current = clip;
     entry.baseLoop = loop;
-    this.applyBase(entry, fade, false, restart);
+    this.applyBase(entry, fade, sync && !restart, restart);
   }
 
   /**
@@ -379,6 +558,7 @@ export class AnimationSystem {
     const loop = opts.loop ?? false;
     const additive = opts.additive === true;
     const speed = opts.speed ?? 1;
+    const phaseLock = typeof opts.phaseLock === "number" && Number.isFinite(opts.phaseLock) ? opts.phaseLock : null;
     // Idempotent, like play(): net replication re-asserts the layer every
     // frame it is up, and restarting the clip each time would freeze it on
     // its first frame. `restart` is how a caller replays the same clip.
@@ -386,9 +566,14 @@ export class AnimationSystem {
       // …but a re-assert MAY retune the rate. A cast whose window is extended
       // mid-flight (a channel that got longer) slows down where it stands
       // rather than starting over.
-      if (speed !== entry.layer.speed) {
+      // …and re-aim a lock: the legs under the same upper-body clip may have
+      // changed (walk → run, or a new offset). A lock let go runs free at the
+      // asked rate from where it stands.
+      const unlocked = entry.layer.phaseLock !== null && phaseLock === null;
+      entry.layer.phaseLock = phaseLock;
+      if (speed !== entry.layer.speed || unlocked) {
         entry.layer.speed = speed;
-        entry.layer.action.timeScale = speed;
+        if (phaseLock === null) entry.layer.action.timeScale = speed;
       }
       return;
     }
@@ -428,7 +613,11 @@ export class AnimationSystem {
     }
 
     const previous = entry.layer;
-    entry.layer = { clip, action, additive, speed };
+    const anchor = additive || !maskRoot ? null : layerAnchor(entry.root, maskRoot, source);
+    entry.layer = { clip, action, additive, speed, phaseLock, anchor };
+    // Keyed by action: a layer replayed over itself keeps one entry, and a
+    // replaced one keeps its own while it fades out underneath.
+    if (anchor && !entry.anchored.some((a) => a.action === action)) entry.anchored.push({ anchor, action });
     // The base moves off the full-body clip FIRST for an override layer,
     // otherwise both drive the masked bones and the mixer averages them.
     if (!additive) this.applyBase(entry, fade, true);
@@ -496,7 +685,10 @@ export class AnimationSystem {
   /**
    * Start `next`, optionally picking up `from`'s playhead, and fade `from`
    * out. Time sync matters when the two are the same clip in different masks
-   * — a fresh action starts at frame 0, which pops the legs mid-stride.
+   * — a fresh action starts at frame 0, which pops the legs mid-stride — and
+   * between two gait cycles (see play's `sync`). `from` keeps the timeScale it
+   * had: the caller sets the new clip's rate AFTER this, so the outgoing cycle
+   * fades out at its own pace instead of the incoming one's.
    */
   private transition(
     entry: Entry,
@@ -526,8 +718,13 @@ export class AnimationSystem {
     next.setLoop(opts.loop ? THREE.LoopRepeat : THREE.LoopOnce, Infinity);
     next.clampWhenFinished = !opts.loop; // one-shots hold their last frame
     next.timeScale = opts.timeScale ?? 1;
+    // Synced by PHASE, not seconds: the same clip under a different mask has
+    // the same length either way, and two different gait cycles only line up
+    // their steps as fractions of their own cycle.
     const duration = next.getClip().duration;
-    next.time = opts.syncTime && from && from !== next && duration > 0 ? from.time % duration : 0;
+    const fromDuration = from ? from.getClip().duration : 0;
+    const phase = opts.syncTime && from && from !== next && fromDuration > 0 ? from.time / fromDuration : 0;
+    next.time = duration > 0 ? (opts.loop ? phase % 1 : Math.min(1, phase)) * duration : 0;
     next.weight = opts.weight ?? 1;
     next.stopFading();
     next.play();
@@ -599,6 +796,7 @@ export class AnimationSystem {
         entry.baseAction = null;
         entry.layer = null;
         entry.fading.length = 0;
+        entry.anchored.length = 0;
       }
     }
   }
@@ -606,10 +804,50 @@ export class AnimationSystem {
   update(dt: number): void {
     if (!this.running) return;
     for (const entry of this.entries.values()) {
+      if (entry.layer && entry.layer.phaseLock !== null) this.lockLayer(entry, entry.layer);
+      // Undo last frame's turns (newest first, they stack) so the mixer and
+      // the anchors both start from the clip's own pose.
+      for (let i = entry.anchored.length - 1; i >= 0; i--) unanchor(entry.anchored[i]!.anchor);
       entry.mixer.update(dt);
+      if (entry.anchored.length > 0) this.anchorLayers(entry);
       entry.clock += dt;
       if (entry.fading.length > 0) this.reapFaded(entry);
     }
+  }
+
+  /**
+   * Put a phase-locked layer where the base's stride says it should be, and
+   * pace it to cover one cycle per base cycle. Done BEFORE the mixer advances:
+   * both then move by the same fraction of their own cycles this frame, so the
+   * pose applied is in step rather than one frame behind. The heavier clip of
+   * a held blend is the one the layer follows, as for baseClipPhase.
+   */
+  private lockLayer(entry: Entry, layer: Layer): void {
+    let base = entry.baseAction;
+    if (!base) return;
+    const blend = entry.blend;
+    if (blend && blend.action.getEffectiveWeight() > base.getEffectiveWeight()) base = blend.action;
+    const baseDuration = base.getClip().duration;
+    const duration = layer.action.getClip().duration;
+    if (!(baseDuration > 0) || !(duration > 0)) return;
+    const phase = base.time / baseDuration + (layer.phaseLock ?? 0);
+    layer.action.time = (((phase % 1) + 1) % 1) * duration;
+    layer.action.timeScale = base.timeScale * (duration / baseDuration);
+  }
+
+  /**
+   * Re-seat the torso of every override layer still showing (see Anchor),
+   * right after the mixer wrote the pose. A layer fading out keeps its anchor
+   * at its fading weight, so dropping a guard mid-walk eases the chest back
+   * onto the gait's hips instead of snapping it there.
+   */
+  private anchorLayers(entry: Entry): void {
+    entry.anchored = entry.anchored.filter(({ anchor, action }) => {
+      const weight = action.isScheduled() ? action.getEffectiveWeight() : 0;
+      if (weight <= 0) return action === entry.layer?.action;
+      applyAnchor(anchor, action.time, Math.min(1, weight));
+      return true;
+    });
   }
 
   /**

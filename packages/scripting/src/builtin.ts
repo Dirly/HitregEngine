@@ -11,18 +11,32 @@ import {
 } from "./script.js";
 import type { DataTypeSink, ScriptRegistry } from "./registry.js";
 import { CharacterSheetScript } from "./character-sheet.js";
+import { SettleLatch, SoundEmitter, Soundscape, SoundZone, worldClock } from "./soundscape.js";
 import { CharacterUi } from "./character-ui.js";
 import { EquipmentLook } from "./equipment-look.js";
+import { CharacterLook } from "./character-look.js";
+import { NpcScript } from "./npc.js";
+import { NpcUi } from "./npc-ui.js";
+import { Nameplates } from "./nameplates.js";
+import { QuestLog } from "./quest-log.js";
+import { PlayerRecords } from "./player-records.js";
 import { WeaponStance } from "./weapon-stance.js";
+import { stanceCarryFor, type StanceCarry } from "./stance-carry.js";
 import { MobBrain } from "./mob-brain.js";
 import {
   damp,
   fitAction,
   gaitFor,
+  gaitReadingSpeed,
   gaitSpeed as speedForGait,
   GaitTracker,
   groundFollowVy,
   risingByGround,
+  readGround,
+  probeLeaving,
+  airGravityScale,
+  extraGravityDv,
+  airSteer,
   leavingGround,
   playbackRate,
   swimAim,
@@ -44,6 +58,8 @@ import {
   pingPongProgress,
   type LoopMode,
 } from "./easing.js";
+import { FootfallTracker } from "./footfalls.js";
+import { advanceVelocity, isClipAdvance } from "./advance.js";
 
 /**
  * The standard interaction vocabulary, v1. Most gameplay requests should
@@ -443,8 +459,10 @@ class Damageable extends Script {
  * (a one-shot clip that takes over until the given time — on an upper-body
  * LAYER while the character is moving, so a cast or a swing does not stop the
  * legs, and full-body when standing still or when actionFullBody is set;
- * actionHold marks it a HELD pose — a raised guard — looped at its authored
- * pace instead of fitted to the window; actionUpperBody keeps it on the arms
+ * actionHold marks it a HELD pose — a raised guard — played once at its
+ * authored pace and held on its last frame instead of fitted to the window;
+ * actionLoop marks a pose meant to REPEAT — a channel, a cast loop — looped at
+ * its authored pace, never fitted; actionUpperBody keeps it on the arms
  * even standing still, so the legs walk whenever the body does),
  * impulseVel/impulseUntil (an external horizontal drive — dash, knockback —
  * that input cannot cancel while it lasts), liftUntil (a deadline until which
@@ -483,13 +501,78 @@ function clampAbs(value: number, limit: number): number {
   return Math.max(-limit, Math.min(limit, value));
 }
 
+/**
+ * Crossfade seconds between two locomotion cycles (walk → run, run → strafe).
+ * Longer than an action's snap on purpose: the two are phase-matched, so a
+ * quarter second reads as the stride changing pace rather than as a cut.
+ */
+const GAIT_FADE = 0.25;
+/** Seconds a stance carry takes to come onto (or off) the arms — including back after an action. */
+const CARRY_FADE = 0.2;
+/**
+ * Degrees a directional clip holds past its edge (50° side, 130° back) before
+ * giving way. Kept under 5° so the keyboard's own diagonals — exactly 45° and
+ * 135° — always land on the same side of an edge whatever was held before.
+ */
+const HEADING_HYSTERESIS = 4;
+
 class ThirdPersonController extends Script {
   static override scriptName = "third-person-controller";
   static override params = {
     speed: { default: 6.5, min: 0, max: 30, description: "run speed — the default gait" },
     walkSpeed: { default: 2.2, min: 0, max: 30, description: "speed while the walk key is held" },
     sprintSpeed: { default: 9.5, min: 0, max: 40, description: "speed while the sprint key is held" },
-    jump: { default: 8, min: 0, max: 30, description: "jump velocity" },
+    jump: {
+      default: 6.2,
+      min: 0,
+      max: 30,
+      description:
+        "Take-off velocity, m/s. With the default gravity shaping below this is a 1.21 m apex and 0.73 s in the " +
+        "air (a tap: 0.76 m, 0.50 s) — an action-RPG jump. At plain gravity the same number would be a 1.96 m " +
+        "float; raise it with the gravities, not instead of them.",
+    },
+    jumpGravity: {
+      default: 1.6,
+      min: 0.1,
+      max: 6,
+      description:
+        "Gravity while RISING in this character's own jump, as a multiple of world gravity (added by the controller " +
+        "on the fixed step, so the server's copy of the body flies the same arc). Higher = a quicker, punchier rise.",
+    },
+    fallGravity: {
+      default: 2.2,
+      min: 0.1,
+      max: 6,
+      description:
+        "Gravity while FALLING — after a jump's apex or off a ledge — as a multiple of world gravity. A fall heavier " +
+        "than the rise is what separates a snappy jump from a floaty, moon-like symmetric arc.",
+    },
+    jumpCutGravity: {
+      default: 3,
+      min: 0.1,
+      max: 10,
+      description:
+        "Gravity while still rising after the jump key was LET GO, as a multiple of world gravity: the short hop. " +
+        "Equal to jumpGravity makes every jump full height however briefly the key is tapped.",
+    },
+    airControl: {
+      default: 0.3,
+      min: 0,
+      max: 1,
+      description:
+        "How much the stick steers the body in the air, 0..1. 0 = pure momentum (committed jumps), 1 = about as " +
+        "responsive as on the ground. In between the velocity is blended toward the input instead of overwritten, " +
+        "and with no input the body keeps the momentum it took off with.",
+    },
+    stepHeight: {
+      default: 0.35,
+      min: 0,
+      max: 1,
+      description:
+        "Tallest lip, metres, the character steps up onto without a jump (needs groundProbe and groundStick; 0 turns " +
+        "it off). A ray just past the collider's leading edge measures the ground ahead against the slope underfoot; " +
+        "a rise up to this is climbed smoothly instead of the capsule stalling against it or popping over it.",
+    },
     idleClip: { default: "Idle" },
     walkClip: { default: "Walk", description: "optional — falls back to the run clip" },
     runClip: { default: "Run" },
@@ -531,6 +614,12 @@ class ThirdPersonController extends Script {
     backClip: { default: "Run_Bwd", description: "optional — played while backing up" },
     leftClip: { default: "Run_Left", description: "optional — played while strafing left" },
     rightClip: { default: "Run_Right", description: "optional — played while strafing right" },
+    walkBackClip: {
+      default: "Walk_Bwd",
+      description: "optional — backing up at a WALK; a model without it backs up on backClip",
+    },
+    walkLeftClip: { default: "Walk_Left", description: "optional — strafing left at a walk (else leftClip)" },
+    walkRightClip: { default: "Walk_Right", description: "optional — strafing right at a walk (else rightClip)" },
     sprintKey: { default: "ShiftLeft", description: "hold to sprint" },
     walkKey: { default: "AltLeft", description: "hold to walk" },
     autoRunKey: {
@@ -659,9 +748,66 @@ class ThirdPersonController extends Script {
         "to, and any gap between the two shows up as skating feet. The `retarget` tool measures " +
         "these off the baked clips and prints them ready to paste.",
     },
-    footsteps: { default: false, description: "Emit gait-synchronised local movement sounds. The controller measures distance travelled, so steps stay in sync when speed changes." },
+    clipFootfalls: {
+      default: {},
+      description:
+        "When each locomotion clip's feet touch down, as fractions of the clip (0..1), one entry " +
+        "per contact, the LEFT foot's first — e.g. {\"Walk\": [0.98, 0.48], \"Run\": [0, 0.5]}. The " +
+        "order is what lets stanceCarry line a stance's upper body up with a different clip's legs " +
+        "(left contact on left contact); footsteps do not care about it. With it a " +
+        "footstep plays as the clip's playhead passes each contact, so the sound lands with the " +
+        "foot at any speed, gait or playback rate; a clip without an entry falls back to " +
+        "footstepCadence. `retarget` measures these (heel or toe strike, whichever is first) and " +
+        "prints them next to clipSpeeds — `retarget --measure <model.glb>` reads them off a " +
+        "finished bake.",
+    },
+    clipAdvance: {
+      default: {},
+      description:
+        "How far the ground goes by under each one-shot clip that STEPS (a lunge, a sword combo, a " +
+        "heavy swing that closes in), so the body travels with its feet instead of skating and " +
+        "snapping back. Per clip: {d: seconds, f: [metres...], s?: [metres...]} — cumulative travel " +
+        "at evenly spaced points from the first frame (0) to the last, f along the model's +Z " +
+        "(forward), s along its +X. While such a clip plays FULL-BODY on a grounded body (not " +
+        "layered over a gait, not frozen, not during an impulse like a dash, not rooted by " +
+        "speedMult 0) the controller adds the curve's slope x the clip's playback rate to the " +
+        "body's velocity along its facing. It is a velocity, so walls and ledges stop it. " +
+        "`retarget --measure <model.glb>` measures it off the planted feet and prints it next to " +
+        "clipFootfalls. Keys are the DRESSED clip names (Sword_Attack1, not Attack1).",
+    },
+    advanceScale: {
+      default: 1,
+      min: 0,
+      max: 2,
+      description:
+        "Multiplier on clipAdvance travel. 1 keeps the feet planted; 0 turns clip advance off " +
+        "(the old stand-still swings); above 1 lunges further than the feet step, which skates.",
+    },
+    footsteps: {
+      default: false,
+      description:
+        "Emit local foot-contact sounds while grounded. Steps follow clipFootfalls on clips that " +
+        "have them (in time with the feet), else a distance cadence (footstepCadence). Never " +
+        "while airborne, and only on locomotion clips.",
+    },
     footstepSounds: { default: {}, description: "Surface-to-sound map. Keys: grass, sand, dirt, wood, stone, water, snow, metal, rubble. Each value may be a comma-separated variant list." },
-    footstepCadence: { default: 3.1, min: 1, max: 8, description: "Target foot contacts per second while moving. Distance per contact grows with speed, keeping a run from becoming a sped-up walk sound." },
+    footstepCadence: {
+      default: 3.1,
+      min: 1,
+      max: 8,
+      description:
+        "FALLBACK for locomotion clips with no clipFootfalls entry (and hosts with no animation " +
+        "playhead): target foot contacts per second. Distance per contact grows with speed, " +
+        "keeping a run from becoming a sped-up walk sound. Swim strokes always use a distance cadence.",
+    },
+    landSoundAir: {
+      default: 0.25,
+      min: 0,
+      max: 2,
+      description:
+        "Seconds off the ground before touching down plays a landing sound. Shorter drops — a " +
+        "curb, a stair, the lip of a slope — are just the next footstep.",
+    },
     footstepVolume: { default: 0.14, min: 0, max: 1, description: "Maximum local footstep volume. Kept quiet because these are close foley, not music." },
     jumpSound: { default: "", description: "Optional takeoff sound asset id." },
     landSound: { default: "", description: "Optional landing sound asset id; uses the current surface when footstepSounds has a matching key." },
@@ -797,6 +943,25 @@ class ThirdPersonController extends Script {
         "userData.combatUntil (seconds, ctx.now) is in the future, so a character walks and idles normally " +
         "and takes the guarded stance around a fight; always = whenever the weapon is held; never = never.",
     },
+    stanceCarry: {
+      default: "upper",
+      description:
+        "How a stance's gait sits on the body while it walks, runs, sprints or strafes (whenever stanceGaits " +
+        "puts the stance's gait in force). upper = the LEGS always play the plain gait clip (Walk, Run, " +
+        "Run_Left …) and the upper body plays the stance's own clip for that gait (TwoHanded_Run), phase-locked " +
+        "to the legs through clipFootfalls so the arms swing with the stride — or, for a stance in " +
+        "stanceCarryHold with no clip for the gait, the stance's idle held as a carry pose. full = the stance's " +
+        "clip takes the whole body, legs included. Idle and turns are the stance's full-body clips either way; " +
+        "an upper-body action (a raised guard, a cast) replaces the carry while it runs and the carry fades " +
+        "back after.",
+    },
+    stanceCarryHold: {
+      default: ["SwordShield", "Shield"],
+      description:
+        "Stances that HOLD their idle's upper body (<Stance>_<idleClip>) over a gait they have no clip for — " +
+        "a shield carried up rather than swinging at the side. A stance not listed keeps the plain gait's arm " +
+        "swing (a one-handed sword's jog). Only read with stanceCarry: upper.",
+    },
     actionBlend: {
       default: "auto",
       description:
@@ -814,6 +979,11 @@ class ThirdPersonController extends Script {
   /** How long the last stretch off the ground lasted (the landing reads it). */
   private airFor = 0;
   private lastJump = -999;
+  /** Rising in this body's own jump — what jumpGravity / jumpCutGravity shape. */
+  private jumping = false;
+  /** What the step-up ray found this tick (see readGround). */
+  private groundStep = 0;
+  private groundStepReach = 0;
   private autoRun = false;
   private autoRunHeld = false;
   private lastClip = "";
@@ -824,6 +994,35 @@ class ThirdPersonController extends Script {
   private actionLayered = false;
   /** How the running action was fitted to its window (rate, and whether it loops). */
   private actionFit: ActionFit = { rate: 1, loop: true };
+  /** The actionUntil the running action was last seen with — see actionStarting. */
+  private actionEnds = 0;
+  /**
+   * Clip advance (see clipAdvance): the full-body action whose travel the body
+   * follows, its clip-time playhead at the start of the next tick, and the rate
+   * it plays at. `advanceLive` is re-armed every tick the action plays
+   * full-body and consumed by the next tick's movement, so anything that stops
+   * the full-body branch (a layer, a freeze, the action ending) stops the travel.
+   */
+  private advanceClip: string | null = null;
+  private advanceClock = 0;
+  private advanceRate = 1;
+  private advanceLoop = false;
+  private advanceLive = false;
+  private advanceAt = -Infinity;
+  /** The advance velocity applied last tick — taken back out of the measured speed (see ownPlanar). */
+  private advanceLastVel: [number, number] = [0, 0];
+  /** Whether the clip playing now is a locomotion cycle (see play's `gait`). */
+  private lastGait = false;
+  /**
+   * The one upper-body layer, arbitrated: who has it now (a layered ACTION, the
+   * stance CARRY, or nobody), the carry on it, and the carry this tick asks
+   * for. An action always wins; the carry comes back when it ends.
+   */
+  private layerOn: "action" | "carry" | null = null;
+  private layerCarry: StanceCarry | null = null;
+  private carryWant: StanceCarry | null = null;
+  /** Directional clip in force, held through the edges — see travelHeading. */
+  private heading: "back" | "left" | "right" | null = null;
   /** Gait tier currently playing, with its dwell state — see gaitDwell. */
   private readonly gait = new GaitTracker();
   /** Deadlines for the two one-shots that bracket a jump. */
@@ -861,11 +1060,30 @@ class ThirdPersonController extends Script {
   private swimVertical = 0;
   /** Distance paid toward the next foot contact or swim stroke. */
   private footstepDistance = 0;
+  /** No footfalls while the world streams in under a fresh spawn: a body settling onto arriving ground is not walking. */
+  private soundSettle = new SettleLatch();
+  /** The base clip's playhead across ticks — footsteps fire as it passes a clipFootfalls contact. */
+  private readonly footfalls = new FootfallTracker();
+  /** When the last footstep played (s) — two contacts never sound closer than a real stride allows. */
+  private lastStepAt = -Infinity;
 
-  private play(clip: string, fade: number, loop = true, restart = false): void {
+  /**
+   * `gait` marks a locomotion cycle. One gait cycle replacing another (walk →
+   * run, run → strafe) is PHASE-matched and faded over GAIT_FADE: restarting
+   * the incoming cycle at frame 0 swaps the feet mid-stride, and a short
+   * linear fade between two strides that disagree is the pop at every
+   * threshold. Actions and idles keep their own (snappier) fades.
+   */
+  private play(clip: string, fade: number, loop = true, restart = false, gait = false): void {
     if (this.lastClip === clip && !restart) return;
+    const sync = gait && this.lastGait && !restart;
     this.lastClip = clip;
-    this.ctx.setAnimation?.(clip, fade, { loop, ...(restart ? { restart: true } : {}) });
+    this.lastGait = gait;
+    this.ctx.setAnimation?.(clip, sync ? Math.max(fade, GAIT_FADE) : fade, {
+      loop,
+      ...(restart ? { restart: true } : {}),
+      ...(sync ? { sync: true } : {}),
+    });
   }
 
   /**
@@ -886,20 +1104,78 @@ class ThirdPersonController extends Script {
    * only as `stanceGaits` allows — by default only in combat.
    */
   private dress(base: string, gait = false): string {
-    const ud = this.object.userData as { stance?: string | string[]; holdingWeapon?: boolean; combatUntil?: number };
-    let stances = typeof ud.stance === "string" ? [ud.stance] : (ud.stance ?? []);
-    if (gait) {
-      // How a character stands and walks is not how it fights: out of combat
-      // the plain gait, with the weapon simply carried (see stanceGaits).
-      const mode = this.param<string>("stanceGaits");
-      const fighting = (ud.combatUntil ?? 0) > this.ctx.now() / 1000;
-      if (mode === "never" || (mode !== "always" && !fighting)) stances = [];
-    }
+    const ud = this.object.userData as { holdingWeapon?: boolean };
+    const stances = this.stancesFor(gait);
     for (const s of stances) {
       const name = `${s}_${base}`;
       if (this.hasClip(name)) return name;
     }
     return ud.holdingWeapon === true ? this.pick(`${base}_Hold`, base) : base;
+  }
+
+  /**
+   * The weapon stances in force, most specific first — for a GAIT only as
+   * `stanceGaits` allows. How a character stands and walks is not how it
+   * fights: out of combat the plain gait, with the weapon simply carried.
+   */
+  private stancesFor(gait: boolean): readonly string[] {
+    const ud = this.object.userData as { stance?: string | string[]; combatUntil?: number };
+    const stances = typeof ud.stance === "string" ? [ud.stance] : (ud.stance ?? []);
+    if (!gait || stances.length === 0) return stances;
+    const mode = this.param<string>("stanceGaits");
+    const fighting = (ud.combatUntil ?? 0) > this.ctx.now() / 1000;
+    return mode === "never" || (mode !== "always" && !fighting) ? [] : stances;
+  }
+
+  /**
+   * The stance's upper body to carry over the plain locomotion clip `gait`
+   * (see stanceCarry), or null when the gait should be dressed whole — the
+   * `full` policy, a host with no layers, no stance in force, or a stance with
+   * nothing to carry (a one-hander keeps the plain jog's arm swing).
+   */
+  private carryFor(gait: string): StanceCarry | null {
+    if (this.param<string>("stanceCarry") === "full" || !this.ctx.setAnimationLayer) return null;
+    const stances = this.stancesFor(true);
+    if (stances.length === 0) return null;
+    const hold = this.param<string[]>("stanceCarryHold");
+    return stanceCarryFor({
+      gait,
+      stances,
+      idle: this.param<string>("idleClip"),
+      has: (clip) => this.hasClip(clip),
+      hold: Array.isArray(hold) ? hold : [],
+      footfalls: this.param<Record<string, number[]>>("clipFootfalls") ?? {},
+    });
+  }
+
+  /**
+   * Settle the upper-body layer after a tick: a layered action keeps it; else
+   * the carry this tick asked for goes on (fading over the action it replaces,
+   * or in over a bare gait); else whatever is left there comes off. The one
+   * place the layer changes hands, so an action ending mid-walk hands the
+   * arms straight back to the carry instead of clearing and re-raising.
+   */
+  private settleLayer(): void {
+    if (this.action && this.actionLayered) return;
+    const want = this.carryWant;
+    if (want) {
+      const have = this.layerOn === "carry" ? this.layerCarry : null;
+      if (!have || have.clip !== want.clip || have.lock !== want.lock) {
+        this.ctx.setAnimationLayer?.(want.clip, {
+          fade: CARRY_FADE,
+          loop: true,
+          ...(want.lock !== null ? { phaseLock: want.lock } : { speed: 1 }),
+        });
+      }
+      this.layerOn = "carry";
+      this.layerCarry = want;
+      return;
+    }
+    if (this.layerOn !== null) {
+      this.ctx.clearAnimationLayer?.(this.layerOn === "carry" ? CARRY_FADE : 0.15);
+      this.layerOn = null;
+      this.layerCarry = null;
+    }
   }
 
   /** Whether the model has `name` — false while the clip list is still unknown. */
@@ -945,6 +1221,39 @@ class ThirdPersonController extends Script {
     this.ctx.setAnimationSpeed?.(rate);
   }
 
+  /**
+   * Is `action` a NEW action this tick — to be fitted, and played from frame
+   * 0 — rather than the one already running? A different clip is; so is the
+   * SAME clip asked for again once its previous window has run out (the second
+   * cast of one spell, set on the very tick the first one ends, so this never
+   * saw a gap). A window pushed later while it is still running — a channel
+   * that got longer — is the same action carrying on, not a restart.
+   *
+   * Only the START restarts. Restarting every tick re-seeks the clip to frame
+   * 0 sixty times a second: a standing swing that never gets past its first
+   * pose.
+   */
+  private actionStarting(action: string | null, until: number, now: number, dt: number): boolean {
+    const renewed = action !== null && action === this.action && until !== this.actionEnds && this.actionEnds <= now + dt;
+    this.actionEnds = action ? until : 0;
+    return action !== this.action || renewed;
+  }
+
+  /**
+   * How an action plays: a HELD pose (`actionHold` — a raised guard) once at
+   * its authored pace and clamped on its last frame, however long it is held;
+   * a REPEATING one (`actionLoop` — a channel, a cast loop) looped at its
+   * authored pace; anything else fitted to its window (see fitAction). Neither
+   * of the first two is fitted: a window of "until let go" has no length to
+   * fit to, and a loop stretched to its window plays once and stops.
+   */
+  private fitActionFor(clip: string, ud: { actionHold?: boolean; actionLoop?: boolean; actionUntil?: number }, now: number): ActionFit {
+    if (ud.actionLoop === true) return { rate: 1, loop: true };
+    if (ud.actionHold === true) return { rate: 1, loop: false };
+    if (!this.param<boolean>("fitActionClip")) return { rate: 1, loop: true };
+    return fitAction(this.clipLength(clip), (ud.actionUntil ?? now) - now);
+  }
+
   override onStart(): void {
     this.yaw = this.object.rotation.y;
     this.airTime = 0;
@@ -954,6 +1263,12 @@ class ThirdPersonController extends Script {
     this.action = null;
     this.actionLayered = false;
     this.actionFit = { rate: 1, loop: true };
+    this.actionEnds = 0;
+    this.advanceClip = null;
+    this.advanceLive = false;
+    this.advanceAt = -Infinity;
+    this.lastGait = false;
+    this.heading = null;
     this.gait.reset();
     // the body may have been moved (a respawn, a transfer): measure the ground
     // again rather than trusting a resting distance from wherever it was
@@ -963,6 +1278,9 @@ class ThirdPersonController extends Script {
     this.groundRest = null;
     this.stickVy = null;
     this.lastAt = null; // the teleport watch starts from wherever the body is now
+    this.jumping = false;
+    this.groundStep = 0;
+    this.groundStepReach = 0;
     this.pitch = 0;
     this.roll = 0;
     this.swimState = "dry";
@@ -972,11 +1290,15 @@ class ThirdPersonController extends Script {
     this.swimPitchNow = 0;
     this.swimVertical = 0;
     this.footstepDistance = 0;
+    this.footfalls.reset();
     this.jumpUntil = 0;
     this.landUntil = 0;
     this.wasAirborne = false;
     this.turning = null;
     this.lastYaw = this.yaw;
+    this.layerOn = null;
+    this.layerCarry = null;
+    this.carryWant = null;
     this.ctx.clearAnimationLayer?.(0);
     this.play(this.param<string>("idleClip"), 0.2);
   }
@@ -984,10 +1306,19 @@ class ThirdPersonController extends Script {
   override onDispose(): void {
     // the model outlives the script (a rebuild, a respawn); a layer left up
     // would hold a cast pose on its arms forever
-    if (this.actionLayered) this.ctx.clearAnimationLayer?.(0);
+    if (this.actionLayered || this.layerOn !== null) this.ctx.clearAnimationLayer?.(0);
   }
 
   override onFixedUpdate(dt: number): void {
+    this.soundSettle.tick(this.ctx.worldLoading?.(), dt);
+    // The gait below says what carry it wants (if any); the layer is settled
+    // once, after, whichever way the tick went.
+    this.carryWant = null;
+    this.stepBody(dt);
+    this.settleLayer();
+  }
+
+  private stepBody(dt: number): void {
     const sim = this.ctx.sim;
     if (!sim) return;
     const vel = sim.getLinvel(this.entityId);
@@ -1001,6 +1332,7 @@ class ThirdPersonController extends Script {
       actionUntil?: number;
       actionFullBody?: boolean;
       actionHold?: boolean;
+      actionLoop?: boolean;
       actionUpperBody?: boolean;
       impulseVel?: [number, number];
       impulseUntil?: number;
@@ -1011,34 +1343,41 @@ class ThirdPersonController extends Script {
       waterDepth?: number;
       /** The velocity a swimming body is asking for — what this tab sends its authority. */
       swimVelocity?: [number, number, number];
+      /** Clip advance added this tick (world x, z) — sent to the authority on top of the stick. */
+      advanceVel?: [number, number];
     };
+    // Whatever this tick moves by, it is not last tick's lunge until the
+    // grounded branch below says so.
+    ud.advanceVel = undefined;
     // Watched before the freeze, because a body is usually frozen exactly
     // while it is being moved (a death and its respawn are one pair).
     if (this.teleported(Math.hypot(vel[0], vel[1], vel[2]), dt)) this.forgetGround();
     if (ud.frozen) {
       sim.setLinvel(this.entityId, [0, vel[1], 0]);
+      this.advanceLive = false; // a frozen body is pinned, lunge or not
+      this.advanceLastVel = [0, 0];
       // A death or emote clip still plays through a freeze. Freezing stops the
       // legs; it does not cancel an animation somebody asked for — and a
       // script that sets actionClip and frozen together (dying is the usual
       // pair) otherwise watches its death clip get replaced by idle.
       const frozenNow = this.ctx.now() / 1000;
       const held = ud.actionClip && (ud.actionUntil ?? 0) > frozenNow ? this.dress(ud.actionClip) : null;
-      if (this.actionLayered) {
+      if (this.actionLayered || this.layerOn !== null) {
         this.ctx.clearAnimationLayer?.(0.15); // no gait left for it to sit on
         this.actionLayered = false;
+        this.layerOn = null;
+        this.layerCarry = null;
       }
-      const starting = held !== this.action;
+      const starting = this.actionStarting(held, ud.actionUntil ?? 0, frozenNow, dt);
       this.action = held;
       if (held && starting) {
         // fitted like any other action — a death clip that reaches its end and
         // starts again is the single most obvious animation bug there is
-        this.actionFit =
-          this.param<boolean>("fitActionClip") && ud.actionHold !== true
-            ? fitAction(this.clipLength(held), (ud.actionUntil ?? frozenNow) - frozenNow)
-            : { rate: 1, loop: true };
+        this.actionFit = this.fitActionFor(held, ud, frozenNow);
       }
-      this.setRateRaw(held ? this.actionFit.rate : 1);
+      // played BEFORE the rate is set, so the clip fading out keeps its own
       this.play(held ?? this.param<string>("idleClip"), 0.25, !held || this.actionFit.loop, starting && held !== null);
+      this.setRateRaw(held ? this.actionFit.rate : 1);
       return;
     }
 
@@ -1164,6 +1503,11 @@ class ThirdPersonController extends Script {
     // whose window doubles as the coyote grace on a jump.
     const now = this.ctx.now() / 1000;
     const planar = Math.hypot(vel[0], vel[2]);
+    // The body's OWN travel: less the clip advance it was handed last tick.
+    // "Is it walking?" reads this, or a swing's lunge makes the next swing of
+    // the combo an upper-body layer with no lunge of its own.
+    const ownPlanar = Math.hypot(vel[0] - this.advanceLastVel[0], vel[2] - this.advanceLastVel[1]);
+    this.advanceLastVel = [0, 0];
 
     // Swimming replaces the whole vertical half of this tick — no gravity to
     // fight, no ground to follow, no jump, no coyote window — and nothing
@@ -1217,8 +1561,13 @@ class ThirdPersonController extends Script {
       this.wasAirborne = false;
       this.landUntil = 0;
       this.stickVy = null;
+      this.jumping = false;
     } else {
-      const probed = this.probeGround(sim, now, vy, planar);
+      // A script that launched the body owns its rise until its deadline.
+      const lifted = (ud.liftUntil ?? 0) > now;
+      // Our own jump stops being one at its apex; from there it is a fall.
+      if (this.jumping && vy <= 0) this.jumping = false;
+      const probed = this.probeGround(sim, now, vy, planar, x, z, this.jumping || lifted);
       const leaving =
         probed !== null
           ? probed
@@ -1239,8 +1588,13 @@ class ThirdPersonController extends Script {
       // can skip it.
       if (this.wasAirborne && grounded) {
         // The first contact after a fall belongs to the floor just as much as
-        // an ordinary step: sand absorbs it, metal rings, rubble rattles.
-        this.contactSound(4, 1);
+        // an ordinary step: sand absorbs it, metal rings, rubble rattles. Only
+        // after a real fall, though — a step down a curb clears the coyote
+        // window and, sounded as a landing, is a thud on every stair.
+        if (this.airFor >= this.param<number>("landSoundAir")) {
+          this.contactSound(4, 1);
+          this.lastStepAt = now;
+        }
         // Skipped at speed on purpose: a character landing mid-run flows back
         // into the run, and stopping to absorb the landing reads as a stumble.
         if (this.airFor >= this.param<number>("landDrop") && planar < this.param<number>("speed") * 0.6) {
@@ -1248,20 +1602,55 @@ class ThirdPersonController extends Script {
         }
       }
       this.wasAirborne = !grounded;
-      if (input.isDown("Space") && grounded) {
+      if (grounded && now - this.lastJump >= 0.25) this.jumping = false;
+      const jumpHeld = input.isDown("Space");
+      let tookOff = false;
+      if (jumpHeld && grounded) {
         this.movementSound(this.param<string>("jumpSound"), 3, 0.75);
         vy = this.param<number>("jump");
         this.lastJump = now; // and no re-jump inside the coyote window
+        this.jumping = true;
+        tookOff = true;
         // the push-off owns the body until it has played out, then the air clip
         // loops under it — a jump that opens on its airborne pose has no weight
         this.jumpUntil = now + (this.clipLength(this.param<string>("jumpClip")) ?? 0.35);
         this.landUntil = 0;
       }
-      vy = this.followGround(x, vy, z, grounded && !((ud.liftUntil ?? 0) > now), now, dt);
-      sim.setLinvel(this.entityId, [x, vy, z]);
+      // A full-body action that steps carries the body with its feet (see
+      // clipAdvance). Added to the gait rather than replacing it, and ahead of
+      // ground-following so a lunge down a slope stays on the slope.
+      const [ax, az] = this.takeClipAdvance(grounded && !driven && !lifted && (ud.speedMult ?? 1) > 0, dt);
+      if (ax !== 0 || az !== 0) ud.advanceVel = [ax, az];
+      this.advanceLastVel = [ax, az];
+      vy = this.followGround(x + ax, vy, z + az, grounded && !lifted, now, dt);
+      // Gravity, shaped. World gravity alone gives a symmetric arc that hangs:
+      // at 6.5 m/s a 2.1 m apex and 1.3 s in the air, taller than the
+      // character. The controller adds the difference on the fixed step (the
+      // take-off tick excepted, so the jump leaves at exactly `jump`), which
+      // keeps it per-character and identical on the server's copy of the body.
+      if (!tookOff && !lifted && (!grounded || this.jumping)) {
+        vy += extraGravityDv(
+          airGravityScale(vy, this.jumping, jumpHeld, {
+            riseGravity: this.param<number>("jumpGravity"),
+            fallGravity: this.param<number>("fallGravity"),
+            cutGravity: this.param<number>("jumpCutGravity"),
+          }),
+          dt,
+        );
+      }
+      // Air control: momentum carries, the stick only nudges. Writing the full
+      // gait velocity every airborne tick let the body turn on a dime mid-air.
+      let vx = x + ax;
+      let vz = z + az;
+      if (!grounded && !driven) {
+        [vx, vz] = airSteer(vel[0], vel[2], x, z, len > 0, this.param<number>("airControl"), dt);
+      }
+      sim.setLinvel(this.entityId, [vx, vy, vz]);
     }
 
-    this.updateFootsteps(planar, grounded, isSwimming, stroking, dt);
+    // TRUE contact for footsteps, not `grounded`: that one keeps the coyote
+    // grace, which is a jump window, and would step on air off every ledge.
+    this.updateFootsteps(planar, grounded && this.airTime === 0, isSwimming, stroking, dt);
 
     const facingTarget = this.steerFacing(ud, x, z, faceCamera, backing, fx, fz, driven, len, now, dt);
     // sculling backwards plays the upright tread cycle, so it must not be laid
@@ -1284,7 +1673,8 @@ class ThirdPersonController extends Script {
     // between layered and full-body every time the character crossed the
     // walking threshold mid-animation.
     const action = ud.actionClip && (ud.actionUntil ?? 0) > now ? this.dress(ud.actionClip) : null;
-    if (action !== this.action) {
+    const starting = this.actionStarting(action, ud.actionUntil ?? 0, now, dt);
+    if (starting) {
       const blend = this.param<string>("actionBlend");
       const layered =
         action !== null &&
@@ -1302,40 +1692,45 @@ class ThirdPersonController extends Script {
           // full-body guard raised standing still would pin the legs in its
           // pose for as long as it is held — the character slides, not walks
           ud.actionUpperBody === true ||
-          planar > Math.max(0.2, this.param<number>("walkSpeed") * 0.5));
-      if (this.actionLayered && !layered) this.ctx.clearAnimationLayer?.(0.15);
+          ownPlanar > Math.max(0.2, this.param<number>("walkSpeed") * 0.5));
+      // An action layer that ended is not cleared here: settleLayer hands the
+      // arms back to the stance carry if the gait wants one, else clears.
       this.action = action;
       this.actionLayered = layered;
       // Fit the clip to the window the caller asked for. A cast that lasts
       // three seconds and a cast animation that lasts one are not a request to
       // play the animation three times — that repeat is what makes a long cast
       // read as a stuck loop rather than a long cast. Where the window is too
-      // long for even the slowest playback to cover, it loops after all, and a
-      // clip nobody can measure (model still loading, headless host) keeps the
-      // old looping behaviour.
-      // A HELD pose (a raised guard) has no window to fit: it loops at its
-      // authored pace for as long as the caller keeps asserting it.
-      this.actionFit =
-        action && this.param<boolean>("fitActionClip") && ud.actionHold !== true
-          ? fitAction(this.ctx.animationDuration?.(action) ?? null, (ud.actionUntil ?? now) - now)
-          : { rate: 1, loop: true };
+      // long for even the slowest playback to cover, it plays once at that
+      // floor and holds, and a clip nobody can measure (model still loading,
+      // headless host) keeps the old looping behaviour.
+      // A HELD pose (a raised guard) and a REPEATING one (a channel) have no
+      // window to fit — see fitActionFor.
+      this.actionFit = action ? this.fitActionFor(action, ud, now) : { rate: 1, loop: true };
       if (action && layered) {
         this.ctx.setAnimationLayer?.(action, {
           fade: 0.08,
           loop: this.actionFit.loop,
           speed: this.actionFit.rate,
+          // the same clip asked for again replays; a new one starts at 0 anyway
+          restart: true,
         });
+        this.layerOn = "action";
+        this.layerCarry = null;
       }
     }
     // Full-body: the action IS the pose, so nothing below runs. Layered: fall
     // through and pick a gait as usual — the legs are still ours.
     if (action && !this.actionLayered) {
+      // restart ON THE START ONLY: the same clip twice in a row (a second cast
+      // of one spell) has already been played to its clamped last frame, and a
+      // plain play() of the clip already current is a no-op — but restarting
+      // every tick seeks it back to frame 0 sixty times a second, and the
+      // swing never plays at all.
+      this.play(action, 0.05, this.actionFit.loop, starting);
+      // after the play, so the gait fading out keeps its own rate
       this.setRateRaw(this.actionFit.rate);
-      // restart: the same clip twice in a row (a second cast of one spell) has
-      // already been played to its clamped last frame, and a plain play() of
-      // the clip already current is a no-op — the character would freeze
-      // holding the pose from the previous cast.
-      this.play(action, 0.05, this.actionFit.loop, true);
+      this.trackClipAdvance(action, starting, now, dt);
       return;
     }
 
@@ -1361,16 +1756,16 @@ class ThirdPersonController extends Script {
       // a model without a push-off clip stays on its looping air clip; playing
       // that one as a one-shot would clamp it on its last frame forever
       const pushing = start !== air && now < this.jumpUntil;
-      this.setRateRaw(1);
       this.play(variant(pushing ? start : air), 0.15, !pushing);
+      this.setRateRaw(1);
       return;
     }
 
     if (now < this.landUntil) {
       const land = this.pick(this.param<string>("landClip"), idle);
       if (land !== idle) {
-        this.setRateRaw(1);
         this.play(variant(land), 0.08, false);
+        this.setRateRaw(1);
         return;
       }
       this.landUntil = 0;
@@ -1387,8 +1782,15 @@ class ThirdPersonController extends Script {
     // paying that out at the horizontal rate is skating. The vertical share is
     // capped against the horizontal so a body bouncing on the spot does not
     // read as sprinting.
+    //
+    // …with one deliberate slow-down taken back out: a strafe or backpedal is
+    // `sideSpeedMult` of the gait BY DESIGN (the player's own intent, not the
+    // world slowing them), and read raw a sideways run fell under the walk/run
+    // line and played the walk cycle at its rate cap — a scurry that still
+    // skated. See gaitReadingSpeed.
     const tuning: GaitTuning = { walkSpeed, runSpeed, sprintSpeed };
-    const gait = this.stepGait(planar, tuning, now);
+    const sideMult = this.param<number>("sideSpeedMult");
+    const gait = this.stepGait(gaitReadingSpeed(planar, lateral && len > 0 && !driven ? sideMult : 1), tuning, now);
     const moving = Math.hypot(planar, Math.min(Math.abs(vel[1]), planar * 1.2));
 
     // Wading is a BAND, not a line: the wade cycle is mixed into whatever the
@@ -1407,9 +1809,9 @@ class ThirdPersonController extends Script {
     }
 
     if (gait === "idle") {
-      this.setRateRaw(1);
       const turn = this.turnInPlace(dt);
       this.play(variant(turn ?? idle), 0.25);
+      this.setRateRaw(1);
       return;
     }
     this.turning = null;
@@ -1430,17 +1832,21 @@ class ThirdPersonController extends Script {
     // turning to face where it runs, so mid-turn the two disagree by up to 180°
     // for a few frames, and reading a heading off that flickers the back clip
     // at the start of every move.
-    const heading = faceCamera || backing ? this.travelHeading(x, z, facingTarget) : null;
+    const heading = faceCamera || backing ? this.travelHeading(x, z, facingTarget, this.heading) : null;
+    this.heading = heading;
     if (heading !== null) {
-      const directional =
-        heading === "back"
-          ? this.pick(this.param<string>("backClip"), clip)
-          : heading === "left"
-            ? this.pick(this.param<string>("leftClip"), clip)
-            : this.pick(this.param<string>("rightClip"), clip);
+      // A walk keeps to walking clips where the model has them (Walk_Left …);
+      // otherwise the run's strafe stands in, paced to the walk by setRate.
+      const runDir = this.param<string>(heading === "back" ? "backClip" : heading === "left" ? "leftClip" : "rightClip");
+      const walkDir =
+        gait === "walk"
+          ? this.param<string>(heading === "back" ? "walkBackClip" : heading === "left" ? "walkLeftClip" : "walkRightClip")
+          : "";
+      const walking = walkDir !== "" && this.hasClip(walkDir);
+      const directional = walking ? walkDir : this.pick(runDir, clip);
       if (directional !== clip) {
         clip = directional;
-        nominal = runSpeed * this.param<number>("sideSpeedMult");
+        nominal = (walking ? walkSpeed : runSpeed) * sideMult;
       }
     }
 
@@ -1460,9 +1866,15 @@ class ThirdPersonController extends Script {
 
     // paced by the clip actually SHOWN: a greatsword jog is not authored at
     // the pace of the unarmed run it stands in for
-    const shown = variant(clip);
+    // The rate is set AFTER the play: set first, the cycle fading OUT would be
+    // retimed to the incoming clip's pace for the length of the crossfade.
+    // Stance carry: the legs keep the plain gait and the stance rides the arms
+    // (see stanceCarry) — a two-handed library's own run is a different run.
+    const carry = this.carryFor(clip);
+    this.carryWant = carry;
+    const shown = carry ? clip : variant(clip);
+    this.play(shown, 0.15, true, false, true);
     this.setRate(moving, shown, nominal);
-    this.play(shown, 0.15);
   }
 
   /**
@@ -1527,6 +1939,7 @@ class ThirdPersonController extends Script {
   private blendPlay(from: string, to: string, weight: number, fade: number): void {
     if (this.ctx.setAnimationBlend && from !== to) {
       this.lastClip = weight >= 0.5 ? to : from; // keep play()'s idempotence honest
+      this.lastGait = false; // the host phase-matches a held blend itself
       this.ctx.setAnimationBlend(from, to, weight, fade);
       return;
     }
@@ -1701,6 +2114,50 @@ class ThirdPersonController extends Script {
   }
 
   /**
+   * Arm clip advance for the NEXT tick's movement: the full-body action now
+   * playing, and its clip-time playhead. Restarted at 0 when the action
+   * starts; otherwise moved on by the tick at the rate it played at.
+   */
+  private trackClipAdvance(action: string, starting: boolean, now: number, dt: number): void {
+    // carried on only from the tick just before — a gap is a new action
+    if (starting || action !== this.advanceClip || now - this.advanceAt > dt * 1.5) {
+      this.advanceClip = action;
+      this.advanceClock = 0;
+    } else {
+      this.advanceClock += dt * this.advanceRate;
+    }
+    this.advanceAt = now;
+    this.advanceRate = this.actionFit.rate;
+    this.advanceLoop = this.actionFit.loop;
+    this.advanceLive = true;
+  }
+
+  /**
+   * This tick's clip-advance velocity (world x, z), or zeros. Consumes the arm
+   * trackClipAdvance left: a tick that does not play the action full-body
+   * again does not travel again.
+   */
+  private takeClipAdvance(allowed: boolean, dt: number): [number, number] {
+    const live = this.advanceLive;
+    this.advanceLive = false;
+    if (!live || !allowed || !this.advanceClip) return [0, 0];
+    const scale = this.param<number>("advanceScale") ?? 1;
+    if (!(scale > 0)) return [0, 0];
+    const entry = (this.param<Record<string, unknown>>("clipAdvance") ?? {})[this.advanceClip];
+    if (!isClipAdvance(entry)) return [0, 0];
+    const duration = this.clipLength(this.advanceClip) ?? entry.d ?? 0;
+    return advanceVelocity(entry, {
+      clock: this.advanceClock,
+      dt,
+      rate: this.advanceRate,
+      duration,
+      loop: this.advanceLoop,
+      yaw: this.yaw,
+      scale,
+    });
+  }
+
+  /**
    * How long a clip runs, or null when nobody can say (no model yet, a
    * headless host). Callers pick their own fallback rather than being handed a
    * guess dressed as a measurement.
@@ -1800,6 +2257,8 @@ class ThirdPersonController extends Script {
     this.groundNormal = null;
     this.groundDist = Infinity;
     this.stickVy = null;
+    this.groundStep = 0;
+    this.jumping = false;
     this.airTime = 0;
     this.airFor = 0;
     this.wasAirborne = false;
@@ -1814,13 +2273,13 @@ class ThirdPersonController extends Script {
     // restFromCollider, which is where it comes from).
   }
 
-  private movementSound(raw: string, priority: number, gain = 1): void {
-    if (!this.param<boolean>("footsteps")) return;
+  private movementSound(raw: string, priority: number, gain = 1, pitch = 1): void {
+    if (!this.param<boolean>("footsteps") || !this.soundSettle.ready) return;
     const local = this.ctx.localPlayer?.();
     if (local && local !== this.entityId) return;
     const choices = raw.split(",").map((sound) => sound.trim()).filter(Boolean);
     const sound = choices[Math.floor(Math.random() * choices.length)];
-    if (sound) this.ctx.playSound?.(sound, { volume: this.param<number>("footstepVolume") * gain, playbackRate: 0.95 + Math.random() * 0.1, priority });
+    if (sound) this.ctx.playSound?.(sound, { volume: this.param<number>("footstepVolume") * gain, playbackRate: pitch * (0.95 + Math.random() * 0.1), priority });
   }
 
   private surfaceKey(raw: string): string {
@@ -1842,55 +2301,159 @@ class ThirdPersonController extends Script {
     const moving = swimming ? stroking : grounded && planar > 0.15;
     if (!moving) {
       this.footstepDistance = 0;
+      // standing still or in the air: the next contact is judged from the
+      // playhead as it is when the feet are down again, not from before
+      this.footfalls.reset();
       return;
     }
-    this.footstepDistance += planar * dt;
-    const distance = swimming ? Math.max(0.65, planar / 1.8) : Math.max(0.55, planar / this.param<number>("footstepCadence"));
-    if (this.footstepDistance < distance) return;
-    this.footstepDistance %= distance;
     if (swimming) {
+      this.footfalls.reset();
+      this.footstepDistance += planar * dt;
+      const stroke = Math.max(0.65, planar / 1.8);
+      if (this.footstepDistance < stroke) return;
+      this.footstepDistance %= stroke;
       this.movementSound(this.param<string>("swimSound"), 2, 0.65);
       return;
     }
-    this.contactSound(1, 1);
+    // In time with the feet: the clip's own contacts, read off its playhead.
+    const phase = this.ctx.animationPhase?.() ?? null;
+    const table = this.param<Record<string, number[]>>("clipFootfalls") ?? {};
+    const contacts = phase ? table[phase.clip] : undefined;
+    if (phase && Array.isArray(contacts) && contacts.length > 0) {
+      this.footstepDistance = 0;
+      const duration = this.ctx.animationDuration?.(phase.clip) ?? null;
+      const advance = duration && duration > 0 ? (this.lastRate * dt) / duration : undefined;
+      const hit = this.footfalls.step(phase.clip, phase.t01, contacts, advance);
+      if (hit.count > 0) this.footstep(hit.foot);
+      return;
+    }
+    this.footfalls.reset();
+    // Fallback cadence — only for a clip that IS a gait. An action or an idle
+    // playing while the body drifts (a dash, a knockback) has no footsteps in
+    // it; a host with no playhead at all (headless) gets the cadence.
+    if (phase && !this.isGaitClip(phase.clip)) {
+      this.footstepDistance = 0;
+      return;
+    }
+    this.footstepDistance += planar * dt;
+    const distance = Math.max(0.55, planar / this.param<number>("footstepCadence"));
+    if (this.footstepDistance < distance) return;
+    this.footstepDistance %= distance;
+    this.footstep(null);
   }
 
-  private contactSound(priority: number, gain: number): void {
+  /** A looping gait by name (walk, run, sprint, strafe, crouch-walk) — not its enter/exit one-shots. */
+  private isGaitClip(clip: string): boolean {
+    return /(^|_)(walk|run|sprint|jog|strafe)(_|$)|crouch_fwd/i.test(clip) && !/enter|exit|start|stop|land/i.test(clip);
+  }
+
+  /**
+   * One foot contact. `foot` is its index in the clip's footfall list (even
+   * one foot, odd the other) — each foot gets a slightly different pitch, so a
+   * stride reads as two feet rather than one sample repeated. Null from the
+   * cadence fallback, which cannot know which foot it is.
+   */
+  private footstep(foot: number | null): void {
+    const now = this.ctx.now() / 1000;
+    // Two contacts closer than a sprinting stride allows are one contact heard
+    // twice: a landing and the first step, or a gait change across a footfall.
+    if (now - this.lastStepAt < 0.12) return;
+    this.lastStepAt = now;
+    const pitch = foot === null ? 1 : foot % 2 === 0 ? 0.98 : 1.03;
+    // ±12% on the level (about 0.88, so footstepVolume stays the ceiling it
+    // says it is): identical steps are the loop the ear catches first
+    this.contactSound(1, 0.88 * (1 + (Math.random() * 2 - 1) * 0.12), pitch);
+  }
+
+  private contactSound(priority: number, gain: number, pitch = 1): void {
     const p = this.object.position;
     const key = this.surfaceKey(this.ctx.surfaceAt?.(p.x, p.y, p.z) ?? "dirt");
     const sounds = this.param<Record<string, string>>("footstepSounds") ?? {};
-    this.movementSound(sounds[key] ?? sounds.dirt ?? "", priority, gain);
+    this.movementSound(sounds[key] ?? sounds.dirt ?? "", priority, gain, pitch);
   }
 
-  private probeGround(sim: SimLike, now: number, vy: number, planarSpeed: number): boolean | null {
+  private probeGround(
+    sim: SimLike,
+    now: number,
+    vy: number,
+    planarSpeed: number,
+    wantX: number,
+    wantZ: number,
+    launched: boolean,
+  ): boolean | null {
     const interval = this.param<number>("groundProbe");
     if (!(interval > 0) || !sim.raycast) return null;
     // Sticking to the ground needs a CURRENT normal — 50 ms is a third of a
     // metre at a run, which is the whole crest — so a moving body that sticks
     // probes every tick. Standing still, or with sticking off, the interval is
-    // plenty.
-    const fresh = this.param<number>("groundStick") > 0 && planarSpeed > 0.1;
+    // plenty. Moving is the stick's intent OR measured travel: a body stalled
+    // against a lip is exactly the one that needs its step ray.
+    const moving = planarSpeed > 0.1 || Math.hypot(wantX, wantZ) > 0.1;
+    const fresh = this.param<number>("groundStick") > 0 && moving;
     if (fresh || now - this.probeAt >= interval) {
       this.probeAt = now;
       const at = (this.scratch ??= this.object.position.clone());
       this.object.getWorldPosition(at);
-      const hit = sim.raycast([at.x, at.y, at.z], [0, -1, 0], PROBE_REACH, {
-        exclude: [this.entityId],
-      });
-      this.groundNormal = hit ? hit.normal : null;
-      this.groundDist = hit ? hit.distance : Infinity;
       if (this.groundRest === null) this.groundRest = this.restFromCollider();
-      if (hit && this.groundRest === null && this.airTime === 0 && Math.abs(vy) < 1) {
-        this.groundRest = hit.distance;
+      const raycast = sim.raycast.bind(sim);
+      const exclude = [this.entityId];
+      // Centre ray, then (only when it reports a gap) a ring inside the
+      // footprint, then the step ray ahead — see readGround for why one ray
+      // from the capsule's axis reads every lip it climbs as a drop.
+      const reading = readGround(
+        (dx, dz) => {
+          const hit = raycast([at.x + dx, at.y, at.z + dz], [0, -1, 0], PROBE_REACH, { exclude });
+          return hit ? { distance: hit.distance, normal: hit.normal } : null;
+        },
+        {
+          rest: this.groundRest ?? 0,
+          radius: this.footRadius(),
+          dirX: wantX,
+          dirZ: wantZ,
+          stepHeight: fresh && this.groundRest !== null ? this.param<number>("stepHeight") : 0,
+          slack: PROBE_SLACK,
+        },
+      );
+      this.groundNormal = reading.normal;
+      this.groundDist = reading.dist;
+      this.groundStep = reading.step;
+      this.groundStepReach = reading.reach;
+      if (Number.isFinite(reading.centre) && this.groundRest === null && this.airTime === 0 && Math.abs(vy) < 1) {
+        this.groundRest = reading.centre;
       }
+    } else {
+      this.groundStep = 0;
     }
     if (this.groundRest === null) return null;
-    // Rising means the body has left the ground — unless the rise is the
-    // ground itself, climbed. Following a slope up writes exactly this
-    // velocity, and reading it as a jump is how running UP a hill ends in the
-    // falling clip with both feet on the ground.
-    if (vy > 0.8 && !this.risingByStick(vy)) return true;
-    return this.groundDist > this.groundRest + PROBE_SLACK;
+    // Rising is NOT leaving the ground unless something launched the body:
+    // running up a hill or being lifted over a lip rises with the feet down,
+    // and reading that as a jump is how climbing ends in the air clip.
+    return probeLeaving({
+      dist: this.groundDist,
+      rest: this.groundRest,
+      slack: PROBE_SLACK,
+      stick: this.param<number>("groundStick"),
+      vy,
+      launched,
+    });
+  }
+
+  /**
+   * Horizontal radius of the collider — where the ground ring and the step ray
+   * sit. 0 where the collider cannot say (the ring is then skipped).
+   */
+  private footRadius(): number {
+    const collider = this.ctx.getEntity(this.entityId)?.components["collider"] as
+      | { shape?: string; size?: number[] }
+      | undefined;
+    const size = collider?.size;
+    if (!collider || !size) return 0;
+    const shape = collider.shape ?? "box";
+    if (shape !== "capsule" && shape !== "box" && shape !== "sphere" && shape !== "cylinder") return 0;
+    const across = Math.min(size[0] ?? 0, size[2] ?? size[0] ?? 0);
+    if (!(across > 0)) return 0;
+    const scale = Math.abs(this.object.getWorldScale((this.scale ??= this.object.scale.clone())).x) || 1;
+    return (across / 2) * scale;
   }
 
   /**
@@ -1941,6 +2504,9 @@ class ThirdPersonController extends Script {
       dt,
       ours: this.risingByStick(vy),
       popCap: this.param<number>("stepPopCap"),
+      step: this.groundStep,
+      stepReach: this.groundStepReach,
+      wrote: this.stickVy,
     });
     this.stickVy = follow;
     return follow ?? vy;
@@ -1983,20 +2549,28 @@ class ThirdPersonController extends Script {
    * Where the character is travelling relative to where it is FACING, or null
    * when it is running forwards (the common case, and the only one the plain
    * gait clips depict).
+   *
+   * `previous` biases the two edges (50° and 130°) toward the clip already in
+   * force by HEADING_HYSTERESIS, so travel that wanders across an edge — a
+   * dash, a knockback, a turning camera — does not crossfade forward, side,
+   * forward several times a second.
    */
   private travelHeading(
     x: number,
     z: number,
     facing: number,
+    previous: "back" | "left" | "right" | null = null,
   ): "back" | "left" | "right" | null {
     if (x === 0 && z === 0) return null;
     let angle = Math.atan2(x, z) - facing;
     while (angle > Math.PI) angle -= Math.PI * 2;
     while (angle < -Math.PI) angle += Math.PI * 2;
-    const deg = (angle * 180) / Math.PI;
-    if (Math.abs(deg) <= 50) return null;
-    if (Math.abs(deg) >= 130) return "back";
-    return deg > 0 ? "left" : "right";
+    const deg = Math.abs((angle * 180) / Math.PI);
+    const forwardEdge = 50 + (previous === null ? HEADING_HYSTERESIS : -HEADING_HYSTERESIS);
+    const backEdge = 130 + (previous === "back" ? -HEADING_HYSTERESIS : HEADING_HYSTERESIS);
+    if (deg <= forwardEdge) return null;
+    if (deg >= backEdge) return "back";
+    return angle > 0 ? "left" : "right";
   }
 }
 
@@ -2016,6 +2590,8 @@ class ThirdPersonController extends Script {
  */
 class BoneSocket extends Script {
   static override scriptName = "bone-socket";
+  // an item on a bone is drawn for every body, simulated here or not
+  static override presentation = true;
   static override params = {
     bone: {
       default: "mixamorig:RightHand",
@@ -2412,6 +2988,7 @@ class DayNight extends Script {
 
   private apply(first: boolean): void {
     this.object.userData["dayNightHour"] = this.hour;
+    worldClock.hour = this.hour;
     const setSky = this.ctx.setSky;
     if (!setSky) return;
     const base = this.base;
@@ -2795,6 +3372,8 @@ class Weather extends Script {
   private flashAt = -1;
   /** Seconds until the thunder for that strike, or -1. */
   private thunderIn = -1;
+  /** Weather is heard only once the world has loaded in around the player (see SettleLatch). */
+  private soundSettle = new SettleLatch();
   private lastStrike = 0;
   private unsubscribe: (() => void) | null = null;
 
@@ -2880,6 +3459,7 @@ class Weather extends Script {
     // curtain of rain for ten seconds, which is the clearest possible way to
     // say the two systems have never met.
     const submerged = this.headUnderWater();
+    this.soundSettle.tick(this.ctx.worldLoading?.(), dt);
     // ease toward the targets: a change is a front rolling in, not a switch
     const k = Math.min(1, dt / Math.max(0.5, this.param<number>("fadeSeconds")));
     for (const kind of KINDS) {
@@ -2908,7 +3488,7 @@ class Weather extends Script {
         const sound = sounds[Math.floor(Math.random() * sounds.length)];
         // A small detune stops two close strikes using the same source from
         // sounding copy-pasted; wider variation turns thunder into a cartoon.
-        if (sound)
+        if (sound && this.soundSettle.ready)
           this.ctx.playSound?.(sound, {
             volume: this.param<number>("thunderVolume"),
             positional: false,
@@ -2925,7 +3505,7 @@ class Weather extends Script {
   /** Keep the ambient bed continuous while the front and biome blend breathe. */
   private syncSound(kind: WeatherKind, intensity: number, soundParam: string, volumeParam: string): void {
     const sound = String(this.param<string>(soundParam) ?? "").trim();
-    const volume = Math.max(0, Math.min(1, intensity * this.param<number>(volumeParam)));
+    const volume = this.soundSettle.ready ? Math.max(0, Math.min(1, intensity * this.param<number>(volumeParam))) : 0;
     this.ctx.setSoundLoop?.(kind, volume > 0.003 ? sound : undefined, { volume, positional: false });
   }
 
@@ -3516,5 +4096,15 @@ export function registerBuiltinScripts(
   add(CharacterSheetScript);
   add(CharacterUi);
   add(EquipmentLook);
+  add(CharacterLook);
+  add(NpcScript);
+  add(NpcUi);
+  add(Nameplates);
+  add(QuestLog);
+  add(PlayerRecords);
   add(WeaponStance);
+  // WoW-style background audio: biome/time beds, spot emitters, zone/town/combat music
+  add(Soundscape);
+  add(SoundZone);
+  add(SoundEmitter);
 }

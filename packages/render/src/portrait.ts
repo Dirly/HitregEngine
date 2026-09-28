@@ -35,6 +35,13 @@ export interface PortraitOptions {
   clips?: THREE.AnimationClip[];
   /** Clip to loop (default "Idle"; falls back to any clip whose name contains "idle", then the first clip). */
   clip?: string;
+  /**
+   * Light colours: the sky and ground of the hemisphere fill and the back rim.
+   * The default is a cool studio (blue-grey sky, blue rim). A cool fill turns a
+   * dark warm skin grey-violet — its diffuse is too dim to outweigh the blue —
+   * so the character creator asks for a neutral-warm one.
+   */
+  lights?: { sky?: THREE.ColorRepresentation; ground?: THREE.ColorRepresentation; rim?: THREE.ColorRepresentation };
 }
 
 export class PortraitView {
@@ -90,10 +97,10 @@ export class PortraitView {
       }
     });
     this.scene.add(this.clone);
-    const hemi = new THREE.HemisphereLight(0xdfe6f5, 0x2a3040, 2.0);
+    const hemi = new THREE.HemisphereLight(opts.lights?.sky ?? 0xdfe6f5, opts.lights?.ground ?? 0x2a3040, 2.0);
     const key = new THREE.DirectionalLight(0xffffff, 3.2);
     key.position.set(1.5, 3, 2.5 * this.forward);
-    const rim = new THREE.DirectionalLight(0x9fb3ff, 0.8);
+    const rim = new THREE.DirectionalLight(opts.lights?.rim ?? 0x9fb3ff, 0.8);
     rim.position.set(-2, 2, -2.5 * this.forward);
     this.scene.add(hemi, key, rim);
 
@@ -144,7 +151,10 @@ export class PortraitView {
     const h = this.canvas.clientHeight || 1;
     const size = this.renderer.getSize(new THREE.Vector2());
     if (size.x !== w || size.y !== h) {
-      this.renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+      // clientWidth is in the element's own CSS px; under a CSS zoom (a UI
+      // scaled up for a big monitor) it is drawn larger, so render that much finer
+      const zoom = this.canvas.getBoundingClientRect().width / w || 1;
+      this.renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1) * zoom);
       this.renderer.setSize(w, h, false);
       this.camera.aspect = w / h;
       this.camera.updateProjectionMatrix();
@@ -199,6 +209,16 @@ export class PortraitView {
   /** Re-fit the camera on the next frame (the source swapped models). */
   refit(): void {
     this.framed = false;
+  }
+
+  /** The posed clone — a creation screen parents appearance pieces to its bones. */
+  get model(): THREE.Object3D {
+    return this.clone;
+  }
+
+  /** Turn the model to a yaw (drag-to-rotate). Adds to any `spin`. */
+  setYaw(radians: number): void {
+    this.clone.rotation.y = radians;
   }
 
   dispose(): void {

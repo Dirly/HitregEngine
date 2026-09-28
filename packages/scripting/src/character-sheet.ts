@@ -1,12 +1,16 @@
 import {
   addItem,
   allocate,
+  applyBuild,
+  archetypeStartingItems,
   characterEventDecls,
   characterSheetSchema,
   CHARACTER_EVENTS,
   createSheet,
   derivedStats,
   equip,
+  EQUIPMENT_SLOTS,
+  itemFitsSlot,
   firstFit,
   gridOf,
   grantXp,
@@ -14,7 +18,9 @@ import {
   removeItem,
   splitStack,
   unequip,
+  validateBuild,
   type Attribute,
+  type CharacterCreation,
   type CharacterSheet,
   type EquipmentSlot,
   type GridTarget,
@@ -68,11 +74,22 @@ export class CharacterSheetScript extends Script {
       description:
         "progression data-asset id (assets/progression/<id>.json) — levels, xp curve, points, stat formulas; empty = engine defaults (20 levels, 1 point a level)",
     },
+    creation: {
+      default: "",
+      description:
+        "creation data-asset id (assets/creation/<id>.json) — when the body arrives with a build (netState build/<bodyId>, written by the server from the play ticket), a FRESH sheet gets its archetype lean, records its traits + appearance, and is given the archetype's startingItems (worn first; this script's own never displace them); empty = builds are ignored",
+    },
     startingLevel: { default: 1, min: 1, max: 200, description: "a fresh sheet starts here, with the points that many levels imply" },
     startingItems: {
       default: [] as Array<{ itemId: string; qty?: number; equip?: boolean }>,
       description:
         '[{ "itemId": "<items/ id>", "qty": 1, "equip": false }] given to a fresh sheet in order (put the bag first, equipped, so the rest has room) — ignored when a saved sheet is restored',
+    },
+    startingCoins: {
+      default: 0,
+      min: 0,
+      max: 100000000,
+      description: "copper a FRESH sheet starts with (100 = 1 silver, 10000 = 1 gold) — ignored when a saved sheet is restored",
     },
     persist: {
       default: true,
@@ -170,10 +187,29 @@ export class CharacterSheetScript extends Script {
     );
   }
 
-  /** A brand-new sheet from the params: level, then the starting items. */
+  /**
+   * A brand-new sheet from the params: level, the creation build, the script's
+   * starting items, then the build's ARCHETYPE kit (creation `startingItems`:
+   * a starting armour set) — after, so a bag in the script's list has made room.
+   */
   private fresh(): CharacterSheet {
     let sheet = createSheet(this.env.progression, this.param<number>("startingLevel"));
-    for (const entry of this.param<Array<{ itemId?: string; qty?: number; equip?: boolean }>>("startingItems") ?? []) {
+    sheet = this.withBuild(sheet);
+    // the archetype kit FIRST, worn straight out of the (still empty) pockets; the
+    // script's own list after it never takes a worn kit piece off (see give)
+    const creation = this.creationRules();
+    if (creation && sheet.build) sheet = this.give(sheet, archetypeStartingItems(creation, sheet.build.archetype));
+    sheet = this.give(sheet, this.param<Array<{ itemId?: string; qty?: number; equip?: boolean }>>("startingItems") ?? []);
+    return { ...sheet, coins: this.param<number>("startingCoins") ?? 0 };
+  }
+
+  /**
+   * Add (and equip) a starting kit in order; a refused entry is skipped with a
+   * warning. `equip` only fills an EMPTY slot: a starting item never displaces
+   * one already worn (the archetype's gloves stay on over the script's).
+   */
+  private give(sheet: CharacterSheet, entries: ReadonlyArray<{ itemId?: string; qty?: number; equip?: boolean }>): CharacterSheet {
+    for (const entry of entries) {
       if (!entry?.itemId) continue;
       const r = addItem(sheet, entry.itemId, entry.qty ?? 1, this.env);
       if (!r.ok) {
@@ -181,13 +217,45 @@ export class CharacterSheetScript extends Script {
         continue;
       }
       sheet = r.sheet;
-      if (entry.equip) {
+      const item = this.env.catalog(entry.itemId);
+      const free = item ? EQUIPMENT_SLOTS.some((slot) => itemFitsSlot(item, slot) && !sheet.equipment[slot]) : false;
+      if (entry.equip && free) {
         const worn = equip(sheet, r.uids[r.uids.length - 1]!, undefined, this.env);
         if (worn.ok) sheet = worn.sheet;
         else console.warn(`[character-sheet] ${this.actorId}: could not equip starting ${entry.itemId} — ${worn.error}`);
       }
     }
     return sheet;
+  }
+
+  /** The creation rules named by the `creation` param, or null. */
+  private creationRules(): CharacterCreation | null {
+    const id = this.param<string>("creation");
+    const asset = id ? this.ctx.getDataAsset?.(id) : undefined;
+    return asset?.type === "creation" ? (asset.data as CharacterCreation) : null;
+  }
+
+  /**
+   * The build the body arrived with, stamped on. Re-validated here: this is
+   * the authority, and the build is the one thing about a character a player
+   * chose from a client.
+   */
+  private withBuild(sheet: CharacterSheet): CharacterSheet {
+    const raw = this.store.get(`build/${this.actorId}`);
+    const id = this.param<string>("creation");
+    if (raw === undefined || !id) return sheet;
+    const asset = this.ctx.getDataAsset?.(id);
+    if (asset?.type !== "creation") {
+      console.warn(`[character-sheet] creation asset "${id}" not found — build ignored`);
+      return sheet;
+    }
+    const creation = asset.data as CharacterCreation;
+    const v = validateBuild(creation, raw);
+    if (!v.ok) {
+      console.warn(`[character-sheet] ${this.actorId}: build refused — ${v.error}`);
+      return sheet;
+    }
+    return applyBuild(sheet, creation, v.build);
   }
 
   /**

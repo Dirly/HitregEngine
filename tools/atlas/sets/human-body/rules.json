@@ -1,0 +1,14 @@
+{
+  "requires": {
+    "RobesFront": ["RobesBack"],
+    "RobesBack": ["RobesFront"],
+    "Buckle": ["Belt"],
+    "F_RobesFront": ["F_RobesBack"],
+    "F_RobesBack": ["F_RobesFront"],
+    "F_Buckle": ["F_Belt"]
+  },
+  "excludes": {
+    "RobesBack": ["TassetBack"],
+    "F_RobesBack": ["F_TassetBack"]
+  }
+}

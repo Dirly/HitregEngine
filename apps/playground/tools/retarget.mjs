@@ -31,12 +31,14 @@ import "./node-dom-shim.mjs";
 import { addTextureSearchRoot } from "./node-dom-shim.mjs";
 import * as THREE from "three";
 import { FBXLoader } from "three/examples/jsm/loaders/FBXLoader.js";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
 import fs from "node:fs";
 import path from "node:path";
 import { RIG_MAPS, CLIP_PRESETS, detectRigMap } from "./rig-map.mjs";
 import { sanitizeFbx } from "./_fbx.mjs";
 import { normalizeLoop } from "./_clips.mjs";
+import { reportLocomotion } from "./_locomotion.mjs";
 
 // ---------------------------------------------------------------- args
 
@@ -65,6 +67,37 @@ function parseArgs(argv) {
 
 const args = parseArgs(process.argv.slice(2));
 
+// --measure: read clipSpeeds + clipFootfalls + clipAdvance back off an already-baked GLB,
+// without the source FBXs a full bake needs.
+if (args.measure) {
+  const file = path.resolve(String(args.measure));
+  if (!fs.existsSync(file)) {
+    console.error(`retarget: no such file: ${file}`);
+    process.exit(1);
+  }
+  const buf = fs.readFileSync(file);
+  const warn = console.warn;
+  console.warn = () => {}; // embedded-texture chatter; nothing here needs pixels
+  const gltf = await new Promise((resolve, reject) =>
+    new GLTFLoader().parse(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength), "", resolve, reject),
+  ).finally(() => (console.warn = warn));
+  const bones = new Map();
+  gltf.scene.traverse((o) => {
+    if (o.isBone) bones.set(o.name, o);
+  });
+  // the TARGET side of a map names this skeleton's own hip and toes
+  const rigMap = args.rig
+    ? RIG_MAPS[args.rig]
+    : Object.values(RIG_MAPS).find((m) => bones.has(m.hip) && (m.contacts ?? []).every((c) => bones.has(c)));
+  if (!rigMap) {
+    console.error("retarget: --measure found no rig map whose hip and contact bones this model has (try --rig)");
+    process.exit(1);
+  }
+  console.log(`${path.basename(file)}: ${gltf.animations.length} clips, ${bones.size} bones, rig ${rigMap.id}`);
+  reportLocomotion(gltf.scene, bones, gltf.animations, rigMap);
+  process.exit(0);
+}
+
 if (args.help || (!args.mesh && !args.list)) {
   console.log(`
 retarget — bake an FBX animation library onto a differently-rigged character
@@ -90,12 +123,19 @@ retarget — bake an FBX animation library onto a differently-rigged character
   --fps <n>             resample rate for baked clips. Default 30.
   --list                print the source library's clip names and exit.
   --no-hips             don't transfer hip translation (rotation only).
+  --keep-bind <list>    target bones the rest reconciliation leaves at bind
+                        instead of aiming (default: the rig map's keepBind;
+                        "none" aims every mapped bone, the old behaviour).
+  --measure <file.glb>  print clipSpeeds, clipFootfalls and clipAdvance for an already-baked
+                        character and exit (no FBX needed). Also printed after
+                        every bake.
 
 Examples:
   node tools/retarget.mjs --anim UAL1.fbx --list
   node tools/retarget.mjs --anim UAL1.fbx --anim UAL2.fbx --list
   node tools/retarget.mjs --mesh HumanRigged.fbx --anim UAL1.fbx \\
     --out projects/voxel-demo/assets/models/mmo/human.glb
+  node tools/retarget.mjs --measure projects/voxel-demo/assets/models/mmo/human.glb
 `);
   process.exit(0);
 }
@@ -192,15 +232,33 @@ function worldQuaternions(root, bones) {
  * improvement — was tried and is worse: it is degenerate for near-vertical
  * bones, and the neck falling into that case rotates the head 180°. Don't
  * reintroduce it without rendering the head.
+ *
+ * Bones in `keepBind` are not aimed at all: they keep their BIND orientation
+ * in world space, undoing whatever their parents' corrections carried in. Aim
+ * alignment is right where the two rests differ in POSE (a T-pose arm against
+ * an A-pose arm) and wrong where they differ only in where each rigger put the
+ * JOINTS: the UE mannequin's clavicle starts at the sternum and runs 38° back
+ * to the shoulder, AccuRig's starts beside the spine and runs out, so aiming
+ * one along the other swept the shoulders ~50° back in every clip. Both
+ * torsos stand neutral at rest; there the target's bind IS the source's rest.
  */
-function alignTargetRestToSource(tgtRoot, tgtBones, rigMap, srcRestPos, report) {
+function alignTargetRestToSource(tgtRoot, tgtBones, rigMap, srcRestPos, report, keepBind = new Set()) {
   const order = parentFirst(tgtRoot);
   const pa = new THREE.Vector3();
   const pb = new THREE.Vector3();
   const curWorld = new THREE.Quaternion();
   const parentWorld = new THREE.Quaternion();
+  tgtRoot.updateMatrixWorld(true);
+  const bindWorld = new Map(order.map((b) => [b.name, b.getWorldQuaternion(new THREE.Quaternion())]));
 
   for (const bone of order) {
+    if (keepBind.has(bone.name)) {
+      if (bone.parent) bone.parent.getWorldQuaternion(parentWorld);
+      else parentWorld.identity();
+      bone.quaternion.copy(parentWorld.invert().multiply(bindWorld.get(bone.name)));
+      bone.updateMatrixWorld(true);
+      continue;
+    }
     // an aim may offer several candidates — first one this rig actually has
     const aimName = [rigMap.aim[bone.name]]
       .flat()
@@ -325,9 +383,9 @@ function retargetClip({
       const srcName = mapped && mirror ? mirror.twin(mapped) : mapped;
       const srcBone = srcName ? srcBones.get(srcName) : null;
       if (srcBone) {
-        srcBone.getWorldQuaternion(srcWorld);
         // delta = animated ∘ rest⁻¹, taken in world space so differing bone
         // axes between the two rigs cancel out
+        srcBone.getWorldQuaternion(srcWorld);
         deltaQ.copy(srcWorld).multiply(srcRestQuat.get(srcName).clone().invert());
         if (mirror) reflectQuat(deltaQ, mirror.normal);
         desired.copy(deltaQ).multiply(tgtAlignedQuat.get(bone.name));
@@ -434,77 +492,6 @@ function parseSelector(spec) {
       if (a) out.start = Number(a);
       if (b) out.end = Number(b);
     } else throw new Error(`retarget: unknown clip modifier "@${m}" in "${spec}"`);
-  }
-  return out;
-}
-
-// -------------------------------------------------- authored ground speed
-
-/**
- * The speed each baked locomotion clip depicts, in units/sec.
- *
- * In-place clips carry no translation, but the speed is still recoverable:
- * while a foot is PLANTED it slides backwards under the hip at exactly the
- * speed the character is meant to be travelling. So measure that slip, over
- * frames where the toe is genuinely on the ground.
- *
- * Absolute ground height is what makes this work — "the lowest 25% of this
- * foot's own range" calls a sprint's flight frames stance and reads back half
- * the real speed. A sprint's feet are in the air most of the cycle.
- *
- * Without these numbers a controller has to assume every clip was authored at
- * whatever speed its gait happens to be tuned to, and every gap between the
- * two is skating feet.
- */
-function measureClipSpeeds(root, bones, clips, rigMap, groundY) {
-  const hip = bones.get(rigMap.hip);
-  const contacts = (rigMap.contacts ?? []).map((n) => bones.get(n)).filter(Boolean);
-  if (!hip || contacts.length === 0) return {};
-
-  const mixer = new THREE.AnimationMixer(root);
-  const out = {};
-  for (const clip of clips) {
-    // A clip with no ground under it has no ground speed. Swimming measures
-    // ~0.8 units/sec off legs kicking past the hip, and a controller told that
-    // number plays the stroke at four times its rate — so the one case where
-    // the measurement is not merely useless but actively wrong is excluded by
-    // name. The controller then rates a stroke against its own swim speed.
-    if (/^(swim|tread)/i.test(clip.name)) continue;
-    const N = 120;
-    const dt = clip.duration / N;
-    if (!(dt > 0)) continue;
-    const action = mixer.clipAction(clip);
-    action.play();
-
-    const hips = [];
-    const feet = contacts.map(() => []);
-    for (let i = 0; i <= N; i++) {
-      mixer.setTime(clip.duration * (i / N) * 0.999);
-      root.updateMatrixWorld(true);
-      hips.push(hip.getWorldPosition(new THREE.Vector3()));
-      contacts.forEach((c, k) => feet[k].push(c.getWorldPosition(new THREE.Vector3())));
-    }
-    action.stop();
-    mixer.uncacheClip(clip);
-
-    const slips = [];
-    for (const track of feet) {
-      for (let i = 0; i < track.length - 1; i++) {
-        if (track[i].y > groundY || track[i + 1].y > groundY) continue;
-        // planted foot, measured against the hip: what is left is the ground
-        // sliding past, which is the speed the clip depicts
-        const d = track[i].clone().sub(hips[i]).sub(track[i + 1].clone().sub(hips[i + 1]));
-        d.y = 0;
-        slips.push(d.length() / dt);
-      }
-    }
-    if (slips.length < 6) continue;
-    slips.sort((a, b) => a - b);
-    const median = slips[Math.floor(slips.length / 2)];
-    // Below walking pace it isn't locomotion — it's a turn, a landing or an
-    // idle shuffle, where a planted foot pivoting reads as a trickle of slip.
-    // Reporting those invites them into a controller that never plays them.
-    if (median > 0.5) out[clip.name] = Number(median.toFixed(2));
   }
   return out;
 }
@@ -704,13 +691,19 @@ if (sourceClips.size) {
     console.log(`  hip x${hipScale.toFixed(4)}`);
 
     const alignReport = [];
-    const tgtAlignedQuat = alignTargetRestToSource(meshGroup, tgtBones, rigMap, srcRestPos, alignReport);
+    // --keep-bind overrides the map's list for every rig ("none" empties it)
+    const keepSpec = args["keep-bind"];
+    const keepBind = new Set(
+      typeof keepSpec === "string" ? (keepSpec === "none" ? [] : keepSpec.split(",").map((s) => s.trim())) : (rigMap.keepBind ?? []),
+    );
+    const tgtAlignedQuat = alignTargetRestToSource(meshGroup, tgtBones, rigMap, srcRestPos, alignReport, keepBind);
     restoreLocals(tgtBones, tgtBind);
     meshGroup.updateMatrixWorld(true);
     alignReport.sort((a, b) => b.deg - a.deg);
     console.log(
       `  rest alignment: ${alignReport.length} bones corrected, largest ` +
-        alignReport.slice(0, 4).map((r) => `${r.bone} ${r.deg.toFixed(0)}°`).join(", "),
+        alignReport.slice(0, 4).map((r) => `${r.bone} ${r.deg.toFixed(0)}°`).join(", ") +
+        (keepBind.size ? `; ${[...keepBind].filter((b) => tgtBones.has(b)).length} held at bind (keepBind)` : ""),
     );
 
     // The body's left-right axis at rest, for mirroring: left shoulder minus
@@ -811,22 +804,14 @@ loops: ${loopKinds.open.length} closed with their opening pose, ${loopKinds.clos
   restoreLocals(tgtBones, tgtBind);
   meshGroup.updateMatrixWorld(true);
 
-  // What speed does each clip actually depict? The controller needs this to
-  // play them at the right rate; without it the feet skate by exactly the
-  // ratio between the clip and whatever the gait is tuned to.
-  const groundY = new THREE.Box3().setFromObject(meshGroup).min.y + 0.06 * modelScale;
+  // What speed does each clip actually depict, and when do its feet land? The
+  // controller needs both: the speed to play a clip at the rate that keeps its
+  // feet planted, the footfalls to put a footstep on each contact (see
+  // _locomotion.mjs). `--measure <glb>` prints the same off a finished bake.
   const anyRig = prepared.values().next().value.rigMap;
-  const speeds = measureClipSpeeds(meshGroup, tgtBones, outClips, anyRig, groundY);
+  reportLocomotion(meshGroup, tgtBones, outClips, anyRig);
   restoreLocals(tgtBones, tgtBind);
   meshGroup.updateMatrixWorld(true);
-  if (Object.keys(speeds).length) {
-    console.log("\nauthored ground speed per clip (units/sec):");
-    for (const [name, v] of Object.entries(speeds)) console.log(`  ${name.padEnd(18)} ${v}`);
-    console.log(
-      "\npaste into the third-person-controller's clipSpeeds param:\n  " +
-        JSON.stringify(speeds),
-    );
-  }
 }
 
 // ---- export

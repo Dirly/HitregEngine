@@ -44,8 +44,14 @@ interface Raster {
   state: Uint8Array;
   /** Cell-centre inside flag from the scanline, kept for band cells whose point turns out to be beyond the band. */
   inside: Uint8Array;
-  /** Segment indices per band cell (null elsewhere). */
-  segments: (Int32Array | null)[];
+  /**
+   * Segment indices per band cell, packed: cell i lists
+   * `segments[offsets[i] .. offsets[i + 1])`, empty outside the band. One
+   * Int32Array per band cell cost ~140 bytes of object overhead each, and the
+   * MMO world has over a hundred thousand of them in every thread's field.
+   */
+  offsets: Uint32Array;
+  segments: Int32Array;
   /** Counter-clockwise outline. */
   pts: [number, number][];
   band: number;
@@ -79,8 +85,7 @@ export class PolygonIndex {
     const state = r.state[i]!;
     if (state === OUTSIDE) return FAR_OUTSIDE;
     if (state === INSIDE) return FAR_INSIDE;
-    const list = r.segments[i] ?? null;
-    const sd = exactSigned(r.pts, list, x, z);
+    const sd = exactSigned(r.pts, r.segments, r.offsets[i]!, r.offsets[i + 1]!, x, z);
     // a band cell whose point is beyond the band: the listed segments may not
     // include the true nearest, so the sign comes from the cell instead
     if (Math.abs(sd) > r.band) return r.inside[i] ? FAR_INSIDE : FAR_OUTSIDE;
@@ -144,40 +149,58 @@ function buildRaster(points: readonly (readonly [number, number])[], band: numbe
   // segment, listing every segment within band + a FULL diagonal, so any
   // segment within `band` of any point of the cell is on the list
   const reach = band + cell * 1.42;
-  const lists: number[][] = new Array(w * h);
-  for (let s = 0; s < n; s++) {
-    const a = pts[s]!;
-    const b = pts[(s + 1) % n]!;
-    const sx0 = Math.max(0, Math.floor((Math.min(a[0], b[0]) - reach - x0) / cell));
-    const sx1 = Math.min(w - 1, Math.ceil((Math.max(a[0], b[0]) + reach - x0) / cell));
-    const sz0 = Math.max(0, Math.floor((Math.min(a[1], b[1]) - reach - z0) / cell));
-    const sz1 = Math.min(h - 1, Math.ceil((Math.max(a[1], b[1]) + reach - z0) / cell));
-    const dx = b[0] - a[0];
-    const dz = b[1] - a[1];
-    const lenSq = dx * dx + dz * dz;
-    for (let iz = sz0; iz <= sz1; iz++) {
-      const cz = z0 + (iz + 0.5) * cell;
-      for (let ix = sx0; ix <= sx1; ix++) {
-        const cx = x0 + (ix + 0.5) * cell;
-        const t = lenSq < 1e-12 ? 0 : Math.max(0, Math.min(1, ((cx - a[0]) * dx + (cz - a[1]) * dz) / lenSq));
-        const px = cx - (a[0] + dx * t);
-        const pz = cz - (a[1] + dz * t);
-        if (px * px + pz * pz > reach * reach) continue;
-        const i = ix + iz * w;
-        state[i] = BAND;
-        (lists[i] ??= []).push(s);
+  // two passes over the same cells: count each cell's list, then fill it
+  const counts = new Uint32Array(w * h);
+  const visit = (each: (cellIndex: number, segment: number) => void): void => {
+    for (let s = 0; s < n; s++) {
+      const a = pts[s]!;
+      const b = pts[(s + 1) % n]!;
+      const sx0 = Math.max(0, Math.floor((Math.min(a[0], b[0]) - reach - x0) / cell));
+      const sx1 = Math.min(w - 1, Math.ceil((Math.max(a[0], b[0]) + reach - x0) / cell));
+      const sz0 = Math.max(0, Math.floor((Math.min(a[1], b[1]) - reach - z0) / cell));
+      const sz1 = Math.min(h - 1, Math.ceil((Math.max(a[1], b[1]) + reach - z0) / cell));
+      const dx = b[0] - a[0];
+      const dz = b[1] - a[1];
+      const lenSq = dx * dx + dz * dz;
+      for (let iz = sz0; iz <= sz1; iz++) {
+        const cz = z0 + (iz + 0.5) * cell;
+        for (let ix = sx0; ix <= sx1; ix++) {
+          const cx = x0 + (ix + 0.5) * cell;
+          const t = lenSq < 1e-12 ? 0 : Math.max(0, Math.min(1, ((cx - a[0]) * dx + (cz - a[1]) * dz) / lenSq));
+          const px = cx - (a[0] + dx * t);
+          const pz = cz - (a[1] + dz * t);
+          if (px * px + pz * pz > reach * reach) continue;
+          each(ix + iz * w, s);
+        }
       }
     }
-  }
-  const segments: (Int32Array | null)[] = new Array(w * h).fill(null);
-  for (let i = 0; i < w * h; i++) if (lists[i]) segments[i] = Int32Array.from(lists[i]!);
-  return { x0, z0, cell, w, h, state, inside, segments, pts, band };
+  };
+  visit((i) => {
+    state[i] = BAND;
+    counts[i]!++;
+  });
+  const offsets = new Uint32Array(w * h + 1);
+  for (let i = 0; i < w * h; i++) offsets[i + 1] = offsets[i]! + counts[i]!;
+  const segments = new Int32Array(offsets[w * h]!);
+  const cursor = offsets.slice(0, w * h);
+  visit((i, s) => {
+    segments[cursor[i]!++] = s;
+  });
+  return { x0, z0, cell, w, h, state, inside, offsets, segments, pts, band };
 }
 
-/** Exact signed distance using the listed segments (or all of them when the list is missing). */
-function exactSigned(pts: readonly (readonly [number, number])[], list: Int32Array | null, x: number, z: number): number {
+/** Exact signed distance using the segments `list[from, to)` (all of them when that range is empty). */
+function exactSigned(
+  pts: readonly (readonly [number, number])[],
+  list: Int32Array,
+  from: number,
+  to: number,
+  x: number,
+  z: number,
+): number {
   const n = pts.length;
-  const count = list ? list.length : n;
+  const listed = to > from;
+  const count = listed ? to - from : n;
   let bestD = Infinity;
   let bestCross = 0;
   let bestInterior = false;
@@ -185,7 +208,7 @@ function exactSigned(pts: readonly (readonly [number, number])[], list: Int32Arr
   let secondCross = 0;
   let secondInterior = false;
   for (let k = 0; k < count; k++) {
-    const s = list ? list[k]! : k;
+    const s = listed ? list[from + k]! : k;
     const a = pts[s]!;
     const b = pts[(s + 1) % n]!;
     const dx = b[0] - a[0];

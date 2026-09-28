@@ -2,6 +2,7 @@ import * as THREE from "three/webgpu";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import type { PolyMeshSource, SceneDoc, VoxelMeshSource } from "@hitreg/core";
 import { polyMeshGeometry } from "./poly-mesh-geometry.js";
+import { surfaceGeometry, type SurfaceMeshSource } from "./surface-mesh.js";
 import { FOLIAGE_WIND } from "./foliage-wind.js";
 import {
   buildScene,
@@ -52,7 +53,8 @@ interface ProxyMesh {
     | { kind: "asset"; assetId: string; node?: string }
     | { kind: "voxel"; world: string; cell: [number, number]; lodStep?: number; yRange?: [number, number] }
     | { kind: "heightmap" }
-    | { kind: "path" };
+    | { kind: "path" }
+    | SurfaceMeshSource;
   material?: string;
 }
 
@@ -692,6 +694,16 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
     // world space, so merged sheets shade exactly as the separate ones did.
     // A poly with material slots or per-face colour keeps the deferred path:
     // its groups do not survive a bucket merge.
+    // Generated water (one clipped mesh per cell, voxel/chunk.ts) merges the
+    // same way: world-space shading, and the current rides in uv, which the
+    // merge keeps.
+    if (mesh.source.kind === "surface") {
+      const prepped = prepForMerge(surfaceGeometry(mesh.source), false);
+      prepped.applyMatrix4(entityTransform(entity));
+      const key = mesh.material ?? "__default";
+      addToBucket(key, materialForId(mesh.material, options, materialCache), prepped);
+      continue;
+    }
     if ((mesh.source as { kind: string }).kind === "poly") {
       const { geometry, compiled } = polyMeshGeometry(mesh.source as unknown as PolyMeshSource);
       const single = !compiled.colors && compiled.groups.every((g) => g.materialIndex === 0);

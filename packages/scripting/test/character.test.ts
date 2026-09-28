@@ -21,7 +21,7 @@ registerCoreComponents(coreRegistry);
 
 const noInput: InputLike = { isDown: () => false };
 
-function harness(startingItems: Array<{ itemId: string; qty?: number; equip?: boolean }> = [], timed = false) {
+function harness(startingItems: Array<{ itemId: string; qty?: number; equip?: boolean }> = [], timed = false, build?: unknown) {
   const events = new EventRegistry();
   registerCoreEvents(events);
   const assets = new AssetLibrary();
@@ -39,6 +39,16 @@ function harness(startingItems: Array<{ itemId: string; qty?: number; equip?: bo
     type: "item",
     name: "potion",
     data: { name: "Potion", stack: 5, size: [1, 1], weight: 0.5, kind: "consumable" },
+  });
+  assets.addDataAsset({
+    id: "rules",
+    type: "creation",
+    name: "rules",
+    data: {
+      archetypes: [{ id: "brawn", name: "Brawn", attributes: { strength: 2, constitution: 1 } }],
+      traits: [{ id: "emberborn", name: "Emberborn", ability: "firebolt" }],
+      appearance: [{ id: "sex", label: "Sex", options: [{ id: "male", label: "Male" }, { id: "female", label: "Female" }] }],
+    },
   });
   const registry = new ScriptRegistry();
   registerBuiltinScripts(registry, events, assets);
@@ -63,7 +73,7 @@ function harness(startingItems: Array<{ itemId: string; qty?: number; equip?: bo
         tags: [],
         components: {
           transform: {},
-          script: { name: "character-sheet", params: { actor: "player", startingItems, persist: false, progression: timed ? "timed" : "" } },
+          script: { name: "character-sheet", params: { actor: "player", startingItems, persist: false, progression: timed ? "timed" : "", creation: "rules" } },
         },
       },
     },
@@ -77,6 +87,8 @@ function harness(startingItems: Array<{ itemId: string; qty?: number; equip?: bo
   ]);
   const netState = new NetStateStore();
   registerCharacterNetState(netState);
+  // what the server writes from the play ticket before the body spawns
+  if (build !== undefined) netState.set("build/player", build);
   const bus = new EventBus(events);
   const runtime = new ScriptRuntime({
     doc,
@@ -102,6 +114,17 @@ function harness(startingItems: Array<{ itemId: string; qty?: number; equip?: bo
 }
 
 describe("character-sheet builtin", () => {
+  it("stamps the body's creation build onto a fresh sheet, and ignores an illegal one", () => {
+    const plain = harness().sheet();
+    const built = harness([], false, { archetype: "brawn", traits: ["emberborn"], appearance: { sex: "female" } }).sheet();
+    expect(built.attributes.strength).toBe(plain.attributes.strength + 2);
+    expect(built.attributes.constitution).toBe(plain.attributes.constitution + 1);
+    expect(built.build).toEqual({ archetype: "brawn", traits: ["emberborn"], appearance: { sex: "female" } });
+    const illegal = harness([], false, { archetype: "brawn", traits: ["sunborn"] }).sheet();
+    expect(illegal.build).toBeUndefined();
+    expect(illegal.attributes.strength).toBe(plain.attributes.strength);
+  });
+
   it("holds equipment in its source until the authority finishes and refuses overlapping actions", () => {
     const h = harness([{ itemId: "helm" }], true);
     h.bus.emit("inventory.equip", { actorId: "player", uid: "i1" }); h.tick(30);

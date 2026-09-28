@@ -60,6 +60,13 @@ export async function loadAssets(
     // character progression: item definitions and the levelling rules
     { kind: "items", type: "item", onlyJson: true },
     { kind: "progression", type: "progression", onlyJson: true },
+    // character creation: archetypes, birth traits, appearance slots
+    { kind: "creation", type: "creation", onlyJson: true },
+    // townsfolk: quests, what NPCs say, what shops sell
+    { kind: "quests", type: "quest", onlyJson: true },
+    { kind: "dialogues", type: "dialogue", onlyJson: true },
+    { kind: "shops", type: "shop", onlyJson: true },
+    { kind: "places", type: "places", onlyJson: true },
   ];
   await Promise.all(
     jsonKinds.map(async ({ kind, type, onlyJson }) => {

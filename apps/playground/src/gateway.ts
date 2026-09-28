@@ -10,8 +10,13 @@
  * rendering while the body hops servers.
  *
  * This file owns the small sign-in panel too. Design: DESIGN.md dark
- * tokens, product register — a card, not a splash screen.
+ * tokens, product register — a card, not a splash screen. With creation
+ * rules (main's GET /creation, else the game's local `creation` asset) a new
+ * character goes through the full creation screen (character-creation.ts).
  */
+
+import type { CharacterBuild, CharacterCreation } from "@hitreg/core";
+import { applyCreationSkin, mountCreationScreen, watchUiScale, type CreationPreview } from "./character-creation.js";
 
 export interface GatewaySession {
   session: string;
@@ -23,6 +28,8 @@ export interface GatewayCharacter {
   id: string;
   name: string;
   createdAt: string;
+  /** Creation choices; absent on characters made before creation existed. */
+  build?: CharacterBuild;
 }
 
 export interface PlayGrant {
@@ -116,8 +123,17 @@ export class GatewayClient {
     return r.characters;
   }
 
-  async createCharacter(name: string): Promise<GatewayCharacter> {
-    const r = await this.call<{ character: GatewayCharacter; characters: GatewayCharacter[] }>("/characters", { name });
+  /** The creation rules main validates against; null when main has none (or is too old to say). */
+  async creation(): Promise<CharacterCreation | null> {
+    try {
+      return (await this.call<{ creation: CharacterCreation | null }>("/creation")).creation;
+    } catch {
+      return null;
+    }
+  }
+
+  async createCharacter(name: string, build?: CharacterBuild): Promise<GatewayCharacter> {
+    const r = await this.call<{ character: GatewayCharacter; characters: GatewayCharacter[] }>("/characters", { name, ...(build ? { build } : {}) });
     if (this.session) this.remember({ ...this.session, characters: r.characters });
     return r.character;
   }
@@ -187,6 +203,28 @@ const STYLE = `
 .hg-list li.hg-selected{border-color:#58a6ff;background:#1f3a5f}
 .hg-list li button{margin-left:auto}
 .hg-muted{color:#8b949e}
+/* the game's look, when its creation rules carry a ui block (character-creation.ts sets the vars) */
+.hg-gate.hg-cc-skin{background:radial-gradient(ellipse at 50% 50%,#2a221880 0%,#0a0908f0 65%,#050404 100%),var(--cc-backdrop,none);background-size:auto,198px 176px;font:14px/1.45 var(--cc-font);color:var(--cc-text);text-shadow:0 1px 2px #000;image-rendering:pixelated}
+.hg-gate.hg-cc-skin .hg-card{position:relative;isolation:isolate;width:400px;background:none;border-radius:0;box-shadow:none;border:calc(var(--cc-panel-border) - 12px) solid transparent;padding:4px 6px 6px}
+.hg-gate.hg-cc-skin .hg-card::before{content:"";position:absolute;inset:calc(12px - var(--cc-panel-border));pointer-events:none;border:var(--cc-panel-border) solid transparent;border-image:var(--cc-panel) var(--cc-panel-slice) / var(--cc-panel-border) var(--cc-panel-repeat);z-index:-1}
+.hg-gate.hg-cc-skin .hg-card::after{content:"";position:absolute;inset:-4px -13px;background:linear-gradient(#121110eb,#121110f0),var(--cc-backdrop,none);background-size:auto,198px 176px;z-index:-2;pointer-events:none}
+.hg-gate.hg-cc-skin .hg-card h1{font-weight:normal;font-size:19px;text-transform:uppercase;letter-spacing:.16em;color:var(--cc-heading);border-bottom:1px solid #645039;padding-bottom:8px;margin-bottom:6px}
+.hg-gate.hg-cc-skin .hg-card .hg-sub,.hg-gate.hg-cc-skin .hg-muted{color:var(--cc-muted)}
+.hg-gate.hg-cc-skin .hg-card label{color:#b79c6b;font-size:12px;letter-spacing:.12em}
+.hg-gate.hg-cc-skin .hg-card input{border-radius:0;background:#080807;border:1px solid #655036;color:#e9d9b8;font:15px var(--cc-font)}
+.hg-gate.hg-cc-skin .hg-card input:focus{border-color:#b18b4b;box-shadow:0 0 8px #bd803a44}
+.hg-gate.hg-cc-skin .hg-btn{border-radius:0;color:var(--cc-text);font:12px var(--cc-font);text-transform:uppercase;letter-spacing:.08em;background:#191714;background-clip:padding-box;border:var(--cc-button-border) solid transparent;border-image:var(--cc-button) var(--cc-button-slice) / var(--cc-button-border) stretch;min-height:40px;padding:2px 14px}
+.hg-gate.hg-cc-skin .hg-btn:hover{filter:brightness(1.5);color:#ffe5a9}
+.hg-gate.hg-cc-skin .hg-btn.hg-primary{background:#2b1c10;color:#f4dca8;font-weight:normal;border-image:var(--cc-button-on) var(--cc-button-on-slice) / var(--cc-button-border) stretch}
+.hg-gate.hg-cc-skin .hg-link{color:#e4c080;font-family:var(--cc-font)}
+.hg-gate.hg-cc-skin .hg-list li{justify-content:flex-start;gap:8px;padding:7px 14px 7px 10px;border-radius:0;background:#15120f;background-clip:padding-box;border:var(--cc-card-border) solid transparent;border-image:var(--cc-card) var(--cc-card-slice) fill / var(--cc-card-border) stretch;color:var(--cc-heading);cursor:pointer}
+.hg-gate.hg-cc-skin .hg-list li.hg-selected{border-image:var(--cc-card-on) var(--cc-card-on-slice) fill / var(--cc-card-border) stretch;background:#15120f;filter:brightness(1.12)}
+.hg-gate.hg-cc-skin .hg-list li.hg-selected::before{content:"✓ ";color:#f0cd85}
+.hg-gate.hg-cc-skin .hg-err{color:#eeb88a}
+.hg-gate.hg-cc-skin .hg-list li .hg-muted{margin-left:auto;font-style:italic}
+.hg-gate .hg-btn{white-space:nowrap}
+.hg-gate.hg-rules .hg-newname{display:none}
+.hg-gate.hg-rules .hg-newrow .hg-btn{flex:1}
 .hg-status{position:fixed;left:8px;bottom:8px;z-index:9999;font:11px ui-monospace,Menlo,Consolas,monospace;color:#8b949e;background:rgba(10,14,20,.72);padding:6px 9px;border-radius:6px;pointer-events:none;white-space:pre}
 `;
 
@@ -194,6 +232,12 @@ export interface GatewayPanelOptions {
   client: GatewayClient;
   /** Called with a fresh grant: the app dials the layer and enters play. */
   onPlay(grant: PlayGrant, character: GatewayCharacter): void;
+  /** The game's own creation rules — used when main does not publish any. */
+  localCreation?: () => CharacterCreation | null;
+  /** The creation screen's 3D preview (the host owns renderer + models). */
+  preview?: (canvas: HTMLCanvasElement, creation: CharacterCreation) => CreationPreview | null;
+  /** Texture id → URL, so the creation screen can wear the game's UI pieces. */
+  textureUrl?: (id: string) => string | undefined;
 }
 
 export interface GatewayPanel {
@@ -214,6 +258,7 @@ export function mountGatewayPanel(opts: GatewayPanelOptions): GatewayPanel {
   root.setAttribute("role", "dialog");
   root.setAttribute("aria-label", "Sign in");
   document.body.appendChild(root);
+  watchUiScale(root); // lives as long as the page
   const status = document.createElement("div");
   status.className = "hg-status";
   status.textContent = `gateway ${opts.client.base}`;
@@ -221,6 +266,14 @@ export function mountGatewayPanel(opts: GatewayPanelOptions): GatewayPanel {
 
   let chosen: GatewayCharacter | null = null;
   let busy = false;
+  // main's rules win (they are what /characters validates against); fetched once per panel
+  let rules: Promise<CharacterCreation | null> | null = null;
+  const creationRules = (): Promise<CharacterCreation | null> =>
+    (rules ??= opts.client.creation().then((fromMain) => fromMain ?? opts.localCreation?.() ?? null));
+  // the game's look on this card too, as soon as its rules are known
+  void creationRules().then((creation) => {
+    if (creation && opts.textureUrl) applyCreationSkin(root, creation, opts.textureUrl);
+  });
 
   const el = <K extends keyof HTMLElementTagNameMap>(tag: K, props: Partial<HTMLElementTagNameMap[K]> & { text?: string } = {}, ...children: Node[]): HTMLElementTagNameMap[K] => {
     const node = document.createElement(tag);
@@ -294,6 +347,8 @@ export function mountGatewayPanel(opts: GatewayPanelOptions): GatewayPanel {
     sub.appendChild(out);
     const list = el("ul", { className: "hg-list" });
     const err = el("div", { className: "hg-err" });
+    let archetypeNames = new Map<string, string>();
+    const archetypeName = (id: string): string => archetypeNames.get(id) ?? "";
     let selected: string | null = opts.client.lastCharacter();
     const play = el("button", { className: "hg-btn hg-primary", text: "Play" });
     const refresh = (): void => {
@@ -303,6 +358,7 @@ export function mountGatewayPanel(opts: GatewayPanelOptions): GatewayPanel {
       if (!chars.some((c) => c.id === selected)) selected = chars[0]?.id ?? null;
       for (const c of chars) {
         const li = el("li", { className: c.id === selected ? "hg-selected" : "" }, el("span", { text: c.name }));
+        if (c.build) li.appendChild(el("span", { className: "hg-muted", text: archetypeName(c.build.archetype) }));
         li.setAttribute("role", "option");
         li.setAttribute("aria-selected", c.id === selected ? "true" : "false");
         li.onclick = () => {
@@ -350,11 +406,43 @@ export function mountGatewayPanel(opts: GatewayPanelOptions): GatewayPanel {
         play.disabled = false;
       }
     };
-    const createRow = el("div", { className: "hg-row" }, newName, create);
+    newName.classList.add("hg-newname");
+    const createRow = el("div", { className: "hg-row hg-newrow" }, newName, create);
     createRow.style.marginTop = "0";
     card.append(title, sub, list, el("label", { text: "new character" }), createRow, err, el("div", { className: "hg-row" }, play));
     root.appendChild(card);
     refresh();
+    // with creation rules, "new character" is the creation screen instead of a bare name
+    void creationRules().then((creation) => {
+      if (!creation || !root.contains(card)) return;
+      archetypeNames = new Map(creation.archetypes.map((a) => [a.id, a.name]));
+      refresh();
+      create.textContent = "New character…";
+      // the creation screen asks for the name itself
+      root.classList.add("hg-rules");
+      create.onclick = () => {
+        if (busy) return;
+        root.hidden = true;
+        const screen = mountCreationScreen({
+          creation,
+          name: newName.value.trim(),
+          ...(opts.textureUrl ? { textureUrl: opts.textureUrl } : {}),
+          ...(opts.preview ? { preview: (canvas: HTMLCanvasElement) => opts.preview!(canvas, creation) } : {}),
+          onCreate: async (name, build) => {
+            const c = await opts.client.createCharacter(name, build);
+            selected = c.id;
+            newName.value = "";
+            screen.close();
+            root.hidden = false;
+            refresh();
+          },
+          onCancel: () => {
+            screen.close();
+            root.hidden = false;
+          },
+        });
+      };
+    });
     void opts.client.characters().then(refresh, (error: unknown) => {
       if (!opts.client.session) renderAuth();
       else err.textContent = error instanceof Error ? error.message : String(error);

@@ -3,7 +3,9 @@
  *
  * Two namespaces in the player-data contract (ARCHITECTURE §3c, category 2):
  *
- *   character  { sheet }                 the `character/<bodyId>` netState value
+ *   character  { sheet, records }        the `character/<bodyId>` netState value, and the
+ *                                        per-character records beside it (`quests/`, `npc/`,
+ *                                        `vault/` — core PERSISTED_PLAYER_NAMESPACES)
  *   world      { "pos:<scene>": {position, yaw} }   where the body stood, per scene
  *
  * The layer is the save authority: it reads the sheet the character-sheet
@@ -21,6 +23,8 @@ export const NS_WORLD = "world";
 
 export interface PlayerSave {
   sheet: unknown | null;
+  /** Per-character netState records by namespace (`quests`, `npc`, `vault`), restored as `<ns>/<bodyId>`. */
+  records: Record<string, unknown>;
   position: [number, number, number] | null;
   yaw: number;
   /** Revisions of the records the save came from. */
@@ -29,9 +33,15 @@ export interface PlayerSave {
 
 export interface CommitInput {
   sheet: unknown | undefined;
+  /** Per-character netState records by namespace; absent namespaces keep their saved value. */
+  records?: Record<string, unknown>;
   scene: string;
   position: [number, number, number] | null;
   yaw: number;
+}
+
+function recordsOf(raw: unknown): Record<string, unknown> {
+  return raw && typeof raw === "object" && !Array.isArray(raw) ? { ...(raw as Record<string, unknown>) } : {};
 }
 
 export class PlayerStore {
@@ -78,6 +88,7 @@ export class PlayerStore {
         : null;
     return {
       sheet: character?.data["sheet"] ?? null,
+      records: recordsOf(character?.data["records"]),
       position,
       yaw: typeof pos?.yaw === "number" && Number.isFinite(pos.yaw) ? pos.yaw : 0,
       rev,
@@ -87,9 +98,11 @@ export class PlayerStore {
   /** Save; returns the new revisions per namespace written. */
   async commit(playerId: string, input: CommitInput): Promise<Record<string, number>> {
     const rev: Record<string, number> = {};
-    if (input.sheet !== undefined) {
+    const records = Object.entries(input.records ?? {}).filter(([, v]) => v !== undefined);
+    if (input.sheet !== undefined || records.length > 0) {
       rev[NS_CHARACTER] = await this.write(playerId, NS_CHARACTER, (data) => {
-        data["sheet"] = input.sheet;
+        if (input.sheet !== undefined) data["sheet"] = input.sheet;
+        if (records.length > 0) data["records"] = { ...recordsOf(data["records"]), ...Object.fromEntries(records) };
       });
     }
     if (input.position) {

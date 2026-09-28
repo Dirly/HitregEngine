@@ -12,6 +12,7 @@
  *   assets-index.json                  ({ models:[], materials:[], prefabs:[], scenes:[], ... })
  *   assets/<kind>/<file>               (the copied content)
  */
+import { AudioSystem, type AudioComponentData } from "./audio-system.js";
 import * as THREE from "three/webgpu";
 import CameraControls from "camera-controls";
 import {
@@ -50,7 +51,7 @@ import { initProjectScripts } from "./project-scripts.js";
 import { startDevConsole } from "./dev-console.js";
 import { ChunkManager } from "./chunk-manager.js";
 import { bakeImpostorAtlas } from "./impostor-bake.js";
-import { voxelGroundProbes } from "./voxel-ground.js";
+import { syncWorldCover, voxelGroundProbes } from "./voxel-ground.js";
 import {
   loadVolumes,
   loadWorldRecipes,
@@ -137,6 +138,7 @@ async function main(): Promise<void> {
 
   // 4. camera + controls
   const camera = new THREE.PerspectiveCamera(60, canvas.clientWidth / canvas.clientHeight, 0.1, 500);
+  const audio = new AudioSystem(camera, (soundId) => assets.getSound(soundId)?.url);
   camera.position.set(0, 6, 14);
   const controls = new CameraControls(camera, canvas);
   controls.maxPolarAngle = 1.45;
@@ -182,6 +184,7 @@ async function main(): Promise<void> {
   const modelLooks = createModelLooks({
     objectOf: (entityId) => built.objects.get(entityId),
     textureUrl: (assetId) => assets.getTexture(assetId)?.url,
+    resolveModel: (assetId) => assets.getModel(assetId)?.url,
     moving: movingInstances,
     effects: () => ambientVfx, // item effects are standing vfx plays, batched with every other
   });
@@ -260,6 +263,14 @@ async function main(): Promise<void> {
     d.normalize();
     return [d.x, d.z];
   };
+  // a world point on screen for DOM overlays (ctx.worldToScreen)
+  const screenPoint = new THREE.Vector3();
+  const worldToScreen = (x: number, y: number, z: number): { x: number; y: number; distance: number } | null => {
+    screenPoint.set(x, y, z).project(camera);
+    if (screenPoint.z < -1 || screenPoint.z > 1 || Math.abs(screenPoint.x) > 1.1 || Math.abs(screenPoint.y) > 1.1) return null;
+    const rect = canvas.getBoundingClientRect();
+    return { x: rect.left + ((screenPoint.x + 1) / 2) * rect.width, y: rect.top + ((1 - screenPoint.y) / 2) * rect.height, distance: camera.position.distanceTo(screenPoint.set(x, y, z)) };
+  };
   const scripts = new ScriptRuntime({
     doc: expanded,
     objects: built.objects,
@@ -267,21 +278,25 @@ async function main(): Promise<void> {
     events: eventBus,
     registry: scriptRegistry,
     input,
+    worldToScreen,
     viewForward,
     recenterView: () => cameraRig.returnToAim(),
     renderPortrait: (entityId, canvas, opts) => {
       const object = built.objects.get(entityId);
       if (!object) return null;
       const view = new PortraitView(object, canvas, { ...opts, clips: animations.clipsOf(entityId) });
+      // the head, hair, helm and pads are drawn by moving batches, not under the body: seat copies on the clone's bones
+      modelLooks.dressPortrait(object, view.model, () => view.refit());
       return () => view.dispose();
     },
     netState,
     setAnimation: (id, clip, fade, opts) =>
-      animations.play(id, clip, fade ?? 0.3, opts?.loop ?? true, opts?.restart ?? false),
+      animations.play(id, clip, fade ?? 0.3, opts?.loop ?? true, opts?.restart ?? false, opts?.sync ?? false),
     setAnimationLayer: (id, clip, opts) => animations.playLayer(id, clip, opts),
     clearAnimationLayer: (id, fade) => animations.clearLayer(id, fade ?? 0.2),
     animationClips: (id) => animations.clipNames(id),
     animationDuration: (id, clip) => animations.clipDuration(id, clip),
+    animationPhase: (id) => animations.baseClipPhase(id),
     setAnimationSpeed: (id, multiplier) => animations.setSpeed(id, multiplier),
     setBillboard: (id, opts) => billboards.setValue(id, opts),
     setParticles: (id, opts) => particles.setValue(id, opts),
@@ -299,8 +314,28 @@ async function main(): Promise<void> {
       });
     },
     setModelLook: (id, look) => modelLooks.set(id, look),
-    playSound: () => {}, // v1: audio components/SFX via scripts' own WebAudio; AudioSystem is a later add
+    modelTables: (assetId) => modelLooks.tables(assetId),
+    playSound: (entityId, soundId, opts) => {
+      const src = soundId ?? (expanded.entities[entityId]?.components["audio"] as AudioComponentData | undefined)?.src;
+      if (!src) return;
+      if (opts?.at) void audio.playAt(built.scene, opts.at, src, opts);
+      else void audio.play(built.objects.get(entityId) ?? null, src, opts);
+    },
+    setSoundLoop: (entityId, slot, soundId, opts) =>
+      audio.setLoop(`${entityId}/${slot}`, built.objects.get(entityId) ?? null, soundId, opts),
+    hasSound: (soundId) => assets.getSound(soundId) !== undefined,
+    // called from a frame, long after the streamer below exists
+    worldLoading: () => chunkManager.stats.loading > 0,
+    soundDuration: (soundId) => {
+      const seconds = audio.duration(soundId);
+      if (seconds === undefined && assets.getSound(soundId)) audio.preload(soundId);
+      return seconds;
+    },
   });
+  vfx.resolvers.playSound = (soundId, at, volume) => void audio.playAt(built.scene, at, soundId, { volume });
+  // browsers start audio suspended until a gesture
+  window.addEventListener("pointerdown", () => audio.resume(), { once: true });
+  window.addEventListener("keydown", () => audio.resume(), { once: true });
   scripts.start();
   animations.setRunning(true);
 
@@ -328,6 +363,8 @@ async function main(): Promise<void> {
     resolveMaxAnisotropy: () => renderer.getMaxAnisotropy(),
     onInstancedBatch: (batch) => foliageLod.register(batch),
     onLight: (_entityId, light, importance) => lightBudget.register(light, importance),
+    // particles in streamed cells (waterfall mist): registered like the scene's, dropped on unload
+    onParticles: (entityId, group, data) => particles.register(entityId, group, data, (id: string) => assets.getTexture(id)?.url),
     onVfx: (entityId, group, data) => ambientVfx.register(entityId, group, data),
     onClusteredMesh: (_entityId, mesh) => clusterLod.register(mesh),
     bakeImpostor: (object, bounds) => bakeImpostorAtlas(renderer, object, bounds),
@@ -338,7 +375,10 @@ async function main(): Promise<void> {
       if (simulated) scripts.addEntities(doc, objects);
     },
     onUnloaded: (ids) => {
-      for (const id of ids) built.objects.delete(id);
+      for (const id of ids) {
+        built.objects.delete(id);
+        particles.unregister(id);
+      }
       scripts.removeEntities(ids);
     },
     onDisposeInstancedBatch: (batch) => foliageLod.unregister(batch),
@@ -372,6 +412,12 @@ async function main(): Promise<void> {
   await chunkManager.configure(streamer, built.scene);
   // ground probes for the `grass` component; null world -> no cover, no throw
   const ground = voxelGroundProbes(() => (voxelWorldId ? getVoxelWorld(voxelWorldId) : null));
+  // the world carries its own cover (recipe.cover), one layer per `cover:<id>`
+  grass.regionTest = ground.regionTest;
+  const worldCoverRoot = new THREE.Group();
+  worldCoverRoot.name = "world-cover";
+  built.scene.add(worldCoverRoot);
+  syncWorldCover(grass, worldCoverRoot, voxelWorldId ? getVoxelWorld(voxelWorldId) : null, new Set(), (id: string) => assets.getTexture(id)?.url);
 
   // camera rig config (data-driven from the active camera's rig)
   let followId: string | null = null;

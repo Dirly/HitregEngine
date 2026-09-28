@@ -13,7 +13,7 @@
  * a material.
  *
  * What it does, in the order that matters:
- *   1. seam-blends each theme's `tools/atlas/out/<recipe>/<theme>/atlas.png`
+ *   1. seam-blends (unless --no-seam-blend) each theme's `tools/atlas/out/<recipe>/<theme>/atlas.png`
  *      ON ITS OWN. The blend reads the key's UV layout, so running it on a
  *      packed page writes into the wrong texels.
  *   2. packs the blended sheets into one page (8px gutters of edge pixels).
@@ -28,6 +28,12 @@
  *   6. re-renders the inventory icon of every item drawn from the model
  *      (item-icon.mjs --model), so icons follow the bake.
  *
+ * `--with <recipe> --with-themes <a> <b> …` puts a SECOND recipe's mesh into the
+ * same model and its themes on the same page: the player's head is the male and
+ * the female head in ONE mesh, so a face of either sex is a tile of one page and
+ * every head is one draw. Its parts join the part table after the first
+ * recipe's; the sheets must be the same size.
+ *
  * unwrap-weapon also rewrites the recipe's key files in tools/atlas/sets/ as a
  * side effect. This tool puts them back as they were.
  */
@@ -37,6 +43,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { decodePng, encodePng } from "./_png.mjs";
+import { assertSquarePage, squareGrid } from "./_page.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const PLAYGROUND = path.resolve(here, "..");
@@ -59,6 +66,14 @@ if (!recipe || !project || themes.length === 0) {
   console.error("usage: weapon-page --recipe <name> --project <project> --themes <a> <b> … [--model weapons/<recipe>-uber.glb]");
   process.exit(1);
 }
+const withRecipe = typeof args.with === "string" ? args.with : null;
+const withThemes = args["with-themes"] === undefined || args["with-themes"] === true ? [] : [].concat(args["with-themes"]);
+if (withRecipe && withThemes.length === 0) {
+  console.error("--with needs --with-themes");
+  process.exit(1);
+}
+// --no-seam-blend: pack the painted sheets as they are (the blend rewrites texels along every island edge)
+const seamBlend = args["no-seam-blend"] !== true;
 const modelId = typeof args.model === "string" ? args.model : `weapons/${recipe}-uber.glb`;
 const textureDir = path.posix.dirname(modelId);
 const assets = path.join(PLAYGROUND, "projects", project, "assets");
@@ -69,28 +84,39 @@ if (!fs.existsSync(assets)) {
 const outDir = path.join(ENGINE, "tools", "atlas", "out", recipe);
 const setDir = path.join(ENGINE, "tools", "atlas", "sets", recipe);
 const work = fs.mkdtempSync(path.join(os.tmpdir(), `weapon-page-${recipe}-`));
-const unwrap = (extra) =>
-  execFileSync(process.execPath, [path.join(here, "unwrap-weapon.mjs"), "--recipe", recipe, "--no-check", ...extra], {
+const unwrapOf = (name, extra) =>
+  execFileSync(process.execPath, [path.join(here, "unwrap-weapon.mjs"), "--recipe", name, "--no-check", ...extra], {
     cwd: PLAYGROUND,
     stdio: "pipe",
   }).toString();
+const unwrap = (extra) => unwrapOf(recipe, extra);
 
 // the set's committed files, restored at the end (unwrap-weapon rewrites them)
 const setBackup = new Map();
-for (const f of fs.existsSync(setDir) ? fs.readdirSync(setDir) : []) {
-  const p = path.join(setDir, f);
-  if (fs.statSync(p).isFile()) setBackup.set(p, fs.readFileSync(p));
-}
+for (const dir of [setDir, ...(withRecipe ? [path.join(ENGINE, "tools", "atlas", "sets", withRecipe)] : [])])
+  for (const f of fs.existsSync(dir) ? fs.readdirSync(dir) : []) {
+    const p = path.join(dir, f);
+    if (fs.statSync(p).isFile()) setBackup.set(p, fs.readFileSync(p));
+  }
 
 try {
   // 1. blend each theme against the key it was painted over
   const sheets = themes.map((theme) => {
     const atlas = path.join(outDir, theme, "atlas.png");
     if (!fs.existsSync(atlas)) throw new Error(`no atlas for theme "${theme}" at ${path.relative(ENGINE, atlas)} — import-atlas it first`);
+    if (!seamBlend) return { theme, id: `${textureDir}/${recipe}-${theme}.png`, file: atlas };
     unwrap(["--atlas", atlas, "--out-mesh", path.join(work, `blend-${theme}`)]);
     const blended = path.join(outDir, theme, "atlas-seamblend.png");
     return { theme, id: `${textureDir}/${recipe}-${theme}.png`, file: fs.existsSync(blended) ? blended : atlas };
   });
+  for (const theme of withThemes) {
+    const dir = path.join(ENGINE, "tools", "atlas", "out", withRecipe, theme);
+    const atlas = path.join(dir, "atlas.png");
+    if (!fs.existsSync(atlas)) throw new Error(`no atlas for ${withRecipe} theme "${theme}" at ${path.relative(ENGINE, atlas)}`);
+    unwrapOf(withRecipe, ["--atlas", atlas, "--out-mesh", path.join(work, `blend-with-${theme}`)]);
+    const blended = path.join(dir, "atlas-seamblend.png");
+    sheets.push({ theme, id: `${textureDir}/${withRecipe}-${theme}.png`, file: fs.existsSync(blended) ? blended : atlas });
+  }
 
   // 2. pack
   const PAD = 8;
@@ -99,11 +125,7 @@ try {
   for (const d of decoded) {
     if (d.png.width !== size || d.png.height !== size) throw new Error(`${d.theme}: ${d.png.width}px, the page is ${size}px — one sheet size per page`);
   }
-  const cols = Math.ceil(Math.sqrt(decoded.length));
-  const rows = Math.ceil(decoded.length / cols);
-  const stride = size + PAD * 2;
-  const W = cols * stride;
-  const H = rows * stride;
+  const { cols, stride, W, H } = squareGrid(decoded.length, size, PAD);
   const page = new Uint8Array(W * H * 4);
   const tiles = {};
   decoded.forEach((d, i) => {
@@ -121,11 +143,17 @@ try {
     tiles[d.id] = [ox / W, oy / H, size / W].map((v) => +v.toFixed(6));
   });
   const pagePath = path.join(work, `${recipe}-page.png`);
+  assertSquarePage(W, H, `weapon-page ${recipe}`);
   fs.writeFileSync(pagePath, encodePng(W, H, page));
 
   // 3. bake it into the ubermesh
   unwrap(["--atlas", pagePath, "--seam-blend", "0", "--out-mesh", path.join(work, "baked")]);
-  const uber = path.join(work, "baked-uber.glb");
+  let uber = path.join(work, "baked-uber.glb");
+  if (withRecipe) {
+    unwrapOf(withRecipe, ["--atlas", pagePath, "--seam-blend", "0", "--out-mesh", path.join(work, "baked-with")]);
+    uber = path.join(work, "baked-merged.glb");
+    fs.writeFileSync(uber, mergeUber(fs.readFileSync(path.join(work, "baked-uber.glb")), fs.readFileSync(path.join(work, "baked-with-uber.glb"))));
+  }
 
   // 4. part + tile tables into the mesh node's extras
   const glb = fs.readFileSync(uber);
@@ -170,4 +198,102 @@ try {
 } finally {
   for (const [p, bytes] of setBackup) fs.writeFileSync(p, bytes);
   fs.rmSync(work, { recursive: true, force: true });
+}
+
+/**
+ * The second ubermesh's triangles appended to the first's primitive: its part
+ * indices (uv1) moved past the first's and its part table merged in. Both were
+ * baked with the same page, so the first's material serves both.
+ */
+function mergeUber(a, b) {
+  const read = (glb) => {
+    const jl = glb.readUInt32LE(12);
+    const json = JSON.parse(glb.subarray(20, 20 + jl).toString());
+    const bin = glb.subarray(28 + jl, 28 + jl + glb.readUInt32LE(20 + jl));
+    const node = json.nodes.find((n) => n.mesh !== undefined);
+    const prim = json.meshes[node.mesh].primitives[0];
+    const count = json.accessors[prim.attributes.POSITION].count;
+    let order = Array.from({ length: count }, (_, i) => i);
+    if (prim.indices !== undefined) {
+      const acc = json.accessors[prim.indices];
+      const view = json.bufferViews[acc.bufferView];
+      const start = (view.byteOffset ?? 0) + (acc.byteOffset ?? 0);
+      const size = { 5121: 1, 5123: 2, 5125: 4 }[acc.componentType];
+      order = Array.from({ length: acc.count }, (_, i) =>
+        size === 1 ? bin[start + i] : size === 2 ? bin.readUInt16LE(start + i * 2) : bin.readUInt32LE(start + i * 4),
+      );
+    }
+    // an attribute flattened to the triangle list, `shift` added to its first component
+    const flat = (name, shift = 0) => {
+      const acc = json.accessors[prim.attributes[name]];
+      if (acc.componentType !== 5126) throw new Error(`mergeUber: ${name} is not float`);
+      const view = json.bufferViews[acc.bufferView];
+      const n = { VEC2: 2, VEC3: 3, VEC4: 4 }[acc.type];
+      const start = (view.byteOffset ?? 0) + (acc.byteOffset ?? 0);
+      const stride = view.byteStride ?? n * 4;
+      const res = new Float32Array(order.length * n);
+      order.forEach((v, i) => {
+        for (let c = 0; c < n; c++) res[i * n + c] = bin.readFloatLE(start + v * stride + c * 4) + (c === 0 ? shift : 0);
+      });
+      return { res, n, type: acc.type };
+    };
+    return { json, bin, node, prim, flat };
+  };
+  const A = read(a);
+  const B = read(b);
+  const offset = Object.keys(A.node.extras.parts).length;
+  const chunks = [A.bin];
+  let at = A.bin.length;
+  const attributes = {};
+  for (const name of Object.keys(A.prim.attributes)) {
+    if (B.prim.attributes[name] === undefined) throw new Error(`mergeUber: the second mesh has no ${name}`);
+    const x = A.flat(name);
+    const y = B.flat(name, name === "TEXCOORD_1" ? offset : 0);
+    const data = new Float32Array(x.res.length + y.res.length);
+    data.set(x.res);
+    data.set(y.res, x.res.length);
+    const pad = (4 - (at % 4)) % 4;
+    if (pad) {
+      chunks.push(Buffer.alloc(pad));
+      at += pad;
+    }
+    const buf = Buffer.from(data.buffer);
+    A.json.bufferViews.push({ buffer: 0, byteOffset: at, byteLength: buf.length, target: 34962 });
+    chunks.push(buf);
+    at += buf.length;
+    const acc = { bufferView: A.json.bufferViews.length - 1, componentType: 5126, count: data.length / x.n, type: x.type };
+    if (name === "POSITION") {
+      acc.min = [Infinity, Infinity, Infinity];
+      acc.max = [-Infinity, -Infinity, -Infinity];
+      for (let i = 0; i < acc.count; i++)
+        for (let c = 0; c < 3; c++) {
+          acc.min[c] = Math.min(acc.min[c], data[i * 3 + c]);
+          acc.max[c] = Math.max(acc.max[c], data[i * 3 + c]);
+        }
+    }
+    A.json.accessors.push(acc);
+    attributes[name] = A.json.accessors.length - 1;
+  }
+  A.prim.attributes = attributes;
+  delete A.prim.indices;
+  for (const [name, i] of Object.entries(B.node.extras.parts)) {
+    if (A.node.extras.parts[name] !== undefined) throw new Error(`mergeUber: both meshes have a part "${name}"`);
+    A.node.extras.parts[name] = i + offset;
+  }
+  const bin = Buffer.concat(chunks);
+  const binPad = Buffer.concat([bin, Buffer.alloc((4 - (bin.length % 4)) % 4)]);
+  A.json.buffers[0].byteLength = binPad.length;
+  let js = Buffer.from(JSON.stringify(A.json));
+  js = Buffer.concat([js, Buffer.alloc((4 - (js.length % 4)) % 4, 0x20)]);
+  const head = Buffer.alloc(12);
+  head.writeUInt32LE(0x46546c67, 0);
+  head.writeUInt32LE(2, 4);
+  head.writeUInt32LE(12 + 8 + js.length + 8 + binPad.length, 8);
+  const jh = Buffer.alloc(8);
+  jh.writeUInt32LE(js.length, 0);
+  jh.writeUInt32LE(0x4e4f534a, 4);
+  const bh = Buffer.alloc(8);
+  bh.writeUInt32LE(binPad.length, 0);
+  bh.writeUInt32LE(0x004e4942, 4);
+  return Buffer.concat([head, jh, js, bh, binPad]);
 }

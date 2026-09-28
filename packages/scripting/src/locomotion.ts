@@ -56,6 +56,22 @@ export function gaitFor(speed: number, tuning: GaitTuning, previous: Gait | null
   return "sprint";
 }
 
+/**
+ * The speed to pick a gait FROM, when the game itself slows some directions
+ * of travel: measured speed with that deliberate slow-down taken back out.
+ *
+ * A strafe or a backpedal moves at `sideSpeedMult` of the gait's speed by
+ * design — 6.5 m/s × 0.65 = 4.2 in the MMO, which is under the walk/run
+ * threshold. Read raw, every sideways RUN became a walk cycle played at 4×
+ * and clamped at {@link RATE_MAX}: a scurry that still skated. The multiplier
+ * is the player's own intent (run key vs walk key, which way they pushed), so
+ * it is divided back out; anything ELSE slowing the body — a swamp, a wade, a
+ * debuff, an AI — is still read as measured.
+ */
+export function gaitReadingSpeed(planarSpeed: number, directionMult: number): number {
+  return directionMult > 0 && directionMult < 1 ? planarSpeed / directionMult : planarSpeed;
+}
+
 /** Ordering of the tiers — idle 0 through sprint 3. */
 export function gaitTier(gait: Gait): number {
   return TIER[gait];
@@ -111,9 +127,10 @@ export function playbackRate(travelSpeed: number, authoredSpeed: number): number
 
 /**
  * How far a one-shot action clip may be stretched or compressed to fill the
- * window its owner asked for. Past the floor the clip is looped instead: a
- * two-second channel pose spread over thirty seconds is not slow, it is
- * stopped.
+ * window its owner asked for. Past the floor it plays once at the floor and
+ * HOLDS its last frame — never loops: a swing or a death that starts over is
+ * the single most obvious animation bug there is. A pose that is meant to
+ * repeat (a channel) says so with `actionLoop` and is never fitted at all.
  */
 export const ACTION_RATE_MIN = 0.35;
 export const ACTION_RATE_MAX = 3;
@@ -130,8 +147,8 @@ export interface ActionFit {
  * one-second animation should be one slow cast, not the same second three
  * times — that repeat is the single most obvious tell that an animation was
  * bolted onto a timer. Where the window is longer than even the slowest
- * playback covers, it loops (slowly), and where it is shorter the clip speeds
- * up to land on time.
+ * playback covers, it plays once at that floor and holds the last frame for
+ * the rest, and where it is shorter the clip speeds up to land on time.
  *
  * An unknown duration (a model still loading, a headless host with no mixer)
  * falls back to the old behaviour rather than guessing.
@@ -139,7 +156,7 @@ export interface ActionFit {
 export function fitAction(clipDuration: number | null | undefined, window: number): ActionFit {
   if (!clipDuration || clipDuration <= 0 || !(window > 0)) return { rate: 1, loop: true };
   const rate = clipDuration / window;
-  if (rate < ACTION_RATE_MIN) return { rate: ACTION_RATE_MIN, loop: true };
+  if (rate < ACTION_RATE_MIN) return { rate: ACTION_RATE_MIN, loop: false };
   if (rate > ACTION_RATE_MAX) return { rate: ACTION_RATE_MAX, loop: false };
   return { rate, loop: false };
 }
@@ -227,7 +244,13 @@ export class GaitTracker {
  * "somebody else's" it survived — a 0.78 m hop through every front door, head
  * first at the lintel, falling clip and all. So a rise faster than `popCap`
  * that is NOT ours, this close to the ground, is a collision artefact and is
- * replaced by the ordinary follow. The caller keeps real lifts out of here: it
+ * CLIPPED to `popCap` — not zeroed: the body does have to rise the lip's
+ * height to cross it, and zeroing the rise stalled it against every lip of a
+ * voxel hillside. Climbing also suspends the gap pull (the gap is the lower
+ * cell the capsule's axis is still over), and `step` lifts the body over a lip
+ * the look-ahead ray saw before the capsule reaches it. Jump shaping and air
+ * control live in {@link airGravityScale} / {@link airSteer}.
+ * The caller keeps real lifts out of here: it
  * does not call this during a jump, nor while a script holds the body's
  * `liftUntil` channel.
  */
@@ -237,25 +260,292 @@ export function groundFollowVy(
   vy: number,
   normal: readonly [number, number, number],
   gap: number,
-  opts: { stick: number; slopeTolerance: number; dt: number; ours: boolean; popCap?: number },
+  opts: {
+    stick: number;
+    slopeTolerance: number;
+    dt: number;
+    ours: boolean;
+    popCap?: number;
+    /**
+     * Metres the ground just AHEAD stands above the plane the body is
+     * following — a lip to step up (see {@link readGround}). 0/absent = none.
+     */
+    step?: number;
+    /** How far ahead that step was measured, metres. */
+    stepReach?: number;
+    /**
+     * What this function returned last tick, if anything. A rise past it that
+     * gravity cannot explain is contact lifting the body up a lip, even when
+     * it is close enough to count as `ours`.
+     */
+    wrote?: number | null;
+  },
 ): number | null {
   if (!(opts.stick > 0) || normal[1] <= 0.5 || gap > opts.stick) return null;
+  const popCap = opts.popCap ?? 0;
   if (vy > 0.8 && !opts.ours) {
-    const popCap = opts.popCap ?? 0;
     if (!(popCap > 0) || vy <= popCap) return null;
   }
   const planar = Math.hypot(x, z);
   if (planar < 0.1) return null; // standing still: leave it to contact resolution
-  const cap = Math.max(1, planar * opts.slopeTolerance);
   const along = -(normal[0] * x + normal[2] * z) / normal[1];
+  // Downhill is capped by slopeTolerance — that is what separates following a
+  // descent from falling. Uphill gets the steepest ground the follow runs on
+  // at all (normal.y > 0.5 is 60°): marching-cubes terrain puts 45-55° faces
+  // on every little lip, and capping the climb at 39° there held the body's
+  // rise below what the ground asked for, so it ground into the face and its
+  // measured speed sank under the idle threshold — a creep in the idle pose.
+  const cap = Math.max(1, planar * (along > 0 ? Math.max(opts.slopeTolerance, UPHILL_RATIO) : opts.slopeTolerance));
   let follow = Math.max(-cap, Math.min(cap, along));
-  if (gap > 0.02) follow -= Math.min(gap / Math.max(opts.dt, 1 / 240), cap);
+  // Closing a gap pulls DOWN, and that is only ever right on the way down.
+  // Climbing — the ground rising under the feet, or contact lifting the body
+  // up a lip — the gap is the lower cell the centre is still over, and pulling
+  // toward it drags the body back into the step it is climbing.
+  const lifted = vy > 0.05 && (!opts.ours || (opts.wrote != null && vy > opts.wrote + 0.1));
+  const climbing = along > 0.05 || lifted;
+  if (gap > 0.02 && !climbing) follow -= Math.min(gap / Math.max(opts.dt, 1 / 240), cap);
+  // A rise contact gave the body climbing a lip is kept, clipped to the pop
+  // cap: zeroing it stalled the body against every voxel lip, letting it
+  // through whole is the doorway hop.
+  if (lifted) follow = Math.max(follow, popCap > 0 ? Math.min(vy, popCap) : vy);
+  // Step up a lip seen ahead, proportionally to what is left of it — so it
+  // lands level with the top instead of hopping over it.
+  const step = opts.step ?? 0;
+  const reach = opts.stepReach ?? 0;
+  if (step > STEP_MIN && reach > 0) {
+    follow = Math.max(follow, Math.min(STEP_RATE_MAX, (2 * step * planar) / reach));
+  }
   return follow;
 }
+
+/** Steepest uphill ratio ground-following climbs at (≈56°, under the 60° walkable cut). */
+export const UPHILL_RATIO = 1.5;
+/** Lips lower than this are the capsule's own business. */
+const STEP_MIN = 0.04;
+/** Fastest a step-up lifts the body, m/s. */
+export const STEP_RATE_MAX = 5;
 
 /** A rise this body owes to {@link groundFollowVy} rather than to a jump. */
 export function risingByGround(vy: number, wrote: number | null): boolean {
   return wrote !== null && Math.abs(vy - wrote) < 1;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Reading the ground under a capsule                                          */
+/* -------------------------------------------------------------------------- */
+
+/** One downward ray's answer: distance below the body's origin, and the surface normal. */
+export interface GroundCast {
+  distance: number;
+  normal: readonly [number, number, number];
+}
+
+/** What {@link readGround} learned about the ground under and ahead of a body. */
+export interface GroundReading {
+  /** Nearest ground under the FOOTPRINT: the centre ray, or the ring when the centre is off the ground. */
+  dist: number;
+  /** The centre ray alone (Infinity on a miss). */
+  centre: number;
+  /** Normal of the ground the body stands on, or null over nothing. */
+  normal: [number, number, number] | null;
+  /** Metres the ground ahead stands above the plane being followed — a lip to step up; 0 for none. */
+  step: number;
+  /** How far ahead the step ray looked, metres (0 = it did not). */
+  reach: number;
+}
+
+/** Past this gap under the centre the footprint ring is consulted. */
+const RING_AFTER = 0.05;
+/** Ring points sit this fraction of the collider radius out from the axis. */
+const RING_FRACTION = 0.75;
+/** How far past the collider's edge the step ray looks. */
+const STEP_LOOK = 0.2;
+
+/**
+ * Read the ground under a capsule with more than one ray.
+ *
+ * One ray from the body's CENTRE is wrong exactly where a character most needs
+ * it right: climbing a lip. The capsule's rounded foot is on the upper cell
+ * while its axis is still over the lower one, so the centre ray reads the
+ * ground as a lip's height further down than it is — past the probe's slack,
+ * which after `coyoteTime` played the air clip on a body sliding up a bump.
+ * On voxel terrain with a lip every few metres that was a character gliding
+ * up every hill.
+ *
+ * So: the centre ray first (the common case, one query), and only when it
+ * reports a gap, four more on a ring inside the footprint, oriented along
+ * travel. The nearest of them is the ground the capsule is standing on.
+ * Separately, when `stepHeight` > 0 and the body is moving, one ray a little
+ * past the collider's leading edge measures how far the ground AHEAD stands
+ * above the plane under the body — a lip to lift over before the capsule runs
+ * into it (see {@link groundFollowVy}'s `step`).
+ *
+ * `cast(dx, dz)` casts one ray straight down from the body's origin offset by
+ * (dx, dz); `rest` is the origin-to-feet distance, `radius` the collider's.
+ * Pure — the controller and the dedicated server run the same one.
+ */
+export function readGround(
+  cast: (dx: number, dz: number) => GroundCast | null,
+  o: { rest: number; radius: number; dirX: number; dirZ: number; stepHeight: number; slack: number },
+): GroundReading {
+  const c = cast(0, 0);
+  const centre = c ? c.distance : Infinity;
+  let dist = centre;
+  let normal: [number, number, number] | null = c ? [c.normal[0], c.normal[1], c.normal[2]] : null;
+  const dirLen = Math.hypot(o.dirX, o.dirZ);
+  const fx = dirLen > 1e-6 ? o.dirX / dirLen : 1;
+  const fz = dirLen > 1e-6 ? o.dirZ / dirLen : 0;
+  if (centre > o.rest + RING_AFTER && o.radius > 0) {
+    const r = o.radius * RING_FRACTION;
+    // forward, back, left, right of travel
+    const ring: Array<[number, number]> = [
+      [fx * r, fz * r],
+      [-fx * r, -fz * r],
+      [-fz * r, fx * r],
+      [fz * r, -fx * r],
+    ];
+    let best: GroundCast | null = null;
+    for (const [dx, dz] of ring) {
+      const hit = cast(dx, dz);
+      if (hit && hit.distance < dist) {
+        dist = hit.distance;
+        best = hit;
+      }
+    }
+    // the centre is off the ground the body stands on: take the footing's normal
+    if (best && !(centre <= o.rest + o.slack)) normal = [best.normal[0], best.normal[1], best.normal[2]];
+  }
+  let step = 0;
+  let reach = 0;
+  if (o.stepHeight > 0 && dirLen > 1e-6 && Number.isFinite(dist)) {
+    reach = o.radius + STEP_LOOK;
+    const ahead = cast(fx * reach, fz * reach);
+    if (ahead && ahead.normal[1] > 0.5) {
+      // where a plane of this normal would put the ground ahead, from here
+      const n = normal && normal[1] > 0.5 ? normal : ([0, 1, 0] as const);
+      const expected = o.rest + (n[0] * fx * reach + n[2] * fz * reach) / n[1];
+      const rise = expected - ahead.distance;
+      if (rise > 0 && rise <= o.stepHeight) step = rise;
+    }
+  }
+  return { dist, centre, normal, step, reach };
+}
+
+/**
+ * Is the probe's reading evidence of LEAVING the ground this tick?
+ *
+ * Rising is not, by itself: a body running up a hill, or being lifted over a
+ * lip by contact, rises with its feet on the ground, and the old rule — any
+ * rise we did not write ourselves is airborne — read every such climb as a
+ * jump. Only a rise somebody LAUNCHED (this body's own jump, or a script
+ * holding `liftUntil`) is. A climb gets the ground-stick distance as its slack
+ * instead of the tighter contact slack: a body going UP cannot be falling.
+ */
+export function probeLeaving(p: {
+  dist: number;
+  rest: number;
+  slack: number;
+  stick: number;
+  vy: number;
+  launched: boolean;
+}): boolean {
+  if (p.launched && p.vy > 0.8) return true;
+  const slack = p.vy > 0.3 && !p.launched ? Math.max(p.slack, p.stick) : p.slack;
+  return p.dist > p.rest + slack;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Jumps and air                                                               */
+/* -------------------------------------------------------------------------- */
+
+/** The gravity the physics world runs at (packages/physics sim default), m/s². */
+export const STANDARD_GRAVITY = 9.81;
+
+/**
+ * How a jump is shaped. The multipliers are multiples of world gravity for the
+ * body while airborne; the controller adds the difference on top of the sim's
+ * own gravity each fixed tick, so it is per-character and runs identically on
+ * the dedicated server.
+ */
+export interface JumpTuning {
+  /** Take-off velocity, m/s. */
+  jump: number;
+  /** Gravity while rising with the jump key held. */
+  riseGravity: number;
+  /** Gravity once falling (any fall, not only a jump's). */
+  fallGravity: number;
+  /** Gravity while still rising after the jump key was let go — the short hop. */
+  cutGravity: number;
+}
+
+/**
+ * Gravity multiple for one airborne tick. Falling is always `fallGravity` —
+ * a heavy fall is most of what makes a jump read as snappy rather than floaty.
+ * Rising is only shaped for this body's OWN jump: a launch pad or a knockback
+ * keeps plain gravity, so whoever launched it gets the arc they asked for.
+ */
+export function airGravityScale(vy: number, jumping: boolean, held: boolean, t: Omit<JumpTuning, "jump">): number {
+  if (vy <= 0) return t.fallGravity;
+  if (!jumping) return 1;
+  return held ? t.riseGravity : Math.max(t.riseGravity, t.cutGravity);
+}
+
+/**
+ * Velocity change for one tick that turns the sim's own gravity into `scale`
+ * of it. The sim already applies 1×, so this is only the difference.
+ */
+export function extraGravityDv(scale: number, dt: number, g = STANDARD_GRAVITY): number {
+  return -(scale - 1) * g * dt;
+}
+
+/** Approach rate (1/s) of the air steer at airControl = 1 — about ground-like. */
+export const AIR_RESPONSE = 12;
+
+/**
+ * Horizontal velocity for an airborne tick: momentum carries, the stick only
+ * NUDGES it. Writing the full gait velocity every airborne tick (what the
+ * controller used to do) is a character that can reverse in mid-air — the
+ * other half of floaty. `airControl` 0 is pure momentum, 1 near-full control.
+ * With no input the body keeps what it has.
+ */
+export function airSteer(
+  vx: number,
+  vz: number,
+  wantX: number,
+  wantZ: number,
+  steering: boolean,
+  airControl: number,
+  dt: number,
+): [number, number] {
+  if (!steering) return [vx, vz];
+  const k = 1 - Math.exp(-Math.max(0, airControl) * AIR_RESPONSE * dt);
+  return [vx + (wantX - vx) * k, vz + (wantZ - vz) * k];
+}
+
+/**
+ * The arc a jump flies on flat ground, integrated at the fixed step exactly as
+ * the controller + sim do it (the take-off tick at plain gravity, extra gravity
+ * from the next one). `holdFor` is how long the key stays down (Infinity = the
+ * whole jump). Returns the apex height and the time back on the ground.
+ */
+export function jumpArc(t: JumpTuning, opts: { dt?: number; holdFor?: number } = {}): { apex: number; airtime: number } {
+  const dt = opts.dt ?? 1 / 60;
+  const holdFor = opts.holdFor ?? Infinity;
+  let vy = t.jump;
+  let y = 0;
+  let apex = 0;
+  let time = 0;
+  let first = true;
+  while (time < 10) {
+    if (!first) vy += extraGravityDv(airGravityScale(vy, vy > 0, time < holdFor, t), dt);
+    first = false;
+    vy -= STANDARD_GRAVITY * dt; // the sim's own step
+    y += vy * dt;
+    time += dt;
+    apex = Math.max(apex, y);
+    if (y <= 0) break;
+  }
+  return { apex, airtime: time };
 }
 
 /** Exponential smoothing that behaves the same at any tick rate. */

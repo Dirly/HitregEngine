@@ -23,6 +23,8 @@ export interface SheetStoreLike {
   isAuthority(): boolean;
   get(key: string): unknown;
   set(key: string, value: unknown): boolean;
+  delete(key: string): boolean;
+  keys(prefix?: string): string[];
   onChange(cb: (key: string, value: unknown) => void): () => void;
 }
 
@@ -37,6 +39,12 @@ const localStore: SheetStoreLike = {
     for (const cb of [...localHandlers]) cb(key, value);
     return true;
   },
+  delete: (key) => {
+    if (!localValues.delete(key)) return false;
+    for (const cb of [...localHandlers]) cb(key, undefined);
+    return true;
+  },
+  keys: (prefix = "") => [...localValues.keys()].filter((k) => k.startsWith(prefix)),
   onChange: (cb) => {
     localHandlers.add(cb);
     return () => {

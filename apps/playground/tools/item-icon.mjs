@@ -155,7 +155,15 @@ function readGlb(file) {
         });
       }
     }
-  return { tris, parts: extras.parts ?? null };
+  // a model with its own baked texture (placeholders, props) and no theme sheet
+  // on the item renders in that texture instead of flat grey
+  const img = json.images?.find((im) => im.bufferView !== undefined && im.mimeType === "image/png");
+  let embedded = null;
+  if (img) {
+    const view = json.bufferViews[img.bufferView];
+    embedded = decodePng(Buffer.from(bin.subarray(view.byteOffset ?? 0, (view.byteOffset ?? 0) + view.byteLength)));
+  }
+  return { tris, parts: extras.parts ?? null, embedded };
 }
 
 // ---------------------------------------------------------------- vector bits
@@ -177,7 +185,7 @@ const add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
  * cropped to the object with a 1 px margin, longest side SIZE.
  */
 function renderItem(model, look, frame) {
-  const { tris, parts } = readGlb(model);
+  const { tris, parts, embedded } = readGlb(model);
   let shown = tris;
   if (look.parts?.length && parts) {
     const want = new Set(look.parts.map((n) => parts[n]).filter((i) => i !== undefined));
@@ -186,7 +194,7 @@ function renderItem(model, look, frame) {
     shown = tris.filter((t) => want.has(t.part));
   }
   if (!shown.length) throw new Error("no triangles left after the part filter");
-  const tex = look.texture ? decodePng(fs.readFileSync(path.join(assets, "textures", look.texture))) : null;
+  const tex = look.texture ? decodePng(fs.readFileSync(path.join(assets, "textures", look.texture))) : embedded;
 
   // camera: looks FROM `from`, i.e. along -from
   const from = norm(frame.from ?? [1, 0, 0]);

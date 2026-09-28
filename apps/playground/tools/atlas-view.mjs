@@ -43,6 +43,7 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { execFileSync } from "node:child_process";
 import { decodePng, encodePng } from "./_png.mjs";
+import { assertSquarePage, squareGrid } from "./_page.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const PLAYGROUND = path.resolve(here, "..");
@@ -356,8 +357,7 @@ for (const b of builds) console.log(`  ${b.label}: ${b.names.join(" + ")}`);
   });
   sheets.length = 0;
   sheets.push(...decoded.map((d) => d.sh));
-  const cols = Math.ceil(Math.sqrt(decoded.length));
-  const rows = Math.ceil(decoded.length / cols);
+  const { cols, rows } = squareGrid(decoded.length, size, PAD);
   const stride = size + PAD * 2;
   const W = cols * stride;
   const H = rows * stride;
@@ -382,6 +382,7 @@ for (const b of builds) console.log(`  ${b.label}: ${b.names.join(" + ")}`);
   }
   const packId = `${name}-pack.png`;
   const packPath = path.join(assets, "textures", packId);
+  assertSquarePage(W, H, "atlas-view");
   fs.writeFileSync(packPath, encodePng(W, H, packed));
   console.log(`  packed ${decoded.length} sheets of ${size}px -> ${W}x${H}`);
 

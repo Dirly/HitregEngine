@@ -69,6 +69,25 @@ upperarms), and correction is where error lives. Re-exporting is otherwise a
 drop-in — the map keys on names, and the rest reconciliation is measured at
 bake time from whatever pose the new file has.
 
+**Aim only where the rests differ in POSE, not where the riggers differ in
+JOINTS.** Aiming a bone rotates it until it points along its source bone. For a T-pose arm against an A-pose arm
+that is the point. For a torso it is wrong. Riggers disagree about where the
+joints go: the UE mannequin's clavicle starts at the sternum and runs 38° back
+to the shoulder, while AccuRig's starts beside the spine and runs out. AccuRig's
+neck joint also sits behind the head joint, leaning 28° to the mannequin's 11°.
+Aimed, the human's shoulders swept ~50° back (glenohumeral 3-4% of height
+behind the hips in every clip) and its face tipped 17° up. Derek called it
+"stretched-back shoulders and a bird neck". The map's `keepBind` list (the spine
+above the hip, the neck, the head and the clavicles) leaves those bones at bind:
+both rigs stand neutral there, and the source's world deltas apply on top.
+Hands came out too: palm roll against the source went from 10.5° to 3.4°,
+because the upperarm no longer inherits the swung clavicle. The hip stays aimed
+(0.9°), so the legs and every `clipSpeeds`/`clipFootfalls`/`clipAdvance` number
+are unchanged. Check a new rig pair with anatomical landmarks the two rigs
+share: skull base (head joint) against the glenohumeral joints (upperarms)
+against the hip, plus face pitch. Joint-to-joint directions mislead here,
+because they differ by convention. `--keep-bind none` reproduces the old bake.
+
 Skeleton correspondences are data in `apps/playground/tools/rig-map.mjs`
 (`bones`, plus the `aim` chain that makes the rest reconciliation possible).
 An `aim` may list several candidate children so one map covers rigs of
@@ -164,9 +183,54 @@ call after seeing a shield-up run and a guarded idle all the time: it read as
 a different, stiffer character. The game sets `combatUntil` a few seconds past
 every swing, block and hit.
 
+**Even in a fight, the legs are the plain gait's (`stanceCarry: "upper"`, the
+default).** A two-handed library's own run is a different run: shorter stride,
+sunk hips, its own cadence. Next to the plain jog every one-hander uses, Derek
+found it "reaaaally bad". So in walk, run, sprint, strafe and backpedal the base
+clip is always the plain one (`Run`, `Run_Left` …, paced by ITS `clipSpeeds`),
+and the stance rides the upper-body layer:
+
+- **The stance's own clip for the gait** (`TwoHanded_Run` over `Run`) is
+  phase-locked to the legs. The layer is held at the base's normalised phase
+  plus an offset every frame and paced to it (`phaseLock` on
+  `setAnimationLayer`, `AnimationSystem.lockLayer`), so the arms swing with the
+  stride at any rate. The offset lines up the two clips' LEFT-foot contacts
+  from `clipFootfalls` (`carryPhaseOffset`). That is why the order in those
+  lists matters (see *Footsteps*): `Run`'s first contact is the left foot and
+  `TwoHanded_Run`'s the right, so aligning first contacts put the arms half a
+  stride out.
+- **No clip for the gait**, for a stance listed in `stanceCarryHold` (default
+  `SwordShield`, `Shield`): the stance's idle upper body is held as a carry
+  pose, so a shield rides up while walking instead of swinging at the side.
+- **Neither** (a one-handed `Sword`): nothing rides over the gait. The plain
+  jog keeps its own arm swing, which is the jog Derek asked the others to match.
+
+Idle and turns stay the stance's full-body clips. The carry follows
+`stanceGaits`: out of combat nothing is carried. `stanceCarry: "full"`
+restores the whole-body stance gait per controller. An
+upper-body ACTION owns the layer while it runs (see *Layers*); the carry fades
+back over it (0.2 s) when it ends. So blocking while walking is plain `Walk`
+legs under `SwordShield_Block`, and letting go returns to the carried shield
+without the arms dropping in between.
+
+**The layer's torso sits on the layer clip's hips, not the gait's** (a
+mesh-space blend, `Anchor` in `packages/render/src/animation.ts`). Stance idles
+stand BLADED: `SwordShield_Idle` turns the hips −54° and twists the spine and
+neck back so the chest, shield and eyes face forward. Masked naively, that
+counter-twist lands on the walk's square hips and the shield and head point
+~40° (guard: ~60°) off to the side while moving. Every frame, after the mixer,
+the spine chain (Waist → Spine01 → Spine02, the turn shared between them) is
+turned by the difference between the live hips and the clip's own, so the
+upper body keeps its standing-stance orientation relative to the character.
+It applies to every override layer (casts over a run too) and eases out with
+the layer's fade.
+
 A held pose — a raised guard — sets `actionHold` beside `actionClip`, and the
-controller loops it at its authored pace instead of fitting it to the window.
-It also sets `actionUpperBody`: a guard is ARMS, and one raised standing still
+controller plays it ONCE at its authored pace and holds its last frame for as
+long as the guard is up, instead of fitting it to the window (a block is a
+raise-and-hold clip; looped, the shield re-raised every 1.4 s). A pose meant to
+REPEAT — a channel, a cast loop — sets `actionLoop` instead: looped at its
+authored pace, never fitted. It also sets `actionUpperBody`: a guard is ARMS, and one raised standing still
 would otherwise take the whole body for as long as it is held, so the
 character slides rather than walks when it moves behind the shield.
 
@@ -184,7 +248,10 @@ the character — `combatUntil` for the shield); `fit-grip --grip center --bone
 view, one column per sampled frame — with the scene's own sockets and the
 equipped items' parts, so what it shows is what the game will draw.
 `--override` tries socket params without touching the scene, `--zoom <bone>`
-crops to a hand. (Its renderer, `_softrender.mjs`, draws mirror images; the
+crops to a hand. A clip named `Legs+Upper` (`Run+TwoHanded_Run`,
+`Walk+SwordShield_Idle`) draws a stance carry: the first clip below
+`CC_Base_Waist`, the second from it up, locked by the doc's `clipFootfalls`
+(`@0.25` forces the offset). (Its renderer, `_softrender.mjs`, draws mirror images; the
 sheet flips them back. Anything else using it for handedness must too.)
 
 **Fit a socket; don't nudge it.** `tools/fit-grip.mjs` computes a
@@ -248,6 +315,54 @@ part names unique per model, so a slot per kind can watch the same hand and only
 the one drawing the equipped item's model shows it (`equipment-look` hides a
 look for another model). `fit-grip --model-frame` fits them without measuring.
 Replace a placeholder by pointing its slot's mesh at the real model.
+
+## A remodelled body on the same rig: `reskin`
+
+When the modeller reworks a rigged character — cuts the body into switchable
+pieces, adds a robe — re-rigging it with an auto-rigger means a new skeleton:
+new rolls and rest pose, so every retargeted clip, fitted grip and socket would
+be redone (and AccuRig's spine placement is what went wrong the first time).
+`tools/reskin.mjs` keeps the rig instead. Each new vertex takes the weights of
+the closest point on the OLD skinned surface, blended across that triangle, and
+the rig GLB is edited surgically: the primitive's accessors are replaced, the
+clips and every extra stay byte for byte.
+
+```
+node tools/reskin.mjs --rig projects/voxel-demo/assets/models/mmo/human.glb \
+  --in <HumanBase.obj> --parts <body pieces> --mirror <one-sided pieces> \
+  --bind TassetFront=CC_Base_Pelvis --bind TassetBack=CC_Base_Pelvis \
+  --bind ChestHalo=CC_Base_Spine02 --texture <atlas.png> \
+  --out projects/voxel-demo/assets/models/mmo/human-body.glb
+```
+
+- The output is a skinned UBERMESH: part index in TEXCOORD_1, `parts` in the
+  mesh node's extras, so a character shows chest, trousers, robe and tassets by
+  part mask on one draw.
+- It prints how far each part sat from the old surface. Under ~0.3% of body
+  height is the same body; a part far from everything took the wrong weights.
+- `--mirror` builds the other side of a piece modelled once (an arm, a foot),
+  sharing its UVs. `--bind` pins a piece to one bone: a back plate to the spine;
+  a tasset to the PELVIS, never the thighs. The auto-rigger bound tassets to the
+  thighs, which is what warped them. Pinned, they hang, and `clothSway` gives
+  them their swing (they still do not collide with a thigh in a full stride).
+  An open robe keeps its copied weights and moves with the legs.
+- `--theme <sheetId>=<atlas.png>` (repeated) packs every outfit's sheet onto
+  one page and writes the `tiles` table, like `weapon-page`; the first theme is
+  the default look (KHR_texture_transform). An outfit is then a tile plus a
+  part list, and every body is still one draw. `--rules` bakes a part-rules
+  table (`tools/atlas/sets/human-body/rules.json`).
+- A second body on the same rig goes in the SAME mesh. The female is the male
+  at 0.96 (measured: chest, hips, hands and feet all 0.95-0.96), so
+  `--grow 1.041667:<her parts>` stores her pieces at male size: they fit the
+  one skeleton, take the male surface's weights (within ~2% of it; the bust
+  and belt are the furthest), and her UVs share every outfit sheet. A female
+  character is the whole model at 0.96 (the creation `sex` option's `scale`),
+  which brings her head and shoulders down with the bones. `--repeat
+  Name=F_Name,Name` names her accessories, which share their names with his.
+- The material masks at alpha 0.5 and draws both faces: the robe's frayed hem
+  and the back ornament's open ring are authored in the sheet's alpha. Check a
+  theme's alpha at the body's real UVs before shipping it: several armor sheets
+  left holes in the boots, which only show once alpha is honoured.
 
 ## Rigging a creature that has no skeleton
 
@@ -508,6 +623,19 @@ an airborne clip. Two things about it are worth knowing:
   body hovering either side of a threshold, which is exactly what running along
   a hillside is, crossfades several times a second. That churn is most of what
   gets reported as "the animation is rough".
+- **A deliberate slow-down is taken back out before the gait is read.** A
+  strafe or backpedal moves at `sideSpeedMult` of the gait by design — in the
+  MMO 6.5 × 0.65 = 4.2 m/s, under the 4.35 walk/run line — so read raw, every
+  sideways or diagonal RUN played the walk cycle at its 2.5× rate cap and still
+  skated. The multiplier is the player's own intent, so it is divided back out
+  (`gaitReadingSpeed`); a swamp, a wade or an AI slowing the body still reads
+  as measured.
+- **Gait switches are phase-matched.** Walk → run → sprint (and run → strafe)
+  starts the incoming cycle at the outgoing one's normalised time
+  (`setAnimation(..., { sync: true })`) over a 0.25 s fade; restarting it at
+  frame 0 swaps the feet mid-stride. The new clip's rate is set AFTER the play,
+  so the cycle fading out keeps its own pace. Idles and actions keep their own
+  snappier fades and start from the top.
 
 `syncClipSpeed` scales playback to the ground actually covered, which is what
 stops feet skating between gaits — in-place clips are authored for one speed.
@@ -522,14 +650,24 @@ two is skating feet. The clips are not all near each other either — the librar
 this pipeline was built for authors its walk at **1.0 m/s** and its run at
 **6.0**, so a walk gait tuned to a game-feel 2 m/s skates by a factor of two
 while the run looks fine. `retarget` measures each baked clip (a planted foot
-slides backwards under the hip at exactly the speed the clip depicts) and
-prints the numbers ready to paste.
+slides under the hip at exactly the speed the clip depicts) and prints the
+numbers ready to paste — `clipSpeeds`, and next to it `clipFootfalls` (see
+*Footsteps* below). It prints them after every bake, and
+`pnpm -F playground retarget --measure <model.glb>` reads them off a finished
+GLB without the source FBXs. The measurement lives in `tools/_locomotion.mjs`.
 
-**How a clip's speed is measured, and why the number may have moved.** In
-`autorig` — `retarget` still uses the older fixed line, deliberately, because a
-biped's feet reach the ground in every gait and changing it would move numbers
-already tuned against — a foot is treated as planted at the bottom of *its own*
-arc in *that* clip: its lowest sample plus 6% of body height. A gallop
+**How a clip's speed is measured, and why the number may have moved.** Both
+tools treat a foot as planted at the bottom of *its own* arc in *that* clip,
+and take the slip as a planar magnitude (a strafe's ground goes by sideways).
+`retarget` uses the foot's lowest sample plus 2% of body height, and only for a
+foot that reaches the ground at all. It used to use a fixed line at the bind
+pose's sole, which a strafe defeats: a sideways run lands on the edge of the
+foot, the toe bone rides a few centimetres up through the stance, and the line
+kept mostly the roll-on and roll-off frames where the foot barely moves. That
+read the human's `Run_Left`/`Run_Right` at 1.16/1.13 m/s; per foot they measure
+1.98/2.02, which is also what the stride covers. The forward gaits barely moved
+(Walk 1.01 → 1.02, Run 6.01 → 5.98, Run_Bwd 4.87 → 4.91); Sprint went 8.69 →
+9.18. In `autorig` the band is 6% of body height. A gallop
 lifts the whole animal (this dog's Run carries its hips a fifth of a
 body-height higher than its Walk), so against a fixed line a running quadruped's
 feet never touch and the clip cannot be measured at all. It is also why a
@@ -564,7 +702,13 @@ turns to face where it runs, so travel and facing disagree by up to 180° for
 the first few frames of every move; reading a heading off that flickers the
 back clip at the start of each run. For the same reason the heading is measured
 against the facing the character is turning *toward*, not its current
-interpolated yaw.
+interpolated yaw. The edges (50° to the side, 130° to the back) hold the clip
+already in force for 4° either way, so travel wandering across one does not
+flicker; the band stays under 5° so the keyboard's exact 45°/135° diagonals
+land the same way every time. At a WALK the controller plays
+`walkBackClip`/`walkLeftClip`/`walkRightClip` (`Walk_Bwd`, `Walk_Left`,
+`Walk_Right`) where the model has them, else the run's directional clip paced
+down to the walk.
 
 `backpedal` (on by default) is the other half: pressing back keeps the
 character facing forward and plays the back clip, rather than spinning it round
@@ -595,7 +739,9 @@ threshold mid-animation.
 
 **Where the split lands.** The mask defaults to the rig's shallowest
 spine/waist/chest bone — the first joint above the hips, which is the split
-every game uses and the one every rig `retarget` produces has. Override it per
+every game uses and the one every rig `retarget` produces has. On the MMO's CC
+rig that is `CC_Base_Waist`, a SIBLING of `CC_Base_Pelvis` under `CC_Base_Hip`:
+the hip and the legs stay the gait's, waist-up is the action's. Override it per
 character with the animator's `upperBody`, or per call with `mask`. A rig with
 no matching bone falls back to a plain full-body play and says so in the
 console: better a cast that stops the legs than a cast nobody sees.
@@ -627,7 +773,19 @@ Three things to know before you reach for this:
   foot-skate cure — scales the gait only, so a cast layered over a sprint plays
   at its authored speed rather than at sprint rate. The layer carries its own
   rate instead (`speed` on `setAnimationLayer`), which is what fits a cast to
-  its cast time.
+  its cast time. The exception is `phaseLock`: a locked layer is placed at the
+  base's phase plus an offset each frame and paced to the base, because a
+  stance carry has to swing with the legs.
+
+**There is one layer, and the controller arbitrates it.** A layered action
+wins. Otherwise the stance carry the gait asked for goes on (see *Weapon
+stances*), else the layer comes off. `settleLayer` runs once at the end of each
+tick. An action ending mid-walk therefore hands the arms straight to the
+carry (a 0.2 s fade over the action) instead of clearing to the bare gait and
+re-raising. A full-body action, a jump, a swim or a freeze clears the carry
+for its length. A second layer slot in the AnimationSystem was the
+alternative. It would have needed two base complements and two replicated
+layers, for a case the controller can decide in one place.
 
 ## An action lasts as long as it was told to
 
@@ -638,23 +796,116 @@ timer, so the controller **fits the clip to the window** — one slow cast rathe
 than three quick ones, and a clip longer than its window speeds up to land on
 time. `ctx.animationDuration(clip)` is where the length comes from.
 
-Two limits keep it honest. Past `ACTION_RATE_MIN` the clip loops after all (a
-two-second pose spread over thirty seconds is not slow, it is stopped), and a
-clip nobody can measure — a model still loading, a headless host with no mixer
-— keeps the old looping behaviour rather than guessing. `fitActionClip: false`
-turns the whole thing off.
+Two limits keep it honest. Past `ACTION_RATE_MIN` the clip plays once at that
+floor and holds its last frame — a one-shot is never looped to fill a window,
+because a swing or a death that comes round again is a second swing nobody
+asked for. A pose that SHOULD repeat says so with `actionLoop` (looped at rate
+1, never fitted), and a held one with `actionHold` (once at rate 1, clamped).
+A clip nobody can measure — a model still loading, a headless host with no
+mixer — keeps the old looping behaviour rather than guessing.
+`fitActionClip: false` turns the whole thing off.
 
 The same fit applies to a **frozen** body's held clip, which is how a death
 animation stops playing twice.
 
 A one-shot played a second time needs `restart`: the clip is already the
 current one, clamped on its last frame, so a plain re-play is a no-op that
-reads as a character frozen mid-swing. The controller passes it on every action
-start; a script driving `ctx.setAnimation` itself has to say so.
+reads as a character frozen mid-swing. The controller passes it when an action
+STARTS — a new clip, or the same clip asked for again once its previous window
+has run out (a chained swing set on the very tick the last one ends) — and
+only then. Passed every tick it re-seeks the clip to frame 0 sixty times a
+second and a standing swing never plays at all. A window pushed later while it
+is still running (a channel that got longer) carries on rather than
+restarting. A script driving `ctx.setAnimation` itself has to say so.
+
+A caster that sets `actionClip` should also set `actionHold` and `actionLoop`
+(to false for an ordinary one-shot): they are sticky userData, and a stale
+`actionLoop` from a channel would loop the next swing.
 
 The layer replicates alongside the base clip (`animL` in the entity snapshot,
 and the dedicated server applies the same moving/standing rule to player
 bodies), so other clients see the cast over the run, not one or the other.
+A layer with no live action under it is a stance carry. It goes out as a loop
+(`animM: "loop"`), or, when it is phase-locked, with its offset (`animO`), and
+the receiver locks it to its own copy of the gait. The action flags
+(`actionHold`/`actionLoop`) are sticky userData, so they are read only while an
+action is live. Otherwise a stale `actionHold` replays the carry as a clamped
+one-shot. **The dedicated server does not dress clips at all**: `PlayerDriver`
+has no model and so no clip list. It sends plain `Attack1`/`Run` for server-mode
+players, with no stance and no carry. The server runs the builtin scripts,
+`weapon-stance` among them, so the stance list can be known there. What it
+lacks is which `<Stance>_<clip>` the model has. Mirroring `dress` and
+`stanceCarryFor` there needs that list, for example the clip names shipped to
+the server with the template.
+
+### A swing that steps moves the body
+
+Every clip `retarget` bakes is in place (the hip's start-to-end drift is
+removed), so a sword lunge is a planted foot sliding BACK under a body that
+stays put. On a capsule that does not move, the feet skate and the character
+snaps back to where it started. Derek's words: "the feet do not move the player
+forward so it doesn't line up". `clipAdvance` fixes it: per one-shot, how far
+the ground goes by under it, and the controller moves the body by that much
+while the clip plays.
+
+```json
+"clipAdvance": { "SwordShield_Attack3": { "d": 0.7, "f": [0, 0.08, 0.12, …, 1.28] } }
+```
+
+`f` is cumulative metres along the model's +Z (its forward) at 21 evenly spaced
+points from the first frame (0) to the last. `s` is the same along +X, present
+only when a clip moves sideways at least 15 cm. `d` is the clip's length, used
+where the host cannot report one. Keys are DRESSED names (`Sword_Attack3`, not
+`Attack1`), because that is what plays.
+
+- **Where the numbers come from.** `retarget` prints them after a bake, and
+  `--measure <glb>` prints them off a finished one, next to `clipFootfalls`. While a
+  foot is planted, the ground moves at minus that foot's velocity. So each sample
+  follows the SUPPORT: the lowest foot (toe or ankle, each from its own low
+  point), averaged with the other foot while it is within 3 cm. The average
+  matters. A lunge that spreads its stance slides both feet at once in opposite
+  directions (`Sword_Attack1`: left 0.9 m back, right 0.7 m forward). Following
+  either foot alone reports the whole stride, forwards or backwards. A lone low
+  foot moving faster than 4 m/s is landing, not planted, so the next foot up is
+  followed instead. Stretches with no foot within 20 cm of the ground are
+  interpolated. Walks, runs, turns, idles and swims get no entry.
+- **What the controller does.** While a clip with an entry plays FULL-BODY on a
+  grounded body, it adds the curve's slope times the clip's playback rate to
+  the velocity, along the body's facing (`advanceScale`, 0..2, default 1,
+  scales it). It is a velocity in `fixedUpdate`, so walls stop it and a ledge
+  drops you. A fitted swing that plays at 1.2x covers its ground at 1.2x, so
+  the feet stay planted. There is no advance during an upper-body layer (the
+  legs are running), a freeze, an impulse (a dash owns horizontal velocity),
+  a jump, or with `speedMult` 0 (rooted/staggered). A lower `speedMult` from
+  cast commitment slows the stick, not the lunge. That is on purpose: a
+  slowed lunge is exactly the foot-skate this exists to remove.
+- **Combos.** "Is it walking?" is asked when each action starts, against the
+  body's speed LESS last tick's advance (`ownPlanar`). Read raw, the first
+  swing's lunge (1-2.5 m/s, past the 1.1 m/s walk line) would put every later
+  swing of the combo on a layer with no lunge of its own.
+- **No clip stripping.** The pose is not modified. The bake's in-place
+  conversion already took the hip's drift out, and the curve is read off the
+  feet of that same in-place pose. Moving the body by the curve plants those
+  feet, and what is left of the hip's motion is the lunge's weight shift over
+  the feet. A clip baked with `--keep-root` carries its own travel in the hip,
+  its planted feet do not slip, and it measures (correctly) as zero.
+- **Server.** The client adds the advance to the velocity it claims
+  (`userData.advanceVel`, read by `getLocalInput`). `PlayerDriver` adds
+  `advanceAllowance` to its speed cap while an action is live and the body
+  is not rooted. The allowance is the table's peak speed × `advanceScale` ×
+  `ACTION_RATE_MAX`, so a committed swing (speedMult 0.18-0.85) is not clipped
+  as a speed hack. The server also decides layered/full-body ONCE per action
+  now, as the controller does. The claim is one number, so it cannot take the
+  lunge back out. Instead, a swing that starts within 0.25 s of a full-body
+  one inherits full-body (`CHAIN_GRACE`).
+
+Measured on human.glb (fwd m over the clip): SwordShield_Attack3 1.28 (a steady
+slide: the source had root motion, linearly removed), Staff_Attack2 0.54,
+Sword_Attack3 0.30 (a leap onto the left foot, then settling), Sword_Attack1
+0.41, GreatSword_Attack3 / Axe2H_Attack1 0.73, GreatSword_Heavy 1.67,
+SwordShield_Heavy 1.86 (+0.68 side), Axe2H_Heavy 2.01, Sword_Combo 1.23. Attack1-3
+(plain), SwordShield_Attack1/2, GreatSword_Attack1 and Staff_Attack1/4 are
+essentially in place.
 
 ## Free-hanging cloth
 
@@ -720,16 +971,25 @@ still counted as ground, as a ratio (0.8 ≈ 39°, about as steep as a body
 walks). If a character running downhill plays the falling clip, that param is
 the first place to look, not `fallSpeed`.
 
-**Velocity alone is guessing; a ray knows.** `groundProbe` casts one downward
-ray every so often (0.05s by default; 0 turns it off) and settles the question
-outright — and the same hit carries the surface NORMAL, so the two slope
-problems are one query rather than two. The resting distance is *measured*, not
-derived from the collider: the ray starts at the body's origin, which sits at a
-different height above the feet for every capsule, offset and model, so the
-first probe taken while the velocity heuristic is confident records it and
-everything after is a comparison against that. It costs one query per character
-per interval — raise the interval for a crowd, and everything degrades to the
+**Velocity alone is guessing; a ray knows.** `groundProbe` casts a downward
+ray every so often (0.05s by default, every tick while moving; 0 turns it off)
+and settles the question outright — and the same hit carries the surface
+NORMAL, so the two slope problems are one query rather than two. The resting
+distance comes from the collider (half its height less its offset); it is only
+measured for a body whose collider cannot state it. Everything degrades to the
 velocity path when there is no `raycast` to call.
+
+**One ray from the capsule's axis is wrong on every lip it climbs.** The
+rounded foot is already on the upper cell while the axis is still over the
+lower one, so the centre ray reads the ground a lip's height further down —
+past the 0.3 m slack for any real voxel lip, and after `coyoteTime` the air
+clip played on a body sliding up the bump ("he glides up hills"). So
+`readGround` (locomotion.ts) casts the centre ray first and, **only when it
+reports a gap**, four more on a ring inside the footprint oriented along
+travel; the nearest is the ground the capsule stands on. A flat run is still
+one ray. And a RISE is no longer airborne evidence by itself: only a rise
+something launched (the body's own jump, or `liftUntil`) is. An unlaunched
+rise — a climb — gets `groundStick` as its slack. See `probeLeaving`.
 
 **A character standing bolt upright on a hillside is wrong even when its clips
 are right.** `slopeAlign` leans the body onto the ground normal, capped by
@@ -762,6 +1022,31 @@ otherwise a knockback or a launch pad would be quietly deleted. That second
 rule is also why running uphill does not read as airborne: the rise is the
 ground, climbed, not a body leaving it.
 
+Climbing has four more rules, all from voxel terrain, where a marching-cubes
+hillside is a staircase of small lips with 45-55° faces:
+
+- **No gap pull while climbing.** Closing a gap pulls DOWN, which is only right
+  on the way down. Climbing (ground rising along travel, or contact lifting
+  the body past what the follow wrote last tick) the gap is the lower cell the
+  axis is still over, and pulling toward it drags the body back into the lip.
+- **Uphill is capped at the walkable limit, not at `slopeTolerance`.**
+  `slopeTolerance` is what separates following a descent from falling, so it
+  still caps downhill. Capping the climb at 39° held the rise below what a 50°
+  lip face asked for; the body ground into it and its measured speed sank
+  under the idle threshold — a creep in the idle pose. Uphill now allows 1.5
+  (≈56°, under the 60° normal cut-off).
+- **A pop is clipped, not zeroed.** `stepPopCap` used to replace a contact pop
+  with the plain follow (0 on flat ground). The body does have to rise a lip's
+  height to cross it, so zeroing stalled it against every lip; now the rise is
+  kept up to the cap. The doorway hop stays fixed: the next tick the rise is
+  ours and is overwritten.
+- **Step-up.** One more ray, a little past the collider's leading edge,
+  measures the ground ahead against the plane underfoot. A rise up to
+  `stepHeight` (0.35 m) is climbed before the capsule reaches it, at a rate
+  proportional to what is left of it (capped at 5 m/s), so the body lands level
+  with the top rather than hopping over it. A smooth slope measures zero here —
+  the plane already predicts it.
+
 The **dedicated server runs the same function on player bodies**. It has to: a
 client predicting the ground while the authority arcs over it is worse than
 either alone, since every slope becomes a fight the authority wins by yanking
@@ -769,8 +1054,26 @@ the player back.
 
 ## Jumps, landings and turning on the spot
 
-Every one of these is an optional clip: a model that shipped without them
-behaves exactly as it did before they existed.
+**The arc.** World gravity alone is a symmetric arc that hangs: the MMO's old
+`jump` 6.5 was a 2.1 m apex (taller than the character) and 1.3 s in the air.
+The controller shapes gravity itself — added as a velocity delta on the fixed
+step, so it is per-character and the dedicated server's `PlayerDriver` flies
+the same arc — as multiples of world gravity: `jumpGravity` while rising in
+its own jump with the key held, `jumpCutGravity` while still rising after the
+key is released (the short hop), `fallGravity` for every fall. A launch pad or
+knockback (`liftUntil`) keeps plain gravity. Defaults — `jump` 6.2, 1.6 / 3 /
+2.2 — give a **1.21 m apex and 0.73 s airtime** (a tap: 0.76 m, 0.50 s);
+`jumpArc()` in locomotion.ts integrates any tuning at the fixed step, so
+retune with numbers rather than by feel. Raise `jump` together with the
+gravities, never instead of them.
+
+**Air control.** Airborne, the controller no longer writes the full gait
+velocity each tick (that let a body reverse in mid-air). `airControl` (0.3)
+blends the velocity toward the input, and with no input the take-off momentum
+carries. Dashes and knockbacks (`impulseVel`) still own the horizontal.
+
+Every one of the following is an optional clip: a model that shipped without
+them behaves exactly as it did before they existed.
 
 - `jumpClip` is the push-off, played once as the body leaves the ground before
   `airClip` loops. A jump that opens on its airborne pose has no weight.
@@ -782,6 +1085,65 @@ behaves exactly as it did before they existed.
   that pivot is a statue on a turntable. They start above `turnClipSpeed`
   radians per second and hold down to a much slower one, so a turn that eases
   off does not flicker back to idle halfway through.
+
+## Footsteps
+
+`footsteps: true` plays a surface sound (`footstepSounds`, keyed by what
+`surfaceAt` reports under the body) on each foot contact. **The timing comes
+from the clip, not from a clock.** `clipFootfalls` lists, per locomotion clip,
+where in the clip (0..1) each foot lands:
+
+```json
+"clipFootfalls": { "Walk": [0.983, 0.479], "Run": [0, 0.5], "Run_Left": [0.917, 0.442] }
+```
+
+The LEFT foot's contact comes first, then the rest in stride order round the
+loop. `retarget` prints them that way (`_locomotion.mjs` finds the left contact
+bone by name). Footsteps ignore the order. The stance carry uses it to line up
+one clip's arms with another clip's legs. A list measured before this (plain
+ascending) may lead with the right foot. Re-measure with `retarget --measure`
+before trusting a carry built on it.
+
+The controller reads the base clip's playhead each tick
+(`ctx.animationPhase()`, served by `AnimationSystem.baseClipPhase`) and plays a
+step as it passes a contact. Playback rate, gait changes and speed changes
+cannot put a step out of time, because the sound follows the same playhead the
+pose does. The old scheme, a step every `speed / footstepCadence` metres, gave
+a fixed 3.1 steps a second at a walk, a run and a sprint alike, while the walk
+clip was playing at 2.2x and the run at 1.1x. Details:
+
+- **Where the numbers come from.** `retarget` prints them after a bake, or
+  `--measure <glb>` off a finished one. A foot's height is the lower of its toe
+  and its ankle, each from its own lowest point in the clip, so heel strike and
+  toe strike both count, whichever is first. It lands when it is within a
+  couple of centimetres of that low point and its slide under the hip has
+  turned to go with the ground. Height alone hears a crouch-walk a
+  quarter-second late (the sole lands above where the toe ends the stance) and
+  a heel that hovers before a two-handed step early. Only looping gaits get
+  entries: walks, runs, sprints, strafes, crouch-walks. Swim and tread have no
+  contacts.
+- **Crossing rules** (`@hitreg/scripting` `footfallsCrossed` /
+  `FootfallTracker`). The interval is half-open round the loop, so a contact
+  the playhead lands on exactly fires once. A wrap from 0.98 to 0.02 passes a
+  contact at 0. Several contacts in one tick are all counted and one sound
+  plays. Whole extra loops (rate × dt ÷ duration beyond the visible move) are
+  counted too. A clip change counts only a small forward move, which is what a
+  phase-synced gait crossfade gives. A restart or a phase jump re-anchors with
+  no sound. Steps closer than 0.12 s are one step. During a held blend the
+  heavier clip answers. During a crossfade the incoming one does.
+- **Fallbacks.** A gait clip with no entry, or a host with no playhead
+  (headless), uses the distance cadence `footstepCadence`. Swim strokes always
+  use a distance cadence. An action or idle playing while the body drifts (a
+  dash, a knockback) plays no steps.
+- **Only on the ground.** Steps need true contact. The coyote window is a
+  jump grace, and with it a character walking off a ledge kept stepping on air.
+  The landing sound needs `landSoundAir` seconds off the ground (0.25 by
+  default). Before that, every curb and stair step down sounded as a landing.
+- **Variation.** Each step's level varies ±12% around 0.88 of
+  `footstepVolume`, so the param is still the ceiling. The two feet sit a few
+  percent apart in pitch so a stride reads as two feet. A sound set is a
+  comma-separated list per surface, picked at random. Swapping the audio is an
+  edit to `footstepSounds` only.
 
 ## The same arithmetic, everywhere
 

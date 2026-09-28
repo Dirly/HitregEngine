@@ -48,6 +48,11 @@ describe("MovingInstanceSystem", () => {
     const { system, holders, mesh } = await setup();
     expect(system.root.children).toHaveLength(1);
     expect(mesh().instanceCount).toBe(3);
+    // every instance shows nothing yet (partMask 0): the batch skips its draw altogether
+    expect(system.stats()).toEqual({ batches: 1, instances: 3, draws: 0 });
+    expect(mesh().visible).toBe(false);
+    system.setLook("e0", { parts: ["Handle"] });
+    system.update();
     expect(system.stats()).toEqual({ batches: 1, instances: 3, draws: 1 });
     holders[1]!.position.set(5, 6, 7);
     system.update();
@@ -132,5 +137,47 @@ describe("MovingInstanceSystem", () => {
     expect(system.anchorOf("e0", { part: "Blade1", at: [0.5, 1, 0.5] })?.toArray()).toEqual([0.5, 1, 1]);
     expect(system.anchorOf("e0", { part: "Nope" })).toBeNull();
     expect(system.anchorOf("not-moving", { part: "Blade1" })).toBeNull();
+  });
+
+  it("gives each part its own tile per instance (groups), still ONE draw", async () => {
+    const { system, mesh } = await setup();
+    const before = mesh().material;
+    system.setLook("e1", { groups: [{ parts: ["Handle"], texture: "weapons/iron.png" }, { parts: ["Blade1"], texture: "weapons/steel.png" }] });
+    system.update();
+    // the batch switched to its appearance material once, and is still one batch
+    expect(system.root.children).toHaveLength(1);
+    expect(mesh().material).not.toBe(before);
+    expect(mesh().hasAppearance).toBe(true);
+    expect(uberOf(mesh(), 1)[3]).toBe(0b11); // shown = the groups' union
+    const buf = (mesh().geometry.getAttribute("instanceAppearance0") as THREE.InterleavedBufferAttribute).data.array;
+    // part 0 → code 1 (iron), part 1 → code 2 (steel): 1 + 2*256 in the first float
+    expect(buf[16]).toBe(1 + 2 * 256);
+    // an instance with no groups keeps code 0 everywhere = its uber tile, as before
+    expect(Array.from(buf.slice(0, 16))).toEqual(new Array(16).fill(0));
+    system.setLook("e1", { groups: null });
+    system.update();
+    expect(buf[16]).toBe(0);
+  });
+
+  it("survives equipping and unequipping a worn piece over and over (character-look's messages)", async () => {
+    const { system, mesh } = await setup();
+    // exactly what character-look sends a helm: a fresh skinSheets [] every time
+    const worn = () => ({ parts: ["Handle", "Blade1"], groups: [{ parts: ["Handle", "Blade1"], texture: "weapons/steel.png" }], skinTint: null, skinSheets: [] });
+    const bare = () => ({ parts: [], groups: [], skinTint: null, skinSheets: [] });
+    system.setLook("e0", worn());
+    system.update();
+    const first = mesh();
+    for (let i = 0; i < 6; i++) {
+      system.setLook("e0", bare());
+      system.update();
+      expect(uberOf(mesh(), 0)[3]).toBe(0);
+      system.setLook("e0", worn());
+      system.update();
+      expect(system.root.children).toHaveLength(1);
+      expect(mesh().visible).toBe(true);
+      expect(uberOf(mesh(), 0)[3]).toBe(0b11);
+    }
+    // a look change re-encodes one slot; it never rebuilds the batch
+    expect(mesh()).toBe(first);
   });
 });

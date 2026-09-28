@@ -24,8 +24,15 @@ The contract every playbook relies on:
 
 Playbooks:
 
+- [rivers-and-falls.md](rivers-and-falls.md) — THE RULES every river follows
+  (lowland rivers, one waterfall each, banks, the network, capture), how the
+  water is drawn, and the order for rebuilding a world. Read before any river
+  work or world regeneration.
 - [rivers.md](rivers.md) — carve a river from a lake to the sea or into
   another river, by hand, and check it.
+- [ground-cover.md](ground-cover.md) — flowers, wheat, ferns, reeds, lily
+  pads: the recipe's `cover` layers, the rules for gating them by biome,
+  surface and water, generating and packing the art, and `worldgen cover`.
 - [zones.md](zones.md) — cut the world into the named zones chat and
   server placement key on (`regions`): borders on landmarks, a hub town
   each, checked with `worldgen regions`. The `zone-architect` sub-agent

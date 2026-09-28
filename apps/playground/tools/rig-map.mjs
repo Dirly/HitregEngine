@@ -108,6 +108,26 @@ export const ccBaseFromUeMannequin = {
     CC_Base_R_Thumb2: "thumb_02_r",
     CC_Base_R_Thumb3: "thumb_03_r",
   },
+  /**
+   * Target bones the rest reconciliation leaves at BIND instead of aiming (see
+   * alignTargetRestToSource). The torso and clavicles: both rigs stand neutral
+   * there, and their rest directions differ only in where each rigger put the
+   * joints. Aimed, AccuRig's clavicles (beside the spine, running out) were
+   * swung onto the mannequin's (at the sternum, running 38° back) — shoulders
+   * swept ~50° back and 3-4% of body height behind the hips in every clip —
+   * and its neck (behind the head joint, 28° forward) onto the mannequin's
+   * 11°, which tipped the face 17° up: the "bird neck". The hip stays aimed
+   * (0.9°) so the legs, and every clipSpeed measured off them, are unchanged.
+   */
+  keepBind: [
+    "CC_Base_Waist",
+    "CC_Base_Spine01",
+    "CC_Base_Spine02",
+    "CC_Base_NeckTwist01",
+    "CC_Base_Head",
+    "CC_Base_L_Clavicle",
+    "CC_Base_R_Clavicle",
+  ],
   aim: {
     CC_Base_Hip: "CC_Base_Waist",
     CC_Base_Waist: "CC_Base_Spine01",
@@ -218,6 +238,9 @@ export const ccBaseFromMixamo = {
     ...mixamoDigits("Right", "R"),
   },
   aim: ccBaseFromUeMannequin.aim,
+  // same target, same reasoning: Mixamo's shoulders and neck sit where its
+  // rigger put them, not where AccuRig did (clavicle 29-35° off, aimed)
+  keepBind: ccBaseFromUeMannequin.keepBind,
 };
 
 export const RIG_MAPS = {

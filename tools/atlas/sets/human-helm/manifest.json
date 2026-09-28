@@ -1,0 +1,134 @@
+{
+  "size": 132,
+  "bleed": 2,
+  "bgLum": 236,
+  "filter": "nearest",
+  "solidGround": true,
+  "keyColor": "#00ffff",
+  "groundFringe": 1,
+  "fitSearch": 1.6,
+  "slots": {
+    "#ff0000": {
+      "name": "helm1",
+      "transparency": false,
+      "cut": false
+    },
+    "#a00000": {
+      "name": "helm1-back",
+      "transparency": false,
+      "cut": false
+    },
+    "#002090": {
+      "name": "helm2-back",
+      "transparency": false,
+      "cut": false
+    },
+    "#007000": {
+      "name": "helm3-back",
+      "transparency": false,
+      "cut": false
+    },
+    "#400080": {
+      "name": "hood-back",
+      "transparency": false,
+      "cut": false
+    },
+    "#005050": {
+      "name": "facecover-back",
+      "transparency": false,
+      "cut": false
+    },
+    "#ff8000": {
+      "name": "helm1-flair",
+      "transparency": false,
+      "cut": false
+    },
+    "#ffd000": {
+      "name": "helm1-nobeard",
+      "transparency": false,
+      "cut": false
+    },
+    "#0040ff": {
+      "name": "helm2",
+      "transparency": false,
+      "cut": false
+    },
+    "#6080ff": {
+      "name": "helm2-front",
+      "transparency": false,
+      "cut": false
+    },
+    "#00a0ff": {
+      "name": "helm2-nobeard",
+      "transparency": false,
+      "cut": false
+    },
+    "#00c000": {
+      "name": "helm3",
+      "transparency": false,
+      "cut": false
+    },
+    "#808080": {
+      "name": "noseguard1",
+      "transparency": false,
+      "cut": false
+    },
+    "#404040": {
+      "name": "noseguard2",
+      "transparency": false,
+      "cut": false
+    },
+    "#6a00c0": {
+      "name": "hood",
+      "transparency": false,
+      "cut": false
+    },
+    "#e0c000": {
+      "name": "crown",
+      "transparency": true,
+      "cut": "top"
+    },
+    "#c00060": {
+      "name": "headband",
+      "transparency": false,
+      "cut": false
+    },
+    "#ff60c0": {
+      "name": "bandana",
+      "transparency": false,
+      "cut": false
+    },
+    "#008080": {
+      "name": "facecover",
+      "transparency": false,
+      "cut": false
+    },
+    "#a06020": {
+      "name": "ornate-side",
+      "transparency": true,
+      "cut": true,
+      "fit": "contain-uniform",
+      "fitPadding": 4,
+      "anchorPad": 0,
+      "anchor": "bottom"
+    },
+    "#c08040": {
+      "name": "ornate-top",
+      "transparency": true,
+      "cut": true,
+      "fit": "contain-uniform",
+      "fitPadding": 4,
+      "anchorPad": 0,
+      "anchor": "bottom"
+    },
+    "#804000": {
+      "name": "ornate-top2",
+      "transparency": true,
+      "cut": true,
+      "fit": "contain-uniform",
+      "fitPadding": 4,
+      "anchorPad": 0,
+      "anchor": "bottom"
+    }
+  }
+}

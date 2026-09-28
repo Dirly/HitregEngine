@@ -1,4 +1,4 @@
-import { twoHanderOf, type EquipmentSlot } from "@hitreg/core";
+import { composeModelLook, twoHanderOf, type EquipmentSlot, type LookPiece } from "@hitreg/core";
 import { Script, type ModelLook } from "./script.js";
 import { catalogOf, readSheet, sheetKey, sheetStoreOf, type SheetStoreLike } from "./character-store.js";
 
@@ -26,9 +26,16 @@ import { catalogOf, readSheet, sheetKey, sheetStoreOf, type SheetStoreLike } fro
  * so every tab draws every character's gear from the same fact, and equipping
  * needs no event of its own. Presentation only: on a dedicated server there is
  * no `setModelLook` and this does nothing.
+ *
+ * Several slots, ONE model: `slot: "chest,legs,gloves,boots"` on the body.
+ * Every item in those slots drawn on the target's model is merged (core
+ * `composeModelLook`, later slots win a shared part) into one look whose
+ * `groups` give each item's parts its own sheet — a vanguard chest over
+ * ranger legs is still one mesh, one material, one draw.
  */
 export class EquipmentLook extends Script {
   static override scriptName = "equipment-look";
+  static override presentation = true;
   static override params = {
     actor: {
       default: "",
@@ -36,11 +43,16 @@ export class EquipmentLook extends Script {
     },
     slot: {
       default: "primary",
-      description: "equipment slot id to show (primary, secondary, helm, chest …)",
+      description:
+        "equipment slot id to show (primary, secondary, helm, chest …); several, comma-separated (chest,legs,gloves,boots), merge every item on the target's model into one per-part look",
     },
     target: {
       default: "",
       description: "entity whose model shows the item; empty = this entity's PARENT (the socketed model)",
+    },
+    item: {
+      default: "",
+      description: "a FIXED item id to show instead of reading a sheet — a townsperson's sword; non-empty = `actor` and `slot` are ignored",
     },
   };
 
@@ -76,12 +88,41 @@ export class EquipmentLook extends Script {
   }
 
   private refresh(): void {
+    const fixed = this.param<string>("item");
+    if (fixed) return this.show(fixed);
     const sheet = readSheet(this.store, this.param<string>("actor"));
-    const slot = this.param<string>("slot") as EquipmentSlot;
+    const slots = this.param<string>("slot").split(",").map((s) => s.trim()).filter(Boolean) as EquipmentSlot[];
+    if (slots.length > 1) {
+      this.showComposed(slots.map((slot) => {
+        const uid = sheet?.equipment[slot];
+        return uid ? sheet?.items[uid]?.itemId ?? null : null;
+      }));
+      return;
+    }
+    const slot = slots[0] ?? ("primary" as EquipmentSlot);
     // an off-hand item stays worn under a two-hander, but is not drawn
     const blocked = slot === "offhand" && sheet && twoHanderOf(sheet, { catalog: catalogOf(this.ctx) });
     const uid = blocked ? undefined : sheet?.equipment[slot];
     this.show(uid ? sheet?.items[uid]?.itemId ?? null : null);
+  }
+
+  /** Several slots on one model: one look, a sheet group per item. */
+  private showComposed(itemIds: Array<string | null>): void {
+    const catalog = catalogOf(this.ctx);
+    const pieces: LookPiece[] = [];
+    for (const id of itemIds) {
+      const appearance = id ? catalog(id)?.appearance : undefined;
+      if (appearance) pieces.push({ model: appearance.model, parts: appearance.parts, texture: appearance.texture ?? null });
+    }
+    const model = this.targetModel || pieces[0]?.model || "";
+    const composed = composeModelLook(pieces, model);
+    const look: ModelLook = composed
+      ? { parts: composed.parts, groups: composed.groups, glow: null, effects: [] }
+      : { partMask: 0, groups: null, glow: null, effects: [] };
+    const key = JSON.stringify(look);
+    if (key === this.shown) return;
+    this.shown = key;
+    this.ctx.setModelLook?.(this.target, look);
   }
 
   private show(itemId: string | null): void {

@@ -1,10 +1,12 @@
 import {
-  createWorldField,
   getVoxelWorld,
   invalidateVoxelWorld,
+  isVoxelWorldInUse,
+  registerVoxelRecipe,
   registerVoxelWorld,
   registerVolume,
-  getVolume,
+  registerVolumeDoc,
+  isVolumeInUse,
   invalidateVolume,
   primeVoxelMesh,
   voxelChunkDoc,
@@ -472,10 +474,12 @@ export async function loadWorldRecipes(
     files.map(async (file) => {
       const id = file.replace(/\.json$/, "");
       try {
-        const field = registerVoxelWorld(id, await readJson("worlds", file));
-        // remember what it was built from, so the first watcher event for an
-        // unchanged file is recognised as the no-op it is
-        registeredRecipes.set(id, JSON.stringify(field.recipe));
+        // parsed now, built when a scene first asks for it (getVoxelWorld):
+        // a project carries recipes it never streams
+        const recipe = registerVoxelRecipe(id, await readJson("worlds", file));
+        // remember what it was registered from, so the first watcher event for
+        // an unchanged file is recognised as the no-op it is
+        registeredRecipes.set(id, JSON.stringify(recipe));
         loaded.push(id);
       } catch (error) {
         console.warn(`[voxel] world recipe "${id}" is invalid:`, error);
@@ -495,7 +499,7 @@ export function applyWorldRecipeEdit(id: string, content: string | null): boolea
   if (content === null) {
     invalidateVoxelWorld(id);
     registeredRecipes.delete(id);
-    return getVoxelWorld(id) !== null;
+    return isVoxelWorldInUse(id);
   }
   try {
     const recipe = worldRecipeSchema.parse(JSON.parse(content));
@@ -507,8 +511,14 @@ export function applyWorldRecipeEdit(id: string, content: string | null): boolea
     // the PARSED recipe, so key order and whitespace are not a world reload.
     const canonical = JSON.stringify(recipe);
     if (registeredRecipes.get(id) === canonical) return false;
-    // parse first, then swap: a half-valid recipe must never replace a good one
-    createWorldField(recipe);
+    // a world nothing streams takes the new recipe unbuilt: nothing to re-stream
+    if (!isVoxelWorldInUse(id)) {
+      registerVoxelRecipe(id, recipe);
+      registeredRecipes.set(id, canonical);
+      return false;
+    }
+    // registerVoxelWorld builds before it swaps: a recipe that fails to build
+    // throws here and the good world stays
     registerVoxelWorld(id, recipe);
     registeredRecipes.set(id, canonical);
     return true;
@@ -530,8 +540,9 @@ const registeredRecipes = new Map<string, string>();
  * index, alongside the world recipes above and for the same reason: a
  * `mesh.source` of kind `csg` names its volume by id, and render, physics and
  * placement each resolve it from this registry rather than from the asset
- * library. An invalid document is reported and skipped — the entity then
- * draws nothing, rather than the scene failing to build.
+ * library. The index lists every project's volumes, so each is compiled only
+ * when a scene first meshes it; an invalid document is reported then and the
+ * entity draws nothing, rather than the scene failing to build.
  */
 export async function loadVolumes(
   index: Record<string, string[]>,
@@ -543,10 +554,10 @@ export async function loadVolumes(
     files.map(async (file) => {
       const id = file.replace(/\.json$/, "");
       try {
-        registerVolume(id, await readJson("volumes", file));
+        registerVolumeDoc(id, await readJson("volumes", file));
         loaded.push(id);
       } catch (error) {
-        console.warn(`[csg] volume "${id}" is invalid:`, error);
+        console.warn(`[csg] volume "${id}" is unreadable:`, error);
       }
     }),
   );
@@ -561,11 +572,16 @@ export async function loadVolumes(
  */
 export function applyVolumeEdit(id: string, content: string | null): boolean {
   if (content === null) {
-    const had = getVolume(id) !== null;
+    const had = isVolumeInUse(id);
     invalidateVolume(id);
     return had;
   }
   try {
+    // a volume no scene has meshed takes the new document uncompiled
+    if (!isVolumeInUse(id)) {
+      registerVolumeDoc(id, JSON.parse(content));
+      return false;
+    }
     registerVolume(id, JSON.parse(content));
     return true;
   } catch (error) {

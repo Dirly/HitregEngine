@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { RIVER_FREEBOARD } from "../src/voxel/field.js";
 import {
   createWorldField,
   defaultWorldRecipe,
@@ -352,7 +353,11 @@ describe("lakes", () => {
   it("reports the lake and river surface heights, and the sea, through waterY", () => {
     expect(field.waterY(300, 300)).toBe(55);
     expect(field.waterY(300, 450)).toBeNull();
-    expect(field.waterY(0, 0)).toBeCloseTo(60 + 3 * 0.7, 5); // river bed 60 at x=0, plus 70% of depth
+    // a river on flat ground runs in a cut: its water stands at least the
+    // freeboard under the land beside it, whatever its bed said
+    expect(field.waterY(0, 0)).not.toBeNull();
+    expect(field.waterY(0, 0)!).toBeLessThanOrEqual(bare.height(0, 30) - RIVER_FREEBOARD + 0.3);
+    expect(field.waterY(0, 0)!).toBeGreaterThan(field.height(0, 0));
     expect(field.waterY(0, 40)).toBeNull(); // beside the channel
   });
 
@@ -541,23 +546,23 @@ describe("water in chunk documents", () => {
   });
   const field = createWorldField(watery);
 
-  it("emits a river ribbon in the cells the channel crosses and nowhere else", () => {
+  it("emits river water in the cells the channel crosses and nowhere else", () => {
     const crossed = voxelChunkDoc(field, "w", 0, 0, { scatter: false });
-    const ribbon = Object.values(crossed.entities).find((e) => e.tags?.includes("river"));
-    expect(ribbon).toBeDefined();
-    const mesh = ribbon!.components["mesh"] as { source: { kind: string; points: number[][] }; material: string };
-    expect(mesh.source.kind).toBe("path");
+    const water = Object.values(crossed.entities).find((e) => e.tags?.includes("water"));
+    expect(water).toBeDefined();
+    const mesh = water!.components["mesh"] as { source: { kind: string; positions: number[]; indices: number[] }; material: string };
+    expect(mesh.source.kind).toBe("surface");
     expect(mesh.material).toBe("terrain/test-water");
-    expect(mesh.source.points.length).toBeGreaterThanOrEqual(2);
+    expect(mesh.source.indices.length).toBeGreaterThan(0);
     // the surface rides above the bed: bed 60 at x = 0, plus 70% of depth
-    const ys = mesh.source.points.map((p) => p[1]!);
+    const ys = mesh.source.positions.filter((_, i) => i % 3 === 1);
     expect(Math.min(...ys)).toBeGreaterThan(50);
     expect(Math.max(...ys)).toBeLessThan(73);
     const dry = voxelChunkDoc(field, "w", 0, 5, { scatter: false });
-    expect(Object.values(dry.entities).some((e) => e.tags?.includes("river"))).toBe(false);
+    expect(Object.values(dry.entities).some((e) => e.tags?.includes("water"))).toBe(false);
   });
 
-  it("emits one flat lake sheet per overlapped cell, clipped to the cell", () => {
+  it("emits flat lake water in each overlapped cell, clipped to the cell", () => {
     const cells = [
       [0, 2],
       [1, 2],
@@ -567,24 +572,23 @@ describe("water in chunk documents", () => {
     let sheets = 0;
     for (const [cx, cz] of cells) {
       const doc = voxelChunkDoc(field, "w", cx, cz, { scatter: false });
-      const sheet = Object.values(doc.entities).find((e) => e.tags?.includes("lake"));
+      const sheet = Object.values(doc.entities).find((e) => e.tags?.includes("water"));
       if (!sheet) continue;
       sheets++;
-      const mesh = sheet.components["mesh"] as { source: { kind: string; vertices: number[][]; faces: { v: number[] }[] } };
-      expect(mesh.source.kind).toBe("poly");
-      for (const v of mesh.source.vertices) {
-        expect(v[1]).toBe(55);
-        expect(v[0]).toBeGreaterThanOrEqual(-1e-6);
-        expect(v[0]).toBeLessThanOrEqual(watery.cellSize + 1e-6);
-        expect(v[2]).toBeGreaterThanOrEqual(-1e-6);
-        expect(v[2]).toBeLessThanOrEqual(watery.cellSize + 1e-6);
+      const mesh = sheet.components["mesh"] as { source: { kind: string; positions: number[] } };
+      expect(mesh.source.kind).toBe("surface");
+      for (let i = 0; i < mesh.source.positions.length; i += 3) {
+        expect(mesh.source.positions[i + 1]).toBe(55);
+        expect(mesh.source.positions[i]).toBeGreaterThanOrEqual(-1e-6);
+        expect(mesh.source.positions[i]).toBeLessThanOrEqual(watery.cellSize + 1e-6);
+        expect(mesh.source.positions[i + 2]).toBeGreaterThanOrEqual(-1e-6);
+        expect(mesh.source.positions[i + 2]).toBeLessThanOrEqual(watery.cellSize + 1e-6);
       }
-      expect(mesh.source.faces[0]!.v.length).toBe(mesh.source.vertices.length);
     }
     expect(sheets).toBeGreaterThanOrEqual(3);
     // a cell the lake does not reach gets none
     const far = voxelChunkDoc(field, "w", 5, 5, { scatter: false });
-    expect(Object.values(far.entities).some((e) => e.tags?.includes("lake"))).toBe(false);
+    expect(Object.values(far.entities).some((e) => e.tags?.includes("water"))).toBe(false);
   });
 
   it("emits nothing wet without a water material", () => {

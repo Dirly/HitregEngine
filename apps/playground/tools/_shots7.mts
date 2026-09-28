@@ -1,0 +1,15 @@
+import fs from "node:fs";
+import { createWorldField, worldRecipeSchema } from "@hitreg/core";
+const recipe = worldRecipeSchema.parse(JSON.parse(fs.readFileSync("projects/voxel-demo/assets/worlds/mmo.json", "utf8")));
+const field = createWorldField(recipe);
+const spots: unknown[] = [];
+const c = field.falls.filter((f) => f.river === "river-15").sort((a, b) => b.top - a.top);
+const top = c[0]!, bot = c[c.length - 1]!, h = top.top - bot.bottom;
+const cx = (top.x + bot.x) / 2, cz = (top.z + bot.z) / 2;
+spots.push(["lake-cascade-front", cx, bot.bottom + h * 0.45, cz, bot.dirX, bot.dirZ, h * 0.2, 55 + h * 0.6]);
+spots.push(["lake-cascade-side", cx, bot.bottom + h * 0.45, cz, bot.dirX - bot.dirZ * 1.5, bot.dirZ + bot.dirX * 1.5, h * 0.3, 60 + h * 0.5]);
+const s = field.falls.find((f) => f.river === "river-1")!;
+const sh = s.top - s.bottom;
+spots.push(["shore-front", s.x, s.bottom + sh * 0.4, s.z, s.dirX, s.dirZ, 6, 36]);
+spots.push(["shore-side", s.x, s.bottom + sh * 0.4, s.z, s.dirX - s.dirZ * 1.5, s.dirZ + s.dirX * 1.5, 10, 38]);
+console.log(JSON.stringify(spots));

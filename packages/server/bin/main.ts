@@ -18,6 +18,7 @@
  *   --data <dir>            file persistence root (default <playground>/.hitreg/data) — ignored with --database
  *   --database <url>        Postgres connection string — or HITREG_DATABASE_URL
  *   --experience <id>       persistence scope (default: the scene name)
+ *   --creation <id>         character-creation asset (default: the only `creation` asset installed, if exactly one)
  *   --cap <n>               players per layer (default 40)
  *   --headroom <n>          free slots to keep before starting a layer (default 5)
  *   --min <n> / --max <n>   layers to keep / at most (default 1 / 4)
@@ -35,7 +36,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { regionAt, worldRecipeSchema, type RegionDoc } from "@hitreg/core";
+import { findCreation, regionAt, worldRecipeSchema, type RegionDoc } from "@hitreg/core";
 import { loadContent, playgroundRoots } from "../src/assets.js";
 import { FileAccountStore, FilePlayerDataBackend } from "../src/persistence/file.js";
 import { PostgresStore } from "../src/persistence/postgres.js";
@@ -112,6 +113,8 @@ async function main(): Promise<void> {
     if (regions.length > 0 && at && at.length === 3) spawnZone = regionAt(regions, at[0]!, at[2]!)?.id ?? null;
     console.log(regions.length > 0 ? `[main] zones: ${regions.length} regions, spawn zone ${spawnZone ?? "(none)"}` : "[main] zones: none (whole-world layers)");
   }
+  const creation = findCreation(content.assets, arg("creation"));
+  console.log(creation ? `[main] character creation: ${creation.archetypes.length} archetypes, ${creation.traits.length} birth traits, ${creation.appearance.length} appearance slots` : "[main] character creation: none (name-only characters)");
   const mainUrl = `ws://127.0.0.1:${port}`;
   const supervisor = flag("no-supervisor")
     ? null
@@ -149,6 +152,7 @@ async function main(): Promise<void> {
     },
     supervisor,
     worldFiles: content.worldFiles,
+    ...(creation ? { creation } : {}),
     ...(regions.length > 0 ? { zones: { regions, spawnZone, ...(num("zone-cap") !== undefined ? { zoneCap: num("zone-cap")! } : {}) } } : {}),
   });
   console.log(`[main] gateway ${handle.url} · layers dial ${mainUrl}/cluster · clients will be sent to ${publicHost}:${from}-${to}`);

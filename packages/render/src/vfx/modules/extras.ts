@@ -40,7 +40,9 @@ export class SoundLive extends LiveModule<SoundModule> {
 
   protected onBegin(): void {
     const p = this.pose.position;
-    this.host.resolvers.playSound?.(this.module.asset, [p.x, p.y, p.z], this.module.volume);
+    const variants = this.module.asset.split(",").map((id) => id.trim()).filter(Boolean);
+    const asset = variants[Math.floor(Math.random() * variants.length)];
+    if (asset) this.host.resolvers.playSound?.(asset, [p.x, p.y, p.z], this.module.volume);
   }
 
   protected onUpdate(): void {}

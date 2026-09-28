@@ -44,6 +44,7 @@ import {
 import { PhysicsSim, initPhysics, type BodyState, type MeshGeometryData } from "@hitreg/physics";
 import { registerCommsEvents } from "@hitreg/comms";
 import { isClientOnlyScript } from "./scripts.js";
+import { fileMeshGeometry } from "./mesh-geometry.js";
 
 /** A keyboard nobody is pressing — the server has no local player. */
 export const NULL_INPUT: InputLike = { isDown: () => false, mouseDelta: () => [0, 0] };
@@ -61,8 +62,11 @@ export interface HeadlessWorldOptions {
   /** Sim rate. Default 60, the engine default. */
   fixedHz?: number;
   /**
-   * Collision geometry for asset-mesh colliders. The server has no GLB
-   * loader today; omit and trimesh/convex asset colliders fall back to boxes.
+   * Collision geometry for asset-mesh colliders. Default: read each model's
+   * file (its asset url is a path on disk here) and extract the same triangles
+   * the browser cooks — without it a trimesh/convex asset collider falls back
+   * to a `collider.size` box at the entity origin and the authority's world
+   * disagrees with every client's.
    */
   meshGeometry?: (assetId: string, node?: string) => MeshGeometryData | Promise<MeshGeometryData | null> | null | undefined;
   /** Entities to leave out of the world at boot (by predicate) — e.g. the scene doc's own player. */
@@ -122,7 +126,7 @@ export class HeadlessWorld {
     this.fixedDt = 1 / (opts.fixedHz ?? 60);
     this.scene.name = "server";
     this.sim = new PhysicsSim({ ...base, entities: {} }, undefined, {
-      meshGeometry: opts.meshGeometry ?? (() => null),
+      meshGeometry: opts.meshGeometry ?? fileMeshGeometry((id) => opts.assets.getModel(id)?.url),
     });
     this.eventBus = new EventBus(this.eventRegistry);
     this.eventBus.setNetRole("authority");
@@ -140,6 +144,9 @@ export class HeadlessWorld {
       input: NULL_INPUT,
       events: this.eventBus,
       netState: this.netState,
+      // ctx.getDataAsset: the character sheet's item catalog, its progression and creation rules live here —
+      // without it every sheet on the server knew no items and ignored every build
+      ...(opts.assets ? { assets: opts.assets } : {}),
       setAnimation: (id, clip) => {
         this.anims.set(id, clip);
       },

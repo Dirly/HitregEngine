@@ -115,7 +115,10 @@ function brief(items) {
     lines.push(`## ${it.file}`);
     lines.push(`Exact output size: ${it.size} pixels. Save as exactly "${it.file}" in the cwd.`);
     if (it.alpha) lines.push("Background MUST be fully transparent (a real PNG alpha channel, not white, not a checkerboard pattern).");
-    if (it.ref) lines.push("A reference image is attached: match its palette, grain and pixel density. Follow the text below for subject and layout.");
+    const n = [].concat(it.ref ?? []).length;
+    if (n === 1) lines.push("A reference image is attached: match its palette, grain and pixel density. Follow the text below for subject and layout.");
+    // several: the text below says what each one is for, by its order
+    if (n > 1) lines.push(`${n} reference images are attached, in the order the text below names them.`);
     lines.push("", it.prompt.trim(), "");
   }
   lines.push(`Resize to the exact pixel size with nearest-neighbour (never bilinear) so pixel art stays crisp${items.some((i) => i.alpha) ? ", preserving alpha" : ""}.`);
@@ -137,11 +140,14 @@ async function generate(items, timeoutSec) {
     write(it.id, {
       id: it.id, status: "pending", createdAt: new Date().toISOString(), requester: opt("requester", "claude"),
       purpose: it.purpose ?? "", size: it.size, target: it.target, prompt: it.prompt,
-      refs: it.ref ? [path.resolve(it.ref)] : [], notes: "",
+      refs: [].concat(it.ref ?? []).map((r) => path.resolve(r)), notes: "",
     });
   }
 
-  const refs = items.map((i) => i.ref).filter(Boolean);
+  // every item's references, once each, in first-seen order — a set whose
+  // images share a key and a style reference attaches each file once, and the
+  // prompts can name them by position
+  const refs = [...new Set(items.flatMap((i) => [].concat(i.ref ?? [])).map((r) => path.resolve(r)))];
   const t0 = Date.now();
   const res = runCodex(stage, brief(items), refs, timeoutSec);
   const secs = Number(((Date.now() - t0) / 1000).toFixed(0));
@@ -199,7 +205,7 @@ if (cmd === "gen") {
     return {
       id: it.id, file: `${it.id}.png`, target: path.resolve(root, it.target), size: it.size ?? "1024x1024",
       prompt: shared ? `${shared}\n\n${it.prompt}` : it.prompt, alpha: !!it.alpha,
-      ref: it.ref ? path.resolve(root, it.ref) : undefined, purpose: it.purpose ?? "",
+      ref: it.ref ? [].concat(it.ref).map((r) => path.resolve(root, r)) : undefined, purpose: it.purpose ?? "",
     };
   }), Number(opt("timeout", 1800)));
 } else if (cmd === "new") {

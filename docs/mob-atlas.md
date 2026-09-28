@@ -477,6 +477,40 @@ island is half as wide, its top edge is the centre line, and it is painted once
 for both sides like the piece it sits on. The overlap report knows a mirrored
 part is doubled on purpose.
 
+A piece modelled as ONE half (a helm shell on +Z, one arm) is the other case:
+the recipe's `mirrorCopy: { axis: "z", parts: [...] }` builds the missing half
+after the unwrap, reflected with reversed winding and sharing the UVs, so every
+output (GLB, ubermesh, OBJ) carries both halves painted once. A part that
+really crosses the plane (more than 5% of its depth each side, like a nose
+guard) is skipped with a warning; fold that one with `mirror: "z"` instead. The
+player headgear (`human-helm`) unwraps each half shell as its side profile.
+
+## A fringe of cut-out planes: `merge`, `square`, `viewUp`
+
+A mess of loose planes that reads as leaves, spikes, feathers or fur (the
+shoulder pad's PlanerRim / PlanerAccent) is ONE part and ONE painted motif.
+`merge: { PlanerRim: [...] }` in a recipe joins the named objects into one
+part (rename same-named objects first with `repeats`; two dozen planes as
+parts would blow the 24-part mask). Same-named objects are better grouped by
+where they sit: `{ PlanerRim: { of: "plane", nearest: "Rim1" }, PlanerAccent:
+{ of: "plane", nearest: "Accent1" } }` sends each `plane` to the entry whose
+`nearest` part its centre is closest to, so a re-export that reorders the
+objects cannot swap the groups. `method: "square"` then maps every piece
+of that part (a run of triangles joined at their corners, one quad per
+Blockbench plane) corners-to-corners onto the WHOLE slot square in its own
+frame: up is the boundary edge closest to `up` (default `"+y"`, `upAlt` for a
+plane lying flat), centre to centre, so every plane samples the same texels
+the right way up and a motif painted from the square's centre radiates from
+every plane's. The slot is a cut-out with `fit: "contain-uniform"` and no
+anchor, and the prompt asks for a transparent margin on all four sides. On a
+plane `view`, `viewUp: [x, y, z]` stands a LEANING ornament upright in its
+island, so its base is the island's bottom edge (`human-shoulder`). Two
+importer options for tiny cut-outs: `openEnclosed: <texels>` (a number) opens
+enclosed white pockets down to that size, the slits between a fringe's
+points; `keepFit: true` keeps a contain fit the importer would otherwise
+reject for leaving the (mostly empty) block bare, which left plumes cropped at
+the top edge.
+
 ## A head that is seen from every side: `sphere`
 
 Four cuts of the ghoul's head failed Derek's eye before this one. A FRONT view
@@ -500,6 +534,60 @@ bottom edge by a height mapping — on the anansi one such triangle ran out as a
 sliver across half the island. `split` works on a `sphere` exactly as on a
 plane: `split: [{ slot: "head-under", facing: "-y", above: 0.6, u: "+z", v: "-x" }]`
 puts it on its own island seen from below, centred under the strip.
+
+**A head modelled as several shells** (the player head: a face panel, a band
+round the sides and back, a jaw piece) goes on ONE strip: give every shell the
+same `sphere` settings and the same `centerOf` LIST of all of them, so the
+centre and oval are measured once and the shells meet edge to edge
+(`human-head` recipe).
+
+## A head module every player wears: a page of faces, a hair ubermesh
+
+The `human-head` recipe is not a mob. It is one head mesh worn by every human
+character, with many faces to pick from, so it ships like a weapon type: one
+ubermesh, one PAGE of every face (`weapon-page --recipe human-head --model
+mmo/human-head.glb`), and a character picks a face by its tile. Sixteen faces,
+eight male and eight female, sit 4x4 on one page, all one skin tone.
+
+- **Density is the body's, and so is the filter.** `human.glb` measures 104
+  texels/m on its 256 sheet, so the head declares `texelsPerMetre:
+  HELD_GEAR_TEXELS_PER_M` and ships a 72px sheet (112/m), shrunk NEAREST
+  (`atlas.filter: "nearest"`), not box-averaged. A crisper or softer face reads
+  as a different art style beside the body.
+- **No face widening on a head with marks.** `face: { scale }` exists because
+  the ghoul's generator painted faces twice too wide. With marks the human-head
+  generator painted TO them, at natural proportions, into the widened space, and
+  on the model every face came back squeezed sideways: long narrow noses.
+- **The strip's middle must be the front of the face** (`centered: true` on the
+  sphere). The old seam rule sent every seam triangle of one side to the far
+  end, the strip came out lopsided, and since a generator centres a face on its
+  block, every face landed off to one side.
+- **Mirror the face.** Slot `symmetric: true` moves the axis the generator
+  painted onto the island's centre; `mirror: true` copies the left half onto the
+  right, in key pixels and again at the target size about the nearest texel
+  edge (nearest sampling otherwise gives one eye a catchlight the other lacks).
+  One-sided features in a SUBJECT (a scar, a mole) come out doubled.
+- **Eye height from face thirds, not the brow bump.** Eyes at 85.5 on a face
+  whose nose base the moustache mesh puts at 82.3 read as a long nose; 85.0 did
+  not.
+- **The hair, beard and moustache are their OWN ubermesh** (`mmo/human-hair.glb`,
+  `tools/carry-mesh.mjs`): the modeller's own UVs onto the tiling hair swatch,
+  resampled nearest to 40px so the hair lands at ~109 texels/m (the tool prints
+  each part's density), one part per style, one draw. Carried inside the head's
+  72px sheet the swatch shrank to ~50/m, hair could not change without the face
+  tile, and hair colour needs a material of its own.
+- The creation screen's appearance options name `model`, `socket`,
+  `offset`/`rotationDeg`/`scale`, `texture` (the tile), `parts` and `hideBones`
+  (`CC_Base_Head` strips `human.glb`'s hood and head under the module; the
+  headless `human-body.glb` needs none). Options in different slots naming the
+  same model fold into one piece.
+- **Women get their own head, in the SAME mesh.** Female faces painted on the
+  male head read as men whatever the prompt said (its jaw is square). The
+  modeller's female head (`human-head-female`, narrower jaw, parts `F_*`) is
+  unwrapped on its own key and merged into the male one by `weapon-page --with
+  human-head-female --with-themes …`: its triangles join the mesh after the
+  male parts and its faces become tiles of the same page, so a face of either
+  sex is still one draw. A face option shows its own sex's four parts.
 
 ## Face MARKS on the key, and room for the face the generator draws
 
@@ -622,6 +710,28 @@ silently, with no warning anywhere. Always give a transparency slot an explicit
 the empty run reaches the island's bottom edge, so a generator that paints the
 robe a fifth too short loses that fifth off the HEM — which is what a hem is —
 instead of punching a hole through the middle of the cloth.
+
+`cut: "top"` is the same rule upside down: a crown opens only where the white
+between its points reaches the island's TOP edge, so the band stays whole.
+
+An ornament plane (plume, horns, antlers) is fixed to its helm along the
+block's BOTTOM edge: the prompt asks for ONE silhouette growing from a base at
+the centre of that edge, with white around and between its parts. Generators
+still paint past the block, and the importer then CROPS at the island border:
+a straight edge through every feather. So the art is scaled into the block:
+`fit: "contain-uniform", fitPadding: 4, anchorPad: 0, anchor: "bottom"` — one
+scale for both axes (a stretched plume looks wrong), a margin on the free sides,
+and NONE at the anchored base (`anchorPad`), or the fit lifts the ornament off
+the helm and it floats. Measured after the change: zero opaque texels on any
+ornament's free edges across four themes.
+
+`atlas.solidGround: true` makes every texel owned by a SOLID island opaque,
+gutter included; only cut-out islands keep a transparent gutter. A masked
+material mips its alpha, so a thin face at the edge of a solid island (a helm's
+back seen side-on) blends with a transparent gutter a mip down and becomes a
+hole you can see through at a distance. A side-profile shell also wants its
+back-facing faces `split` into their own island (`facing: "-x"`): seen side-on
+they get no texels at all.
 
 **A cap cannot be flared out of a patch.** The ratkin's tail is a tapering box
 projected down Z; its tip cap's normal is -X, so it lies in the dropped plane

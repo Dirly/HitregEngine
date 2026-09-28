@@ -56,19 +56,39 @@ export type GameHud = z.infer<typeof gameHudSchema>;
 export const questSchema = z.object({
   id: z.string().min(1), title: z.string().min(1), description: z.string(),
   objectives: z.array(z.object({
-    id: z.string().min(1), label: z.string().min(1), kind: z.enum(["visit", "kill", "collect"]),
+    id: z.string().min(1), label: z.string().min(1),
+    kind: z.enum(["visit", "kill", "collect", "talk"]).describe(
+      "visit: stand inside `area`; kill: defeat `target` (an entity id or its template prefix); collect: carry `target` " +
+      "(an item id); talk: open a conversation with the NPC whose entity id is `target`.",
+    ),
     target: z.string().default(""), required: z.number().int().positive().default(1),
   })).min(1).refine(a => new Set(a.map(o => o.id)).size === a.length, "duplicate objective id"),
   area: z.object({
     label: z.string(), center: z.tuple([z.number(), z.number()]), radius: z.number().min(50),
-  }).describe("Approximate search region [world X, world Z], never an exact objective marker. Only the compass may visualize this region."),
+  }).optional().describe("Approximate search region [world X, world Z], never an exact objective marker. Only the compass may visualize this region. Absent = no compass guidance (an errand inside a town)."),
   rewardXp: z.number().int().min(0).default(0),
-}).describe("Quest definition. Progress belongs to authority-owned quest journals, not this asset.");
+  rewardCoins: z.number().int().min(0).default(0).describe("Coins paid on completion, in copper (100 copper = 1 silver, 100 silver = 1 gold)."),
+  rewardItems: z.array(z.object({ itemId: z.string().min(1), qty: z.number().int().min(1).default(1) })).default([])
+    .describe("Items given on completion. A hand-in is refused while they do not fit the bags."),
+  giver: z.string().default("").describe("Entity id of the NPC who offers it (its dialogue's `acceptQuest`). Empty = granted by a script (quest-log `autoStart`)."),
+  turnIn: z.string().default("").describe(
+    "Entity id of the NPC it is handed in to. Set = finishing the objectives makes it READY, and it completes (paying its " +
+    "rewards) only through that NPC's dialogue (`turnInQuest`). Empty = it completes the moment the objectives do.",
+  ),
+  requires: z.array(z.string()).default([]).describe("Quest ids that must be COMPLETE before this one can be accepted (a chain)."),
+  consume: z.boolean().default(false).describe("On hand-in, take the `collect` objectives' items out of the bags (the ore is handed over)."),
+  level: z.number().int().min(1).default(1).describe("Suggested level, shown in the journal; never enforced."),
+  places: z.string().default("").describe("places asset id (assets/places/<town>.json) its text's {dir:id} / {far:id} / {place:id} tokens resolve against — never write a compass word by hand."),
+}).describe("Quest definition (assets/quests/<id>.json). Progress belongs to authority-owned quest journals, not this asset.");
 export type Quest = z.infer<typeof questSchema>;
+export type QuestInput = z.input<typeof questSchema>;
+export const QUEST_STATUSES = ["active", "ready", "complete"] as const;
+export type QuestStatus = (typeof QUEST_STATUSES)[number];
 export const questJournalSchema = z.object({
   version: z.literal(1).default(1), tracked: z.string().nullable().default(null),
   quests: z.record(z.string(), z.object({
-    status: z.enum(["active", "complete"]), progress: z.record(z.string(), z.number().int().min(0)),
+    status: z.enum(QUEST_STATUSES).describe("active: objectives open; ready: objectives done, waiting to be handed in to the quest's `turnIn` NPC; complete: rewarded."),
+    progress: z.record(z.string(), z.number().int().min(0)),
   })),
 });
 export type QuestJournal = z.infer<typeof questJournalSchema>;
@@ -80,13 +100,47 @@ export function nearbyTowns<T extends { center: readonly [number, number] }>(tow
   return towns.filter(t => Math.hypot(t.center[0] - x, t.center[1] - z) <= radius);
 }
 
-/** Monotonic objective progress; completion/rewards can only happen once. */
+/**
+ * Monotonic objective progress; completion/rewards can only happen once. A
+ * quest with a `turnIn` NPC stops at "ready": only {@link turnInQuest} completes it.
+ */
 export function advanceQuest(journal: QuestJournal, quest: Quest, objectiveId: string, amount = 1): QuestJournal {
   const state = journal.quests[quest.id];
   const objective = quest.objectives.find(o => o.id === objectiveId);
   if (!state || state.status !== "active" || !objective || !Number.isFinite(amount) || amount <= 0) return journal;
   const progress = { ...state.progress, [objectiveId]: Math.min(objective.required, (state.progress[objectiveId] ?? 0) + Math.floor(amount)) };
-  const complete = quest.objectives.every(o => (progress[o.id] ?? 0) >= o.required);
-  return { ...journal, tracked: complete && journal.tracked === quest.id ? null : journal.tracked,
-    quests: { ...journal.quests, [quest.id]: { status: complete ? "complete" : "active", progress } } };
+  const done = quest.objectives.every(o => (progress[o.id] ?? 0) >= o.required);
+  const status: QuestStatus = !done ? "active" : quest.turnIn ? "ready" : "complete";
+  return { ...journal, tracked: status === "complete" && journal.tracked === quest.id ? null : journal.tracked,
+    quests: { ...journal.quests, [quest.id]: { status, progress } } };
+}
+
+const emptyJournal = (): QuestJournal => questJournalSchema.parse({ quests: {} });
+
+/** Why `quest` cannot be accepted into `journal` right now, or null when it can. */
+export function questOfferProblem(journal: QuestJournal | null | undefined, quest: Quest): string | null {
+  const state = journal?.quests[quest.id];
+  if (state) return state.status === "complete" ? "already completed" : "already accepted";
+  for (const need of quest.requires) if (journal?.quests[need]?.status !== "complete") return `requires "${need}" first`;
+  return null;
+}
+
+/** Accept a quest (a giver's dialogue, a script's autoStart); it becomes the tracked one when `track`. */
+export function acceptQuest(journal: QuestJournal | null | undefined, quest: Quest, track = true): { journal: QuestJournal; error: string | null } {
+  const base = journal ?? emptyJournal();
+  const problem = questOfferProblem(base, quest);
+  if (problem) return { journal: base, error: problem };
+  const quests = { ...base.quests, [quest.id]: { status: "active" as const, progress: {} } };
+  return { journal: { ...base, tracked: track || !base.tracked ? quest.id : base.tracked, quests }, error: null };
+}
+
+/** Hand a READY quest in: it becomes complete. Paying the rewards (once, on this transition) is the caller's. */
+export function turnInQuest(journal: QuestJournal | null | undefined, quest: Quest): { journal: QuestJournal; error: string | null } {
+  const base = journal ?? emptyJournal();
+  const state = base.quests[quest.id];
+  if (!state) return { journal: base, error: "quest not accepted" };
+  if (state.status === "complete") return { journal: base, error: "already handed in" };
+  if (state.status !== "ready") return { journal: base, error: "objectives not finished" };
+  const quests = { ...base.quests, [quest.id]: { ...state, status: "complete" as const } };
+  return { journal: { ...base, tracked: base.tracked === quest.id ? null : base.tracked, quests }, error: null };
 }

@@ -18,6 +18,7 @@ import { hexColor } from "../components/core.js";
  */
 export const SLOT_KINDS = [
   "helm",
+  "shoulders",
   "gloves",
   "chest",
   "legs",
@@ -35,6 +36,7 @@ export type SlotKind = (typeof SLOT_KINDS)[number];
 /** Equipment slot ids, in the order a paper doll lays them out. */
 export const EQUIPMENT_SLOTS = [
   "helm",
+  "shoulders",
   "gloves",
   "chest",
   "legs",
@@ -283,6 +285,12 @@ export const itemSchema = z
       .default(1)
       .describe("Maximum quantity per stack (one grid cell). 1 = unique instances (every piece of gear)."),
     weight: z.number().min(0).default(0).describe("Kilograms per unit; carried AND worn items count against capacity."),
+    value: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe("Base price of one unit in copper (100 copper = 1 silver, 100 silver = 1 gold). A shop sells at its `markup` of this and buys at its `buyRate`; 0 = worthless (vendors will not buy it)."),
     rarity: z.enum(RARITIES).default("common"),
     icon: z
       .string()

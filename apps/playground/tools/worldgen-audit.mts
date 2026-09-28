@@ -145,7 +145,9 @@ export function auditWorld(recipe: WorldRecipe, field: WorldField): WaterAudit {
       detail.push(`${r.id.padEnd(10)} gully      width ${r.width.toFixed(1).padStart(5)}`);
       continue;
     }
-    for (let i = 0; i + 1 < r.bedY.length; i++) if (r.bedY[i + 1]! > r.bedY[i]! + 1e-6) uphillSteps++;
+    // the WATER must never climb; the bed may, at the plunge pool under a waterfall
+    const levels = r.surfaceY && r.surfaceY.length === r.points.length ? r.surfaceY : r.bedY;
+    for (let i = 0; i + 1 < levels.length; i++) if (levels[i + 1]! > levels[i]! + 1e-6) uphillSteps++;
     const last = r.points[r.points.length - 1]!;
     const first = r.points[0]!;
     const lastLake = inLake(last[0], last[1], surfaceAt(r, r.points.length - 1));
@@ -329,7 +331,7 @@ export function auditWorld(recipe: WorldRecipe, field: WorldField): WaterAudit {
   const wetCount = rivers.filter((r) => r.water).length;
   const summary =
     `audit: ${wetCount} wet reaches + ${rivers.length - wetCount} dry gullies (${toSea} to sea, ${toLake} into lakes, ${toRiver} into rivers, ${dangling} dangling), ` +
-    `${lakes.length} lakes (${lakesUnconnected} without a river), ${uphillSteps} uphill bed steps, ${outletsOff} outlets off level, ` +
+    `${lakes.length} lakes (${lakesUnconnected} without a river), ${uphillSteps} uphill steps, ${outletsOff} outlets off level, ` +
     `${townsUnderWater} towns under water, ${roadPointsSubmerged} road points submerged, ${bridges.length} bridges (${bridgesLoose} loose ends)`;
   return { problems, detail, summary, counts };
 }

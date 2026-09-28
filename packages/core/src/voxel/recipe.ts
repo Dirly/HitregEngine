@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { hexColor, meshWindSchema, spawnAreaSchema, MAX_SPLAT_LAYERS } from "../components/core.js";
+import { fallSiteSchema } from "./fall-sites.js";
+import { hexColor, meshWindSchema, spawnAreaSchema, MAX_SPLAT_LAYERS, grassSchema } from "../components/core.js";
 import { regionSchema } from "./regions.js";
 
 /**
@@ -123,6 +124,15 @@ export const riverSchema = z.object({
         "a hair under the sea or flush with the river it ends on), and the world carves, banks and waters it live. " +
         "`worldgen rivers --trace` writes one; a hand-written doc never should.",
     ),
+  surfaceY: z
+    .array(z.number())
+    .optional()
+    .describe(
+      "Per-point WATER level, same length as `points`. OMIT IT: the field resamples every river and solves its " +
+        "water as level pools stepping down in short rapids (a pool holds until the ground has fallen 1.2 m), flush " +
+        "with any lake it passes through and with the river it ends on, and cuts the bed under that level. Written " +
+        "only on the field's solved copy (`WorldField.rivers`); a doc that carries it is taken exactly as written.",
+    ),
   maxGrade: z
     .number()
     .min(0)
@@ -138,7 +148,8 @@ export const riverSchema = z.object({
     .boolean()
     .default(true)
     .describe(
-      "Emit a water surface along the channel (a ribbon at bed + most of `depth`, in the recipe's `riverMaterial`). " +
+      "Carry water in the channel: level pools stepping down in rapids, clipped from the terrain cell by cell, in " +
+        "the recipe's `riverMaterial`. " +
         "false is a dry gully: carved and painted, no sheet.",
     ),
   surface: z
@@ -934,6 +945,20 @@ const scatterClumpSchema = z.object({
 
 export type ScatterClumpDoc = z.infer<typeof scatterClumpSchema>;
 
+/**
+ * One ground-cover layer owned by the WORLD rather than by a scene: the same
+ * data a `grass` component carries, plus an id. A world recipe is what every
+ * server's pipeline generates, so cover authored here follows the world —
+ * its biomes, its lakes, its palette — instead of living in one scene file
+ * that only knows one world.
+ */
+export const coverLayerSchema = grassSchema.extend({
+  id: z.string().describe("Stable name; the host registers the layer as `cover:<id>`."),
+  note: z.string().optional().describe("Why this layer exists / where it is meant to read. Ignored by the engine."),
+});
+
+export type CoverLayerDoc = z.infer<typeof coverLayerSchema>;
+
 /** One kind of thing scattered across the world: trees, rocks, bushes, grass tufts. */
 const scatterSchema = z.object({
   id: z.string(),
@@ -1614,6 +1639,17 @@ export const worldRecipeSchema = z.object({
         "one texture.",
     ),
   scatter: z.array(scatterSchema).default([]),
+  cover: z
+    .array(coverLayerSchema)
+    .default([])
+    .describe(
+      "Ground cover for this world: camera-following billboard layers (grass, flowers, reeds, lily pads), each " +
+        "a `grass` component's data plus an `id`. Scatter places PROPS into chunks; cover is the dense small " +
+        "stuff drawn only near the camera. Gate each layer by `biomes` (which place), `surfaces` (which ground), " +
+        "`water` (shore / floating) and `clump` (patches, not carpets). Every layer costs one draw call only " +
+        "while it has instances near the camera, so a world can carry dozens. `worldgen cover <world>` audits " +
+        "it (unknown biome/surface names, missing textures, realized density per biome).",
+    ),
 
   pipeline: z
     .record(z.string(), z.string())
@@ -1655,6 +1691,10 @@ export const worldRecipeSchema = z.object({
         .describe("Hand- or agent-drawn river centrelines. AUTHORING input: `worldgen rivers` solves each into `rivers`."),
       tunnels: z.array(tunnelSchema).default([]).describe("Carved cave passages. Written by `worldgen caves`."),
       blobs: z.array(blobSchema).default([]),
+      fallSites: z
+        .array(fallSiteSchema)
+        .optional()
+        .describe("Agent-crafted waterfalls: a solved fall split into a cascade of pools and dressed with rocks. Written by `worldgen fall-site`; see docs/world-editing/rivers-and-falls.md."),
       pois: z.array(poiSchema).default([]),
       camps: z
         .array(campSchema)
@@ -1748,16 +1788,17 @@ export const worldRecipeSchema = z.object({
     .string()
     .optional()
     .describe(
-      "Material asset id for river ribbons and lake sheets emitted into streamed cells. Without it rivers " +
-        "are carved but dry. `worldgen init` writes one beside the terrain material.",
+      "Material asset id for the water emitted into streamed cells (lakes, and rivers without a `riverMaterial`), " +
+        "clipped from each cell's terrain. Without it rivers are carved but dry. `worldgen init` writes one beside " +
+        "the terrain material.",
     ),
   riverMaterial: z
     .string()
     .optional()
     .describe(
-      "Material asset id for river ribbons specifically — a water material with `flowMode: \"channel\"`, so " +
-        "the water visibly runs downstream. Falls back to `waterMaterial` (standing water). `worldgen rivers` " +
-        "writes `<waterMaterial>-river` and sets this.",
+      "Material asset id for river water specifically — a water material with `flowMode: \"field\"`, so " +
+        "the water visibly runs downstream along the current each vertex carries. Falls back to `waterMaterial` " +
+        "(standing water). `worldgen rivers` writes `<waterMaterial>-river` and sets this.",
     ),
   bridgeMaterial: z
     .string()

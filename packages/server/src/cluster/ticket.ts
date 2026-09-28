@@ -12,6 +12,7 @@
  */
 
 import { createHmac, timingSafeEqual } from "node:crypto";
+import type { CharacterBuild } from "@hitreg/core";
 
 export interface TicketClaims {
   /** Account id. */
@@ -24,6 +25,13 @@ export interface TicketClaims {
   srv: string;
   /** Persistence revisions per namespace the destination must load at least (transfer safety). */
   rev?: Record<string, number>;
+  /**
+   * Character-creation build, signed so a client cannot pick its own lean.
+   * The layer hands it to the body (netState build/<bodyId>); the sheet
+   * authority applies it only to a FRESH sheet, so it is harmless on a
+   * character that already has a save.
+   */
+  build?: CharacterBuild;
   /** Why the holder is arriving (join, transfer, instance) — informational. */
   reason?: string;
   /** Issued-at / expiry, unix seconds. */

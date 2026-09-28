@@ -1,5 +1,7 @@
 import * as THREE from "three/webgpu";
 import {
+  applyModelAppearance,
+  loadGltf,
   applyModelEmissive,
   applyModelMap,
   applyModelPartMask,
@@ -10,7 +12,7 @@ import {
   type MovingInstanceSystem,
   type PartAnchor,
 } from "@hitreg/render";
-import type { ModelLook } from "@hitreg/scripting";
+import type { ModelLook, ModelTables } from "@hitreg/scripting";
 import type { ItemEffect } from "@hitreg/core";
 
 /**
@@ -37,6 +39,15 @@ export interface ModelLooks {
   modelLoaded(entityId: string, root: THREE.Object3D): void;
   /** Once per frame: place effects whose model has loaded, re-place after a rebuild. */
   update(): void;
+  /** `ctx.modelTables`: a model's parts/tiles/rules extras, loaded once (null when unknown). */
+  tables(assetId: string): Promise<ModelTables | null>;
+  /**
+   * A portrait of a character (its body cloned into a private scene) lacks the
+   * pieces drawn by the moving batches — the head, hair, helm, pads. Seat a
+   * plain copy of each (the same look, on the same bone, where it sits right
+   * now) on the clone's bones. `refit` re-frames the portrait once they land.
+   */
+  dressPortrait(source: THREE.Object3D, clone: THREE.Object3D, refit: () => void): void;
 }
 
 /** What AmbientVfx needs (the `vfx` component's data) — structural, so no render import. */
@@ -65,6 +76,8 @@ interface CarriedEffects {
 export function createModelLooks(opts: {
   objectOf: (entityId: string) => THREE.Object3D | undefined;
   textureUrl: (assetId: string) => string | undefined;
+  /** Model asset id → URL, for `tables`; absent = tables resolve null. */
+  resolveModel?: (assetId: string) => string | undefined;
   /** A `mesh.moving` instance takes its look as per-instance attributes instead (one draw for all). */
   moving?: MovingInstanceSystem;
   /** Plays item effects; absent = effects are ignored (headless). */
@@ -114,6 +127,33 @@ export function createModelLooks(opts: {
   // -- the plain (non-batched) model --------------------------------------------
 
   const apply = (entityId: string, root: THREE.Object3D, look: ModelLook): void => {
+    // the whole character's scale (the female body is the male rig at 0.96)
+    if (look.scale !== undefined) root.scale.setScalar(look.scale);
+
+    // Per-part sheets / skin tone: the model's shared appearance material, the
+    // look on the mesh. BEFORE the part mask: a skin sheet limited to parts
+    // reads their islands from the geometry, and the look that first builds a
+    // page's skin mask must see the whole model, not one wearer's trimmed copy.
+    let dressed = false;
+    if (look.groups !== undefined || look.skinTint !== undefined || look.skinSheets !== undefined || look.tintWhole !== undefined) {
+      if (look.groups !== undefined) root.userData["lookGroups"] = look.groups;
+      if (look.skinTint !== undefined) root.userData["lookTint"] = look.skinTint;
+      if (look.skinSheets !== undefined) root.userData["lookSkinSheets"] = look.skinSheets;
+      if (look.tintWhole !== undefined) root.userData["lookTintWhole"] = look.tintWhole;
+      const groups = (root.userData["lookGroups"] as ModelLook["groups"]) ?? null;
+      const skinTint = (root.userData["lookTint"] as string | null | undefined) ?? null;
+      if (groups || skinTint) {
+        applyModelAppearance(
+          root,
+          { groups: groups ?? [], skinTint },
+          root.userData["lookTintWhole"] === true
+            ? { tintWhole: true }
+            : { skin: (root.userData["lookSkinSheets"] as ModelLook["skinSheets"]) ?? null },
+        );
+        dressed = true; // the page's tiles come from the groups; a single `texture` would fight them
+      }
+    }
+
     let mask = look.partMask;
     if (look.parts) {
       const index = modelPartIndex(root);
@@ -134,6 +174,7 @@ export function createModelLooks(opts: {
       }
     }
     if (look.glow !== undefined) applyModelEmissive(root, look.glow);
+    if (dressed) return;
 
     if (look.texture === undefined) return;
     // the model's own sheet, kept the first time a theme replaces it
@@ -266,8 +307,72 @@ export function createModelLooks(opts: {
     placeEffects(entityId);
   };
 
+  const tableCache = new Map<string, Promise<ModelTables | null>>();
+  const tables = (assetId: string): Promise<ModelTables | null> => {
+    let pending = tableCache.get(assetId);
+    if (!pending) {
+      const url = opts.resolveModel?.(assetId);
+      pending = url
+        ? loadGltf(url).then(
+            (gltf) => {
+              let found: ModelTables | null = null;
+              gltf.scene.traverse((node) => {
+                const data = node.userData;
+                if (found || (!data["parts"] && !data["tiles"])) return;
+                found = {
+                  parts: (data["parts"] as Record<string, number> | undefined) ?? null,
+                  tiles: data["tiles"] && typeof data["tiles"] === "object" ? Object.keys(data["tiles"] as object) : [],
+                  rules: data["rules"] ?? null,
+                };
+              });
+              return found ?? { parts: null, tiles: [], rules: null };
+            },
+            (error: unknown) => {
+              console.warn(`[model-look] tables of "${assetId}" failed to load`, error);
+              return null;
+            },
+          )
+        : Promise.resolve(null);
+      tableCache.set(assetId, pending);
+    }
+    return pending;
+  };
+
+  /** The merged look of every moving entity (the batch holds it on the GPU; a portrait needs it again). */
+  const movingLooks = new Map<string, ModelLook>();
+
+  const dressPortrait = (source: THREE.Object3D, clone: THREE.Object3D, refit: () => void): void => {
+    const rel = new THREE.Matrix4();
+    source.updateWorldMatrix(true, true);
+    source.traverse((group) => {
+      const piece = group.userData["characterPiece"] as { entityId: string; model: string; socket: string } | undefined;
+      const look = piece ? movingLooks.get(piece.entityId) : undefined;
+      if (!piece || !look?.parts?.length) return;
+      const bone = source.getObjectByName(piece.socket);
+      const cloneBone = clone.getObjectByName(piece.socket);
+      const url = opts.resolveModel?.(piece.model);
+      if (!bone || !cloneBone || !url) return;
+      // where the piece sits on its bone right now, kept as the bone moves in the portrait's idle
+      const at = rel.copy(bone.matrixWorld).invert().multiply(group.matrixWorld).clone();
+      void loadGltf(url).then((gltf) => {
+        // the part mask gives the copy an index of its own; materials stay the shared ones
+        const copy = gltf.scene.clone(true);
+        apply(`portrait:${piece.entityId}`, copy, look);
+        const holder = new THREE.Group();
+        holder.matrixAutoUpdate = false;
+        holder.matrix.copy(at);
+        holder.add(copy);
+        cloneBone.add(holder);
+        refit();
+      });
+    });
+  };
+
   return {
+    tables,
+    dressPortrait,
     set(entityId, look) {
+      if (opts.moving?.has(entityId)) movingLooks.set(entityId, { ...movingLooks.get(entityId), ...look });
       if (look.effects !== undefined) {
         const current = carried.get(entityId);
         // a re-sent identical look (a rebuild restarting the script) keeps its plays

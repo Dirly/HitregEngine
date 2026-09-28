@@ -239,6 +239,7 @@ export const volumePaintSchema = z.object({
   normal: z.tuple([z.number().finite(),z.number().finite(),z.number().finite()]).optional().describe("Optional local-space facing direction for an angle-limited area fill."),
   maxAngle: z.number().min(0).max(180).default(180).describe("Maximum angle in degrees from the chosen normal. 180 paints all facing directions."),
   fill: z.boolean().default(false).describe("Uniform coverage inside radius instead of brush falloff. This is a bounded facing-angle fill, not a connected-component flood fill."),
+  tint: z.tuple([z.number().min(0).max(2),z.number().min(0).max(2),z.number().min(0).max(2)]).optional().describe("Optional RGB vertex tint blended in with the same coverage as the layer, e.g. the biome grass tint so painted grass tops match the terrain around them."),
 }).describe("Spherical texture stroke in volume-local metres. Smooth falloff; later strokes blend over earlier ones without changing density or collision.");
 
 export const volumeDocSchema = z.object({
@@ -260,6 +261,7 @@ export const volumeDocSchema = z.object({
   surface: csgSurfaceSchema.prefault({}).describe("Default palette triple, used by any node that declares none."),
   nodes: z.array(csgNodeSchema).default([]).describe("Applied IN ORDER over empty space. Later nodes win."),
   paint: z.array(volumePaintSchema).default([]).describe("Persistent ordered texture strokes, evaluated after the CSG surface palette."),
+  tint: z.tuple([z.number().min(0).max(2),z.number().min(0).max(2),z.number().min(0).max(2)]).optional().describe("RGB vertex tint the whole volume is multiplied by (the terrain-splat material's tintByVertexColor). Omit for white. Set it to the terrain's biome tint where a volume must match the ground it is fused with."),
 }).superRefine((doc, ctx) => {
   for (let i = 0; i < doc.nodes.length; i++) {
     const materials = doc.nodes[i]!.mesh?.triangleMaterials;
@@ -268,13 +270,15 @@ export const volumeDocSchema = z.object({
 });
 
 export type VolumePaint = z.infer<typeof volumePaintSchema>;
-export function blendVolumePaint(stroke: VolumePaint, x: number, y: number, z: number, weights: Float32Array, offset: number, count: number, normal: readonly number[] = [0,1,0]): void {
-  if (stroke.layer >= count) return;
-  if(stroke.normal){const length=Math.hypot(...stroke.normal)*Math.hypot(...normal);if(length<1e-9)return;const dot=stroke.normal.reduce((s,v,i)=>s+v*normal[i]!,0)/length;if(dot+1e-7<Math.cos(stroke.maxAngle*Math.PI/180))return;}
+/** Blend one stroke into a vertex's splat weights; returns the coverage it applied (0 when it misses). */
+export function blendVolumePaint(stroke: VolumePaint, x: number, y: number, z: number, weights: Float32Array, offset: number, count: number, normal: readonly number[] = [0,1,0]): number {
+  if (stroke.layer >= count) return 0;
+  if(stroke.normal){const length=Math.hypot(...stroke.normal)*Math.hypot(...normal);if(length<1e-9)return 0;const dot=stroke.normal.reduce((s,v,i)=>s+v*normal[i]!,0)/length;if(dot+1e-7<Math.cos(stroke.maxAngle*Math.PI/180))return 0;}
   const t = Math.max(0, 1 - Math.hypot(x-stroke.center[0], y-stroke.center[1], z-stroke.center[2])/stroke.radius);
   const amount = (stroke.fill?(t>0?1:0):t*t*(3-2*t))*stroke.strength;
-  if (!amount) return;
+  if (!amount) return 0;
   for(let i=0;i<count;i++) weights[offset+i] = weights[offset+i]!*(1-amount)+(i===stroke.layer?amount:0);
+  return amount;
 }
 
 export type CsgSurface = z.infer<typeof csgSurfaceSchema>;
@@ -616,6 +620,12 @@ export interface Volume {
   surfaceAt(x: number, y: number, z: number, ny: number, out: Float32Array, offset: number, nx?: number, nz?: number): void;
   /** Exact source-face normal where an unrounded/unblended triangle node owns the boundary. */
   surfaceNormalAt?(x: number, y: number, z: number, out: Float64Array): boolean;
+  /**
+   * False when no `add` node can reach the region: nodes apply over empty
+   * space and only `add` puts solid in, so such a region is air throughout
+   * and the mesher skips it without sampling a single point.
+   */
+  solidMayReach?(min: readonly [number, number, number], max: readonly [number, number, number]): boolean;
 }
 
 export function createVolume(input: VolumeDoc | unknown): Volume {
@@ -692,6 +702,37 @@ export function createVolume(input: VolumeDoc | unknown): Volume {
 
   const activeAll = prepared;
   const ownerScratch = new Int32Array(1);
+  /**
+   * Surface (owner) queries run once per mesh VERTEX over every node, which
+   * on a document of hundreds of small nodes cost more than the lattice
+   * itself. A coarse grid over the bounds lists, per cell, the nodes whose box
+   * (plus the owner margin `evaluate` uses) reaches it — exactly the ones
+   * `evaluate` would not skip there — so the answer is unchanged. Built on
+   * first use; small documents keep the plain list.
+   */
+  let ownerGrid: { cell: number; n: [number, number, number]; lists: PreparedNode[][] } | null = null;
+  const ownerNodes = (x: number, y: number, z: number): PreparedNode[] => {
+    if (prepared.length < 32) return activeAll;
+    if (!ownerGrid) {
+      const cell = Math.max(doc.voxelSize * 8, 4);
+      const margin = doc.voxelSize * 2;
+      const n: [number, number, number] = [0, 1, 2].map((a) => Math.max(1, Math.ceil((max[a]! - min[a]!) / cell))) as [number, number, number];
+      if (n[0] * n[1] * n[2] > 200000) return activeAll;
+      const lists: PreparedNode[][] = [];
+      for (let k = 0; k < n[2]; k++)
+        for (let j = 0; j < n[1]; j++)
+          for (let i = 0; i < n[0]; i++) {
+            const c0 = [min[0] + i * cell - margin, min[1] + j * cell - margin, min[2] + k * cell - margin];
+            const c1 = [min[0] + (i + 1) * cell + margin, min[1] + (j + 1) * cell + margin, min[2] + (k + 1) * cell + margin];
+            lists.push(prepared.filter((p) => p.mesh !== undefined || p.node.op === "intersect" || (p.max[0]! >= c0[0]! && p.min[0]! <= c1[0]! && p.max[1]! >= c0[1]! && p.min[1]! <= c1[1]! && p.max[2]! >= c0[2]! && p.min[2]! <= c1[2]!)));
+          }
+      ownerGrid = { cell, n, lists };
+    }
+    const g = ownerGrid;
+    const i = Math.floor((x - min[0]) / g.cell), j = Math.floor((y - min[1]) / g.cell), k = Math.floor((z - min[2]) / g.cell);
+    if (i < 0 || j < 0 || k < 0 || i >= g.n[0] || j >= g.n[1] || k >= g.n[2]) return activeAll;
+    return g.lists[i + j * g.n[0] + k * g.n[0] * g.n[1]]!;
+  };
   const sourceNormal = new Float64Array(3);
 
   return {
@@ -701,6 +742,13 @@ export function createVolume(input: VolumeDoc | unknown): Volume {
     min,
     max,
     density: (x, y, z) => evaluate(x, y, z, null, activeAll),
+    solidMayReach: (lo, hi) =>
+      prepared.some(
+        (p) =>
+          p.node.op === "add" &&
+          (p.mesh !== undefined ||
+            (p.max[0]! >= lo[0]! && p.min[0]! <= hi[0]! && p.max[1]! >= lo[1]! && p.min[1]! <= hi[1]! && p.max[2]! >= lo[2]! && p.min[2]! <= hi[2]!)),
+      ),
     surfaceNormalAt: (x, y, z, out) => {
       evaluate(x, y, z, ownerScratch, activeAll);
       const p = ownerScratch[0]! >= 0 ? prepared[ownerScratch[0]!] : undefined;
@@ -730,11 +778,48 @@ export function createVolume(input: VolumeDoc | unknown): Volume {
           p.node.op === "intersect" ||
           (p.max[0]! >= lo[0]! && p.min[0]! <= hi[0]! && p.max[1]! >= lo[1]! && p.min[1]! <= hi[1]! && p.max[2]! >= lo[2]! && p.min[2]! <= hi[2]!),
       );
-      return (x, y, z) => evaluate(x, y, z, null, active);
+      // The same filter again per sub-cell (SUB^3 of them), so a sample loops
+      // only over the nodes whose boxes reach ITS corner of the region. This is
+      // exactly what `evaluate` would skip anyway — a node is dropped only
+      // where every sample is outside its box — so the field is unchanged; on
+      // a document of many small nodes (generated rock formations: hundreds)
+      // the per-sample loop, not the distance functions, was the cost. Each
+      // cell is padded by a voxel so the contourer's gradient taps just past a
+      // lattice point still read the full set.
+      const SUB = 4;
+      if (active.length < 24) return (x, y, z) => evaluate(x, y, z, null, active);
+      const pad = doc.voxelSize;
+      const cs = [0, 1, 2].map((a) => Math.max(1e-9, (hi[a]! - lo[a]!) / SUB));
+      const lists: PreparedNode[][] = [];
+      for (let k = 0; k < SUB; k++)
+        for (let j = 0; j < SUB; j++)
+          for (let i = 0; i < SUB; i++) {
+            const c0 = [lo[0]! + i * cs[0]! - pad, lo[1]! + j * cs[1]! - pad, lo[2]! + k * cs[2]! - pad];
+            const c1 = [lo[0]! + (i + 1) * cs[0]! + pad, lo[1]! + (j + 1) * cs[1]! + pad, lo[2]! + (k + 1) * cs[2]! + pad];
+            lists.push(
+              active.filter(
+                (p) =>
+                  p.mesh !== undefined ||
+                  p.node.op === "intersect" ||
+                  (p.max[0]! >= c0[0]! && p.min[0]! <= c1[0]! && p.max[1]! >= c0[1]! && p.min[1]! <= c1[1]! && p.max[2]! >= c0[2]! && p.min[2]! <= c1[2]!),
+              ),
+            );
+          }
+      return (x, y, z) => {
+        const fx = (x - lo[0]!) / cs[0]!, fy = (y - lo[1]!) / cs[1]!, fz = (z - lo[2]!) / cs[2]!;
+        // outside the region by more than the pad: the full list, never a wrong one
+        if (fx < -pad / cs[0]! || fy < -pad / cs[1]! || fz < -pad / cs[2]! || fx > SUB + pad / cs[0]! || fy > SUB + pad / cs[1]! || fz > SUB + pad / cs[2]!) return evaluate(x, y, z, null, active);
+        const i = Math.min(SUB - 1, Math.max(0, Math.floor(fx)));
+        const j = Math.min(SUB - 1, Math.max(0, Math.floor(fy)));
+        const k = Math.min(SUB - 1, Math.max(0, Math.floor(fz)));
+        return evaluate(x, y, z, null, lists[i + j * SUB + k * SUB * SUB]!);
+      };
     },
     surfaceAt: (x, y, z, ny, out, offset, nx=0, nz=0) => {
-      evaluate(x, y, z, ownerScratch, activeAll);
-      const owning = ownerScratch[0]! >= 0 ? prepared[ownerScratch[0]!]! : undefined;
+      // the owner index is into the list evaluated, which is the grid cell's, not `prepared`
+      const candidates = ownerNodes(x, y, z);
+      evaluate(x, y, z, ownerScratch, candidates);
+      const owning = ownerScratch[0]! >= 0 ? candidates[ownerScratch[0]!]! : undefined;
       const surface = owning?.surface ?? doc.surface;
       let triangleMaterial: number | undefined;
       if (owning?.mesh && owning.node.mesh?.triangleMaterials) {
@@ -759,11 +844,19 @@ export function createVolume(input: VolumeDoc | unknown): Volume {
         add(surface.ceiling, down);
         add(surface.wall, wall);
       }
-      for (const stroke of doc.paint) blendVolumePaint(stroke, x, y, z, out, offset, count, [nx,ny,nz]);
-      // tint: the material multiplies by it, and a volume has no biome
-      out[offset + count] = 1;
-      out[offset + count + 1] = 1;
-      out[offset + count + 2] = 1;
+      // tint: the material multiplies by it; a volume has no biome, so it is
+      // the document's own (white unless set) and whatever strokes blend in
+      const base = doc.tint ?? [1, 1, 1];
+      out[offset + count] = base[0];
+      out[offset + count + 1] = base[1];
+      out[offset + count + 2] = base[2];
+      for (const stroke of doc.paint) {
+        // outside the stroke's sphere it paints nothing: skip before the facing test
+        const ex = x - stroke.center[0], ey = y - stroke.center[1], ez = z - stroke.center[2];
+        if (ex * ex + ey * ey + ez * ez >= stroke.radius * stroke.radius) continue;
+        const amount = blendVolumePaint(stroke, x, y, z, out, offset, count, [nx,ny,nz]);
+        if (amount > 0 && stroke.tint) for (let c = 0; c < 3; c++) out[offset + count + c] = out[offset + count + c]! * (1 - amount) + stroke.tint[c]! * amount;
+      }
     },
   };
 }
@@ -837,9 +930,10 @@ export function buildVolumeMesh(volume: Volume, lodStep = 1): VoxelMesh {
         const xs = Float64Array.from({ length: nx }, (_, i) => volume.min[0] + (lattice.offset[0] + i) * step);
         const ys = Float64Array.from({ length: ny }, (_, i) => volume.min[1] + (lattice.offset[1] + i) * step);
         const zs = Float64Array.from({ length: nz }, (_, i) => volume.min[2] + (lattice.offset[2] + i) * step);
-        const density = volume.sampler(origin, [
-          xs[nx - 1]!, ys[ny - 1]!, zs[nz - 1]!,
-        ]);
+        const blockMax: [number, number, number] = [xs[nx - 1]!, ys[ny - 1]!, zs[nz - 1]!];
+        // no solid can reach this block: it is air throughout, nothing to mesh
+        if (volume.solidMayReach && !volume.solidMayReach(origin, blockMax)) continue;
+        const density = volume.sampler(origin, blockMax);
         if (canCullBlocks) {
           const rx = (nx - 1) * step / 2, ry = (ny - 1) * step / 2, rz = (nz - 1) * step / 2;
           if (Math.abs(density(origin[0] + rx, origin[1] + ry, origin[2] + rz)) > Math.hypot(rx, ry, rz)) continue;
@@ -950,11 +1044,53 @@ export function buildVolumeMesh(volume: Volume, lodStep = 1): VoxelMesh {
 
 const volumes = new Map<string, Volume>();
 const volumeMeshes = new Map<string, VoxelMesh>();
+/**
+ * Registered but not yet compiled. The asset index lists every project's
+ * volumes (187 dungeon rooms and passages at the time of writing), and
+ * compiling one builds its triangle BVHs: doing that for all of them at load
+ * held ~130 MB in a tab that streams none. `getVolume`/`csgMesh` compile on
+ * first use.
+ */
+const pendingVolumes = new Map<string, unknown>();
+/** Compiling threw: warned once, resolves to null until re-registered. */
+const failedVolumes = new Set<string>();
+
+function resolveVolume(id: string): Volume | null {
+  const built = volumes.get(id);
+  if (built) return built;
+  if (!pendingVolumes.has(id)) return null;
+  const doc = pendingVolumes.get(id);
+  pendingVolumes.delete(id);
+  try {
+    const volume = createVolume(doc);
+    volumes.set(id, volume);
+    return volume;
+  } catch (error) {
+    failedVolumes.add(id);
+    console.warn(`[csg] volume "${id}" is invalid:`, error);
+    return null;
+  }
+}
+
+/** Register a volume document WITHOUT compiling it; the first `getVolume`/`csgMesh` does. */
+export function registerVolumeDoc(id: string, doc: unknown): void {
+  volumes.delete(id);
+  failedVolumes.delete(id);
+  pendingVolumes.set(id, doc);
+  invalidateVolume(id);
+}
+
+/** Whether anything has asked for this volume (compiled, or tried and failed). */
+export function isVolumeInUse(id: string): boolean {
+  return volumes.has(id) || failedVolumes.has(id);
+}
 
 export function registerVolume(id: string, doc: VolumeDoc | unknown): Volume {
   const volume = createVolume(doc);
   const previous = volumes.get(id);
   const paintOnly = previous && JSON.stringify({...previous.doc,paint:[]}) === JSON.stringify({...volume.doc,paint:[]});
+  pendingVolumes.delete(id);
+  failedVolumes.delete(id);
   volumes.set(id, volume);
   if(paintOnly){
     for(const [key,mesh] of volumeMeshes){
@@ -964,6 +1100,7 @@ export function registerVolume(id: string, doc: VolumeDoc | unknown): Volume {
         const p=i*3;
         volume.surfaceAt(mesh.positions[p]!,mesh.positions[p+1]!,mesh.positions[p+2]!,mesh.normals[p+1]!,weights,0,mesh.normals[p]!,mesh.normals[p+2]!);
         mesh.splat.set(weights.subarray(0,mesh.surfaceCount),i*mesh.surfaceCount);
+        if(mesh.tint.length===mesh.vertexCount*3)mesh.tint.set(weights.subarray(mesh.surfaceCount,mesh.surfaceCount+3),p);
       }
     }
   }else invalidateVolume(id);
@@ -971,11 +1108,11 @@ export function registerVolume(id: string, doc: VolumeDoc | unknown): Volume {
 }
 
 export function getVolume(id: string): Volume | null {
-  return volumes.get(id) ?? null;
+  return resolveVolume(id);
 }
 
 export function volumeIds(): string[] {
-  return [...volumes.keys()];
+  return [...new Set([...volumes.keys(), ...pendingVolumes.keys()])];
 }
 
 export function invalidateVolume(id: string): void {
@@ -986,6 +1123,8 @@ export function invalidateVolume(id: string): void {
 
 export function clearVolumes(): void {
   volumes.clear();
+  pendingVolumes.clear();
+  failedVolumes.clear();
   volumeMeshes.clear();
 }
 
@@ -1018,7 +1157,7 @@ export function csgMesh(source: CsgMeshSource): VoxelMesh {
   const key = `${source.volume}:${lodStep}`;
   const hit = volumeMeshes.get(key);
   if (hit) return hit;
-  const volume = volumes.get(source.volume);
+  const volume = resolveVolume(source.volume);
   if (!volume) return EMPTY_VOLUME_MESH;
   const mesh = buildVolumeMesh(volume, lodStep);
   volumeMeshes.set(key, mesh);

@@ -17,6 +17,7 @@ import {
   xpForLevel,
   type Progression,
 } from "./progression.js";
+import { archetypeBonus, characterBuildSchema, type CharacterBuild, type CharacterCreation } from "./creation.js";
 
 /**
  * The character sheet: level, experience, attributes, and every item the
@@ -77,6 +78,12 @@ export const characterSheetSchema = z
       .default(0)
       .describe("Total experience earned. Level is derived from it through the progression curve, never edited directly."),
     unspent: z.number().int().min(0).default(0).describe("Attribute points earned but not yet allocated."),
+    coins: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe("Money carried, in copper (100 copper = 1 silver, 100 silver = 1 gold). Changed only by the authority: vendors, quest rewards, the vault."),
     attributes: z.object(attributeInts).prefault({}).describe("Base + allocated points, before worn-item modifiers."),
     equipment: z
       .partialRecord(z.enum(EQUIPMENT_SLOTS), z.string())
@@ -86,6 +93,9 @@ export const characterSheetSchema = z
       .record(z.string(), itemStackSchema)
       .prefault({})
       .describe("Every owned stack keyed by uid — worn ones have no container, carried ones name a grid and a cell."),
+    build: characterBuildSchema
+      .optional()
+      .describe("What the player chose at character creation (archetype, birth traits, appearance). Set once on a fresh sheet; every peer draws the appearance from it."),
     seq: z.number().int().min(0).default(0).describe("Uid counter, so stack ids are deterministic on the authority."),
     inventoryAction: z.object({
       command: inventoryCommandSchema,
@@ -131,6 +141,21 @@ export function createSheet(progression: Progression = DEFAULT_PROGRESSION, leve
     unspent: (lvl - 1) * progression.pointsPerLevel,
     attributes: { ...progression.baseAttributes },
   });
+}
+
+/**
+ * Stamp a creation build onto a sheet: the archetype's attribute lean on top
+ * of the current attributes, and the build itself (traits + appearance) for
+ * everyone to read. Validate the build first (`validateBuild`) — this trusts it.
+ * Applying twice would add the lean twice, so a sheet that already carries a
+ * build is returned unchanged.
+ */
+export function applyBuild(sheet: CharacterSheet, creation: CharacterCreation, build: CharacterBuild): CharacterSheet {
+  if (sheet.build) return sheet;
+  const bonus = archetypeBonus(creation, build.archetype);
+  const attributes = { ...sheet.attributes };
+  for (const a of Object.keys(attributes) as Attribute[]) attributes[a] = Math.max(0, attributes[a] + bonus[a]);
+  return { ...sheet, attributes, build };
 }
 
 // -- geometry ---------------------------------------------------------------------
@@ -325,7 +350,8 @@ export function allocate(sheet: CharacterSheet, attribute: Attribute, _env: Shee
 
 // -- inventory reducers ---------------------------------------------------------
 
-function nextUid(sheet: CharacterSheet): string {
+/** Mint the next stack uid (bumps `seq` — call on a draft copy). */
+export function nextUid(sheet: CharacterSheet): string {
   sheet.seq += 1;
   return `i${sheet.seq}`;
 }

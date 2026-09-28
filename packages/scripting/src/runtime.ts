@@ -1,4 +1,4 @@
-import type { AnimationLayerOptions, LivePostFxOptions, LiveSkyOptions, LiveSkyBase, BiomeAt, WaterAt, ModelLook } from "./script.js";
+import type { AnimationLayerOptions, LivePostFxOptions, LiveSkyOptions, LiveSkyBase, BiomeAt, RegionAt, WaterAt, ModelLook, ModelTables } from "./script.js";
 import type * as THREE from "three";
 import type { NetStateStore, PlayerDataService, ProfilerLike, SceneDoc } from "@hitreg/core";
 import type {
@@ -28,6 +28,8 @@ export interface RuntimeOptions {
   viewForward?: () => [number, number];
   /** Host camera hook: the same aim in 3D, pitch included (see ScriptContext.viewDirection). */
   viewDirection?: () => [number, number, number];
+  /** Host camera hook: a world point on screen (see ScriptContext.worldToScreen). */
+  worldToScreen?: (x: number, y: number, z: number) => { x: number; y: number; distance: number } | null;
   /** Host camera hook: the local player acted, bring the view back behind the aim (see ScriptContext.recenterView). */
   recenterView?: () => void;
   /** This tab's own player entity id (see ScriptContext.localPlayer). */
@@ -39,12 +41,14 @@ export interface RuntimeOptions {
     entityId: string,
     clip: string,
     fadeSeconds?: number,
-    opts?: { loop?: boolean; restart?: boolean },
+    opts?: { loop?: boolean; restart?: boolean; sync?: boolean },
   ) => void;
   /** Host animation hook: which clips this entity's model loaded with. */
   animationClips?: (entityId: string) => string[];
   /** Authored seconds of one clip on an entity's model (null when absent). */
   animationDuration?: (entityId: string, clip: string) => number | null;
+  /** Host animation hook: the base clip's playhead as 0..1 of the clip (see ScriptContext.animationPhase). */
+  animationPhase?: (entityId: string) => { clip: string; t01: number } | null;
   /** Host animation hook: hold two base clips at a weight (see ScriptContext.setAnimationBlend). */
   setAnimationBlend?: (entityId: string, from: string, to: string, weight: number, fadeSeconds?: number) => void;
   /** Host animation hook: scale playback rate (1 = authored). */
@@ -54,7 +58,7 @@ export interface RuntimeOptions {
   /** Host animation hook: fade the layer out, restoring the full-body base. */
   clearAnimationLayer?: (entityId: string, fadeSeconds?: number) => void;
   /** Host audio hook: play an entity's audio component or a sound asset id. */
-  playSound?: (entityId: string, soundId?: string, opts?: { volume?: number; positional?: boolean; refDistance?: number; playbackRate?: number; priority?: number }) => void;
+  playSound?: (entityId: string, soundId?: string, opts?: { volume?: number; positional?: boolean; refDistance?: number; playbackRate?: number; priority?: number; at?: readonly [number, number, number] }) => void;
   /** Host audio hook: keep one named, script-owned loop playing at a chosen gain. */
   setSoundLoop?: (entityId: string, slot: string, soundId: string | undefined, opts?: { volume?: number; positional?: boolean; refDistance?: number }) => void;
   /** Host billboard hook: mutate an entity's billboard (fill/text/visible). */
@@ -90,11 +94,20 @@ export interface RuntimeOptions {
   ) => void;
   /** Host ubermesh hook: runtime parts/theme of a model (see ScriptContext.setModelLook). */
   setModelLook?: (entityId: string, look: ModelLook) => void;
+  /** Host model-tables hook: a model's parts/tiles/rules extras (see ScriptContext.modelTables). */
+  modelTables?: (assetId: string) => Promise<ModelTables | null>;
   /** Host sky hook: live sky/sun/moon control (see ScriptContext.setSky). */
   setSky?: (opts: LiveSkyOptions) => void;
   getSky?: () => LiveSkyBase | null;
   /** Host biome hook: the voxel world's biome blend at a point. */
   biomeAt?: (x: number, z: number) => BiomeAt | null;
+  /** Host zone hook: the recipe region under a point. */
+  regionAt?: (x: number, z: number) => RegionAt | null;
+  /** Host audio hooks: does a sound id exist, and how long is it once decoded. */
+  hasSound?: (soundId: string) => boolean;
+  /** Host streaming hook: the world around the player is still loading. */
+  worldLoading?: () => boolean;
+  soundDuration?: (soundId: string) => number | undefined;
   /** Host water hook: the water standing over a point (authored volumes + a procedural world's own). */
   waterAt?: (x: number, y: number, z: number) => WaterAt | null;
   /** Host path-mesh hook: rebuild an entity's path geometry from new (world-space) control points. */
@@ -277,6 +290,8 @@ export class ScriptRuntime {
   suspendEntities(ids: Iterable<string>): void {
     for (const id of ids) {
       const script = this.instances.get(id);
+      // presentation (a worn look, an item on a bone) keeps drawing a body this tab does not simulate
+      if (script && (script.constructor as { presentation?: boolean }).presentation === true) continue;
       if (script) {
         try {
           script.onDispose?.();
@@ -498,6 +513,7 @@ export class ScriptRuntime {
         every: (seconds, cb) => this.scheduleTimer(id, seconds, cb, true),
         ...(this.opts.viewForward ? { viewForward: this.opts.viewForward } : {}),
         ...(this.opts.viewDirection ? { viewDirection: this.opts.viewDirection } : {}),
+        ...(this.opts.worldToScreen ? { worldToScreen: this.opts.worldToScreen } : {}),
         ...(this.opts.recenterView ? { recenterView: this.opts.recenterView } : {}),
         ...(this.opts.localPlayer ? { localPlayer: this.opts.localPlayer } : {}),
         setActiveCamera: (cameraId) => {
@@ -505,7 +521,7 @@ export class ScriptRuntime {
         },
         ...(this.opts.setAnimation
           ? {
-              setAnimation: (clip: string, fade?: number, opts?: { loop?: boolean; restart?: boolean }) =>
+              setAnimation: (clip: string, fade?: number, opts?: { loop?: boolean; restart?: boolean; sync?: boolean }) =>
                 this.opts.setAnimation!(id, clip, fade, opts),
             }
           : {}),
@@ -513,6 +529,7 @@ export class ScriptRuntime {
         ...(this.opts.animationDuration
           ? { animationDuration: (clip: string) => this.opts.animationDuration!(id, clip) }
           : {}),
+        ...(this.opts.animationPhase ? { animationPhase: () => this.opts.animationPhase!(id) } : {}),
         ...(this.opts.setAnimationBlend
           ? {
               setAnimationBlend: (from: string, to: string, weight: number, fadeSeconds?: number) =>
@@ -533,7 +550,7 @@ export class ScriptRuntime {
           : {}),
         ...(this.opts.playSound
           ? {
-              playSound: (soundId?: string, opts?: { volume?: number; positional?: boolean; refDistance?: number; playbackRate?: number; priority?: number }) =>
+              playSound: (soundId?: string, opts?: { volume?: number; positional?: boolean; refDistance?: number; playbackRate?: number; priority?: number; at?: readonly [number, number, number] }) =>
                 this.opts.playSound!(id, soundId, opts),
             }
           : {}),
@@ -579,11 +596,16 @@ export class ScriptRuntime {
         ...(this.opts.setModelLook
           ? { setModelLook: (entityId: string, look: ModelLook) => this.opts.setModelLook!(entityId, look) }
           : {}),
+        ...(this.opts.modelTables ? { modelTables: (assetId: string) => this.opts.modelTables!(assetId) } : {}),
         ...(this.opts.setSky ? { setSky: (opts: LiveSkyOptions) => this.opts.setSky!(opts) } : {}),
         ...(this.opts.setPostFx ? { setPostFx: (opts: LivePostFxOptions) => this.opts.setPostFx!(opts) } : {}),
         ...(this.opts.daylight ? { daylight: () => this.opts.daylight!() } : {}),
         ...(this.opts.getSky ? { getSky: () => this.opts.getSky!() } : {}),
         ...(this.opts.biomeAt ? { biomeAt: (x: number, z: number) => this.opts.biomeAt!(x, z) } : {}),
+        ...(this.opts.regionAt ? { regionAt: (x: number, z: number) => this.opts.regionAt!(x, z) } : {}),
+        ...(this.opts.worldLoading ? { worldLoading: () => this.opts.worldLoading!() } : {}),
+        ...(this.opts.hasSound ? { hasSound: (soundId: string) => this.opts.hasSound!(soundId) } : {}),
+        ...(this.opts.soundDuration ? { soundDuration: (soundId: string) => this.opts.soundDuration!(soundId) } : {}),
         ...(this.opts.waterAt ? { waterAt: (x: number, y: number, z: number) => this.opts.waterAt!(x, y, z) } : {}),
         ...(this.opts.setPathPoints
           ? {

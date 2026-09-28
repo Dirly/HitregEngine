@@ -24,9 +24,11 @@ import {
 } from "@hitreg/net";
 import {
   isTransferLocked,
+  PERSISTED_PLAYER_NAMESPACES,
   WaterIndex,
   waterQuery,
   waterVolumes,
+  type CharacterBuild,
   type EntityDoc,
   type NetObjectData,
   type RecipeEdit,
@@ -70,6 +72,8 @@ export interface PlayerIdentity {
   name: string;
   /** Revisions a transfer ticket promised the save is at. */
   rev?: Record<string, number>;
+  /** Character-creation build from the ticket; seeds a fresh sheet (netState build/<bodyId>). */
+  build?: CharacterBuild;
 }
 
 /** The save authority's two calls. Without one, nothing persists (dev). */
@@ -179,6 +183,7 @@ export class GameServer {
       animL?: string;
       animR?: number;
       animD?: number;
+      animM?: "hold" | "loop";
       syncTransform: boolean;
     }
   >();
@@ -440,6 +445,16 @@ export class GameServer {
           console.warn(`[server] saved sheet for ${peerId} failed validation — starting fresh`);
         }
       }
+      // quests, NPC memory, the vault: in before the scripts that own them start
+      for (const [ns, value] of Object.entries(save?.records ?? {})) {
+        if (!(PERSISTED_PLAYER_NAMESPACES as readonly string[]).includes(ns) || value === null || value === undefined) continue;
+        if (!this.world.netState.set(`${ns}/${bodyId}`, value)) console.warn(`[server] saved ${ns} for ${peerId} failed validation — starting fresh`);
+      }
+      // the creation build, for the sheet authority to stamp onto a FRESH
+      // sheet — a saved sheet already carries its build and ignores this
+      if (identity?.build && !this.world.netState.set(`build/${bodyId}`, identity.build)) {
+        console.warn(`[server] creation build for ${peerId} failed validation — ignored`);
+      }
       this.world.addEntities({ ...this.world.base, entities: spawned.server });
       for (const [id, doc] of Object.entries(spawned.client)) this.runtimeDocs.set(id, doc);
       this.world.netState.set(`owner/${bodyId}`, peerId);
@@ -503,6 +518,7 @@ export class GameServer {
       for (const key of this.world.netState.keys(`combat/${player.bodyId}.`)) this.world.netState.delete(key);
       for (const key of this.world.netState.keys(`cooldown/${player.bodyId}.`)) this.world.netState.delete(key);
       this.world.netState.delete(`character/${player.bodyId}`);
+      this.world.netState.delete(`build/${player.bodyId}`);
       this.world.netState.delete(`landing/${player.bodyId}`);
       this.world.netState.delete(`transferLock/${player.bodyId}`);
       this.world.netState.delete(`owner/${player.bodyId}`);
@@ -521,6 +537,7 @@ export class GameServer {
     const object = this.world.objects.get(player.bodyId);
     return {
       sheet: this.world.netState.get(`character/${player.bodyId}`),
+      records: Object.fromEntries(PERSISTED_PLAYER_NAMESPACES.map((ns) => [ns, this.world.netState.get(`${ns}/${player.bodyId}`)])),
       scene: this.scene,
       position: this.world.positionOf(player.bodyId),
       yaw: object ? object.rotation.y : 0,
@@ -697,6 +714,7 @@ export class GameServer {
         animL?: string;
         animR?: number;
         animD?: number;
+        animM?: "hold" | "loop";
         syncTransform: boolean;
       }
     >();
@@ -715,8 +733,12 @@ export class GameServer {
       // Seconds left of a one-shot action (a cast, a swing). The client fits
       // the clip to it — only the client knows how long the clip is — so a
       // long cast plays once, slowly, there as well.
-      const until = (this.world.objects.get(id)?.userData as { actionUntil?: number } | undefined)
-        ?.actionUntil;
+      const ud = this.world.objects.get(id)?.userData as
+        | { actionUntil?: number; actionHold?: boolean; actionLoop?: boolean }
+        | undefined;
+      const until = ud?.actionUntil;
+      // a held guard or a channel loop must not replay as a fitted one-shot
+      const animM = animL ? (ud?.actionLoop ? "loop" : ud?.actionHold ? "hold" : undefined) : undefined;
       const animD =
         syncAnim && typeof until === "number" && until > simSeconds
           ? r3(until - simSeconds)
@@ -735,6 +757,7 @@ export class GameServer {
         ...(animL ? { animL } : {}),
         ...(animR !== undefined && animR !== 1 ? { animR: r3(animR) } : {}),
         ...(animD !== undefined ? { animD } : {}),
+        ...(animM ? { animM } : {}),
         syncTransform: netObj?.sync.transform ?? true,
       });
     }
@@ -786,6 +809,7 @@ export class GameServer {
         ...(s.animL ? { animL: s.animL } : {}),
         ...(s.animR !== undefined ? { animR: s.animR } : {}),
         ...(s.animD !== undefined ? { animD: s.animD } : {}),
+        ...(s.animM ? { animM: s.animM } : {}),
       };
     }
     state["entities"] = { managed: visible.map((r) => r.id), updates, removed: left };

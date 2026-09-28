@@ -44,6 +44,46 @@ export {
 } from "./billboards.js";
 export { applyFoliageNormals, foliageNormals, type FoliageNormalOptions } from "./foliage-normals.js";
 export { applyModelBrightness } from "./model-brightness.js";
+export {
+  APPEARANCE_DATA,
+  APPEARANCE_FLOATS,
+  APPEARANCE_MAX_PARTS,
+  APPEARANCE_MAX_TILES,
+  SKIN_CLASSIFIER,
+  appearanceMaterial,
+  applyModelAppearance,
+  classifySkin,
+  encodeAppearance,
+  modelTileTable,
+  carveSkinFeatures,
+  classifyPageSkin,
+  linearToOklab,
+  oklabToLinear,
+  SKIN_FEATURES,
+  SKIN_KEEP,
+  SKIN_LINE,
+  SKIN_TONED,
+  SKIN_SOFT,
+  protectMouth,
+  skinLightness,
+  sheetLightness,
+  TONE_FIT,
+  tonedSkin,
+  skinRegions,
+  SKIN_CLASSIFIER_TIGHT,
+  type SkinSheet,
+  type SkinContext,
+  type SkinRegions,
+  partTileCode,
+  setPartTile,
+  skinPageOf,
+  skinReference,
+  tileCodes,
+  type AppearanceGroup,
+  type AppearanceLook,
+  type EncodedAppearance,
+} from "./appearance.js";
+export { applyInstanceAppearance, INSTANCE_APPEARANCE_ATTRIBUTES } from "./instancing.js";
 export { applyModelEmissive, applyModelMap, applyModelPartMask, modelPartIndex, partBounds, partMaskFromNames, partSize, resolvePartAnchor, type PartAnchor } from "./ubermesh.js";
 export { MovingInstanceSystem, type MovingInstanceEntry, type MovingInstanceGlow, type MovingInstanceLook } from "./moving-instances.js";
 export { findSocketBone, socketParamsFrom, socketWorldPose, type SocketParams } from "./socket-pose.js";
@@ -53,9 +93,14 @@ export { asNodeMaterial, cloneMaterial, editMeshMaterials } from "./node-materia
 export {
   GrassSystem,
   crossQuadGeometry,
+  flatQuadGeometry,
+  pickGrassTile,
+  pickGrassTileIndex,
+  addCapQuad,
   type GrassData,
   type GroundSampler,
   type FoliageSampler,
+  type CoverRegionTest,
   type GrassTextureResolver,
 } from "./grass.js";
 export {
@@ -115,6 +160,7 @@ export {
 } from "./impostor.js";
 export { LightBudgetSystem } from "./light-budget.js";
 export { pathGeometry, type PathMeshSource } from "./path-mesh.js";
+export { surfaceGeometry, type SurfaceMeshSource } from "./surface-mesh.js";
 export { WaterWake, waterWakeUniforms, type WaterWakeOptions } from "./water-wake.js";
 export { polyMeshGeometry, polyFaceForHit } from "./poly-mesh-geometry.js";
 export {
