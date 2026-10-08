@@ -1,7 +1,13 @@
 import * as THREE from "three/webgpu";
+import type { VegetationTint } from "@hitreg/core";
+import { applyInstanceVegetationTint, encodeVegetationTint } from "./vegetation-tint.js";
 import { buildPortalMaterial } from "./portal-material.js";
 import { STATIC_BATCH_FLAG } from "./static-batch.js";
-import { InstancedProps, applyInstanceAppearance, applyInstanceGlow, applyInstanceUber, applyInstanceUvRotation, applyInstancedProps } from "./instancing.js";
+import { modelScope, nameEmbeddedTextures, shareModelMaterials } from "./gltf-dedupe.js";
+import { applyAtlasMaterials } from "./town-atlas.js";
+import { enableSkinnedBounds } from "./skinned-bounds.js";
+import { enableSkinnedShadowRange } from "./skinned-shadows.js";
+import { InstancedProps, applyInstanceAppearance, applyInstanceGlow, applyInstanceHang, applyInstanceUber, applyInstanceUvRotation, applyInstancedProps } from "./instancing.js";
 import { applyWorldUv } from "./primitive-uv.js";
 import {
   positionWorld,
@@ -46,16 +52,19 @@ import {
   cross,
   mx_fractal_noise_float,
   texture as tslTexture,
+  atan,
   uniform,
   viewportDepthTexture,
   perspectiveDepthToViewZ,
   fwidth,
   min,
   Fn,
+  reflect,
 } from "three/tsl";
 import { GLTFLoader, type GLTF } from "three/addons/loaders/GLTFLoader.js";
 import { applyFoliageNormals } from "./foliage-normals.js";
 import { waterWakeUniforms } from "./water-wake.js";
+import { seaAbyss, seaBreakers, seaGlint, seaSkyReflection, seaSwell, seaWhitecaps, type SeaParams } from "./water-sea.js";
 import { applyModelBrightness } from "./model-brightness.js";
 import { applyFoliageWind, type FoliageWindOptions } from "./foliage-wind.js";
 import { applyFoliageFade } from "./foliage-fade.js";
@@ -88,7 +97,7 @@ import { polyMeshGeometry } from "./poly-mesh-geometry.js";
 import { surfaceGeometry, type SurfaceMeshSource } from "./surface-mesh.js";
 import { horizonTint } from "./atmosphere.js";
 import { buildTerrainSplatMaterial, SPLAT_ATTRIBUTES, type MacroNoiseData } from "./terrain-splat.js";
-import { mergeModelSubmeshes } from "./static-batch.js";
+import { mergeModelSubmeshes, prepareStaticModel } from "./static-batch.js";
 import { applyModelPartMask } from "./ubermesh.js";
 import type { MovingInstanceEntry } from "./moving-instances.js";
 import { voxelGeometry, csgGeometry, voxelColliderProxyGeometry } from "./voxel-geometry.js";
@@ -100,15 +109,18 @@ import type { InstancedPropBatch } from "./foliage-lod.js";
 import type { InstancedPropPool } from "./prop-pool.js";
 import { pathGeometry, type PathMeshSource } from "./path-mesh.js";
 import { pathScatterPlacements, type PathScatterData } from "./path-scatter.js";
-import { flushDecals, syncEntityDecals, type DecalData, type DecalRequest } from "./decals.js";
+import { flushDecals, reprojectDecalsAround, syncEntityDecals, type DecalData, type DecalRequest } from "./decals.js";
 import { DEFAULT_SHADOW_SETTINGS, applyShadowSettings, type ShadowSettings } from "./csm.js";
 import { DEFAULT_VOLUMETRIC_SETTINGS, type FogSettings, type VolumetricSettings } from "./atmosphere.js";
 import type { EnvironmentSettings } from "./environment.js";
+import { nightLevel } from "./daylight.js";
+import { rimmedCopy } from "./rim-light.js";
 import { SceneLighting, SKY_DOME_UNIFORMS, type SkyData, type SkyDomeUniforms } from "./scene-lighting.js";
 import {
   applyMaterialCommon,
   applyMaterialMaps,
   makeMaterialUniforms,
+  nightScaled,
   materialMapKey,
   materialMapKeyOf,
   materialSourceOf,
@@ -134,7 +146,11 @@ export function loadGltf(url: string): Promise<GLTF> {
     gltfPending.add(url);
     pending = (gltfLoader ??= new GLTFLoader())
       .loadAsync(url)
-      .then((gltf) => {
+      .then(async (gltf) => {
+        // name embedded kit textures by content first, so the sharing below
+        // also covers files exported without the kit tools (see gltf-dedupe)
+        const scope = modelScope(url);
+        await nameEmbeddedTextures(gltf, scope);
         // glTF custom semantics must start with '_'; GLTFLoader lowercases
         // them. Restore the renderer's vertex-paint attribute names.
         gltf.scene.traverse((node) => {
@@ -146,12 +162,63 @@ export function loadGltf(url: string): Promise<GLTF> {
           }
         });
         shareNamedTextures(gltf.scene);
+        applyWindowGlass(gltf.scene);
+        // atlased kits (tools/town-atlas.mjs): one shared tile-sampling material per page
+        applyAtlasMaterials(gltf.scene);
+        shareModelMaterials(gltf.scene, scope);
+        // creatures and characters: a rim keeps them readable in the dark (sky.rim; 0 = off)
+        gltf.scene.traverse((node) => {
+          const mesh = node as THREE.SkinnedMesh;
+          if (!mesh.isSkinnedMesh) return;
+          mesh.material = Array.isArray(mesh.material) ? mesh.material.map(rimmedCopy) : rimmedCopy(mesh.material);
+        });
         return gltf;
       })
       .finally(() => gltfPending.delete(url));
     gltfCache.set(url, pending);
   }
   return pending;
+}
+
+/** The window kit's pane material (docs/world-standards/building-styles.md → Windows). */
+const WINDOW_GLASS = /windowglass/i;
+const WINDOW_GLOW = new THREE.Color("#ffb060");
+
+/**
+ * Lit windows at night, by CONVENTION: the window kit puts every pane on one
+ * material named `WindowGlass` and nothing else on it, so any glTF material
+ * with that name becomes a night light — its own pane texture, unchanged by
+ * day, added back as a warm emissive that fades in with darkness (the shared
+ * `nightLevel` uniform; bloom catches it). Converted once on the cached
+ * scene, so every building sharing the kit shares ONE material. No extra
+ * draw, no light: a town reads as lived in after dark for a multiply.
+ */
+const windowGlassMaterials = new WeakMap<THREE.Material, THREE.Material>();
+function applyWindowGlass(root: THREE.Object3D): void {
+  root.traverse((node) => {
+    const mesh = node as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    const swap = (m: THREE.Material): THREE.Material => {
+      if (!WINDOW_GLASS.test(m.name)) return m;
+      const cached = windowGlassMaterials.get(m);
+      if (cached) return cached;
+      const src = m as THREE.MeshStandardMaterial;
+      const glass = new THREE.MeshStandardNodeMaterial({
+        name: m.name,
+        color: src.color ?? new THREE.Color(1, 1, 1),
+        map: src.map ?? null,
+        roughness: src.roughness ?? 1,
+        metalness: src.metalness ?? 0,
+        side: src.side,
+        alphaTest: src.alphaTest,
+      });
+      const pane = src.map ? (tslTexture(src.map) as unknown as THREE.Node<"vec4">).rgb : vec3(1, 1, 1);
+      glass.emissiveNode = pane.mul(uniform(WINDOW_GLOW)).mul(float(1.6)).mul(nightLevel) as THREE.Node<"vec3">;
+      windowGlassMaterials.set(m, glass);
+      return glass;
+    };
+    mesh.material = Array.isArray(mesh.material) ? mesh.material.map(swap) : swap(mesh.material);
+  });
 }
 
 /** Prefix the kit-import tools give a glTF texture whose bytes are shared by many files. */
@@ -216,6 +283,13 @@ export function gltfLoadingCount(): number {
 }
 
 export interface BuildOptions {
+  /**
+   * Treat this entity's meshes as `mesh.static` (batchable, frozen model)
+   * without the authored flag. The host answers from the document: an entity
+   * whose own and ancestors' components can never move it (no script,
+   * rigidbody, animator, effects…). Unset = only authored `static` counts.
+   */
+  autoStatic?(entityId: string): boolean;
   /** Resolve a mesh asset id to a fetchable glTF/GLB URL (from the AssetLibrary). */
   resolveModel?(assetId: string): string | undefined;
   /**
@@ -360,6 +434,8 @@ export interface MaterialData {
   vertexColors?: boolean;
   emissive: string;
   emissiveIntensity: number;
+  /** Fade the emissive term by time of day (see the schema). */
+  nightGlow?: number;
   emissiveMap?: string;
   /** Animated pixelated noise glow on top of the surface (see the schema). */
   overlay?: {
@@ -426,6 +502,8 @@ export interface MaterialData {
     wakeHeight?: number;
     /** How much the wake's crests also froth. 0 = pure water motion. */
     wakeFoam?: number;
+    /** Open-sea layer (water-sea.ts); absent = plain water. */
+    sea?: SeaParams;
   };
 }
 
@@ -458,6 +536,7 @@ interface MeshData {
         wind?: FoliageWindOptions;
         cameraFade?: boolean;
         uvRotation?: number;
+        vegetationTint?: VegetationTint;
         atlasTile?: [number, number, number];
         partMask?: number;
       }
@@ -478,6 +557,8 @@ interface MeshData {
   receiveShadow: boolean;
   renderMode?: "auto" | "instanced" | "clustered";
   lod?: boolean;
+  lodDistance?: number;
+  lodProxy?: string;
   /** instanced only: follows its entity every frame (see MovingInstanceSystem). */
   moving?: boolean;
   /** Authoring hint that this mesh never moves — drives static draw-call
@@ -508,11 +589,15 @@ export function polygonGeometry(source: {
 interface LightData {
   kind: "directional" | "point" | "spot" | "ambient";
   color: string;
+  /** ambient only: a hemisphere fill (color from above, groundColor from below). */
+  groundColor?: string;
   intensity: number;
   range: number;
   angle: number;
   castShadow: boolean;
   importance?: number;
+  /** Time of day the light is on (see the schema). */
+  when?: "always" | "night" | "day";
   /** directional + castShadow only — shadow camera ortho frustum half-width. */
   shadowSize?: number;
   /** `light.shadow`; every field optional here because old docs predate it. */
@@ -557,6 +642,9 @@ function normalizeSky(sky: SkyData): SkyData {
         density: rawFog.density ?? 0.015,
         heightFalloff: rawFog.heightFalloff ?? 0.15,
         baseHeight: rawFog.baseHeight ?? 0,
+        // optional terms pass straight through (absent = off, not in the shader)
+        ...(rawFog.sunScatter !== undefined ? { sunScatter: rawFog.sunScatter, sunScatterPower: rawFog.sunScatterPower ?? 6 } : {}),
+        ...(rawFog.mist ? { mist: rawFog.mist } : {}),
       }
     : undefined;
   const rawVolumetric = sky.volumetric as Partial<VolumetricSettings> | undefined;
@@ -610,10 +698,11 @@ export interface BuiltScene {
   lighting: SceneLighting;
 }
 
+// matte, like the material schema's defaults (owner ruling 2026-10-06: no unasked-for sheen)
 const defaultMaterial = new THREE.MeshStandardMaterial({
   color: 0x9aa0a8,
-  roughness: 0.85,
-  metalness: 0.05,
+  roughness: 1,
+  metalness: 0,
 });
 
 /**
@@ -640,7 +729,11 @@ function buildSkyDome(
     shadow: string;
     sun?: string;
     sunAmount?: number;
+    texture?: string | undefined;
+    pixel?: number;
   },
+  horizon?: { texture: string; height: number; repeat: number; offset: number; opacity: number; depth: number },
+  resolveTexture?: (assetId: string) => string | undefined,
 ): THREE.Mesh {
   // defensive: production sky data is always zod-validated (top/bottom always
   // real hex strings) before it reaches here, but TSL's color() warns loudly
@@ -690,7 +783,16 @@ function buildSkyDome(
     cloudSun: uniform(new THREE.Color(clouds?.sun ?? "#ffb27a")),
     cloudSunAmount: uniform(clouds?.sunAmount ?? 0),
     cloudLight: uniform(1),
+    cloudTexOn: uniform(0),
+    horizonOpacity: uniform(0),
   };
+  // Painted layers are built against empty textures and filled on load (a
+  // graph change would recompile the dome); each stays switched off by its
+  // uniform until its image is actually there.
+  const cloudMap = new THREE.Texture();
+  const horizonMap = new THREE.Texture();
+  loadSkyLayer(cloudMap, clouds?.texture, resolveTexture, THREE.RepeatWrapping, () => (uniforms.cloudTexOn.value = 1));
+  loadSkyLayer(horizonMap, horizon?.texture, resolveTexture, THREE.ClampToEdgeWrapping, () => (uniforms.horizonOpacity.value = horizon?.opacity ?? 1));
   // TSL's generics cannot follow uniform-typed colours through mix/pow/add;
   // the graph is the same one the constant version built, just with uniforms
   // in the leaves.
@@ -724,7 +826,9 @@ function buildSkyDome(
   const lattice: any = dirStars.mul(float(110));
   const cell: any = floor(lattice);
   const inCell: any = sub(sub(lattice, cell), float(0.5));
-  const h0: any = hash(dot(cell, vec3(1, 57, 113)));
+  // +32768 keeps the seed positive: TSL hash() converts it to an unsigned int, so
+  // every negative cell (half the sky) used to collapse onto one value
+  const h0: any = hash(dot(cell, vec3(1, 57, 113)).add(32768));
   const h1: any = hash(h0.mul(91.3));
   const h2: any = hash(h0.mul(7.7));
   const h3: any = hash(h0.mul(3.1));
@@ -736,6 +840,21 @@ function buildSkyDome(
   const starFade: any = mul(smoothstep(float(0.02), float(0.2), dir.y), sub(float(1), hazeAmount));
   const starLight: any = mul(mul(mul(mul(lit, dot_), twinkle), add(float(0.6), mul(h2, float(0.9)))), mul(u.starsIntensity, starFade));
   colorNode = add(colorNode, mul(vec3(0.85, 0.9, 1.0), starLight));
+  // Painted horizon backdrop: a 360° greyscale strip wrapped around the
+  // horizon, coloured by the LIVE sky so day/night, weather and zone moods
+  // recolour it for free. Light grey is far (melts into the horizon colour),
+  // dark is near (toward a silhouette mixed from the sky's own colours). It
+  // covers the sun glow, moon and stars behind it; the clouds still pass over.
+  if (horizon) {
+    const yaw: any = add(div(atan(dir.z, dir.x), float(Math.PI * 2)), float(0.5 + horizon.offset / (Math.PI * 2)));
+    const hv: any = clamp(div(add(dir.y, float(0.02)), float(horizon.height + 0.02)), 0.002, 0.998);
+    const hs: any = tslTexture(horizonMap, vec2(fract(mul(yaw, float(horizon.repeat))), hv));
+    const lum: any = dot(hs.rgb, vec3(0.299, 0.587, 0.114));
+    const silhouette: any = mul(mix(u.bottom, u.top, float(0.35)), float(0.55));
+    const near: any = mul(sub(float(1), lum), float(horizon.depth * 1.6));
+    const hColor: any = mix(u.bottom, silhouette, clamp(near, 0, 1));
+    colorNode = mix(colorNode, hColor, mul(hs.a, u.horizonOpacity));
+  }
   // clouds: the view direction projected onto a plane above the camera,
   // fractal noise drifting with the wind, thresholded by coverage. Composited
   // LAST so a cloud hides the sun, the moon and the stars behind it. Thicker
@@ -747,15 +866,53 @@ function buildSkyDome(
   // constant keeps distant clouds compact
   const planeY: any = add(mul(max(dir.y, float(0)), float(0.7)), float(0.3));
   const plane: any = vec2(dir.x, dir.z).div(planeY).mul(mul(float(0.35), u.cloudScale));
-  const drift: any = plane.add(mul(u.cloudSpeed, mul(time, float(0.02))));
+  let drift: any = plane.add(mul(u.cloudSpeed, mul(time, float(0.02))));
+  // the painted deck's second, higher layer: the same tile scaled down, offset
+  // and drifting slower, so the two never line up into one repeating pattern
+  let driftBack: any = plane.mul(float(0.77)).add(vec2(0.37, 0.61)).add(mul(u.cloudSpeed, mul(time, float(0.013))));
+  // PSX: quantise the layer's coordinates so the cloud is drawn in chunky
+  // cells (the painted texture's own texels, or blocks of the noise)
+  const cells = clouds?.pixel ?? 0;
+  if (cells > 0) {
+    drift = div(floor(mul(drift, float(cells))), float(cells));
+    driftBack = div(floor(mul(driftBack, float(cells))), float(cells));
+  }
   const noise: any = mx_fractal_noise_float(vec3(drift.x, drift.y, mul(time, float(0.01))), 4, 2.2, 0.5, 1);
   const density: any = add(mul(noise, float(0.5)), float(0.5));
-  const threshold: any = sub(float(1), u.cloudCoverage);
-  const cloudAlpha: any = mul(
-    smoothstep(threshold, add(threshold, u.cloudSoftness), density),
-    smoothstep(float(0.0), float(0.14), dir.y),
-  );
-  const thickness: any = smoothstep(threshold, float(1), density);
+  const horizonFade: any = smoothstep(float(0.0), float(0.14), dir.y);
+  let cloudAlpha: any;
+  let thickness: any;
+  if (clouds?.texture) {
+    // Painted clouds own the sky up to coverage ~0.45. Past it the sky closes
+    // in two steps, both in the art's own pixels: a second, higher painted
+    // layer shows through the gaps (0.45..0.8), then the procedural deck fills
+    // whatever is left (0.7..1). Procedural noise alone as the filler read as
+    // pale sky between the banks, so a "full" sky never looked closed.
+    const cs: any = tslTexture(cloudMap, fract(drift));
+    const cb: any = tslTexture(cloudMap, fract(driftBack));
+    const paintedAlpha: any = mul(mul(cs.a, smoothstep(float(0.02), float(0.2), u.cloudCoverage)), u.cloudTexOn);
+    const backAlpha: any = mul(mul(cb.a, smoothstep(float(0.45), float(0.8), u.cloudCoverage)), u.cloudTexOn);
+    const stormThreshold: any = sub(float(1), mul(max(sub(u.cloudCoverage, float(0.7)), float(0)), float(3)));
+    const stormAlpha: any = smoothstep(stormThreshold, add(stormThreshold, u.cloudSoftness), density);
+    cloudAlpha = mul(max(max(paintedAlpha, backAlpha), stormAlpha), horizonFade);
+    const lum = vec3(0.299, 0.587, 0.114);
+    const paintedThick: any = sub(float(1), dot(cs.rgb, lum));
+    // the higher layer sits a little deeper in shadow, so the front banks
+    // still read as in front
+    const backThick: any = add(mul(sub(float(1), dot(cb.rgb, lum)), float(0.85)), float(0.15));
+    // the last filler sits in the painted greys' range (sampled linear, they
+    // land around 0.6..0.97), or it lights every gap as a pale patch
+    const stormThick: any = add(float(0.62), mul(smoothstep(stormThreshold, float(1), density), float(0.33)));
+    // front over back over procedural: whichever is the nearest one present
+    const front: any = step(float(0.5), paintedAlpha);
+    const back: any = mul(sub(float(1), front), step(float(0.5), backAlpha));
+    const rest: any = mul(sub(float(1), front), sub(float(1), back));
+    thickness = add(add(mul(paintedThick, front), mul(backThick, back)), mul(stormThick, rest));
+  } else {
+    const threshold: any = sub(float(1), u.cloudCoverage);
+    cloudAlpha = mul(smoothstep(threshold, add(threshold, u.cloudSoftness), density), horizonFade);
+    thickness = smoothstep(threshold, float(1), density);
+  }
   let cloudColor: any = mix(u.cloudColor, u.cloudShadow, mul(thickness, float(0.75)));
   // Dawn and dusk are DIRECTIONAL: a low sun lights the deck from the side,
   // so the cloud near its azimuth burns and the far side of the sky stays
@@ -785,6 +942,37 @@ function buildSkyDome(
   mesh.userData["skyDome"] = true;
   mesh.userData[SKY_DOME_UNIFORMS] = uniforms;
   return mesh;
+}
+
+/** Fill one of the dome's painted layers in place once its image arrives (nearest: PSX pixels). */
+function loadSkyLayer(
+  map: THREE.Texture,
+  assetId: string | undefined,
+  resolveTexture: ((assetId: string) => string | undefined) | undefined,
+  wrapS: THREE.Wrapping,
+  onLoad: () => void,
+): void {
+  if (!assetId) return;
+  const url = resolveTexture?.(assetId);
+  if (!url) {
+    console.warn(`[render] no texture asset "${assetId}" for the sky — that layer is skipped`);
+    return;
+  }
+  new THREE.TextureLoader().loadAsync(url).then(
+    (loaded) => {
+      map.image = loaded.image;
+      map.colorSpace = THREE.SRGBColorSpace;
+      map.wrapS = wrapS;
+      map.wrapT = wrapS;
+      map.minFilter = THREE.NearestFilter;
+      map.magFilter = THREE.NearestFilter;
+      map.generateMipmaps = false;
+      map.needsUpdate = true;
+      loaded.dispose();
+      onLoad();
+    },
+    (error) => console.warn(`[render] sky layer failed to load: ${url}`, error),
+  );
 }
 
 /** Triangular prism rising toward +Z — the graybox ramp. */
@@ -1168,16 +1356,28 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
   const wakeSlopeX = mul(sub(wakeAt(vec2(wakeTexel, float(0))), wakeAt(vec2(mul(wakeTexel, float(-1)), float(0)))), wakeRun);
   // v runs opposite world z, so the taps swap to keep the gradient in +z
   const wakeSlopeZ = mul(sub(wakeAt(vec2(float(0), mul(wakeTexel, float(-1)))), wakeAt(vec2(float(0), wakeTexel))), wakeRun);
-  const slopeX = add(add(mul(dhAlong, alongDir.x), mul(dhAcross, acrossDir.x)), wakeSlopeX);
-  const slopeZ = add(add(mul(dhAlong, alongDir.y), mul(dhAcross, acrossDir.y)), wakeSlopeZ);
+  // water depth under the surface (hoisted: the sea's swell is sheltered by it)
+  const sceneViewZ = perspectiveDepthToViewZ(viewportDepthTexture(), cameraNear, cameraFar);
+  const waterDepth = max(sub(positionView.z, sceneViewZ), float(0)); // world units, >= 0
+  const viewToFrag = normalize(sub(positionWorld, cameraPosition));
+  // the VERTICAL depth: view-ray depth times the ray's slope (exact for a flat bed)
+  const verticalDepth = mul(waterDepth, max(abs(viewToFrag.y), float(0.02)));
+  // -- open sea (water-sea.ts): each piece compiled only when its knob is on --
+  const sea = w.sea;
+  const seaShelter = sea ? smoothstep(float(0), float(sea.shelterDepth), verticalDepth) : null;
+  const swell = sea && seaShelter ? seaSwell(sea, worldXZ, seaShelter) : null;
+  let slopeX = add(add(mul(dhAlong, alongDir.x), mul(dhAcross, acrossDir.x)), wakeSlopeX);
+  let slopeZ = add(add(mul(dhAlong, alongDir.y), mul(dhAcross, acrossDir.y)), wakeSlopeZ);
+  if (swell) {
+    slopeX = add(slopeX, swell.slopeX);
+    slopeZ = add(slopeZ, swell.slopeZ);
+  }
   // bend the geometry's own world normal (up for a sheet, sideways for a
   // fall) by the slope, then into view space, which is what normalNode is
   const bumpedWorld = normalize(add(normalWorld, vec3(mul(slopeX, float(-1)), float(0), mul(slopeZ, float(-1)))));
   material.normalNode = normalize(cameraViewMatrix.mul(vec4(bumpedWorld, float(0))).xyz);
 
   // -- toon-banded depth color: hard-ish steps, not a smooth gradient --
-  const sceneViewZ = perspectiveDepthToViewZ(viewportDepthTexture(), cameraNear, cameraFar);
-  const waterDepth = max(sub(positionView.z, sceneViewZ), float(0)); // world units, >= 0
   const depthFadeDist = float(w.depthFadeDistance);
   const bandWidth = mul(depthFadeDist, float(0.06)); // narrow = crisp but still anti-aliased
   const shallowToMid = mul(depthFadeDist, float(0.35));
@@ -1343,6 +1543,12 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
     void loadWaterTexture(map, data, options);
   }
 
+  // the sea's deep water sinks to its abyss colour OVER the texture, and the
+  // swell's crests catch a little light while its troughs fall into shade
+  if (sea) base = seaAbyss(sea, base, verticalDepth);
+  // banded, not smooth: five flat tones from trough to crest (PS1)
+  if (swell) base = mul(base as THREE.Node<"vec3">, add(float(1), mul(floor(add(mul(swell.crest, float(2.5)), float(0.5))), float(0.24 / 2.5))));
+
   // Shoreline foam. Two things stop it reading as a drawn contour line:
   //
   // 1. The band's distance is PERTURBED by the surface texture's own moving
@@ -1363,8 +1569,6 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
   // out by depth, so a steep bank keeps it narrow and a deep one has none.
   const foamWidth = float(Math.max(w.foamWidth, 0.001));
   const foamBandM = float(Math.max(0.05, w.foamBand ?? 0.9));
-  const viewToFrag = normalize(sub(positionWorld, cameraPosition));
-  const verticalDepth = mul(waterDepth, max(abs(viewToFrag.y), float(0.02)));
   // slope of the bed under the water: depth change per metre across the surface
   const metresPerPixel = max(add(fwidth(positionWorld.x), fwidth(positionWorld.z)), float(1e-4));
   const bedSlope = max(div(fwidth(verticalDepth), metresPerPixel), float(0.05));
@@ -1402,7 +1606,15 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
   // (on a fall face the fall texture carries the white water; the froth only tops it up)
   // (a fall face stands a hand in front of its rock, so the depth-based shore
   // foam would paint all of it white: steep faces keep their fall texture)
-  base = mix(base as THREE.Node<"vec3">, tslColor(w.foamColor), max(max(mul(foamEdge, sub(float(1), steepness)), wakeFroth), mul(mul(rapids, float(0.75)), sub(float(1), mul(steepness, float(0.7))))));
+  let foamAmount = max(max(mul(foamEdge, sub(float(1), steepness)), wakeFroth), mul(mul(rapids, float(0.75)), sub(float(1), mul(steepness, float(0.7)))));
+  // the sea's breaker lines rolling in to the beach, and whitecaps out on the swell
+  if (sea) {
+    const breakers = seaBreakers(sea, shoreDistance, worldXZ, foamBreakup, Math.max(1, Math.round(w.foamSteps ?? 3)), swell, verticalDepth);
+    if (breakers) foamAmount = max(foamAmount, breakers);
+    const caps = seaShelter ? seaWhitecaps(sea, worldXZ, swell, seaShelter) : null;
+    if (caps) foamAmount = max(foamAmount, mul(caps, float(0.8)));
+  }
+  base = mix(base as THREE.Node<"vec3">, tslColor(w.foamColor), foamAmount);
   // A fall's face is the fall texture, not water tinted by depth: the rock is
   // a metre behind it, so the depth bands and foam turned it into stripes
   if (fallColour) base = mix(base as THREE.Node<"vec3">, fallColour, mul(steepness, float(0.9)));
@@ -1482,7 +1694,28 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
   // colour at the horizon: bright by day, dark at dusk like the land around
   // it, instead of a constant near-white that floated over a fogged-out hill
   const rim = (tslColor(w.rimColor) as unknown as THREE.Node<"vec3">).mul(horizonTint as unknown as THREE.Node<"vec3">);
-  const lit = mix(shaded as THREE.Node<"vec3">, rim, fresnel);
+  let lit = mix(shaded as THREE.Node<"vec3">, rim, fresnel);
+  // The SEA reflects the live sky along the reflected ray, and glints where a
+  // pixel facet mirrors the sun. Both are LIGHT, so on a lit material they go
+  // to emissive (the sun must not light the sky's own reflection a second
+  // time); the albedo gives up the fresnel share it reflects.
+  /** Additive light for a lit sea material (front face only), or null. */
+  let seaLight: THREE.Node<"vec3"> | null = null;
+  if (sea) {
+    const reflected = reflect(viewToFrag, bumpedWorld);
+    const skyRefl = sea.sky > 0 ? seaSkyReflection(sea, reflected, rim) : rim;
+    const glint = seaGlint(sea, worldXZ, reflected, swell);
+    // foam is not a mirror: it keeps its own colour instead of the sky's
+    const seaFresnel = mul(fresnel, sub(float(1), foamAmount));
+    if (material instanceof THREE.MeshStandardNodeMaterial) {
+      lit = mul(shaded as THREE.Node<"vec3">, sub(float(1), seaFresnel)) as unknown as typeof lit;
+      seaLight = mul(skyRefl, seaFresnel) as unknown as THREE.Node<"vec3">;
+      if (glint) seaLight = add(seaLight, glint) as unknown as THREE.Node<"vec3">;
+    } else {
+      lit = mix(shaded as THREE.Node<"vec3">, skyRefl, seaFresnel) as unknown as typeof lit;
+      if (glint) lit = add(lit, glint) as unknown as typeof lit;
+    }
+  }
 
   // -- the surface FROM BELOW ------------------------------------------------
   //
@@ -1505,6 +1738,7 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
   // sides: the underside look is for a ceiling of water, not a falling sheet
   const facing = max(float(frontFacing as unknown as THREE.Node<"float">), steepness);
   material.colorNode = mix(underside, lit as unknown as THREE.Node<"vec3">, facing);
+  if (seaLight && material instanceof THREE.MeshStandardNodeMaterial) material.emissiveNode = mul(seaLight, facing);
 
   // -- edge fade: opacity to 0 well before the mesh's own physical boundary --
   const camDist = length(sub(cameraPosition, positionWorld));
@@ -1609,6 +1843,10 @@ export function makeMaterial(data: MaterialData, options?: TextureResolver): THR
       (material as THREE.MeshBasicNodeMaterial & { emissiveNode: THREE.Node | null }).emissiveNode = (
         uniforms.emissive as unknown as THREE.Node<"color">
       ).mul(uniforms.emissiveIntensity as unknown as THREE.Node<"float">) as unknown as THREE.Node;
+      (material as THREE.MeshBasicNodeMaterial & { emissiveNode: THREE.Node | null }).emissiveNode = nightScaled(
+        (material as unknown as { emissiveNode: THREE.Node }).emissiveNode,
+        data,
+      );
       applyMaterialCommon(material, data);
       return material;
     }
@@ -1640,6 +1878,11 @@ export function makeMaterial(data: MaterialData, options?: TextureResolver): THR
         emissive: new THREE.Color(data.emissive),
         emissiveIntensity: data.emissiveIntensity,
       });
+      if ((data.nightGlow ?? 0) > 0) {
+        // night-fading emissive needs an explicit node (three's built-in emissive slot cannot be scaled)
+        const uniforms = makeMaterialUniforms(material, data);
+        material.emissiveNode = nightScaled((uniforms.emissive as unknown as THREE.Node<"color">).mul(uniforms.emissiveIntensity as unknown as THREE.Node<"float">), data) as THREE.Node<"vec3">;
+      }
       applyMaterialCommon(material, data);
       return material;
     }
@@ -1832,6 +2075,7 @@ interface PendingInstance {
   cameraFade?: boolean;
   /** `mesh.source.uvRotation`, degrees — see INSTANCE_UV_ROTATION_ATTRIBUTE. */
   uvRotation?: number;
+  vegetationTint?: VegetationTint;
   /** `mesh.material` — an engine material asset that replaces the model's own. */
   material?: string;
   /** `mesh.source.atlasTile` — [uOffset, vOffset, scale] into a packed sheet. */
@@ -1841,6 +2085,8 @@ interface PendingInstance {
   castShadow: boolean;
   receiveShadow: boolean;
   lod: boolean;
+  lodDistance?: number;
+  lodProxy?: string;
   /**
    * Where the eventual shared InstancedMesh(es) get parented — `ctx.scene`
    * for a whole build (buildScene), or the entity's own group for a single-
@@ -1972,6 +2218,8 @@ function populateEntityGroup(
   let createdCamera: THREE.PerspectiveCamera | null = null;
   {
     const meshData = entity.components["mesh"] as MeshData | undefined;
+    // authored `static`, or a host ruling that nothing can move this entity
+    const staticMesh = meshData?.static === true || options.autoStatic?.(id) === true;
     if (meshData && meshData.source.kind === "primitive") {
       const mesh = new THREE.Mesh(
         geometryFor(
@@ -1987,7 +2235,7 @@ function populateEntityGroup(
       mesh.castShadow = meshData.castShadow;
       mesh.receiveShadow = meshData.receiveShadow;
       mesh.userData["entityId"] = id;
-      mesh.userData[STATIC_BATCH_FLAG] = meshData.static === true;
+      mesh.userData[STATIC_BATCH_FLAG] = staticMesh;
       group.add(mesh);
     }
     if (meshData && meshData.source.kind === "polygon") {
@@ -1998,7 +2246,7 @@ function populateEntityGroup(
       mesh.castShadow = meshData.castShadow;
       mesh.receiveShadow = meshData.receiveShadow;
       mesh.userData["entityId"] = id;
-      mesh.userData[STATIC_BATCH_FLAG] = meshData.static === true;
+      mesh.userData[STATIC_BATCH_FLAG] = staticMesh;
       group.add(mesh);
     }
 
@@ -2022,7 +2270,7 @@ function populateEntityGroup(
       mesh.castShadow = meshData.castShadow;
       mesh.receiveShadow = meshData.receiveShadow;
       mesh.userData["entityId"] = id;
-      mesh.userData[STATIC_BATCH_FLAG] = meshData.static === true;
+      mesh.userData[STATIC_BATCH_FLAG] = staticMesh;
       mesh.userData["polyMesh"] = true;
       group.add(mesh);
     }
@@ -2032,7 +2280,7 @@ function populateEntityGroup(
       mesh.castShadow = meshData.castShadow;
       mesh.receiveShadow = meshData.receiveShadow;
       mesh.userData["entityId"] = id;
-      mesh.userData[STATIC_BATCH_FLAG] = meshData.static === true;
+      mesh.userData[STATIC_BATCH_FLAG] = staticMesh;
       group.add(mesh);
     }
 
@@ -2044,7 +2292,7 @@ function populateEntityGroup(
       mesh.castShadow = meshData.castShadow;
       mesh.receiveShadow = meshData.receiveShadow;
       mesh.userData["entityId"] = id;
-      mesh.userData[STATIC_BATCH_FLAG] = meshData.static === true;
+      mesh.userData[STATIC_BATCH_FLAG] = staticMesh;
       // marks this mesh for ctx.setPathPoints (main.ts) — a live-simulated
       // rope/chain rebuilds its geometry every tick from new control points,
       // reusing every OTHER field (crossSection/width/radius/...) from the
@@ -2063,7 +2311,7 @@ function populateEntityGroup(
         mesh.castShadow = meshData.castShadow;
         mesh.receiveShadow = meshData.receiveShadow;
         mesh.userData["entityId"] = id;
-        mesh.userData[STATIC_BATCH_FLAG] = meshData.static === true;
+        mesh.userData[STATIC_BATCH_FLAG] = staticMesh;
         mesh.userData["voxelSource"] = meshData.source;
         // No camera-collision proxy here, unlike the heightmap branch below.
         // `refreshCameraColliders` only walks the BASE scene document's static
@@ -2086,7 +2334,7 @@ function populateEntityGroup(
         mesh.castShadow = meshData.castShadow;
         mesh.receiveShadow = meshData.receiveShadow;
         mesh.userData["entityId"] = id;
-        mesh.userData[STATIC_BATCH_FLAG] = meshData.static === true;
+        mesh.userData[STATIC_BATCH_FLAG] = staticMesh;
         mesh.userData["csgSource"] = meshData.source;
         group.add(mesh);
       }
@@ -2103,7 +2351,7 @@ function populateEntityGroup(
       mesh.castShadow = meshData.castShadow;
       mesh.receiveShadow = meshData.receiveShadow;
       mesh.userData["entityId"] = id;
-      mesh.userData[STATIC_BATCH_FLAG] = meshData.static === true;
+      mesh.userData[STATIC_BATCH_FLAG] = staticMesh;
       // main.ts's refreshCameraColliders() raycasts static geometry every
       // frame for camera dolly-collision (no acceleration structure) — doing
       // that against full render resolution (up to 256x256) is expensive even
@@ -2175,12 +2423,15 @@ function populateEntityGroup(
         wind: meshData.source.wind,
         cameraFade: meshData.source.cameraFade,
         uvRotation: meshData.source.uvRotation,
+        vegetationTint: meshData.source.vegetationTint,
         material: meshData.material,
         atlasTile: meshData.source.atlasTile,
         partMask: meshData.source.partMask,
         castShadow: meshData.castShadow,
         receiveShadow: meshData.receiveShadow,
         lod: meshData.lod ?? true,
+        lodDistance: meshData.lodDistance,
+        lodProxy: meshData.lodProxy,
         anchor: scene ?? group,
       };
       if (list) list.push(entry);
@@ -2225,9 +2476,11 @@ function populateEntityGroup(
               if ((node as THREE.Mesh).isMesh) {
                 node.castShadow = meshData.castShadow;
                 node.receiveShadow = meshData.receiveShadow;
-                // skinned bounds stay at the bind pose, so a moved/teleported
-                // character would be frustum-culled while plainly on screen
-                if ((node as THREE.SkinnedMesh).isSkinnedMesh) node.frustumCulled = false;
+                // Updated lazily from the current bone pose, including teleports.
+                if ((node as THREE.SkinnedMesh).isSkinnedMesh) {
+                  enableSkinnedBounds(node as THREE.SkinnedMesh);
+                  enableSkinnedShadowRange(node);
+                }
               }
               node.userData["entityId"] = id;
             });
@@ -2263,7 +2516,14 @@ function populateEntityGroup(
               mergeModelSubmeshes(instance);
             }
             group.add(instance);
+            // The initial decal flush can precede async model arrival. Fit
+            // nearby projectors now that their static receiver exists.
+            if (scene) reprojectDecalsAround(scene, id, group, options);
             options.onModelLoaded?.(id, instance, gltf.animations ?? []);
+            if (staticMesh && !clustered && (gltf.animations?.length ?? 0) === 0 &&
+                !entity.components["animator"] && !entity.components["clothSway"]) {
+              prepareStaticModel(instance);
+            }
           },
           (error) => console.warn(`[render] failed to load model:`, error),
         );
@@ -2283,7 +2543,10 @@ function populateEntityGroup(
       let light: THREE.Light | null = null;
       switch (lightData.kind) {
         case "ambient":
-          light = new THREE.AmbientLight(color, lightData.intensity);
+          // groundColor = the interior readability floor: a hemisphere, so floors, walls and ceilings read apart
+          light = lightData.groundColor
+            ? new THREE.HemisphereLight(color, new THREE.Color(lightData.groundColor), lightData.intensity)
+            : new THREE.AmbientLight(color, lightData.intensity);
           break;
         case "point":
           light = new THREE.PointLight(color, lightData.intensity, lightData.range);
@@ -2324,6 +2587,7 @@ function populateEntityGroup(
         else applyShadowSettings(light, lightData.castShadow, shadow, shadowSize);
         light.userData["runtimeEnabled"] = true;
         light.userData["lightImportance"] = lightData.importance ?? 1;
+        if (lightData.when && lightData.when !== "always") light.userData["lightWhen"] = lightData.when;
         group.add(light);
         options.onLight?.(id, light, lightData.importance ?? 1);
       }
@@ -2361,7 +2625,7 @@ function populateEntityGroup(
           (error) => console.warn(`[render] sky texture failed: ${panoramaUrl}`, error),
         );
       } else {
-        const dome = buildSkyDome(skyData.top, skyData.bottom, skyData.sun, skyData.moon, skyData.stars, skyData.clouds);
+        const dome = buildSkyDome(skyData.top, skyData.bottom, skyData.sun, skyData.moon, skyData.stars, skyData.clouds, skyData.horizon, options.resolveTexture);
         group.add(dome);
         scene.background = new THREE.Color(skyData.bottom);
         ctx.lighting?.attachSkyDome(dome);
@@ -2484,7 +2748,7 @@ function flushInstancedPending(pending: Map<string, PendingInstance[]>, options:
     // is built synchronously alongside the near/far ones — no batch ever gets
     // registered without its mid tier and then patched later
     Promise.all([loadGltf(url), simplifierReady()]).then(
-      ([gltf]) => {
+      async ([gltf]) => {
         // Leaf normals FIRST, on the shared cached scene, before anything
         // clones or derives from it — the mid-tier decimation and the impostor
         // bake both read normals, and both are cached by (assetId, node), so a
@@ -2503,13 +2767,33 @@ function flushInstancedPending(pending: Map<string, PendingInstance[]>, options:
         const wind = entries.find((e) => e.wind !== undefined)?.wind;
         if (wind) applyFoliageWind(gltf.scene, wind);
         if (entries.some((e) => e.cameraFade)) applyFoliageFade(gltf.scene);
-        const byNode = new Map<string | undefined, PendingInstance[]>();
+        const byNode = new Map<string, PendingInstance[]>();
         for (const entry of entries) {
-          const bucket = byNode.get(entry.node);
+          // Different visibility/LOD policies must not inherit the first
+          // instance's settings just because they reference the same model.
+          const key = JSON.stringify([entry.node, entry.lod, entry.lodDistance, entry.lodProxy,
+            entry.castShadow, entry.receiveShadow]);
+          const bucket = byNode.get(key);
           if (bucket) bucket.push(entry);
-          else byNode.set(entry.node, [entry]);
+          else byNode.set(key, [entry]);
         }
-        for (const [node, group] of byNode) instanceGltfInto(assetId, gltf, node, group, options);
+        for (const group of byNode.values()) {
+          const first = group[0]!;
+          let proxy: GltfSubmesh | undefined;
+          if (first.lod && first.lodProxy) {
+            try {
+              const proxyUrl = options.resolveModel?.(first.lodProxy);
+              if (!proxyUrl) throw new Error(`no URL for ${first.lodProxy}`);
+              const parts = extractGltfSubmeshes(await loadGltf(proxyUrl), undefined);
+              if (parts?.length !== 1 || Array.isArray(parts[0]!.material)) throw new Error("proxy needs one mesh/material");
+              proxy = parts[0]!;
+            } catch (error) {
+              console.warn(`[render] authored LOD proxy unavailable; retaining detail for ${assetId}`, error);
+              for (const entry of group) entry.lod = false;
+            }
+          }
+          instanceGltfInto(assetId, gltf, first.node, group, options, proxy);
+        }
       },
       (error) => console.warn(`[render] failed to load instanced model "${assetId}":`, error),
     );
@@ -2603,6 +2887,7 @@ export interface ImpostorPageItem {
   gltf: GLTF;
   submeshes: GltfSubmesh[];
   matrices: readonly THREE.Matrix4[];
+  vegetationTints?: readonly (VegetationTint | undefined)[];
 }
 
 const impostorPageMaterialCache = new Map<string, THREE.Material>();
@@ -2647,6 +2932,7 @@ export function impostorPageBatchFor(
     }
     const total = group.entries.reduce((n, e) => n + e.item.matrices.length, 0);
     const batch = new InstancedProps(impostorPageGeometry(total), material, total);
+    batch.enableVegetationTint();
     const regions = new Float32Array(total * 3);
     const radii = new Float32Array(total);
     const centers = new Float32Array(total * 3);
@@ -2657,7 +2943,8 @@ export function impostorPageBatchFor(
       const region = atlas.region!;
       const radius = bounds.getSize(center).length() / 2;
       bounds.getCenter(center);
-      for (const matrix of item.matrices) {
+      for (const [localIndex, matrix] of item.matrices.entries()) {
+        batch.setVegetationTintAt(i, encodeVegetationTint(item.vegetationTints?.[localIndex]));
         matrices.push(matrix);
         regions[i * 3] = region.u;
         regions[i * 3 + 1] = region.v;
@@ -2673,19 +2960,23 @@ export function impostorPageBatchFor(
     // the anchor is the centre ATTRIBUTE, so the geometry's own bounds are a
     // point at the origin — give the batch a sphere over its placements
     const sphere = new THREE.Sphere();
+    const placedBounds = new THREE.Box3();
+    const instanceSphere = new THREE.Sphere();
+    const instanceBox = new THREE.Box3();
     const point = new THREE.Vector3();
-    let maxRadius = 0;
     for (let k = 0; k < total; k++) {
       batch.setMatrixAt(k, matrices[k]!);
       writeImpostorSlot(batch, data, k, k);
       point.set(centers[k * 3]!, centers[k * 3 + 1]!, centers[k * 3 + 2]!).applyMatrix4(matrices[k]!);
-      if (k === 0) sphere.center.copy(point);
-      else sphere.expandByPoint(point);
-      maxRadius = Math.max(maxRadius, radii[k]! * data.scales[k]!);
+      instanceSphere.set(point, radii[k]! * data.scales[k]!);
+      sphere.union(instanceSphere);
+      placedBounds.union(instanceSphere.getBoundingBox(instanceBox));
     }
-    sphere.radius += maxRadius;
     batch.geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1);
     batch.boundingSphere = sphere;
+    // The page's vertex positions are all zero; Box3 cannot infer the shader's
+    // placed canopy from them. Horizon culling must include every tree top.
+    batch.boundingBox = placedBounds;
     batch.instanceCount = total;
     batch.instanceMatrix.needsUpdate = true;
     batch.castShadow = false;
@@ -2702,6 +2993,7 @@ export function impostorBatchFor(
   submeshes: GltfSubmesh[],
   matrices: readonly THREE.Matrix4[],
   options: BuildOptions,
+  vegetationTints?: readonly (VegetationTint | undefined)[],
 ): InstancedProps | null {
   if (matrices.length === 0) return null;
   const source: THREE.Object3D = node ? (gltf.scene.getObjectByName(node) ?? gltf.scene) : gltf.scene;
@@ -2709,9 +3001,11 @@ export function impostorBatchFor(
   const impostor = cachedImpostor(assetId, node, source, bounds, options);
   if (!impostor) return null;
   const far = new InstancedProps(impostorGeometry(bounds, matrices.length), impostor.material, matrices.length);
+  far.enableVegetationTint();
   const data = impostorInstanceData(matrices);
   for (let i = 0; i < matrices.length; i++) {
     far.setMatrixAt(i, matrices[i]!);
+    far.setVegetationTintAt(i, encodeVegetationTint(vegetationTints?.[i]));
     writeImpostorSlot(far, data, i, i);
   }
   far.instanceCount = matrices.length;
@@ -2761,9 +3055,12 @@ export function cachedInstancedMaterial(
   cacheKey: string,
   source: THREE.Material | THREE.Material[],
   options: {
+    vegetationTint?: boolean;
     uvRotation?: boolean;
     uber?: boolean;
     glow?: boolean;
+    /** Per-instance hang blend (a moving worn model whose ends rest on the body). The cache key must say so too. */
+    hang?: boolean;
     /** Per-instance part tiles + skin tint (appearance.ts); needs `uber`. The cache key must say so too. */
     appearance?: { tiles: Record<string, readonly number[]> | null; skin?: import("./appearance.js").SkinContext | null };
   } = {},
@@ -2777,6 +3074,8 @@ export function cachedInstancedMaterial(
   const instancedClone = (m: THREE.Material): THREE.Material => {
     const clone = asNodeMaterial(cloneMaterial(m));
     applyInstancedProps(clone);
+    // before the uber hook, whose collapse of hidden parts must see the final position
+    if (options.hang) applyInstanceHang(clone);
     // a material that binds the uv-rotation attribute is only ever handed to
     // batches that allocate it, hence its own cache key (see instanceGltfInto)
     if (options.uvRotation) applyInstanceUvRotation(clone);
@@ -2787,6 +3086,7 @@ export function cachedInstancedMaterial(
     if (options.glow) applyInstanceGlow(clone);
     // per-part tiles and skin tint, replacing the colour node the uber hook set
     if (options.appearance && options.uber) applyInstanceAppearance(clone, options.appearance.tiles, { skin: options.appearance.skin });
+    if (options.vegetationTint) applyInstanceVegetationTint(clone);
     return clone;
   };
   const cloned = Array.isArray(source) ? source.map(instancedClone) : instancedClone(source);
@@ -2915,7 +3215,10 @@ export function instancedFarProxyMaterial(isTall: boolean, look: MaterialLook): 
   let material = farProxyMaterialCache.get(key);
   if (!material) {
     material = buildFarProxyMaterial(isTall, look);
+    // This fallback has no material slot names; preserve its dominant role.
+    if (look.map) material.name = look.map.name;
     applyInstancedProps(material);
+    applyInstanceVegetationTint(material);
     farProxyMaterialCache.set(key, material);
   }
   return material;
@@ -2999,6 +3302,7 @@ function instanceGltfInto(
   node: string | undefined,
   entries: PendingInstance[],
   options: BuildOptions,
+  authoredProxy?: GltfSubmesh,
 ): void {
   const submeshes = extractGltfSubmeshes(gltf, node);
   if (submeshes === null) {
@@ -3016,19 +3320,19 @@ function instanceGltfInto(
   // the per-instance uv-rotation attribute, which the pool does not carry.
   const pool = options.instancePool;
   const owner = options.instancePoolOwner;
-  if (pool && owner && !entries.some((entry) => entry.uvRotation !== undefined)) {
-    if (!pool.isLive(owner)) return; // the cell unloaded while its model was loading
+  if (pool && owner && !pool.isLive(owner)) return; // includes authored proxies that awaited another asset
+  if (pool && owner && !authoredProxy && !entries.some((entry) => entry.uvRotation !== undefined)) {
     const first = entries[0]!;
     const placed = entries.map((entry) => {
       entry.group.updateWorldMatrix(true, false);
-      return { id: entry.id, matrix: entry.group.matrixWorld.clone() };
+      return { id: entry.id, matrix: entry.group.matrixWorld.clone(), vegetationTint: entry.vegetationTint };
     });
     pool.add(
       assetId,
       node,
       gltf,
       submeshes,
-      { castShadow: first.castShadow, receiveShadow: first.receiveShadow, lod: first.lod },
+      { castShadow: first.castShadow, receiveShadow: first.receiveShadow, lod: first.lod, lodDistance: first.lodDistance },
       placed,
       owner,
       options,
@@ -3047,6 +3351,7 @@ function instanceGltfInto(
   }
 
   const first = entries[0]!;
+  const vegetationTints = Float32Array.from(entries.flatMap(entry => encodeVegetationTint(entry.vegetationTint)));
   // `mesh.material` used to be dropped on the floor here — the batch always
   // drew the model's own materials, so setting one on an instanced mesh did
   // nothing and said nothing. One material for the whole batch is the only
@@ -3073,7 +3378,7 @@ function instanceGltfInto(
   // apart from the plain clone so batches of the same asset without it keep
   // their plain shader and never bind an attribute they did not allocate.
   const rotated = entries.some((entry) => entry.uvRotation !== undefined);
-  const materialKeySuffix = `${rotated ? "#uvrot" : ""}${entries.some((e) => e.atlasTile !== undefined || e.partMask !== undefined) ? "#uber" : ""}`;
+  const materialKeySuffix = `#vegetation${rotated ? "#uvrot" : ""}${entries.some((e) => e.atlasTile !== undefined || e.partMask !== undefined) ? "#uber" : ""}`;
   const uvRotations = rotated
     ? Float32Array.from(entries, (entry) => THREE.MathUtils.degToRad(entry.uvRotation ?? 0))
     : undefined;
@@ -3081,6 +3386,10 @@ function instanceGltfInto(
     if (!uvRotations) return;
     instanced.enableUvRotation();
     for (let i = 0; i < uvRotations.length; i++) instanced.setUvRotationAt(i, uvRotations[i]!);
+  };
+  const applyVegetationTints = (instanced: InstancedProps): void => {
+    instanced.enableVegetationTint();
+    for (let i = 0; i < entries.length; i++) instanced.setVegetationTintAt(i, vegetationTints, i * 6);
   };
 
   // Per-instance atlas tile and part mask (modular weapons). Same contract as
@@ -3105,7 +3414,7 @@ function instanceGltfInto(
       cachedInstancedMaterial(
         `${assetId}#${node ?? ""}#${index}#${materialId ?? ""}${materialKeySuffix}`,
         override ?? sub.material,
-        { uvRotation: rotated, uber: ubered },
+        { uvRotation: rotated, uber: ubered, vegetationTint: true },
       ),
       entries.length,
     );
@@ -3117,6 +3426,7 @@ function instanceGltfInto(
       instanced.setMatrixAt(i, instanceMatrixScratch);
     }
     applyUvRotations(instanced);
+    applyVegetationTints(instanced);
     applyUber(instanced);
     instanced.instanceMatrix.needsUpdate = true;
     // InstancedMesh's bounding sphere defaults to null (unlike a plain Mesh's
@@ -3154,6 +3464,7 @@ function instanceGltfInto(
           geometry,
           cachedInstancedMaterial(`${assetId}#${node ?? ""}#${index}${materialKeySuffix}`, sub.material, {
             uvRotation: rotated,
+            vegetationTint: true,
             uber: ubered,
           }),
           entries.length,
@@ -3170,6 +3481,7 @@ function instanceGltfInto(
           instanced.setMatrixAt(i, instanceMatrixScratch);
         }
         applyUvRotations(instanced);
+        applyVegetationTints(instanced);
         applyUber(instanced);
         instanced.instanceMatrix.needsUpdate = true;
         instanced.computeBoundingSphere();
@@ -3190,10 +3502,14 @@ function instanceGltfInto(
   // Without a baker (headless build, or the app opted out) the primitive
   // proxies stand in: a cross-billboard for tall props, a box for squat ones.
   const bounds = submeshBounds(submeshes);
-  const impostor = cachedImpostor(assetId, node, source, bounds, options);
+  const impostor = authoredProxy ? null : cachedImpostor(assetId, node, source, bounds, options);
   let far: InstancedProps;
   let impostorData: ImpostorInstanceData | undefined;
-  if (impostor) {
+  if (authoredProxy) {
+    const geometry = authoredProxy.geometry.clone().applyMatrix4(authoredProxy.localMatrix);
+    const material = cachedInstancedMaterial(`${first.lodProxy}#authored-far`, authoredProxy.material, { vegetationTint: true });
+    far = new InstancedProps(geometry, material, entries.length);
+  } else if (impostor) {
     far = new InstancedProps(impostorGeometry(bounds, entries.length), impostor.material, entries.length);
     impostorData = impostorInstanceData(matrices);
   } else {
@@ -3207,6 +3523,7 @@ function instanceGltfInto(
     far = new InstancedProps(farGeometry, instancedFarProxyMaterial(isTall, materialLook(dominantSubmesh.material)), entries.length);
   }
   far.castShadow = false; // a rough blob casting a shadow reads worse than no shadow
+  applyVegetationTints(far);
   far.receiveShadow = first.receiveShadow;
   for (let i = 0; i < entries.length; i++) far.setMatrixAt(i, matrices[i]!);
   far.instanceMatrix.needsUpdate = true;
@@ -3225,14 +3542,17 @@ function instanceGltfInto(
   const localMatrices = submeshes.map((sub) => sub.localMatrix);
   const batch: InstancedPropBatch = {
     near: nearMeshes,
+    lodDistance: first.lodDistance,
     mid: midMeshes,
     far,
     positions,
     matrices,
+    radius: bounds.getBoundingSphere(new THREE.Sphere()).radius,
     ...(localMatrices.some((m) => !m.equals(identityScratch)) ? { localMatrices } : {}),
     ...(midError !== undefined ? { midError } : {}),
     ...(impostorData ? { impostor: impostorData } : {}),
     ...(uvRotations ? { uvRotations } : {}),
+    vegetationTints,
   };
   for (const mesh of nearMeshes) mesh.userData["foliageLodBatch"] = batch;
   if (midMeshes) for (const mesh of midMeshes) mesh.userData["foliageLodBatch"] = batch;

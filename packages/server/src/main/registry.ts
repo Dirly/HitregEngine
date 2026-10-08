@@ -222,11 +222,16 @@ export class ServerRegistry {
       (s) => s.id !== opts.exclude && s.accepting && !s.draining && this.free(s) > 0 && this.hosts(s, opts.zone) && this.playersInZone(s, opts.zone) < opts.zoneCap,
     );
     const has = (id: string): ServerEntry | undefined => candidates.find((s) => s.id === id);
+    // a party stays together: a member joins a mate's copy even when the zone there is at its cap — the cap is
+    // soft by at most a party (8), the process cap stays hard. Without this a full copy split every party
+    // that formed while its first member was already inside.
     for (const member of opts.partyMembers ?? []) {
       if (member === opts.characterId) continue;
       const on = this.whereIs.get(member);
-      const server = on ? has(on) : undefined;
-      if (server) return { server, why: "party" };
+      const entry = on ? this.servers.get(on) : undefined;
+      if (entry && entry.kind === "layer" && entry.scene === opts.scene && entry.id !== opts.exclude && entry.accepting && !entry.draining && this.free(entry) > 0 && this.hosts(entry, opts.zone)) {
+        return { server: entry, why: "party" };
+      }
     }
     const aff = this.affinity.get(opts.characterId);
     if (aff && now - aff.at <= this.affinityTtlMs) {

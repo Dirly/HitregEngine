@@ -104,10 +104,12 @@ export class FileAccountStore implements AccountStore {
       return "ok" as const;
     });
   }
-  update(record: AccountRecord): Promise<void> {
+  update(record: AccountRecord, expected?: AccountRecord): Promise<boolean> {
     const file = this.byId(record.id);
     return this.locks.run(file, () => {
+      if (expected && JSON.stringify(readJson(file)) !== JSON.stringify(expected)) return false;
       writeJsonAtomic(file, record);
+      return true;
     });
   }
   /** Scan every account file — hobby scale; an index would be a premature file to keep in sync. */

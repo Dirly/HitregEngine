@@ -1,6 +1,7 @@
 import * as THREE from "three/webgpu";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
-import type { PolyMeshSource, SceneDoc, VoxelMeshSource } from "@hitreg/core";
+import type { PolyMeshSource, SceneDoc, VoxelMeshSource, VegetationTint } from "@hitreg/core";
+import { encodeVegetationTint, vegetationMaterialRole } from "./vegetation-tint.js";
 import { polyMeshGeometry } from "./poly-mesh-geometry.js";
 import { surfaceGeometry, type SurfaceMeshSource } from "./surface-mesh.js";
 import { FOLIAGE_WIND } from "./foliage-wind.js";
@@ -50,7 +51,7 @@ interface ProxyMesh {
         uv?: { mode?: "stretch" | "world"; scale?: [number, number] };
       }
     | { kind: "polygon"; points: Array<[number, number]>; height: number; bevel?: { size: number; segments: number } }
-    | { kind: "asset"; assetId: string; node?: string }
+    | { kind: "asset"; assetId: string; node?: string; vegetationTint?: VegetationTint }
     | { kind: "voxel"; world: string; cell: [number, number]; lodStep?: number; yRange?: [number, number] }
     | { kind: "heightmap" }
     | { kind: "path" }
@@ -323,7 +324,8 @@ function mergeBucket(geoms: THREE.BufferGeometry[]): THREE.BufferGeometry | null
  *
  * Returns null — caller falls back to `mergeGeometries` — for anything outside
  * the shape this file produces: a missing index, a differing attribute set,
- * interleaved or normalized or differently-typed attributes. Nothing here
+ * interleaved, differently-normalized or differently-typed attributes (an
+ * indexed voxel world's unorm8 layer ids merge as they are). Nothing here
  * reads or writes a shared object; every buffer is freshly allocated.
  */
 function mergeIndexed(geoms: THREE.BufferGeometry[]): THREE.BufferGeometry | null {
@@ -344,7 +346,7 @@ function mergeIndexed(geoms: THREE.BufferGeometry[]): THREE.BufferGeometry | nul
       const attr = g.attributes[name] as THREE.BufferAttribute | undefined;
       const ref = first.attributes[name] as THREE.BufferAttribute;
       if (!attr || (attr as AnyAttribute as THREE.InterleavedBufferAttribute).isInterleavedBufferAttribute) return null;
-      if (attr.normalized || ref.normalized) return null;
+      if (attr.normalized !== ref.normalized) return null;
       if (attr.itemSize !== ref.itemSize) return null;
       if (attr.array.constructor !== ref.array.constructor) return null;
       if (attr.gpuType !== ref.gpuType) return null;
@@ -363,7 +365,7 @@ function mergeIndexed(geoms: THREE.BufferGeometry[]): THREE.BufferGeometry | nul
       out.set(attr.array as unknown as ArrayLike<number>, offset);
       offset += attr.count * ref.itemSize;
     }
-    const attribute = new THREE.BufferAttribute(out, ref.itemSize, false);
+    const attribute = new THREE.BufferAttribute(out, ref.itemSize, ref.normalized);
     attribute.gpuType = ref.gpuType;
     merged.setAttribute(name, attribute);
   }
@@ -542,12 +544,16 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
       if (lodded.length > 0 && cachedImpostor(assetId, node, source, submeshBounds(submeshes), options)) {
         // collected across every species and batched once below — all the
         // species whose atlases share a page draw as one
-        impostorItems.push({ assetId, node, gltf, submeshes, matrices: lodded.map(([, entity]) => entityTransform(entity).clone()) });
+        impostorItems.push({ assetId, node, gltf, submeshes,
+          matrices: lodded.map(([, entity]) => entityTransform(entity).clone()),
+          vegetationTints: lodded.map(([, entity]) => (entity.components["mesh"] as ProxyMesh & { source: { kind: "asset" } }).source.vegetationTint),
+        });
         toMerge = entities.filter(([, entity]) => (entity.components["mesh"] as { lod?: boolean }).lod === false);
       }
     }
     for (const [, entity] of toMerge) {
       const placement = entityTransform(entity).clone();
+      const tint = (entity.components["mesh"] as ProxyMesh & { source: { kind: "asset" } }).source.vegetationTint;
       submeshes.forEach((sub, index) => {
         // `sub.geometry` belongs to the shared glTF cache — every other chunk
         // and every un-merged instance of this model holds the same object, so
@@ -556,12 +562,37 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
         // duplicated every attribute, then toNonIndexed() expanded them again).
         const prepped = prepForMerge(sub.geometry, true);
         prepped.applyMatrix4(matrix.copy(placement).multiply(sub.localMatrix));
-        const bucketKey = Array.isArray(sub.material)
+        let bucketKey = Array.isArray(sub.material)
           ? `gltf:${key}#${index}`
           : mergedBucketKey(sub.material, `gltf:${key}#${index}`);
+        const materials = Array.isArray(sub.material) ? sub.material : [sub.material];
+        const hasRoles = materials.some(m => vegetationMaterialRole(m));
+        if (hasRoles) {
+          // Real-geometry fallback uses vertex colour, still one merged draw
+          // per material. Do not mutate cached source geometry or material.
+          const encoded = encodeVegetationTint(tint);
+          const colors = new Float32Array(prepped.getAttribute("position").count * 3).fill(1);
+          const groups = Array.isArray(sub.material) && sub.geometry.groups.length
+            ? sub.geometry.groups
+            : [{ start: 0, count: prepped.index?.count ?? prepped.getAttribute("position").count, materialIndex: 0 }];
+          for (const range of groups) {
+            const roleMaterial = materials[range.materialIndex ?? 0];
+            const role = roleMaterial && vegetationMaterialRole(roleMaterial);
+            if (!role) continue;
+            const offset = role === "bark" ? 0 : 3;
+            const rgb = encoded.slice(offset, offset + 3);
+            for (let i = range.start; i < range.start + range.count; i++) {
+              const vertex = prepped.index ? prepped.index.getX(i) : i;
+              colors.set(rgb, vertex * 3);
+            }
+          }
+          prepped.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+          bucketKey += "#vegetation";
+        }
         // merged geometry, so the MERGED cache: the instanced clones carry the
         // InstancedProps transform node and expect instance attributes
         const material = withoutFoliageWind(cachedMergedMaterial(bucketKey, sub.material));
+        if (hasRoles) for (const m of Array.isArray(material) ? material : [material]) (m as THREE.MeshStandardMaterial).vertexColors = true;
         addToBucket(bucketKey, material, prepped);
       });
     }
@@ -588,7 +619,7 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
       impostorDrawCalls += 1;
     }
     for (const item of unpaged) {
-      const batch = impostorBatchFor(item.assetId, item.node, item.gltf, item.submeshes, item.matrices, options);
+      const batch = impostorBatchFor(item.assetId, item.node, item.gltf, item.submeshes, item.matrices, options, item.vegetationTints);
       if (batch) {
         group.add(batch);
         impostorDrawCalls += 1;
@@ -764,6 +795,8 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
     // the far ring, and rasterising a supercell of terrain into them is pure cost
     mesh.castShadow = false;
     mesh.receiveShadow = false;
+    // what the culling system's horizon is built from (the drawn terrain)
+    mesh.userData["terrainProxy"] = true;
     group.add(mesh);
     mergedDrawCalls += 1;
   }

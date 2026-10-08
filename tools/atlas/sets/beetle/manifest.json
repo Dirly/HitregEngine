@@ -1,0 +1,64 @@
+{
+  "size": 226,
+  "bleed": 2,
+  "bgLum": 236,
+  "keyColor": "#00ffff",
+  "groundFringe": 1,
+  "fitSearch": 1.6,
+  "slots": {
+    "#ff0000": {
+      "name": "leg1",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#00ff00": {
+      "name": "leg3",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#0000ff": {
+      "name": "leg2",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#ffff00": {
+      "name": "antenna",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#ff00ff": {
+      "name": "head",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#ff8000": {
+      "name": "abdomen",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#8000ff": {
+      "name": "thorax",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#008c00": {
+      "name": "mandible",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#00008c": {
+      "name": "eyes",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    }
+  }
+}

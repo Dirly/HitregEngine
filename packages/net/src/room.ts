@@ -11,6 +11,7 @@
 import type { Transport } from "./transport.js";
 import {
   decodeMessage,
+  encodeJson,
   encodeMessage,
   type ClientMessage,
   type Message,
@@ -126,12 +127,19 @@ export class RoomHost {
    * (The authority's event bus collects replicate-flagged events per tick;
    * this ships them.) No-op with nothing to send or nobody to hear it.
    */
-  broadcastEvents(events: Array<{ name: string; payload: unknown }>): void {
+  broadcastEvents(events: Array<{ name: string; payload: unknown }>, except?: ReadonlySet<string>): void {
     if (this.closed || events.length === 0 || this.joined.size === 0) return;
     const packet = encodeMessage({ t: "events", tick: this.currentTick, events });
     for (const peerId of this.joined.keys()) {
+      if (except?.has(peerId)) continue;
       this.transport.send(peerId, "reliable", packet);
     }
+  }
+
+  /** Replicated events to ONE joined peer (an authority routing events by interest), reliable-ordered. */
+  sendEventsTo(peerId: string, events: Array<{ name: string; payload: unknown }>): void {
+    if (this.closed || events.length === 0 || !this.joined.has(peerId)) return;
+    this.transport.send(peerId, "reliable", encodeMessage({ t: "events", tick: this.currentTick, events }));
   }
 
   /** Full session-state sync to one peer (joiner sync), reliable-ordered. */
@@ -144,14 +152,22 @@ export class RoomHost {
     );
   }
 
-  /** Session-state delta to every joined peer, reliable-ordered. */
-  broadcastState(delta: { set: Record<string, unknown>; removed: string[] }): void {
+  /** Session-state delta to every joined peer (but `except`: peers sent their own merged delta), reliable-ordered. */
+  broadcastState(delta: { set: Record<string, unknown>; removed: string[] }, except?: ReadonlySet<string>): void {
     if (this.closed || this.joined.size === 0) return;
     if (Object.keys(delta.set).length === 0 && delta.removed.length === 0) return;
     const packet = encodeMessage({ t: "state", tick: this.currentTick, delta });
     for (const peerId of this.joined.keys()) {
+      if (except?.has(peerId)) continue;
       this.transport.send(peerId, "reliable", packet);
     }
+  }
+
+  /** Session-state delta to ONE joined peer (state only it may hold), reliable-ordered. */
+  sendStateDeltaTo(peerId: string, delta: { set: Record<string, unknown>; removed: string[] }): void {
+    if (this.closed || !this.joined.has(peerId)) return;
+    if (Object.keys(delta.set).length === 0 && delta.removed.length === 0) return;
+    this.transport.send(peerId, "reliable", encodeMessage({ t: "state", tick: this.currentTick, delta }));
   }
 
   /**
@@ -176,6 +192,30 @@ export class RoomHost {
       this.transport.send(peerId, "unreliable", encodeMessage({ t: "snapshot", tick: now, baseTick, state }));
     }
     this.lastSnapshotTick = now;
+  }
+
+  /**
+   * Advance the host's tick without sending snapshots — for an authority that sends each peer's snapshot
+   * itself ({@link sendSnapshot}), e.g. staggered so a crowd's snapshots do not all land on one tick.
+   */
+  setTick(now: number): void {
+    if (this.closed) return;
+    this.currentTick = now;
+  }
+
+  /** One peer's full snapshot of `tick` (the tick its state describes), unreliable. */
+  sendSnapshot(peerId: string, tick: number, state: unknown): void {
+    if (this.closed || !this.joined.has(peerId)) return;
+    this.transport.send(peerId, "unreliable", encodeMessage({ t: "snapshot", tick, baseTick: null, state }));
+  }
+
+  /**
+   * {@link sendSnapshot} with the state already serialised (`stateJson` must be valid JSON) — for an authority
+   * that builds each peer's snapshot from fragments it encoded once for everyone.
+   */
+  sendSnapshotJson(peerId: string, tick: number, stateJson: string): void {
+    if (this.closed || !this.joined.has(peerId)) return;
+    this.transport.send(peerId, "unreliable", encodeJson(`{"t":"snapshot","tick":${tick},"baseTick":null,"state":${stateJson}}`));
   }
 
   close(): void {
@@ -260,7 +300,8 @@ export class RoomHost {
     for (const cb of [...this.commandHandlers]) cb(from, tick, input);
   }
 
-  private removePeer(peerId: string): void {
+  /** Forget a joined peer after a server-owned departure; the caller owns closing its transport. */
+  removePeer(peerId: string): void {
     if (!this.joined.delete(peerId)) return;
     const packet = encodeMessage({ t: "peerLeft", peerId });
     for (const remaining of this.joined.keys()) {

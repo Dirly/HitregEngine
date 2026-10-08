@@ -28,6 +28,12 @@ Measured on six mannequins: six held swords cost 4 draws (1 main + 3 shadow
 cascades) against 24 when each was its own mesh. Two magic swords with glow
 and three emitters added one draw.
 
+Entirely hidden or unequipped holders occupy no GPU instance slot. The moving
+item system packs shown holders into the draw buffer, carrying their transforms,
+tiles, masks, glow, appearance and hang data together. An unchanged pose also
+keeps its uploaded transform. Individual hidden parts of a shown ubermesh still
+collapse in the vertex stage; this does not remove their vertex cost.
+
 ## The item file
 
 ```json

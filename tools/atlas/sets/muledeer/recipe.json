@@ -1,0 +1,211 @@
+{
+ "source": "MMO/3d/Mobs/Dragon/MuleDeer-parts.obj",
+ "sourceScale": 1,
+ "objScale": 1,
+ "outMesh": "MMO/3d/Mobs/Dragon/MuleDeer-unwrapped",
+ "sheet": 1254,
+ "keyStroke": 8,
+ "smooth": 48,
+ "margin": 22,
+ "gutter": 48,
+ "atlas": {
+  "size": 640,
+  "bleed": 2,
+  "bgLum": 236
+ },
+ "mirrorCopy": {
+  "axis": "z",
+  "parts": [
+   "MuleDeer_Head",
+   "MuleDeer_Body",
+   "MuleDeer_LegFront",
+   "MuleDeer_Tail",
+   "MuleDeer_LegBack"
+  ]
+ },
+ "slots": {
+  "head": {
+   "color": "#ff0000",
+   "fit": "contain",
+   "labelMax": 1
+  },
+  "crown": {
+   "color": "#00ff00",
+   "fit": "contain",
+   "matchTo": "head",
+   "label": "head top"
+  },
+  "snout": {
+   "color": "#0000ff",
+   "fit": "contain",
+   "matchTo": "head",
+   "label": "snout front"
+  },
+  "body": {
+   "color": "#ffff00",
+   "fit": "contain"
+  },
+  "chest": {
+   "color": "#ff00ff",
+   "fit": "contain",
+   "matchTo": "body",
+   "label": "chest"
+  },
+  "rump": {
+   "color": "#ff8000",
+   "fit": "contain",
+   "matchTo": "body",
+   "label": "rump"
+  },
+  "back": {
+   "color": "#8000ff",
+   "fit": "contain",
+   "matchTo": "body",
+   "label": "back top"
+  },
+  "leg-front": {
+   "color": "#008c00",
+   "fit": "contain",
+   "matchTo": "body"
+  },
+  "tail": {
+   "color": "#00008c",
+   "fit": "contain",
+   "matchTo": "body"
+  },
+  "leg-back": {
+   "color": "#8c0000",
+   "fit": "contain",
+   "matchTo": "body"
+  }
+ },
+ "parts": {
+  "MuleDeer_Head": {
+   "slot": "head",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.4,
+   "split": [
+    {
+     "slot": "snout",
+     "facing": "+x",
+     "above": 0.7,
+     "u": "-z",
+     "v": "-y",
+     "flare": 0.15
+    },
+    {
+     "slot": "crown",
+     "facing": "+y",
+     "above": 0.7,
+     "u": "+x",
+     "v": "+z",
+     "flare": 0.15
+    }
+   ]
+  },
+  "MuleDeer_Body": {
+   "slot": "body",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.35,
+   "split": [
+    {
+     "slot": "chest",
+     "facing": "+x",
+     "above": 0.6,
+     "u": "-z",
+     "v": "-y",
+     "flare": 0.15
+    },
+    {
+     "slot": "rump",
+     "facing": "-x",
+     "above": 0.6,
+     "u": "+z",
+     "v": "-y",
+     "flare": 0.15
+    },
+    {
+     "slot": "back",
+     "facing": "+y",
+     "above": 0.62,
+     "u": "+x",
+     "v": "+z",
+     "flare": 0.1
+    }
+   ]
+  },
+  "MuleDeer_LegFront": {
+   "slot": "leg-front",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "MuleDeer_Tail": {
+   "slot": "tail",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "MuleDeer_LegBack": {
+   "slot": "leg-back",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  }
+ },
+ "layout": {
+  "col": [
+   {
+    "row": [
+     "body",
+     "tail",
+     "snout"
+    ]
+   },
+   {
+    "row": [
+     "leg-back",
+     "head",
+     "back",
+     "crown"
+    ]
+   },
+   {
+    "row": [
+     "leg-front",
+     "chest",
+     "rump"
+    ]
+   }
+  ]
+ },
+ "marks": [
+  {
+   "slot": "head",
+   "at": [
+    0.6994,
+    1.3083,
+    -0.0883
+   ],
+   "shape": "eye",
+   "size": 10
+  }
+ ],
+ "cutoutSlots": [],
+ "combos": [
+  [
+   "MuleDeer_Head",
+   "MuleDeer_Body",
+   "MuleDeer_LegFront",
+   "MuleDeer_Tail",
+   "MuleDeer_LegBack"
+  ]
+ ]
+}

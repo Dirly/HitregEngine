@@ -1,4 +1,5 @@
 import * as THREE from "three/webgpu";
+import { readWorldPosition, readWorldQuaternion } from "../static-transforms.js";
 import { paletteFor, paletteFromMaterial, vfxEffectSchema, type Palette, type VfxEffect } from "@hitreg/core";
 import type { VfxFrame } from "./base.js";
 import type { VfxHandle, VfxSystem } from "./system.js";
@@ -152,12 +153,12 @@ export class AmbientVfx {
         this.entries.delete(id);
         continue;
       }
-      entry.group.getWorldPosition(tmpPos);
+      readWorldPosition(entry.group, tmpPos);
       const { frame, data } = entry;
       frame.origin[0] = tmpPos.x;
       frame.origin[1] = tmpPos.y;
       frame.origin[2] = tmpPos.z;
-      entry.group.getWorldQuaternion(tmpQuat);
+      readWorldQuaternion(entry.group, tmpQuat);
       frame.basis?.copy(tmpQuat);
       tmpDir.set(0, 0, 1).applyQuaternion(tmpQuat);
       frame.direction[0] = tmpDir.x;
@@ -196,9 +197,9 @@ export class AmbientVfx {
   }
 
   private paletteOf(data: AmbientVfxData): Palette {
-    if (!data.material) return paletteFor("fire");
+    if (!data.material) return paletteFor("destruction");
     const material = this.options.resolveMaterial?.(data.material) as { color?: unknown; emissive?: unknown } | undefined;
-    if (!material) console.warn(`[vfx] material "${data.material}" not found; using the fire palette`);
+    if (!material) console.warn(`[vfx] material "${data.material}" not found; using the destruction (fire) palette`);
     return paletteFromMaterial(material);
   }
 

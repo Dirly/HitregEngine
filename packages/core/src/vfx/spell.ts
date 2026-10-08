@@ -88,6 +88,58 @@ export const spellArchetypeSchema = z.object({
     .describe("Sustained kinds (beam, zone, channel, pulse, buff, summon, portal): seconds the effect holds."),
   ticksPerSecond: z.number().min(0).default(0).describe("Sustained kinds: payload applications per second."),
   speed: z.number().min(0).default(22).describe("projectile: metres/sec."),
+  volley: z
+    .object({
+      count: z.number().int().min(1).max(12).default(1).describe("Shots per cast. 1 = a single shot."),
+      interval: z.number().min(0.02).max(1).default(0.1).describe("Seconds between shots."),
+      spread: z
+        .number()
+        .min(0)
+        .max(45)
+        .default(0)
+        .describe(
+          "Degrees a shot may be turned off the aim. The scatter BLOOMS: the first shot flies at 0.3× this, the last " +
+            "at the full spread, so a burst reads as sustained fire rather than a shotgun.",
+        ),
+      jitter: z
+        .number()
+        .min(0)
+        .max(1.5)
+        .default(0)
+        .describe("Metres each shot's launch point is scattered around the hand — a barrage, not a single-file line."),
+    })
+    .prefault({})
+    .describe("projectile: RAPID FIRE — several shots per cast, each with its own flight and impact."),
+  wiggle: z
+    .object({
+      amplitude: z.number().min(0).max(3).default(0).describe("Metres a shot sways either side of its line. 0 = dead straight."),
+      wavelength: z.number().min(0.5).max(20).default(4).describe("Metres of flight per full sway."),
+      vertical: z
+        .number()
+        .min(0)
+        .max(3)
+        .default(0)
+        .describe(
+          "Metres a shot bobs up and down, on its own phase and a slightly shorter wavelength — with a side sway the " +
+            "shot traces a loose corkscrew instead of a flat zig-zag. 0 = level.",
+        ),
+    })
+    .prefault({})
+    .describe(
+      "projectile: shots WEAVE instead of flying dead straight — each its own phase, easing in so it leaves the hand " +
+        "straight. The same curve drives the hit test (wiggleOffset), so a shot hits where it is drawn.",
+    ),
+  homing: z
+    .object({
+      turnRate: z.number().min(0).max(720).default(0).describe("Degrees/sec a shot steers toward its target. 0 = flies straight."),
+      acquire: z.number().min(0).default(24).describe("Metres from the caster a target may be locked at."),
+      cone: z.number().min(0).max(180).default(40).describe("Degrees either side of the aim a target may be locked in."),
+    })
+    .prefault({})
+    .describe(
+      "projectile: SEEKING shots. Locked at release onto the target nearest the aim (what the crosshair is on); a " +
+        "slow turn rate is out-run by a sprint, a fast one only by cover.",
+    ),
   growTo: z.number().min(0).optional().describe("Lingering volumes that grow: the final radius."),
   height: z.number().positive().default(2.5).describe("Vertical extent of the volume, metres either side."),
   cooldown: z.number().min(0).default(6),
@@ -108,12 +160,21 @@ const phasesShape = Object.fromEntries(PHASES.map((p) => [p, vfxEffectSchema.opt
 export const spellSchema = z.object({
   name: z.string().default("untitled"),
   note: z.string().default(""),
-  element: elementSchema.default("arcane"),
+  element: elementSchema.default("destruction"),
   palette: z
     .object({ primary: hexColor, secondary: hexColor, glow: hexColor })
     .optional()
     .describe("Override the element's palette. Omitted = the element's own."),
   feel: z.array(feelSchema).default([]).describe("Aesthetic bias used when this spell was generated."),
+  texel: z
+    .number()
+    .min(0)
+    .max(2)
+    .default(0)
+    .describe(
+      "The spell's PSX grid in world metres per texel, applied to every module that leaves its own `texel` at 0 — " +
+        "so pieces added or rerolled later match the rest. 0 = off.",
+    ),
   seed: z.number().int().default(0),
   archetype: spellArchetypeSchema.prefault({}),
   phases: z.object(phasesShape).prefault({}),
@@ -153,6 +214,74 @@ export interface SpellTimeline {
   total: number;
   /** Where the spell resolves relative to the caster: origin distance along facing. */
   reach: number;
+  /** Projectile shots per cast and the seconds between them (1 and 0 for a single shot). */
+  shots: number;
+  shotInterval: number;
+}
+
+/** Shots a spell fires per cast: its volley for a projectile, else 1. */
+export function shotCount(a: SpellArchetype): number {
+  return a.kind === "projectile" ? Math.max(1, a.volley.count) : 1;
+}
+
+/** Degrees shot `i` of a volley may be turned off the aim: the scatter blooms from 0.3× to 1×. */
+export function shotSpread(a: SpellArchetype, i: number): number {
+  const n = shotCount(a);
+  const bloom = n > 1 ? 0.3 + 0.7 * (i / (n - 1)) : 0.3;
+  return a.volley.spread * bloom;
+}
+
+/** A cheap deterministic hash → [0, 1). */
+function unit(seed: number): number {
+  let h = Math.imul((seed | 0) ^ 0x9e3779b9, 0x85ebca6b) >>> 0;
+  h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35) >>> 0;
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
+/**
+ * Metres a weaving shot sits to the side of its line after flying
+ * `travelled` metres (positive = left of its heading). `seed` picks the
+ * shot's phase — a shot's index, a projectile id's number — so every shot of
+ * a burst weaves differently, and a server and its clients agree. Eases in
+ * over the first half wavelength so the shot leaves the hand straight.
+ */
+export function wiggleOffset(w: { amplitude: number; wavelength: number }, seed: number, travelled: number): number {
+  if (!(w.amplitude > 0)) return 0;
+  const phase = unit(seed) * Math.PI * 2;
+  const ease = Math.min(1, travelled / Math.max(0.1, w.wavelength * 0.5));
+  return w.amplitude * ease * Math.sin((travelled / Math.max(0.1, w.wavelength)) * Math.PI * 2 + phase);
+}
+
+/**
+ * Where shot `i` leaves relative to the hand: [right, up] metres, inside the
+ * volley's jitter. Deterministic per (seed, i) so a server and its clients,
+ * and every replay in the lab, launch the same way.
+ */
+export function shotJitter(a: { volley: { jitter: number } }, seed: number, i: number): [number, number] {
+  const j = a.volley.jitter;
+  if (!(j > 0)) return [0, 0];
+  const ang = unit(seed * 31 + i * 7919) * Math.PI * 2;
+  const rad = Math.sqrt(unit(seed * 17 + i * 104729)) * j;
+  return [Math.cos(ang) * rad, Math.sin(ang) * rad * 0.6];
+}
+
+/**
+ * Metres a weaving shot sits above its line after `travelled` metres: the
+ * vertical half of the weave, its own phase and 0.8× the wavelength so the
+ * two never lock into a flat figure. Eases in like `wiggleOffset`.
+ */
+export function wiggleLift(w: { vertical?: number; wavelength: number }, seed: number, travelled: number): number {
+  const amp = w.vertical ?? 0;
+  if (!(amp > 0)) return 0;
+  const len = Math.max(0.1, w.wavelength * 0.8);
+  const phase = unit(seed * 7 + 3) * Math.PI * 2;
+  const ease = Math.min(1, travelled / (len * 0.5));
+  return amp * ease * Math.sin((travelled / len) * Math.PI * 2 + phase);
+}
+
+/** Does this spell's projectile steer? */
+export function isHoming(a: SpellArchetype): boolean {
+  return a.kind === "projectile" && a.homing.turnRate > 0;
 }
 
 const SUSTAINED: ReadonlySet<SpellKind> = new Set([
@@ -189,7 +318,11 @@ export function spellTimeline(a: SpellArchetype): SpellTimeline {
     const step = 1 / a.ticksPerSecond;
     for (let t = step; t <= duration + 1e-6; t += step) ticks.push(lingerAt + t);
   }
-  const endAt = lingerAt + duration;
+  const shots = projectile ? Math.max(1, a.volley.count) : 1;
+  const shotInterval = shots > 1 ? a.volley.interval : 0;
+  // a volley's last shot leaves (shots-1)·interval after the first
+  const burst = (shots - 1) * shotInterval;
+  const endAt = lingerAt + duration + burst;
   const hold = telegraphed ? duration : 0;
   return {
     telegraph: telegraphed ? { at: 0, windup, hold } : null,
@@ -208,6 +341,8 @@ export function spellTimeline(a: SpellArchetype): SpellTimeline {
     end: duration > 0 ? { at: endAt } : null,
     total: endAt + 2.5,
     reach,
+    shots,
+    shotInterval,
   };
 }
 

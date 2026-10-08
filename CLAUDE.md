@@ -23,6 +23,11 @@ pnpm typecheck                   # all packages
 
 ## Non-negotiable invariants
 
+- **Catalog reusable props before installation.** Every imported, user-made,
+  generated or modified prop/vegetation variant follows `docs/prop-cataloging.md`.
+  Update the owning catalog, preserve source/UV/material/behavior information,
+  and run its coverage/dependency check plus the appropriate asset review. This
+  applies to every agent and includes fire/VFX prefabs, not just raw meshes.
 - **Every scene mutation is an ops batch** (`applyOps`), never a direct edit of
   a scene doc or a file rewrite. Ops are atomic and return inverse ops (undo).
 - **JSON is authoring truth, not runtime state.** Docs compile/expand into
@@ -65,6 +70,8 @@ These invariants apply to every task. The detailed references below are loaded
 when their subsystem is involved; they are not a mandatory reading bundle.
 Read the relevant sections once, and revisit them when the task or code changes.
 
+- **Accounts, world selection, persistence, camp/logout, or reconnect behavior:** read
+  `docs/storage.md` and the relevant flow in `docs/hosting.md`.
 - **Dungeon rooms and tunnels are modeled in Blender** (Blender MCP) and imported
   through the `tools/mesh-dc` bridge; read `docs/blender-dc-authoring.md` first. The
   DC construction tools carve, add stairs and fit portals inside imported stamps.
@@ -79,6 +86,45 @@ Read the relevant sections once, and revisit them when the task or code changes.
 - **Dungeon texture requests and theme swaps:** read `docs/dungeon-materials.md`.
   Keep the eight stone roles and add wood, metal and smooth stone: eleven textures
   by default, with stable asset roles for changing themes while reusing geometry.
+- **Statues from human kits or mobs:** read `tools/statue-maker/SKILL.md` and its
+  adjacent toolkit README. It covers static pose baking, male/female and outfit
+  choices, smooth stone shading, decorated pedestals and placement verification.
+  A statue base containing a tomb or walkable entrance also uses the dungeon route above.
+- **Making a zone (towns, POIs, dungeons, quests) from a generated world, or dressing any
+  space with props:** read `docs/zone-pipeline.md`. The order is a command, `zonegen status`
+  (ok/STALE/MISSING + `--next`); do the row it names. Props are placed by NAME through a
+  dressing plan (`dress check` / `dress apply`), never by writing a transform, and are chosen
+  from `props menu`, never by reading a catalog.
+- **Running a whole zone** (design, look, places, life, quests, review): read `docs/zone-creation.md` (the
+  `zone-creator` skill wraps it). Places are designed in the zone brief before any quest; reviewers use
+  `docs/world-standards/review-rubric.md`.
+- **World-building task skills** (each = commands + gates + what a failure means; index and the one
+  "Not encoded yet" list: `docs/world-standards/README.md`): `site-finder` (where places go, wall lines),
+  `terrain-edits` (patches, lips, roads, vegetation, clearings, floating plants, blades), `site-dressing`
+  (outdoor props by name), `prop-intake` (catalogue, reskins, prop requests), `zone-mood` (tone not brightness),
+  `dungeon-build` (room kit, role noise, every pipeline gate), `dungeon-lighting` (readability, matte, culling,
+  buckets), `portals` (veil, cover/--fit, trip, real-client play, loading art). Design bars: `site-standards`,
+  `dungeon-standards`, `interior-standards`, `encounter-standards`, `world-standards`; towns: `town-planner`
+  (wall, settle, wear, lights). New lessons go into a skill or a check, not `docs/zone-creation-lessons.md`.
+- **Complete POI creation/revision:** use `tools/poi-review/creator/SKILL.md` for
+  one owner agent per whole location, an explicit adventure brief and early
+  playable design review. Its intake schema and preparer live beside it. The
+  coordinator reviews and serializes installation; content corrections stay
+  with the owner. Preparing the workflow does not authorize world edits.
+- **Outdoor POI placement and dungeon entrance review:** read `tools/poi-review/SKILL.md`.
+  The agent-agnostic authoring process is `tools/poi-review/README.md`; its shared
+  CLI/API planner produces a sized work plan and review template from a JSON brief.
+  Survey the rendered terrain before choosing the footprint; review discovery,
+  spatial logic, terrain shaping and actual capsule access together. Numeric
+  traversal alone does not establish a believable or visually finished site.
+- **Culling (behind terrain, too small, interiors) or structuring a POI/building
+  prefab for it:** read `docs/culling.md`. Landmark under the root, clutter under
+  `culling.minScreenPx`, furnishings under `culling.interior`.
+- **Town construction/export and static baking:** read `docs/town-baking.md`
+  alongside the owning WFC kit's construction rules. Preserve editable sources;
+  compile compatible atlas materials per building shell and separate room/floor
+  interiors. The existing district exporter is a legacy path, not a partitioned
+  bake implementation. Review its documented limitations before installing.
 - **Any picture an agent needs drawn** — texture tiles, prop/gear art, plan,
   section or concept references: read `docs/image-generation.md`.
   `apps/playground/tools/image-request.mjs gen` drives the Codex CLI headlessly

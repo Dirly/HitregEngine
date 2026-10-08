@@ -60,6 +60,24 @@ export const modelMountSchema = z
       .record(z.string(), z.array(z.string()).min(1))
       .optional()
       .describe('Only for wearers whose appearance holds one of these options — { "sex": ["male"] } for a man\'s placement.'),
+    hang: z
+      .object({
+        socket: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Bone the hanging ends ride instead, as it sat against `socket` at the bind pose. Omit it (recommended): a bone " +
+              "that moves against the head in the idles (the chest breathing, hunching, arms folded) drags the ends with it.",
+          ),
+      })
+      .optional()
+      .describe(
+        "Ends that hang — braids, long hair down the back — blended per vertex by the model's baked hang weight " +
+          "(TEXCOORD_1.y: 0 = rides `socket`, 1 = hangs). With no `socket` here they hang PLUMB: as modelled on the body's " +
+          "root, wherever the head is now, so a nod or a tilt bends the hair instead of swinging it. Still one instanced " +
+          "draw; a model without weights rides `socket` whole.",
+      ),
   })
   .describe(
     "Where a socketed model sits on the body — ONE place for every option and item drawing it: the creator's face, hair " +
@@ -75,6 +93,8 @@ export interface ModelPlacement {
   rotationDeg: [number, number, number];
   scale: number;
   mirrorTo?: { socket: string; offset: [number, number, number]; rotationDeg: [number, number, number] } | undefined;
+  /** The bone the model's hanging ends follow (modelMountSchema `hang`). */
+  hang?: { socket?: string | undefined } | undefined;
 }
 
 /**
@@ -129,6 +149,13 @@ export const archetypeSchema = z
         "Items a FRESH character of this archetype is given — a starting armour set, equipped — BEFORE the character-sheet " +
           "script's own startingItems, which never take a worn kit piece off. A restored sheet never gets them again.",
       ),
+    startingCoins: z
+      .number()
+      .int()
+      .min(0)
+      .max(100000000)
+      .optional()
+      .describe("Copper a FRESH character of this archetype starts with (100 = 1 silver). Absent = the character-sheet script's startingCoins."),
   })
   .describe("A starting lean — Brawn, Cunning, Wise. Adds a few attribute points; locks nothing out.");
 export type Archetype = z.infer<typeof archetypeSchema>;
@@ -294,6 +321,13 @@ export const creationSkinSchema = z
     card: frameSchema.optional().describe("Frame around an archetype/trait row and its icon (an inventory slot)."),
     cardActive: frameSchema.optional().describe("The same frame when chosen (a lit slot)."),
     backdrop: z.string().optional().describe("Texture tiled behind the panels (darkened)."),
+    scene: z
+      .string()
+      .optional()
+      .describe(
+        "A painted picture filling the whole screen behind the character (the creation and character-select screens): the " +
+          "model and its 3D clearing stand in front of it. Absent = the tiled backdrop.",
+      ),
     divider: z.string().optional().describe("Ornament drawn under section headings and the title."),
     crest: z.string().optional().describe("Emblem above the title."),
     close: z.string().optional().describe("Image for the Back/close control in a panel corner."),
@@ -485,7 +519,7 @@ function satisfies(requires: Record<string, string[]> | undefined, appearance: R
 export function mountFor(creation: CharacterCreation, model: string, appearance: Record<string, string>): ModelPlacement | null {
   const mount = creation.mounts.find((m) => m.model === model && satisfies(m.requires, appearance));
   if (!mount) return null;
-  return { socket: mount.socket, offset: mount.offset, rotationDeg: mount.rotationDeg, scale: mount.scale, mirrorTo: mount.mirrorTo };
+  return { socket: mount.socket, offset: mount.offset, rotationDeg: mount.rotationDeg, scale: mount.scale, mirrorTo: mount.mirrorTo, hang: mount.hang };
 }
 
 /** An option's placement: its own socket fields when it has them, else the model's mount; null = it dresses the body. */
@@ -511,6 +545,11 @@ export function bodyOptionOf(creation: CharacterCreation, build: Pick<CharacterB
 /** Items an archetype starts with (empty for an unknown one). */
 export function archetypeStartingItems(creation: CharacterCreation, archetypeId: string): StartingItem[] {
   return creation.archetypes.find((a) => a.id === archetypeId)?.startingItems ?? [];
+}
+
+/** Copper an archetype starts with, or undefined when it names none. */
+export function archetypeStartingCoins(creation: CharacterCreation, archetypeId: string): number | undefined {
+  return creation.archetypes.find((a) => a.id === archetypeId)?.startingCoins;
 }
 
 /** Attribute points an archetype adds (zeros for the rest). */

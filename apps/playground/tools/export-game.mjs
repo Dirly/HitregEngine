@@ -20,7 +20,28 @@ if (!existsSync(SRC)) { console.error("no assets at " + SRC); process.exit(1); }
 // time, so a bundle without them boots a scene whose terrain simply never
 // exists — sky, water and hand-placed props render over an empty world, with
 // only a console warning to say why.
-const KINDS = ["scenes", "materials", "prefabs", "models", "textures", "audio", "terrain", "spritesheets", "worlds"];
+//
+// KEEP IN STEP WITH src/asset-loader.ts: every folder it reads must ship. The
+// data kinds were missing for a while — a published build then had no
+// `creation` asset, so every NPC (and the player) lost its head, hair and helm,
+// and townsfolk had no dialogue, places, shops or quests.
+const KINDS = [
+  "scenes", "materials", "prefabs", "models", "textures", "audio", "terrain", "spritesheets", "worlds", "volumes",
+  // data assets (asset-loader.ts jsonKinds)
+  "vfx", "spells", "items", "progression", "creation", "quests", "dialogues", "shops", "places", "perform-actions",
+  // the PLAYER map's terrain picture (src/world-map.ts): maps/<world>.base.png ONLY
+  "maps",
+  // loading art (a scene's `loadingScreen`, docs/hosting.md → "Loading art"): the painted cover only
+  "loading",
+];
+// Per-kind file filters. maps/ also holds <world>.png (markers baked in, every layer) and
+// <world>.layers.json (quest places, reservations, packs) — authoring/review data a player
+// must never receive. Only the plain terrain picture ships.
+const SHIP = {
+  maps: (rel) => /^[^/]+\.base\.png$/.test(rel),
+  // loading/<scene>.snapshot.png is the raw capture kept for review, never shipped
+  loading: (rel) => /^[^/]+\.(png|jpe?g|webp)$/i.test(rel) && !/\.snapshot\.png$/i.test(rel),
+};
 
 function walk(dir, base = dir) {
   const out = [];
@@ -40,7 +61,7 @@ let files = 0;
 for (const kind of KINDS) {
   const kdir = join(SRC, kind);
   if (!existsSync(kdir)) { index[kind] = []; continue; }
-  const list = walk(kdir);
+  const list = walk(kdir).filter((rel) => (SHIP[kind] ? SHIP[kind](rel) : true));
   index[kind] = list;
   for (const rel of list) {
     const dst = join(out, "content", kind, rel);

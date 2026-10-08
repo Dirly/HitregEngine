@@ -21,6 +21,18 @@ export interface CharacterRecord {
   createdAt: string;
   /** Character-creation choices (archetype, birth traits, appearance). Absent on characters made before creation existed. */
   build?: CharacterBuild;
+  /**
+   * When its owner deleted it (ISO time). A deleted character cannot be played and is not listed with the others,
+   * but it can be restored for DELETE_GRACE_DAYS and keeps its name reserved meanwhile; after that it is purged.
+   */
+  deletedAt?: string;
+  /**
+   * The WORLD it lives on (a main server's world id). One character per account per world (Derek, 2026-10-07);
+   * absent on characters made before worlds existed — they belong to the world that reads them.
+   */
+  world?: string;
+  /** Server-owned save identity. Old characters keep the account save; new ones get their own character id. */
+  saveId?: string;
 }
 
 export interface AccountRecord {
@@ -41,8 +53,8 @@ export interface AccountStore {
   get(id: string): Promise<AccountRecord | null>;
   /** Create; "taken" when the name exists. */
   create(record: AccountRecord): Promise<"ok" | "taken">;
-  /** Replace the whole record (characters changed). */
-  update(record: AccountRecord): Promise<void>;
+  /** Replace the record; an expected record makes this an atomic compare-and-swap across world servers. */
+  update(record: AccountRecord, expected?: AccountRecord): Promise<boolean>;
   /** A character by NAME (case-insensitive) with its account — "/friend <name>", "/invite <name>". */
   findCharacter(name: string): Promise<CharacterMatch | null>;
   /** A character by id with its account — the owner of a friend, the name of a party member. */
@@ -64,6 +76,31 @@ export function matchCharacter(record: AccountRecord, by: { name?: string; id?: 
 export const ACCOUNT_NAME = /^[A-Za-z0-9_][A-Za-z0-9_ -]{1,22}[A-Za-z0-9_]$/;
 export const CHARACTER_NAME = /^[A-Za-z][A-Za-z' -]{1,18}[A-Za-z]$/;
 export const MAX_CHARACTERS = 8;
+/** Days a deleted character can be restored before it is gone for good. */
+export const DELETE_GRACE_DAYS = 7;
+
+/** The world a character lives on: its own, else the reading world (characters made before worlds existed). */
+export function worldOf(character: CharacterRecord, defaultWorld: string): string {
+  return character.world ?? defaultWorld;
+}
+
+/** The characters an account can play (not deleted). */
+export function liveCharacters(record: AccountRecord): CharacterRecord[] {
+  return record.characters.filter((c) => !c.deletedAt);
+}
+
+/** Deleted characters still inside the grace window (restorable). */
+export function restorableCharacters(record: AccountRecord, now = Date.now()): CharacterRecord[] {
+  return record.characters.filter((c) => c.deletedAt && now - Date.parse(c.deletedAt) < DELETE_GRACE_DAYS * 86_400_000);
+}
+
+/** Drop deleted characters past the grace window; true when anything was dropped (the record needs saving). */
+export function purgeDeleted(record: AccountRecord, now = Date.now()): boolean {
+  const keep = record.characters.filter((c) => !c.deletedAt || now - Date.parse(c.deletedAt) < DELETE_GRACE_DAYS * 86_400_000);
+  if (keep.length === record.characters.length) return false;
+  record.characters = keep;
+  return true;
+}
 
 export function newId(prefix: string): string {
   return `${prefix}-${randomBytes(6).toString("base64url").replace(/[^A-Za-z0-9_-]/g, "x")}`;
@@ -98,9 +135,10 @@ export class MemoryAccountStore implements AccountStore {
     this.byName.set(record.nameLower, record.id);
     return Promise.resolve("ok");
   }
-  update(record: AccountRecord): Promise<void> {
+  update(record: AccountRecord, expected?: AccountRecord): Promise<boolean> {
+    if (expected && JSON.stringify(this.byId.get(record.id)) !== JSON.stringify(expected)) return Promise.resolve(false);
     this.byId.set(record.id, structuredClone(record));
-    return Promise.resolve();
+    return Promise.resolve(true);
   }
   findCharacter(name: string): Promise<CharacterMatch | null> {
     for (const r of this.byId.values()) {

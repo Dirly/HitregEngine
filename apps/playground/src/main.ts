@@ -5,6 +5,7 @@ import CameraControls from "camera-controls";
 import * as THREE from "three/webgpu";
 import {
   findCreation,
+  surfaceBaseIndex,
   AssetLibrary,
   chunkDocSchema,
   chunkFileName,
@@ -20,8 +21,15 @@ import {
   Profiler,
   registerChunkComponents,
   PlayerDataService,
-  registerCharacterNetState,
-  registerTransferLockNetState,
+  PERSISTED_PLAYER_NAMESPACES,
+  PORTAL_EVENTS,
+  portalDeparture,
+  portalKey,
+  portalVolumeDistance,
+  portalVolumeOf,
+  PORTAL_TRIGGER_DEFAULTS,
+  resolvePortalArrival,
+  type PortalTravel,
   regionAt,
   registerCoreAssetTypes,
   registerCoreComponents,
@@ -54,6 +62,7 @@ import {
 } from "@hitreg/core";
 import {
   AnimationSystem,
+  CROWD_POSE_LOD,
   ClothSwaySystem,
   WaterWake,
   waterWakeUniforms,
@@ -68,6 +77,9 @@ import {
   detachLightDebug,
   BillboardSystem,
   batchStaticMeshes,
+  freezeStaticSubtree,
+  refreshStaticSubtree,
+  thawStaticSubtree,
   buildScene,
   collectBones,
   EngineRenderer,
@@ -102,7 +114,19 @@ import {
   type RigBodyCollider,
   type RigVec3,
   type AmbientVfx,
+  CullingSystem,
+  cullRootIndex,
+  cullRootsOf,
+  registerCullRoots,
+  type CullUnit,
 } from "@hitreg/render";
+
+/**
+ * Instanced props smaller than this many RENDERED pixels tall are not drawn
+ * (FoliageLodSystem.setMinScreenPx). Render pixels, so a pixelated 480-line
+ * frame drops a pebble sooner than a native 1440p one: it could not show it.
+ */
+const CULL_MIN_SCREEN_PX = 1.5;
 
 /** The `camera` component and its authored rig block, straight off the schema. */
 type CameraComponentData = ReturnType<typeof cameraSchema.parse>;
@@ -112,7 +136,6 @@ import { createAmbientVfx, createVfx, makeVfxHost, warmVfx } from "./vfx-host.js
 import { initPhysics, Layers, PhysicsSim } from "@hitreg/physics";
 import {
   EventBus,
-  fitAction,
   InputService,
   registerBuiltinScripts,
   ScriptRegistry,
@@ -120,10 +143,13 @@ import {
   swimStateFor,
   swimVy,
   type BiomeAt,
+  type RegionAt,
   type SwimState,
   type SwimTuning,
 } from "@hitreg/scripting";
 import { createModelLooks } from "./model-looks.js";
+import { createFaceShotHost } from "./face-shot-host.js";
+import { mountLoadScreen } from "./load-screen.js";
 import {
   createAssetSelection,
   createContextMenu,
@@ -158,24 +184,22 @@ import { buildStarterDoc } from "./starter-scene.js";
 import { ChunkManager } from "./chunk-manager.js";
 import { SubsceneManager, type SubsceneInstance } from "./subscene-manager.js";
 import { BridgePlayerDataBackend } from "./player-data-bridge.js";
+import { loadingArtOf, mountPortalCurtain } from "./portal-curtain.js";
 import { NetPresence, type NetReplica } from "./net-presence.js";
-import { GatewayClient, mountGatewayPanel, resolveGateway, type GatewayPanel } from "./gateway.js";
 import { mountCreationScreen } from "./character-creation.js";
 import { createCreationPreview } from "./creation-preview.js";
+import { registerCommsEvents } from "@hitreg/comms";
+import { NetRuntimeWorld, planSuspension, resolveNetEndpoint, stripServerPlayers } from "./net-session.js";
 import {
-  clientLink,
-  createComms,
-  hostLink,
-  localLink,
-  netStateMembership,
-  registerCommsEvents,
-  registerCommsNetState,
-  type CommsLink,
-} from "@hitreg/comms";
-import { mountCommsUI } from "@hitreg/comms/ui";
-import { mountSocialPanel, type SocialPanel } from "./social.js";
-import { mountToasts } from "./toasts.js";
-import { loadAssets } from "./asset-loader.js";
+  createSessionComms,
+  mountConnectionOverlay,
+  mountGatewayFlow,
+  peerPresenceHooks,
+  registerSessionNetState,
+  type GatewayFlow,
+  type SessionComms,
+} from "./net-client.js";
+import { loadAssets, loadedProjectScope } from "./asset-loader.js";
 import { saveAsset, clientLog } from "./dev-log.js";
 import { applyBodyState } from "./physics-sync.js";
 import { bakeImpostorAtlas } from "./impostor-bake.js";
@@ -253,6 +277,11 @@ async function main(): Promise<void> {
   // streamed cells share one set of instanced batches per model (prop-pool.ts)
   // instead of one per cell — the cell count stops multiplying the draw count
   const propPool = new InstancedPropPool(foliageLod);
+  // Culling units (culling.ts): streamed cells, HLOD blocks, POIs and
+  // `culling` entities hidden behind terrain, too small on screen, or as an
+  // interior seen from outside. One system for the scene and the streamer.
+  const culling = new CullingSystem();
+  let baseCullUnits: CullUnit[] = [];
   // cluster-DAG continuous LOD for `renderMode: "clustered"` hero meshes —
   // re-selects each mesh's cut per frame; prunes meshes streamed out itself
   const clusterLod = new ClusterLodSystem();
@@ -371,6 +400,7 @@ async function main(): Promise<void> {
     onSimulationLost: (ids) => scripts?.removeEntities(ids),
   });
   chunkManager.profiler = profiler; // chunk loads land as spans, see ChunkManager.profiler
+  chunkManager.setCulling(culling);
   // additive scene modules: whole scene files placed as one-line `subscene`
   // entities, streamed by proximity (or resident with mode "always")
   const subsceneManager = new SubsceneManager(assets, registry, {
@@ -469,7 +499,7 @@ async function main(): Promise<void> {
   let lastWrittenScene = loadedSceneContent;
   const sceneList = observable<string[]>([]);
   try {
-    const index = (await fetch("/__hitreg/assets-index").then((r) => r.json())) as {
+    const index = (await fetch("/__hitreg/assets-index?kinds=scenes").then((r) => r.json())) as {
       scenes?: string[];
     };
     sceneList.set(
@@ -855,6 +885,22 @@ async function main(): Promise<void> {
   // used to leave the viewport looking frozen/empty with no feedback at all.
   let sceneSwitchPending = false;
   let sceneSwitchStartedAt = 0;
+  // -- portals in local play (docs/hosting.md → "Portals") -------------------------
+  // A portal trip with no dedicated server: the session authority is this tab, so
+  // the trip is a scene swap — carry the traveller's state (sheet + the records a
+  // server saves beside it), switch the hosted scene under a curtain, land on the
+  // arrival anchor. The dev save (PlayerDataService) stays under the experience
+  // the trip started in, so the scripts' own restores agree with what is carried.
+  let portalSwitching = false;
+  let portalExperience: string | null = null;
+  let pendingPortalArrival: { scene: string; sheet: unknown; records: Record<string, unknown> } | null = null;
+  const portalCurtain = mountPortalCurtain();
+  /** heading the last portal arrival faced (local play); the camera is turned to it once play resumes */
+  let portalArrivalYaw: number | null = null;
+  /** a destination scene's text a portal trip read for its loading art, handed to switchScene */
+  let prefetchedScene: { name: string; text: string } | null = null;
+  const fetchSceneText = (name: string): Promise<string> =>
+    fetch(`/__hitreg/asset-file?file=${encodeURIComponent(`scenes/${name}.scene.json`)}`).then((r) => r.text());
   const SCENE_SWITCH_TIMEOUT_MS = 10000; // don't stay stuck forever if something never resolves
   function showSceneLoading(name: string): void {
     sceneSwitchPending = true;
@@ -868,6 +914,8 @@ async function main(): Promise<void> {
   }
 
   async function switchScene(name: string): Promise<void> {
+    // a scene picked by hand starts its own dev save; a portal keeps the trip's
+    if (!portalSwitching) portalExperience = null;
     if (editingPrefab.get()) {
       console.warn("[prefab-edit] save or discard the prefab edit before switching scenes");
       return;
@@ -877,15 +925,29 @@ async function main(): Promise<void> {
       return;
     }
     if (name === store.doc.name) return;
+    // This page registered only the boot scene's project and its dependsOn.
+    // A scene from any other project needs its own page load, or it would
+    // open with its prefabs and materials missing.
+    const scope = loadedProjectScope();
+    const targetProject = sceneMenuProjectOf(sceneMenu.get(), name)?.name;
+    if (scope && targetProject && !scope.has(targetProject)) {
+      persistScene();
+      rememberLastScene(name);
+      const url = new URL(location.href);
+      url.searchParams.set("scene", name);
+      location.assign(url.toString());
+      return;
+    }
     travelHold = null;
     travelView = null;
     travelLoadingEl.style.display = "none";
     persistScene(); // save where we were
     showSceneLoading(name);
     try {
-      const content = await fetch(
-        `/__hitreg/asset-file?file=${encodeURIComponent(`scenes/${name}.scene.json`)}`,
-      ).then((r) => r.text());
+      // a portal trip has usually fetched the destination already (for its loading art)
+      const pre = prefetchedScene?.name === name ? prefetchedScene.text : null;
+      prefetchedScene = null;
+      const content = pre ?? (await fetchSceneText(name));
       const parsed = sceneDocSchema.safeParse(JSON.parse(content));
       if (!parsed.success) {
         console.warn(`[scene] ${name} failed validation:`, parsed.error);
@@ -974,7 +1036,8 @@ async function main(): Promise<void> {
     doc: () => lastExpanded,
     objectOf: (entityId) => built?.objects.get(entityId),
     dragging: () => manipulating.get()?.ids ?? [],
-    showAlt: () => settings.get().previewHolstered === true,
+    // the holstered view and the stance pose are prefab-editing tools only
+    showAlt: () => editingPrefab.get() !== null && settings.get().previewHolstered === true,
     selected: () => selection.get(),
     item: (itemId) => assets.getDataAsset(itemId)?.data as ReturnType<Parameters<typeof createSocketPreview>[0]["item"]>,
     setLook: (entityId, look) => modelLooks.set(entityId, look),
@@ -1008,11 +1071,50 @@ async function main(): Promise<void> {
    * an entity being edited is always drawn from its own live mesh.
    */
   let staticBatch: StaticBatchHandle | null = null;
+  let staticBatchPending = false;
+  /** Side of the square world cells that POI-tagged static meshes merge within (metres). */
+  const STATIC_BATCH_CELL = 256;
+  let staticBatchPendingSince: number | null = null;
+  /** The scene the last whole-scene precompile ran on (see rebuildStaticBatch). */
+  let precompiledScene: THREE.Scene | null = null;
   const rebuildStaticBatch = (): void => {
+    staticBatchPending = false;
+    for (const unit of baseCullUnits) culling.unregister(unit);
+    baseCullUnits = [];
     staticBatch?.dispose();
     staticBatch = null;
     if (!built) return;
-    staticBatch = batchStaticMeshes(built.scene);
+    // a `culling` entity's meshes merge apart from the rest, so it can hide alone
+    const cullRoots = lastExpanded ? cullRootsOf(lastExpanded) : [];
+    const cullRootOf = cullRootIndex(cullRoots);
+    // Merge groups. An AUTHORED culling unit (a `culling` component: an
+    // interior, a clutter set) keeps its own merge so it can hide alone. A
+    // unit that exists only because its entity is tagged `poi` (every town
+    // building) only ever hid behind the horizon — and one unit per building
+    // left every material of every house as its own draw (~110 of a town's
+    // 240 main-pass draws). Those merge by STATIC_BATCH_CELL instead: a few draws per
+    // cell, still frustum- and screen-size-culled cell by cell.
+    const cullRootById = new Map(cullRoots.map((root) => [root.id, root]));
+    const authoredUnit = (rootId: string | undefined): string | undefined => {
+      for (let root = rootId ? cullRootById.get(rootId) : undefined; root; root = root.parent ? cullRootById.get(root.parent) : undefined) {
+        if (lastExpanded.entities[root.id]?.components["culling"]) return root.id;
+      }
+      return undefined;
+    };
+    const cellOf = (mesh: THREE.Mesh): string => {
+      const e = mesh.matrixWorld.elements;
+      return `cell:${Math.floor(e[12]! / STATIC_BATCH_CELL)},${Math.floor(e[14]! / STATIC_BATCH_CELL)}`;
+    };
+    staticBatch = batchStaticMeshes(built.scene, {
+      groupOf: (mesh: THREE.Mesh) => authoredUnit(cullRootOf.get(mesh.userData["entityId"] as string)) ?? cellOf(mesh),
+      // entity groups whose whole subtree is merged and still: hide them so no
+      // pass walks a town of empty groups (see batchStaticMeshes)
+      prunable: (node) => {
+        const id = node.userData["entityId"] as string | undefined;
+        return !!id && built.objects.get(id) === node && subtreeStill(id);
+      },
+    });
+    baseCullUnits = registerCullRoots(culling, cullRoots, built.objects, staticBatch);
     // Build every pipeline the level needs now rather than on first sight of
     // each object. WebGPU compiles per material/geometry pair on first DRAW, so
     // without this the cost arrives as a stall each time the camera pans
@@ -1020,7 +1122,14 @@ async function main(): Promise<void> {
     // corner nobody has looked at yet. Deliberately NOT awaited: the frame loop
     // keeps running and pipelines become ready as they land. It follows the
     // batch because merging changes which geometries exist.
-    void renderer.precompile(built.scene, camera);
+    // The whole scene once per build; a later re-merge (models landing,
+    // edits) only made new batch meshes, so only those need compiling.
+    if (precompiledScene !== built.scene) {
+      precompiledScene = built.scene;
+      void renderer.precompile(built.scene, camera);
+    } else if (staticBatch) {
+      void renderer.precompileGroup(staticBatch.group, camera, built.scene);
+    }
   };
   // cached terrain tiles for ground-height queries (grass placement, camera
   // height-above-ground fade) — rebuilt alongside `lastExpanded`, not on every
@@ -1175,47 +1284,55 @@ async function main(): Promise<void> {
    * until then, and `netPresence.rehome()` sets the real one (again on
    * every `transfer` the layer sends).
    */
-  const netGateway = resolveGateway();
-  const netServerUrl: string | null = (() => {
-    if (netGateway) return "gateway";
-    const fromQuery = new URLSearchParams(location.search).get("server");
-    if (fromQuery) return fromQuery;
-    try {
-      return localStorage.getItem("hitreg:server");
-    } catch {
-      return null;
-    }
-  })();
-  /** Gateway mode: set once `/play` granted a layer; play sessions wait for it. */
-  let netGrant: { url: string; ticket: string; server: string; scene: string } | null = null;
-  let gatewayPanel: GatewayPanel | null = null;
-  /** Entity docs the server spawned at runtime (players, NPCs), by id. */
-  const netRuntimeDocs = new Map<string, SceneDoc["entities"][string]>();
-  /** Our own body's id on the server, once the `world` module told us. */
-  let netSelfId: string | null = null;
-  const animations = new AnimationSystem();
+  // the one order both hosts read it in (net-session.ts resolveNetEndpoint)
+  const netEndpoint = resolveNetEndpoint({
+    query: new URLSearchParams(location.search),
+    host: "dev",
+    storage: (() => {
+      try {
+        return localStorage;
+      } catch {
+        return null;
+      }
+    })(),
+  });
+  const netGateway = netEndpoint.kind === "gateway" ? netEndpoint.url : null;
+  const netServerUrl: string | null =
+    netEndpoint.kind === "gateway" ? "gateway" : netEndpoint.kind === "server" ? netEndpoint.url : null;
+  /** Gateway mode: sign-in, the grant (play sessions wait for it), social, transfers (net-client.ts). */
+  let gatewayFlow: GatewayFlow | null = null;
   /**
-   * A replicated layer played the way the authority plays it: a held guard
-   * once and clamped, a channel looped at rate 1, a one-shot fitted to the
-   * window it had when it STARTED here — the window shrinks every snapshot,
-   * and refitting each frame would speed the clip up as it plays.
+   * Entity docs the server spawned at runtime (players, NPCs) and which one is
+   * ours — the server's `world` module (net-session.ts NetRuntimeWorld).
    */
-  const remoteLayerOptions = (
-    id: string,
-    layer: string,
-    opts?: { action?: number; mode?: "hold" | "loop"; lock?: number },
-  ) => {
-    // a stance carry: looped, held in step with the legs like the owner's
-    if (typeof opts?.lock === "number") return { fade: 0.2, loop: true, phaseLock: opts.lock };
-    if (opts?.mode === "loop") return { fade: 0.08, loop: true, speed: 1 };
-    if (opts?.mode === "hold") return { fade: 0.08, loop: false, speed: 1 };
-    if (opts?.action === undefined) return { fade: 0.08, loop: true };
-    if (animations.layerClip(id) === layer) {
-      return { fade: 0.08, loop: false, speed: animations.layerSpeedOf(id) };
-    }
-    const fit = fitAction(animations.clipDuration(id, layer), opts.action);
-    return { fade: 0.08, loop: fit.loop, speed: fit.rate };
-  };
+  const netWorld = new NetRuntimeWorld({
+    build: (docs) => void buildNetRuntimeObjects(docs),
+    attach: (ids) => attachNetRuntimeToSession(ids),
+    despawn: (ids) => despawnNetRuntimeObjects(ids),
+    onSelf: () => {
+      resolveFollowTarget();
+      if (playMode.get() !== "edit") refreshCameraColliders();
+      gatewayFlow?.arrived();
+    },
+    // the server terraformed the world: same path a recipe file edit takes
+    onRecipe: (id, recipe) => {
+      if (applyWorldRecipeEdit(id, JSON.stringify(recipe))) {
+        chunkManager.reloadAll();
+        console.log(`[net] world recipe "${id}" updated by the server — re-streaming`);
+      }
+    },
+    // the layer hands us to another server (party pull, a dungeon, a
+    // rebalance): bye here, dial there with the ticket — the rendered world
+    // stays, only the server's entities (players, NPCs) swap
+    onTransfer: (t) => {
+      if (gatewayFlow) gatewayFlow.transfer(t, store.doc.name, (scene, label) => void travelToScene(scene, label));
+      else netPresence?.rehome(t.url, t.ticket);
+    },
+  });
+  const netRuntimeDocs = netWorld.docs;
+  const animations = new AnimationSystem();
+  // mobs and townsfolk with no authored poseLod still pose less often far away
+  animations.defaultPoseLod = CROWD_POSE_LOD;
   const cloth = new ClothSwaySystem();
   /** tag -> the entity id `entityByTag` last found for it (re-checked on use), null for a miss. */
   const tagLookup = new Map<string, string | null>();
@@ -1320,17 +1437,28 @@ async function main(): Promise<void> {
   let livePostFx: LivePostFxOptions["sandstorm"] | null = null;
   function setRuntimePostFx(opts: LivePostFxOptions): void {
     if (opts.sandstorm) livePostFx = opts.sandstorm;
+    if (opts.grade !== undefined) renderer.setGradeMood(opts.grade);
   }
   // ctx.biomeAt — the weather script's "what is the ground here" question,
   // answered from the recipe's own biome rules (the same blend the terrain
   // texture and the grass use), so zone edges fade exactly where the ground does
   // ctx.regionAt — which named zone (town zones nested first) a point is in;
   // the soundscape's "am I in town" question
-  function runtimeRegionAt(x: number, z: number): { id: string; name: string; tags: readonly string[]; hub?: readonly [number, number] } | null {
+  function runtimeRegionAt(x: number, z: number): RegionAt | null {
     if (!activeVoxelWorld) return null;
     const field = getVoxelWorld(activeVoxelWorld);
     const region = field ? regionAt(field.recipe.regions, x, z) : null;
-    return region ? { id: region.id, name: region.name, tags: region.tags, ...(region.hub ? { hub: region.hub } : {}) } : null;
+    if (!region) return null;
+    // a nested town zone without its own mood wears its parent's
+    const mood = region.mood ?? (region.within ? field!.recipe.regions.find((r) => r.id === region.within)?.mood : undefined);
+    // a signature place (region tagged `place`) is look only: its name and mood, the ZONE's tags and hub (it is not
+    // a zone for "am I in town", sanctuaries or hosting)
+    const place = regionAt(field!.recipe.regions, x, z, { places: true });
+    if (place && place !== region && place.tags.includes("place")) {
+      const placeMood = place.mood ?? mood;
+      return { id: place.id, name: place.name, tags: region.tags, ...(region.hub ? { hub: region.hub } : {}), ...(placeMood ? { mood: placeMood } : {}) };
+    }
+    return { id: region.id, name: region.name, tags: region.tags, ...(region.hub ? { hub: region.hub } : {}), ...(mood ? { mood } : {}) };
   }
   function runtimeBiomeAt(x: number, z: number): BiomeAt | null {
     if (!activeVoxelWorld) return null;
@@ -1515,30 +1643,121 @@ async function main(): Promise<void> {
       const terrain = terrainId ? assets.getDataAsset(terrainId)?.data as { size: [number, number]; resolution: number; heights: number[] } | undefined : undefined;
       if (terrain) mesh.source = { ...mesh.source, size: terrain.size, resolution: terrain.resolution, heights: terrain.heights };
     }
-    if (netServerUrl) {
-      // the server owns players: its per-joiner body replaces the authored one
-      const drop = new Set<string>();
-      for (const [id, e] of Object.entries(expanded.entities)) {
-        if (e.parent === null && e.tags.includes("player")) drop.add(id);
-      }
-      let grew = true;
-      while (grew) {
-        grew = false;
-        for (const [id, e] of Object.entries(expanded.entities)) {
-          if (!drop.has(id) && e.parent !== null && drop.has(e.parent)) {
-            drop.add(id);
-            grew = true;
-          }
-        }
-      }
-      for (const id of drop) delete expanded.entities[id];
-    }
+    // the server owns players: its per-joiner body replaces the authored one
+    if (netServerUrl) stripServerPlayers(expanded);
     return expanded;
   }
+
+  /**
+   * Components that never move an entity. An entity whose own and ancestors'
+   * components all come from this list is static in practice even without
+   * `mesh.static`, so its meshes batch and its models freeze — a town of
+   * collider-and-mesh buildings was ~1,200 draws a frame (each repeated per
+   * shadow cascade) and ~15,000 objects walked, none of which can move.
+   * Anything not listed (script, rigidbody, animator, billboards…)
+   * counts as possibly moving.
+   */
+  const STILL_COMPONENTS = new Set([
+    "transform", "mesh", "collider", "dressing", "culling", "light", "audio", "decal",
+    "visibility", "spawnArea", "portalAnchor", "prefab", "tags", "lod",
+    // effects read their entity's position and draw from their own batches;
+    // they never move it (a lamp's flame must not make its post unbatchable)
+    "vfx", "particles",
+  ]);
+  let autoStaticDoc: SceneDoc | null = null;
+  const autoStaticMemo = new Map<string, boolean>();
+  const isAutoStatic = (id: string): boolean => {
+    if (autoStaticDoc !== lastExpanded) {
+      autoStaticDoc = lastExpanded;
+      autoStaticMemo.clear();
+    }
+    const known = autoStaticMemo.get(id);
+    if (known !== undefined) return known;
+    const entity = lastExpanded?.entities[id];
+    let still = !!entity && Object.keys(entity.components).every((k) => STILL_COMPONENTS.has(k));
+    if (still && entity!.parent) still = isAutoStatic(entity!.parent);
+    autoStaticMemo.set(id, still);
+    return still;
+  };
+
+  /** Is this entity AND everything under it still (see isAutoStatic)? Memoized per expansion. */
+  let subtreeStillDoc: SceneDoc | null = null;
+  const subtreeStillMemo = new Map<string, boolean>();
+  let entityChildren = new Map<string, string[]>();
+  const subtreeStill = (id: string): boolean => {
+    if (subtreeStillDoc !== lastExpanded) {
+      subtreeStillDoc = lastExpanded;
+      subtreeStillMemo.clear();
+      entityChildren = new Map();
+      for (const [childId, entity] of Object.entries(lastExpanded?.entities ?? {})) {
+        if (!entity.parent) continue;
+        const list = entityChildren.get(entity.parent);
+        if (list) list.push(childId);
+        else entityChildren.set(entity.parent, [childId]);
+      }
+    }
+    const known = subtreeStillMemo.get(id);
+    if (known !== undefined) return known;
+    let still = isAutoStatic(id);
+    if (still) for (const child of entityChildren.get(id) ?? []) if (!subtreeStill(child)) { still = false; break; }
+    subtreeStillMemo.set(id, still);
+    return still;
+  };
+
+  /**
+   * Play mode freezes every authored subtree that is still all the way down
+   * (see freezeStaticSubtree): the renderer's per-frame matrix walk then skips
+   * whole towns and camps. Only while PLAYING — the editor moves entities
+   * through reconcile, which a frozen subtree would not see. A model landing
+   * inside a frozen subtree refreshes it (onModelLoaded), and stopping play
+   * thaws everything.
+   */
+  const frozenEntityRoots = new Set<THREE.Object3D>();
+  const freezeStaticEntities = (): void => {
+    thawStaticEntities();
+    const doc = lastExpanded;
+    if (!doc || !built) return;
+    for (const [id, entity] of Object.entries(doc.entities)) {
+      if (!subtreeStill(id) || (entity.parent && subtreeStill(entity.parent))) continue;
+      const object = built.objects.get(id);
+      if (!object) continue;
+      freezeStaticSubtree(object);
+      frozenEntityRoots.add(object);
+    }
+  };
+  const thawStaticEntities = (): void => {
+    for (const root of frozenEntityRoots) thawStaticSubtree(root);
+    frozenEntityRoots.clear();
+  };
+  /** After something was added under `object`: recompute the frozen subtree holding it, if any. */
+  const refreshFrozenAround = (object: THREE.Object3D): void => {
+    for (let at: THREE.Object3D | null = object; at; at = at.parent) {
+      if (frozenEntityRoots.has(at)) {
+        refreshStaticSubtree(at);
+        return;
+      }
+    }
+  };
+
+  /**
+   * What the base scene's build registered with the LOD systems. A full
+   * rebuild must release them: they hold the previous scene's meshes, and
+   * through `parent` the whole previous scene graph — every agent edit to the
+   * open scene kept another copy alive (~18k objects, ~45 MB each).
+   */
+  const sceneLodBatches = new Set<Parameters<typeof foliageLod.register>[0]>();
+  const sceneClusterMeshes = new Set<Parameters<typeof clusterLod.register>[0]>();
+  const releaseSceneLods = (): void => {
+    for (const batch of sceneLodBatches) foliageLod.unregister(batch);
+    for (const mesh of sceneClusterMeshes) clusterLod.unregister(mesh);
+    sceneLodBatches.clear();
+    sceneClusterMeshes.clear();
+  };
 
   // shared by the full rebuild and per-entity reconcile: callbacks read
   // `built`/`lastExpanded` at call time, so one options object serves both
   const sceneBuildOptions: BuildOptions = {
+    autoStatic: isAutoStatic,
     movingInstances,
     resolveModel: (assetId) => assets.getModel(assetId)?.url,
     resolveMaterial: (assetId) => assets.getDataAsset(assetId)?.data,
@@ -1558,12 +1777,25 @@ async function main(): Promise<void> {
       }),
     onGrass: (entityId, group, data) =>
       grass.register(entityId, group, data, (assetId) => assets.getTexture(assetId)?.url),
-    onInstancedBatch: (batch) => foliageLod.register(batch),
+    onInstancedBatch: (batch) => {
+      foliageLod.register(batch);
+      sceneLodBatches.add(batch);
+    },
     bakeImpostor: (object, bounds) => bakeImpostorAtlas(renderer, object, bounds),
-    onClusteredMesh: (_entityId, mesh) => clusterLod.register(mesh),
+    onClusteredMesh: (_entityId, mesh) => {
+      clusterLod.register(mesh);
+      sceneClusterMeshes.add(mesh);
+    },
     onModelLoaded: (entityId, root, clips) => {
+      if (frozenEntityRoots.size > 0) refreshFrozenAround(root);
       modelLooks.modelLoaded(entityId, root);
       const entity = lastExpanded.entities[entityId] ?? netRuntimeDocs.get(entityId);
+      // Initial batching precedes asynchronous model arrival. Coalesce loads
+      // into one rebuild instead of permanently leaving fixed props unbatched
+      // (or rebuilding the whole level once for every individual prop).
+      if (lastExpanded.entities[entityId] && ((entity?.components["mesh"] as { static?: boolean } | undefined)?.static || isAutoStatic(entityId))) {
+        staticBatchPending = true;
+      }
       const animator = entity?.components["animator"] as AnimatorData | undefined;
       animations.register(entityId, root, clips, animator ?? null, entity?.parent ?? null);
       const clothData = entity?.components["clothSway"] as Partial<ClothSwayOptions> | undefined;
@@ -1632,11 +1864,14 @@ async function main(): Promise<void> {
     billboards.clear();
     grass.clear();
     const endBuild = profiler.span("scene.build", `${Object.keys(lastExpanded.entities).length} entities`);
+    frozenEntityRoots.clear(); // the old objects go with the old scene
+    releaseSceneLods();
     try {
       built = buildScene(lastExpanded, sceneBuildOptions);
     } finally {
       endBuild();
     }
+    if (playMode.get() !== "edit") freezeStaticEntities();
     built.scene.add(movingInstances.root);
     // grass.clear() above dropped the world cover layers too; parent their
     // group in the new scene and let the frame loop re-register them
@@ -1793,6 +2028,18 @@ async function main(): Promise<void> {
     end: () => profiler.end(),
   });
   const [backend] = await Promise.all([renderer.init(), initPhysics()]);
+  // unit-frame face pictures (ctx.faceShot): shot once per look through this renderer, cached
+  const faceShots = createFaceShotHost({
+    renderer: renderer.renderer,
+    objectOf: (entityId) => built?.objects.get(entityId),
+    meshOf: (entityId) => {
+      const doc = lastExpanded?.entities[entityId] ?? netRuntimeDocs.get(entityId);
+      const mesh = doc?.components["mesh"] as { source?: { assetId?: string }; material?: string } | undefined;
+      return mesh ? { ...(mesh.source?.assetId ? { assetId: mesh.source.assetId } : {}), ...(mesh.material ? { material: mesh.material } : {}) } : undefined;
+    },
+    modelLooks,
+    clipsOf: (entityId) => animations.clipsOf(entityId),
+  });
 
   // Far plane 4000, the same as a scene camera's default: the editor camera is
   // what a person flying the world in edit mode sees through, and at 500 the
@@ -2231,10 +2478,6 @@ async function main(): Promise<void> {
 
   // -- multiplayer presence (dev): other tabs on this scene appear as avatars --
 
-  const netPlayerPos = new THREE.Vector3();
-  const netPlayerQuat = new THREE.Quaternion();
-  const netPlayerEuler = new THREE.Euler(0, 0, 0, "YXZ");
-
   // -- world replication (host-authoritative NPCs) ----------------------------
   // What syncs: entities with a `netObject` component (declarative policy:
   // authority, relevancy radius, send cadence), plus an implicit default —
@@ -2254,15 +2497,9 @@ async function main(): Promise<void> {
       netSuspended.clear(); // not playing — nothing is actually suspended
       return; // (session start re-derives from netPresence.replicatedIds())
     }
-    const target = new Set(ids);
-    // Another player's server-spawned subtree stays suspended whatever the
-    // managed set says: the server only lists the BODY (it is the thing with a
-    // transform to replicate), but its child scripts — a caster reading the
-    // keyboard, an actor — belong to that player's tab, never to this one.
-    const ownSubtree = new Set(netSelfId ? netRuntimeSubtree(netSelfId) : []);
-    const foreign = (id: string): boolean => netRuntimeDocs.has(id) && !ownSubtree.has(id);
-    const toSuspend = [...target].filter((id) => !netSuspended.has(id));
-    const toResume = [...netSuspended].filter((id) => !target.has(id) && !foreign(id));
+    // another player's server-spawned subtree stays suspended (net-session.ts planSuspension)
+    const own = netWorld.ownSubtree();
+    const { toSuspend, toResume, next } = planSuspension(ids, netSuspended, (id) => netWorld.isForeign(id, own));
     if (toSuspend.length > 0 || toResume.length > 0) {
       console.log(`[net] host-simulated entities: +${toSuspend.length} -${toResume.length}`);
     }
@@ -2294,10 +2531,8 @@ async function main(): Promise<void> {
         if (object) sim.setPosition(id, [object.position.x, object.position.y, object.position.z]);
       }
     }
-    const keep = [...netSuspended].filter(foreign);
     netSuspended.clear();
-    for (const id of target) netSuspended.add(id);
-    for (const id of keep) netSuspended.add(id);
+    for (const id of next) netSuspended.add(id);
   }
 
   // The HUD, the compass and weather each ask several times a frame; scanning
@@ -2305,7 +2540,7 @@ async function main(): Promise<void> {
   // top allocation sources in play. Remember the answer and re-check it.
   let cachedPlayerId: string | null = null;
   function localPlayerId(): string | null {
-    if (netSelfId && built.objects.has(netSelfId)) return netSelfId;
+    if (netWorld.selfId && built.objects.has(netWorld.selfId)) return netWorld.selfId;
     if (cachedPlayerId !== null && lastExpanded.entities[cachedPlayerId]?.tags.includes("player")) return cachedPlayerId;
     cachedPlayerId = null;
     for (const id in lastExpanded.entities) {
@@ -2321,15 +2556,6 @@ async function main(): Promise<void> {
   // session. OUR body gets physics + scripts (that is the prediction loop);
   // everyone else's gets scripts registered-but-suspended so the host-driven
   // ghost path (suspendForHost) owns it from the first frame.
-  function netRuntimeSubtree(rootId: string): string[] {
-    const out = [rootId];
-    for (let i = 0; i < out.length; i++) {
-      for (const [id, e] of netRuntimeDocs) {
-        if (e.parent === out[i] && !out.includes(id)) out.push(id);
-      }
-    }
-    return out;
-  }
   function buildNetRuntimeObjects(docs: SceneDoc["entities"]): Map<string, THREE.Object3D> {
     const partial: SceneDoc = { ...lastExpanded, entities: docs };
     const result = buildScene(partial, sceneBuildOptions);
@@ -2345,7 +2571,7 @@ async function main(): Promise<void> {
   function attachNetRuntimeToSession(ids?: string[]): void {
     if (!sim || !scripts) return;
     const list = ids ?? [...netRuntimeDocs.keys()];
-    const own = new Set(netSelfId ? netRuntimeSubtree(netSelfId) : []);
+    const own = netWorld.ownSubtree();
     const ownDocs: SceneDoc["entities"] = {};
     const otherDocs: SceneDoc["entities"] = {};
     const objects = new Map<string, THREE.Object3D>();
@@ -2368,69 +2594,17 @@ async function main(): Promise<void> {
       for (const id of otherIds) netSuspended.add(id);
     }
   }
-  function despawnNetRuntime(ids: string[]): void {
-    const present = ids.filter((id) => netRuntimeDocs.has(id));
-    if (present.length === 0) return;
+  /** Tear down runtime entities the registry just forgot (net-session.ts NetRuntimeWorld.despawn). */
+  function despawnNetRuntimeObjects(present: string[]): void {
     sim?.removeEntities(present);
     scripts?.removeEntities(present, { silent: true });
     for (const id of present) {
       const object = built.objects.get(id);
       object?.parent?.remove(object);
       built.objects.delete(id);
-      netRuntimeDocs.delete(id);
       netSuspended.delete(id);
       prevBodyPos.delete(id);
       currBodyPos.delete(id);
-      if (id === netSelfId) netSelfId = null;
-    }
-  }
-  /** The server's `world` module: entity docs to build, ids to drop. */
-  function onWorldModule(data: unknown): void {
-    const msg = data as
-      | { t?: string; entities?: SceneDoc["entities"]; ids?: unknown; self?: unknown }
-      | null;
-    if (!msg || typeof msg !== "object") return;
-    if (msg.t === "spawn" && msg.entities && typeof msg.entities === "object") {
-      const fresh: SceneDoc["entities"] = {};
-      for (const [id, doc] of Object.entries(msg.entities)) {
-        if (netRuntimeDocs.has(id)) continue;
-        netRuntimeDocs.set(id, doc);
-        fresh[id] = doc;
-      }
-      if (typeof msg.self === "string") netSelfId = msg.self;
-      const ids = Object.keys(fresh);
-      if (ids.length > 0) {
-        buildNetRuntimeObjects(fresh);
-        attachNetRuntimeToSession(ids);
-      }
-      if (typeof msg.self === "string") {
-        resolveFollowTarget();
-        if (playMode.get() !== "edit") refreshCameraColliders();
-        if (gatewayPanel) gatewayPanel.setStatus(`${gatewayPanel.character()?.name ?? ""} · ${netGrant?.server ?? "server"}`);
-      }
-      console.log(`[net] server spawned ${ids.length} entities${typeof msg.self === "string" ? ` (you are ${msg.self})` : ""}`);
-    } else if (msg.t === "despawn" && Array.isArray(msg.ids)) {
-      despawnNetRuntime(msg.ids.filter((id): id is string => typeof id === "string"));
-    } else if (msg.t === "recipe") {
-      // the server terraformed the world: same path a recipe file edit takes
-      const m = msg as unknown as { id?: unknown; recipe?: unknown };
-      if (typeof m.id === "string" && m.recipe && typeof m.recipe === "object") {
-        if (applyWorldRecipeEdit(m.id, JSON.stringify(m.recipe))) {
-          chunkManager.reloadAll();
-          console.log(`[net] world recipe "${m.id}" updated by the server — re-streaming`);
-        }
-      }
-    } else if (msg.t === "transfer") {
-      // the layer hands us to another server (party pull, a dungeon, a
-      // rebalance): bye here, dial there with the ticket — the rendered
-      // world stays, only the server's entities (players, NPCs) swap
-      const m = msg as unknown as { url?: unknown; ticket?: unknown; reason?: unknown; srv?: unknown };
-      if (typeof m.url === "string" && typeof m.ticket === "string") {
-        console.log(`[net] transfer → ${m.url} (${typeof m.reason === "string" ? m.reason : "?"})`);
-        netGrant = { url: m.url, ticket: m.ticket, server: typeof m.srv === "string" ? m.srv : "?", scene: netGrant?.scene ?? store.doc.name };
-        gatewayPanel?.setStatus(`${gatewayPanel.character()?.name ?? ""} · transferring (${typeof m.reason === "string" ? m.reason : "?"})…`);
-        netPresence?.rehome(m.url, m.ticket);
-      }
     }
   }
   /** Host-side physics proxies for remote players (entity ids in the sim). */
@@ -2450,11 +2624,9 @@ async function main(): Promise<void> {
   };
   /** Which proxies are swimming — the hysteresis the shared rule needs to hold a mode. */
   const netProxySwim = new Map<string, SwimState>();
-  const NET_NUDGE_DIST = 1.0; // prediction drift beyond this eases toward authority
-  const NET_SNAP_DIST = 3.5; // …and beyond this teleports (velocity reset)
 
-  // the host-side comms link learns about joins/leaves from here (RoomHost has no roster hook)
-  let hostCommsLink: (CommsLink & { notifyRoster(): void }) | null = null;
+  /** Chat + voice (net-client.ts createSessionComms), made once NetPresence exists. */
+  let sessionComms: SessionComms | null = null;
   // Which scenes belong to a project that plays on dedicated servers ONLY
   // (project.json `multiplayer: "server"`): those never form a P2P dev room,
   // so a tab with no server plays alone. `?p2p=1` overrides for a two-tab
@@ -2469,124 +2641,37 @@ async function main(): Promise<void> {
     })
     .catch(() => undefined);
   const forceP2P = new URLSearchParams(location.search).has("p2p");
+  // the local body, remote animation and the event bus: the same hooks a published client uses
+  const netPeerHooks = peerPresenceHooks({
+    playing: () => playMode.get() === "playing",
+    localPlayerId,
+    objectOf: (id) => built.objects.get(id),
+    docOf: (id) => lastExpanded.entities[id] ?? netRuntimeDocs.get(id),
+    sim: () => sim,
+    isDown: (code) => input.isDown(code),
+    viewForward,
+    animations,
+    eventBus: () => eventBus,
+  });
   netPresence = new NetPresence({
+    ...netPeerHooks,
     getSceneName: () => store.doc.name,
     serverUrl: netServerUrl,
     allowP2P: () => forceP2P || !serverOnlyScenes.has(store.doc.name),
     // connect while playing: an editor tab has no business holding a body
     // (gateway mode also waits until main has placed us — no grant, no dial)
-    wantsSession: () => playMode.get() === "playing" && (!netGateway || netGrant !== null),
+    wantsSession: () => playMode.get() === "playing" && (!netGateway || (gatewayFlow?.grant() ?? null) !== null),
     // a server-spawned body replaces the capsule avatar for that peer
     hasEntityForPeer: (peerId) => {
       const id = netPresence?.netState.get(`player/${peerId}`);
       return typeof id === "string" && built.objects.has(id);
     },
-    onRosterChanged: () => hostCommsLink?.notifyRoster(),
-    getLocalPlayer: () => {
-      if (playMode.get() !== "playing") return null;
-      const playerId = localPlayerId();
-      const object = playerId ? built.objects.get(playerId) : undefined;
-      if (!object) return null;
-      object.getWorldPosition(netPlayerPos);
-      object.getWorldQuaternion(netPlayerQuat);
-      netPlayerEuler.setFromQuaternion(netPlayerQuat);
-      return {
-        position: [netPlayerPos.x, netPlayerPos.y, netPlayerPos.z],
-        yaw: netPlayerEuler.y,
-      };
-    },
-    // movement INTENT for the host's proxy sim — mirrors the controller's
-    // input mapping (camera-relative WASD → desired horizontal velocity)
-    getLocalInput: () => {
-      if (playMode.get() !== "playing") return null;
-      const playerId = localPlayerId();
-      const object = playerId ? built.objects.get(playerId) : undefined;
-      if (!playerId || !object) return null;
-      const ud = object.userData as {
-        speedMult?: number;
-        frozen?: boolean;
-        swimming?: string;
-        swimVelocity?: [number, number, number];
-        advanceVel?: [number, number];
-      };
-      if (ud.frozen) return { v: [0, 0], jump: false };
-      // Swimming: the controller already solved where this body is pointed
-      // (camera pitch included), so relay THAT rather than re-deriving a flat
-      // heading here — two derivations is two answers, and the authority's
-      // wins.
-      if (ud.swimming === "swimming" && ud.swimVelocity) {
-        const [sx, sy, sz] = ud.swimVelocity;
-        return { v: [sx, sz], jump: input.isDown("Space"), vy: sy };
-      }
-      let forward = 0;
-      let strafe = 0;
-      if (input.isDown("KeyW") || input.isDown("ArrowUp")) forward += 1;
-      if (input.isDown("KeyS") || input.isDown("ArrowDown")) forward -= 1;
-      if (input.isDown("KeyA") || input.isDown("ArrowLeft")) strafe -= 1;
-      if (input.isDown("KeyD") || input.isDown("ArrowRight")) strafe += 1;
-      const [fx, fz] = viewForward();
-      let x = fx * forward + -fz * strafe;
-      let z = fz * forward + fx * strafe;
-      const len = Math.hypot(x, z);
-      const script = (lastExpanded.entities[playerId] ?? netRuntimeDocs.get(playerId))?.components["script"] as
-        | { params?: { speed?: number; swimSpeed?: number; swimDownKey?: string } }
-        | undefined;
-      // A swimmer asks for its swim speed, not its run speed: the authority
-      // clamps what arrives, and a stroke sent as a sprint is a body the
-      // server keeps overtaking.
-      const swimming = ud.swimming === "swimming";
-      const speed =
-        (swimming ? (script?.params?.swimSpeed ?? 3.2) : (script?.params?.speed ?? 6.5)) *
-        (ud.speedMult ?? 1);
-      if (len > 0) {
-        x = (x / len) * speed;
-        z = (z / len) * speed;
-      }
-      // A swing that steps in moves the body with its feet (the controller's
-      // clipAdvance). The authority only moves what is claimed, so the lunge is
-      // part of the claim — without it the server pins the swinger in place.
-      if (ud.advanceVel) {
-        x += ud.advanceVel[0];
-        z += ud.advanceVel[1];
-      }
-      // Vertical intent is only meaningful in water; out of it, Space is the
-      // jump the authority already reads.
-      // the same comma-separated list the controller reads — one key here and
-      // three there is a dive that works single-player and not on a server
-      const diveKeys = (script?.params?.swimDownKey ?? "ControlLeft,KeyC,KeyX").split(",");
-      const diving = diveKeys.some((k) => k.trim() && input.isDown(k.trim()));
-      const vy = (input.isDown("Space") ? 1 : 0) - (diving ? 1 : 0);
-      return { v: [x, z], jump: input.isDown("Space"), vy };
-    },
+    onRosterChanged: () => sessionComms?.notifyRoster(),
     getProxyState: (peerId) => {
       const state = sim?.states().get(netProxyId(peerId));
       return state
         ? { p: [r3(state.position[0]), r3(state.position[1]), r3(state.position[2])] }
         : null;
-    },
-    // client-side prediction reconciliation: our local sim ran ahead; the
-    // host's verdict arrived. Small drift is normal (dead-band), medium
-    // drift glides toward authority keeping velocity, huge drift snaps.
-    reconcileLocalPlayer: (p) => {
-      if (playMode.get() !== "playing" || !sim) return;
-      const playerId = localPlayerId();
-      if (!playerId) return;
-      const state = sim.states().get(playerId);
-      if (!state) return;
-      const dx = p[0] - state.position[0];
-      const dy = p[1] - state.position[1];
-      const dz = p[2] - state.position[2];
-      const err = Math.hypot(dx, dy, dz);
-      if (err > NET_SNAP_DIST) {
-        sim.setPosition(playerId, p);
-      } else if (err > NET_NUDGE_DIST) {
-        const k = 0.2; // one-fifth of the error per snapshot ≈ invisible glide
-        sim.setTranslation(playerId, [
-          state.position[0] + dx * k,
-          state.position[1] + dy * k,
-          state.position[2] + dz * k,
-        ]);
-      }
     },
     collectReplicas: () => {
       if (playMode.get() !== "playing") return null; // host not simulating
@@ -2661,30 +2746,16 @@ async function main(): Promise<void> {
     onWorldEntities: (ids) => suspendForHost(ids),
     getEntityObject: (id) =>
       playMode.get() === "playing" ? (built.objects.get(id) ?? null) : null,
-    setEntityAnim: (id, clip, layer, opts) => {
-      animations.play(id, clip, 0.25);
-      // the authority's gait rate, or every remote body skates
-      animations.setSpeed(id, opts?.rate ?? 1);
-      if (layer) animations.playLayer(id, layer, remoteLayerOptions(id, layer, opts));
-      else animations.clearLayer(id, 0.15);
-    },
-    // replicated gameplay events ride the session event bus in both directions
-    collectNetEvents: () => eventBus?.takeOutbox() ?? [],
-    onNetEvents: (events) => eventBus?.injectRemote(events),
-    emitLocalEvent: (name, payload) => eventBus?.emit(name, payload),
-    // peer→authority requests (to-authority events): out on peers, in on host
-    collectPeerEvents: () => eventBus?.takeCommandOutbox() ?? [],
-    onPeerEvent: (from, events) => eventBus?.injectFromPeer(from, events),
     onRoleChanged: (role) => {
       eventBus?.setNetRole(role === "host" ? "authority" : role === "peer" ? "peer" : "local");
       // the server session ended: its entities go with it (they come back
       // with the next welcome), so nothing of the server's runs unowned here
-      if (role === "off" && netServerUrl) despawnNetRuntime([...netRuntimeDocs.keys()]);
+      if (role === "off" && netServerUrl) netWorld.clear();
     },
   });
   // the server's `world` module (entity docs for players + runtime NPCs)
   netPresence.onSession((session) => {
-    if (session?.role === "peer" && netServerUrl) session.client.onModule("world", onWorldModule);
+    if (session?.role === "peer" && netServerUrl) session.client.onModule("world", (data) => netWorld.handle(data));
   });
   // ?creator — the character creation screen on its own (design iteration,
   // no gateway needed): Create logs the build instead of making a character
@@ -2695,7 +2766,7 @@ async function main(): Promise<void> {
       const screen = mountCreationScreen({
         creation,
         textureUrl: (id) => assets.getTexture(id)?.url,
-        preview: (canvas) => createCreationPreview(canvas, creation, (id) => assets.getModel(id)?.url),
+        preview: (canvas) => createCreationPreview(canvas, creation, (id) => assets.getModel(id)?.url, (id) => assets.getTexture(id)?.url),
         onCreate: (name, build) => {
           console.log("[creation] would create", name, JSON.stringify(build));
           return Promise.resolve();
@@ -2705,141 +2776,66 @@ async function main(): Promise<void> {
     }
   }
   // gateway mode: sign in, pick a character, and Play dials the layer main chose
-  let socialPanel: SocialPanel | null = null;
+  // (net-client.ts mountGatewayFlow — the published client runs the same flow)
+  const netZoneName = (id: string): string => {
+    const field = activeVoxelWorld ? getVoxelWorld(activeVoxelWorld) : null;
+    return field?.recipe.regions.find((r) => r.id === id)?.name ?? id;
+  };
   if (netGateway) {
-    const gatewayClient = new GatewayClient(netGateway);
-    let playing: { id: string; name: string } | null = null;
-    gatewayPanel = mountGatewayPanel({
-      client: gatewayClient,
+    gatewayFlow = mountGatewayFlow({
+      url: netGateway,
+      presence: netPresence,
       localCreation: () => findCreation(assets),
       textureUrl: (id) => assets.getTexture(id)?.url,
-      preview: (canvas, creation) => createCreationPreview(canvas, creation, (id) => assets.getModel(id)?.url),
-      onPlay: (grant, character) => {
-        netGrant = grant;
-        playing = { id: character.id, name: character.name };
-        console.log(`[net] gateway placed ${character.name} on ${grant.server} (${grant.url})`);
-        netPresence?.rehome(grant.url, grant.ticket);
+      preview: (canvas, creation) => createCreationPreview(canvas, creation, (id) => assets.getModel(id)?.url, (id) => assets.getTexture(id)?.url),
+      zoneName: netZoneName,
+      say: (text) => sessionComms?.comms.chat.system(text),
+      onPlay: () => {
         if (playMode.get() !== "playing") playMode.set("playing");
-        void socialPanel?.refresh();
       },
     });
-    // friends and party: main's facts, the layer's events, one panel (O) and the slash commands
-    const socialZoneName = (id: string): string => {
-      const field = activeVoxelWorld ? getVoxelWorld(activeVoxelWorld) : null;
-      return field?.recipe.regions.find((r) => r.id === id)?.name ?? id;
-    };
-    socialPanel = mountSocialPanel({
-      client: gatewayClient,
-      character: () => playing,
-      say: (text) => comms?.chat.system(text),
-      zoneName: socialZoneName,
+    const flow = gatewayFlow;
+    (window as unknown as { __hitregGateway?: unknown }).__hitregGateway = { client: flow.client, panel: flow.panel, social: flow.social, grant: () => flow.grant() };
+  }
+  const socialPanel = gatewayFlow?.social ?? null;
+  // the load-in screen: a painted screen until the world around the player is streamed in and the frame rate has
+  // settled (shaders compiled, models uploaded) — instead of dropping them into a hitching, half-built world
+  mountLoadScreen({
+    creation: () => findCreation(assets),
+    textureUrl: (id) => assets.getTexture(id)?.url,
+    signals: {
+      wanted: () => playMode.get() === "playing" && (!netGateway || (gatewayFlow?.grant() ?? null) !== null),
+      connected: () => !netServerUrl || netPresence.serverLink().phase === "connected",
+      hasBody: () => {
+        const id = netServerUrl ? netWorld.selfId : localPlayerId();
+        return !!id && built.objects.has(id);
+      },
+      loading: () => chunkManager.stats.loading + subsceneManager.stats.loading,
+      switching: () => sceneSwitchPending,
+      place: () => {
+        const id = netServerUrl ? netWorld.selfId : localPlayerId();
+        const body = id ? built.objects.get(id) : undefined;
+        const region = body ? runtimeRegionAt(body.position.x, body.position.z) : null;
+        return region?.name ?? "";
+      },
+    },
+  });
+  // what the player sees while the server link is down (connecting, lost, refused, travelling)
+  if (netServerUrl) {
+    mountConnectionOverlay({
+      presence: netPresence,
+      world: netWorld,
+      wanted: () => playMode.get() === "playing" && (!netGateway || (gatewayFlow?.grant() ?? null) !== null),
+      gateway: gatewayFlow,
     });
-    // the things worth a glance even with chat scrolled away: a friend arriving, an ask
-    const toasts = mountToasts();
-    netPresence.onSession((session) => {
-      if (session?.role === "peer" && netServerUrl) {
-        session.client.onModule("social", (raw) => {
-          const event = raw as { kind: string; name?: string; zone?: string | null };
-          socialPanel?.handleEvent(event);
-          const zone = event.zone ? ` in ${socialZoneName(event.zone)}` : "";
-          if (event.kind === "friend.online") toasts.show(`${event.name} is online${zone}`, "friend");
-          else if (event.kind === "friend.offline") toasts.show(`${event.name} went offline`, "friend");
-          else if (event.kind === "friend.request") toasts.show(`${event.name} wants to be your friend — O to answer`, "friend", 8000);
-          else if (event.kind === "friend.accepted") toasts.show(`${event.name} is now your friend`, "friend");
-          else if (event.kind === "party.invite") toasts.show(`${event.name} invited you to a party — /accept or O`, "party", 8000);
-          else if (event.kind === "party.joined") toasts.show(`${event.name} joined the party`, "party");
-          else if (event.kind === "party.left") toasts.show(`${event.name} left the party`, "party");
-          else if (event.kind === "party.kicked") toasts.show("You were removed from the party", "party");
-          else if (event.kind === "guild.invite") toasts.show(`${event.name} invited you to ${(event as { guildName?: string }).guildName ?? "a guild"} — /guild accept or O`, "guild", 8000);
-          else if (event.kind === "guild.joined") toasts.show(`${event.name} joined the guild`, "guild");
-          else if (event.kind === "guild.left") toasts.show(`${event.name} left the guild`, "guild");
-          else if (event.kind === "guild.kicked") toasts.show("You were removed from the guild", "guild");
-          else if (event.kind === "guild.leader") toasts.show(`${event.name} now leads the guild`, "guild");
-          else if (event.kind === "guild.motd") toasts.show(`Guild: ${(event as { text?: string }).text ?? ""}`, "guild", 8000);
-          else if (event.kind === "guild.disbanded") toasts.show("The guild was disbanded", "guild");
-        });
-      }
-    });
-    (window as unknown as { __hitregGateway?: unknown }).__hitregGateway = { client: gatewayClient, panel: gatewayPanel, social: socialPanel, grant: () => netGrant };
   }
 
   // -- comms: text chat + VoIP (@hitreg/comms), riding the room's module channel --
-  // Membership (team/party) is plain netState so scripts assign it with the
-  // API they already have; chat routes on the host, voice gates on the sender
-  // (docs/comms.md). The link follows the session: host / peer / alone.
-  registerCommsNetState(netPresence.netState);
-  // character/<bodyId> sheets (character-sheet builtin) — validated, in the spec
-  registerCharacterNetState(netPresence.netState);
-  registerTransferLockNetState(netPresence.netState); // transferLock/<bodyId> — combat holds a body on its server
-  const commsSelf = netPresence.self();
-  const commsPos = new THREE.Vector3();
-  const commsFwd = new THREE.Vector3();
-  const commsUp = new THREE.Vector3();
-  const commsQuat = new THREE.Quaternion();
+  // net-client.ts createSessionComms: membership is plain netState, chat routes
+  // on the host, voice gates on the sender (docs/comms.md); the link follows
+  // the session: host / peer / alone.
+  registerSessionNetState(netPresence.netState);
   let commsListenerCamera: THREE.Camera = camera; // whichever camera rendered last frame
-  const comms = createComms({
-    link: localLink(commsSelf.peerId, commsSelf.name),
-    membership: netStateMembership(netPresence.netState),
-    positionOf: (peerId) => netPresence?.positionOf(peerId) ?? null,
-    // zone chat: the recipe zone under the player, or the scene as one zone
-    // (a P2P host routes it here; a dedicated layer routes it server-side)
-    zoneOf: (peerId) => {
-      const p = netPresence?.positionOf(peerId);
-      if (!p) return null;
-      // an agent-drawn region first (recipe.regions), else the climate cell, else the scene
-      const field = activeVoxelWorld ? getVoxelWorld(activeVoxelWorld) : null;
-      const region = field ? regionAt(field.recipe.regions, p[0], p[2]) : null;
-      if (region) return region.id;
-      const zone = runtimeBiomeAt(p[0], p[2])?.zone;
-      return zone && zone.length > 0 ? zone : store.doc.name;
-    },
-    listenerPose: () => {
-      if (playMode.get() !== "playing") return null;
-      const cam = commsListenerCamera;
-      cam.getWorldPosition(commsPos);
-      cam.getWorldDirection(commsFwd);
-      commsUp.set(0, 1, 0).applyQuaternion(cam.getWorldQuaternion(commsQuat));
-      return {
-        position: [commsPos.x, commsPos.y, commsPos.z],
-        forward: [commsFwd.x, commsFwd.y, commsFwd.z],
-        up: [commsUp.x, commsUp.y, commsUp.z],
-      };
-    },
-    // "/team red" from a player — dev/social default; a rules-driven game
-    // passes chat.allowSelfAssign:false and writes these keys from a script
-    assign: (peerId, kind, value) => {
-      const key = `comms.${kind}/${peerId}`;
-      if (value === null) {
-        netPresence!.netState.delete(key);
-        return true;
-      }
-      return netPresence!.netState.set(key, value);
-    },
-    emitEvent: (name, payload) => eventBus?.emit(name, payload),
-    chat: { proximityRadius: 25 },
-    voice: { proximityRadius: 25, fullVolumeRadius: 5, mode: "ptt" },
-  });
-  netPresence.onSession((session) => {
-    hostCommsLink = null;
-    if (!session) {
-      comms.setLink(localLink(commsSelf.peerId, commsSelf.name));
-    } else if (session.role === "host") {
-      hostCommsLink = hostLink(session.host, session.selfId, session.selfName);
-      comms.setLink(hostCommsLink);
-    } else {
-      // the host's display name isn't in the roster the client receives —
-      // mirror the dev naming scheme (guest-<id tail>) until identities are real
-      comms.setLink(
-        clientLink(
-          session.client,
-          session.hostId,
-          `guest-${session.hostId.slice(-4)}`,
-          session.selfId,
-          session.selfName,
-        ),
-      );
-    }
-  });
   /**
    * The developer console, when this build has one (see dev-console.ts).
    *
@@ -2856,20 +2852,24 @@ async function main(): Promise<void> {
   }).then((handle) => {
     devConsole = handle;
   });
-  mountCommsUI({
-    chat: comms.chat,
-    voice: comms.voice,
-    onCommand: (name, args) => {
-      if (socialPanel?.command(name, args)) return true;
-      return devConsole?.command(name, args) ?? false;
+  sessionComms = createSessionComms({
+    presence: netPresence,
+    eventBus: () => eventBus,
+    playing: () => playMode.get() === "playing",
+    listenerCamera: () => commsListenerCamera,
+    // an agent-drawn region first (recipe.regions), else the climate cell, else the scene
+    zoneOf: (p) => {
+      const field = activeVoxelWorld ? getVoxelWorld(activeVoxelWorld) : null;
+      const region = field ? regionAt(field.recipe.regions, p[0], p[2]) : null;
+      if (region) return region.id;
+      const zone = runtimeBiomeAt(p[0], p[2])?.zone;
+      return zone && zone.length > 0 ? zone : store.doc.name;
     },
-  }); // bottom-left overlay; Enter opens
-  comms.voice.attachKeyboard(window); // V = say, B = team, N = party (push-to-talk)
-  comms.chat.system(
-    socialPanel
-      ? "Enter: chat · /s /z /g /t /p /gu pick a channel · O: friends, party & guild · /friend /invite /accept /decline /travel <name> · /guild … · mic button for voice"
-      : "Enter: chat · /s /z /g /t /p pick a channel · /team x · /party x · mic button for voice",
-  );
+    social: socialPanel,
+    runPlayerCommand: (name, args) => scripts?.runPlayerCommand(name, args),
+    devCommand: (name, args) => devConsole?.command(name, args) ?? false,
+  });
+  const comms = sessionComms.comms;
   // "unpack model parts": each named sub-object of a loaded kit becomes a child
   // entity referencing that node; the original keeps only the group transform
   function unpackModel(id: string): void {
@@ -2947,8 +2947,16 @@ async function main(): Promise<void> {
 
   // Unity-style flow: edit/paused = editor visible; play = fullscreen game.
   // Backquote starts play from edit, pauses from play, and resumes from pause.
+  /** Set once live-sync is installed (below): applies a scene edit held during play. */
+  let flushDeferredSceneEdit: (() => void) | null = null;
   playMode.subscribe(() => {
     editorVisible.set(playMode.get() !== "playing");
+    if (playMode.get() === "edit") {
+      thawStaticEntities();
+      // a scene file an agent changed while you played applies now
+      flushDeferredSceneEdit?.();
+    }
+    else if (frozenEntityRoots.size === 0) freezeStaticEntities();
     // the streamed-cell list is not published while playing (see
     // publishLoadedChunkCells), so it is stale on the way back — refresh once
     if (playMode.get() === "edit") publishLoadedChunkCells();
@@ -2986,8 +2994,21 @@ async function main(): Promise<void> {
     travelLoadingEl.textContent = label;
     travelLoadingEl.style.display = "flex";
   }
+  // the map asks for the world several times a frame: resolve it once per scene doc
+  let worldMapFor: { doc: SceneDoc; world: ReturnType<typeof resolveVoxelWorld> } | null = null;
+  const worldMapWorld = (): ReturnType<typeof resolveVoxelWorld> => {
+    if (worldMapFor?.doc !== lastExpanded) worldMapFor = { doc: lastExpanded, world: resolveVoxelWorld(lastExpanded) };
+    return worldMapFor.world;
+  };
   const worldMap = createWorldMapOverlay({
-    world: () => resolveVoxelWorld(lastExpanded)?.data.world ?? null,
+    // the editor host is a dev tool: places, dungeons, quest givers and the DEV
+    // layer can be toggled on (D). The published runtime (play.ts) passes false.
+    devLayers: true,
+    // markers belong to the signed-in character; a local editor session keeps one "local" set
+    owner: () => gatewayFlow?.character()?.id ?? null,
+    world: () => worldMapWorld()?.data.world ?? null,
+    recipe: () => worldMapWorld()?.field.recipe ?? null,
+    scene: () => lastExpanded ?? null,
     position: () => {
       const target = playMode.get() !== "edit" && followTargetId ? built.objects.get(followTargetId) : null;
       if (target) target.getWorldPosition(worldMapPos);
@@ -3153,10 +3174,23 @@ async function main(): Promise<void> {
 
   /** A world point on screen for DOM overlays (ctx.worldToScreen): CSS px from the viewport corner, or null. */
   const screenPoint = new THREE.Vector3();
+  // One layout read per task, not per call: nameplates ask for every mob in
+  // view while writing their own DOM, so each getBoundingClientRect forced a
+  // synchronous layout. Cleared after the current task (the frame's script pass).
+  let canvasRectCache: DOMRect | null = null;
+  function canvasRect(): DOMRect {
+    if (!canvasRectCache) {
+      canvasRectCache = canvas.getBoundingClientRect();
+      queueMicrotask(() => {
+        canvasRectCache = null;
+      });
+    }
+    return canvasRectCache;
+  }
   function worldToScreen(x: number, y: number, z: number): { x: number; y: number; distance: number } | null {
     screenPoint.set(x, y, z).project(camera);
     if (screenPoint.z < -1 || screenPoint.z > 1 || Math.abs(screenPoint.x) > 1.1 || Math.abs(screenPoint.y) > 1.1) return null;
-    const rect = canvas.getBoundingClientRect();
+    const rect = canvasRect();
     return {
       x: rect.left + ((screenPoint.x + 1) / 2) * rect.width,
       y: rect.top + ((1 - screenPoint.y) / 2) * rect.height,
@@ -3170,6 +3204,11 @@ async function main(): Promise<void> {
     if (viewDir.lengthSq() < 1e-6) return [0, 0, -1];
     viewDir.normalize();
     return [viewDir.x, viewDir.y, viewDir.z];
+  }
+  const viewPos = new THREE.Vector3();
+  function viewOrigin(): [number, number, number] {
+    camera.getWorldPosition(viewPos);
+    return [viewPos.x, viewPos.y, viewPos.z];
   }
 
   const audio = new AudioSystem(camera, (soundId) => assets.getSound(soundId)?.url);
@@ -3273,7 +3312,13 @@ async function main(): Promise<void> {
     audio.resume();
     prevBodyPos.clear();
     currBodyPos.clear();
-    sim = new PhysicsSim(lastExpanded, undefined, { meshGeometry });
+    // props' and buildings' mesh colliders are built only near the bodies this
+    // tab simulates (the server does the same around its foci): wasm memory
+    // never shrinks, and the whole world's colliders were most of it
+    // (?statics=0 builds them all at boot, as before: for memory A/Bs)
+    const streamStatics = new URLSearchParams(location.search).get("statics") === "0" ? undefined : { radius: 96 };
+    sim = new PhysicsSim(lastExpanded, undefined, { meshGeometry, ...(streamStatics ? { streamStatics } : {}) });
+    sim.updateStaticsAroundBodies();
     // fresh sim — clean out stale proxy anchors; proxies respawn on next input
     for (const id of [...netProxies]) despawnNetProxy(id);
     chunkManager.setSim(sim); // loaded chunks collide too
@@ -3288,6 +3333,9 @@ async function main(): Promise<void> {
     // alone in the room = fresh single-player run = clean session state;
     // with others present the state belongs to the ROOM and must survive
     netPresence?.resetSessionStateIfSolo();
+    landPortalArrival();
+    // the host's half of a portal trip, when this tab is the authority (a dedicated server does its own)
+    eventBus.on(PORTAL_EVENTS.travel, (payload) => void portalTravelLocal(payload as PortalTravel));
     startScripts();
     animations.setRunning(true);
 
@@ -3328,7 +3376,8 @@ async function main(): Promise<void> {
         field.splatAt(x, ground, z, 1, surfaceWeights, 0);
         let best = 0;
         for (let i = 1; i < field.surfaceCount; i++) if (surfaceWeights[i]! > surfaceWeights[best]!) best = i;
-        return field.recipe.surfaces[best]?.name ?? "dirt";
+        // a zone's own grass/cobble answers as the base surface it restyles
+        return field.recipe.surfaces[surfaceBaseIndex(field.recipe, best)]?.name ?? "dirt";
       }
     }
     const hit = sim?.raycast([x, y + 0.2, z], [0, -1, 0], 4);
@@ -3350,13 +3399,14 @@ async function main(): Promise<void> {
       // dev identity: single local player; the scene is the experience
       playerData: new PlayerDataService(playerDataBackend, {
         playerId: "local",
-        experienceId: store.doc.name,
+        experienceId: portalExperience ?? store.doc.name,
       }),
       registry: scriptRegistry,
       profiler, // per-script-name scopes under "scripts" (see RuntimeOptions)
       input,
       viewForward,
       viewDirection,
+      viewOrigin,
       worldToScreen,
       recenterView: () => cameraRig.returnToAim(),
       localPlayer: () => localPlayerId(),
@@ -3383,6 +3433,7 @@ async function main(): Promise<void> {
         modelLooks.dressPortrait(object, view.model, () => view.refit());
         return () => view.dispose();
       },
+      faceShot: (entityId) => faceShots.faceShot(entityId),
       setLight: setRuntimeLight,
       setModelLook: (entityId, look) => modelLooks.set(entityId, look),
       modelTables: (assetId) => modelLooks.tables(assetId),
@@ -3446,9 +3497,10 @@ async function main(): Promise<void> {
       const cam = entity.components["camera"] as CameraComponentData | undefined;
       if (cam?.active && (cam.rig?.mode === "follow" || cam.rig?.mode === "chase")) {
         const tag = cam.rig.targetTag;
-        const self = netSelfId ? netRuntimeDocs.get(netSelfId) : undefined;
+        const selfId = netWorld.selfId;
+        const self = selfId ? netRuntimeDocs.get(selfId) : undefined;
         followTargetId =
-          (self && self.tags.includes(tag) ? netSelfId : null) ??
+          (self && self.tags.includes(tag) ? selfId : null) ??
           Object.entries(lastExpanded.entities).find(([, e]) => e.tags.includes(tag))?.[0] ??
           [...netRuntimeDocs].find(([, e]) => e.tags.includes(tag))?.[0] ??
           null;
@@ -3543,6 +3595,9 @@ async function main(): Promise<void> {
       dataOnly.add("rigidbody").add("collider").add("joint");
     }
     const expanded = expandForRuntime();
+    // reconcile writes transforms into objects a frozen subtree would not
+    // re-read; thaw first, refreeze below once the batch is rebuilt
+    thawStaticEntities();
     const ok = reconcileScene(
       built,
       lastExpanded,
@@ -3574,6 +3629,7 @@ async function main(): Promise<void> {
     // inside the merge, once live — which is a far more confusing bug than the
     // merge being rebuilt slightly too often.
     rebuildStaticBatch();
+    if (playMode.get() !== "edit") freezeStaticEntities();
     return true;
   }
 
@@ -3615,6 +3671,196 @@ async function main(): Promise<void> {
    * before it can draw anything, and the view hold costs nothing if the ground
    * is already resident (the checks pass on the first frame and it clears).
    */
+  /** Save-before-spawn for a portal arrival: the carried state goes in before the scripts start, the body onto the anchor. */
+  function landPortalArrival(): void {
+    const pending = pendingPortalArrival;
+    if (!pending || pending.scene !== store.doc.name) return;
+    pendingPortalArrival = null;
+    const playerId = localPlayerId();
+    const state = netPresence?.netState;
+    if (!playerId || !state || !sim) return;
+    const records = { ...pending.records };
+    const arrival = resolvePortalArrival(records["portal"], pending.scene, lastExpanded.entities);
+    if (arrival) records["portal"] = arrival.next;
+    if (pending.sheet !== undefined && pending.sheet !== null && !state.set(`character/${playerId}`, pending.sheet)) console.warn("[portal] carried sheet refused");
+    for (const ns of PERSISTED_PLAYER_NAMESPACES) {
+      const value = records[ns];
+      if (value !== undefined && value !== null && !state.set(`${ns}/${playerId}`, value)) console.warn(`[portal] carried ${ns} refused`);
+    }
+    if (!arrival) {
+      console.warn(`[portal] no arrival anchor in ${pending.scene} — landing on the scene's own spawn`);
+      return;
+    }
+    sim.setPosition(playerId, arrival.position);
+    const object = built.objects.get(playerId);
+    if (object) {
+      object.position.set(arrival.position[0], arrival.position[1], arrival.position[2]);
+      object.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), arrival.yaw);
+      object.updateMatrixWorld(true);
+    }
+    portalArrivalYaw = arrival.yaw;
+    clientLog(`portal: landed in ${pending.scene}${arrival.anchor ? ` at ${arrival.anchor}` : ""} (${arrival.position.map((n) => n.toFixed(1)).join(", ")})`);
+  }
+
+  const waitFor = async (cond: () => boolean, timeoutMs: number): Promise<boolean> => {
+    const start = performance.now();
+    while (!cond()) {
+      if (performance.now() - start > timeoutMs) return false;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return true;
+  };
+
+  /** Swap the hosted scene under the curtain and resume play there (a portal trip, or a server transfer into another scene). */
+  async function travelToScene(scene: string, label: string): Promise<boolean> {
+    // the destination's loading art (docs/hosting.md → "Loading art"): read while the curtain closes
+    const textP = fetchSceneText(scene).catch(() => null);
+    const shown = portalCurtain.show(label);
+    const sceneText = await textP;
+    if (sceneText) prefetchedScene = { name: scene, text: sceneText };
+    const art = loadingArtOf(sceneText, (rel) => `/__hitreg/asset-file?file=${encodeURIComponent(rel)}`);
+    let progress = 0;
+    let goal = 0.15;
+    const step = (to: number): void => {
+      progress = Math.max(progress, goal); // the stage just finished: its share is done
+      goal = to;
+      if (art) portalCurtain.setProgress(progress);
+    };
+    // the line creeps toward the stage it is in and jumps when a stage completes (never backwards)
+    const creep = art ? setInterval(() => portalCurtain.setProgress((progress += (goal - progress) * 0.06)), 100) : null;
+    if (art) {
+      portalCurtain.setProgress(0);
+      await portalCurtain.setArt({ url: art.url, title: art.title ?? label.replace(/^(Entering|Leaving)\s+|…$/g, "") });
+    } else portalCurtain.setProgress(null);
+    await shown;
+    const done = (): void => {
+      if (creep) clearInterval(creep);
+    };
+    step(0.3);
+    portalSwitching = true;
+    try {
+      await switchScene(scene);
+    } finally {
+      portalSwitching = false;
+    }
+    if (store.doc.name !== scene) {
+      pendingPortalArrival = null;
+      prefetchedScene = null;
+      done();
+      portalCurtain.hide();
+      return false;
+    }
+    step(0.55);
+    await waitFor(() => !sceneSwitchPending, 15000);
+    step(0.85);
+    playMode.set("playing");
+    faceCameraToArrival();
+    await waitFor(() => travelView === null && travelHold === null, 30000);
+    done();
+    portalCurtain.setProgress(art ? 1 : null);
+    if (art) await new Promise((r) => setTimeout(r, 160)); // the full line is seen before the fade
+    // play start re-aligns the rig from the editor camera: turn it to the arrival heading again before the fade-in
+    faceCameraToArrival();
+    portalArrivalYaw = null;
+    portalCurtain.hide();
+    return true;
+  }
+
+  /**
+   * Point the play camera the way the traveller arrived facing: the anchor's
+   * yaw in local play (portalArrivalYaw); under a dedicated server (gateway
+   * transfer) the body's own heading, which the server spawned on the anchor.
+   */
+  function faceCameraToArrival(): void {
+    let yaw = portalArrivalYaw;
+    if (yaw === null) {
+      const id = localPlayerId();
+      const body = id ? built.objects.get(id) : null;
+      if (!body) return;
+      const q = body.getWorldQuaternion(new THREE.Quaternion());
+      const f = new THREE.Vector3(0, 0, 1).applyQuaternion(q);
+      yaw = Math.atan2(f.x, f.z);
+    }
+    // the rig's yaw is where the camera sits FROM the pivot: behind a body facing `yaw`
+    cameraRig.setOrbit(yaw + Math.PI, null);
+  }
+
+  // -- walking into a trigger portal: the screen darkens down the passage ----------------
+  let portalRampDoc: SceneDoc | null = null;
+  let portalRampList: { id: string; vol: NonNullable<ReturnType<typeof portalVolumeOf>>; fade: number }[] = [];
+  /** per portal: armed once the body has been clear of its fade zone; insideSince = ms the body has stood in the box */
+  const portalRampState = new Map<string, { armed: boolean; insideSince: number | null }>();
+  const portalRampVec = new THREE.Vector3();
+  function updatePortalRamp(): void {
+    if (playMode.get() !== "playing" || portalCurtain.visible) {
+      if (!portalCurtain.visible) portalCurtain.ramp(0);
+      return;
+    }
+    if (portalRampDoc !== lastExpanded) {
+      portalRampDoc = lastExpanded;
+      portalRampState.clear();
+      portalRampList = [];
+      for (const [id, e] of Object.entries(lastExpanded?.entities ?? {})) {
+        const script = e.components["script"] as { name?: string; params?: Record<string, unknown> } | undefined;
+        if (script?.name !== "portal") continue;
+        const vol = portalVolumeOf(script.params);
+        const fade = typeof script.params?.["fade"] === "number" ? (script.params["fade"] as number) : PORTAL_TRIGGER_DEFAULTS.fade;
+        if (vol && fade > 0) portalRampList.push({ id, vol, fade });
+      }
+    }
+    if (portalRampList.length === 0) return;
+    const pid = localPlayerId();
+    const body = pid ? built.objects.get(pid) : null;
+    if (!body) return portalCurtain.ramp(0);
+    const now = performance.now();
+    let alpha = 0;
+    for (const p of portalRampList) {
+      const portal = built.objects.get(p.id);
+      if (!portal) continue;
+      const local = portal.worldToLocal(body.getWorldPosition(portalRampVec));
+      const d = portalVolumeDistance([local.x, local.y, local.z], p.vol);
+      let st = portalRampState.get(p.id);
+      if (!st) portalRampState.set(p.id, (st = { armed: false, insideSince: null }));
+      // an arrival beside or inside the box is not walking into it: arm only once clear of the fade zone
+      if (d > p.fade + 0.5) {
+        st.armed = true;
+        st.insideSince = null;
+        continue;
+      }
+      if (!st.armed) continue;
+      if (d === 0) {
+        st.insideSince ??= now;
+        // refused (the trip never came): lift the darkness until the body walks out and in again
+        if (now - st.insideSince > 700) {
+          st.armed = false;
+          continue;
+        }
+      } else st.insideSince = null;
+      alpha = Math.max(alpha, 1 - d / p.fade);
+    }
+    portalCurtain.ramp(alpha * alpha * (3 - 2 * alpha));
+  }
+
+  async function portalTravelLocal(travel: PortalTravel): Promise<void> {
+    if (netServerUrl || portalCurtain.visible || playMode.get() !== "playing") return; // a server moves its own players
+    const state = netPresence?.netState;
+    if (!state) return;
+    const body = travel.actorId;
+    const next = portalDeparture(state.get(portalKey(body)), travel, { scene: store.doc.name });
+    const records: Record<string, unknown> = {};
+    for (const ns of PERSISTED_PLAYER_NAMESPACES) records[ns] = state.get(`${ns}/${body}`);
+    records["portal"] = next.record;
+    portalExperience ??= store.doc.name;
+    pendingPortalArrival = { scene: next.scene, sheet: state.get(`character/${body}`), records };
+    const params = (lastExpanded.entities[travel.portalId]?.components["script"] as { params?: { name?: string } } | undefined)?.params;
+    const where = params?.name || next.scene;
+    clientLog(`portal: ${travel.portalId} → ${next.scene}${travel.back ? " (back)" : ""}`);
+    if (!(await travelToScene(next.scene, travel.back ? `Leaving ${where}…` : `Entering ${where}…`))) {
+      console.warn(`[portal] could not open scene "${next.scene}"`);
+      playMode.set("playing");
+    }
+  }
+
   function holdForPlayLanding(): void {
     const playerId = localPlayerId();
     const object = playerId ? built.objects.get(playerId) : null;
@@ -3842,7 +4088,8 @@ async function main(): Promise<void> {
     return true;
   }
 
-  installLiveSync({
+  flushDeferredSceneEdit = installLiveSync({
+    isPlaying: () => playMode.get() === "playing",
     assets,
     registry,
     store,
@@ -3859,7 +4106,7 @@ async function main(): Promise<void> {
       lastWrittenScene = content;
     },
     getLastWrittenPrefab: () => lastWrittenPrefab,
-  });
+  }).flushDeferred;
 
   const devBridgeDeps = {
     registry,
@@ -4144,6 +4391,9 @@ async function main(): Promise<void> {
       renderer,
       chunkManager,
       propPool,
+      foliageLod,
+      culling,
+      terrainHeight: (x: number, z: number) => sampleTerrainHeight(x, z),
       waterWakeUniforms,
       // the wake height field: a probe can pin its centre or read its size
       get waterWake() {
@@ -4171,6 +4421,42 @@ async function main(): Promise<void> {
         return sim;
       },
       playMode,
+      // the play session's event bus and replicated state: a probe can send what a client sends (player.interact) and read records
+      get eventBus() {
+        return eventBus;
+      },
+      get netState() {
+        return netPresence?.netState ?? null;
+      },
+      sceneName: () => store.doc.name,
+      // the merged static meshes (stats: batches/merged/skipped) and the
+      // expanded doc they came from: a probe can see what never batched
+      get staticBatch() {
+        return staticBatch;
+      },
+      get expanded() {
+        return lastExpanded;
+      },
+      rebatch: () => rebuildStaticBatch(),
+      get staticBatchPending() {
+        return staticBatchPending;
+      },
+      // A/B switch for the play-mode freeze of static entity subtrees
+      freezeStatic: (on: boolean) => (on ? freezeStaticEntities() : thawStaticEntities()),
+      portalCurtain: () => portalCurtain.visible,
+      // the local body and a dev fast-travel to an exact point (map travel with a given height): tools/portal-play.mts
+      playerId: () => localPlayerId(),
+      object: (id: string) => built.objects.get(id) ?? null,
+      travelTo: (x: number, y: number, z: number): string => {
+        const id = localPlayerId();
+        if (playMode.get() !== "playing" || netServerUrl || !sim || !id) return "not in local play";
+        const pos: [number, number, number] = [x, y, z];
+        sim.setPosition(id, pos);
+        travelHold = { id, pos };
+        beginTravelView(x, z);
+        return "ok";
+      },
+      travelling: () => travelView !== null || travelHold !== null,
       scene: () => built.scene,
       // submit an ops batch exactly as the inspector does — a probe can then
       // test an edit's real path (live script-param patching during play)
@@ -4191,6 +4477,8 @@ async function main(): Promise<void> {
         clips: animations.clipNames(id),
       }),
       cloth: (id: string) => cloth.swayOf(id)?.toArray() ?? null,
+      // the animation system itself: a perf probe toggles `holdBones` for an in-session A/B
+      animations,
       info: () => JSON.parse(JSON.stringify(renderer.renderer.info)),
       graphStats: () => {
         const byType = new Map<string, number>();
@@ -4317,6 +4605,8 @@ async function main(): Promise<void> {
     netProxies.delete(id);
   }
 
+  /** Fixed steps since load: streamed static colliders are re-evaluated every 6th (10 Hz). */
+  let staticsStreamStep = 0;
   const loop = new FixedTimestepLoop({
     fixedUpdate: (dt) => {
       if (playMode.get() !== "playing" || !sim) return;
@@ -4374,6 +4664,11 @@ async function main(): Promise<void> {
       // COUNT and contact complexity, the readback with how many of those
       // bodies have render objects — they grow for different reasons and
       // have different fixes, so one "physics" number can't be acted on
+      if (++staticsStreamStep % 6 === 0) {
+        profiler.begin("physics.statics");
+        sim.updateStaticsAroundBodies();
+        profiler.end();
+      }
       profiler.begin("physics.step");
       sim.step(dt);
       profiler.end();
@@ -4398,12 +4693,28 @@ async function main(): Promise<void> {
       // per-script-name scopes come from inside the runtime (see its
       // `profiler` option) — this wrapper is what nests them under "scripts"
       profiler.begin("scripts");
+      // a dedicated server's client reads deadlines stamped on the server's clock
+      const hostMs = netPresence?.hostSimNow() ?? null;
+      if (hostMs !== null) scripts?.syncClock(hostMs);
       scripts?.fixedUpdate(dt);
       profiler.end();
       profiler.end(); // fixed
     },
     update: (dt, alpha) => {
       profiler.begin("update");
+      // Re-merge once models stop arriving. A streamed world may never reach
+      // zero loads (chunk props keep coming), so a pending merge also runs
+      // after a few seconds — otherwise every model that landed after the
+      // first merge stayed one draw per pass for the whole session.
+      if (staticBatchPending) {
+        const now = performance.now();
+        staticBatchPendingSince ??= now;
+        if (gltfLoadingCount() === 0 || now - staticBatchPendingSince > 4000) {
+          staticBatchPendingSince = null;
+          const endBatch = profiler.span("scene.staticBatch");
+          try { rebuildStaticBatch(); } finally { endBatch(); }
+        }
+      }
       profiler.begin("interpolate");
       // draw dynamic bodies between their last two sim states
       if (playMode.get() === "playing" && sim) {
@@ -4439,6 +4750,7 @@ async function main(): Promise<void> {
         );
       }
       syncRigTargetVisibility();
+      updatePortalRamp();
       // Foliage that blocks the shot dissolves (mesh source `cameraFade`).
       // Hooked here because this is where "who the camera is following" is
       // already resolved, and it is OFF in edit mode on purpose: dissolving
@@ -4454,8 +4766,20 @@ async function main(): Promise<void> {
       if (playMode.get() === "edit") {
         // held items in the editor: characters stand in their idle's first
         // frame and every bone-socket is resolved, so a sword can be placed
-        // in the hand without pressing play (see socket-preview.ts)
-        animations.poseStill();
+        // in the hand without pressing play (see socket-preview.ts). A
+        // selected held item stands its character in that weapon's stance
+        // idle instead (known from last frame's socket pass — a frame late, once)
+        const stances = editingPrefab.get() ? socketPreview.stanceClips() : new Map<string, readonly string[]>();
+        animations.poseStill(
+          stances.size === 0
+            ? undefined
+            : (id) => {
+                const wanted = stances.get(id);
+                if (!wanted) return null;
+                const have = animations.clipNames(id);
+                return wanted.find((c) => have.includes(c)) ?? null;
+              },
+        );
         socketPreview.update();
       }
       if (playMode.get() !== "playing") {
@@ -4463,8 +4787,15 @@ async function main(): Promise<void> {
       }
       if (playMode.get() === "playing") {
         profiler.begin("animations");
-        animations.update(dt);
+        const animationCameraId = scripts?.getActiveCameraId();
+        const animationCamera = (animationCameraId && built.cameras.get(animationCameraId)) ||
+          (!followTargetId && built.activeCamera) || camera;
+        animations.update(dt, animationCamera, followTargetId);
+        profiler.end();
+        profiler.begin("late-scripts");
         scripts?.lateUpdate(dt); // bone-attached items follow THIS frame's pose
+        profiler.end();
+        profiler.begin("cloth");
         try {
           cloth.update(dt);
         } catch (error) {
@@ -4600,6 +4931,16 @@ async function main(): Promise<void> {
       }
       foliageLod.update(renderCamera.getWorldPosition(foliageLodCameraPos));
       clusterLod.update(renderCamera, canvas.clientHeight || window.innerHeight);
+      profiler.end();
+      profiler.begin("culling");
+      {
+        // judged in the pixels actually rendered (pixelation lowers them), and
+        // the LOD system's projection is in CSS pixels, so convert for it
+        const cssHeight = canvas.clientHeight || window.innerHeight;
+        const renderHeight = renderer.renderHeight || cssHeight;
+        foliageLod.setMinScreenPx(CULL_MIN_SCREEN_PX * (cssHeight / renderHeight));
+        culling.update(renderCamera, renderHeight);
+      }
       profiler.end();
       profiler.begin("light-budget");
       lightBudget.update(built.scene, renderCamera);
@@ -4738,6 +5079,10 @@ async function main(): Promise<void> {
         s.meshes > 0
           ? `cluster LOD: ${s.meshes} meshes · ${s.clusters} clusters · ${s.triangles.toLocaleString()} tris · ${s.culled} culled\n`
           : "")(clusterLod.stats()) +
+      ((c) =>
+        c.units > 0
+          ? `culling: ${c.units} units · ${c.occluded} behind terrain · ${c.small} small · ${c.interior} interiors · ${tiers.culled} props · ${c.ms.toFixed(2)} ms\n`
+          : "")(culling.stats()) +
       `draw calls: ${info.render.drawCalls}  ·  tris: ${info.render.triangles.toLocaleString()}\n` +
       `geometries: ${info.memory.geometries}  ·  textures: ${info.memory.textures}\n` +
       // p95, not the mean: the HUD's job is to make a hitch visible, and a
@@ -4769,12 +5114,23 @@ async function main(): Promise<void> {
   // background throttling, so a tiny worker keeps the fixed loop stepping
   // while hidden; rAF takes back over seamlessly on return (the loop's
   // substep cap guards against catch-up spirals either way).
+  //
+  // Hidden, it steps the SIM ONLY (plus the net session and voice, which peers
+  // depend on) — never the render-side `update`. It used to run the whole
+  // frame, drawing the world at 20 Hz into a canvas nobody can see (never
+  // presented, while the page's own timers are throttled to ~1 wake-up a
+  // minute), and a tab switch could leave the tab frozen for good, editor UI
+  // included, until a reload.
   const tickerUrl = URL.createObjectURL(
     new Blob(["setInterval(() => postMessage(0), 50);"], { type: "text/javascript" }),
   );
   const bgTicker = new Worker(tickerUrl);
   bgTicker.onmessage = () => {
-    if (document.hidden) loop.tick(performance.now());
+    if (!document.hidden) return;
+    const dt = loop.step(performance.now());
+    if (dt === null) return;
+    netPresence?.update(dt);
+    comms.update();
   };
 }
 

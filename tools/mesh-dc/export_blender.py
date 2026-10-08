@@ -64,7 +64,7 @@ def orient_closed_solid(positions, triangles, label):
 
 def export_mesh_stamp(filepath, *, objects=None, anchor=(0,0,0), palette=None,
                       material_roles=None, group_for=None, component_filter=None,
-                      name='Blender mesh stamp', audit_path=None):
+                      name='Blender mesh stamp', audit_path=None, noise=None):
     """Export selected/tagged objects to validated Y-up mesh-stamp JSON.
 
     Object properties: dc_role='prop' excludes, dc_export=False excludes,
@@ -72,6 +72,12 @@ def export_mesh_stamp(filepath, *, objects=None, anchor=(0,0,0), palette=None,
     its palette role. Explicit call arguments override these defaults.
     component_filter(obj, bounds, material_names) can omit loose prop solids
     embedded in an older aggregate object. It cannot alter geometry.
+
+    Role noise: an object's dc_noise string (e.g. 'rock-wall', 'rock-roof',
+    'tread') is recorded per solid as solidNoise and keys the project's noise
+    table; untagged solids are keyed by their palette roles. Pass the table
+    (a dict, or a path to authoring/noise.json) as noise= to embed it in the
+    stamp, so every importer applies the same table (tools/mesh-dc/noise.mjs).
     """
     import bpy
     from mathutils import Vector
@@ -127,7 +133,8 @@ def export_mesh_stamp(filepath, *, objects=None, anchor=(0,0,0), palette=None,
             if group_name is None:
                 continue
             group = groups.setdefault(group_name, {'name':group_name,'positions':[], 'indices':[],
-                                     'solidTriangleCounts':[], 'triangleMaterials':[]})
+                                     'solidTriangleCounts':[], 'triangleMaterials':[], 'solidNoise':[]})
+            noise_key = obj.get('dc_noise') or None
             object_audit = {'object':obj.name, 'group':group_name, 'sourceSolids':len(parts), 'exportedSolids':0}
             for part_index, source_tris in enumerate(parts.values()):
                 used = sorted({i for tri in source_tris for i in tri.vertices})
@@ -156,6 +163,7 @@ def export_mesh_stamp(filepath, *, objects=None, anchor=(0,0,0), palette=None,
                 group['positions'].extend(round(c,9) for v in positions for c in v)
                 group['indices'].extend(i+offset for tri in triangles for i in tri)
                 group['solidTriangleCounts'].append(len(triangles))
+                group['solidNoise'].append(str(noise_key) if noise_key else None)
                 for tri in source_tris:
                     material = mesh.materials[tri.material_index] if tri.material_index < len(mesh.materials) else None
                     group['triangleMaterials'].append(material_index(material,obj.get('dc_material')))
@@ -164,12 +172,17 @@ def export_mesh_stamp(filepath, *, objects=None, anchor=(0,0,0), palette=None,
         finally:
             evaluated.to_mesh_clear()
     groups = [g for g in groups.values() if g['indices']]
+    for g in groups:
+        if not any(g['solidNoise']):
+            del g['solidNoise']
     report = {'sourceObjects':len(objects),'groups':len(groups), 'objects':audits,
               'excludedComponents':excluded_components,'closureFailures':failures,
               'closedSolids':sum(len(g['solidTriangleCounts']) for g in groups),
               'triangles':sum(len(g['indices'])//3 for g in groups),
               'anchorBlender':list(anchor),'axisConversion':'[x,y,z] -> [x,z,-y], after anchor subtraction',
-              'passed':not failures and bool(groups)}
+              'passed':not failures and bool(groups),
+              'roleNoiseTags':{'tagged': sum(1 for g in groups for k in g.get('solidNoise', []) if k),
+                               'keys': sorted({k for g in groups for k in g.get('solidNoise', []) if k})}}
     if audit_path:
         Path(audit_path).parent.mkdir(parents=True,exist_ok=True)
         Path(audit_path).write_text(json.dumps(report,indent=2),encoding='utf-8')
@@ -178,6 +191,10 @@ def export_mesh_stamp(filepath, *, objects=None, anchor=(0,0,0), palette=None,
     if not groups:
         raise ValueError('No structure solids survived the export filter')
     document = {'version':1,'name':name,'palette':palette,'meshes':groups}
+    if noise is not None:
+        if isinstance(noise, (str, os.PathLike)):
+            noise = json.loads(Path(noise).read_text(encoding='utf-8'))
+        document['noise'] = noise
     destination = Path(filepath)
     destination.parent.mkdir(parents=True,exist_ok=True)
     temporary = destination.with_suffix(destination.suffix+'.tmp')

@@ -1,0 +1,83 @@
+{
+  "size": 456,
+  "bleed": 2,
+  "bgLum": 236,
+  "keyColor": "#00ffff",
+  "groundFringe": 1,
+  "fitSearch": 1.6,
+  "slots": {
+    "#ff0000": {
+      "name": "head",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#00ff00": {
+      "name": "thorax",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "head"
+    },
+    "#008c00": {
+      "name": "abdomen",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#0000ff": {
+      "name": "leg1",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "thorax"
+    },
+    "#8000ff": {
+      "name": "leg2",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "leg1"
+    },
+    "#00008c": {
+      "name": "leg3",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "leg1"
+    },
+    "#ff8000": {
+      "name": "antenna",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#c0c060": {
+      "name": "mandible",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#46c846": {
+      "name": "abdomen-queen",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "abdomen"
+    },
+    "#e0e090": {
+      "name": "mandible-soldier",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "mandible"
+    },
+    "#a05a28": {
+      "name": "mandible-army",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "mandible"
+    }
+  }
+}

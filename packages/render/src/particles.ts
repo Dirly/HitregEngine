@@ -1,5 +1,6 @@
 import * as THREE from "three/webgpu";
 import { InstancedProps, applyInstancedProps } from "./instancing.js";
+import { worldDaylight } from "./daylight.js";
 import {
   attribute,
   cameraFar,
@@ -23,6 +24,8 @@ type N = any;
 
 /** Validated `particles` component data (schema lives in @hitreg/core). */
 export interface ParticlesData {
+  /** Time of day the emitter runs (rate scaled by darkness/daylight). */
+  when?: "always" | "night" | "day";
   emitting: boolean;
   rate: number;
   max: number;
@@ -59,7 +62,7 @@ export interface ParticlesData {
   snap?: number;
   /** PSX stepping: simulation ticks per second (0 = every frame). */
   frameRate?: number;
-  subUV?: { cols: number; rows: number; mode: "life" | "loop" | "random"; fps: number };
+  subUV?: { cols: number; rows: number; mode: "life" | "loop" | "random" | "row"; fps: number; firstRow?: number; rowCount?: number };
   softFade: number;
   stretch: number;
   /** What the quad points at — see the schema. Default "camera". */
@@ -643,6 +646,13 @@ class Emitter {
       this.spawnDebt = 0;
       return;
     }
+    // Idle: nothing alive and nothing to spawn (an ambient layer dialled to 0)
+    // costs no matrix walk and no loop. Bursts and splashes update their own transforms.
+    const rate = d.when === "night" ? d.rate * (1 - worldDaylight.value) : d.when === "day" ? d.rate * worldDaylight.value : d.rate;
+    if (this.alive === 0 && (!this.emitting || !(rate > 0.001))) {
+      this.spawnDebt = 0;
+      return;
+    }
     this.group.updateWorldMatrix(true, false);
     // simulation time this frame: the whole frame, or whole PSX ticks (often 0)
     const dt = this.stepped(frameDt);
@@ -744,8 +754,8 @@ class Emitter {
       }
     }
 
-    if (this.emitting && d.rate > 0) {
-      this.spawnDebt += d.rate * dt;
+    if (this.emitting && rate > 0) {
+      this.spawnDebt += rate * dt;
       const births = Math.floor(this.spawnDebt);
       if (births > 0) {
         this.spawnDebt -= births;
@@ -949,6 +959,15 @@ class Emitter {
     const frames = this.subFrames;
     if (sub.mode === "random") return Math.floor(seed * frames) % frames;
     if (sub.mode === "loop") return Math.floor(age * sub.fps) % frames;
+    if (sub.mode === "row") {
+      // a variant per particle (its row), animated along that row from its own phase
+      const cols = Math.max(1, sub.cols);
+      const first = Math.min(Math.max(0, sub.firstRow ?? 0), Math.max(1, sub.rows) - 1);
+      const rows = Math.max(1, Math.min(sub.rowCount || Infinity, Math.max(1, sub.rows) - first));
+      const row = first + (Math.floor(seed * rows) % rows);
+      const col = Math.floor(age * sub.fps + seed * 977) % cols;
+      return row * cols + col;
+    }
     return Math.min(frames - 1, Math.floor(t * frames));
   }
 }
@@ -975,6 +994,8 @@ class ParticleBatch {
   private capacity = 0;
   readonly emitters = new Set<Emitter>();
   private disposed = false;
+  /** A `texture` sheet is still loading (nothing is drawn until it is in). */
+  private awaitingTexture = false;
 
   constructor(
     private readonly data: ParticlesData,
@@ -994,6 +1015,7 @@ class ParticleBatch {
     if (sprite) this.material.map = sprite;
     const textureUrl = data.texture ? resolveTexture?.(data.texture) : undefined;
     if (textureUrl) {
+      this.awaitingTexture = true;
       // swap in async — WebGPU crashes on textures whose image is still null
       new THREE.TextureLoader().load(
         textureUrl,
@@ -1002,6 +1024,7 @@ class ParticleBatch {
             texture.dispose();
             return;
           }
+          this.awaitingTexture = false;
           texture.colorSpace = THREE.SRGBColorSpace;
           if (data.filter === "nearest") {
             texture.magFilter = THREE.NearestFilter;
@@ -1012,7 +1035,11 @@ class ParticleBatch {
           this.buildShader();
         },
         undefined,
-        (error) => console.warn(`[particles] texture failed to load: ${textureUrl}`, error),
+        (error) => {
+          // a missing sheet falls back to the stand-in sprite rather than vanishing
+          this.awaitingTexture = false;
+          console.warn(`[particles] texture failed to load: ${textureUrl}`, error);
+        },
       );
     }
     this.mesh = this.allocate(16);
@@ -1132,6 +1159,9 @@ class ParticleBatch {
       count += emitter.write(matrices, shader, colors, count);
       root ??= emitter.sceneRoot();
     }
+    // A textured look draws nothing until its sheet has loaded: the stand-in
+    // sprite played through a sub-UV grid is a hard white box on screen.
+    if (this.awaitingTexture) count = 0;
     mesh.instanceCount = count;
     // The batch lives in the scene its emitters do (or under the host's own
     // root — the VFX system keeps its batches beside its other modules).

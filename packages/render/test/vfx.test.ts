@@ -112,7 +112,7 @@ describe("VfxSystem", () => {
     const cam = new THREE.PerspectiveCamera();
     const spell = generateSpell({
       seed: 3,
-      element: "fire",
+      element: "destruction",
       archetype: { kind: "projectile", range: 10, speed: 10, windup: 0.3, radius: 1.5 },
       catalog: {},
     });
@@ -211,6 +211,92 @@ describe("VfxSystem", () => {
     let spread = 0;
     for (let i = 0; i < pos.count; i++) spread = Math.max(spread, Math.abs(pos.getY(i)));
     expect(spread).toBeGreaterThan(0.1);
+    sys.dispose();
+  });
+
+  it("a decal drapes over the ground and lives its fade-out tail before retiring", () => {
+    const sys = new VfxSystem();
+    const scene = new THREE.Scene();
+    const cam = new THREE.PerspectiveCamera();
+    const warn = console.warn;
+    console.warn = () => {}; // no sheet resolver: the decal warns and stays hidden
+    const f: VfxFrame = { ...frame(), ground: (x) => x * 0.2 };
+    const handle = sys.play(effect([{ kind: "decal", sheet: "none", size: 4, duration: 1, fadeOut: 0.5 }]), f);
+    sys.update(0.05, cam, scene);
+    console.warn = warn;
+    let decal: THREE.Mesh | undefined;
+    scene.children[0]!.traverse((o) => {
+      if ((o as THREE.Mesh).isMesh && (o as THREE.Mesh).geometry.type === "PlaneGeometry") decal = o as THREE.Mesh;
+    });
+    const pos = decal!.geometry.attributes["position"] as THREE.BufferAttribute;
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (let i = 0; i < pos.count; i++) {
+      lo = Math.min(lo, pos.getZ(i));
+      hi = Math.max(hi, pos.getZ(i));
+    }
+    // a 4 m mark on a 0.2 slope rises 0.8 m across its width
+    expect(hi - lo).toBeCloseTo(0.8, 1);
+    sys.update(1.2, cam, scene); // past its life, inside the fade
+    expect(handle.done).toBe(false);
+    sys.update(0.4, cam, scene);
+    expect(handle.done).toBe(true);
+    sys.dispose();
+  });
+
+  it("a volley flies one travel and lands one impact per shot; a seeker curves onto its target", () => {
+    const sys = new VfxSystem();
+    const scene = new THREE.Scene();
+    const cam = new THREE.PerspectiveCamera();
+    const spell = generateSpell({
+      seed: 21,
+      element: "water",
+      archetype: { kind: "projectile", range: 10, speed: 20, windup: 0.1, volley: { count: 4, interval: 0.1, spread: 10 } },
+    });
+    const impacts: number[] = [];
+    const f: VfxFrame = { ...frame(), origin: [0, 0, -10], target: [0, 1, -10], direction: [0, 0, -1] };
+    const handle = sys.playSpell(spell, f);
+    // count impact plays by watching live instances rise after the flights end
+    for (let t = 0; t < 3; t += 0.05) {
+      sys.update(0.05, cam, scene);
+      impacts.push(sys.stats().live);
+    }
+    expect(Math.max(...impacts)).toBeGreaterThan(0);
+    sys.update(4, cam, scene);
+    expect(handle.done).toBe(true);
+
+    // a seeker aimed off to the side still arrives at a target standing elsewhere
+    const seeker = generateSpell({ seed: 5, element: "holy", archetype: { kind: "projectile", range: 12, speed: 12, windup: 0.1, homing: { turnRate: 360, acquire: 20, cone: 60 } } });
+    const target = new THREE.Object3D();
+    target.position.set(6, 1, -8);
+    scene.add(target);
+    const h2 = sys.playSpell(seeker, { ...frame(), origin: [0, 0, -12], direction: [0, 0, -1], targetObject: target });
+    let t = 0;
+    while (!h2.done && t < 6) {
+      sys.update(0.02, cam, scene);
+      t += 0.02;
+    }
+    expect(h2.done).toBe(true);
+    sys.dispose();
+  });
+
+  it("launch() drives a shot from outside and lands it on impact()", () => {
+    const sys = new VfxSystem();
+    const scene = new THREE.Scene();
+    const cam = new THREE.PerspectiveCamera();
+    const spell = generateSpell({ seed: 8, element: "destruction", archetype: { kind: "projectile", range: 10, speed: 20, windup: 0, volley: { count: 3, interval: 0.1, spread: 6 } } });
+    const handle = sys.playSpell(spell, frame(), { manual: ["travel", "impact"] });
+    const shots = [0, 1, 2].map((i) => handle.launch([i, 1, 0], [0, 0, -20]));
+    sys.update(0.05, cam, scene);
+    const flying = sys.stats().live;
+    expect(flying).toBeGreaterThan(0);
+    for (const s of shots) s.setPath([0, 1, -3], [0, 0, -20]);
+    shots[0]!.impact([0, 0, -5]);
+    shots[1]!.impact();
+    shots[2]!.end();
+    sys.update(5, cam, scene);
+    sys.update(5, cam, scene);
+    expect(handle.done).toBe(true);
     sys.dispose();
   });
 });

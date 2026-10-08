@@ -5,6 +5,15 @@ lists live in the spec (`animator` component, `third-person-controller`
 params) — read those for exact names, and this for what will silently go
 wrong.
 
+Distance-based pose evaluation is opt-in on `animator` (see the generated spec).
+Use it for background residents: stable looping poses can update less often
+while their playback clock continues. Keep combat layers, one-shots and transitions
+at full rate so completion events and contact timing retain their existing behavior.
+The runtime does this automatically for opted-in models, and protects the followed
+character. Hosts pass the camera and followed entity to `AnimationSystem.update`;
+hosts that omit camera context retain full-rate evaluation. Physics and AI updates
+are independent of the pose schedule.
+
 ## Getting clips onto a character
 
 The engine loads **GLB / self-contained glTF only**, and a character needs its
@@ -242,6 +251,39 @@ like a tray while walking. `bone-socket` takes a second pose (`altBone`,
 `altOffset`, `altRotationDeg`) eased in while `altWhen` holds (a userData key on
 the character — `combatUntil` for the shield); `fit-grip --grip center --bone
 <Hand> --as alt --when combatUntil` computes it, and `pose-sheet --alt` shows it.
+
+**A swing faces forward.** The Mixamo weapon packs cut their attacks out of
+spinning sequences: `Sword_Attack3` opened with the chest 160° from forward,
+`SwordShield_Attack3` turned 250°, `GreatSword_Attack3` 300°, `Axe2H_Heavy`
+nearly 600°. Standing, that is a pirouette on the spot; moving, the swing rides
+the upper-body layer with its torso anchored to the clip's own hips, so the
+torso spins over legs that keep walking. Derek: "some swings make the torso do
+a 360 which looks very very odd … especially while moving". A selector's
+`@yaw60` keeps the chest within 60° of forward by turning the HIP about world
+up, per key: a spin (the chest ends 150°+ from where it started) becomes a
+sweep across ±36° in the same direction, paced by the original's progress; any
+other turn is soft-clamped (untouched up to 60% of the limit). The arms keep
+what they do relative to the chest, so the blade path is the clip's own minus
+the pirouette. The rig-map `weapons` preset carries it on every swing that
+turned past the limit, and consecutive combo steps now hand over near the same
+facing (one sweep ends where the next begins) instead of snapping 130°.
+
+A held GUARD squares up instead: `@yaw10@arms` on `TwoHanded_Block` /
+`_Block_Hit` turns the chest to face forward while the clavicles take half the
+counter-turn and the upper arms the rest, so the blade stays where the parry
+put it and the SHOULDERS do the reaching; the neck keeps its facing, or the
+head would inherit the turn and look 30° off to the side. (Derek on the
+two-handed parry: "the torso doesnt twist to go into position and its moreso
+the shoulders".) Stance idles that stand bladed on purpose (`SwordShield_Idle`,
+`SwordShield_Block`) are left alone.
+
+`tools/clip-yaw.mjs <glb>` reports every clip's chest yaw (lo, hi, net, and
+chest-vs-hips twist; SPIN flags). `--preset combat+weapons --write` applies the
+preset's `@yaw` modifiers to an existing GLB by rewriting only those bones'
+rotation keys in the binary chunk, so nothing else in the file changes; a
+re-bake applies them itself. The MMO player draws `human-body.glb`, which
+carries its OWN copy of the clips (reskin copies them): patch it as well as
+`human.glb`.
 
 **Look at a bake with the weapons in hand before shipping it.**
 `tools/pose-sheet.mjs` renders clips as a contact sheet — one row per clip per
@@ -537,6 +579,23 @@ Two things that are deliberately NOT clever:
 `--gait-seed` jitters stride, lift, duty, clearance and spine flex a few percent
 per bake, so two mobs built from one mesh do not move identically.
 
+**Hit reactions are generated too, on every autorig bake** (no donor we use has
+one: the dog has no hit clip). `Hit` (0.4 s) and `Hit_Heavy` (0.9 s) are the
+Idle's pose, frame by frame, struck from the front: the hip recoils back and
+down and pitches nose-up, the trunk (spine up to the bone the forelegs hang
+from) takes most of that pitch back and twists, the neck (spine past it) and
+the bone called `Head` jerk back and up a beat later, the left forepaw lifts
+(heavy: steps back and up again, the right one braces out, a sideways sway and
+a head shake), and every foot is put back where the Idle had it by damped CCD
+(the leg's root bone — shoulder, pelvis — is left alone, so a welded chest
+holds: the wolf's chest box measures x1.45 / x1.56, under its Run's x2.54).
+Rotations are applied in WORLD axes, since the donor's bone frames are its own.
+The skull is `Head` by name, never the path's last bone: the dog's `Nose` is a
+`--skip` bone left at the donor's position, and turning it swings the snout
+about a point outside the head. Made before `--dangle`, so a hung tail swings
+through them; left out of the clip-speed measurement (`--hits none` skips them,
+`--hit-scale f | Hit=f,Hit_Heavy=f` tones a stiff neck down).
+
 ### When the donor's anatomy doesn't transfer
 
 Borrowing a library borrows an anatomy of motion along with it, and some of it
@@ -582,6 +641,278 @@ solving it once costs nothing at runtime, on every client and on a headless
 server with no renderer at all. What it cannot do is react to a turn the
 animation does not contain; if that matters, this becomes the resting shape and
 a live spring layers over it.
+
+### Feet on the floor, heads that hold, deaths that fall (2026-10-06)
+
+Derek's review of the dog-donor mammals — the pig's ears bouncing and
+stretching the top of its head, the rhino and bison half in the ground, the
+lions and the bear "so bad" — traced to a handful of general faults, all fixed
+in `autorig` itself rather than per animal:
+
+- **Ears and the snout rode an unfitted bone.** The dog's `Ear_*` and
+  `Headtip` are children of its `Nose`, which the jaw skip left at the
+  DONOR's position, outside the target's head. Ear bones then took the top of
+  the skull (220 of the pig's head vertices) and `Headtip` the snout, all
+  swinging about that outside point. Now: `Ear*` bones are skipped like the
+  jaw (`--keep-ears` to allow a mesh with separate flopping ears), anything
+  parented under a skipped bone is skipped too, and a skipped bone inside the
+  body is still *fitted* — only a top-level anchor (`root`) stays put. Ears
+  modelled into the head ride `Head`; a separate ear piece is `--bind`'d.
+- **The fit pose bent the knees.** Every mesh is modelled standing on straight
+  legs; fitted in a walk's average (knees bent) every leg came out too long,
+  and every clip that straightened one drove the foot through the floor — the
+  rhino's Idle 53 cm deep, the lion's 29. The default reference is now the
+  IDLE's average for the legs and trunk, with the neck, head and tail taking
+  their *world* rotation from the walk's average (an alert idle holds the head
+  high and the tail up; a level-modelled head bound to that plays star-gazing).
+  The symmetry pass now centres any bone *named* for the midline (spine, neck,
+  head, tail) however far the idle swung it.
+- **Grounding pass, every clip** (`--ground-fix none` to skip). Re-sampled at
+  30 fps (60 for a cycle under 1.2 s), frame by frame: each foot's SOLE (the
+  rest-floor vertices on that leg) is given the height the donor's same foot
+  has above its floor, scaled by leg length; the hips move by the mean error;
+  each leg is solved to its height by IK of the bones above the ankle (the
+  ankle and foot keep the clip's world orientation, no joint turning more than
+  20° from the clip — a sitting thigh carries rump flesh); anything still under
+  the floor lifts the body. Generated clips keep their own arcs and are offset
+  so each foot's lowest point is the floor; hits and attacks put planted feet
+  on the floor and leave a lifted paw lifted; a Death matches the donor's
+  lowest point. Result on all 17 mammals: lowest point ≥ -1 cm in every frame
+  of every clip (it was -55 cm). Never sample clips with a mixer after
+  `skeleton.pose()`: three's PropertyMixer only rewrites a value that CHANGED,
+  so a constant track (the dog's Hips through Howl) is lost after frame one —
+  `sampleClip` reads the tracks directly.
+- **Midline weights.** A chest or belly vertex between a pair of legs is
+  nearest the two legs and took them 50/50 with nothing on the spine; legs
+  folding together dragged it out like taffy (the bison's chest x18 in its
+  death). Whatever a vertex holds of both sides of a limb pair moves to the
+  central bone they hang from (`--no-midline`).
+- **Generated gaits are re-solved analytically.** `_gait.mjs` CCDs each frame
+  from rest, toes and all: it curls paws flat back in swing and now and then
+  lands on the other branch (the bear's foreleg and shoulder spun 172° in one
+  frame of its gallop). Autorig stops the gait at the ANKLE (`--gait-ankle
+  none` to undo), then re-solves every leg at the gait's own keys with
+  two-bone IK in the rest knee's plane (an anatomical elbow-back/stifle-forward
+  pole, with some up in it, when the leg was fitted straight), the paw riding
+  the shin. New footfall tables `lumber` (a bear's or boar's short heavy step)
+  and `prowl` (a big cat's long, low, level stride); `--gait-sway <deg>` rolls
+  the hips and shoulders once per stride.
+- **`--death collapse`** replaces the dog's stage death (rears up, goes over
+  backwards) with a generated one: forelegs buckle, hindquarters follow, the
+  body rolls onto its side, the head and tail go down last, grounded every
+  frame. **`--attack gore`** generates the attack (`Bite`) for a horned or
+  tusked animal: hips drive forward, the head drops and thrusts, then hooks up.
+
+Recipes in use: dogs, hyena, wolf, rat, horse, elk, deer, sheep keep the dog's
+clips (+ collapse for the hoofed); pig and bear `Walk=lumber,Run=gallop`
++ sway + collapse (+ gore for the pig); bison and rhino also generate their
+Idle (`Idle=idle`) and gore; the lion `Walk=prowl,Run=gallop`, `--belly
+between` (its belly was measured on the floor — the knee-at-the-hoof fit),
+collapse, and an idle head held up with `--damp`. Checked with a probe of
+every clip (lowest vertex per frame, lowest per foot, worst edge stretch per
+part) and the `--render` sheets, which now draw the floor line and paint
+anything below it RED.
+
+**Same day, corrected** (Derek: "the wolf animation is all forms of fucked…
+all the hoofed animals are also messed up"). Two of the changes above broke
+borrowed gallops and are reversed: the fit is back in the WALK's average
+(fitted in the idle, every dog Run flung the hind legs up level behind the
+body), and grounding a BORROWED clip now solves only the feet the donor has
+planted — a foot the donor has in the air keeps the donor's leg, carried by
+the hip shift (frames with no foot down take the shift interpolated from their
+neighbours; `--ground-swing solve` is the old behaviour). What the walk fit
+leaves under the floor the planted-foot IK takes out. The rule for any change
+here: render every clip against the last good GLB before shipping; no clip may
+look worse. Also: `--call roar[:Clip]` generates the call clip as a STANDING
+roar (legs planted, chest up, head raised and thrust forward) — the dog's
+Howl sits the animal down, which suits canines only; it is used for the lion,
+bear, pig, sheep, goat and every hoofed animal. A generated gait's `clipSpeeds`
+entry is its built speed, not the slip measurement (which read a gallop's paw
+roll as 1.86 m/s on a 4.46 m/s pig). The pig's gallop runs with
+`--gait-ankle none` (the ankle re-solve folded its hind legs under the belly).
+
+## When no donor fits: `legrig`
+
+`autorig` needs a donor with the same body plan. There is no eight-legged
+donor, and a sprawler is not a dog: fitted to `Dog.glb`, the alligator's
+legs (which stick out sideways and bend at an elbow pointing up) barely moved,
+and its shoulders sheared. `pnpm -F playground legrig` reads the skeleton off
+the mesh instead and GENERATES the clips:
+
+```
+pnpm -F playground legrig --creature spider \
+  --texture ../../tools/atlas/out/spider/<theme>/atlas-seamblend.png \
+  --out projects/<game>/assets/models/mmo/mobs/spider.glb --render /tmp/rig
+```
+
+- **The mesh is the unwrap's `-parts.obj`.** The creature is already cut into
+  named parts for its atlas (docs/mob-atlas.md), so the rig reuses that cut:
+  `trunk` parts are skinned along a chain of stations down the body axis, and
+  every leg part (both sides, from `mirrorCopy`) becomes a two-bone chain:
+  root where it meets the body, knee off the root-foot line (toward the
+  `pole`: `"out"` for a sprawler's elbow, `"up"` for a spider's apex), foot at
+  the far end. A creature is a `CREATURES` entry at the top of the tool, like
+  an unwrap recipe.
+- **Locomotion is two-bone IK on a footfall table**, not keyed rotations: each
+  foot drags back through stance and lifts forward through swing, so feet stay
+  planted and the printed `clipSpeeds` is exact, `stride / (duty x period)`.
+  Phases are per leg (`phase`): diagonal pairs for the alligator, an
+  alternating tetrapod (L1 R2 L3 R4) for the spider. A sprawler's trunk also
+  swings in a travelling S-wave (`sway`).
+- Clips: `Idle`, `Walk`, `Run`, `Bite` (the name `mobBite` plays) and `Death`
+  (a roll onto the back, legs curled over the belly; play it once and clamp).
+- The output is an UBERMESH like the unwrap's: part index in TEXCOORD_1 and
+  the unwrap's `-parts.json` table in the mesh node's extras, so an optional
+  part (the alligator's `Gator_Sail`) is shown or hidden by `partMask` /
+  a look's `parts` on the animated mob, one draw either way.
+- Output faces +Z, in metres (`length` or `span` in the entry), feet on y = 0,
+  the same contract as `autorig`. `--render` writes a side + three-quarter
+  contact sheet per clip; look at Walk and Death before shipping.
+
+What the later creatures added (dragon, lion, goat, ant, trout):
+
+- **`pole: "rest"`** bends each knee the way the MODEL'S knee already bends
+  (the knee's offset off the root-foot line, carried with the body). Use it for
+  any upright quadruped; `"out"` is only right for a true sprawler.
+- **`rigid: { part: bone }`** binds a piece whole to one bone: horns, eyes,
+  ears, a mane, back spikes, fins. Left on the trunk chain, a horn that reaches
+  back past the skull bends with the neck.
+- **`wings: [{ part, name, parent }]`** builds a two-bone wing (root, half way,
+  tip) that the clips raise, flap and fold.
+- **The seam weld.** The parts were cut out of ONE shell, so a body vertex and
+  a leg vertex share every position along the cut. Weighted separately they
+  tear into slivers the moment a leg moves; the tool gives every vertex at a
+  shared position the limb's weights (`welded N seam vertices`), and a leg's
+  root is fully the body's.
+- **No legs is allowed.** A fish is `legs: []` with the trunk wave as its
+  swim: Walk and Run carry only `sway`, and `stride / duty` sets the speed it
+  prints.
+- **`alternatives` and `profile`.** A `scaledCopy` part (the ant queen's
+  gaster) is listed in `alternatives` so it does not count toward the size the
+  creature is scaled to, and `profile` names the parts the trunk's length and
+  station heights are measured on (also what keeps the alligator's sail from
+  lifting its spine).
+- **`plan: "quad"`** (the dragon): the body moves with the legs — hips and
+  chest pitch against each other (twice a stride walking, once galloping), the
+  weight rolls side to side, the neck nods against the head, the tail follows a
+  beat behind — plus a per-gait `phase` (a gallop: fronts, then hinds), and
+  Idle / Bite (coil and strike) / Roar (rear up, wings spread) / Death (onto
+  the side). `blend: [{ part, axis, bones }]` weights a part along its own axis
+  through a chain (the dragon's upright neck: chest → neck → head); left on the
+  body's length axis it moved as one block and tore at both ends.
+- **Smooth shading.** The mesh is a triangle soup, so three's
+  `computeVertexNormals` gave every face its own normal and the animal read as
+  a faceted cage (Derek). Normals are averaged over every face meeting at a
+  position within `crease` degrees (default 100: box-section legs have 90° corners; 60 and 80 left low-poly
+  corners faceted), which also welds the shading across part seams. One
+  helper, `tools/_normals.mjs`, serves legrig AND autorig (`--crease`):
+  autorig used to keep the unwrapped OBJ's flat normals, so every Dog-donor
+  mammal shipped faceted. "All mobs need smooth shading" (Derek, 2026-10-06).
+- **Dog-shaped animals go to `autorig` after all.** The lion and the goat
+  looked stiff on generated gaits; on `Dog.glb`'s library (`--clips
+  "Idle=Idle_Alert,Walk,Run,Bite,Death,Roar=Howl"`) they move like animals.
+  `autorig` now takes an unwrap's `-parts.obj`: `--bind Part=Bone` pins a
+  piece whole to one bone (`Lion_Mane=Head`, `Goat_Horn=Head`), and the part
+  index (TEXCOORD_1 + `parts`) is carried through so the mane or the horns
+  still toggle by mask. `--dangle --dangle-stiffness 1.2 --dangle-gravity 9`
+  hangs a lion's tail the dog carries straight out. A long neck does not fit
+  the dog (the dragon's collapsed into the dog's short neck): that one stays on
+  `legrig`.
+- **`chains`: a part that bends along its own curve** (the scorpion's tail runs
+  back, up and over; its arms): `{ part, name, parent, bones, sides }` lays
+  bones down the part by distance ALONG THE SURFACE from where it meets the
+  body, so a curled tail is segmented down its curl, not by height. `sting`
+  (arachnid) uses a tail chain and arm chains: Bite is a tail strike SOLVED so
+  the stinger lands at `reach`/`height` past the body's front with the body
+  lunging and arching, Heavy is a claw seize plus two stabs, Pinch claw snaps,
+  and Death goes belly-down with the tail and claws laid limp along the ground
+  (`flatten`). A scorpion must never die on its back: it rests on its raised tail.
+- **Flying insects' legs fold** (`fold: [out, up, fwd]` per leg, leg lengths from
+  the leg root in the body's frame, `pole: "body"`): IK tucks them under the
+  thorax with a little dangle (`legSwing`), `biteFold` reaches them forward,
+  `deadFold` curls them on the back. Split a one-part leg set per pair with
+  `regions` by shell. An abdomen or long tail as several trunk links `curl`s,
+  `pump`s and sways (`tailSway`) per gait; `flight.deadCurl` sets how it lies
+  dead. `--full` renders a flyer's sheets over the whole clip, not one wing beat.
+- **Stride is capped by the leg.** A stride longer than the leg can reach
+  stretches the hip into slivers; the lion settled at about two-thirds of its
+  leg length for Walk.
+- **Check the found joints with `--verbose` before tuning motion** (2026-10-06). The
+  automatic search put the gator's elbow 0.12 m from its shoulder (the whole leg
+  swung from the shoulder: the run's pinch) and the dragon's leg ROOT at its toes
+  (the real feet rode the body). Place them by hand: `rootAt` / `kneeAt`
+  `[out, up, fwd]` in output metres, `root: "top"` for hanging legs, `foot: f` to
+  keep a foot flat, `kneeBand` to soften a thick elbow. A stride longer than the
+  leg's reach goes straight and skates: shorten stride AND period together so
+  `clipSpeeds` stays the same.
+- **`girdle` (sprawl gaits): the trunk bends with the legs.** Shoulders and hips
+  yaw so the reaching leg's shoulder goes forward with it (the lizard's standing
+  S), `roll` onto the stance legs; the free `sway` wave had turned the shoulders
+  against the stride. Gator run shoulder stretch went x4.06 -> x1.78.
+- **`groundIgnore: [parts]`** — grounding (every `ground()`, every Death) ignores
+  these: a gator on its back rests on its back with the sail through the ground,
+  a dead dragon on its belly with wings/spikes/horns wherever they fall.
+- **`plan: "serpent"`** (the cobra): the body is one `chains` part (36 links,
+  `band: 0.5`) laid along a world POLYLINE by `follow` (link by link at its own
+  length, level-framed so it never rolls). Idle/Bite/Hit keep the modelled coil
+  planted (FABRIK on the front `anchor` links only); Walk/Run follow a sine track
+  that scrolls back at exactly the clip speed (stride = wavelength), so contacts
+  never slide sideways; Death drops the hood beside/over the coil and searches
+  the head down onto the ground. `junction` blends a ragged upright part into its
+  chain, `hood` adds a leaf bone with a SCALE track (the flare), `stiffTip` keeps
+  a hooked tail tip's modelled bend.
+- **Walker wings fold** (`quad` plan): `wings[].fold` dirs + normal in the body
+  frame; `wingFold(k)` from the model's raised wings, `wingSplay(s)` lays dead
+  wings out over the ground. Quad Death = belly crash with neck/tail searched
+  down onto the ground; biped Death = topple onto the side with the legs folded
+  in the body's frame and neck/tail searched down.
+- **Every plan gets `Hit` (0.4 s flinch) and `Hit_Heavy` (0.9 s stagger).**
+  Both are the plan's own Idle (`idlePose`) struck from the front: the root
+  recoils back a few % of the trunk span, the hub pitches nose-up (the tail's
+  base link takes the pitch back so a ground-lying tail is not driven in), the
+  front trunk compresses and twists, neck and head jerk back and up a beat
+  later, the tail whips, and the legs are re-solved onto `foot0`. Per plan:
+  quad/sprawl lift a front paw (heavy: a step back and up again, the other
+  forefoot braced, a sideways sway and a head shake); arachnid pulls its legs
+  in pair by pair; biped rocks back on its heels (`footPitch` < 0) with a
+  stumble step on the heavy one; a legless sprawl swims it off (sideways jerk,
+  C-bend, tail kick, a roll on the heavy one); a flyer jolts back, drops and
+  misses a beat (wings mixed toward a stalled pose). A spec's `hit` tunes it:
+  `{ style: "strike" }` gives a legless creature that rears (the cobra) the
+  walkers' recoil instead of the swim; `light` / `heavy` override the numbers.
+  combat-actor plays them as `hitClip` / `staggerClip` (below, "Hit reactions").
+
+- **Deaths turn on the body's own centre** (2026-10-06, Derek: "shouldn't it be a
+  turn on their center axis instead of the off center roll?"). The root sits on
+  the floor under the body, so every Death that rolled the root (sprawl and
+  arachnid flips, quad crash, biped topple, flyer fall, the sting death, the
+  sprawl Heavy's barrel roll) swung the animal out sideways about a point on
+  the ground — the T-rex's trunk travelled 3.4 m. legrig's `pivotRoot()` moves
+  the root so the trunk centroid (on the midline) stays put after any root
+  rotation, and grounding settles it — continuously through a topple or roll,
+  so it never hangs in the air; the old hand lifts (+0.32 m arachnid, +0.15 m
+  sprawl, the quad's 0.12 m sideways shift) are gone. autorig holds the BODY
+  part's centre (else the hips+spine vertices) over its footprint in every
+  Death, borrowed or `collapse` (`--death-hold none` to skip). Max trunk drift
+  now: wolf 0.9 cm (was 32), shark 1.4 (55), alligator 9 (44), T-rex 45 (344;
+  the rest is its scripted stagger step on a 12 m animal).
+- **Antennae are never legs.** A leg part cut with the antennae in it (the
+  hornet's Hornet_Leg holds both) gets a `regions` entry re-tagging the antenna
+  shells (`as: "Hornet_Antenna"`) plus `rigid` on the head; left in a leg
+  region they became part of the leg's IK chain and swung off the face.
+  Check `-parts.json` shells (by centroid) for every insect before rigging.
+
+### Themes as materials, and the flip
+
+A mob variant is the SAME rigged GLB with a different texture: a material
+asset (`materials/mobs/<mob>-<theme>.json`, `map` + `filter: "nearest"`) named
+by the prefab's `mesh.material`, as the ghoul variants do. **The PNG must be
+stored upside down**: a material map loads with `flipY` on, while the GLB's
+UVs follow glTF's top-left convention, so an atlas copied straight across lands
+mirrored top to bottom on the model (orange legs where the hide should be).
+The ghoul's shipped textures are flipped copies of their atlases; measured, a
+flipped comparison matches them exactly. An optional part is chosen per
+prefab with `mesh.source.partMask` (the bits are the unwrap's `-parts.json`).
 
 ## Wiring it into a scene
 
@@ -838,6 +1169,54 @@ lacks is which `<Stance>_<clip>` the model has. Mirroring `dress` and
 `stanceCarryFor` there needs that list, for example the clip names shipped to
 the server with the template.
 
+### A strike lands on its hit (contact fitting)
+
+A fitted swing used to put the WHOLE clip over the WHOLE cast window, so the
+blade crossed the target wherever its contact fell in the clip, often
+100-250 ms before the authority's hit. The window is the caller's, so the caller
+fixes it: play the clip at the one rate that puts its contact on the resolve,
+`window = clipLength × windup / contact`. voxel-demo measures each strike
+clip's contact with `projects/voxel-demo/tools/clip-contacts.mjs` (the
+weapon tip, from the player prefab's own sockets, crossing the target line
+fastest and furthest out; a clip with two blows lists both and the one nearest
+the clip's own pace is used) and sets `actionUntil` from it in combat-caster.
+Damage timing never moves.
+
+A window longer than the cast (a slowed strike) means the same clip can be
+asked for again while its last window is still open, which `actionStarting`
+treats as "carrying on". A writer that bumps `userData.actionSeq` (any number,
+changed per action) says "this is a new action" outright, and the controller
+restarts the clip.
+
+### Hit reactions (clips)
+
+combat-actor (voxel-demo) has two: `staggerClip`, played when the stability
+pool breaks (or a parry/guard break staggers), and `hitClip` (default "" =
+off), a light flinch on an ordinary blow that landed — not one that killed,
+staggered, or met a raised guard (that shows `blockHitClip`). The authority
+decides and writes the body's action clip, which the server replicates like
+the stagger; the flinch only takes a FREE action channel (a swing, a cast, a
+held guard or a stagger already playing wins) and the next action overwrites
+it, so it never interrupts an attack. `hitClipSeconds` (0.4) and
+`hitClipCooldown` (0.6 s, a flurry is one flinch). Animals: `staggerClip:
+"Hit_Heavy"`, `hitClip: "Hit"` (both generated by legrig/autorig, set by
+make-prefabs.mjs and rig-ratwolf.sh); human rigs: `hitClip: "Hit_Chest"`. The
+clip and the procedural `poseFlinch` below stack.
+
+### Hit flinch (no clip)
+
+`userData.poseFlinch = { at, dir, angle, ms, twist?, wobble? }` on a model, its
+entity or a body up to three levels up (like `poseHoldUntil`): `at` is
+performance.now() ms, `dir` the world direction the blow travels, `angle`
+radians at the peak, `ms` the length, `twist` radians about up, `wobble` 0..1 a
+damped sway back past upright (a reel). After the mixer and the layer anchors,
+the spine chain (the upper-body split and two spine bones above it) is turned
+by that world rotation split over the chain: a snap out in the first 12%, an
+ease back. The rotations as left are saved first and put back before the next
+mixer pass (only where a bone still holds what the flinch wrote), so a held
+pose is never pushed twice; it also applies during a hit-stop. Test:
+`packages/render/test/animation-flinch.test.ts`.
+
 ### A swing that steps moves the body
 
 Every clip `retarget` bakes is in place (the hip's start-to-end drift is
@@ -899,13 +1278,14 @@ where the host cannot report one. Keys are DRESSED names (`Sword_Attack3`, not
   lunge back out. Instead, a swing that starts within 0.25 s of a full-body
   one inherits full-body (`CHAIN_GRACE`).
 
-Measured on human.glb (fwd m over the clip): SwordShield_Attack3 1.28 (a steady
-slide: the source had root motion, linearly removed), Staff_Attack2 0.54,
-Sword_Attack3 0.30 (a leap onto the left foot, then settling), Sword_Attack1
-0.41, GreatSword_Attack3 / Axe2H_Attack1 0.73, GreatSword_Heavy 1.67,
-SwordShield_Heavy 1.86 (+0.68 side), Axe2H_Heavy 2.01, Sword_Combo 1.23. Attack1-3
-(plain), SwordShield_Attack1/2, GreatSword_Attack1 and Staff_Attack1/4 are
-essentially in place.
+Measured on human.glb after the yaw pass (see *A swing faces forward*; fwd / side m
+over the clip): Sword_Attack3 0.85 / 0.26, SwordShield_Attack3 0.39 / -0.84,
+SwordShield_Heavy 0.65, GreatSword_Attack3 / Axe2H_Attack1 0.40, GreatSword_Attack4
+0.18 / -0.63, GreatSword_Heavy 0.26 / -0.47, Staff_Attack2 0.28 / -0.35,
+Sword_Combo 1.23. Axe2H_Heavy, Attack1-3 (plain),
+SwordShield_Attack1 and Staff_Attack1 are essentially in place. Turning a
+clip's hips changes where its feet go, so re-run `--measure` after any
+`clip-yaw` pass and paste the table again.
 
 ## Free-hanging cloth
 

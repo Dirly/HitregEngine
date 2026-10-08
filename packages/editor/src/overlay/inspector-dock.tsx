@@ -6,9 +6,9 @@ import {
   type SceneDoc,
   type SceneStore,
 } from "@hitreg/core";
-import type { AssetSelection, MeshEditState, Observable, Pin, Pins, Selection } from "../state.js";
+import type { AssetSelection, EditorSettings, MeshEditState, Observable, Pin, Pins, Selection } from "../state.js";
 import { MeshComponentPanel } from "./poly-mesh-inspector.js";
-import { apply, buttonStyle, DockHeader, useObservable, useStoreDoc } from "./common.js";
+import { activeButtonStyle, apply, buttonStyle, DockHeader, useObservable, useStoreDoc } from "./common.js";
 import { Row, TextField, ValueField } from "./fields.js";
 import { PrefabKnobs } from "./prop-field.js";
 import { AssetInspector } from "./asset-inspector.js";
@@ -53,6 +53,10 @@ export function InspectorDock(props: {
   onPinDelete?: (id: string) => void;
   /** Mesh-edit mode state, for the poly-mesh panel's "edit mesh" button. */
   meshEdit?: MeshEditState;
+  /** Editor settings (the holstered view of a character's held items). */
+  settings?: Observable<EditorSettings>;
+  /** The prefab open for isolation editing, if any. */
+  editingPrefab?: string | null;
 }) {
   const doc = useStoreDoc(props.store);
   const selected = useObservable(props.selection);
@@ -86,6 +90,8 @@ export function InspectorDock(props: {
             onPinUpdate={props.onPinUpdate}
             onPinDelete={props.onPinDelete}
             meshEdit={props.meshEdit}
+            settings={props.settings}
+            editingPrefab={props.editingPrefab}
           />
         ) : selectedAsset ? (
           <AssetInspector
@@ -275,6 +281,8 @@ function Inspector(props: {
   onPinUpdate?: (id: string, patch: Partial<Pin>) => void;
   onPinDelete?: (id: string) => void;
   meshEdit?: MeshEditState;
+  settings?: Observable<EditorSettings>;
+  editingPrefab?: string | null;
 }) {
   const entity = props.doc.entities[props.id]!;
   const [addChoice, setAddChoice] = useState("");
@@ -312,6 +320,8 @@ function Inspector(props: {
           }
         />
       </Row>
+
+      {props.settings && props.editingPrefab && <HolsterRow id={props.id} doc={props.doc} settings={props.settings} />}
 
       {Object.entries(entity.components).map(([name, data]) => (
         <div key={name} style={{ marginTop: 10 }}>
@@ -405,5 +415,34 @@ function Inspector(props: {
         </button>
       </div>
     </div>
+  );
+}
+
+const isSocket = (e: SceneDoc["entities"][string] | undefined): boolean =>
+  (e?.components["script"] as { name?: string } | undefined)?.name === "bone-socket";
+
+/**
+ * Held items in their holstered pose (back, hip) or in the hand, for placing
+ * either with the gizmo. Shown on a held-item socket and on the character
+ * carrying sockets, while a prefab is open; dragging an item with no holster
+ * yet gives it one.
+ */
+function HolsterRow(props: { id: string; doc: SceneDoc; settings: Observable<EditorSettings> }) {
+  const settings = useObservable(props.settings);
+  const entities = props.doc.entities;
+  const carries = isSocket(entities[props.id]) || Object.values(entities).some((e) => e.parent === props.id && isSocket(e));
+  if (!carries) return null;
+  const on = settings.previewHolstered === true;
+  return (
+    <Row label="held items">
+      <button
+        style={on ? activeButtonStyle : buttonStyle}
+        aria-pressed={on}
+        title="Place the holstered pose (back, hip) or the one in the hand. Dragging an item with no holster yet gives it one."
+        onClick={() => props.settings.set({ ...settings, previewHolstered: !on })}
+      >
+        {on ? "holstered" : "in hand"}
+      </button>
+    </Row>
   );
 }

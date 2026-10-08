@@ -13,7 +13,9 @@ import type { ValidationResult } from "./components/registry.js";
  *   may mutate; peers read. Peers request changes through to-authority
  *   events — the authoritative handler decides and writes.
  * - read-replicated: every peer holds the full replica (deltas ride the
- *   reliable channel; joiners get a full sync).
+ *   reliable channel; joiners get a full sync) — except an owner-only
+ *   namespace (`define(…, { audience: "owner" })`), which a dedicated server
+ *   sends to its value's owner alone (and which a promoted P2P host lacks).
  * - migration-proof: because every peer has the replica, a promoted host
  *   simply keeps the store's contents as its authoritative state — enemy
  *   HP and quest progress survive the handoff for free.
@@ -35,17 +37,36 @@ export interface NetStateDelta {
   removed: string[];
 }
 
+/**
+ * Who a namespace's values are replicated to. "all" (the default): every
+ * peer. "owner": only the peer that controls the body named by the value's
+ * `owner` field (a body id; the server maps it through `owner/<bodyId>`) —
+ * nobody else is sent the key at all, not even its removal. A value with no
+ * `owner` stays on the authority. A loot bag only its owner may see is one.
+ */
+export type NetStateAudience = "all" | "owner";
+
+export interface NetStateNamespaceOptions {
+  audience?: NetStateAudience;
+}
+
 export class NetStateStore {
   private readonly values = new Map<string, unknown>();
+  /** Keys by namespace, so `keys("combat/…")` walks one namespace, not the whole store. */
+  private readonly byNamespace = new Map<string, Set<string>>();
+  private _keyVersion = 0;
+  private readonly namespaceVersions = new Map<string, number>();
   private readonly schemas = new Map<string, z.ZodType>();
+  /** Namespaces replicated to their value's owner only (`define(…, { audience: "owner" })`). */
+  private readonly ownerOnly = new Set<string>();
   private readonly handlers = new Set<NetStateChangeHandler>();
   private readonly warnedNamespaces = new Set<string>();
   private dirtySet = new Map<string, unknown>();
   private dirtyRemoved = new Set<string>();
   private authority = true;
 
-  /** Register a value schema for a namespace ("enemyHp" validates "enemyHp/*"). */
-  define(namespace: string, schema: z.ZodType): void {
+  /** Register a value schema for a namespace ("enemyHp" validates "enemyHp/*"), and who it replicates to. */
+  define(namespace: string, schema: z.ZodType, options: NetStateNamespaceOptions = {}): void {
     if (!/^[a-z][a-zA-Z0-9-.]*$/.test(namespace)) {
       throw new Error(`netState namespace "${namespace}" is invalid`);
     }
@@ -53,6 +74,24 @@ export class NetStateStore {
       throw new Error(`netState namespace "${namespace}" is already defined`);
     }
     this.schemas.set(namespace, schema);
+    if (options.audience === "owner") this.ownerOnly.add(namespace);
+  }
+
+  /**
+   * Who may be sent `key` holding `value`: undefined = every peer; a body id =
+   * only the peer controlling that body; null = nobody (an owner-only value
+   * without an owner). The authority's replication layer asks this per key.
+   */
+  audienceOf(key: string, value: unknown): string | null | undefined {
+    const slash = key.indexOf("/");
+    if (slash < 0 || !this.ownerOnly.has(key.slice(0, slash))) return undefined;
+    const owner = value !== null && typeof value === "object" ? (value as { owner?: unknown }).owner : undefined;
+    return typeof owner === "string" && owner ? owner : null;
+  }
+
+  /** Whether any namespace is owner-only (a replication layer can skip filtering when none is). */
+  get hasOwnerOnly(): boolean {
+    return this.ownerOnly.size > 0;
   }
 
   /**
@@ -72,8 +111,39 @@ export class NetStateStore {
   }
 
   keys(prefix?: string): string[] {
-    const all = [...this.values.keys()];
-    return prefix === undefined ? all : all.filter((k) => k.startsWith(prefix));
+    if (prefix === undefined) return [...this.values.keys()];
+    // a prefix that names a namespace (or reaches into one) only needs that namespace's keys
+    const slash = prefix.indexOf("/");
+    if (slash > 0) {
+      const set = this.byNamespace.get(prefix.slice(0, slash));
+      if (!set) return [];
+      if (slash === prefix.length - 1) return [...set];
+      const out: string[] = [];
+      for (const k of set) if (k.startsWith(prefix)) out.push(k);
+      return out;
+    }
+    const out: string[] = [];
+    for (const k of this.values.keys()) if (k.startsWith(prefix)) out.push(k);
+    return out;
+  }
+
+  /**
+   * Bumped whenever a key is added or removed (not when a value changes). A
+   * reader that derives something from the KEY SET — "which bodies have combat
+   * state" — rebuilds it only when this moved, instead of scanning every tick.
+   */
+  get keyVersion(): number {
+    return this._keyVersion;
+  }
+
+  /** Like `keyVersion`, for one namespace's keys only (0 before it has any). */
+  namespaceVersion(namespace: string): number {
+    return this.namespaceVersions.get(namespace) ?? 0;
+  }
+
+  private bump(namespace: string): void {
+    this._keyVersion++;
+    this.namespaceVersions.set(namespace, (this.namespaceVersions.get(namespace) ?? 0) + 1);
   }
 
   /** Authority write. Returns false (with a warning) on a peer or bad value. */
@@ -94,8 +164,13 @@ export class NetStateStore {
       console.warn(`[netState] set("${key}") rejected:`, checked.error);
       return false;
     }
-    this.write(key, checked.data);
-    this.dirtySet.set(key, checked.data);
+    const value_ = checked.data;
+    // an unchanged primitive is not news: nothing to dispatch, nothing to send.
+    // (A value already waiting in this tick's delta stays there.) Objects compare
+    // by reference, so a script that rebuilds one still sends it.
+    if (this.values.has(key) && this.values.get(key) === value_ && (value_ === null || typeof value_ !== "object") && !this.dirtyRemoved.has(key)) return true;
+    this.write(key, value_);
+    this.dirtySet.set(key, value_);
     this.dirtyRemoved.delete(key);
     return true;
   }
@@ -116,6 +191,7 @@ export class NetStateStore {
     }
     if (!this.values.has(key)) return false;
     this.values.delete(key);
+    this.unindex(key);
     this.dirtyRemoved.add(key);
     this.dirtySet.delete(key);
     this.dispatch(key, undefined);
@@ -156,6 +232,7 @@ export class NetStateStore {
       for (const key of [...this.values.keys()]) {
         if (!incoming.has(key)) {
           this.values.delete(key);
+          this.unindex(key);
           this.dispatch(key, undefined);
         }
       }
@@ -164,7 +241,10 @@ export class NetStateStore {
     if (payload.delta) {
       for (const [key, value] of Object.entries(payload.delta.set)) this.write(key, value);
       for (const key of payload.delta.removed) {
-        if (this.values.delete(key)) this.dispatch(key, undefined);
+        if (this.values.delete(key)) {
+          this.unindex(key);
+          this.dispatch(key, undefined);
+        }
       }
     }
   }
@@ -172,6 +252,8 @@ export class NetStateStore {
   /** New session/room: forget everything (no change events — nothing to react to). */
   clear(): void {
     this.values.clear();
+    for (const ns of this.byNamespace.keys()) this.bump(ns);
+    this.byNamespace.clear();
     this.dirtySet = new Map();
     this.dirtyRemoved = new Set();
   }
@@ -180,7 +262,9 @@ export class NetStateStore {
   jsonSchemas(): Record<string, unknown> {
     const out: Record<string, unknown> = {};
     for (const [namespace, schema] of this.schemas) {
-      out[namespace] = z.toJSONSchema(schema, { io: "input" });
+      const json = z.toJSONSchema(schema, { io: "input" }) as Record<string, unknown>;
+      // an owner-only namespace says so: a reader must not expect every tab to hold it
+      out[namespace] = this.ownerOnly.has(namespace) ? { ...json, "x-audience": "owner" } : json;
     }
     return out;
   }
@@ -208,9 +292,27 @@ export class NetStateStore {
     const had = this.values.has(key);
     const prev = this.values.get(key);
     this.values.set(key, value);
+    if (!had) {
+      const slash = key.indexOf("/");
+      const ns = slash > 0 ? key.slice(0, slash) : key;
+      let set = this.byNamespace.get(ns);
+      if (!set) {
+        set = new Set();
+        this.byNamespace.set(ns, set);
+      }
+      set.add(key);
+      this.bump(ns);
+    }
     // skip no-op primitive rewrites (full syncs re-send everything); object
     // values compare by reference, so handlers must stay idempotent
     if (!had || prev !== value) this.dispatch(key, value);
+  }
+
+  private unindex(key: string): void {
+    const slash = key.indexOf("/");
+    const ns = slash > 0 ? key.slice(0, slash) : key;
+    this.byNamespace.get(ns)?.delete(key);
+    this.bump(ns);
   }
 
   private dispatch(key: string, value: unknown): void {

@@ -174,10 +174,8 @@ describe("weather fronts", () => {
     expect(early.cloudDark!).toBeLessThan(0.2);
     expect(late.cloudDark!).toBeGreaterThan(0.4);
     expect(late.gloom!).toBeGreaterThan(early.gloom!);
-    // coverage closes over too — a storm is not a bright sky that got dimmer.
-    // A RANGE, not a number: the downpour plateau breathes by design, so the
-    // exact value at any instant is not the contract.
-    expect(sky[sky.length - 1]!.clouds!.coverage!).toBeGreaterThan(0.6);
+    // the sky closes over too — a storm is not a bright sky that got dimmer
+    expect(late.overcast!).toBeGreaterThan(0.99);
   });
 
   it("leans the rain downwind, and the streaks carry the wind's own speed", () => {
@@ -238,15 +236,28 @@ describe("weather fronts", () => {
     }
   });
 
-  it("closes the sky over without flattening it into one grey card", () => {
+  it("closes the whole sky once it is properly raining, and leaves coverage authored", () => {
     const { sky } = run(150, { force: "storm", changeMinutes: 4, fadeSeconds: 2 });
-    const clouds = sky[sky.length - 1]!.clouds!;
-    expect(clouds.coverage!).toBeGreaterThan(0.6);
-    // NOT total: at ~0.95 the deck stops having shapes in it and reads as a
-    // flat fog-coloured card — weaker than the overcast it replaced.
-    expect(clouds.coverage!).toBeLessThanOrEqual(0.85);
+    const last = sky[sky.length - 1]!;
+    // rain under a blue gap is what overcast exists to rule out
+    expect(last.weather!.overcast!).toBeGreaterThan(0.99);
+    // the deck's shapes are its shading now, so coverage itself is not driven
+    expect(last.clouds!.coverage).toBeUndefined();
     // and harder-edged, not softer: soft cloud is haze, which fog already does
-    expect(clouds.softness!).toBeLessThan(0.35);
+    expect(last.clouds!.softness!).toBeLessThan(0.35);
+  });
+
+  it("closes the sky early in the front, before the downpour", () => {
+    const { sky } = run(240, { force: "storm", changeMinutes: 4, fadeSeconds: 2 });
+    // the drizzle phase (see the envelope test): mostly closed already
+    expect(sky[Math.round(30 * 30)]!.weather!.overcast!).toBeGreaterThan(0.7);
+  });
+
+  it("pins a dry overcast from the param, and clears it with nothing falling", () => {
+    const grey = run(20, { force: "clear", overcast: "0.6", fadeSeconds: 2 });
+    expect(grey.last().weather!.overcast!).toBeCloseTo(0.6, 2);
+    const clear = run(20, { force: "clear", overcast: "0", fadeSeconds: 2 });
+    expect(clear.last().weather!.overcast!).toBe(0);
   });
 
   it("does not put a sandstorm over a forest because the player stood on a sandy patch", () => {

@@ -1,0 +1,210 @@
+{
+  "size": 778,
+  "bleed": 2,
+  "bgLum": 236,
+  "keyColor": "#00ffff",
+  "groundFringe": 1,
+  "fitSearch": 1.6,
+  "slots": {
+    "#ff0000": {
+      "name": "head",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "symmetric": true,
+      "mirror": true
+    },
+    "#8c0000": {
+      "name": "crown",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "head",
+      "mirror": true
+    },
+    "#c04040": {
+      "name": "jaw",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "mirror": true
+    },
+    "#0000ff": {
+      "name": "arm",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "torso"
+    },
+    "#8000ff": {
+      "name": "hand",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "forearm"
+    },
+    "#00ff00": {
+      "name": "leg",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "torso"
+    },
+    "#008c46": {
+      "name": "foot",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#ff0080": {
+      "name": "belt",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#80ff00": {
+      "name": "buckle",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#8c8c00": {
+      "name": "robes-front",
+      "transparency": true,
+      "cut": "bottom",
+      "fit": "contain",
+      "anchor": "top",
+      "fitPadding": 0,
+      "hem": {
+        "depth": 2,
+        "jag": 5,
+        "wave": 4
+      }
+    },
+    "#008c8c": {
+      "name": "robes-back",
+      "transparency": true,
+      "cut": "bottom",
+      "fit": "contain",
+      "anchor": "top",
+      "fitPadding": 0,
+      "hem": {
+        "depth": 2,
+        "jag": 5,
+        "wave": 4
+      },
+      "matchTo": "robes-front"
+    },
+    "#468c00": {
+      "name": "tasset-front",
+      "transparency": true,
+      "cut": "bottom",
+      "fit": "contain",
+      "anchor": "top",
+      "fitPadding": 0,
+      "hem": {
+        "depth": 2,
+        "jag": 4,
+        "wave": 3
+      }
+    },
+    "#4040c0": {
+      "name": "tasset-back",
+      "transparency": true,
+      "cut": "bottom",
+      "fit": "contain",
+      "anchor": "top",
+      "fitPadding": 0,
+      "hem": {
+        "depth": 2,
+        "jag": 4,
+        "wave": 3
+      },
+      "matchTo": "tasset-front"
+    },
+    "#ff8000": {
+      "name": "torso",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "symmetric": true,
+      "mirror": true
+    },
+    "#ff00ff": {
+      "name": "shoulders",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "torso"
+    },
+    "#00008c": {
+      "name": "forearm",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "arm"
+    },
+    "#008c00": {
+      "name": "shin",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "leg"
+    },
+    "#a0a0ff": {
+      "name": "feather1",
+      "transparency": true,
+      "cut": true,
+      "fit": "contain-uniform",
+      "fitPadding": 4,
+      "anchor": "bottom",
+      "anchorPad": 0,
+      "openEnclosed": 0.01,
+      "keepFit": true
+    },
+    "#c0a0ff": {
+      "name": "feather2",
+      "transparency": true,
+      "cut": true,
+      "fit": "contain-uniform",
+      "fitPadding": 4,
+      "anchor": "bottom",
+      "anchorPad": 0,
+      "openEnclosed": 0.01,
+      "keepFit": true
+    },
+    "#a0c0ff": {
+      "name": "feather3",
+      "transparency": true,
+      "cut": true,
+      "fit": "contain-uniform",
+      "fitPadding": 4,
+      "anchor": "bottom",
+      "anchorPad": 0,
+      "openEnclosed": 0.01,
+      "keepFit": true
+    },
+    "#ffa0c0": {
+      "name": "feather4",
+      "transparency": true,
+      "cut": true,
+      "fit": "contain-uniform",
+      "fitPadding": 4,
+      "anchor": "bottom",
+      "anchorPad": 0,
+      "openEnclosed": 0.01,
+      "keepFit": true
+    },
+    "#a0ffc0": {
+      "name": "feather5",
+      "transparency": true,
+      "cut": true,
+      "fit": "contain-uniform",
+      "fitPadding": 4,
+      "anchor": "bottom",
+      "anchorPad": 0,
+      "openEnclosed": 0.01,
+      "keepFit": true
+    }
+  }
+}

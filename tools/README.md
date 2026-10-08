@@ -20,6 +20,9 @@ arrangement as `apps/playground/projects/`. No submodule, no gitlink.
 | `wfc-3d/`         | `hitreg.wfc-3d`        | 3D wave-function-collapse over a prefab tileset; emits a reusable prefab of nested instances. `kit.mjs` turns a modelled kit (parts + example structures) into atlased modules, cell prefabs and a learned tileset. |
 | `texture-intake/` | —                      | Normalizes dropped image sets into the material map channels the renderer expects. |
 | `mesh-dc/`        | `hitreg.mesh-dc`        | Converts closed Blender structures into editable, palette-preserving DC volume prefabs. See its README for source preparation and validation. |
+| `statue-maker/`   | `hitreg.statue-maker`   | Bakes character or creature poses into smooth static sculptures with anchored collision prefabs; CLI and registered host share one recipe implementation. |
+| `dungeon-pipeline/` | — | Shared stage runner + standard stage list for Blender-to-DC dungeons, with the quality gates (noise, originality, atlas, recipe, compare) that block `--next`. CLI library imported by each dungeon's `authoring/pipeline.mjs`. |
+| `poi-review/` | `hitreg.poi-review` | Agent-agnostic POI work plans and construction handoffs; terrain access planning, meshed-terrain reachability, headroom, support and assembly checks. Requires a separate visual review. |
 
 These are tracked because they are the reference implementations of the
 contract and because the engine's own test and spec depend on them: root

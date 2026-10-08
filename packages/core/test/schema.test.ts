@@ -14,6 +14,22 @@ function setup() {
 }
 
 describe("ComponentRegistry", () => {
+  it("validates authored instance LOD policy without changing existing defaults", () => {
+    const registry = setup(), source = { kind: "asset", assetId: "town.glb" };
+    expect(registry.validate("mesh", { source, renderMode: "instanced", lodDistance: 450, lodProxy: "town-far.gltf" }).ok).toBe(true);
+    expect(registry.validate("mesh", { source, lodDistance: 0 }).ok).toBe(false);
+    expect(registry.validate("mesh", { source, lodProxy: "" }).ok).toBe(false);
+    const ordinary = registry.validate("mesh", { source });
+    expect(ordinary.ok && (ordinary.data as { lodDistance?: number }).lodDistance).toBeUndefined();
+  });
+  it("validates opt-in animation pose rates and increasing distance thresholds", () => {
+    const registry = setup();
+    expect(registry.validate("animator", { poseLod: [{ distance: 40, fps: 20 }, { distance: 100, fps: 10 }] }).ok).toBe(true);
+    expect(registry.validate("animator", { poseLod: [{ distance: 100, fps: 20 }, { distance: 40, fps: 10 }] }).ok).toBe(false);
+    expect(registry.validate("animator", { poseLod: [{ distance: 40, fps: 0 }] }).ok).toBe(false);
+    const ordinary = registry.validate("animator", {});
+    expect(ordinary.ok && (ordinary.data as { poseLod?: unknown }).poseLod).toBeUndefined();
+  });
   it("rejects duplicate registration", () => {
     const registry = setup();
     expect(() => registerCoreComponents(registry)).toThrow(/already registered/);
@@ -165,15 +181,20 @@ describe("ComponentRegistry", () => {
       "camera",
       "clothSway",
       "collider",
+      "culling",
+      "cullingProfile",
       "decal",
+      "dressing",
       "grass",
       "joint",
       "light",
+      "loadingScreen",
       "mesh",
       "netObject",
       "particles",
       "pathScatter",
       "placement",
+      "portalAnchor",
       "postfx",
       "prefab",
       "rigidbody",

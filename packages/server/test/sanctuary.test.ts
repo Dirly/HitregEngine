@@ -52,6 +52,9 @@ try {
 } catch (error) {
   console.warn("sanctuary test skipped:", error instanceof Error ? error.message : error);
 }
+// Every hit here is about something other than a crit: never roll one (package S's
+// damage-stats.test.ts pins those through the same seam).
+if (layer) (layer.world.scriptRegistry.get("combat-actor") as unknown as { critRoll: () => number }).critRoll = () => 1;
 
 describe.skipIf(!layer)("sanctuaries and zone crossings on a layer", { timeout: 60_000 }, () => {
   const transports: WebSocketClientTransport[] = [];

@@ -31,6 +31,177 @@ new sheet or a plain-English refusal — never a throw. `derivedStats` turns a
 sheet into what a HUD or a controller reads: effective attributes, pools,
 armor, weight, capacity, encumbrance, and the grids currently present.
 
+**Durability.** An item may declare a maximum `durability`; a stack carries
+its current points in `durability` (absent = full). `wearEquipped` (the
+authority-internal `character.wear` event, emitted on death) takes 10% of
+each worn item's maximum; a stack at 0 is broken and `derivedStats` skips its
+modifiers. Repair is an NPC service — see docs/town-npcs.md.
+
+**Instance data travels with the item.** Everything on a stack besides
+`itemId`, `qty`, `container`, `x`, `y` is that instance's data (today
+`durability` and rolled `twists`; the engine never reads twists). It is
+opaque to the engine (`character/instance.ts`: `instanceOf`, `sameInstance`,
+`canMerge`) and goes wherever the item goes, through one path: `removeItem`
+hands back the loose stack WITH its data (`looseStackSchema`, the stack schema
+minus the cell), and `placeStack` lands a loose stack with its data. The vault,
+a shop's buy-back shelf (`shop/<id>.resale`), the ground (`ground/<dropId>`)
+and a character-to-character `transferStack` all hold loose stacks, so a new
+per-instance field on `itemStackSchema` travels everywhere with no other
+change. Only identical instances merge (bags, vault, shelf); splitting copies
+the data to both halves; a quest hand-in takes plain copies first. A transfer
+may name fields the game marks resettable (`reset`); nothing else is dropped.
+
+- **Loot bags** (`character/loot.ts`, `lootbag/<bagId>`): ONE
+  container for everything lying in the world for someone — a creature's drops
+  (`inventory.bag`, authority-internal, emitted where the kill is decided), a
+  dropped stack (`inventory.drop` makes a new `dropped` bag at the dropper's
+  feet), and what a killed character leaves their killer (a BODY bag, below).
+  **Bags are take-only**: nothing is ever added to a bag once made — the paid
+  vault is the one safe long-term storage, a bag is a claim window. An EARNED
+  bag lasts `bagSeconds` (character-sheet, 3 days; `bagCap` 40 per owner,
+  oldest removed first); a DROPPED bag lasts `dropSeconds` (600) and an owner
+  may have `dropCap` (5) at once — past it a drop is refused. **Saved with the
+  owner**: on a server with a save authority the layer packs the owner's live
+  bags into the per-character record `lootbags/<bodyId>` on every commit
+  (`packSavedBags`: lifetimes turned into wall-clock `expires`) and unpacks the
+  bags of the scene a character spawns in (`unpackSavedBags`) — so a bag
+  survives a logout and a restart, runs in REAL time, and is live only while
+  its owner is online in its scene. With no save authority (local play, a P2P
+  host, an open `serve`) bags live in netState while the world runs and are
+  lost on a restart. `lootClock` is the wall clock (tests replace it). **Only the
+  owner sees it**: the namespace is owner-only (`define(…, { audience:
+  "owner" })`), so a dedicated server sends it to the owner's peer alone (a
+  P2P host still replicates it to everyone; the `loot-ui` builtin draws only
+  your own). `inventory.loot { bagId, index? | uid? }` (to-authority, owner
+  and `pickupRadius` checked; anyone else is told "it is gone") takes one stack
+  or everything that fits; what does not fit STAYS in the bag (part of a stack
+  takes what fits; "no room for the rest"); `coins: true` / take-all bring its
+  copper. `roomFor` tells a window what fits.
+- **Body bags and the loot lock.** A body bag names a killed character
+  (`body`) and what of theirs the owner may take, fixed at the death by the
+  game: `carried` uids (any, as many as fit; `inventory.loot { uid }` or
+  `{ all: true }`), `coins` (their copper; `{ coins: true }`) and a choice of
+  `takes` from `offer` (worn gear). Every stack moves through the same
+  hand-over as a transfer, data intact; what does not fit stays with the
+  victim; `{ done: true }` leaves the rest. While it lasts the victim is
+  **loot-locked** (`lootlock/<bodyId>`): their sheet refuses move, split,
+  equip, unequip, drop and giving away, a pending inventory action is
+  cancelled, and the `npc` builtin refuses them every service (shop, vault,
+  repair, quests); belt use and weapon swaps still work. A server keeps a
+  disconnected looted body (and so its sheet) until the lock ends, refuses to
+  transfer it, and main sends a returning player back to that held body.
+- **Corpses** (`inventory.corpse`, authority-internal, emitted where death is
+  decided; a loot bag with `corpse: <the dead body>`). What the character
+  carried in its grids — every stack but the ENTRUSTED — and all its copper
+  leave the sheet into the corpse at the body (core `corpseContents`); worn
+  gear stays on the character. With a killer's claim (`killer`,
+  `claimSeconds`) the killer OWNS the corpse until `claimUntil`: they alone
+  see it and take its contents, the money, and `takes` of `offer` (the dead
+  character's worn gear, still on their sheet; the game decides the list); the
+  dead character is loot-locked meanwhile. `{ done: true }`, the claim's time,
+  or the killer leaving the server passes it to the dead character
+  (`releaseCorpse`; empty = gone), who alone sees it until `seconds` (the
+  whole lifetime from the death). A corpse is SAVED with its dead character
+  like an earned bag — even while a claim holds it (`bagKeeper`) — and is
+  never evicted by `bagCap`. `loot-ui` titles it "your corpse", and shows a
+  claimed one to the killer in the body window's three parts.
+- **Plundered** (sheet `plunderedUntil`, wall clock): a body bag or a claimed
+  corpse with `plunder: <seconds>` plunders its victim when a worn item is
+  taken; no looter may take another worn item from them until then (the take
+  is refused; `isPlundered` lets a game leave the offer empty).
+- **Soulbound SLOTS** (sheet `soulslots`: slot → stack uid, chosen at a soul
+  binder — dialogue `openSoulbind`, request `soul.attune`, reducer
+  `attuneSoulSlots`). An item is protected only while WORN in its slot and is
+  the attuned instance (`soulProtected`): `transferStack` refuses it whatever
+  the caller allows, a corpse's offer drops it. An item swapped into the slot
+  in the field is NOT protected until it is attuned again; carried items never
+  are. Re-attuning the same slots is free; changing WHICH slots costs the
+  binder's `price` (a first choice is free); `slots` caps the count;
+  `exclude` (default the bag and the belt) cannot be chosen. `character-ui`
+  marks an enchanted slot with a rune — ◆ while it holds its attuned item, ◇
+  struck through while it holds another — and the tooltip says which, in
+  words (`soulStatus`). Console override: `/soulbind <slot|uid|itemId> [off]`
+  (authority-internal `inventory.soulbind { slot, bound }`, no cap, no price).
+  The old per-instance `soulbound` flag is GONE (a saved stack carrying it
+  parses without it).
+- **Entrusted items** (item `entrusted`, optional `entrustedQuest`): specific
+  quest items in the character's keeping. `transferStack`, `vaultDeposit`,
+  `shopSell` and the sheet's drop refuse them; `corpseContents` leaves them on
+  the character; a dialogue `turnInQuest` of their `entrustedQuest` takes every
+  carried one back (`takeEntrusted`). The schema refuses `entrusted` on an
+  equippable item. Not built: there is no quest ABANDON in the engine yet, so
+  an entrusted item without a hand-in leaves only through `consume` / `take`.
+- **Broken gear**: at 0 durability an item stays worn and drawn but adds no
+  modifiers (`wornItems` skips it, so `derivedStats` — and every combat read of
+  the published stats — ignores it); it is never destroyed; the tooltip says
+  "Broken … no stats until repaired". Repair cost is `value × missing/max ×
+  rate`: item `value` already climbs with tier and rarity (MMO items: common
+  25–420 c, uncommon 150–2750, rare 1500–9000, legendary 40000).
+- **Party loot** (`inventory.bag { share: true }`): the owner's party
+  (`comms.party/<peer>`) members within `partyRange` (60 m) share the kill —
+  items at or above `rollRarity` (uncommon) go to a need/greed/pass roll
+  (`lootroll/<rollId>`, `loot.roll` to answer, `rollSeconds` 45, no answer =
+  pass; any need beats every greed, then a server 1–100, ties re-roll; all
+  pass = the killer's; `loot.rolled` announces it), the rest round-robin, the
+  copper splits evenly; each member's share and each win is a new bag of
+  their own at the corpse. Not in a party, or alone in range: unchanged.
+- The `loot-ui` builtin is the client: the ground prop (a clone of a hidden
+  `template` entity; `dropTemplate` / `dropIcon` for your own dropped items),
+  a "[F] Loot" prompt, the take window with the inventory's tooltips
+  (`fillItemTip`) — a body window in three parts (money, their bags, worn: choose
+  one) — and the roll prompts (icon, full tooltip, Need / Greed / Pass, a
+  timer) with one chat line per settled roll.
+- **The shared ground.** `ground/<dropId>` (`groundItemSchema`) is an item
+  ANYONE may pick up (`inventory.pickup { dropId }`, within `pickupRadius`;
+  what does not fit stays). Nothing in the engine writes one any more (a drop
+  goes into a loot bag); it stays as the primitive for a game that wants
+  public ground loot.
+- **Character to character.** `inventory.transfer { actorId, toActorId, uid }`
+  is authority-internal (a peer cannot send it): both bodies present, within
+  `range`, room for all of it, both sheets or neither; `allowWorn` lets a loot
+  take worn gear. It announces `inventory.transferred`. There is no trade
+  window yet; this is the primitive one calls once both sides agreed.
+
+## Gear is the bar: skills, timed equips, weapon sets, the belt
+
+**Items carry skills** (`skills`, ids opaque to the engine): `primary` (left
+click while it is the weapon in hand), `secondary` (right click: an ability or
+a game-reserved guard verb such as `@block`), `bar` (hotbar skills — a
+one-hander, an off-hand item and a trinket contribute ONE, a two-hander TWO;
+`skillAllowance` / `auditItemSkills` report a file that declares more), `use`
+(what a consumable does from the belt) and `guard` (`kind`, `parryWindow`,
+`blockPower`, `wardAlly`, `school`, `reward` — tuning the game resolves). A
+game builds its bar from these; the engine only stores and replicates them.
+
+**Equips take time and stop in combat.** `equipSeconds` on an item beats the
+progression's `inventoryDurations` (replacing a worn item takes the longer of
+the two; `actionSeconds` computes it). The `character-sheet` param
+`combatLock` names a netState namespace whose `<ns>/<bodyId>` holds a sim time
+(ms) the body is fighting until — the MMO uses `transferLock`. While it is in
+the future, anything that puts gear on or takes it off (`changesWornGear`:
+equip, unequip, moving or dropping a worn stack) is refused, and a change
+under way is cancelled with the item left where it was. Rearranging the bags
+is never locked.
+
+**Two weapon sets.** Set 0 is `primary` + `offhand`, set 1 is `secondary`
+alone (two-handed weapons list `secondary` among their slots to be swappable).
+Which is in hand is netState `hand/<bodyId>` (`handStateSchema`: `set`, and
+`swapTo`/`swapFrom`/`swapUntil` while a swap is pending, for a progress bar).
+A `character.swap` request (the `weapon-stance` `swapKey` sends it) lands after
+the sheet's `swapSeconds` and IS allowed in combat; swapping to an empty
+secondary is refused. `weapon-stance` and `equipment-look` (`inHand`, default
+on) show the set in hand: a `primary` look draws the secondary item, an
+`offhand` look draws nothing. `itemsInHand(sheet, set, env)` is the one rule
+(a two-hander leaves the off hand empty).
+
+**The belt** is `consumable`, `consumable2`, `consumable3` (`BELT_SLOTS`; a
+whole stack sits in each). `inventory.use { slot }` removes one (`useItem`),
+starts the shared cooldown (`useCooldown`, sheet `beltReadyAt` in sim ms,
+never saved) and announces `inventory.used { itemId, skill }`; the GAME applies
+the effect — on the authority, from a local emission only. Use works in combat.
+`character-ui` shows a listed slot's numbered siblings (`expandKinds`), so a
+scene listing `trinket` and `consumable` gets both trinkets and the whole belt.
+
 ## Who owns what at runtime
 
 - `character-sheet` (builtin, attach to the body or a child with `actor`)
@@ -50,7 +221,7 @@ armor, weight, capacity, encumbrance, and the grids currently present.
   `data-drop="external"` fires a bubbling `hr-item-drop` DOM event there with
   `{ uid, actorId, fromSlot }`. The bag grids carry `data-container/cols/rows`
   so a stash can drop into a specific cell. `npc-ui`'s vault is the reference.
-- Requests (`inventory.move/equip/unequip/drop/split`, `character.allocate`)
+- Requests (`inventory.move/equip/unequip/drop/split/use`, `character.allocate`, `character.swap`)
   are `to-authority`; a request arriving over the wire must come from the
   peer that owns the body (`owner/<bodyId>` in netState, written by the
   server). Grants (`character.xp`, `inventory.give`) are **not replicated at
@@ -137,8 +308,8 @@ item without one shows its initials in its rarity colour.
 Put the bag first and `equip` it so the rest of the starting items have a
 grid to land in; the pockets alone are small by design. A kill/quest script
 grants with `ctx.events.emit("character.xp", { actorId, amount })`, a pickup
-with `inventory.give`; listen for `inventory.dropped` to spawn a world item
-where something was thrown away.
+with `inventory.give`; a thrown-away stack lies in netState `ground/<dropId>`
+(announced by `inventory.dropped`) until someone sends `inventory.pickup`.
 
 ## Character creation
 

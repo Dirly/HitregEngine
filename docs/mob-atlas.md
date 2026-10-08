@@ -485,6 +485,35 @@ really crosses the plane (more than 5% of its depth each side, like a nose
 guard) is skipped with a warning; fold that one with `mirror: "z"` instead. The
 player headgear (`human-helm`) unwraps each half shell as its side profile.
 
+## Castes and toggles: optional parts and `scaledCopy`
+
+One mob mesh carries its variants as PARTS, and a prefab picks them with
+`mesh.source.partMask` (bits from `<Mob>-unwrapped-parts.json`). Two ways to
+get a part:
+
+- **A modelled piece kept separate** (the cut script keeps it its own part):
+  a lion's mane (hidden, a lioness), a dragon's wings (a drake), a goat's
+  horns and beard (a nanny). Or one generated outright, like the alligator's
+  sail (`work/split-gator.mjs`), which then needs its own slot and art.
+- **`scaledCopy`**: an alternative built from an existing part, the same
+  triangles scaled about an anchor on its bounds, wearing the SAME UVs:
+
+      scaledCopy: [
+        { name: "Ant_AbdomenQueen", from: "Ant_Abdomen", scale: [2.1, 1.55, 1.7], anchor: ["max", "mid", 0] },
+        { name: "Ant_MandibleSoldier", from: "Ant_Mandible", scale: [4.6, 2.6, 2.0], anchor: ["min", "mid", 0] },
+      ],
+
+  It runs after `mirrorCopy`, after the key is cut, so the key does not change
+  and every theme already painted covers the copy: a queen and a soldier cost
+  no generator rounds. Anchor the end that attaches (the waist end of a
+  gaster, the base of a jaw); the centre plane (`0` on z) keeps a mirrored pair
+  symmetric. The base part and its copy overlap, so every look shows one or
+  the other, never both: say so in `combos`, and give a rig (`legrig`'s
+  `alternatives`) the list so the copy does not count toward the animal's size.
+
+A whole-body change needs no part at all: a prefab's visual `scale` (per axis)
+stretches the trout into a pike.
+
 ## A fringe of cut-out planes: `merge`, `square`, `viewUp`
 
 A mess of loose planes that reads as leaves, spikes, feathers or fur (the

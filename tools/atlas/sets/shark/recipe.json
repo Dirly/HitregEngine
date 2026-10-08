@@ -1,0 +1,199 @@
+{
+ "source": "MMO/3d/Mobs/Dragon/Shark-parts.obj",
+ "sourceScale": 1,
+ "objScale": 1,
+ "outMesh": "MMO/3d/Mobs/Dragon/Shark-unwrapped",
+ "sheet": 1254,
+ "keyStroke": 8,
+ "smooth": 48,
+ "margin": 22,
+ "gutter": 48,
+ "atlas": {
+  "size": 792,
+  "bleed": 2,
+  "bgLum": 236
+ },
+ "mirrorCopy": {
+  "axis": "z",
+  "parts": [
+   "Shark_Fin",
+   "Shark_Body",
+   "Shark_TailFin"
+  ]
+ },
+ "slots": {
+  "fin": {
+   "color": "#ff0000",
+   "fit": "contain"
+  },
+  "body": {
+   "color": "#00ff00",
+   "fit": "contain"
+  },
+  "tail-fin": {
+   "color": "#ffff00",
+   "fit": "contain",
+   "matchTo": "body"
+  },
+  "mouth-roof": {
+   "color": "#ff00ff",
+   "fit": "contain",
+   "label": "upper gums"
+  },
+  "mouth-floor": {
+   "color": "#ff8000",
+   "fit": "contain",
+   "label": "lower gums"
+  },
+  "snout": {
+   "color": "#00ffff",
+   "fit": "contain",
+   "label": "snout front"
+  }
+ },
+ "parts": {
+  "Shark_Fin": {
+   "slot": "fin",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Shark_Body": {
+   "slot": "body",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.35,
+   "split": [
+    {
+     "slot": "mouth-roof",
+     "facing": "-y",
+     "above": 0.6,
+     "where": {
+      "x": [
+       0.775,
+       1
+      ],
+      "y": [
+       0.344,
+       1
+      ]
+     },
+     "u": "+x",
+     "v": "-z",
+     "flare": 0.1
+    },
+    {
+     "slot": "mouth-floor",
+     "facing": "+y",
+     "above": 0.6,
+     "where": {
+      "x": [
+       0.775,
+       1
+      ],
+      "y": [
+       0,
+       0.449
+      ]
+     },
+     "u": "+x",
+     "v": "+z",
+     "flare": 0.1
+    },
+    {
+     "slot": "snout",
+     "facing": "+x",
+     "above": 0.55,
+     "where": {
+      "x": [
+       0.9,
+       1
+      ]
+     },
+     "u": "-z",
+     "v": "-y",
+     "flare": 0.2
+    }
+   ]
+  },
+  "Shark_TailFin": {
+   "slot": "tail-fin",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  }
+ },
+ "layout": {
+  "col": [
+   {
+    "row": [
+     "body"
+    ]
+   },
+   {
+    "row": [
+     "fin",
+     "snout",
+     {
+      "col": [
+       "mouth-roof",
+       "mouth-floor"
+      ]
+     },
+     "tail-fin"
+    ]
+   }
+  ]
+ },
+ "marks": [
+  {
+   "slot": "body",
+   "at": [
+    1.7563,
+    0.6405,
+    -0.1181
+   ],
+   "shape": "eye",
+   "size": 10
+  },
+  {
+   "slot": "body",
+   "from": [
+    1.55,
+    0.53,
+    -0.205
+   ],
+   "to": [
+    1.97,
+    0.58,
+    -0.04
+   ],
+   "shape": "line"
+  },
+  {
+   "slot": "snout",
+   "from": [
+    1.99,
+    0.58,
+    0
+   ],
+   "to": [
+    1.94,
+    0.57,
+    -0.12
+   ],
+   "shape": "line"
+  }
+ ],
+ "cutoutSlots": [],
+ "combos": [
+  [
+   "Shark_Fin",
+   "Shark_Body",
+   "Shark_TailFin"
+  ]
+ ]
+}

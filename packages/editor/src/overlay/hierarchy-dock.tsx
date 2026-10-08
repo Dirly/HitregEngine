@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { childrenOf, newId, type SceneDoc, type SceneStore } from "@hitreg/core";
+import { newId, type SceneDoc, type SceneStore } from "@hitreg/core";
 import {
   isEditRigId,
   observable,
@@ -16,6 +16,29 @@ import { applyMaterialToMany } from "../selection-ops.js";
 import { apply, buttonStyle, DockHeader, SearchInput, useObservable, useStoreDoc } from "./common.js";
 
 /**
+ * Children of every entity, built once per document version. `childrenOf`
+ * scans the whole doc per call, and the tree asks once per row — quadratic,
+ * ~144M checks per render on a 12k-entity world. Docs are replaced (never
+ * mutated) by ops, so the entities object identity is the version. Same order
+ * as childrenOf (document key order).
+ */
+const childIndexes = new WeakMap<object, Map<string | null, string[]>>();
+function childrenIn(doc: SceneDoc, parent: string | null): string[] {
+  let index = childIndexes.get(doc.entities);
+  if (!index) {
+    index = new Map();
+    for (const id of Object.keys(doc.entities)) {
+      const p = doc.entities[id]!.parent;
+      const list = index.get(p);
+      if (list) list.push(id);
+      else index.set(p, [id]);
+    }
+    childIndexes.set(doc.entities, index);
+  }
+  return index.get(parent) ?? [];
+}
+
+/**
  * Flat, depth-first visible order (roots then children) — used for shift-range
  * selection. The editor's own scaffolding (prefab-isolation studio lighting)
  * is skipped: it lives in the working doc so the render pipeline lights it,
@@ -23,7 +46,7 @@ import { apply, buttonStyle, DockHeader, SearchInput, useObservable, useStoreDoc
  */
 function flattenIds(doc: SceneDoc, parent: string | null = null): string[] {
   const out: string[] = [];
-  for (const id of childrenOf(doc, parent)) {
+  for (const id of childrenIn(doc, parent)) {
     if (isEditRigId(id)) continue;
     out.push(id, ...flattenIds(doc, id));
   }
@@ -234,7 +257,7 @@ interface TreeProps {
 }
 
 function Tree(props: TreeProps) {
-  const ids = childrenOf(props.doc, props.parent).filter((id) => !isEditRigId(id));
+  const ids = childrenIn(props.doc, props.parent).filter((id) => !isEditRigId(id));
   return (
     <>
       {ids.map((id) => (

@@ -1,0 +1,395 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "number",
+      "const": 1
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "kind": {
+      "default": "site",
+      "description": "Terrain-route checks an outdoor connection without requiring constructed models, materials or support probes. It still requires routes and design intent.",
+      "type": "string",
+      "enum": [
+        "site",
+        "terrain-route"
+      ]
+    },
+    "bounds": {
+      "type": "object",
+      "properties": {
+        "min": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ]
+        },
+        "max": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ]
+        }
+      },
+      "required": [
+        "min",
+        "max"
+      ],
+      "additionalProperties": false,
+      "description": "World-space survey and collision bounds; include the whole approach and subterranean route, with air above the highest terrain."
+    },
+    "surveyStep": {
+      "default": 2,
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "models": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1
+          },
+          "position": {
+            "default": [
+              0,
+              0,
+              0
+            ],
+            "type": "array",
+            "prefixItems": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ]
+          },
+          "yaw": {
+            "default": 0,
+            "type": "number"
+          },
+          "scale": {
+            "default": 1,
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "architecture": {
+            "default": true,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "model"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "routes": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "points": {
+            "minItems": 2,
+            "type": "array",
+            "items": {
+              "type": "array",
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                }
+              ]
+            }
+          },
+          "lanes": {
+            "default": [
+              -0.65,
+              0,
+              0.65
+            ],
+            "minItems": 3,
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          },
+          "enclosedFrom": {
+            "description": "Waypoint index where every subsequent segment must have a roof and measured clearance.",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "minHeadroom": {
+            "default": 2.6,
+            "type": "number",
+            "exclusiveMinimum": 0
+          }
+        },
+        "required": [
+          "id",
+          "points"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "probes": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "buried",
+              "air",
+              "support"
+            ]
+          },
+          "points": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "array",
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                }
+              ]
+            }
+          },
+          "tolerance": {
+            "default": 0.08,
+            "type": "number",
+            "minimum": 0
+          },
+          "excludeModels": {
+            "default": [],
+            "description": "For support rays, exclude the supported object itself using model instance IDs; otherwise its own surface can falsely count as support.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "points"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "materials": {
+      "default": [],
+      "description": "Authored surface claims requiring visual confirmation; numeric scale and contradictory joint choices are checked.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "modeledJoints": {
+            "type": "boolean"
+          },
+          "textureHasJoints": {
+            "type": "boolean"
+          },
+          "metresPerTexel": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "targetMetresPerTexel": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "relativeTolerance": {
+            "default": 0.2,
+            "type": "number",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "id",
+          "modeledJoints",
+          "textureHasJoints",
+          "metresPerTexel",
+          "targetMetresPerTexel"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "neighbours": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "position": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ]
+          },
+          "minDistance": {
+            "type": "number",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "id",
+          "position",
+          "minDistance"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "anchor": {
+      "type": "array",
+      "prefixItems": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "number"
+        }
+      ]
+    },
+    "player": {
+      "default": {
+        "height": 1.8,
+        "diameter": 0.7,
+        "step": 0.4,
+        "speed": 4
+      },
+      "type": "object",
+      "properties": {
+        "height": {
+          "default": 1.8,
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "diameter": {
+          "default": 0.7,
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "step": {
+          "default": 0.4,
+          "type": "number",
+          "minimum": 0
+        },
+        "speed": {
+          "default": 4,
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 15
+        }
+      },
+      "additionalProperties": false
+    },
+    "intent": {
+      "description": "Explain discovery, destination and terrain integration before building. Aesthetic acceptance still requires a separate visual review.",
+      "type": "object",
+      "properties": {
+        "purpose": {
+          "type": "string",
+          "minLength": 1
+        },
+        "arrival": {
+          "type": "string",
+          "minLength": 1
+        },
+        "interior": {
+          "type": "string",
+          "minLength": 1
+        },
+        "landscape": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "purpose",
+        "arrival",
+        "interior",
+        "landscape"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "version",
+    "name",
+    "bounds",
+    "anchor"
+  ],
+  "additionalProperties": false
+}

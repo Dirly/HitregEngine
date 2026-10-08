@@ -121,7 +121,7 @@ export function marchingCubes(block: SampledBlock, options: MarchOptions = {}): 
   const attrSpecs = Object.entries(options.attributes ?? {});
   const attrOut: Record<string, number[]> = {};
   for (const [name] of attrSpecs) attrOut[name] = [];
-  const scratch = new Float32Array(16);
+  const scratch = new Float32Array(Math.max(16, ...attrSpecs.map(([, spec]) => spec.size)));
 
   /** Welded vertex index per lattice edge: key = (latticeIndex * 3 + axis). */
   const vertexOf = new Map<number, number>();

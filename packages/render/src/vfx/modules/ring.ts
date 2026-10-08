@@ -175,6 +175,8 @@ export class RingLive extends LiveModule<RingModule> {
     const expand = m.expand[0] + (m.expand[1] - m.expand[0]) * k;
     const s = Math.max(0.001, m.radius * expand * this.sizeAt(t));
     this.mesh.scale.set(s, s, s);
+    // the PSX grid stays the same size in the world as the ring grows
+    this.x.b.value = this.cellsAcross(2 * s);
 
     const p = this.pose.position;
     const spin = m.spin * (now - this.startedAt);

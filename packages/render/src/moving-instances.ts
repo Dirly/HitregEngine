@@ -13,7 +13,7 @@ import { modelPartIndex, partBounds, partMaskFromNames, partSize, resolvePartAnc
  * instance ONCE, when the scene builds, and hangs the batch off the scene
  * root. That is right for a forest and useless for a sword in a hand. Here
  * every instance keeps a pointer to its entity's group and re-reads the
- * group's world matrix every frame, so it follows whatever moves the entity (a
+ * group's world matrix while shown, so it follows whatever moves the entity (a
  * parent, a `bone-socket`, a script), while every moving instance of one
  * asset stays ONE draw call. Thirty players' swords cost what one does.
  *
@@ -25,6 +25,8 @@ import { modelPartIndex, partBounds, partMaskFromNames, partSize, resolvePartAnc
  * theme sheet id and resolves both against the model's own tables (glTF
  * extras: `parts` from unwrap-weapon, `tiles` from the page bake), so an item
  * never carries a raw mask or a UV rectangle.
+ * Hidden/unequipped holders stay registered but have no GPU slot: shown holders
+ * are packed densely, and unchanged transforms keep their existing buffer data.
  *
  * No LOD tiers: a held item is small, it is near the thing holding it, and
  * swapping it for an impostor would cost more than it saves.
@@ -118,7 +120,12 @@ interface Slot {
   appearance: Float32Array | null;
   groups: readonly AppearanceGroup[] | null;
   skinTint: string | null;
-  /** What the GPU holds for this slot's mask: `mask`, or 0 while hidden. */
+  /** Last packed GPU index; -1 while hidden or after a buffer rebuild. */
+  uploadedIndex: number;
+  /** Last uploaded holder transforms, kept in double precision for exact comparisons. */
+  uploadedWorld: THREE.Matrix4;
+  uploadedHang: THREE.Matrix4 | null;
+  /** What the GPU holds for this slot's mask. */
   uploadedMask: number;
   dirty: boolean;
 }
@@ -134,11 +141,22 @@ interface Batch {
   receiveShadow: boolean;
   /** Drawn with the appearance material (per-part tiles; `skinSheets` = the page's opted-in skin). */
   appearance: { skinSheets: readonly SkinSheet[]; whole: boolean } | null;
+  /**
+   * Drawn with the hang blend: some holder's group carries a `hangDelta`
+   * (character-look, for a mount with `hang`). Switched on once, like the
+   * appearance material.
+   */
+  hang: boolean;
 }
 
 const NO_APPEARANCE = new Float32Array(APPEARANCE_FLOATS);
 const WHOLE_MASK = 0xffffff;
 const _matrix = new THREE.Matrix4();
+const _hangPos = new THREE.Vector3();
+const _hangRot = new THREE.Quaternion();
+const _hangScale = new THREE.Vector3();
+/** Where a holder's group carries its hang placement (world space; see character-look). */
+const HANG_DELTA = "hangDelta";
 
 export class MovingInstanceSystem {
   /** Add this to the scene being rendered; every batch lives under it. */
@@ -168,6 +186,7 @@ export class MovingInstanceSystem {
         castShadow: entry.castShadow,
         receiveShadow: entry.receiveShadow,
         appearance: null,
+        hang: false,
       };
       this.batches.set(assetId, batch);
       this.load(batch, entry.textureFilter);
@@ -182,6 +201,9 @@ export class MovingInstanceSystem {
       groups: null,
       skinTint: null,
       pending: null,
+      uploadedIndex: -1,
+      uploadedWorld: new THREE.Matrix4(),
+      uploadedHang: null,
       uploadedMask: -1,
       dirty: true,
     };
@@ -236,33 +258,53 @@ export class MovingInstanceSystem {
         if (topOf(slot.group) !== top) this.remove(slot.id);
       }
       if (!batch.submeshes || batch.meshes.length === 0) continue;
+      if (!batch.hang && batch.slots.some((slot) => slot.group.userData[HANG_DELTA])) {
+        batch.hang = true;
+        this.build(batch, batch.meshes[0]!.capacity);
+      }
       if (batch.slots.length > batch.meshes[0]!.capacity) this.grow(batch);
-      const count = batch.slots.length;
-      let anyShown = false;
-      for (let i = 0; i < count; i++) {
-        const slot = batch.slots[i]!;
+      let count = 0;
+      let matricesChanged = false;
+      for (const slot of batch.slots) {
         const shownMask = visibleInTree(slot.group) ? slot.mask : 0;
-        if (shownMask !== 0) anyShown = true;
+        // A zero part mask collapses vertices but still runs their shader.
+        // Pack only shown holders into [0, count), skipping their CPU work too.
+        if (shownMask === 0) {
+          slot.uploadedIndex = -1;
+          continue;
+        }
+        const i = count++;
+        const movedSlot = slot.uploadedIndex !== i;
         if (shownMask !== slot.uploadedMask) slot.dirty = true;
         slot.group.updateWorldMatrix(true, false);
+        const moved = movedSlot || !slot.uploadedWorld.equals(slot.group.matrixWorld);
+        const hang = batch.hang ? (slot.group.userData[HANG_DELTA] as THREE.Matrix4 | undefined) : undefined;
+        const hangChanged = movedSlot || (hang ? !slot.uploadedHang?.equals(hang) : slot.uploadedHang !== null);
+        if (hang && hangChanged) hang.decompose(_hangPos, _hangRot, _hangScale);
         for (let s = 0; s < batch.meshes.length; s++) {
           const mesh = batch.meshes[s]!;
-          _matrix.multiplyMatrices(slot.group.matrixWorld, batch.submeshes[s]!.localMatrix);
-          mesh.setMatrixAt(i, _matrix);
-          if (slot.dirty) {
+          if (moved) {
+            _matrix.multiplyMatrices(slot.group.matrixWorld, batch.submeshes[s]!.localMatrix);
+            mesh.setMatrixAt(i, _matrix);
+          }
+          if (mesh.hasHang && hangChanged) mesh.setHangAt(i, hang ? _hangRot : null, hang ? _hangPos : null);
+          // A compacted holder must bring ALL of its attributes into the new slot.
+          if (slot.dirty || movedSlot) {
             mesh.setUberAt(i, slot.tile[0], slot.tile[1], slot.tile[2], shownMask);
             if (mesh.hasGlow) mesh.setGlowAt(i, slot.glow);
             if (mesh.hasAppearance) mesh.setAppearanceAt(i, slot.appearance ?? NO_APPEARANCE);
           }
         }
+        if (moved) { slot.uploadedWorld.copy(slot.group.matrixWorld); matricesChanged = true; }
+        if (hangChanged) slot.uploadedHang = hang ? (slot.uploadedHang ?? new THREE.Matrix4()).copy(hang) : null;
+        slot.uploadedIndex = i;
         slot.uploadedMask = shownMask;
         slot.dirty = false;
       }
       for (const mesh of batch.meshes) {
         mesh.instanceCount = count;
-        mesh.instanceMatrix.needsUpdate = true;
-        // every instance collapsed (nobody wears a helm): skip the draw, not just its triangles
-        mesh.visible = count > 0 && anyShown;
+        if (matricesChanged) mesh.instanceMatrix.needsUpdate = true;
+        mesh.visible = count > 0;
       }
     }
   }
@@ -314,10 +356,11 @@ export class MovingInstanceSystem {
         sub.geometry,
         batch.appearance
           ? cachedInstancedMaterial(
-              `${batch.assetId}#moving-look${batch.appearance.whole ? "#whole" : JSON.stringify(batch.appearance.skinSheets)}#${index}`,
+              `${batch.assetId}#moving-look${batch.appearance.whole ? "#whole" : JSON.stringify(batch.appearance.skinSheets)}${batch.hang ? "#hang" : ""}#${index}`,
               sub.material,
               {
                 uber: true,
+                hang: batch.hang,
                 // A worn look carries no glow: WebGPU guarantees 16 vertex input
                 // LOCATIONS, and position/normal/uv/uv1 + the matrix (4) + uber +
                 // glow (4) + appearance (4) is 17 — the pipeline fails and takes
@@ -333,7 +376,7 @@ export class MovingInstanceSystem {
                 },
               },
             )
-          : cachedInstancedMaterial(`${batch.assetId}#moving#${index}`, sub.material, { uber: true, glow: true }),
+          : cachedInstancedMaterial(`${batch.assetId}#moving${batch.hang ? "#hang" : ""}#${index}`, sub.material, { uber: true, glow: true, hang: batch.hang }),
         capacity,
       );
       // capacity is fixed per InstancedProps, so the batch is rebuilt larger
@@ -342,16 +385,17 @@ export class MovingInstanceSystem {
       mesh.name = `moving:${batch.assetId}#${index}`;
       mesh.castShadow = batch.castShadow;
       mesh.receiveShadow = batch.receiveShadow;
-      // every instance moves every frame; a culling volume would be stale by
-      // the next one, and a handful of held items is cheaper to draw than to cull
+      // Held items can move every frame; a fixed culling volume would be stale
+      // by the next one. Only shown holders enter the buffer.
       mesh.frustumCulled = false;
       mesh.enableUber();
       if (!batch.appearance) mesh.enableGlow();
       if (batch.appearance) mesh.enableAppearance();
+      if (batch.hang) mesh.enableHang();
       this.root.add(mesh);
       return mesh;
     });
-    for (const slot of batch.slots) slot.dirty = true;
+    for (const slot of batch.slots) { slot.dirty = true; slot.uploadedIndex = -1; }
   }
 
   private grow(batch: Batch): void {

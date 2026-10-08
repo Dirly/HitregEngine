@@ -70,12 +70,15 @@ export class ClusterLink {
     drain: new Set<() => void>(),
     zones: new Set<(hosted: HostedZones) => void>(),
     arrival: new Set<(requestId: string, position: [number, number, number]) => void>(),
+    evidence: new Set<(requestId: string, q: { reporter: string; target: string; minutes: number }) => void>(),
     link: new Set<(up: boolean) => void>(),
     chat: new Set<(line: BridgedChatLine, origin: string) => void>(),
     party: new Set<(characterId: string, party: string | null) => void>(),
     social: new Set<(characterId: string, event: SocialEvent) => void>(),
     blocks: new Set<(characterId: string, blocked: string[]) => void>(),
     guild: new Set<(characterId: string, guild: string | null) => void>(),
+    sanction: new Set<(characterId: string, s: { muteUntil: number | null; reason?: string; notice?: string }) => void>(),
+    kick: new Set<(characterId: string, text: string, refuseUntil?: number) => void>(),
   };
   private firstRegistration: { resolve: (r: Registered) => void; reject: (e: Error) => void } | null = null;
 
@@ -188,6 +191,9 @@ export class ClusterLink {
       case "arrival.check":
         for (const cb of this.handlers.arrival) cb(msg.requestId, msg.position);
         return;
+      case "evidence.request":
+        for (const cb of this.handlers.evidence) cb(msg.requestId, { reporter: msg.reporter, target: msg.target, minutes: msg.minutes });
+        return;
       case "chat":
         for (const cb of this.handlers.chat) cb(msg.line, msg.origin);
         return;
@@ -202,6 +208,12 @@ export class ClusterLink {
         return;
       case "guild":
         for (const cb of this.handlers.guild) cb(msg.characterId, msg.guild);
+        return;
+      case "sanction":
+        for (const cb of this.handlers.sanction) cb(msg.characterId, { muteUntil: msg.muteUntil, ...(msg.reason !== undefined ? { reason: msg.reason } : {}), ...(msg.notice !== undefined ? { notice: msg.notice } : {}) });
+        return;
+      case "kick":
+        for (const cb of this.handlers.kick) cb(msg.characterId, msg.text, msg.refuseUntil);
         return;
     }
   }
@@ -264,6 +276,18 @@ export class ClusterLink {
     return () => this.handlers.guild.delete(cb);
   }
 
+  /** Main says whether a character on this layer is muted, and until when (docs/moderation.md §3). */
+  onSanction(cb: (characterId: string, s: { muteUntil: number | null; reason?: string; notice?: string }) => void): () => void {
+    this.handlers.sanction.add(cb);
+    return () => this.handlers.sanction.delete(cb);
+  }
+
+  /** Main ends a character's session (a ban). */
+  onKick(cb: (characterId: string, text: string, refuseUntil?: number) => void): () => void {
+    this.handlers.kick.add(cb);
+    return () => this.handlers.kick.delete(cb);
+  }
+
   rpc<T = unknown>(call: LayerRpc): Promise<T> {
     if (this.closed) return Promise.reject(new Error("cluster link closed"));
     const id = this.nextRpc++;
@@ -277,7 +301,7 @@ export class ClusterLink {
     });
   }
 
-  onTransferBegin(cb: (m: { characterId: string; srv: string; url: string; reason: string }) => void): () => void {
+  onTransferBegin(cb: (m: { characterId: string; srv: string; url: string; reason: string; scene?: string; portal?: import("./protocol.js").PortalHop }) => void): () => void {
     this.handlers.transfer.add(cb);
     return () => this.handlers.transfer.delete(cb);
   }
@@ -309,6 +333,11 @@ export class ClusterLink {
   onArrivalCheck(cb: (requestId: string, position: [number, number, number]) => void): () => void {
     this.handlers.arrival.add(cb);
     return () => this.handlers.arrival.delete(cb);
+  }
+  /** Main asks for chat evidence for a report (docs/moderation.md §2); answer with rpc `evidence.result`. */
+  onEvidenceRequest(cb: (requestId: string, q: { reporter: string; target: string; minutes: number }) => void): () => void {
+    this.handlers.evidence.add(cb);
+    return () => this.handlers.evidence.delete(cb);
   }
 
   /** Core's persistence contract, served by main over this socket. */

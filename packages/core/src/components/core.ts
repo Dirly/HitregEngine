@@ -6,9 +6,13 @@ import { registerPathComponents } from "./path.js";
 
 /** Most splat layers a terrain material may carry — four vec4 weight attributes. Mirrored by the recipe palette cap. */
 export const MAX_SPLAT_LAYERS = 16;
+/** Layer cap for `splat.source: "indexed"` (the texture array's depth, not a fetch count). */
+export const MAX_INDEXED_SPLAT_LAYERS = 64;
 import { registerVoxelComponents } from "./voxel.js";
 import { registerPlacementComponent } from "./placement.js";
+import { registerDressingComponent } from "./dressing.js";
 import { registerDecalComponent } from "./decal.js";
+import { loadingScreenSchema, portalAnchorSchema } from "../portal.js";
 import { polyMeshSourceSchema } from "../poly-mesh/types.js";
 
 export const vec3 = z.tuple([z.number(), z.number(), z.number()]);
@@ -16,6 +20,13 @@ export const quat = z.tuple([z.number(), z.number(), z.number(), z.number()]);
 export const hexColor = z
   .string()
   .regex(/^#[0-9a-fA-F]{6}$/, "expected hex color like #ff8800");
+
+const tintMultiplier = z.tuple([z.number().min(0).max(4), z.number().min(0).max(4), z.number().min(0).max(4)]);
+export const vegetationTintSchema = z.object({
+  bark: tintMultiplier.default([1, 1, 1]),
+  leaves: tintMultiplier.default([1, 1, 1]),
+}).describe("Linear RGB multipliers for materials/textures named Bark/Trunk/Wood and Leaves/Leaf/Foliage/Branch/Bush. [1,1,1] preserves the original texture; other material roles remain unchanged.");
+export type VegetationTint = z.infer<typeof vegetationTintSchema>;
 
 export const transformSchema = z.object({
   position: vec3.default([0, 0, 0]),
@@ -35,6 +46,86 @@ export const visibilitySchema = z.object({
     .default(true)
     .describe("False hides this entity's complete render subtree in edit and play mode. Scripts may still reveal it at runtime through the entity Object3D."),
 });
+
+/**
+ * A culling unit: this entity's whole render subtree is shown or hidden as
+ * one thing, by the renderer's culling system (packages/render/src/culling.ts).
+ * Runtime-only — culling never changes the document or the simulation.
+ */
+export const cullingSchema = z
+  .object({
+    occlusion: z
+      .boolean()
+      .default(true)
+      .describe(
+        "Hide the subtree while terrain stands between it and the camera (the horizon test against the drawn voxel " +
+          "terrain). Hidden subtrees still cast shadows. False for something that must never pop: a beacon on a peak.",
+      ),
+    minScreenPx: z
+      .number()
+      .min(0)
+      .default(0)
+      .describe(
+        "Hide the subtree while its bounds would stand fewer than this many pixels tall on screen (render pixels, after " +
+          "pixelation). Use it on a DETAIL child of a place — clutter, carts, crates, a camp's small props — so the " +
+          "place's landmark reads from afar and its contents arrive as they become visible. 0 = never by size.",
+      ),
+    interior: z
+      .boolean()
+      .default(false)
+      .describe(
+        "An interior: drawn only while the camera is within `reveal` metres of the subtree's bounds, and never baked " +
+          "into distant HLOD proxies. Put a building's furnishings or a POI's inner rooms under one of these, with the " +
+          "shell outside it.",
+      ),
+    reveal: z
+      .number()
+      .min(0)
+      .default(12)
+      .describe("Interior only: how far outside its bounds the camera may be and still see in (doorways, windows)."),
+  })
+  .describe(
+    "Culls this entity's render subtree as one unit: behind terrain, too small on screen, or an interior seen from " +
+      "outside. A root tagged `poi` (every generated POI) is a unit with these defaults even without the component; " +
+      "author one on the prefab root to change them, and nest more on a POI's detail or interior children.",
+  );
+
+export type CullingData = z.infer<typeof cullingSchema>;
+
+/**
+ * Scene-wide culling distances, one per scene (on its root). An instanced dungeon is ALL interior, so the furnishing
+ * default (reveal 12 m, made for a house seen from a street) pops a great hall's props in halfway across it.
+ * Applied where the scene's culling units are built (packages/render/src/culling.ts `cullRootsOf`); runtime-only.
+ */
+export const cullingProfileSchema = z
+  .object({
+    interiorReveal: z
+      .number()
+      .min(0)
+      .optional()
+      .describe(
+        "Every `culling.interior` unit of this scene reveals at least this far (metres from its bounds). Size it to the " +
+          "longest sight line into a room: a giant hall 50-60 m long wants >= 60. Unset = each unit's own `reveal`.",
+      ),
+    maxMinScreenPx: z
+      .number()
+      .min(0)
+      .optional()
+      .describe(
+        "Caps every unit's `culling.minScreenPx` in this scene (0 = nothing hides by size). Interiors are short sight " +
+          "lines; clutter popping by size there reads as a bug, not a saving.",
+      ),
+    occlusion: z
+      .boolean()
+      .optional()
+      .describe("false = no unit of this scene runs the terrain-horizon test (an instance with no voxel terrain)."),
+  })
+  .describe(
+    "Per-scene culling distances for interior scenes (dungeons, instanced interiors) so the props of a room are " +
+      "present when you enter it. One per scene. See docs/culling.md 'Interior scenes'.",
+  );
+
+export type CullingProfileData = z.infer<typeof cullingProfileSchema>;
 
 /**
  * Vertex-shader wind for a model, shared by the `mesh` component and the voxel
@@ -222,6 +313,11 @@ export const meshSchema = z.object({
             "for that gap. 1.5 is a noticeable lift. It brightens the lit and unlit sides alike, so it is not a " +
             "fix for a dead shadow side; that wants image-based lighting.",
         ),
+      vegetationTint: vegetationTintSchema.optional().describe(
+        "Per-instance bark and leaf colour, supported on static (non-moving) instanced asset meshes. Keeps shared models, textures " +
+          "and draw batches: tint values are instance attributes, not material variants. Carried through near/mid " +
+          "LOD and role-mask impostors. An external impostor baker must supply a vegetationMask to retain separate roles.",
+      ),
       uvRotation: z
         .number()
         .optional()
@@ -507,6 +603,18 @@ export const meshSchema = z.object({
       "instanced only: swap to a cheap distance proxy when far from camera. Turn off for props " +
         "already too small/cheap to benefit (grass, small clutter) — the proxy swap only hurts those visually.",
     ),
+  lodDistance: z.number().positive().optional().describe(
+    "Static instanced assets only, when lod is true: camera distance in metres from the placement origin " +
+    "at which the far proxy replaces geometry. Omit to use the host's foliage LOD distance. " +
+    "Large buildings need a longer distance than small props; review silhouette and approach transitions. " +
+    "Does not change collision or streaming distance.",
+  ),
+  lodProxy: z.string().min(1).optional().describe(
+    "Static instanced assets with lod enabled: optional glTF asset ID for authored far geometry instead of an impostor. " +
+    "Must contain one static mesh with one material, in the source model's coordinate frame. " +
+    "Collision continues using source geometry. An invalid/unavailable proxy keeps full geometry. " +
+    "This selects the instance LOD tier; streamed HLOD generation is independent.",
+  ),
   moving: z
     .boolean()
     .default(false)
@@ -530,6 +638,13 @@ export const meshSchema = z.object({
 export const lightSchema = z.object({
   kind: z.enum(["directional", "point", "spot", "ambient"]),
   color: hexColor.default("#ffffff"),
+  groundColor: hexColor
+    .optional()
+    .describe(
+      "ambient only: makes the fill a HEMISPHERE — `color` arrives from above, `groundColor` from below, so floors, " +
+        "walls and ceilings read apart instead of one flat wash. The interior readability floor (dungeons, cellars): " +
+        "a dim fill that keeps every surface legible while fixtures add the warm pools (docs/world-standards/dungeons.md).",
+    ),
   intensity: z
     .number()
     .min(0)
@@ -560,6 +675,14 @@ export const lightSchema = z.object({
     .positive()
     .default(1)
     .describe("Relative priority when the camera's dynamic point-light budget is full. Raise for short critical flashes; distant decorative lights should stay at 1."),
+  when: z
+    .enum(["always", "night", "day"])
+    .default("always")
+    .describe(
+      "point/spot lights: time of day the light is on — `night` scales intensity by darkness (street lanterns, lit " +
+        "windows), fading through dusk with the day-night script. Off-hours lights also stop taking a slot in the " +
+        "point-light budget, so a town full of lanterns costs nothing by day.",
+    ),
   /**
    * directional + castShadow only: half-width of the shadow camera's square
    * ortho frustum, world units (so the frustum spans `-shadowSize` to
@@ -783,6 +906,113 @@ const splatLayerSchema = z.object({
     .describe("World units per texture tile for this layer. Larger = coarser. Give neighbouring layers different scales or their tiling beats in sync."),
 });
 
+/**
+ * `material.water.sea` — the open-sea layer of the water shader. Every
+ * feature is gated at BUILD time by its strength (0 = not compiled), so the
+ * knobs cost nothing when unused.
+ */
+export const seaWaterSchema = z.object({
+  sky: z
+    .number()
+    .min(0)
+    .max(1)
+    .default(1)
+    .describe(
+      "How far the fresnel reflection is the LIVE sky (the dome's zenith/horizon gradient and cloud cover, read along " +
+        "the reflected view ray) instead of the flat `rimColor`. Day/night, weather and zone moods carry over: a storm-grey " +
+        "sky gives a grey sea. The reflection is light, not paint, so the sun does not light it twice. 0 = the old rim.",
+    ),
+  skySteps: z
+    .number()
+    .int()
+    .min(0)
+    .max(32)
+    .default(5)
+    .describe("Bands the reflected sky gradient is posterised into (PS1 look). 0 = smooth."),
+  swellHeight: z
+    .number()
+    .min(0)
+    .default(0.5)
+    .describe(
+      "Long rolling swell under the chop, metres of crest height. Shading only (normals, crest light and trough shade): it " +
+        "never moves vertices, so it works on a coarse ocean plane. Fades out toward shore over `shelterDepth`. 0 = no swell.",
+    ),
+  swellLength: z.number().positive().default(60).describe("Swell wavelength, metres. Speed follows from it (deep-water waves: longer = faster)."),
+  swellDirection: z
+    .tuple([z.number(), z.number()])
+    .default([0.6, 0.8])
+    .describe("Direction the swell TRAVELS, world [x, z] (north is -Z). Used as-is when there is no wind; see `swellWind`."),
+  swellWind: z
+    .number()
+    .min(0)
+    .max(1)
+    .default(0.6)
+    .describe("How far the swell turns to run with the live wind (the sky's cloud drift). 0 = always `swellDirection`."),
+  swellStorm: z
+    .number()
+    .min(0)
+    .default(2)
+    .describe("Extra swell at full storm, as a multiple of `swellHeight` (2 = triple height in a full storm). Storm level comes from the weather wind."),
+  shelterDepth: z
+    .number()
+    .positive()
+    .default(6)
+    .describe("Metres of water depth over which swell and whitecaps build up from nothing at the shoreline: shallow and sheltered water stays calm."),
+  abyssColor: hexColor
+    .default("#0b1a22")
+    .describe("Colour deep water sinks toward, applied OVER the surface texture (the depth bands alone are washed out by a texture). Make it dark and cold for a menacing sea."),
+  abyssDepth: z.number().positive().default(18).describe("Metres of water depth at which the sea is fully `abyssColor` (times `abyssStrength`). Open water with no seabed in view counts as bottomless."),
+  abyssStrength: z.number().min(0).max(1).default(0.7).describe("How far deep water goes to `abyssColor`. 0 = off (not compiled)."),
+  breakers: z
+    .number()
+    .min(0)
+    .max(1)
+    .default(0.7)
+    .describe(
+      "Breaker LINES: stepped foam bands that roll in along the depth contours toward the beach, thin out and die in " +
+        "the shore foam, in sets. Drawn in `foamColor`, quantised by `foamSteps`, broken into segments. 0 = off.",
+    ),
+  breakerReach: z.number().positive().default(24).describe("How far out from the shoreline, metres, breaker lines form and start rolling in (measured across the surface, so a gentle beach and a steep one get the same width of surf)."),
+  breakerCount: z.number().int().min(1).max(8).default(3).describe("Breaker lines between `breakerDepth` and the shore at once."),
+  breakerPeriod: z.number().positive().default(8).describe("Seconds between breakers arriving."),
+  breakerWidth: z.number().min(0.02).max(1).default(0.35).describe("Foam trail behind each breaker's front, as a fraction of the gap between lines."),
+  breakerDepth: z
+    .number()
+    .min(0)
+    .max(30)
+    .optional()
+    .describe(
+      "Run the breakers over this many metres of WATER DEPTH, on depth contours, instead of the shore-distance " +
+        "estimate (`breakerReach`). Contours of a smooth bed are even and parallel to the beach; the estimate is " +
+        "blocky and wobbles with the view. 2-4 m for a beach. Unset = the estimate (older look).",
+    ),
+  breakerBreakup: z
+    .number()
+    .min(0)
+    .max(1)
+    .optional()
+    .describe("How torn the surf lines are: 0 = clean even rolling lines, 1 = fronts dropped into ~5 m segments and frayed by the water texture (the default when unset)."),
+  whitecaps: z
+    .number()
+    .min(0)
+    .max(1)
+    .default(0.12)
+    .describe("Pixel-stepped foam flecks on swell crests in open water on a calm day. 0 together with `whitecapStorm` 0 = off."),
+  whitecapStorm: z.number().min(0).max(1).default(0.6).describe("Extra whitecaps at full storm."),
+  whitecapPixel: z.number().positive().default(0.8).describe("World metres per whitecap block (they drift with the swell)."),
+  glints: z
+    .number()
+    .min(0)
+    .max(1)
+    .default(0.6)
+    .describe(
+      "Sun glints: pixel-snapped sparkles where a jittered facet mirrors the sun, flickering in steps. Follows the live sun " +
+        "and daylight; storm and cloud cover kill them. 0 = off.",
+    ),
+  glintPixel: z.number().positive().default(0.5).describe("World metres per glint cell."),
+  glintSize: z.number().min(0.001).max(0.5).default(0.03).describe("How wide the glint cone around the sun's mirror angle is (bigger = a wider glitter path)."),
+});
+
 /** PBR material — a data asset referenced by mesh.material GUID. */
 export const materialSchema = z.object({
   shader: z
@@ -804,8 +1034,22 @@ export const materialSchema = z.object({
         "there is no per-map offset). Use it to break the phase of a repeating surface between two " +
         "otherwise-identical materials so adjacent walls don't line their tiles up.",
     ),
-  roughness: z.number().min(0).max(1).default(0.85),
-  metalness: z.number().min(0).max(1).default(0.05),
+  roughness: z
+    .number()
+    .min(0)
+    .max(1)
+    .default(1)
+    .describe(
+      "MATTE BY DEFAULT (owner ruling 2026-10-06: a sheen nobody asked for reads as wet plastic under point lights). " +
+        "Keep >= 0.9 for stone, wood, cloth, hide, earth; lower it only for a surface MEANT to shine (ice, water, " +
+        "polished metal) and say so in the asset's note. Dungeon assets are checked by the `matte` quality gate.",
+    ),
+  metalness: z
+    .number()
+    .min(0)
+    .max(1)
+    .default(0)
+    .describe("0 unless the surface IS metal. Under a dark environment any metalness darkens the diffuse read."),
   normalMap: z
     .string()
     .optional()
@@ -961,6 +1205,18 @@ export const materialSchema = z.object({
         "including unlit — unlit's own glow is otherwise invisible to lighting but still feeds bloom. " +
         "Only visibly blooms when a scene postfx bloom pass is enabled.",
     ),
+  nightGlow: z
+    .number()
+    .min(0)
+    .max(1)
+    .default(0)
+    .describe(
+      "Fade the EMISSIVE term with the time of day: 1 = glows only at night (dark by day), 0.5 = half-strength " +
+        "by day, 0 = always (the default). For lantern glass, lit windows, fireflies' jars — the 'no-light' " +
+        "texture that should switch on as the sun goes down. Follows the day-night script's daylight; a scene " +
+        "without one counts as day. Put the art in emissiveMap and keep color dull, so by day it reads as " +
+        "unlit glass.",
+    ),
   emissiveMap: z
     .string()
     .optional()
@@ -1072,14 +1328,18 @@ export const materialSchema = z.object({
       dominantAxis: z.boolean().default(false).describe("Select one triplanar projection per face instead of blending axes. Pair with flatShading for masonry to prevent doubled mortar on bevels; leaves geometry and colliders unchanged. Organic terrain defaults to blended projection."),
       flatShading: z.boolean().default(false).describe("Use triangle face normals for lighting and triplanar texture projection. Useful for DC masonry: smooth corner normals can bend straight mortar courses. Does not move vertices or change colliders; curved surfaces become faceted. Leave false for organic terrain."),
       source: z
-        .enum(["height", "vertex"])
+        .enum(["height", "vertex", "indexed"])
         .default("height")
         .describe(
           "Where the blend weights come from. 'height' = each layer overtakes the previous through its own " +
             "[heightStart, heightEnd] band (heightmap terrain). 'vertex' = the mesh carries a per-vertex vec4 " +
             "weight, which is what marching-cubes voxel terrain generates from its biome rules — that is the " +
             "only way a desert and a snowfield at the SAME altitude can look different. A 'vertex' material on " +
-            "geometry with no splat attribute falls back to height bands rather than rendering untextured.",
+            "geometry with no splat attribute falls back to height bands rather than rendering untextured. " +
+            "'indexed' = the mesh carries the ids and weights of the four layers each vertex blends " +
+            "(`splatIndex`/`splatTop`, written by an indexed voxel world) and every layer's albedo is packed " +
+            "into one texture array: four layers sampled per fragment however deep the palette (up to 64). " +
+            "Normal maps are ignored on this path.",
         ),
       layers: z
         .array(splatLayerSchema)
@@ -1089,10 +1349,11 @@ export const materialSchema = z.object({
         // and a ten-surface world silently rendered WHITE — the material failed
         // validation, the terrain fell back to the default, and nothing said so
         // louder than one console warning.
-        .max(MAX_SPLAT_LAYERS)
+        .max(MAX_INDEXED_SPLAT_LAYERS)
         .describe(
-          "Up to four surfaces. With source 'height' they are ascending bands; with source 'vertex' the array " +
-            "ORDER is the weight vector's channel order and must match the world recipe's `surfaces`.",
+          "Up to 16 surfaces (64 with source 'indexed'). With source 'height' they are ascending bands; with " +
+            "source 'vertex' or 'indexed' the array ORDER is the palette order and must match the world " +
+            "recipe's `surfaces`.",
         ),
       slopeRock: z
         .object({
@@ -1183,6 +1444,10 @@ export const materialSchema = z.object({
             "the tile hides that grid without touching the art. Costs two noise evaluations per fragment and " +
             "no texture fetches, so it is far cheaper than the stochastic-sampling alternative (3x the fetches).",
         ),
+    })
+    .refine((splat) => splat.source === "indexed" || splat.layers.length <= MAX_SPLAT_LAYERS, {
+      message: `more than ${MAX_SPLAT_LAYERS} layers needs source "indexed" (a dense palette blends every layer per fragment)`,
+      path: ["layers"],
     })
     .optional()
     .describe("Only read when shader is 'terrain-splat'."),
@@ -1343,6 +1608,15 @@ export const materialSchema = z.object({
             "disturbed patch is what made every earlier wake read as a decal stuck to the surface. " +
             "0 = pure water motion.",
         ),
+      sea: seaWaterSchema
+        .optional()
+        .describe(
+          "OPEN-SEA layer: live sky reflection, long rolling swell, breaker lines rolling onto the shore, " +
+            "whitecaps, an abyss colour and pixel sun glints. Omit it (lakes, rivers, falls) and the water is " +
+            "exactly the plain water shader. Each feature is compiled in only when its own strength is above 0, " +
+            "so a sea pays only for what it uses. Weather drives it live: the sky colours and cloud cover come " +
+            "from the sky dome, the storm level from the weather wind.",
+        ),
     })
     .optional()
     .describe(
@@ -1373,6 +1647,15 @@ export const animatorSchema = z.object({
   play: z.string().optional(),
   fade: z.number().min(0).default(0.3),
   speed: z.number().default(1),
+  poseLod: z.array(z.object({
+    distance: z.number().positive().describe("Camera distance in metres at which this pose evaluation rate begins."),
+    fps: z.number().positive().max(60).describe("Target pose evaluations per second at this distance; playback time is preserved."),
+  })).max(4).refine(steps => steps.every((step, i) => i === 0 || step.distance > steps[i - 1]!.distance),
+    "Pose LOD distances must be strictly increasing").optional().describe(
+      "Optional distance-based evaluation rates for stable looping poses. Omit for full-rate animation. " +
+      "Near the camera, one-shots, layers, blends and transitions remain full-rate. The host also protects " +
+      "the camera-followed character. Requires a camera passed to AnimationSystem.update; physics and AI are unaffected.",
+    ),
   upperBody: z
     .string()
     .optional()
@@ -1488,6 +1771,36 @@ export const skySchema = z.object({
         .number()
         .default(0)
         .describe("height mode only: WORLD Y (not entity-local) of the densest fog layer — set it to the floor of the space, not to 0 out of habit."),
+      sunScatter: z
+        .number()
+        .min(0)
+        .max(3)
+        .optional()
+        .describe(
+          "exponential/height modes: how much the fog GLOWS toward the sun — looking into a low sun the haze goes " +
+            "warm and bright in the sun's colour, looking away it stays the cold fog colour. 0 = off (flat fog); 0.6-1.2 " +
+            "is a strong dawn/dusk. Follows the live sun, so a day/night script moves it.",
+        ),
+      sunScatterPower: z
+        .number()
+        .min(1)
+        .max(64)
+        .optional()
+        .describe("Default 6. Tightness of that glow around the sun: 2 = half the sky warms, 16 = a halo just around the disc."),
+      mist: z
+        .object({
+          amount: z.number().min(0).max(4).default(0).describe("Extra fog in the low-lying layer. 0 = off; 1 = thick drifting mist. A zone mood's `mist` multiplies it."),
+          top: z.number().default(12).describe("WORLD Y the mist reaches up to (it fades over `thickness` below this). A few metres above the valley floors / sea level it should fill."),
+          thickness: z.number().positive().default(10).describe("Metres over which the mist fades out below `top`: small = a hard surface you can stand above, large = soft."),
+          scale: z.number().positive().default(0.02).describe("Noise frequency of the mist banks per metre (0.02 = banks ~50 m across). Higher = smaller, patchier wisps."),
+          speed: z.tuple([z.number(), z.number()]).default([0.6, 0.25]).describe("Drift of the banks across the ground, metres per second [x, z]."),
+        })
+        .optional()
+        .describe(
+          "exponential/height modes: drifting, patchy ground mist filling the low ground. Absolute height, so it pools " +
+            "in valleys, over the sea and through towns built low; a town on a high shelf looks down on it. One noise " +
+            "octave per fragment — cheap.",
+        ),
     })
     .optional(),
   volumetric: z
@@ -1571,7 +1884,16 @@ export const skySchema = z.object({
    * it (white by day, warm at dawn, dark at night); coverage stays authored. */
   clouds: z
     .object({
-      coverage: z.number().min(0).max(1).default(0).describe("0 = no clouds, 0.4 = scattered, 0.8 = overcast."),
+      coverage: z
+        .number()
+        .min(0)
+        .max(1)
+        .default(0)
+        .describe(
+          "The fair-weather deck: 0 = no clouds, 0.4 = scattered, 0.8 = broken. Weather closes the sky ON TOP of " +
+            "this with `overcast` (the `weather` script: rain fills the whole dome, hides the sun and turns god " +
+            "rays off; console /overcast 0-1), so author the clear-day look here.",
+        ),
       scale: z.number().min(0.05).max(10).default(1).describe("Cloud size; larger = fewer, bigger clouds."),
       speed: z.tuple([z.number(), z.number()]).default([0.6, 0.2]).describe("Wind: drift direction and rate across the sky."),
       softness: z.number().min(0.01).max(1).default(0.35).describe("Edge softness; low = crisp cumulus edges, high = haze."),
@@ -1595,8 +1917,70 @@ export const skySchema = z.object({
             "layer is lit by `color`/`shadow` alone). The `day-night` script drives this: open at the horizon, " +
             "shut by mid-morning.",
         ),
+      texture: z
+        .string()
+        .optional()
+        .describe(
+          "Texture asset id of a PAINTED, seamlessly tiling cloud layer, replacing the procedural noise up to " +
+            "coverage ~0.45. Paint it GREYSCALE with real alpha: alpha is where cloud is, grey is its shading " +
+            "(white = lit `color`, dark = `shadow`), so the day/night script still lights it. Sampled nearest. " +
+            "Past coverage 0.45 the sky closes in the same art: a second, higher layer of this tile shows through the gaps, then a procedural deck fills what is left (coverage 1 = no sky).",
+        ),
+      pixel: z
+        .number()
+        .int()
+        .min(0)
+        .max(4096)
+        .default(0)
+        .describe(
+          "Snap the cloud layer to this many cells per tile (0 = smooth). Gives the procedural deck the same " +
+            "chunky pixels as the painted texture; use the texture's own size or a divisor of it (512 → 128).",
+        ),
     })
     .optional(),
+  rim: z
+    .object({
+      color: hexColor.default("#8fa6d8").describe("Edge light colour on characters. Cold blue reads as moonlight against warm torches."),
+      strength: z.number().min(0).max(3).default(0.25).describe("Edge brightness by day. 0.2-0.5 is a hint that keeps figures readable; 1+ is a stylised outline."),
+      night: z.number().min(0).max(3).default(0.3).describe("Extra edge brightness at full night (follows the day-night script), when dark armour against dark ground needs it most."),
+      power: z.number().min(0.5).max(12).default(4.5).describe("Thinness of the edge: 2 = broad glow, 5 = a thin line on the silhouette."),
+    })
+    .optional()
+    .describe(
+      "A rim (Fresnel) edge light on characters — players and NPCs, ubermesh or not, through the shared appearance " +
+        "materials. Not a light: no shadow, no light slot, a few ALU per character fragment. Omit = off.",
+    ),
+  horizon: z
+    .object({
+      texture: z
+        .string()
+        .describe(
+          "Texture asset id of a 360° backdrop strip (distant ranges, a city skyline), wrapping LEFT to RIGHT. " +
+            "Paint it GREYSCALE with real alpha, art in the lower part and the bottom row opaque: light grey = " +
+            "far (melts into the horizon haze), dark = near (a silhouette). Colour comes from the live sky, so " +
+            "it follows day/night, weather and zone moods with no repaint.",
+        ),
+      height: z
+        .number()
+        .min(0.02)
+        .max(0.9)
+        .default(0.24)
+        .describe("How high the strip's TOP edge reaches, as the sine of the elevation angle (0.24 ≈ 14°). The art usually fills only its lower half, so peaks sit lower than this."),
+      repeat: z.number().int().min(1).max(8).default(1).describe("Copies of the strip around the full circle."),
+      offset: z.number().default(0).describe("Yaw of the strip around world Y, in RADIANS — turn a peak behind the sunset."),
+      opacity: z.number().min(0).max(1).default(1),
+      depth: z
+        .number()
+        .min(0)
+        .max(1)
+        .default(0.45)
+        .describe("How dark the NEAREST layer goes, as a fraction toward a silhouette of the sky's colours. 0 = everything is horizon haze; 0.7 = hard dusk silhouettes."),
+    })
+    .optional()
+    .describe(
+      "Gradient-dome only: a painted horizon backdrop (PS1 skybox style) drawn over the sun glow and under the " +
+        "clouds. Real terrain draws in front of it; it is what shows past the fog where the world ends.",
+    ),
 });
 
 /**
@@ -1891,6 +2275,25 @@ export const postfxSchema = z.object({
       amount: z.number().min(0).max(2).default(0.4).describe("Contrast-adaptive sharpen strength. Its main use is buying back the texture detail FXAA/TAA softened."),
     })
     .prefault({}),
+  dither: z
+    .object({
+      enabled: z.boolean().default(false),
+      levels: z
+        .number()
+        .int()
+        .min(4)
+        .max(256)
+        .default(32)
+        .describe("Shades per colour channel after the dither. 32 is the PlayStation's 15-bit colour (5 bits a channel); 16 is cruder and very visible; 64+ only hides banding."),
+      scale: z.number().int().min(1).max(4).default(1).describe("Screen pixels per dither cell. 1 = per pixel; 2 reads as a chunky retro pattern at high resolution."),
+      amount: z.number().min(0).max(1).default(1).describe("Strength of the dot pattern; 0 leaves only the colour-depth reduction (which then bands)."),
+    })
+    .prefault({})
+    .describe(
+      "PS1-style ordered (4x4 Bayer) dither with reduced colour depth — the PlayStation's signature, and the fix " +
+        "for the banding dark fog, sky and vignette gradients show at full resolution. Runs LAST (after anti-aliasing, " +
+        "which would smear the pattern). A few ALU ops per pixel.",
+    ),
   pixelate: z
     .object({
       enabled: z.boolean().default(false),
@@ -1988,6 +2391,14 @@ export const particlesSchema = z.object({
   emitting: z.boolean().default(true),
   /** Particles spawned per second. */
   rate: z.number().min(0).default(20),
+  when: z
+    .enum(["always", "night", "day"])
+    .default("always")
+    .describe(
+      "Time of day the emitter runs: `night` scales `rate` by darkness (moths round a lantern, fireflies over a " +
+        "pond), `day` by daylight, fading through dusk and dawn with the day-night script. An emitter at rate 0 " +
+        "with nothing alive costs nothing, so night-only emitters are free by day.",
+    ),
   /** Live-particle cap — pool size, hard-capped for the latency budget. */
   max: z.number().int().min(1).max(8000).default(200),
   /** Per-particle lifespan, random in [min, max] seconds. */
@@ -2118,15 +2529,32 @@ export const particlesSchema = z.object({
       cols: z.number().int().min(1).default(1),
       rows: z.number().int().min(1).default(1),
       mode: z
-        .enum(["life", "loop", "random"])
+        .enum(["life", "loop", "random", "row"])
         .default("life")
         .describe(
           "life = play the sheet once across the particle's lifetime (smoke that " +
             "billows and dissipates); loop = play it repeatedly at `fps`; random = " +
             "hold one frame chosen per particle, which is the cheap way to make a " +
-            "hundred identical quads stop looking identical.",
+            "hundred identical quads stop looking identical; row = each particle keeps " +
+            "one random ROW (a variant: a brown leaf, a yellow one) and loops that row's " +
+            "columns at `fps` from its own random start — tumbling leaves, flapping moths.",
         ),
       fps: z.number().positive().default(24),
+      firstRow: z
+        .number()
+        .int()
+        .min(0)
+        .default(0)
+        .describe(
+          "row mode only: the first sheet row this emitter may use. With `rowCount` it carves one shared sheet into " +
+            "per-emitter strips, so different effects (leaves, moths, ash) share ONE texture and draw in ONE batch.",
+        ),
+      rowCount: z
+        .number()
+        .int()
+        .min(0)
+        .default(0)
+        .describe("row mode only: how many rows from `firstRow` each particle picks its variant among. 0 = to the end of the sheet."),
     })
     .optional()
     .describe(
@@ -2585,7 +3013,13 @@ export const netObjectSchema = z.object({
     .enum(["always", "proximity"])
     .default("always")
     .describe('"proximity" transmits only to peers within `radius` (interest management, with leave hysteresis).'),
-  radius: z.number().positive().default(50).describe("Proximity relevancy range in world units."),
+  radius: z
+    .number()
+    .positive()
+    .default(50)
+    .describe(
+      "Proximity relevancy range in world units. On a dedicated server a creature WITHOUT a netObject is already seen out to the interest radius (250), further in proportion to its collider height (a giant up to 600) — add `{ relevancy: \"proximity\", radius: <m> }` on the root only to override that, e.g. a boss that must be seen from across the zone. Leaving `relevancy` out means \"always\" (every player, everywhere).",
+    ),
   sendEvery: z
     .number()
     .int()
@@ -2673,21 +3107,89 @@ export type WaterData = z.infer<typeof waterSchema>;
 /**
  * Server-side enemy population that exists only while a player is near.
  *
- * Nothing spawns at boot. The first player inside `radius` wakes the area:
- * its packs spawn (once) and simulate; when nobody has been inside
+ * Nothing spawns at boot. A player inside `showRadius` (beyond what a client
+ * is sent) has the packs placed, settled and paused; the first player inside
+ * `radius` wakes the area and they simulate; when nobody has been inside
  * `sleepRadius` for `idleSeconds` the pack is paused IN PLACE (scripts
  * suspended, bodies out of the physics world) and resumed where it stood
  * when someone returns. This is what lets a whole-world layer cost what its
  * players cost, not what the map costs (docs/hosting.md). Clients ignore
  * the component; the dedicated server's SpawnAreaManager reads it.
  */
+/** How a spawnArea lays its population out (see `spawnArea.placement`). */
+export const SPAWN_PLACEMENTS = ["pack", "anywhere", "route"] as const;
+export type SpawnPlacement = (typeof SPAWN_PLACEMENTS)[number];
+/** mob-brain's `temperament` values (see `spawnArea.temperament`). */
+export const MOB_TEMPERAMENTS = ["hostile", "territorial", "passive"] as const;
+export type MobTemperament = (typeof MOB_TEMPERAMENTS)[number];
+
+/** One row of `spawnArea.mix`. */
+export const spawnMixEntrySchema = z.object({
+  template: z.string().min(1).describe("NPC template: the id of an npc-tagged scene subtree, a `prefab:<id>`, or a name registered on the server."),
+  weight: z.number().positive().default(1).describe("Relative chance this row is the one rolled."),
+  count: z
+    .tuple([z.number().int().min(1), z.number().int().min(1)])
+    .default([1, 1])
+    .describe("[min, max] creatures spawned together by one roll: [1,1] a single, [1,2] a single or a pair. More than 2 reads as a pack, not ambient life."),
+  temperament: z.enum(MOB_TEMPERAMENTS).optional().describe("This row's temperament (overrides the area's `temperament`)."),
+  near: z.number().min(0).default(4).describe("Metres the members of one roll stand from the first of them (a pair grazing together)."),
+});
+export type SpawnMixEntry = z.infer<typeof spawnMixEntrySchema>;
+
+/** One row of `spawnArea.rares`: a placeholder rare (EverQuest-style), never always up. */
+export const spawnRareSchema = z.object({
+  template: z
+    .string()
+    .min(1)
+    .describe(
+      "The rare's NPC template (a scene subtree id, a `prefab:<id>`, or a registered name). A scene subtree named here is " +
+        "held back by the server (never stands live at its authored spot): the rare exists only when a placeholder rolls it.",
+    ),
+  chance: z
+    .number()
+    .min(0)
+    .max(1)
+    .describe(
+      "Chance (0..1) that a placeholder's slot spawns the rare instead, rolled on every spawn and respawn of a slot (the " +
+        "area's first fill included, so the rare is not guaranteed up at boot). Kill the placeholder to give the slot another roll. " +
+        "Keep it low (0.05-0.2): above ~0.3 the rare is nearly always up.",
+    ),
+  placeholders: z
+    .array(z.string().min(1))
+    .default([])
+    .describe("Templates (of this area's `spawns` / `mix` rows) whose slots may roll the rare. Empty = any slot of the area."),
+  lockout: z
+    .tuple([z.number().min(0), z.number().min(0)])
+    .default([0, 0])
+    .describe("[min, max] seconds after the rare dies (jittered per death) before any slot may roll it again. [0,0] = none."),
+  id: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Shared key: rares with the same id are one creature — at most one alive across every area naming it (and one lockout). Default: one per area and template."),
+  temperament: z.enum(MOB_TEMPERAMENTS).optional().describe("The rare's own temperament (a rare is usually hostile or territorial). Unset = its placeholder slot's."),
+  territory: z.number().min(0).optional().describe("The rare's own `territory` metres (territorial). Unset = the area's."),
+  props: z
+    .record(z.string(), z.unknown())
+    .optional()
+    .describe("`prefab:` templates only: prefab props set on the rare (e.g. `level`, `maxHp`, `xpValue`, `aggroRange`), so a stock body can be the rare without a scene template."),
+});
+export type SpawnRare = z.infer<typeof spawnRareSchema>;
+
 export const spawnAreaSchema = z
   .object({
     radius: z
       .number()
       .positive()
       .default(80)
-      .describe("Metres from the area's origin within which a player wakes it: the packs spawn the first time, resume afterwards."),
+      .describe("Metres from the area's origin within which a player wakes it: the packs simulate (spawning first if they have not been placed yet)."),
+    showRadius: z
+      .number()
+      .positive()
+      .optional()
+      .describe(
+        "Metres within which the packs are PLACED: spawned out of sight, settled on the ground, then paused standing in their idle until a player comes within `radius`. Default: the server's interest radius + 30, so a creature is already standing there when it first comes into view instead of appearing (and dropping) in front of the player.",
+      ),
     sleepRadius: z
       .number()
       .positive()
@@ -2713,6 +3215,93 @@ export const spawnAreaSchema = z
       .default(25)
       .describe("Metres from home an enemy may chase before it must turn back. Handed to each NPC's root script as the `leash` param (with `home`, `roam`, `spawnArea`); the server also fences at 1.5× as a backstop."),
     roam: z.number().min(0).default(10).describe("Idle wander radius around home, passed as the `roam` param."),
+    patrol: z
+      .array(z.tuple([z.number(), z.number(), z.number()]))
+      .default([])
+      .describe(
+        "Patrol route: points in metres relative to the area's origin, walked in order and back (ping-pong) while the pack is idle, " +
+          "instead of wandering inside `roam`. Handed to each NPC as the `patrol` param in world coordinates; the leash and the " +
+          "server's fence are then measured from the nearest point of the route, so the route itself may be longer than the leash. " +
+          "Empty = no patrol.",
+      ),
+    placement: z
+      .enum(SPAWN_PLACEMENTS)
+      .default("pack")
+      .describe(
+        "How the population is laid out. `pack` (the old behaviour): every spawn scattered within its `spread` of the origin, " +
+          "respawned in place by the server's NPC manager. `anywhere`: AMBIENT LIFE — each creature (or pair) spawns, and " +
+          "respawns after `respawn` seconds, at a random walkable open-air point anywhere inside `radius`, never within " +
+          "`hiddenFrom` metres of a player, so no spot can be camped; each one's `home` is its own spawn point and it roams " +
+          "`roamRange` metres round it. Use it for starter wildlife with a `mix` of singles and pairs. `route`: a WANDERING RARE — " +
+          "spawns at a random point along `patrol` (never its start), walks it in a random direction, and respawns after `respawn` " +
+          "seconds out of sight; `unique` keeps one alive per area. Caves: `pack` or `route` (`anywhere` samples the open-air surface).",
+      ),
+    mix: z
+      .array(spawnMixEntrySchema)
+      .default([])
+      .describe(
+        "Weighted table of what spawns: each roll picks one row by `weight` and spawns `count` of it together, until " +
+          "`population` are alive. Singles and pairs ([1,1], [1,2]) read as roaming life; [3,5] reads as a camp. Works in every " +
+          "placement (in `pack` the rolls are scattered within 6 m of the origin, on top of `spawns`). Empty = `spawns` only " +
+          "(in `anywhere` / `route` the `spawns` entries are then the table, weighted by their counts, one creature per roll).",
+      ),
+    population: z
+      .number()
+      .int()
+      .min(1)
+      .optional()
+      .describe(
+        "Creatures alive at once across the area, rolled from `mix`. Default: the sum of the `spawns` counts in `anywhere` " +
+          "(6 with only a `mix`), 1 in `route`, and in `pack` 0 extra (a `pack` with a `mix` rolls this many on top of `spawns`; " +
+          "default the mix's row count). Ignored when `unique` is on.",
+      ),
+    respawn: z
+      .tuple([z.number().min(0), z.number().min(0)])
+      .default([60, 150])
+      .describe(
+        "[min, max] seconds, jittered per death, before a dead creature's corpse is cleared and a replacement spawns somewhere " +
+          "out of sight. `anywhere` and `route` only — `pack` keeps the server's fixed respawn at the spawn point.",
+      ),
+    hiddenFrom: z
+      .number()
+      .min(0)
+      .default(60)
+      .describe("`anywhere` / `route`: no spawn or respawn lands within this many metres of any player, so no spot can be camped."),
+    roamRange: z
+      .tuple([z.number().min(0), z.number().min(0)])
+      .default([40, 80])
+      .describe(
+        "`anywhere` only: [min, max] metres each creature roams round its own spawn point (rolled per creature, replacing " +
+          "`roam`). Its leash is then at least that roam + 20 m, so a long wander is never mistaken for a chase gone too far.",
+      ),
+    unique: z
+      .boolean()
+      .default(false)
+      .describe("`route`: exactly one alive per area (a rare); its replacement waits `respawn` seconds and appears out of sight."),
+    temperament: z
+      .enum(MOB_TEMPERAMENTS)
+      .optional()
+      .describe(
+        "Default temperament for every creature of the area (a `mix` row's own wins), handed to mob-brain as the " +
+          "`temperament` param: hostile (attacks on sight, today's mobs), territorial (attacks only who comes within " +
+          "`territory` metres of it or its home), passive (never starts a fight; hit it and it fights back, then wanders off; " +
+          "never shouts — the server hands passive creatures `alertRadius` 0). Unset = whatever the template's brain says (hostile).",
+      ),
+    territory: z
+      .number()
+      .min(0)
+      .optional()
+      .describe("Metres a `territorial` creature defends round itself and its home, handed to mob-brain as `territory`. Unset = the brain's default (7)."),
+    rares: z
+      .array(spawnRareSchema)
+      .default([])
+      .describe(
+        "PLACEHOLDER RARES: whenever one of this area's slots spawns or respawns (a camp member in `pack`, a roamer in " +
+          "`anywhere`, a walker in `route`) and a rare is neither alive nor locked out, the slot rolls its `chance`; on a hit the " +
+          "rare spawns in that slot instead, with the slot's spot, home, roam, patrol and temperament (or its own). When it dies " +
+          "the slot goes back to placeholder respawns. Listed on the area, not on a row: one rare may sit behind several rows, " +
+          "and one-alive is per area (or per `id`). The old `route` + `unique` wandering rare still works.",
+      ),
   })
   .describe(
     "Proximity-activated enemy population for dedicated servers. Keep every spawn area at least aggro + leash away from a zone edge or transfer band, so a layer swap never happens in sight of a pack.",
@@ -2720,10 +3309,13 @@ export const spawnAreaSchema = z
 
 export type SpawnAreaData = z.infer<typeof spawnAreaSchema>;
 
+
 export function registerCoreComponents(registry: ComponentRegistry): void {
   registry.register("transform", transformSchema);
   registry.register("spawnArea", spawnAreaSchema);
   registry.register("visibility", visibilitySchema);
+  registry.register("culling", cullingSchema);
+  registry.register("cullingProfile", cullingProfileSchema);
   registry.register("mesh", meshSchema);
   registry.register("light", lightSchema);
   registry.register("camera", cameraSchema);
@@ -2740,7 +3332,10 @@ export function registerCoreComponents(registry: ComponentRegistry): void {
   registry.register("grass", grassSchema);
   registry.register("water", waterSchema);
   registry.register("netObject", netObjectSchema);
+  registry.register("portalAnchor", portalAnchorSchema);
+  registry.register("loadingScreen", loadingScreenSchema);
   registerPlacementComponent(registry);
+  registerDressingComponent(registry);
   registerDecalComponent(registry);
   registerPhysicsComponents(registry);
   registerPathComponents(registry);

@@ -32,8 +32,16 @@ export interface LiveSkyOptions {
     softness?: number;
   };
   ambient?: { color?: string; intensity?: number };
-  /** Applied on top of the day/night values: gloom 0..1 dims sun/fill/ambient/IBL, tint blends fog + horizon, wind scales foliage wind, cloudDark drives the deck itself toward storm grey, flash is lightning (a momentary wash over sky, fog and fill — no light is added). */
-  weather?: { gloom?: number; tint?: string; tintAmount?: number; wind?: number; cloudDark?: number; flash?: number };
+  /** Applied on top of the day/night values: gloom 0..1 dims sun/fill/ambient/IBL, tint blends fog + horizon, wind scales foliage wind, cloudDark drives the deck itself toward storm grey, flash is lightning (a momentary wash over sky, fog and fill — no light is added), overcast 0..1 closes the sky over the authored coverage (1 = full deck, no sun disc, no god rays, soft sun). */
+  weather?: { gloom?: number; tint?: string; tintAmount?: number; wind?: number; cloudDark?: number; flash?: number; overcast?: number };
+  /**
+   * A zone's MOOD, layered over the day/night values and under the weather
+   * (see `regionMoodSchema` in @hitreg/core): `sky`/`haze` pull the zenith and
+   * the horizon+fog toward a colour by `amount`; `light` and `shade` MULTIPLY
+   * the sun's and the fill lights' colours; `lightScale` and `fogDensity`
+   * multiply intensities. Omitted fields are neutral. Pass null to clear.
+   */
+  mood?: { sky?: string; haze?: string; amount?: number; light?: string; lightScale?: number; shade?: string; fogDensity?: number; mist?: number } | null;
   /** How much DAYLIGHT there is, 0..1 — a day/night script publishes it so the weather tint (a LIT colour) can be dimmed to the hour instead of lighting up midnight fog. Defaults to 1. */
   daylight?: number;
   environmentIntensity?: number;
@@ -50,6 +58,12 @@ export interface LivePostFxOptions {
     /** The grain's colour when it differs from the authored one (white = a blizzard). */
     color?: string;
   };
+  /**
+   * A live adjustment ON TOP of the scene's authored `postfx.grade` (a zone's
+   * mood): saturation and contrast multiply, temperature adds. Needs the grade
+   * enabled in the scene. Null restores the authored grade.
+   */
+  grade?: { saturation?: number; contrast?: number; temperature?: number } | null;
 }
 
 /** Mirrors `LayerOptions` in @hitreg/render (scripting takes no render dependency). */
@@ -102,6 +116,20 @@ export interface RegionAt {
   tags: readonly string[];
   /** World [x, z] of the zone's centre (a town's square), when it has one. */
   hub?: readonly [number, number];
+  /** The zone's look (recipe `regions[].mood`, inherited by a nested town zone), when it has one. */
+  mood?: Readonly<{
+    sky?: string;
+    haze?: string;
+    amount: number;
+    light?: string;
+    lightScale: number;
+    shade?: string;
+    fogDensity: number;
+    mist: number;
+    saturation: number;
+    contrast: number;
+    temperature: number;
+  }>;
 }
 
 /**
@@ -133,7 +161,8 @@ export interface LiveSkyBase {
   sun: { direction: [number, number, number]; color: string; intensity: number } | null;
   ambient: { color: string; intensity: number } | null;
   environmentIntensity: number;
-  clouds: { coverage: number; softness: number } | null;
+  /** The authored cloud layer; `color`/`shadow` are its DAY lighting (a day/night script cools them toward night). */
+  clouds: { coverage: number; softness: number; color?: string; shadow?: string } | null;
 }
 
 export interface ScriptParamSpec {
@@ -203,6 +232,14 @@ export interface ScriptContext {
   /** Entity ids carrying a tag (expanded scene). */
   findByTag(tag: string): string[];
   /**
+   * Entities with a dynamic or kinematic rigidbody (characters, creatures,
+   * crates) whose object stands within `radius` metres of (x, z) on the
+   * ground plane. Read from the runtime's objects, not the physics world, so
+   * it also sees bodies a net peer does not simulate (another player, a
+   * server's creature: their physics bodies are off on this tab).
+   */
+  bodiesNear?(x: number, z: number, radius: number): string[];
+  /**
    * The entity id of THIS tab's own player, or null when there is none (a
    * headless server, a tab that has not joined). On a dedicated server every
    * joined player is a `player`-tagged body, so `findByTag("player")[0]` is
@@ -235,6 +272,14 @@ export interface ScriptContext {
    * from "looking across it".
    */
   viewDirection?(): [number, number, number];
+  /**
+   * Where the view ray STARTS: the camera's world position. With
+   * {@link viewDirection} it is the crosshair's ray — cast it at the ground
+   * and you have the point the player is aiming at (a placed spell, a
+   * thrown torch), including the over-the-shoulder offset a flat heading
+   * from the character cannot see.
+   */
+  viewOrigin?(): [number, number, number];
   /**
    * Where a world point lands on screen, in CSS pixels from the viewport's
    * top-left, with its distance from the camera — or null when it is behind
@@ -462,6 +507,16 @@ export interface ScriptContext {
     opts?: { spin?: number; clip?: string },
   ): (() => void) | null;
   /**
+   * A small still picture of an entity's FACE (head and shoulders), for unit
+   * frames: an image URL, or null when there is none yet. Never a live render:
+   * the host shoots it once per LOOK (what shows on the head — face, hair,
+   * skin, helm; a creature's model and skin) and caches it, so every rat of one
+   * skin shares one picture. When the look changes (a helm goes on) the old
+   * picture is returned while the new one is shot. Cheap to call every frame.
+   * Absent on headless hosts.
+   */
+  faceShot?(entityId: string): string | null;
+  /**
    * Rebuild THIS entity's `mesh.source.kind: "path"` geometry from new
    * control points (world space) — for a rope/chain/cable whose shape comes
    * from a live simulation (e.g. a joint chain's body positions) instead of
@@ -535,6 +590,19 @@ export interface ScriptSpellHandle extends ScriptVfxHandle {
   trigger(phase: string, at?: [number, number, number]): void;
   /** Drive the projectile from the real simulation (world position). */
   setPath(position: [number, number, number], velocity?: [number, number, number]): void;
+  /**
+   * One SHOT of a projectile spell, driven by the script: it plays the travel
+   * phase on its own path until `impact` (the impact phase there) or `end` (a
+   * miss). A volley is one launch per shot; steer a seeker with `setPath`.
+   * Declare "travel" and "impact" `manual` so the timeline does not also fly one.
+   */
+  launch?(position: [number, number, number], velocity: [number, number, number]): ScriptShotHandle;
+}
+
+export interface ScriptShotHandle {
+  setPath(position: [number, number, number], velocity?: [number, number, number]): void;
+  impact(at?: [number, number, number]): void;
+  end(fade?: number): void;
 }
 
 export interface ScriptVfx {
@@ -628,6 +696,16 @@ export interface ScriptNetState {
   delete(key: string): boolean;
   /** Fires on every change, local or replicated. Auto-unsubscribed on dispose. */
   onChange(cb: (key: string, value: unknown) => void): () => void;
+  /**
+   * Moves only when a key of `namespace` appears or goes (not on value
+   * changes): rebuild something derived from the key SET only when it moved.
+   */
+  namespaceVersion?(namespace: string): number;
+  /**
+   * The same object for every script reading the same store (each script gets
+   * its own wrapper): key a cache shared between scripts on this.
+   */
+  readonly identity?: object;
 }
 
 // ---------------------------------------------------------------------------
@@ -871,6 +949,52 @@ export interface SimLike {
    * moment it sticks in a wall.
    */
   setLayers?(id: string, membership: number, collidesWith?: number): void;
+
+  // ---- cosmetic ragdolls (@hitreg/physics ragdoll.ts) ----------------------
+  // Presentation only: DEBRIS-layer bodies no gameplay query sees, never
+  // replicated. Built from a plan (`planRagdoll`, ragdoll.ts here).
+
+  /** Build a ragdoll; returns its handle. */
+  addRagdoll?(spec: SimRagdollSpec): number;
+  /** Body world poses, 7 floats each (x y z qx qy qz qw); returns the count, 0 = gone. */
+  ragdollPoses?(handle: number, out: Float32Array | number[]): number;
+  /** Every body asleep or slower than the tolerances (m/s, rad/s). */
+  ragdollSettled?(handle: number, linear?: number, angular?: number): boolean;
+  removeRagdoll?(handle: number): void;
+  ragdollStats?(): { active: number; bodies: number; joints: number; created: number; removed: number };
+}
+
+/** Structural copy of @hitreg/physics `RagdollSpec` (keep the two in step). */
+export interface SimRagdollSpec {
+  bodies: Array<{
+    position: [number, number, number];
+    rotation?: [number, number, number, number];
+    collider: {
+      center: [number, number, number];
+      rotation: [number, number, number, number];
+      halfHeight: number;
+      radius: number;
+    };
+    linvel?: [number, number, number];
+    angvel?: [number, number, number];
+    density?: number;
+  }>;
+  /** `limit`: one angle, or [x, y, z] about the bodies' shared spawn rotation. */
+  joints: Array<{ parent: number; child: number; anchor: [number, number, number]; limit: number | [number, number, number] }>;
+  stiffness?: number;
+  damping?: number;
+  /** Seconds over which the motors fade out (0 = they hold). */
+  relax?: number;
+  linearDamping?: number;
+  angularDamping?: number;
+  friction?: number;
+  /** Capsules meet each other (not across a joint or a spawn overlap) and other self-colliding ragdolls. */
+  selfCollide?: boolean;
+  /** From `after` seconds, every body's damping steps up to these. */
+  settle?: { after: number; linearDamping: number; angularDamping: number };
+  /** Root-up height below which a roll further over is damped (a quadruped kept off its back). */
+  rollGuard?: number;
+  layers?: { membership: number; collidesWith: number };
 }
 
 /**
@@ -889,6 +1013,14 @@ export abstract class Script {
    * and {@link Script.onCommand}.
    */
   static commands: ScriptCommandDecl[] = [];
+  /**
+   * PLAYER chat commands this script type answers ("/dance"): typed in the
+   * game's chat by any player, and kept in published builds (unlike
+   * {@link commands}). Declared here for help text; {@link Script.onPlayerCommand}
+   * decides, so a handler may accept names that come from data. Requests that
+   * change state go to the authority as events — a command never decides.
+   */
+  static playerCommands: ScriptCommandDecl[] = [];
   /**
    * Data-asset types a project owns, so a project can register its own
    * ScriptableObject types without editing the shared app bootstrap — same
@@ -948,6 +1080,12 @@ export abstract class Script {
    * surface, not an API: nothing in the engine calls it.
    */
   onCommand?(name: string, args: string[]): string | null;
+  /**
+   * A player chat command ("/dance" -> "dance"). Return null when this script
+   * does not take it (the next one is asked), or the line to show ("" = say
+   * nothing). Runs on the typing player's own tab.
+   */
+  onPlayerCommand?(name: string, args: string[]): string | null;
   onCollision?(otherId: string): void;
   /** Play session ended (stop pressed) — clean up anything external (DOM, timers). */
   onDispose?(): void;
@@ -1024,4 +1162,5 @@ export type ScriptClass = (new () => Script) & {
   events?: ScriptEventDecl[];
   dataTypes?: ScriptDataTypeDecl[];
   commands?: ScriptCommandDecl[];
+  playerCommands?: ScriptCommandDecl[];
 };

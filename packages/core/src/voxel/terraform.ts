@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   blobSchema,
+  passageSchema,
   canyonSchema,
   lakeSchema,
   poiSchema,
@@ -8,6 +9,7 @@ import {
   riverSchema,
   roadSchema,
   townSchema,
+  heightPatchSchema,
   tunnelSchema,
   type WorldRecipe,
 } from "./recipe.js";
@@ -51,9 +53,11 @@ export const FEATURE_KINDS = [
   "ridges",
   "roads",
   "towns",
+  "heightPatches",
   "lakes",
   "tunnels",
   "blobs",
+  "passages",
   "pois",
 ] as const;
 
@@ -65,9 +69,11 @@ const FEATURE_SCHEMAS: Record<FeatureKind, z.ZodType> = {
   ridges: ridgeSchema,
   roads: roadSchema,
   towns: townSchema,
+  heightPatches: heightPatchSchema,
   lakes: lakeSchema,
   tunnels: tunnelSchema,
   blobs: blobSchema,
+  passages: passageSchema,
   pois: poiSchema,
 };
 
@@ -203,6 +209,18 @@ function num(value: unknown, fallback: number): number {
 export function featureFootprint(kind: FeatureKind, feature: unknown): Footprint | null {
   const f = feature as AnyFeature;
   switch (kind) {
+    case "passages": {
+      const c = f["start"] as [number, number, number];
+      const length = num(f["length"], 0) * num(f["direction"], 1);
+      const falloff = num(f["falloff"], 4), pad = falloff + (f["footprint"] === "ellipse" ? num(f["wallNoise"], 0) : 0), half = num(f["width"], 0) / 2 + num(f["wallNoise"], 0) + falloff;
+      if (f["axis"] === "x") return { x0: Math.min(c[0], c[0] + length) - pad, x1: Math.max(c[0], c[0] + length) + pad, z0: c[2] - half, z1: c[2] + half };
+      return { x0: c[0] - half, x1: c[0] + half, z0: Math.min(c[2], c[2] + length) - pad, z1: Math.max(c[2], c[2] + length) + pad };
+    }
+    case "heightPatches": {
+      const origin = f["origin"] as [number, number];
+      const size = f["size"] as [number, number];
+      return { x0: origin[0], z0: origin[1], x1: origin[0] + size[0], z1: origin[1] + size[1] };
+    }
     case "pois":
       return null;
     case "towns": {

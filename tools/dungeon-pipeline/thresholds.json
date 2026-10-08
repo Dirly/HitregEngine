@@ -1,0 +1,355 @@
+{
+  "version": 1,
+  "about": "The dungeon quality bar as DATA (docs/world-standards/dungeons.md 'Quality recipe'; numbers from projects/voxel-demo/authoring/reports/dungeon-quality-recipe.md section 3.4, owner ruling 2026-10-05, palette per the owner's texture correction: ONE ATLAS, one stone colouring, one wood grain/tone, one metal tone). quality.mjs reads only this file for numbers; a dungeon that must differ records a justified exception in its own authoring/quality-exceptions.json, never an edit here.",
+  "references": {
+    "about": "the owner-approved bar: their shipped-light sheets go beside every dungeon's sheet (compare gate)",
+    "fieldfast-barrow": "reports/views/sheet.png",
+    "fieldfast-hall": "authoring/views/sheet.png"
+  },
+  "spaces": {
+    "about": "plan.json space kinds. 'room' spaces carry the per-room recipe; 'passage' spaces (a burrow counts as half a room) only the passage rules. natural = rough rock substrate (noise, no box lumps); everything else is built work.",
+    "roomKinds": [
+      "room",
+      "chamber",
+      "gallery",
+      "cave",
+      "hall",
+      "crypt"
+    ],
+    "passageKinds": [
+      "run",
+      "burrow",
+      "tunnel",
+      "stair",
+      "neck"
+    ],
+    "naturalKinds": [
+      "cave",
+      "burrow",
+      "tunnel"
+    ],
+    "naturalRoles": [
+      "basalt",
+      "rock",
+      "ice",
+      "earth",
+      "snow"
+    ],
+    "ceilingShapeKeys": [
+      "ceiling",
+      "roofRise",
+      "dome",
+      "vault",
+      "roofProfile",
+      "loft",
+      "ribs"
+    ]
+  },
+  "noise": {
+    "about": "natural roles carry geometry noise (tools/mesh-dc/noise.mjs table in authoring/noise.json, embedded in the exported stamp)",
+    "table": "authoring/noise.json",
+    "minNoisedShare": 0.9,
+    "maxRockLumps": 0,
+    "flatDownShare": 0.5,
+    "flatNormalY": 0.98,
+    "minNaturalShare": 0.02,
+    "minDownAreaM2": 20,
+    "smallUseNote": "a dungeon with no natural spaces whose natural-role solids (a hearth back, a rubble fall) are under minNaturalShare of all triangles is not judged; a group is judged for flat ceilings only with >= minDownAreaM2 of downward natural faces"
+  },
+  "atlas": {
+    "about": "one page (one palette, one texture folder) per dungeon; families share one colouring. Hue is only judged on tiles with enough saturation to have one.",
+    "families": {
+      "stone": [
+        "large-ashlar",
+        "coursed-stone",
+        "small-brick",
+        "flagstone",
+        "dressed-trim",
+        "vault-ceiling",
+        "basalt",
+        "smooth-stone",
+        "plaster",
+        "rock",
+        "silt",
+        "earth"
+      ],
+      "wood": [
+        "wood",
+        "panelling",
+        "timber"
+      ],
+      "metal": [
+        "metal"
+      ]
+    },
+    "unfamilied": "coatings and special surfaces (lichen, ice, snow, wallpaper, night-glass, water) are not hue-checked, only tint-checked",
+    "hueBandDeg": 25,
+    "satBand": 0.16,
+    "minSatForHue": 0.08,
+    "tintChroma": 0.12,
+    "tintMinValue": 0.6,
+    "calibration": "2026-10-05 on the owner-approved Fieldfast Hall: its warm wood/panelling tints are chroma 0.11-0.12 and its red small-brick / grey smooth-stone sit 0.13-0.15 off the stone saturation mean, so tintChroma 0.12 and satBand 0.16 pass it; the Barrow's reused-and-tinted tiles (dressed-trim 0.16, lichen, small-brick) still fail.",
+    "tintNote": "a tint is a multiplier: it may darken (value >= tintMinValue) but its chroma (max-min)/max must stay <= tintChroma, so a tint never makes a new colour"
+  },
+  "recipe": {
+    "about": "per room (section 3.4). Counts come from reports/source-audit.json (built detail, by object name <space>.<kind>.n), the dressing plan reports (props, bones, fixtures) and the shipped scene (decals, lights).",
+    "room": {
+      "detailMin": 18,
+      "detailMinMasonry": 22,
+      "propsMin": 6,
+      "propKindsMin": 4,
+      "bonesMax": 4,
+      "boneShareMax": 0.35,
+      "lightsMin": 2,
+      "lightsMax": 5,
+      "decalsMin": 6,
+      "decalsMax": 12,
+      "setPiece": true
+    },
+    "passage": {
+      "about": "runs and burrows: bones capped; one light per segment longer than lightEveryM unless it is declared unlit in the plan (an arrival passage)",
+      "bonesMax": 4,
+      "lightEveryM": 15,
+      "decalsMax": 12
+    },
+    "dungeon": {
+      "propKindsMin": 25,
+      "decalTexturesMin": 3,
+      "decalMidLuma": 70,
+      "fillMax": 6,
+      "fillNote": "2026-10-06: raised from 1.5. The 1.5 cap (\"the Barrow 1.15 is the reference\") produced the lights-on-black the owner rejected; the floor is now the readability gate on the rendered views and the fill comes from lighting.json (hemisphere 5, calibrated on rime-hall-light). The approved Fieldfast Hall runs ambient 3.2."
+    },
+    "masonryRoles": [
+      "coursed-stone",
+      "large-ashlar",
+      "small-brick",
+      "dressed-trim",
+      "flagstone"
+    ],
+    "masonryNote": "a built room is MASONRY (detailMinMasonry) when its wallRole is one of masonryRoles or unset (a DC dungeon's default wall is stone); plastered, panelled or papered rooms take detailMin",
+    "lightClusterM": 1.5,
+    "sourceRadiusM": 1.5,
+    "structuralKinds": [
+      "wall",
+      "wallL",
+      "wallR",
+      "floor",
+      "roof",
+      "ceiling",
+      "step",
+      "stepwedge",
+      "stair",
+      "corner",
+      "fill",
+      "cap",
+      "capEnd",
+      "capStart",
+      "earth",
+      "earth2",
+      "back",
+      "top",
+      "block",
+      "rock",
+      "tide",
+      "pool0",
+      "pool1",
+      "pool2",
+      "undefined"
+    ],
+    "commonDetailKinds": [
+      "arcade",
+      "corbel",
+      "lintel",
+      "pier",
+      "pier-base",
+      "pier-cap",
+      "pilaster",
+      "rib",
+      "beam",
+      "wainscot",
+      "dado",
+      "ledge",
+      "post",
+      "parapet",
+      "bank",
+      "pillar",
+      "deck",
+      "aisle",
+      "aisle-roof",
+      "vault",
+      "walkway",
+      "platform",
+      "leg",
+      "balcony",
+      "causeway"
+    ],
+    "commonDetailPatterns": [
+      "^win\\d*$",
+      "^fire\\d*$",
+      "^\\d+$"
+    ],
+    "bonePattern": "bone|skull|ribcage|skeleton",
+    "mobPattern": "^(mobs|characters|npcs)/",
+    "allowedLoosePrefabs": [
+      "^characters/player$",
+      "^mobs/",
+      "^npcs/",
+      "portal"
+    ],
+    "ruling": "Coordinator ruling 2026-10-05 (owner delegated: \"you need to ultimately decide\"): per-room floors are set near the MEDIAN room of the owner-approved references (Barrow detail 17 / props 3; Hall detail 23 / props 6), raised where the owner explicitly asked for more (props, decals, visible light sources). Decals stay required although neither reference has any (owner: \"you also need decals and more props\"). Tombs/ossuaries may exceed bonesMax through a reasoned authoring/quality-exceptions.json entry (dungeons.md: more bones in a tomb)."
+  },
+  "originality": {
+    "about": "no set-piece builder or build script shared with another dungeon. Builders are the Python files of authoring/ (outside lib/, the shared primitive library) and crafted*/setpieces* recipe files. A function shared with another dungeon fails unless it is a shared primitive named here; a whole file mostly copied (line Jaccard) fails.",
+    "builderFiles": [
+      "\\.py$",
+      "^crafted",
+      "^setpieces"
+    ],
+    "skipDirs": [
+      "lib",
+      "dc-derived",
+      "__pycache__",
+      "views",
+      "textures",
+      "textures-src",
+      "dressing",
+      "ref",
+      "world"
+    ],
+    "primitivesNote": "hexa..wbox are the Barrow's masonry decomposition helpers (pwall/run/room, recipe 3.7: shared and allowed); _profile.._samples are burrow path sweeping. loculi_holes, timber_arch, hull, crafted, cave and rough lumps are set pieces and are NOT primitives.",
+    "referencesAreOriginals": "a function shared with a reference dungeon (references above) fails only the other dungeon: the copy, not the original",
+    "sharedPrimitives": [
+      "hexa",
+      "arch",
+      "spandrels",
+      "to_world",
+      "door_holes",
+      "recess_holes",
+      "profile_pieces",
+      "wbox",
+      "_profile",
+      "zat",
+      "_path",
+      "_seg_at",
+      "_segn",
+      "_point",
+      "_samples",
+      "box",
+      "poly_prism",
+      "arch_solid",
+      "cylinder",
+      "export",
+      "pwall",
+      "run",
+      "room",
+      "ewall",
+      "lathe",
+      "burrow",
+      "wet_floor",
+      "_ccw",
+      "_edge_of",
+      "hexa_uv",
+      "main",
+      "log",
+      "clear_scene",
+      "new_obj",
+      "mat",
+      "add_solid",
+      "solid",
+      "seg",
+      "lerp",
+      "clamp",
+      "v",
+      "tri",
+      "quad",
+      "argv",
+      "_args",
+      "args"
+    ],
+    "minFunctionLines": 4,
+    "fileJaccardMax": 0.6,
+    "ignoreProjects": {
+      "gnawspur-rough": "role-noise proof copy of gnawspur-deeps (project.json title says so); not a dungeon of its own",
+      "noise-lab": "noise test bench"
+    },
+    "dungeonMarker": "authoring/plan.json + authoring/pipeline.mjs"
+  },
+  "readability": {
+    "about": "the readability floor (owner, zone-3 review 2026-10-06: 'pools of light on black look wrong'; dungeons.md 'near black is a fault'). Measured on the shipped-light views (reports/views/*.png): luma = Rec.709 weights on the sRGB bytes, every sampleStep-th pixel. A view is BLACK when more than view.darkShareMax of it is under nearBlack. The dungeon is judged on its MEDIAN view: near-black share (lights on black), mean luminance band (too dark / too bright) and the 10th percentile (flat: even the darkest tenth is lit, no pools of light).",
+    "lumaWeights": [
+      0.2126,
+      0.7152,
+      0.0722
+    ],
+    "sampleStep": 3,
+    "nearBlack": 12,
+    "skipPattern": "^(sheet|compare|plan|section)",
+    "view": {
+      "darkShareMax": 0.9
+    },
+    "dungeon": {
+      "darkShareMedianMax": 0.5,
+      "meanMin": 14,
+      "meanMax": 40,
+      "p10Max": 10
+    },
+    "calibration": "2026-10-06 on the shipped views as they stood. fieldfast-hall (owner-approved bar): median near-black 0.48, mean 21, p10 3, worst view 0.86 -> passes. gnawspur-deeps (owner: 'very bright'): median near-black 0.10, mean 32, p10 14 -> FAILS flat. rime-hall (owner: 'lights on black, horrendous'): median near-black 0.80, mean 9, three views >= 0.95 -> FAILS. fieldfast-barrow's checked-in views: median near-black 0.93, mean 6.6 -> FAILS (the views predate the barrow's current light or the owner judged it in play; re-shoot before acting)."
+  },
+  "matte": {
+    "about": "matte unless intended (owner, zone-3 review 2026-10-06: 'materials gained a SHEEN'). Judged: every painted atlas role (the dc-palette layer's roughness), the palette's own base, every other material asset of the project (schema defaults when left out: roughness 1, metalness 0 since 2026-10-06; 0.85 / 0.05 before) and the project's own GLB materials (glTF: a factor left out is 1). A role or material whose name carries a metalRoles word may be metal and a little smoother. An intended shine (ice, water, polished black ice) is a quality exception with a why.",
+    "roughnessMin": 0.9,
+    "metalRoles": [
+      "metal",
+      "iron",
+      "bronze",
+      "gold",
+      "silver",
+      "steel"
+    ],
+    "metalRoughnessMin": 0.6,
+    "metalnessMax": 0,
+    "schemaDefault": {
+      "roughness": 1,
+      "metalness": 0
+    },
+    "skipShaders": [
+      "unlit",
+      "water",
+      "portal",
+      "wireframe"
+    ],
+    "sources": "2026-10-06 sheen sources found: per-project materials.mjs layer roughness (rime-hall smooth-stone 0.3, ice 0.35, metal 0.5, silt 0.6; gnawspur-deeps metal 0.45, smooth-stone 0.7; fieldfast-barrow smooth-stone 0.55, metal 0.45), rime-hall frozen-dead 0.5 / ice-skin 0.12 on the statues, the material schema default 0.85 / 0.05 (64 voxel-demo materials leave it out) and Blender-default 0.5 roughness on a few town GLBs."
+  },
+  "culling": {
+    "about": "interior pop-in (owner, zone-3 review 2026-10-06: 'walk halfway through a great hall then everything pops into place'). For every interior culling unit in a ROOM (its dressing group), walk the plan route: where the walker first enters the room, the unit must already be revealed (pop-in <= popinMaxM metres walked inside). The scene's cullingProfile (docs/culling.md 'Interior scenes') is applied as the renderer applies it. Bounds are the members' origins padded by propPadM.",
+    "popinMaxM": 2,
+    "propPadM": 1,
+    "requireProfile": false
+  },
+  "compare": {
+    "about": "a sheet of this dungeon's shipped-light views beside the references, newer than the views",
+    "sheet": "reports/compare.png",
+    "width": 1600
+  },
+  "stairs": {
+    "about": "stair/ramp headroom (owner 2026-10-06: a stair ceiling follows the stair, a raked slab or a raking vault, never a flat slab the flight runs up into or a stepped roof). Along every stair/ramp line (plan run profiles with steps, burrow floorProfiles that change height, room-kit stair markers), from 1 m before the first riser to 1 m past the last, every sampleM metres on the centre line and at +-(width/2 - bodyEdgeM): cast down to the walking surface, then up to the first downward face. Clear = ceiling - walking surface. minClearM is the human floor; the band (max - min clear on one line) must stay under max(spreadM, spreadRel x median clear) (a flat ceiling over a rise R spreads by ~R); a ceiling that changes by more than maxJumpM within jumpM beyond what the walk's own pitch explains is a stepped roof (a riser-scale step in the roof; DC rounds a vertical step over 1-2 voxels). Drops narrower than ribM (transverse ribs, arch rings) are max-filtered out before the jump test. Natural (rough rock) stairs: the lane edges are judged for minClearM only, the centre line for the band and steps.",
+    "minClearM": 2.6,
+    "spreadM": 0.9,
+    "spreadRel": 0.12,
+    "sampleM": 0.1,
+    "bodyEdgeM": 0.45,
+    "landingM": 1,
+    "sources": [
+      "authoring/plan.json spaces (run.profile steps, burrow.floorProfile, gallery.stair)",
+      "reports/kit/markers.json and authoring/*.markers.json kind \"stair\" (room kit)"
+    ],
+    "jumpM": 0.2,
+    "maxJumpM": 0.15,
+    "ribM": 0.8
+  },
+  "arrival": {
+    "about": "dungeon arrival safe zone (real-client portal test 2026-10-06: a ghost 15 m from fieldfast-hall's arrival pinned the player under the fight lock, 'cannot leave in the middle of a fight'). No pack (its spread included), patrol point, named creature, miniboss or boss within safeM of any arrival or exit anchor (plan anchors named entry-* / exit-* / arrival*). Straight-line 3D distance in plan metres: never longer than the walk, so it errs on the safe side.",
+    "safeM": 25,
+    "anchorPattern": "^(entry|exit|arrival)"
+  }
+}

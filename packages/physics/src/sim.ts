@@ -12,8 +12,10 @@ import {
   type VoxelMeshSource,
   type SceneDoc,
   type Vec3,
+  type WorldTransform,
 } from "@hitreg/core";
-import { Layers, interactionGroups, queryGroups, type LayerMask } from "./layers.js";
+import { DEFAULT_QUERY_LAYERS, Layers, interactionGroups, queryGroups, type LayerMask } from "./layers.js";
+import { RagdollSet, type RagdollSpec, type RagdollStats } from "./ragdoll.js";
 import {
   DEFAULT_CHARACTER,
   compareHits,
@@ -85,6 +87,47 @@ export interface PhysicsSimOptions {
     assetId: string,
     node?: string,
   ) => MeshGeometryData | Promise<MeshGeometryData | null> | null | undefined;
+  /**
+   * Build static mesh colliders (props, buildings) only near who needs them.
+   * Off by default: every collider is built when its entity is added. On, a
+   * static body whose collider is a trimesh/convex cooked from an asset or
+   * poly mesh is registered instead, and {@link PhysicsSim.updateStatics}
+   * builds it while a focus is within `radius` of its bounds and releases it
+   * past `radius + hysteresis`. Terrain cells (voxel/heightmap) and CSG
+   * volumes are never deferred: they stream, or are needed, on their own terms.
+   */
+  streamStatics?: StaticStreamingOptions;
+}
+
+export interface StaticStreamingOptions {
+  /** Metres (XZ) between a focus and a collider's bounds within which it is built. */
+  radius: number;
+  /** Extra metres before a built collider is released again (default radius / 4). */
+  hysteresis?: number;
+  /** Milliseconds of cooking per {@link PhysicsSim.updateStatics} call (default 4); the rest waits. */
+  budgetMs?: number;
+  /**
+   * A trimesh over this many triangles is cooked as several colliders of at most this many, over as many
+   * updates as the budget needs (default 4096; 0 = always whole). The triangles are the same ones, so the
+   * surface is the same; only a cook that was one 40 ms block (a big quay, a castle) becomes a few short ones.
+   */
+  pieceTriangles?: number;
+}
+
+/** Counts for diagnostics (/admin/status, probes). */
+export interface PhysicsStats {
+  bodies: number;
+  colliders: number;
+  /** Streamable static colliders registered (built or not); 0 when streaming is off. */
+  statics: number;
+  /** Of those, built right now. */
+  staticsBuilt: number;
+  /** Static colliders built and released since the sim started. */
+  staticsBuiltTotal: number;
+  staticsReleasedTotal: number;
+  /** Milliseconds spent cooking streamed statics since the sim started, and the slowest single cook (id, ms). */
+  staticsCookMs: number;
+  staticsSlowest: { id: string; ms: number } | null;
 }
 
 interface JointData {
@@ -119,6 +162,8 @@ export async function initPhysics(): Promise<void> {
  */
 export class PhysicsSim {
   private readonly world: RAPIER.World;
+  /** Cosmetic ragdolls (ragdoll.ts): DEBRIS-layer bodies outside the entity maps. */
+  private readonly ragdolls: RagdollSet;
   /** Every body by entity id (removal, chunk streaming). */
   private readonly bodies = new Map<string, RAPIER.RigidBody>();
   /** Only bodies that can move (dynamic/kinematic) — statics never report state. */
@@ -182,6 +227,18 @@ export class PhysicsSim {
   private charCollision: RAPIER.CharacterCollision | null = null;
   /** Colliders have changed since the last step — see {@link syncQueries}. */
   private queriesDirty = true;
+  // ---- streamed statics (options.streamStatics) -----------------------------
+  /** Every streamable static by id, built or not. */
+  private readonly statics = new Map<string, StreamedStatic>();
+  /** XZ grid of registered statics (cell = streaming radius); huge ones live in `wideStatics`. */
+  private readonly staticGrid = new Map<number, Set<StreamedStatic>>();
+  private readonly wideStatics = new Set<StreamedStatic>();
+  private staticSerial = 0;
+  private staticsBuilt = 0;
+  private staticsBuiltTotal = 0;
+  private staticsReleasedTotal = 0;
+  private staticsCookMs = 0;
+  private staticsSlowest: { id: string; ms: number } | null = null;
 
   constructor(doc: SceneDoc, gravity: Vec3 = [0, -9.81, 0], options: PhysicsSimOptions = {}) {
     if (!initialized) {
@@ -189,6 +246,7 @@ export class PhysicsSim {
     }
     this.options = options;
     this.world = new RAPIER.World({ x: gravity[0], y: gravity[1], z: gravity[2] });
+    this.ragdolls = new RagdollSet(this.world);
     this.addEntities(doc);
   }
 
@@ -200,14 +258,45 @@ export class PhysicsSim {
   addEntities(doc: SceneDoc): void {
     const transforms = worldTransforms(doc);
     const bodies = this.bodies;
+    const stream = this.options.streamStatics;
+    // a joint's ends must exist when pass 2 runs: never defer one
+    let jointEnds: Set<string> | null = null;
+    if (stream) {
+      jointEnds = new Set();
+      for (const [id, entity] of Object.entries(doc.entities)) {
+        const joint = entity.components["joint"] as JointData | undefined;
+        if (joint) jointEnds.add(id).add(joint.target);
+      }
+    }
 
     // pass 1: bodies + colliders
+    let arrivals: Vec3[] | null = null;
     for (const [id, entity] of Object.entries(doc.entities)) {
       const rb = entity.components["rigidbody"] as RigidbodyData | undefined;
       const col = entity.components["collider"] as ColliderData | undefined;
       if (!rb && !col) continue;
-
       const world = transforms.get(id)!;
+      if (stream && col && !jointEnds!.has(id) && streamable(rb, col, entity.components)) {
+        this.registerStatic(id, entity.components, world);
+        continue;
+      }
+      this.buildBody(id, entity.components, world);
+      if (stream && rb?.kind === "dynamic") (arrivals ??= []).push(world.position);
+    }
+    // a body that lands next to a streamed building must find it built
+    if (arrivals) for (const p of arrivals) this.ensureStaticsAround(p[0], p[2]);
+
+    // pass 2: joints
+    this.addJoints(doc);
+  }
+
+  /** Create one entity's body and collider (pass 1 of {@link addEntities}; also a streamed static's build). */
+  private buildBody(id: string, components: Record<string, unknown>, world: WorldTransform): void {
+    const bodies = this.bodies;
+    {
+      const rb = components["rigidbody"] as RigidbodyData | undefined;
+      const col = components["collider"] as ColliderData | undefined;
+      const entity = { components };
       const kind = rb?.kind ?? "static";
       const bodyDesc =
         kind === "dynamic"
@@ -257,7 +346,7 @@ export class PhysicsSim {
             const mesh = entity.components["mesh"] as MeshComponentData | undefined;
             if (mesh?.source.kind !== "heightmap") {
               console.warn(`[physics] ${id}: heightmap collider needs a heightmap mesh component`);
-              continue;
+              return;
             }
             const grid = heightmapMesh(mesh.source as unknown as HeightmapParams);
             shape = RAPIER.ColliderDesc.trimesh(grid.positions, grid.indices);
@@ -289,12 +378,14 @@ export class PhysicsSim {
           default:
             shape = boxFallback();
         }
-        if (!shape) continue;
+        if (!shape) return;
         this.finishCollider(shape, body, col, scaledOffset, id);
       }
     }
+  }
 
-    // pass 2: joints
+  private addJoints(doc: SceneDoc): void {
+    const bodies = this.bodies;
     for (const [id, entity] of Object.entries(doc.entities)) {
       const joint = entity.components["joint"] as JointData | undefined;
       if (!joint) continue;
@@ -341,6 +432,8 @@ export class PhysicsSim {
   /** Remove entities (and their colliders/joints) from the live world. */
   removeEntities(ids: Iterable<string>): void {
     for (const id of ids) {
+      const entry = this.statics.get(id);
+      if (entry) this.unregisterStatic(entry);
       const body = this.bodies.get(id);
       if (!body) continue;
       for (let i = 0; i < body.numColliders(); i++) {
@@ -355,6 +448,408 @@ export class PhysicsSim {
       // reloads the same entity id, and a stale controller holds wasm memory
       this.removeCharacter(id);
     }
+  }
+
+  // =========================================================================
+  // Streamed static colliders (options.streamStatics)
+  //
+  // A world's props and buildings were all cooked into Rapier at boot, and
+  // wasm memory never shrinks: on the MMO scene they were ~1100 of ~1200
+  // colliders and most of the physics heap, nearly all of them nowhere near a
+  // body. Here they are registered with their XZ bounds and built only while
+  // someone is close, the way terrain cells stream. A query far from every
+  // focus does not see them — which is the contract the caller opts into by
+  // passing every point that needs solid ground (players, awake bodies).
+  // =========================================================================
+
+  /**
+   * Build the registered statics near these points and release the ones no
+   * point is near any more. Call every few steps with every focus (XZ is
+   * used). Cooking is bounded by `budgetMs`, nearest first; a static within a
+   * quarter of the radius of a focus is built regardless of the budget.
+   */
+  updateStatics(foci: ReadonlyArray<readonly [number, number, number]>): void {
+    this.streamStatics(foci, this.options.streamStatics?.budgetMs ?? 4, true);
+  }
+
+  /**
+   * {@link updateStatics} with every DYNAMIC body in this sim (asleep or
+   * not: a sleeping body still rests on something) as the foci, plus `extra`
+   * points (a camera). Kinematic bodies are not foci: a door or a lift is
+   * moved, never held up, and scenes scatter them across the whole world.
+   * The host that simulates only its own bodies — a client predicting its
+   * player, a solo or P2P host running its NPCs — needs nothing else.
+   */
+  updateStaticsAroundBodies(extra?: ReadonlyArray<readonly [number, number, number]>): void {
+    if (!this.options.streamStatics) return;
+    const foci = this.bodyFoci;
+    let n = 0;
+    for (const body of this.moving.values()) {
+      if (!body.isDynamic()) continue;
+      const t = body.translation();
+      const f = (foci[n++] ??= [0, 0, 0]);
+      f[0] = t.x;
+      f[1] = t.y;
+      f[2] = t.z;
+    }
+    if (extra) for (const p of extra) foci[n++] = [p[0], p[1], p[2]];
+    foci.length = n;
+    this.updateStatics(foci);
+  }
+  private readonly bodyFoci: Array<[number, number, number]> = [];
+
+  /** Build every registered static near (x, z) now, unbudgeted, releasing nothing (spawns, teleports). */
+  ensureStaticsAround(x: number, z: number): void {
+    this.ensureScratch[0] = x;
+    this.ensureScratch[2] = z;
+    this.streamStatics([this.ensureScratch], Infinity, false);
+  }
+  private readonly ensureScratch: [number, number, number] = [0, 0, 0];
+  private readonly wantScratch: StreamedStatic[] = [];
+  private readonly builtStatics = new Set<StreamedStatic>();
+
+  stats(): PhysicsStats {
+    return {
+      bodies: this.bodies.size,
+      colliders: this.world.colliders.len(),
+      statics: this.statics.size,
+      staticsBuilt: this.staticsBuilt,
+      staticsBuiltTotal: this.staticsBuiltTotal,
+      staticsReleasedTotal: this.staticsReleasedTotal,
+      staticsCookMs: Math.round(this.staticsCookMs),
+      staticsSlowest: this.staticsSlowest,
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // Cosmetic ragdolls (ragdoll.ts). Not entities: no id, no readback through
+  // states(), invisible to queries by default (DEBRIS). Each client builds its
+  // own from its own animated pose; nothing here is ever replicated.
+  // -------------------------------------------------------------------------
+
+  /** Build a ragdoll; returns its handle. Streams the static ground under it first. */
+  addRagdoll(spec: RagdollSpec): number {
+    const root = spec.bodies[0]?.position;
+    if (root) this.ensureStaticsAround(root[0], root[2]);
+    return this.ragdolls.add(spec);
+  }
+
+  /** World poses of a ragdoll's bodies, RAGDOLL_POSE_STRIDE floats each; returns the body count (0 = gone). */
+  ragdollPoses(handle: number, out: Float32Array | number[]): number {
+    return this.ragdolls.poses(handle, out);
+  }
+
+  /** Every body asleep or below the speed tolerances (m/s, rad/s). */
+  ragdollSettled(handle: number, linear?: number, angular?: number): boolean {
+    return this.ragdolls.settled(handle, linear, angular);
+  }
+
+  /** Remove a ragdoll's bodies and joints (the pose it left is the caller's to keep). */
+  removeRagdoll(handle: number): void {
+    this.ragdolls.remove(handle);
+  }
+
+  ragdollStats(): RagdollStats {
+    return this.ragdolls.stats();
+  }
+
+  private streamStatics(
+    foci: ReadonlyArray<readonly [number, number, number]>,
+    budgetMs: number,
+    release: boolean,
+  ): void {
+    const opts = this.options.streamStatics;
+    if (!opts || this.statics.size === 0) return;
+    const R = opts.radius;
+    const K = R + (opts.hysteresis ?? R / 4);
+    const serial = ++this.staticSerial;
+    const want = this.wantScratch;
+    want.length = 0;
+    const visit = (e: StreamedStatic, fx: number, fz: number): void => {
+      const d = Math.hypot(e.x - fx, e.z - fz) - e.r;
+      if (d > K) return;
+      e.keepStamp = serial;
+      if (d > R || e.built) return;
+      if (e.wantStamp !== serial) {
+        e.wantStamp = serial;
+        e.wantD = d;
+        want.push(e);
+      } else if (d < e.wantD) e.wantD = d;
+    };
+    for (const f of foci) {
+      const fx = f[0];
+      const fz = f[2];
+      const x0 = Math.floor((fx - K) / R);
+      const x1 = Math.floor((fx + K) / R);
+      const z0 = Math.floor((fz - K) / R);
+      const z1 = Math.floor((fz + K) / R);
+      for (let ix = x0; ix <= x1; ix++) {
+        for (let iz = z0; iz <= z1; iz++) {
+          const cell = this.staticGrid.get(gridKey(ix, iz));
+          if (cell) for (const e of cell) visit(e, fx, fz);
+        }
+      }
+      for (const e of this.wideStatics) visit(e, fx, fz);
+    }
+    if (release) {
+      for (const e of this.builtStatics) if (e.keepStamp !== serial) this.releaseStatic(e);
+    }
+    if (want.length === 0) return;
+    want.sort((a, b) => a.wantD - b.wantD);
+    const started = performance.now();
+    const must = R / 4;
+    for (const e of want) {
+      if (e.wantD > must && performance.now() - started > budgetMs) break; // the rest next update
+      const t = performance.now();
+      // a big trimesh cooks in pieces: as many as the budget allows (all of them when it is a must)
+      const done = this.buildStatic(e, e.wantD > must ? started + budgetMs : Infinity);
+      const ms = performance.now() - t;
+      this.staticsCookMs += ms;
+      if (!this.staticsSlowest || ms > this.staticsSlowest.ms) this.staticsSlowest = { id: e.id, ms: Math.round(ms * 10) / 10 };
+      if (!done) {
+        // half cooked: releasable like a built one, picked up again next update
+        e.partial = true;
+        this.builtStatics.add(e);
+        break;
+      }
+      e.partial = false;
+      e.built = true;
+      this.builtStatics.add(e);
+      this.staticsBuilt++;
+      this.staticsBuiltTotal++;
+    }
+    want.length = 0;
+  }
+
+  /**
+   * Build one streamed static, or the next pieces of a big trimesh until `deadline` (performance.now ms; at
+   * least one piece per call). True when the collider is complete.
+   */
+  private buildStatic(e: StreamedStatic, deadline: number): boolean {
+    if (!e.pieces) {
+      const pieces = this.splitStatic(e);
+      if (!pieces) {
+        this.buildBody(e.id, e.components, e.world);
+        return true;
+      }
+      // the body first, with no collider (its pieces attach below, over as many calls as they take)
+      const { collider: _pieced, ...rest } = e.components;
+      this.buildBody(e.id, rest, e.world);
+      e.pieces = pieces;
+    }
+    const body = this.bodies.get(e.id);
+    if (!body) {
+      e.pieces = undefined;
+      return true;
+    }
+    const col = e.components["collider"] as ColliderData;
+    const offset = col.offset ?? [0, 0, 0];
+    const sx = Math.abs(e.world.scale[0]);
+    const sy = Math.abs(e.world.scale[1]);
+    const sz = Math.abs(e.world.scale[2]);
+    const scaledOffset: Vec3 = [offset[0] * sx, offset[1] * sy, offset[2] * sz];
+    do {
+      const piece = e.pieces.pop()!;
+      this.finishCollider(RAPIER.ColliderDesc.trimesh(piece.positions, piece.indices), body, col, scaledOffset, e.id);
+    } while (e.pieces.length > 0 && performance.now() < deadline);
+    if (e.pieces.length > 0) return false;
+    e.pieces = undefined;
+    return true;
+  }
+
+  /**
+   * A streamed trimesh over `pieceTriangles` cut into pieces of at most that many: triangles sorted by centroid
+   * along the longest horizontal axis of the mesh, sliced in order, each piece carrying only the vertices it
+   * uses. Null when it cooks whole (small, not a trimesh, not an asset whose geometry is in hand).
+   */
+  private splitStatic(e: StreamedStatic): Array<{ positions: Float32Array; indices: Uint32Array }> | null {
+    const limit = this.options.streamStatics?.pieceTriangles ?? 4096;
+    const col = e.components["collider"] as ColliderData | undefined;
+    if (limit <= 0 || col?.shape !== "trimesh") return null;
+    const source = (e.components["mesh"] as MeshComponentData | undefined)?.source as { kind?: string; assetId?: string; node?: string } | undefined;
+    if (source?.kind !== "asset" || !source.assetId) return null;
+    const data = this.options.meshGeometry?.(source.assetId, source.node);
+    if (!data || data instanceof Promise) return null;
+    const tris = data.indices.length / 3;
+    if (tris <= limit) return null;
+    const positions = scaleVertices(data.positions, [Math.abs(e.world.scale[0]), Math.abs(e.world.scale[1]), Math.abs(e.world.scale[2])]);
+    const idx = data.indices;
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minZ = Infinity;
+    let maxZ = -Infinity;
+    for (let i = 0; i < positions.length; i += 3) {
+      minX = Math.min(minX, positions[i]!);
+      maxX = Math.max(maxX, positions[i]!);
+      minZ = Math.min(minZ, positions[i + 2]!);
+      maxZ = Math.max(maxZ, positions[i + 2]!);
+    }
+    const axis = maxX - minX >= maxZ - minZ ? 0 : 2;
+    const order = new Uint32Array(tris);
+    const key = new Float32Array(tris);
+    for (let t = 0; t < tris; t++) {
+      order[t] = t;
+      key[t] = positions[idx[t * 3]! * 3 + axis]! + positions[idx[t * 3 + 1]! * 3 + axis]! + positions[idx[t * 3 + 2]! * 3 + axis]!;
+    }
+    order.sort((a, b) => key[a]! - key[b]!);
+    const per = Math.ceil(tris / Math.ceil(tris / limit));
+    const pieces: Array<{ positions: Float32Array; indices: Uint32Array }> = [];
+    const remap = new Int32Array(positions.length / 3).fill(-1);
+    for (let start = 0; start < tris; start += per) {
+      const end = Math.min(tris, start + per);
+      const used: number[] = [];
+      const indices = new Uint32Array((end - start) * 3);
+      for (let k = start; k < end; k++) {
+        const t = order[k]!;
+        for (let c = 0; c < 3; c++) {
+          const v = idx[t * 3 + c]!;
+          if (remap[v]! < 0) {
+            remap[v] = used.length;
+            used.push(v);
+          }
+          indices[(k - start) * 3 + c] = remap[v]!;
+        }
+      }
+      const out = new Float32Array(used.length * 3);
+      for (let i = 0; i < used.length; i++) {
+        const v = used[i]!;
+        out[i * 3] = positions[v * 3]!;
+        out[i * 3 + 1] = positions[v * 3 + 1]!;
+        out[i * 3 + 2] = positions[v * 3 + 2]!;
+        remap[v] = -1;
+      }
+      pieces.push({ positions: out, indices });
+    }
+    return pieces;
+  }
+
+  private registerStatic(id: string, components: Record<string, unknown>, world: WorldTransform): void {
+    const old = this.statics.get(id);
+    if (old) this.unregisterStatic(old);
+    const entry: StreamedStatic = {
+      id,
+      components,
+      world,
+      x: world.position[0],
+      z: world.position[2],
+      r: 0,
+      cells: [],
+      wide: false,
+      built: false,
+      keepStamp: -1,
+      wantStamp: -1,
+      wantD: 0,
+    };
+    this.statics.set(id, entry);
+    const bounds = this.staticBounds(entry);
+    if (bounds instanceof Promise) {
+      // placed (and so streamable) once its geometry is known
+      bounds
+        .then((b) => {
+          if (!this.disposed && this.statics.get(id) === entry) this.placeStatic(entry, b);
+        })
+        .catch(() => {
+          if (!this.disposed && this.statics.get(id) === entry) this.placeStatic(entry, null);
+        });
+    } else {
+      this.placeStatic(entry, bounds);
+    }
+  }
+
+  /** Local geometry for a static's bounds: the same source its collider cooks from. */
+  private staticBounds(entry: StreamedStatic): LocalBounds | null | Promise<LocalBounds | null> {
+    const source = (entry.components["mesh"] as MeshComponentData | undefined)?.source;
+    if (source?.kind === "asset") {
+      const asset = source as { kind: "asset"; assetId: string; node?: string };
+      const result = this.options.meshGeometry?.(asset.assetId, asset.node);
+      if (result instanceof Promise) return result.then((data) => (data ? localBounds(data.positions) : null));
+      return result ? localBounds(result.positions) : null;
+    }
+    if (source?.kind === "poly") return localBounds(polyMeshCollision(source as PolyMeshSource).positions);
+    return null;
+  }
+
+  /** World XZ circle from local bounds (null: the collider's box at its offset), then into the grid. */
+  private placeStatic(entry: StreamedStatic, local: LocalBounds | null): void {
+    const { position, rotation, scale } = entry.world;
+    const sx = Math.abs(scale[0]);
+    const sy = Math.abs(scale[1]);
+    const sz = Math.abs(scale[2]);
+    const col = entry.components["collider"] as ColliderData;
+    const offset = col.offset ?? [0, 0, 0];
+    let cx = offset[0] * sx;
+    let cy = offset[1] * sy;
+    let cz = offset[2] * sz;
+    let r: number;
+    if (local) {
+      cx += local.cx * sx;
+      cy += local.cy * sy;
+      cz += local.cz * sz;
+      r = local.h * Math.max(sx, sy, sz);
+    } else {
+      const size = col.size ?? [1, 1, 1];
+      r = Math.hypot(size[0] * sx, size[1] * sy, size[2] * sz) / 2;
+    }
+    // rotate the local centre into the world (q * v * q^-1)
+    const [qx, qy, qz, qw] = rotation;
+    const tx = 2 * (qy * cz - qz * cy);
+    const ty = 2 * (qz * cx - qx * cz);
+    const tz = 2 * (qx * cy - qy * cx);
+    entry.x = position[0] + cx + qw * tx + (qy * tz - qz * ty);
+    entry.z = position[2] + cz + qw * tz + (qx * ty - qy * tx);
+    entry.r = r;
+    const R = this.options.streamStatics!.radius;
+    if (r > 2 * R) {
+      entry.wide = true;
+      this.wideStatics.add(entry);
+      return;
+    }
+    for (let ix = Math.floor((entry.x - r) / R); ix <= Math.floor((entry.x + r) / R); ix++) {
+      for (let iz = Math.floor((entry.z - r) / R); iz <= Math.floor((entry.z + r) / R); iz++) {
+        const key = gridKey(ix, iz);
+        let cell = this.staticGrid.get(key);
+        if (!cell) this.staticGrid.set(key, (cell = new Set()));
+        cell.add(entry);
+        entry.cells.push(key);
+      }
+    }
+  }
+
+  /** Forget a static entirely (its entity left). Its body, if built, is removed by the caller. */
+  private unregisterStatic(entry: StreamedStatic): void {
+    this.statics.delete(entry.id);
+    for (const key of entry.cells) {
+      const cell = this.staticGrid.get(key);
+      cell?.delete(entry);
+      if (cell?.size === 0) this.staticGrid.delete(key);
+    }
+    entry.cells.length = 0;
+    if (entry.wide) this.wideStatics.delete(entry);
+    if (entry.built) this.staticsBuilt--;
+    entry.built = false;
+    entry.partial = false;
+    entry.pieces = undefined;
+    this.builtStatics.delete(entry);
+  }
+
+  /** Take a built static out of the world; it stays registered and builds again when someone comes near. */
+  private releaseStatic(entry: StreamedStatic): void {
+    const body = this.bodies.get(entry.id);
+    if (body) {
+      for (let i = 0; i < body.numColliders(); i++) this.colliderToEntity.delete(body.collider(i).handle);
+      this.world.removeRigidBody(body);
+      this.bodies.delete(entry.id);
+      this.sensors.delete(entry.id);
+      this.queriesDirty = true;
+    }
+    if (entry.built) {
+      this.staticsBuilt--;
+      this.staticsReleasedTotal++;
+    }
+    entry.built = false;
+    entry.partial = false;
+    entry.pieces = undefined;
+    this.builtStatics.delete(entry);
   }
 
   /** Apply the shared collider settings and register it on the body. */
@@ -383,6 +878,10 @@ export class PhysicsSim {
       ),
     );
     const created = this.world.createCollider(shape, body);
+    // The JS Collider keeps the desc's Shape: for a trimesh, its vertex and
+    // index arrays, which the wasm side has already copied. Nothing here reads
+    // `collider.shape` (it re-derives from wasm if anyone does), so let go.
+    created.clearShapeCache();
     this.colliderToEntity.set(created.handle, id);
     this.queriesDirty = true;
     if (col.isTrigger ?? false) this.sensors.add(id);
@@ -522,6 +1021,7 @@ export class PhysicsSim {
   }
 
   step(dt: number): void {
+    this.ragdolls.tick(dt);
     this.world.timestep = dt;
     this.world.step(this.events);
     this.drainEvents();
@@ -590,6 +1090,14 @@ export class PhysicsSim {
   /** Whether the entity's collider was created as a sensor (isTrigger). */
   isTrigger(id: string): boolean {
     return this.sensors.has(id);
+  }
+
+  /** One moving body's position as the physics world has it now (states() without building a map of every body). */
+  getPosition(id: string): Vec3 | null {
+    const body = this.moving.get(id);
+    if (!body) return null;
+    const t = body.translation();
+    return [t.x, t.y, t.z];
   }
 
   getLinvel(id: string): Vec3 | null {
@@ -709,7 +1217,7 @@ export class PhysicsSim {
       maxDistance,
       opts.solid ?? true,
       sensorFlags(opts.includeSensors),
-      queryGroups(opts.layers ?? Layers.ALL),
+      queryGroups(opts.layers ?? DEFAULT_QUERY_LAYERS),
       undefined,
       this.excludeBody,
       predicate,
@@ -769,7 +1277,7 @@ export class PhysicsSim {
       opts.solid ?? true,
       this.rayCollect,
       sensorFlags(opts.includeSensors),
-      queryGroups(opts.layers ?? Layers.ALL),
+      queryGroups(opts.layers ?? DEFAULT_QUERY_LAYERS),
       undefined,
       this.excludeBody,
       predicate,
@@ -822,7 +1330,7 @@ export class PhysicsSim {
       len,
       opts.stopAtPenetration ?? true,
       sensorFlags(opts.includeSensors),
-      queryGroups(opts.layers ?? Layers.ALL),
+      queryGroups(opts.layers ?? DEFAULT_QUERY_LAYERS),
       undefined,
       this.excludeBody,
       predicate,
@@ -900,7 +1408,7 @@ export class PhysicsSim {
       this.resolveShape(shape),
       this.overlapCollect,
       sensorFlags(opts.includeSensors),
-      queryGroups(opts.layers ?? Layers.ALL),
+      queryGroups(opts.layers ?? DEFAULT_QUERY_LAYERS),
       undefined,
       this.excludeBody,
       predicate,
@@ -1211,6 +1719,77 @@ interface CharacterEntry {
   /** cos(maxSlopeClimbAngle), precomputed for the per-collision wall test. */
   climbCos: number;
   up: Vec3;
+}
+
+/** A static collider registered for proximity streaming (PhysicsSim.updateStatics). */
+interface StreamedStatic {
+  id: string;
+  components: Record<string, unknown>;
+  world: WorldTransform;
+  /** World XZ centre and radius of its bounds (0 until placed). */
+  x: number;
+  z: number;
+  r: number;
+  /** Grid cells it was entered in. */
+  cells: number[];
+  /** Too large for the grid: checked against every focus. */
+  wide: boolean;
+  built: boolean;
+  /** A big trimesh cooked piece by piece: the pieces still to cook (positions scaled); `partial` while some are on. */
+  pieces?: Array<{ positions: Float32Array; indices: Uint32Array }>;
+  partial?: boolean;
+  /** Update serials: within keep range / queued to build this update. */
+  keepStamp: number;
+  wantStamp: number;
+  wantD: number;
+}
+
+/** Local AABB centre and half-diagonal of a vertex array. */
+interface LocalBounds {
+  cx: number;
+  cy: number;
+  cz: number;
+  h: number;
+}
+
+/** Provider geometry is shared per model: bound each array once. */
+const boundsCache = new WeakMap<Float32Array, LocalBounds>();
+function localBounds(positions: Float32Array): LocalBounds | null {
+  const hit = boundsCache.get(positions);
+  if (hit) return hit;
+  if (positions.length < 3) return null;
+  let x0 = Infinity, y0 = Infinity, z0 = Infinity;
+  let x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
+  for (let i = 0; i < positions.length; i += 3) {
+    const x = positions[i]!, y = positions[i + 1]!, z = positions[i + 2]!;
+    if (x < x0) x0 = x;
+    if (x > x1) x1 = x;
+    if (y < y0) y0 = y;
+    if (y > y1) y1 = y;
+    if (z < z0) z0 = z;
+    if (z > z1) z1 = z;
+  }
+  const out = { cx: (x0 + x1) / 2, cy: (y0 + y1) / 2, cz: (z0 + z1) / 2, h: Math.hypot(x1 - x0, y1 - y0, z1 - z0) / 2 };
+  boundsCache.set(positions, out);
+  return out;
+}
+
+/** Numeric grid key (cells within ±32k of the origin; a streaming cell is tens of metres). */
+function gridKey(ix: number, iz: number): number {
+  return (ix + 32768) * 65536 + (iz + 32768);
+}
+
+/**
+ * Whether a collider may be deferred under `streamStatics`: a fixed,
+ * non-trigger trimesh/convex cooked from an asset or poly mesh. Terrain
+ * (voxel, heightmap) streams by cell already; CSG volumes are dungeon shells.
+ */
+function streamable(rb: RigidbodyData | undefined, col: ColliderData, components: Record<string, unknown>): boolean {
+  if ((rb?.kind ?? "static") !== "static") return false;
+  if (col.isTrigger ?? false) return false;
+  if (col.shape !== "trimesh" && col.shape !== "convex") return false;
+  const kind = (components["mesh"] as MeshComponentData | undefined)?.source.kind;
+  return kind === "asset" || kind === "poly";
 }
 
 /**

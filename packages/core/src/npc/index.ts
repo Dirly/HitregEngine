@@ -2,10 +2,14 @@ import { z } from "zod";
 import type { AssetLibrary } from "../assets.js";
 import type { NetStateStore } from "../net-state.js";
 import type { EventRegistrationOptions } from "../events.js";
-import { questOfferProblem, type Quest, type QuestJournal } from "../game-ui.js";
+import { questOfferProblem, questState, type Quest, type QuestJournal } from "../game-ui.js";
 export * from "./places.js";
 import { placesSchema } from "./places.js";
-import { addItem, cellAt, nextUid, removeItem, type CharacterSheet, type GridTarget, type SheetEnv } from "../character/sheet.js";
+import { addItem, cellAt, looseStackSchema, nextUid, placeStack, removeItem, type CharacterSheet, type GridTarget, type ItemStack, type SheetEnv } from "../character/sheet.js";
+import { canMerge, hasInstanceData, instanceOf, sameInstance, type InstanceData } from "../character/instance.js";
+import { currentDurability, missingDurability } from "../character/durability.js";
+import { EQUIPMENT_SLOTS, type Item } from "../character/items.js";
+import { DEFAULT_UNBINDABLE_SLOTS, isEntrusted } from "../character/soulbind.js";
 
 /**
  * Town NPCs as data: what they SAY (`dialogue` assets), what they SELL
@@ -21,7 +25,7 @@ import { addItem, cellAt, nextUid, removeItem, type CharacterSheet, type GridTar
  * replicated state. The conversation itself is replicated too
  * (`dialogue/<bodyId>`), so the client only ever draws what the server decided.
  *
- * Persistence: `npc/`, `vault/` and `quests/` are the per-character records a
+ * Persistence: `npc/`, `vault/`, `bind/` and `quests/` are the per-character records a
  * server commits beside the sheet (PERSISTED_PLAYER_NAMESPACES); `dialogue/` is
  * transient and `shop/` is the world's.
  */
@@ -44,46 +48,8 @@ export function formatCoins(copper: number): string {
 
 // -- dialogue -------------------------------------------------------------------------
 
-/** A test against the talking player's state. Every field present must hold. */
-export interface DialogueCondition {
-  quest?: string;
-  status?: "none" | "available" | "active" | "ready" | "complete" | "taken";
-  flag?: string;
-  is?: boolean;
-  met?: boolean;
-  level?: number;
-  item?: string;
-  qty?: number;
-  coins?: number;
-  all?: DialogueCondition[];
-  any?: DialogueCondition[];
-  not?: DialogueCondition;
-}
-
-export const dialogueConditionSchema: z.ZodType<DialogueCondition> = z.lazy(() =>
-  z
-    .object({
-      quest: z.string().min(1).optional().describe("Quest id tested by `status`."),
-      status: z
-        .enum(["none", "available", "active", "ready", "complete", "taken"])
-        .optional()
-        .describe(
-          "With `quest`: none = never accepted; available = can be accepted NOW (not taken, its `requires` done); " +
-            "active = objectives open; ready = objectives done, not handed in; complete = handed in; taken = active or ready.",
-        ),
-      flag: z.string().min(1).optional().describe("A per-character memory flag (set by a `setFlag` action)."),
-      is: z.boolean().optional().describe("With `flag`: the value it must have (default true)."),
-      met: z.boolean().optional().describe("Whether this character had spoken to THIS NPC before the current conversation."),
-      level: z.number().int().min(1).optional().describe("Character level at least this."),
-      item: z.string().min(1).optional().describe("Carries at least `qty` (default 1) of this item id."),
-      qty: z.number().int().min(1).optional(),
-      coins: z.number().int().min(0).optional().describe("Carries at least this many copper."),
-      all: z.array(dialogueConditionSchema).optional().describe("Every one holds."),
-      any: z.array(dialogueConditionSchema).optional().describe("At least one holds."),
-      not: dialogueConditionSchema.optional().describe("This one does NOT hold."),
-    })
-    .describe("A test against the talking character. Every field present must hold; {} is always true."),
-);
+export * from "./conditions.js";
+import { clockHolds, dialogueConditionSchema, weatherHolds, type DialogueCondition, type WorldFacts } from "./conditions.js";
 
 export const dialogueActionSchema = z
   .discriminatedUnion("do", [
@@ -93,6 +59,43 @@ export const dialogueActionSchema = z
     z.object({ do: z.literal("turnInQuest"), quest: z.string().min(1) }).describe("Hand a READY quest in: it completes and pays rewardXp/rewardCoins/rewardItems."),
     z.object({ do: z.literal("openShop"), shop: z.string().min(1) }).describe("Open the shop window (a `shop` asset id) on top of the conversation."),
     z.object({ do: z.literal("openVault") }).describe("Open the character's vault window."),
+    z
+      .object({ do: z.literal("bindSoul") })
+      .describe(
+        "HEARTH bind (the id is kept from when a soul binder did this): the character respawns HERE, at this NPC's " +
+          "`bindPoint` (npc param; default the NPC's own position), instead of the nearest sanctuary. Saved with the " +
+          "character (netState bind/<bodyId>). Every town's innkeeper offers it; the soul binder offers `openSoulbind`.",
+      ),
+    z
+      .object({
+        do: z.literal("openSoulbind"),
+        slots: z.number().int().min(1).max(12).default(3).describe("Most equipment slots a character may have soulbound."),
+        price: z
+          .number()
+          .int()
+          .min(0)
+          .default(5000)
+          .describe("Copper charged when the character CHANGES which slots are soulbound (a first choice and re-attuning the same slots are free)."),
+        exclude: z
+          .array(z.enum(EQUIPMENT_SLOTS))
+          .default([...DEFAULT_UNBINDABLE_SLOTS])
+          .describe("Slots that cannot be chosen (default the worn bag and the belt, which are never looted anyway)."),
+      })
+      .describe(
+        "Open the SOUL BINDER's window: choose up to `slots` equipment slots and attune each to the item worn there now " +
+          "(sheet `soulslots`; request soul.attune). That item cannot be looted from the character while it stays worn there.",
+      ),
+    z
+      .object({
+        do: z.literal("openRepair"),
+        rate: z
+          .number()
+          .min(0)
+          .max(100)
+          .default(0.25)
+          .describe("Price factor: mending an item costs ceil(item value × missing/max × rate) copper, at least 1 for any damage."),
+      })
+      .describe("Open the repair window: every damaged item the character wears or carries, a price each, and Repair all."),
     z.object({ do: z.literal("give"), item: z.string().min(1), qty: z.number().int().min(1).default(1) }).describe("The NPC hands the character items (refused when the bags are full)."),
     z.object({ do: z.literal("take"), item: z.string().min(1), qty: z.number().int().min(1).default(1) }).describe("The character hands items over (refused when it does not carry them)."),
     z.object({ do: z.literal("pay"), coins: z.number().int().min(1) }).describe("The character pays the NPC (refused when it cannot afford it)."),
@@ -135,7 +138,7 @@ export const dialogueSchema = z
   })
   .describe(
     "What an NPC says (assets/dialogues/<id>.json): a graph of nodes, each a line and the player's choices; choices can " +
-      "test the character (quests, flags, items, coins) and act on the server (quests, shop, vault, items, coins).",
+      "test the character (quests, flags, items, coins, hearth bind) and act on the server (quests, shop, vault, repair, hearth bind, soulbound slots, items, coins).",
   );
 export type Dialogue = z.infer<typeof dialogueSchema>;
 
@@ -158,6 +161,12 @@ export interface DialogueFacts {
   quest: (id: string) => Quest | undefined;
   /** `met` at the start of THIS conversation (the open itself counts a meeting). */
   metBefore: boolean;
+  /** The character's soul bind (netState bind/<bodyId>), for `bound`. */
+  bind?: SoulBind | null;
+  /** This NPC's bind point (world metres), for `bound`; absent = `bound: true` never holds. */
+  bindPoint?: readonly [number, number, number] | null;
+  /** World clock, weather and the biome underfoot, for `clock` / `weather`; absent = those never hold. */
+  world?: WorldFacts | null;
 }
 
 /** Carried (not worn) quantity of an item. */
@@ -172,7 +181,7 @@ export function testCondition(c: DialogueCondition | undefined, f: DialogueFacts
   if (!c) return true;
   if (c.quest !== undefined) {
     const def = f.quest(c.quest);
-    const status = f.journal?.quests[c.quest]?.status;
+    const status = questState(f.journal, c.quest)?.status;
     const want = c.status ?? "complete";
     const ok =
       want === "none" ? status === undefined
@@ -186,6 +195,9 @@ export function testCondition(c: DialogueCondition | undefined, f: DialogueFacts
   if (c.level !== undefined && (f.sheet?.level ?? 1) < c.level) return false;
   if (c.item !== undefined && carriedCount(f.sheet, c.item) < (c.qty ?? 1)) return false;
   if (c.coins !== undefined && (f.sheet?.coins ?? 0) < c.coins) return false;
+  if (c.bound !== undefined && isBoundAt(f.bind, f.bindPoint) !== c.bound) return false;
+  if (c.clock !== undefined && !clockHolds(c.clock, f.world?.hour)) return false;
+  if (c.weather !== undefined && !weatherHolds(c.weather, f.world)) return false;
   if (c.all && !c.all.every((x) => testCondition(x, f))) return false;
   if (c.any && !c.any.some((x) => testCondition(x, f))) return false;
   if (c.not && testCondition(c.not, f)) return false;
@@ -224,7 +236,17 @@ export const conversationSchema = z
     text: z.string().describe("The line, as resolved on the server."),
     choices: z.array(z.object({ index: z.number().int().min(0), text: z.string() })).describe("What the player may say (index into the node's choices)."),
     panel: z
-      .union([z.object({ kind: z.literal("shop"), shop: z.string().min(1) }), z.object({ kind: z.literal("vault") })])
+      .union([
+        z.object({ kind: z.literal("shop"), shop: z.string().min(1) }),
+        z.object({ kind: z.literal("vault") }),
+        z.object({ kind: z.literal("repair"), rate: z.number().min(0).describe("The opening action's price factor.") }),
+        z.object({
+          kind: z.literal("soulbind"),
+          slots: z.number().int().min(1).describe("Most slots that may be soulbound."),
+          price: z.number().int().min(0).describe("Copper to change WHICH slots are soulbound."),
+          exclude: z.array(z.enum(EQUIPMENT_SLOTS)).default([]).describe("Slots that cannot be chosen."),
+        }),
+      ])
       .nullable()
       .default(null)
       .describe("A service window open on top of the conversation."),
@@ -233,6 +255,90 @@ export const conversationSchema = z
   })
   .describe("The conversation a character is in, keyed dialogue/<bodyId>. Authority-written; absent = not talking.");
 export type Conversation = z.infer<typeof conversationSchema>;
+
+// -- the hearth bind (respawn point; the action id `bindSoul` is kept) ----------------------------
+
+export const soulBindSchema = z
+  .object({
+    at: z.tuple([z.number(), z.number(), z.number()]).describe("World point (metres) the character respawns at, scattered a metre or two."),
+    name: z.string().default("").describe("Place name the bind is known by (\"Brinehold\")."),
+  })
+  .describe("Where a character's HEARTH is, keyed bind/<bodyId>: its respawn point. Authority-written (dialogue bindSoul, at an innkeeper); saved with the character.");
+export type SoulBind = z.infer<typeof soulBindSchema>;
+
+/** Metres within which a bind counts as "this binder's". */
+export const BIND_MATCH_RADIUS = 1;
+
+/** Whether a character's bind sits at `point` (a binder's bind point). */
+export function isBoundAt(bind: SoulBind | null | undefined, point: readonly [number, number, number] | null | undefined): boolean {
+  if (!bind || !point) return false;
+  return Math.hypot(bind.at[0] - point[0], bind.at[1] - point[1], bind.at[2] - point[2]) <= BIND_MATCH_RADIUS;
+}
+
+// -- repair ----------------------------------------------------------------------------------
+
+/** Default repair price factor (the `openRepair` action's `rate`). */
+export const REPAIR_RATE = 0.25;
+
+/** Copper to mend one instance fully: ceil(value × missing/max × rate), at least 1 when damaged; 0 when undamaged. */
+export function repairCost(stack: Pick<ItemStack, "durability">, item: Item | undefined, rate = REPAIR_RATE): number {
+  const missing = missingDurability(stack, item);
+  if (missing <= 0) return 0;
+  return Math.max(1, Math.ceil(item!.value * (missing / item!.durability!) * rate - 1e-9));
+}
+
+export interface RepairEntry {
+  uid: string;
+  itemId: string;
+  current: number;
+  max: number;
+  cost: number;
+  worn: boolean;
+}
+
+/** Every damaged item the character wears or carries, worn first, with its price. */
+export function damagedItems(sheet: CharacterSheet, env: SheetEnv, rate = REPAIR_RATE): RepairEntry[] {
+  const out: RepairEntry[] = [];
+  for (const [uid, stack] of Object.entries(sheet.items)) {
+    const item = env.catalog(stack.itemId);
+    const cur = currentDurability(stack, item);
+    if (cur === null || cur >= item!.durability!) continue;
+    out.push({ uid, itemId: stack.itemId, current: cur, max: item!.durability!, cost: repairCost(stack, item, rate), worn: stack.container === undefined });
+  }
+  return out.sort((a, b) => Number(b.worn) - Number(a.worn));
+}
+
+export type RepairResult = { ok: true; sheet: CharacterSheet; cost: number; repaired: string[] } | { ok: false; error: string };
+
+function mended(sheet: CharacterSheet, uids: readonly string[], cost: number): CharacterSheet {
+  const next = structuredClone(sheet);
+  for (const uid of uids) delete next.items[uid]!.durability;
+  next.coins -= cost;
+  return next;
+}
+
+/** Mend one damaged instance fully, paying its price. */
+export function repairItem(sheet: CharacterSheet, uid: string, env: SheetEnv, rate = REPAIR_RATE): RepairResult {
+  const stack = sheet.items[uid];
+  if (!stack) return { ok: false, error: "no such item" };
+  const item = env.catalog(stack.itemId);
+  if (!item) return { ok: false, error: `unknown item "${stack.itemId}"` };
+  if (item.durability === undefined) return { ok: false, error: `${item.name} does not wear` };
+  const cost = repairCost(stack, item, rate);
+  if (cost === 0) return { ok: false, error: `${item.name} needs no repair` };
+  if (sheet.coins < cost) return { ok: false, error: `you need ${formatCoins(cost)}` };
+  return { ok: true, sheet: mended(sheet, [uid], cost), cost, repaired: [uid] };
+}
+
+/** Mend everything damaged, all-or-nothing: refused (nothing mended) unless the purse covers the whole bill. */
+export function repairAll(sheet: CharacterSheet, env: SheetEnv, rate = REPAIR_RATE): RepairResult {
+  const list = damagedItems(sheet, env, rate);
+  if (list.length === 0) return { ok: false, error: "nothing needs repair" };
+  const cost = list.reduce((n, e) => n + e.cost, 0);
+  if (sheet.coins < cost) return { ok: false, error: `you need ${formatCoins(cost)} to repair everything` };
+  const uids = list.map((e) => e.uid);
+  return { ok: true, sheet: mended(sheet, uids, cost), cost, repaired: uids };
+}
 
 // -- shops --------------------------------------------------------------------------------------
 
@@ -269,7 +375,13 @@ export type Shop = z.infer<typeof shopSchema>;
 export const shopStateSchema = z
   .object({
     stock: z.record(z.string(), z.number().int().min(0)).default({}).describe("Units left of each LIMITED stock entry (unlimited ones are absent)."),
-    resale: z.array(z.object({ itemId: z.string().min(1), qty: z.number().int().min(1) })).default([]).describe("Goods players sold here, oldest first."),
+    resale: z
+      .array(looseStackSchema)
+      .default([])
+      .describe(
+        "Goods players sold here, oldest first: the buy-back shelf. Each entry keeps the sold instance's data (wear, twists), " +
+          "and only identical instances share an entry, so whoever buys it gets the same item. Lives while the server runs.",
+      ),
   })
   .describe("A shop's live shelf, keyed shop/<shopId>. Authority-written; shared by every player.");
 export type ShopState = z.infer<typeof shopStateSchema>;
@@ -293,7 +405,7 @@ export function shopSellPrice(shop: Shop, itemId: string, env: SheetEnv): number
 /** What the shop pays for one unit, or null when it will not buy it. */
 export function shopBuyPrice(shop: Shop, itemId: string, env: SheetEnv): number | null {
   const item = env.catalog(itemId);
-  if (!item || item.kind === "quest" || item.value <= 0 || shop.buyRate <= 0) return null;
+  if (!item || item.kind === "quest" || item.entrusted || item.value <= 0 || shop.buyRate <= 0) return null;
   if (shop.buys.length > 0 && !shop.buys.includes(item.kind) && !item.tags.some((t) => shop.buys.includes(t))) return null;
   const price = Math.floor(item.value * shop.buyRate);
   return price > 0 ? price : null;
@@ -301,11 +413,16 @@ export function shopBuyPrice(shop: Shop, itemId: string, env: SheetEnv): number 
 
 export type TradeResult = { ok: true; sheet: CharacterSheet; state: ShopState; coins: number } | { ok: false; error: string };
 
-/** The character buys `qty` of an item from the shelf (own stock first, then resale). */
-export function shopBuy(sheet: CharacterSheet, state: ShopState, shop: Shop, itemId: string, qty: number, env: SheetEnv): TradeResult {
+/**
+ * The character buys `qty` of an item from the shelf: own stock first, then
+ * the buy-back shelf. `resale` names one buy-back entry (its index) — that
+ * exact instance, with its wear and twists — instead.
+ */
+export function shopBuy(sheet: CharacterSheet, state: ShopState, shop: Shop, itemId: string, qty: number, env: SheetEnv, resale?: number): TradeResult {
   if (!Number.isInteger(qty) || qty < 1) return { ok: false, error: "qty must be a positive integer" };
-  const entry = shop.stock.find((e) => e.itemId === itemId);
-  const resaleIndex = state.resale.findIndex((r) => r.itemId === itemId);
+  if (resale !== undefined && state.resale[resale]?.itemId !== itemId) return { ok: false, error: "that is no longer for sale" };
+  const entry = resale === undefined ? shop.stock.find((e) => e.itemId === itemId) : undefined;
+  const resaleIndex = resale ?? state.resale.findIndex((r) => r.itemId === itemId);
   if (!entry && resaleIndex < 0) return { ok: false, error: "not for sale here" };
   const limited = entry ? entry.qty !== undefined : true;
   const onShelf = entry ? (limited ? (state.stock[itemId] ?? 0) : Infinity) : state.resale[resaleIndex]!.qty;
@@ -314,7 +431,8 @@ export function shopBuy(sheet: CharacterSheet, state: ShopState, shop: Shop, ite
   if (price === null) return { ok: false, error: "not for sale here" };
   const cost = price * qty;
   if (sheet.coins < cost) return { ok: false, error: `you need ${formatCoins(cost)}` };
-  const added = addItem(sheet, itemId, qty, env);
+  // a buy-back hands over the instance that was sold, wear and twists included
+  const added = entry ? addItem(sheet, itemId, qty, env) : placeStack(sheet, { ...state.resale[resaleIndex]!, qty }, env, { partial: true });
   if (!added.ok) return added;
   if (added.placed < qty) return { ok: false, error: "not enough room in your bags" };
   const next = { ...added.sheet, coins: sheet.coins - cost };
@@ -341,6 +459,7 @@ export function shopSell(
   const stack = sheet.items[uid];
   if (!stack) return { ok: false, error: "no such item" };
   if (stack.container === undefined) return { ok: false, error: "take it off first" };
+  if (isEntrusted(env, stack.itemId)) return { ok: false, error: "that was entrusted to you: it is not yours to sell" };
   const price = shopBuyPrice(shop, stack.itemId, env);
   if (price === null) return { ok: false, error: "the shop will not buy that" };
   const removed = removeItem(sheet, uid, qty, env);
@@ -349,9 +468,10 @@ export function shopSell(
   const next = { ...removed.sheet, coins: sheet.coins + price * n };
   const nextState: ShopState = structuredClone(state);
   if (shop.resale > 0) {
-    const same = nextState.resale.find((r) => r.itemId === stack.itemId);
+    // the shelf keeps the instance as sold; only identical instances share an entry
+    const same = nextState.resale.find((r) => r.itemId === stack.itemId && sameInstance(r, removed.removed));
     if (same) same.qty += n;
-    else nextState.resale.push({ itemId: stack.itemId, qty: n });
+    else nextState.resale.push(structuredClone(removed.removed));
     while (nextState.resale.length > shop.resale) nextState.resale.shift();
   }
   return { ok: true, sheet: next, state: nextState, coins: price * n };
@@ -359,7 +479,11 @@ export function shopSell(
 
 // -- the vault -----------------------------------------------------------------------------------
 
-const vaultStackSchema = z.object({ itemId: z.string().min(1), qty: z.number().int().min(1) });
+/** A vault slot: a loose stack, every per-instance field (wear, twists, …) kept while it is stored. */
+const vaultStackSchema = looseStackSchema;
+
+/** The per-instance fields of a stack (character/instance.ts), to carry them across a move. */
+const wearOf = (s: object): InstanceData => instanceOf(s);
 
 export const vaultSchema = z
   .object({
@@ -408,6 +532,7 @@ export function vaultDeposit(sheet: CharacterSheet, vault: Vault, uid: string, q
   if (stack.container === undefined) return { ok: false, error: "take it off first" };
   const item = env.catalog(stack.itemId);
   if (!item) return { ok: false, error: `unknown item "${stack.itemId}"` };
+  if (item.entrusted) return { ok: false, error: "that was entrusted to you: it stays in your keeping" };
   const want = qty ?? stack.qty;
   if (!Number.isInteger(want) || want < 1 || want > stack.qty) return { ok: false, error: `cannot store ${want} of ${stack.qty}` };
   const next: Vault = structuredClone(vault);
@@ -417,17 +542,17 @@ export function vaultDeposit(sheet: CharacterSheet, vault: Vault, uid: string, q
     if (!Number.isInteger(slot) || slot < 0 || slot >= next.capacity) return { ok: false, error: "no such vault slot" };
     const there = next.items[slot];
     if (!there) {
-      next.items[slot] = { itemId: stack.itemId, qty: want };
-    } else if (there.itemId === stack.itemId && item.stack > 1) {
+      next.items[slot] = { itemId: stack.itemId, qty: want, ...wearOf(stack) };
+    } else if (canMerge(there, stack, item.stack)) {
       stored = Math.min(want, item.stack - there.qty);
       if (stored <= 0) return { ok: false, error: `that ${item.name} stack is full` };
       there.qty += stored;
     } else {
       // swap: the vault's stack takes the bag cell this one leaves
       if (want !== stack.qty) return { ok: false, error: "that slot is taken" };
-      next.items[slot] = { itemId: stack.itemId, qty: want };
+      next.items[slot] = { itemId: stack.itemId, qty: want, ...wearOf(stack) };
       const swapped = structuredClone(sheet);
-      swapped.items[uid] = { itemId: there.itemId, qty: there.qty, container: stack.container, x: stack.x, y: stack.y };
+      swapped.items[uid] = { itemId: there.itemId, qty: there.qty, container: stack.container, x: stack.x, y: stack.y, ...wearOf(there) };
       return { ok: true, sheet: swapped, vault: trimmed(next) };
     }
   } else {
@@ -435,7 +560,7 @@ export function vaultDeposit(sheet: CharacterSheet, vault: Vault, uid: string, q
     if (item.stack > 1) {
       for (const s of next.items) {
         if (left === 0) break;
-        if (!s || s.itemId !== stack.itemId || s.qty >= item.stack) continue;
+        if (!s || s.qty >= item.stack || !canMerge(s, stack, item.stack)) continue;
         const take = Math.min(left, item.stack - s.qty);
         s.qty += take;
         left -= take;
@@ -445,7 +570,7 @@ export function vaultDeposit(sheet: CharacterSheet, vault: Vault, uid: string, q
       const i = freeSlot(next);
       if (i < 0) return { ok: false, error: "the vault is full" };
       const take = Math.min(left, item.stack);
-      next.items[i] = { itemId: stack.itemId, qty: take };
+      next.items[i] = { itemId: stack.itemId, qty: take, ...wearOf(stack) };
       left -= take;
     }
   }
@@ -478,12 +603,12 @@ export function vaultWithdraw(sheet: CharacterSheet, vault: Vault, index: number
     if (!probe.ok) return probe;
     const sheetNext = structuredClone(sheet);
     if (probe.occupant === null) {
-      sheetNext.items[nextUid(sheetNext)] = { itemId: slot.itemId, qty: want, ...to };
+      sheetNext.items[nextUid(sheetNext)] = { itemId: slot.itemId, qty: want, ...to, ...wearOf(slot) };
       take(want);
       return { ok: true, sheet: sheetNext, vault: trimmed(next) };
     }
     const other = sheetNext.items[probe.occupant]!;
-    if (other.itemId === slot.itemId && item.stack > 1) {
+    if (canMerge(other, slot, item.stack)) {
       const n = Math.min(want, item.stack - other.qty);
       if (n <= 0) return { ok: false, error: `that ${item.name} stack is full` };
       other.qty += n;
@@ -491,12 +616,13 @@ export function vaultWithdraw(sheet: CharacterSheet, vault: Vault, index: number
       return { ok: true, sheet: sheetNext, vault: trimmed(next) };
     }
     if (want !== slot.qty) return { ok: false, error: "that cell is taken" };
-    next.items[index] = { itemId: other.itemId, qty: other.qty };
-    sheetNext.items[probe.occupant] = { itemId: slot.itemId, qty: slot.qty, ...to };
+    next.items[index] = { itemId: other.itemId, qty: other.qty, ...wearOf(other) };
+    sheetNext.items[probe.occupant] = { itemId: slot.itemId, qty: slot.qty, ...to, ...wearOf(slot) };
     return { ok: true, sheet: sheetNext, vault: trimmed(next) };
   }
 
-  const added = addItem(sheet, slot.itemId, want, env);
+  // tops up only identical instances, and every new stack keeps the slot's instance data
+  const added = placeStack(sheet, { ...slot, qty: want }, env, { partial: true });
   if (!added.ok) return added;
   take(added.placed);
   return { ok: true, sheet: added.sheet, vault: trimmed(next) };
@@ -511,7 +637,7 @@ export function vaultMove(vault: Vault, from: number, to: number, env: SheetEnv)
   const next: Vault = structuredClone(vault);
   const b = next.items[to];
   const item = env.catalog(a.itemId);
-  if (b && b.itemId === a.itemId && item && item.stack > 1 && b.qty < item.stack) {
+  if (b && item && canMerge(b, a, item.stack) && b.qty < item.stack) {
     const n = Math.min(a.qty, item.stack - b.qty);
     b.qty += n;
     next.items[from] = a.qty - n > 0 ? { ...a, qty: a.qty - n } : null;
@@ -530,12 +656,26 @@ export function vaultCoins(sheet: CharacterSheet, vault: Vault, amount: number):
   return { ok: true, sheet: { ...sheet, coins: sheet.coins - amount }, vault: { ...vault, coins: vault.coins + amount } };
 }
 
-/** Take `qty` of an item out of the carried stacks (quest hand-ins, `take` actions). */
+/** Take back every carried ENTRUSTED item that belongs to quest `questId` (item `entrustedQuest`): the quest is over. */
+export function takeEntrusted(sheet: CharacterSheet, questId: string, env: SheetEnv): CharacterSheet {
+  let next = sheet;
+  for (const [uid, s] of Object.entries(sheet.items)) {
+    const item = env.catalog(s.itemId);
+    if (!item?.entrusted || item.entrustedQuest !== questId || s.container === undefined) continue;
+    const r = removeItem(next, uid, undefined, env);
+    if (r.ok) next = r.sheet;
+  }
+  return next;
+}
+
+/** Take `qty` of an item out of the carried stacks (quest hand-ins, `take` actions), plain instances first. */
 export function takeCarried(sheet: CharacterSheet, itemId: string, qty: number, env: SheetEnv): { ok: true; sheet: CharacterSheet } | { ok: false; error: string } {
   if (carriedCount(sheet, itemId) < qty) return { ok: false, error: `you need ${qty} ${env.catalog(itemId)?.name ?? itemId}` };
   let next = sheet;
   let left = qty;
-  for (const [uid, s] of Object.entries(sheet.items)) {
+  // plain instances go first: a hand-in never takes a twisted or worn copy while a plain one will do
+  const order = Object.entries(sheet.items).sort(([, a], [, b]) => Number(hasInstanceData(a)) - Number(hasInstanceData(b)));
+  for (const [uid, s] of order) {
     if (left === 0) break;
     if (s.itemId !== itemId || s.container === undefined) continue;
     const take = Math.min(left, s.qty);
@@ -564,6 +704,9 @@ export const NPC_EVENTS = {
   withdraw: "vault.withdraw",
   coins: "vault.coins",
   arrange: "vault.move",
+  repair: "repair.item",
+  repairAll: "repair.all",
+  attune: "soul.attune",
 } as const;
 
 export const npcEventDecls: ReadonlyArray<{ name: string; schema: z.ZodType; options?: EventRegistrationOptions }> = [
@@ -572,7 +715,22 @@ export const npcEventDecls: ReadonlyArray<{ name: string; schema: z.ZodType; opt
   { name: NPC_EVENTS.leave, schema: z.object({ actorId, npcId }), options: toAuthority },
   // authority-internal (not replicated): a conversation opened — quest logs count `talk` objectives from it
   { name: NPC_EVENTS.talked, schema: z.object({ actorId, npcId }) },
-  { name: NPC_EVENTS.buy, schema: z.object({ actorId, npcId, itemId: z.string().min(1), qty: z.number().int().min(1).default(1) }), options: toAuthority },
+  {
+    name: NPC_EVENTS.buy,
+    schema: z.object({
+      actorId,
+      npcId,
+      itemId: z.string().min(1),
+      qty: z.number().int().min(1).default(1),
+      resale: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .describe("Index of a buy-back entry (shop/<id>.resale) to buy that exact instance; omitted = own stock first, then the first buy-back entry of the item."),
+    }),
+    options: toAuthority,
+  },
   { name: NPC_EVENTS.sell, schema: z.object({ actorId, npcId, uid: z.string().min(1), qty: z.number().int().min(1).optional() }), options: toAuthority },
   {
     name: NPC_EVENTS.deposit,
@@ -605,10 +763,34 @@ export const npcEventDecls: ReadonlyArray<{ name: string; schema: z.ZodType; opt
     options: toAuthority,
   },
   { name: NPC_EVENTS.coins, schema: z.object({ actorId, npcId, amount: z.number().int() }), options: toAuthority },
+  {
+    name: NPC_EVENTS.repair,
+    schema: z.object({ actorId, npcId, uid: z.string().min(1).describe("Stack uid (worn or carried) to mend.") }).describe("Mend one item at an open repair window."),
+    options: toAuthority,
+  },
+  { name: NPC_EVENTS.repairAll, schema: z.object({ actorId, npcId }).describe("Mend every damaged item at an open repair window (all-or-nothing)."), options: toAuthority },
+  {
+    name: NPC_EVENTS.attune,
+    schema: z
+      .object({
+        actorId,
+        npcId,
+        slots: z.array(z.enum(EQUIPMENT_SLOTS)).max(12).describe("The slots to have soulbound, each attuned to what is worn there now; [] clears them."),
+      })
+      .describe(
+        "At an open soul binder window: soulbind these slots (sheet `soulslots`). Re-attuning the same slots is free; a " +
+          "different set costs the window's `price` (a first choice is free).",
+      ),
+    options: toAuthority,
+  },
 ];
 
-/** Per-character netState namespaces a server saves beside the sheet (and restores before the body spawns). */
-export const PERSISTED_PLAYER_NAMESPACES = ["quests", "npc", "vault"] as const;
+/**
+ * Per-character netState namespaces a server saves beside the sheet (and restores before the body spawns).
+ * `lootbags` holds the loot bags a character owns but are not lying in the current scene; the server packs the
+ * live ones in on save and unpacks this scene's on spawn (character/loot.ts `packSavedBags` / `unpackSavedBags`).
+ */
+export const PERSISTED_PLAYER_NAMESPACES = ["quests", "npc", "vault", "bind", "portal", "lootbags"] as const;
 
 /** `dialogue`, `shop` and `places` data-asset types (assets/dialogues/, assets/shops/; `quest` is a core type already). */
 export function registerNpcAssetTypes(assets: AssetLibrary): void {
@@ -617,10 +799,11 @@ export function registerNpcAssetTypes(assets: AssetLibrary): void {
   assets.defineDataType("places", placesSchema);
 }
 
-/** Register npc/, vault/, dialogue/ and shop/ so they validate on write and appear in the spec. Once per store. */
+/** Register npc/, vault/, bind/, dialogue/ and shop/ so they validate on write and appear in the spec. Once per store. */
 export function registerNpcNetState(store: NetStateStore): void {
   store.define("npc", npcMemorySchema);
   store.define("vault", vaultSchema);
+  store.define("bind", soulBindSchema);
   store.define("dialogue", conversationSchema);
   store.define("shop", shopStateSchema);
 }

@@ -11,14 +11,26 @@ import { loadVolumes, loadWorldRecipes } from "./voxel-world.js";
  * `id` is the scene file it came from, which is the scene's identity (saves
  * go back to that file whatever the doc calls itself).
  */
+/**
+ * Projects whose assets this page loaded (the preferred scene's project plus
+ * its project.json `dependsOn`), or null when everything was loaded. A scene
+ * outside this set needs a page load, not an in-place switch: its assets were
+ * never registered.
+ */
+let projectScope: ReadonlySet<string> | null = null;
+export const loadedProjectScope = (): ReadonlySet<string> | null => projectScope;
+
 export async function loadAssets(
   assets: AssetLibrary,
   preferredScene?: string | null,
 ): Promise<{ id: string; content: string } | null> {
-  const index = (await fetch("/__hitreg/assets-index").then((r) => r.json())) as Record<
-    string,
-    string[]
-  >;
+  const response = await fetch(
+    `/__hitreg/assets-index${preferredScene ? `?scene=${encodeURIComponent(preferredScene)}` : ""}`,
+  );
+  const scopeHeader = response.headers.get("x-hitreg-scope");
+  projectScope = scopeHeader && scopeHeader !== "*" ? new Set(scopeHeader.split(",")) : null;
+  if (projectScope) console.info(`[assets] loading projects: ${[...projectScope].join(", ")}`);
+  const index = (await response.json()) as Record<string, string[]>;
   const fileUrl = (kind: string, file: string) =>
     `/__hitreg/asset-file?file=${encodeURIComponent(`${kind}/${file}`)}`;
   // A merged project library can contain thousands of prefabs. Starting all
@@ -67,6 +79,8 @@ export async function loadAssets(
     { kind: "dialogues", type: "dialogue", onlyJson: true },
     { kind: "shops", type: "shop", onlyJson: true },
     { kind: "places", type: "places", onlyJson: true },
+    // a project's extra perform actions (/dance-style), read by the quest-log
+    { kind: "perform-actions", type: "performActions", onlyJson: true },
   ];
   await Promise.all(
     jsonKinds.map(async ({ kind, type, onlyJson }) => {

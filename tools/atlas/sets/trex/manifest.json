@@ -1,0 +1,88 @@
+{
+  "size": 512,
+  "bleed": 2,
+  "bgLum": 236,
+  "keyColor": "#00ffff",
+  "groundFringe": 1,
+  "fitSearch": 1.6,
+  "slots": {
+    "#ff0000": {
+      "name": "body",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#00ff00": {
+      "name": "arm",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "body"
+    },
+    "#0000ff": {
+      "name": "tail",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "body"
+    },
+    "#ffff00": {
+      "name": "head",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#ff00ff": {
+      "name": "leg",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "body"
+    },
+    "#ff8000": {
+      "name": "claw",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#8000ff": {
+      "name": "teeth",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#ff6060": {
+      "name": "chest",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "body"
+    },
+    "#40c040": {
+      "name": "back",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "body"
+    },
+    "#c0c060": {
+      "name": "belly",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#4080ff": {
+      "name": "tail-under",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchColor": "belly"
+    },
+    "#806000": {
+      "name": "tail-top",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    }
+  }
+}

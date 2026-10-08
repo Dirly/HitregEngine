@@ -32,11 +32,31 @@ export interface LiveSyncDeps {
   getLastWrittenScene: () => string;
   setLastWrittenScene: (content: string) => void;
   getLastWrittenPrefab: () => string;
+  /**
+   * True while the player is playing. A change to the OPEN scene's file that
+   * arrives then is held and applied when play stops: applying it mid-play
+   * rebuilds the whole scene (a multi-second freeze on a big world) and
+   * restarts the session — and agents editing a zone write it constantly.
+   */
+  isPlaying?: () => boolean;
+}
+
+/** Re-apply the scene file change held during play (call when play stops). */
+export interface LiveSync {
+  flushDeferred(): void;
 }
 
 /** file changes (AI edits, text editors) apply in place. */
-export function installLiveSync(deps: LiveSyncDeps): void {
-  if (!import.meta.hot) return;
+export function installLiveSync(deps: LiveSyncDeps): LiveSync {
+  let deferred: { file: string; content: string } | null = null;
+  const sync: LiveSync = {
+    flushDeferred() {
+      const held = deferred;
+      deferred = null;
+      if (held) onChange(held);
+    },
+  };
+  if (!import.meta.hot) return sync;
   const {
     assets,
     registry,
@@ -53,9 +73,11 @@ export function installLiveSync(deps: LiveSyncDeps): void {
     setLastWrittenScene,
     getLastWrittenPrefab,
   } = deps;
-  import.meta.hot.on(
-    "hitreg:asset-changed",
-    (payload: { file: string; content: string | null }) => {
+  import.meta.hot.on("hitreg:asset-changed", (payload: { file: string; content: string | null }) => onChange(payload));
+  return sync;
+
+  function onChange(payload: { file: string; content: string | null }): void {
+    {
       const { file, content } = payload;
       if (!content) return;
       try {
@@ -70,6 +92,11 @@ export function installLiveSync(deps: LiveSyncDeps): void {
             return;
           }
           if (content === getLastWrittenScene()) return; // our own autosave echo
+          if (deps.isPlaying?.()) {
+            if (!deferred) console.info(`[live-sync] ${name} changed on disk while playing — applying when play stops`);
+            deferred = { file, content }; // newest wins
+            return;
+          }
           // the file is the scene's identity, whatever the doc calls itself
           const doc = { ...sceneDocSchema.parse(JSON.parse(content)), name };
           const issues = validateScene(doc, registry);
@@ -173,6 +200,6 @@ export function installLiveSync(deps: LiveSyncDeps): void {
       } catch (error) {
         console.warn(`[live-sync] rejected change to ${file}:`, error);
       }
-    },
-  );
+    }
+  }
 }

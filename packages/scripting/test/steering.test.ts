@@ -275,3 +275,23 @@ describe("TerrainSteering separation", () => {
     expect(result.dir[0]).toBeCloseTo(0);
   });
 });
+
+describe("TerrainSteering under a low ceiling", () => {
+  it("walks through a 2.7 m neck: probes start below the roof, not inside it", () => {
+    // A warren neck: flat floor at 0, solid rock from 2.7 m up. A downward ray that starts inside the rock hits the
+    // roof's underside and reads it as a wall-high step (the old fixed 3 m start did exactly that).
+    const ceiling = 2.7;
+    const base = world({});
+    const sim = {
+      ...base,
+      raycast(origin: [number, number, number], dir: [number, number, number], maxDistance: number, query?: { layers?: number }): SimHit | null {
+        if (dir[1] < -0.5 && origin[1] > ceiling) return { entityId: "roof", point: [origin[0], ceiling, origin[2]], normal: [0, -1, 0], distance: origin[1] - ceiling };
+        return base.raycast!(origin, dir, maxDistance, query);
+      },
+    };
+    const result = solveAt(new TerrainSteering(), sim, [0, 0, 0]);
+    expect(result.blocked).toBe(false);
+    expect(result.groundY).toBe(0);
+    expect(result.dir[1]).toBeCloseTo(1);
+  });
+});

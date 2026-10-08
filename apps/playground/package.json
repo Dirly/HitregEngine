@@ -14,12 +14,16 @@
     "worldgen": "tsx tools/worldgen.mts",
     "retarget": "node tools/retarget.mjs",
     "autorig": "node tools/autorig.mjs",
+    "legrig": "node tools/legrig.mjs",
     "unwrap-weapon": "node tools/unwrap-weapon.mjs",
     "atlas-view": "node tools/atlas-view.mjs",
     "atlas-pack": "node tools/atlas-pack.mjs",
     "weapon-page": "node tools/weapon-page.mjs",
     "wfc": "node ../../tools/wfc-3d/kit.mjs",
-    "dungeon": "tsx tools/dungeon.mts"
+    "dungeon": "tsx tools/dungeon.mts",
+    "dress": "tsx tools/dress.mts",
+    "props": "tsx tools/props.mts",
+    "zonegen": "tsx tools/zonegen.mts"
   },
   "dependencies": {
     "@hitreg/comms": "workspace:*",

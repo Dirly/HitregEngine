@@ -1,0 +1,7 @@
+{ "version": 1, "roles": {
+  "rock-wall": { "amount": 0.32, "scale": 2.0, "octaves": 3 },
+  "rock-roof": { "amount": 0.45, "scale": 2.5, "octaves": 3 },
+  "ice-wall": { "amount": 0.2, "scale": 3.5, "octaves": 2 },
+  "ice-roof": { "amount": 0.25, "scale": 3.5, "octaves": 2 },
+  "earth-floor": { "amount": 0.06, "scale": 2.0, "octaves": 2, "floor": true },
+  "tread": null } }

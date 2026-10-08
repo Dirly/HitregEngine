@@ -13,7 +13,8 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "serve": "tsx bin/serve.ts",
-    "main": "tsx bin/main.ts"
+    "main": "tsx bin/main.ts",
+    "zone-budget": "tsx bin/zone-budget.ts"
   },
   "dependencies": {
     "@hitreg/comms": "workspace:*",

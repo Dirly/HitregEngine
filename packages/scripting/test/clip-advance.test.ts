@@ -80,7 +80,7 @@ const CLIPS = ["Idle", "Walk", "Run", "Sprint", "Jump_Loop", "Lunge", "Stride", 
 const LUNGE: ClipAdvance = { d: 1, f: [0, 0.1, 0.4, 0.8, 1] };
 
 /** The controller on a stand-in sim that integrates the velocity it is handed. */
-function harness(params: Record<string, unknown> = {}) {
+function harness(params: Record<string, unknown> = {}, ahead?: { z: number; kind: string; x?: number }) {
   const held = new Set<string>();
   const input: InputLike = { isDown: (code) => held.has(code) };
   let velocity: [number, number, number] = [0, 0, 0];
@@ -111,15 +111,29 @@ function harness(params: Record<string, unknown> = {}) {
           },
         },
       },
+      {
+        op: "add-entity",
+        id: "ahead",
+        entity: {
+          name: "Ahead",
+          parent: null,
+          tags: [],
+          components: { transform: {}, ...(ahead ? { rigidbody: { kind: ahead.kind } } : {}), collider: { shape: "capsule", size: [0.8, 1.8, 0.8] } },
+        },
+      },
     ],
     core,
   ).doc;
   const registry = new ScriptRegistry();
   registerBuiltinScripts(registry);
   const object = new THREE.Object3D();
+  // something standing on the +Z line at `ahead.z` (its collider 0.4 m round). Not in
+  // the sim at all, as a server's creature is not in a net peer's physics.
+  const other = new THREE.Object3D();
+  other.position.set(ahead?.x ?? 0, 0, ahead?.z ?? 100);
   const runtime = new ScriptRuntime({
     doc,
-    objects: new Map([["hero", object]]),
+    objects: new Map([["hero", object], ["ahead", other]]),
     sim,
     registry,
     input,
@@ -138,6 +152,7 @@ function harness(params: Record<string, unknown> = {}) {
       runtime.fixedUpdate(1 / 60);
       pos[0] += velocity[0] / 60;
       pos[2] += velocity[2] / 60;
+      object.position.set(pos[0], 0, pos[2]);
     }
   };
   return {
@@ -228,6 +243,28 @@ describe("third-person-controller clip advance", () => {
     h.tick(62);
     // the whole of the second clip's travel: it was not laid on a layer
     expect(h.pos[2] - z0).toBeGreaterThan(0.93);
+  });
+
+  it("stops at a body in front instead of walking through it (advanceStop), physics or not, but not at static geometry", () => {
+    const lunge = (ahead?: { z: number; kind: string; x?: number }, params: Record<string, unknown> = {}) => {
+      const h = harness({ ...params }, ahead);
+      h.tick(5);
+      Object.assign(h.ud, { actionClip: "Stride", actionUntil: h.now() + 1 });
+      h.tick(75);
+      return h.pos[2];
+    };
+    expect(lunge()).toBeGreaterThan(2.3); // nothing there: the whole 2.5 m
+    // a dummy 3 m ahead (0.4 m round): the hero (0.4 m) plants once it stands engaged with it,
+    // a metre past the 0.5 m gap, 2.3 m centre to centre
+    const stopped = lunge({ z: 3, kind: "dynamic" });
+    expect(stopped).toBeGreaterThan(0.6);
+    expect(stopped).toBeLessThan(0.85);
+    expect(lunge({ z: 3, kind: "kinematic" })).toBeLessThan(0.85);
+    // static geometry is physics' to stop, not this check's
+    expect(lunge({ z: 3, kind: "static" })).toBeGreaterThan(2.3);
+    expect(lunge({ z: 3, kind: "dynamic" }, { advanceStop: 0 })).toBeGreaterThan(2.3);
+    // one standing off to the side of the swing's line is no stop
+    expect(lunge({ z: 1.6, kind: "dynamic", x: 2 } as { z: number; kind: string })).toBeGreaterThan(2.3);
   });
 
   it("gives an upper-body layer over a run no advance — the legs are running", () => {

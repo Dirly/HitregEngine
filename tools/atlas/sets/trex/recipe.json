@@ -1,0 +1,233 @@
+{
+ "source": "MMO/3d/Mobs/Dragon/TRex-parts.obj",
+ "sourceScale": 1,
+ "objScale": 1,
+ "outMesh": "MMO/3d/Mobs/Dragon/TRex-unwrapped",
+ "sheet": 1254,
+ "keyStroke": 8,
+ "smooth": 48,
+ "margin": 22,
+ "gutter": 48,
+ "atlas": {
+  "size": 512,
+  "bleed": 2,
+  "bgLum": 236
+ },
+ "mirrorCopy": {
+  "axis": "z",
+  "parts": [
+   "TRex_Body",
+   "TRex_Arm",
+   "TRex_Tail",
+   "TRex_Head",
+   "TRex_Leg",
+   "TRex_Claw",
+   "TRex_Teeth"
+  ]
+ },
+ "slots": {
+  "body": {
+   "color": "#ff0000",
+   "fit": "contain"
+  },
+  "arm": {
+   "color": "#00ff00",
+   "fit": "contain",
+   "matchTo": "body"
+  },
+  "tail": {
+   "color": "#0000ff",
+   "fit": "contain",
+   "matchTo": "body"
+  },
+  "head": {
+   "color": "#ffff00",
+   "fit": "contain",
+   "labelMax": 1
+  },
+  "leg": {
+   "color": "#ff00ff",
+   "fit": "contain",
+   "matchTo": "body"
+  },
+  "claw": {
+   "color": "#ff8000",
+   "fit": "contain"
+  },
+  "teeth": {
+   "color": "#8000ff",
+   "fit": "contain"
+  },
+  "chest": {
+   "color": "#ff6060",
+   "fit": "contain",
+   "matchTo": "body",
+   "label": "chest"
+  },
+  "back": {
+   "color": "#40c040",
+   "fit": "contain",
+   "matchTo": "body",
+   "label": "back top"
+  },
+  "belly": {
+   "color": "#c0c060",
+   "fit": "contain",
+   "label": "belly pale"
+  },
+  "tail-under": {
+   "color": "#4080ff",
+   "fit": "contain",
+   "matchColor": "belly",
+   "label": "tail under pale"
+  },
+  "tail-top": {
+   "color": "#806000",
+   "fit": "contain",
+   "label": "tail top"
+  }
+ },
+ "parts": {
+  "TRex_Body": {
+   "slot": "body",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.35,
+   "split": [
+    {
+     "slot": "belly",
+     "facing": "-y",
+     "above": 0.45,
+     "u": "+x",
+     "v": "-z",
+     "flare": 0.1
+    },
+    {
+     "slot": "chest",
+     "facing": "+x",
+     "above": 0.6,
+     "u": "-z",
+     "v": "-y",
+     "flare": 0.15
+    },
+    {
+     "slot": "back",
+     "facing": "+y",
+     "above": 0.62,
+     "u": "+x",
+     "v": "+z",
+     "flare": 0.1
+    }
+   ]
+  },
+  "TRex_Arm": {
+   "slot": "arm",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "TRex_Tail": {
+   "slot": "tail",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25,
+   "split": [
+    {
+     "slot": "tail-under",
+     "facing": "-y",
+     "above": 0.55,
+     "u": "+x",
+     "v": "-z",
+     "flare": 0.1
+    },
+    {
+     "slot": "tail-top",
+     "facing": "+y",
+     "above": 0.62,
+     "u": "+x",
+     "v": "+z",
+     "flare": 0.1
+    }
+   ]
+  },
+  "TRex_Head": {
+   "slot": "head",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.4
+  },
+  "TRex_Leg": {
+   "slot": "leg",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "TRex_Claw": {
+   "slot": "claw",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "TRex_Teeth": {
+   "slot": "teeth",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  }
+ },
+ "layout": {
+  "row": [
+   {
+    "col": [
+     "body",
+     "chest",
+     "tail-top",
+     "teeth",
+     "claw"
+    ]
+   },
+   {
+    "col": [
+     "head",
+     "tail",
+     "belly",
+     "back",
+     "leg",
+     "tail-under",
+     "arm"
+    ]
+   }
+  ]
+ },
+ "marks": [
+  {
+   "slot": "head",
+   "at": [
+    4.8733,
+    5.1187,
+    -0.3353
+   ],
+   "shape": "eye",
+   "size": 10
+  }
+ ],
+ "cutoutSlots": [],
+ "combos": [
+  [
+   "TRex_Body",
+   "TRex_Arm",
+   "TRex_Tail",
+   "TRex_Head",
+   "TRex_Leg",
+   "TRex_Claw",
+   "TRex_Teeth"
+  ]
+ ]
+}

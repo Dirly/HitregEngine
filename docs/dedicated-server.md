@@ -183,11 +183,15 @@ sim tick, then binary snapshots. `GET /admin/status` reports `tickMs` live.
 Run it: `pnpm -F @hitreg/server exec tsx bin/bots.ts --url ws://127.0.0.1:8787 --count 20 --seconds 60`.
 
 **Reconnect grace (iteration 2):** a dropped socket (or a `bye`) holds the
-body for `--grace` seconds (default 30), standing still, still replicated;
+body for `--grace` seconds (default 60), standing still, still replicated;
 the same peer id re-dialing inside the window gets its body back where it
 stood (the client's peer id is stable per tab, so a flaky link is not a
 death). The `world` module carries `{ t: "presence", peerId, linked }` so
 clients can show "away"; the playground ignores it for now.
+
+Intentional logout uses the authority-owned 20-second camp and a confirmed save,
+then removes the body immediately. See [storage and logout](storage.md) for the
+distinction from a dropped connection.
 
 **Not verified yet:**
 1. Client-side prediction feel over real latency (only 0 ms tested).

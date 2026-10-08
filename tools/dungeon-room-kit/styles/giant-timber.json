@@ -1,0 +1,13 @@
+{
+  "id": "giant-timber",
+  "about": "A giant's long hall: carved-library stone walls to the eaves, a steep pitched roof carried on timber bays (wall posts on moulded pads, tie beams, knee braces, king posts, principal rafters, struts, purlins, ridge, wall plates), aisle posts in very wide halls, round-arched dressed doorways.",
+  "construction": "timber",
+  "height": 6.0,
+  "roles": { "wall": "coursed-stone", "trim": "dressed-trim", "floor": "flagstone", "ceiling": "wood", "pier": "large-ashlar", "timber": "wood", "panel": "wood" },
+  "wall": { "thickness": 0.9, "part": "wall-plain" },
+  "floor": { "thickness": 0.5 },
+  "door": { "arch": "round", "width": 3.0, "height": 4.1, "minSpring": 2.6, "ring": 0.4, "proj": 0.1, "voussoirs": 11, "jamb": 0.4, "impost": true },
+  "pilasters": { "every": 4.2 },
+  "timber": { "pitch": 0.55, "bay": 4.2, "post": 0.7, "tie": 0.7, "rafter": 0.5, "roofThickness": 0.5, "purlins": [0.33, 0.66], "aisleSpan": 15 },
+  "dais": { "minLength": 16, "depth": 3.0, "rise": 0.6, "steps": 3, "margin": 2.5, "coping": true, "copingHeight": 0.22 }
+}

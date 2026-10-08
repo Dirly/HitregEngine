@@ -65,7 +65,7 @@ by one pooled class in `@hitreg/render`:
 | `bolt` | lightning: jagged path re-rolled at `refreshHz`, with forks | camera-facing ribbon, glow + core |
 | `light` | the secondary light | a borrowed slot light |
 | `mesh` | a real body: drop / rise / hover / orbit / launch | procedural primitive or a model |
-| `trail` | ribbon behind a moving anchor | rebuilt strip |
+| `trail` | ribbon behind a moving anchor, or the surface a weapon's edge sweeps (`edge`) | one strip in the shared trail batch |
 | `telegraph` | the declared volume: fill grows over the windup, rim, curtain | ported from the combat prototype, draped |
 | `shake` | camera shake | applied inside the draw only |
 | `sound` | one-shot audio | host hook |
@@ -84,6 +84,171 @@ surface use — so fresnel, scrolling `mx_fractal_noise`, dissolve, soft bands
 and vertex displacement all run on the WebGPU backend and its WebGL fallback
 with no second shader system. Nothing in the library needs a texture except
 the flipbook sprites.
+
+### The five schools (`vfx/elements.ts`)
+
+`element` is one of exactly five schools of magic: **shadow, holy, nature,
+water, destruction** — nothing else validates. Water covers frost and ice;
+destruction covers fire, lightning and raw force. Each school has one palette
+(primary / secondary / glow), a default `feel`, the closest authored colour
+row of the purchased flipbooks, its own debris character, name adjectives, and
+its own **symbol sheet** — magic circles, emblems, sparks and glyphs drawn in
+that school's motifs. Symbol catalog entries carry `elements: [school]`; a
+school's spells draw only their own symbols, and unschooled symbols (the
+original hand-drawn `fx-symbols`) are only the fallback for a school that has
+none for a role.
+
+School sheets are generated (docs/image-generation.md) at 1024 px on black and
+taken in with `fx.mjs symbols ... --downsample 2 --elements <school>`: the
+box-filtered halving puts them on the 512 px page the hand-drawn sheet was
+made at, so their circles land in the same ~88 px cells.
+
+Each school also has a **projectile sheet** `fx-projectiles-<school>`
+(heads drawn pointing up, plus the same kinds stuck in the ground; symbols
+intake with `--rows 0-2=head,3-4=stuck`) and a **decal page**
+`fx-decals-<school>` (below). The projectile's head is a symbol; what
+streams off it is `travel.wake`, a particle stream in the school's own
+matter — flames lick up off destruction, droplets drip off water, leaves
+tumble off nature, motes float off holy, smoke rolls off shadow.
+
+### Ground decals that grow in (`decal` module, `fx.mjs decals`)
+
+A `decal` lies on (and drapes over) the ground and GROWS: cracks race out
+from the strike, frost feathers across, vines unfurl, flowers open. The page
+is data, not art: **R = when each texel appears**, G = the drawn brightness,
+A = coverage. `fx.mjs decals <project> <name> <sheet.png> --grid 3x3
+--downsample 2 --elements <school> --cells "crack,web;vine,leaf;…"` computes
+R as the shortest path ALONG the mark from the texel nearest the cell centre,
+so a crack travels down its own line instead of wiping in as a circle; a
+piece that does not touch the rest (a hail stone, a separate leaf) starts
+when a radial front reaches it, then grows along itself. The shader moves
+one uniform (the front): texels behind it show, texels it crossed less than
+`edge` ago burn in `edgeColor`. It holds for its life, then fades or, with
+`recede`, runs the front backwards (growth withdraws, frost melts back).
+Sampled nearest and WITHOUT sRGB decode (`loadTexture(..., nearest, data)`)
+— the channels are timing. One mesh, one draw per decal; pooled per sheet.
+
+The `scar` grammar slot places them: `impact.scar` under a landing (sized
+to the blast, gone inside the impact tail), `linger.scar` across a lingering
+floor, `cast.stompScar` under a slam or war-cry. Dark schools (shadow,
+destruction) leave normal-blended matter with a glowing front; bright ones
+leave additive light. Decal tags (`crack`, `vine`, `frost`, `chain`…) let
+the status effect bias the pick: a root prefers vines, roots and chains.
+Catalog: `assets/fx-catalog/decals.json`, same school rule as symbols.
+
+Traps: the intake's Dijkstra must store distances as Float64 — a Float32
+store rounds below the key it was pushed with and the stale-entry check
+then drops every texel after the seed (every mark came out "all at once").
+A generated sheet can come back black-on-white even when asked otherwise
+(a black-on-white LAYOUT reference did it); the symbol intake reads either
+page colour, but outline art on white becomes hollow outlines — regenerate.
+
+### One texel for the whole spell (`texel`)
+
+`pixel` counts cells ACROSS A SHAPE, so at 24 a 12 m ring had 50 cm blocks
+and a 1 m slash 4 cm ones — every piece of a spell pixelated at a different
+scale, and the big ones looked broken. `texel` is the PSX look in WORLD
+metres per texel, stamped on every module by the generator and carried on
+the spell (`spell.texel`, applied to any module that leaves its own at 0, so
+rerolled and hand-added pieces match). Each renderer derives its cells from
+its real size every frame (`LiveModule.cellsAcross`), so an expanding
+shockwave keeps its block size. Sprites snap their UVs to the grid and read
+the sheet's mip level whose texels match it, so thin line art fades instead
+of dropping out; decals and drawn bodies quantise the same way. **3 cm** is
+the default: it is the hand-drawn sheets' own density at typical sizes —
+6 cm turned a 1.6 m sigil into 27 texels of mush.
+
+### Symbol glow, ground spin, the crown
+
+A symbol sprite's `glow` builds a halo from its own shape (the strongest
+line within `glowSize`, full near and half at the outer ring, banded on the
+texel grid; confined to its cell so neighbours on the sheet never bleed in).
+An AVERAGE of the taps reads nothing on thin line art and a boosted one fills
+a sigil's interior into a white disc. `SCHOOL_GLOW` sets each school's
+strength (holy brightest, shadow smouldering).
+
+Derek's rule: a symbol lying on the ground never spins — `symbolSprite`
+zeroes spin for `orient: "ground"`. Orbiting a body is fine: `crown.glyphs`
+revolves glyphs above the caster's head through the charge, and through the
+whole of a channel or held buff.
+
+### Summoned bodies are drawings (`mesh.sheet` + `cells`)
+
+Procedural cones, octahedra and spheres read as placeholder geometry and are
+never generated: a `mesh` preset without a model asset gets the school's
+`object` symbols instead (`fx-objects-<school>`: rows of spikes, crystals,
+rocks, orbs, blades, drawn upright with the base on the cell floor — intake
+`--roles object --row-tags 0=spike,... --align bottom`), matched by the old
+primitive's name. Each body is an upright quad that yaws to the camera; all
+motions (drop, rise, hover, orbit, launch, forward) are kept. One shared
+material — each body's quad carries its cell in its own UVs. Without a
+drawing for it, a spike/crystal/orb body is simply not generated. Real
+models (`asset`) still render in 3D.
+
+### No generated telegraph; world-space projectiles
+
+The generator no longer fills the spell's `telegraph` phase: the dodge
+volume is the host's to draw from the ABILITY (voxel-demo's telegraph pool),
+and a second one baked into the spell only doubled it. The audit no longer
+demands one; it still keeps the windup's rim clear.
+
+Projectile heads and stuck projectiles use sprite `orient: "world"` +
+`crossed`: fixed in the world with the art's top along the motion (at rest:
+upright, square to the spell direction), a second quad at 90° around the
+long axis so it never vanishes edge-on, spin rolling around that axis. They
+no longer turn to face the camera. Symbols lying on the ground get no glow
+(the offset taps read as a ghosted second copy under the caster).
+
+### Visuals stay inside the damage volume (`vfx/fit.ts`)
+
+A player reads a spell's visuals as the danger zone, so anything drawn past
+the edge the hit test uses is a lie. `moduleReach` measures each module's
+horizontal reach from its anchor — rings and shells at full expansion,
+sprites and decals by half their size (+ orbit), columns, drawn bodies
+(spread + size), stepped repeats by their last step, and particles by
+emitter extent + how far they actually travel (speed with drag over their
+life, only the sideways share of it) + turbulence + their own size.
+`fitSpellToVolume` scales back every piece on the volume (impact, tick,
+linger, end; the cast too when the volume is centred on the caster) to
+`FOOTPRINT_TOLERANCE` × the radius, iterating because a particle's own size
+does not scale. The generator fits every spell and every reroll/add; the
+audit's `footprint` rule flags anything still outside. A game fits a spell
+to the ABILITY that plays it (its real radius, a projectile's splash):
+voxel-demo's saved spells had pieces reaching 1.25–1.9× their radius.
+
+### Rapid fire and homing are part of the spell
+
+`archetype.volley { count, interval, spread }` and `archetype.homing
+{ turnRate, acquire, cone }` (projectile only) make a spell fire several
+shots and/or seek. The timeline carries `shots`/`shotInterval`; the
+sequencer gives EVERY shot its own path, travel play and impact: simulated
+(launched on the burst's rhythm, scattered by its blooming spread —
+`shotSpread`, 0.3× → 1×, seeded so a spell scatters the same way every play
+— steered toward `frame.targetObject` when homing, landing where it
+arrives), or driven by a host through `handle.launch(pos, vel)` → a shot
+handle (`setPath`, `impact`, `end`). The generator rolls volleys and
+seekers, and `shapeVolley` keeps a burst in the budget one heavy bolt fits
+in: no light or shake per shot, particles thinned by √shots, smaller heads,
+each shot's impact trimmed to its most telling pieces, and the cast
+REPEATING with the burst so each shot gets its own flash. The audit counts
+travel and impact once per shot.
+
+A barrage should not be a line of bullets: `archetype.wiggle
+{ amplitude, wavelength }` makes shots WEAVE (`wiggleOffset`: each shot its
+own phase from its seed, easing in so it leaves the hand straight — the
+same pure function a game's hit test uses, so a shot hits where it is
+drawn), `volley.jitter` scatters each launch point around the hand
+(`shotJitter`), and `shapeVolley` shrinks every travel piece by
+max(0.4, 1.1/√shots). Generated rapid fire rolls 5–12 shots every
+0.04–0.09 s with a weave.
+
+### The lab: solo, mute, ban
+
+Every module card in the spell lab has ▶ (play ONLY that piece, on the
+spell's own timeline, so travel pieces still fly), mute (leave it out of Play
+without deleting it) and ban (never generate that preset again for this
+project — `assets/fx-catalog/presets.json`, read into
+`catalog.disabledPresets`; the Banned section under the audit unbans).
 
 ### The spell document (`vfx/spell.ts`)
 
@@ -120,10 +285,10 @@ dissipate…), which spell kinds and elements they suit (or are restricted to),
 which sprite role they need, a minimum intensity.
 
 `GRAMMAR` says, per phase, which slots to fill, how many, and how likely —
-some scaled by intensity. `debris()` is one function with ten looks: what a hit
+some scaled by intensity. `debris()` is one function with five looks: what a hit
 throws off is the strongest element cue after colour, so it is tuned per
-element (embers rise and curl, ice shards streak and fall, storm sparks are
-fast and stretched, blood drops are normal-blended matter).
+school (destruction embers rise and curl, water droplets streak and fall,
+nature spores drift, holy motes float up, shadow is normal-blended smoke).
 
 **Sprites are asked for by role, never by name.** The engine ships no sheets;
 a project maps its library onto `SpriteCatalog` roles (burst, flash, ring,
@@ -245,7 +410,7 @@ same dome and floor. Four answers, all data:
   root, orbiting orbs and a star ring overhead for a stun, an hourglass floor
   and drips for a slow, chevrons and speed lines for a haste, a hex ward for a
   shield, a normal-blended dark shroud for shadow — placed on the body the
-  status lands on. A `shadow` element joined the palette. Buffs and debuffs
+  status lands on. Buffs and debuffs
   FLASH (0.6–1.4 s) unless `archetype.channelled`, in which case the aura
   holds for the duration and fades; `mesh.motion: "forward"` with a body from
   `catalog.bodies` is an afterimage/projection.
@@ -336,6 +501,70 @@ Each answer is data, and each is checked by a test:
   frame interval next to the audit so "chugging" is a number, and
   `window.__hitreg.vfxHost.play(doc, frame)` lets a probe play one module in
   isolation.
+
+## Weapon trails, one batch, and hit-stop (2026-10-04)
+
+Built for voxel-demo's melee (its `docs/combat-build/V-melee-visuals.md` has
+the game side: what drives each piece from combat events and skill data).
+
+- **Every trail is one draw.** `TrailLive` owns no mesh: each live trail
+  writes its strip into the system's `TrailBatch` (`modules/trail-batch.ts`)
+  between `begin`/`end` in `VfxSystem.update`, one mesh per blend mode. What
+  used to be per-trail uniforms (head/tail colour, fade, alpha steps, texel
+  dither cells, opacity) are vertex attributes, and only the written range is
+  uploaded (`addUpdateRange`). Six fighters' sword trails plus a volley's
+  projectile tails: one draw. `sys.trails.stats()` reports vertices per layer.
+- **`trail.edge`: the surface an edge sweeps.** Two points (`from`, `to`) in
+  METRES in the anchor object's own axes (its rotation, not its scale — a
+  held weapon's entity carries its 0.019 import scale), optionally on a named
+  `bone` under it (a creature's hand). Each frame samples both; the ribbon
+  spans them, smoothed by `subdivide` Catmull-Rom points so a fast swing draws
+  an arc; `rootOpacity` keeps the hilt side see-through; `taper` slides the
+  inner side out to the tip as a sample ages; `minSpeed` fades samples whose
+  outer point moved slower than that (a wind-up's raise and the pause at the
+  top leave no smear, the cut does). Anchor it `{ at: "caster", follow: true }`
+  and pass the weapon's entity as the frame's caster.
+- **Hit-stop is a userData stamp.** `AnimationSystem.update` skips any model
+  whose root, entity or a body up to three levels up carries
+  `userData.poseHoldUntil` later than `performance.now()` (ms): the pose holds,
+  the held time is dropped (the clip resumes a beat behind), the simulation is
+  untouched. Presentation only; a script sets it on a body.
+
+Second pass (2026-10-04, same day):
+
+- **A trail can lead with a hot edge.** `trail.falloff` (brightness =
+  `(1 - age/length)^falloff`; 1 = the old linear sheet, 2.5-4 = a short
+  glowing wake) and `trail.coreColor` (a third colour: the ribbon ramps in hard
+  steps core → `color` → `colorEnd`, the core and middle bands are drawn SOLID
+  and the tail band at half strength under the dither; with `edge` the
+  brightness also leans to the outer point, so the core runs along the blade
+  near its tip). Both are vertex attributes of the same batch (`aCore`,
+  `aEdge`): no new material, no new draw. With `falloff > 1` the `taper` slides
+  the inner side all the way to the tip's line. A dark `colorEnd` under
+  additive blending is what makes the tail fall to nothing; a pale one is a
+  translucent sheet.
+- **`anchor.local`: a point ON the anchor object.** With `at: caster|target`,
+  `offset` is in the object's own axes (rotation, not scale) and the module
+  faces with it, re-resolved every frame under `follow`. A particle emitter
+  with `space: "local"` then rides a held weapon's tip — the wind-up gather and
+  glint on any weapon (the first pass's tip glint "landed off the blade"
+  because the offset was in the spell frame and sampled once).
+- **A textured particle look draws nothing until its sheet has loaded**
+  (`ParticleBatch.awaitingTexture`): the stand-in sprite played through a
+  sub-UV grid was a hard white box for the first play. Warm a look you need on
+  frame one (play it once out of sight) so the sheet and its pipeline are ready.
+- **Hit flinch is a userData stamp too:** `userData.poseFlinch = { at, dir,
+  angle, ms, twist?, wobble? }` (same lookup as `poseHoldUntil`) bends the
+  spine chain along the blow after the mixer and the anchors, with the same
+  undo-first rule; it snaps out even during a hit-stop. See
+  `docs/character-animation.md` "Hit flinch".
+
+Traps: a decal's drape probes the frame's `ground`; the runtime's default probe
+hits bodies standing on the ground, which spikes the decal mesh up around
+them — pass a terrain-only `ground` for anything under a fight. A particle
+emitter's pool key is its whole emitter JSON: vary a per-hit effect through the
+module (`burst`, palette slots, anchor), never the emitter, or every hit builds
+a new emitter.
 
 ## Standing effects: torches, braziers, campfires (the `vfx` component)
 
@@ -483,7 +712,7 @@ nearest-filtered, so what you draw is what renders.
 - Additive is light; normal is matter. Nearly everything magical is additive,
   but a cloud has to occlude — you should lose sight of a body standing in a
   poison field. The audit caps how much.
-- Pale palettes (holy, storm) saturate under additive stacking + bloom; their
+- Pale palettes (holy, water glow) saturate under additive stacking + bloom; their
   primaries are kept off-white on purpose. Reach for `glow` sparingly.
 - A telegraph's rim is the only number a dodge is judged against. Nothing may
   cover it during the windup, and generated spells never do.

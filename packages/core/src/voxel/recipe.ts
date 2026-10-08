@@ -1,7 +1,9 @@
 import { z } from "zod";
 import { fallSiteSchema } from "./fall-sites.js";
-import { hexColor, meshWindSchema, spawnAreaSchema, MAX_SPLAT_LAYERS, grassSchema } from "../components/core.js";
+import { hexColor, meshWindSchema, spawnAreaSchema, MAX_SPLAT_LAYERS, grassSchema, vegetationTintSchema } from "../components/core.js";
 import { regionSchema } from "./regions.js";
+import { clearingSchema } from "./vegetation.js";
+import { NATURAL_SURFACE_ROLES } from "./roles.js";
 
 /**
  * The world recipe: a small, hand-editable JSON document that fully determines
@@ -40,6 +42,17 @@ import { regionSchema } from "./regions.js";
  * gets.
  */
 export const MAX_SURFACES = MAX_SPLAT_LAYERS;
+
+/**
+ * Palette cap for a world meshed with `splat: "indexed"`.
+ *
+ * An indexed world's vertices carry only the four layers they blend (ids into
+ * one texture array) however deep the palette is, so this cap is the texture
+ * array's depth, not the fragment shader's fetch count.
+ */
+export const MAX_INDEXED_SURFACES = 64;
+
+export { SURFACE_ROLES, NATURAL_SURFACE_ROLES, type SurfaceRole, type NaturalSurfaceRole } from "./roles.js";
 
 const fbmSchema = z.object({
   frequency: z.number().positive().describe("Cycles per world unit. 0.0008 = continents, 0.01 = hills, 0.08 = rocks."),
@@ -245,6 +258,8 @@ export const roadSchema = z.object({
   leftY: z.array(z.number()).optional().describe("Per-point ground height at the outer edge of the `smooth` band on the road's left (positive cross-product side)."),
   rightY: z.array(z.number()).optional().describe("Per-point ground height at the outer edge of the `smooth` band on the road's right."),
   flatten: z.number().min(0).max(1).default(1).describe("How completely the road height wins over natural terrain."),
+  maxCut: z.number().min(0).optional().describe("Deepest the road may cut BELOW the ground it crosses, metres, at every point of the roadway, shoulder and band (not only on the centreline). A trail with a small maxCut rides along the slope instead of trenching into it: where the graded surface would sit deeper, the tread follows the ground at that depth. Omitted = no limit (a graded road). The lip gate (`worldgen lips`) fails a cut wall the 2 m lattice draws as a zig-zag."),
+  maxFill: z.number().min(0).optional().describe("Highest the road may stand ABOVE the ground it crosses, metres (the fill counterpart of `maxCut`). Omitted = no limit."),
   surface: z
     .string()
     .default("dirt")
@@ -266,6 +281,15 @@ export const roadSchema = z.object({
         "`{ alpine: \"gravel\" }` makes a footpath gravel across the snow and dirt everywhere else. Blended by " +
         "biome membership, so the swap fades across the biome boundary. `worldgen paths`/`trails` write " +
         "gravel for every snow-dominant biome when the palette has gravel.",
+    ),
+  role: z
+    .enum(["road", "paving", "none"])
+    .optional()
+    .describe(
+      "Which zone ground role the painted tread takes (`regions[].ground`); omitted = `road`. `road`: inside a zone that overrides " +
+        "`road`, its surface replaces `surface`. `paving`: a town street or square, painted with the zone's " +
+        "`paving` (cobble); `town-ground` writes it on the streets it builds. `none`: always `surface`. A zone " +
+        "that overrides nothing leaves `surface` as it is.",
     ),
 });
 
@@ -390,6 +414,24 @@ export const terraceSchema = z.object({
 });
 
 /** A settlement pad: terrain pulled flat so WFC buildings have somewhere to stand. */
+export const heightPatchSchema = z.object({
+  id: z.string().default("height-patch"),
+  origin: z.tuple([z.number().finite(), z.number().finite()]).describe("World XZ of the first sample (northwest corner). Rows increase toward +Z."),
+  size: z.tuple([z.number().positive(), z.number().positive()]).describe("World XZ extent from first to last sample, in metres."),
+  columns: z.number().int().min(2).max(1025),
+  rows: z.number().int().min(2).max(1025),
+  heights: z.array(z.number().finite()).max(1050625).describe("Absolute world Y samples, row-major (row * columns + column). Bilinear interpolation; importers decode image brightness into metres before storing."),
+  blend: z.number().positive().describe("Metres INSIDE every patch edge used to smoothstep from existing terrain to these heights. Exactly zero influence and zero blend derivative on the boundary; neighbouring chunks sample the same field. A MINIMUM: the evaluated feather is never narrower than two voxel steps and, unless `feather` is set, widens per edge until the blend is no steeper than `edgeSlope` for the height the patch differs from the ground along that edge (capped at half the extent)."),
+  feather: z.number().positive().optional().describe("Explicit feather width in metres inside every edge (at least `blend`), replacing the automatic per-edge width. A feather narrower than two voxel steps draws as a sawtooth on any edge that is not level with the ground."),
+  edgeSlope: z.number().positive().optional().describe("Steepest rise/run the automatic edge feather allows (default 1 = 45 degrees). Lower = softer edges."),
+  maxSlope: z.number().positive().optional().describe("Steepest rise/run allowed INSIDE the raster. Risers drawn steeper (a terrace or tier wall, a bench edge) are filled at the foot into a talus at this slope, keeping every top level where it is. Omitted = the raster as written. A wall steeper than about 1.6 between 2 m lattice samples draws as a zig-zag; `worldgen lips` reports where."),
+  filter: z.number().min(0).optional().describe("Half-width in metres of the tent prefilter applied to the raster before sampling (default: the voxel step). Anti-aliases cliffs and terrace edges drawn sharper than the lattice so diagonal edges do not stair-step. 0 = raw raster."),
+}).superRefine((p, ctx) => {
+  if (p.heights.length !== p.columns * p.rows) ctx.addIssue({ code: "custom", path: ["heights"], message: "Expected rows * columns height samples" });
+  if (p.blend * 2 > Math.min(...p.size)) ctx.addIssue({ code: "custom", path: ["blend"], message: "Blend cannot exceed half the shorter extent" });
+});
+export type HeightPatchDoc = z.infer<typeof heightPatchSchema>;
+
 export const townSchema = z.object({
   id: z.string().default("town"),
   excludeScatter: z.boolean().optional().describe("When omitted or true, exclude scatter and ground cover across the whole town pad. Set false for landscaped towns whose roads and building foundations provide local clearances."),
@@ -433,6 +475,26 @@ export const townSchema = z.object({
     ),
   /** Free-form, for the WFC/POI stages to read (population tier, faction, ...). */
   tags: z.array(z.string()).default([]),
+});
+
+/** A bounded straight passage; all consumers contour the same signed field. */
+export const passageSchema = z.object({
+  id: z.string().default("passage"),
+  start: z.tuple([z.number().finite(), z.number().finite(), z.number().finite()]).describe("Box entrance centre or ellipse near-end centre at the flat floor datum, in world metres."),
+  axis: z.enum(["x", "z"]).default("z"),
+  direction: z.union([z.literal(1), z.literal(-1)]).default(1),
+  footprint: z.enum(["box", "ellipse"]).default("box").describe("Box passage, or elliptical chamber centred halfway along length. Both preserve a flat floor; ellipse width/length are the protected diameters."),
+  length: z.number().positive().describe("Box straight length or ellipse axial diameter in metres. A box has rectangular terminal planes; an ellipse is centred halfway along this length."),
+  width: z.number().positive().describe("Protected field width in metres. Noise only recesses the sidewalls outward. Coarse MC can bevel floor-wall corners; validate the extracted mesh before claiming this entire width is flat."),
+  height: z.number().positive().describe("Protected base ceiling above the exact flat floor datum; optional arch/roof noise adds clearance above it. Validate extracted headroom at coarse sampling."),
+  wallNoise: z.number().min(0).default(0).describe("Maximum outward wall recess, metres; sidewalls for box, all radial directions including both ends for ellipse. Never intrudes into protected air or changes the flat floor."),
+  noiseDetail: z.number().finite().min(0).max(1).default(0).describe("Fraction of outward wall relief sampled at half noiseScale; zero preserves the original single-scale profile."),
+  roofRise: z.number().finite().min(0).default(0).describe("Additional arched clearance above height: across a box passage, radially over an elliptical chamber. Never lowers the protected base ceiling; roof maximum is floor+height+roofRise+roofNoise."),
+  roofNoise: z.number().finite().min(0).default(0).describe("Maximum additional outward roof recess, metres; fades at footprint edges and never changes the floor or protected base height. Thick rock backing above the full roof maximum must exceed the three-lattice-step roof skirt depth."),
+  noiseScale: z.number().positive().default(6).describe("Wall-noise wavelength in metres; use a scale resolved by the world lattice."),
+  seed: z.number().int().default(1).describe("Deterministic wall-noise seed, combined with the world seed."),
+  falloff: z.number().positive().default(4).describe("Exterior signed-sampling margin in metres; bound terrain influence and use at least two full-detail voxel steps. Coarser LOD is an approximation."),
+  connectionBand: z.number().positive().default(4).describe("Noise fades to zero within this distance of both end planes and floor/ceiling, preserving stable terminal profiles and flat boundary bands."),
 });
 
 /** A raw volume edit — the escape hatch for arches, quarries, cave mouths, monoliths. */
@@ -711,6 +773,15 @@ const surfaceSchema = z.object({
   map: z.string().optional().describe("Texture asset id (assets/textures/) — albedo, projected triplanar."),
   normalMap: z.string().optional(),
   uvScale: z.number().positive().default(4).describe("World units per texture tile."),
+  role: z
+    .enum(NATURAL_SURFACE_ROLES)
+    .optional()
+    .describe(
+      "Which ground ROLE this base surface fills, so a zone can restyle it (`regions[].ground`): inside a zone " +
+        "that overrides the role, this surface's weight moves to the zone's surface, blended by zone membership. " +
+        "Tag every surface that plays the role (grass AND dry grass are both `grass`). Leave a zone's own " +
+        "override surfaces untagged: they are reached through the zone, never remapped themselves.",
+    ),
 });
 
 export type SurfaceDoc = z.infer<typeof surfaceSchema>;
@@ -737,9 +808,9 @@ const biomeSchema = z.object({
     .describe("Softness of the `height` window edges, in WORLD UNITS — height is the one window measured in metres, so it needs its own blend or a 0.08 softness makes a razor edge across a hillside."),
   weight: z.number().positive().default(1).describe("Relative pull where several rules match equally."),
   /** Splat weights on ground this biome considers walkable. Indexed like `surfaces`. */
-  surface: z.array(z.number().min(0)).min(1).max(MAX_SURFACES),
+  surface: z.array(z.number().min(0)).min(1).max(MAX_INDEXED_SURFACES),
   /** Splat weights where the ground is too steep for the biome's cover — its cliff face. */
-  cliff: z.array(z.number().min(0)).min(1).max(MAX_SURFACES).optional(),
+  cliff: z.array(z.number().min(0)).min(1).max(MAX_INDEXED_SURFACES).optional(),
   /** Steepness at which `cliff` fully replaces `surface`. */
   cliffStart: z
     .number()
@@ -1047,6 +1118,23 @@ const scatterSchema = z.object({
   ),
   height: rangeSchema.optional().describe("World-Y window the ground must fall in."),
   scale: z.tuple([z.number().positive(), z.number().positive()]).default([0.9, 1.2]),
+  colorVariants: z.array(z.object({
+    weight: z.number().positive().describe("Relative selection weight, normalized automatically."),
+    tint: vegetationTintSchema,
+  })).min(1).optional().describe(
+    "Weighted per-instance bark/leaf tints for model scatter. A separate stable hash selects the colour without " +
+      "changing placement, scale or yaw. Uses the original model/texture and stays in the same draw batches. " +
+      "Does not tint prefab scatter; use mesh.source.vegetationTint on the prefab's instanced model instead.",
+  ),
+  scaleVariants: z.array(z.object({
+    weight: z.number().positive().describe("Relative selection weight; weights are normalized automatically."),
+    multiplier: z.number().positive().describe("Uniform multiplier of the instance's sampled scale."),
+  })).min(1).optional().describe(
+    "Optional weighted size cohorts, chosen by a separate stable lattice hash. For example, retain small " +
+      "trees while doubling most of the canopy. Does not reroll positions, yaw or base scale. Footprint, " +
+      "ground embedding and collision use the resulting scale; spacing can therefore thin larger cohorts. " +
+      "Omit to preserve existing scatter exactly.",
+  ),
   alignToNormal: z.number().min(0).max(1).default(0).describe("0 = always upright, 1 = fully laid onto the slope."),
   yOffset: z.number().default(0).describe("Sink (negative) or lift the instance along its own up axis."),
   jitter: z.number().min(0).max(1).default(0.85).describe("How far off its lattice point each instance may wander."),
@@ -1622,8 +1710,9 @@ export const worldRecipeSchema = z.object({
   surfaces: z
     .array(surfaceSchema)
     .min(1)
-    .max(MAX_SURFACES)
+    .max(MAX_INDEXED_SURFACES)
     .describe(
+      "Up to 16 with `splat: \"dense\"`, up to 64 with `splat: \"indexed\"` (a palette past 16 is meshed indexed whatever `splat` says). " +
       "The world's surface PALETTE, up to eight, blended per-vertex. Index order is the weight vector's order. " +
         "Every biome names its cover as weights over this one palette, which is how a blighted zone can be all " +
         "blighted-grass and no grass while a coast is sand and dirt: the weights it does not want are simply zero. " +
@@ -1682,6 +1771,7 @@ export const worldRecipeSchema = z.object({
         ),
       roads: z.array(roadSchema).default([]),
       towns: z.array(townSchema).default([]),
+      heightPatches: z.array(heightPatchSchema).default([]).describe("Raster elevation edits applied after ordinary heightfield features. Affect terrain mesh, collision and placement together; later patches win. Existing 3D density modifiers still apply."),
       lakes: z.array(lakeSchema).default([]).describe("Standing water at its own level, basin carved beneath. Written by `worldgen rivers`."),
       bridges: z.array(bridgeSchema).default([]).describe("Road decks spanning rivers. Written by `worldgen roads`."),
       fills: z.array(fillSchema).default([]).describe("Sediment-filled hollows on the river network. Written by `worldgen rivers`."),
@@ -1691,11 +1781,20 @@ export const worldRecipeSchema = z.object({
         .describe("Hand- or agent-drawn river centrelines. AUTHORING input: `worldgen rivers` solves each into `rivers`."),
       tunnels: z.array(tunnelSchema).default([]).describe("Carved cave passages. Written by `worldgen caves`."),
       blobs: z.array(blobSchema).default([]),
+      passages: z.array(passageSchema).default([]).describe("Bounded rectangular flat-floor passage cutters applied after blobs. Signed exterior samples avoid tunnel floor snapping. They remove rock only; a supported floor and roof must already exist. Render, collision and placement share this field."),
       fallSites: z
         .array(fallSiteSchema)
         .optional()
         .describe("Agent-crafted waterfalls: a solved fall split into a cascade of pools and dressed with rocks. Written by `worldgen fall-site`; see docs/world-editing/rivers-and-falls.md."),
       pois: z.array(poiSchema).default([]),
+      clearings: z
+        .array(clearingSchema)
+        .optional()
+        .describe(
+          "Patches kept clear of scatter and/or ground cover (a site's footprint, a hall pad, a town's building plots, " +
+            "streets and door paths), feathered at the edge. Terrain is untouched. Written by `worldgen vegetation " +
+            "--clearings <file>`; see docs/voxel-worlds.md section 31.",
+        ),
       camps: z
         .array(campSchema)
         .default([])
@@ -1807,9 +1906,46 @@ export const worldRecipeSchema = z.object({
       "Material asset id for the placeholder decks emitted for `features.bridges`. `worldgen roads` writes a " +
         "plain timber-coloured one when the recipe has none.",
     ),
+  splat: z
+    .enum(["dense", "indexed"])
+    .default("dense")
+    .describe(
+      "How the terrain mesh carries its surface weights. `dense`: every vertex carries a weight per palette " +
+        "surface (ceil(N/4) vec4 attributes) and the shader blends every layer — fine to 16 surfaces. `indexed`: " +
+        "every vertex carries the ids and weights of the FOUR layers it blends (two 4-byte attributes), the " +
+        "shader samples those four from one texture array, and the palette can be 64 deep (zone ground textures). " +
+        "A palette past 16 is meshed indexed regardless. `worldgen material` must be re-run after changing it.",
+    ),
+  zoneGround: z
+    .object({
+      band: z
+        .number()
+        .positive()
+        .default(150)
+        .describe(
+          "Width in metres of the blend across a zone border where a zone restyles its ground (`regions[].ground`): " +
+            "half outside the polygon, half inside, so two zones meet at 50/50 on the line and nothing is a seam.",
+        ),
+      jitter: z
+        .number()
+        .min(0)
+        .default(0.35)
+        .describe("Noise on the border, as a fraction of `band`, so the blend does not follow a clean offset of the polygon."),
+    })
+    .prefault({})
+    .describe("How zone ground overrides (`regions[].ground`) blend across zone borders."),
 });
 
 export type WorldRecipe = z.infer<typeof worldRecipeSchema>;
+
+/**
+ * Whether a recipe's terrain is meshed and shaded with indexed top-4 layers.
+ * The mesher and `worldgen material` both ask THIS, so the geometry and the
+ * material can never disagree about which attributes exist.
+ */
+export function recipeSplatIndexed(recipe: Pick<WorldRecipe, "splat" | "surfaces">): boolean {
+  return recipe.splat === "indexed" || recipe.surfaces.length > MAX_SURFACES;
+}
 export type RiverDoc = z.infer<typeof riverSchema>;
 export type CanyonDoc = z.infer<typeof canyonSchema>;
 export type RidgeDoc = z.infer<typeof ridgeSchema>;
@@ -1818,6 +1954,7 @@ export type TownDoc = z.infer<typeof townSchema>;
 export type TownGateDoc = z.infer<typeof townGateSchema>;
 export type TerraceDoc = z.infer<typeof terraceSchema>;
 export type BlobDoc = z.infer<typeof blobSchema>;
+export type PassageDoc = z.infer<typeof passageSchema>;
 export type TunnelDoc = z.infer<typeof tunnelSchema>;
 export type PoiDoc = z.infer<typeof poiSchema>;
 export type StoryDoc = z.infer<typeof storySchema>;
@@ -1839,6 +1976,7 @@ export function defaultWorldRecipe(overrides: Partial<WorldRecipe> = {}): WorldR
     version: 1,
     name: "world",
     seed: 1337,
+    features: { passages: [] },
     // Dunes are off in the schema (they cost a climate lookup per column), but
     // this world ships a desert, and a desert without its own landform is just
     // recoloured hills.

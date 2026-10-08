@@ -29,12 +29,24 @@ import { characterBuildSchema, regionAt, validateBuild, type CharacterBuild, typ
 import { ServerRegistry, type ServerEntry } from "./registry.js";
 import { SocialError, SocialStore, isBlocked, type FriendRef } from "./social.js";
 import { GuildStore, rankAbove, type GuildRank, type GuildRecord } from "./guilds.js";
+import { ChatBuffer, MAIN_CHAT_BUFFER_LINES } from "../moderation/chat-buffer.js";
+import { EvidenceRequests, ReportError, ReportIntake, ReportStore } from "../moderation/reports.js";
 import type { Supervisor } from "./supervisor.js";
+import { NameModeration } from "../moderation/names.js";
+import { judgeFromEnv, type ModerationJudge } from "../moderation/judge.js";
+import { ModerationDesk, ModerationError, type AuditRule, type Enforce, type VerdictThresholds } from "../moderation/audit.js";
+import { AUDIT_ACTIONS, ModerationQueue, SANCTION_KINDS, activeSanctions, banLine, muteLine, renameLine, warnLine, type AuditAction, type SanctionKind } from "../moderation/sanctions.js";
+import { ItemsLogMain } from "../moderation/items-log.js";
 import { signSession, signTicket, verifySession } from "../cluster/ticket.js";
 import {
   ACCOUNT_NAME,
   CHARACTER_NAME,
   MAX_CHARACTERS,
+  DELETE_GRACE_DAYS,
+  liveCharacters,
+  worldOf,
+  purgeDeleted,
+  restorableCharacters,
   checkPassword,
   hashPassword,
   newId,
@@ -50,6 +62,7 @@ import {
   type LayerToMain,
   type MainToLayer,
   type TransferAnswer,
+  type PortalHop,
   type TransferTarget,
   type SocialEvent,
 } from "../cluster/protocol.js";
@@ -67,6 +80,15 @@ export interface MainOptions {
   playerData: PlayerDataBackend;
   world: {
     scene: string;
+    /** This world's id: characters are bound to it (one per account). Default: experienceId. */
+    id?: string;
+    /** This world's display name on the server-select screen. Default: the id, title-cased. */
+    name?: string;
+    /**
+     * Other worlds to list on the server-select screen (each its own main, sharing the account database): their id,
+     * name and gateway URL. This main serves only its own world; a player picking another is sent to its gateway.
+     */
+    others?: Array<{ id: string; name: string; url: string }>;
     /** Players per layer (default 40). */
     cap?: number;
     /** Free slots to keep across the pool before starting another layer (default 5). */
@@ -123,12 +145,34 @@ export interface MainOptions {
   /** Autoscale/retire loop period (default 5 s; tests shorten). */
   scaleEverySeconds?: number;
   log?: (line: string) => void;
+  /**
+   * Moderation (docs/moderation.md). Names: the word list + the judge at
+   * `POST /characters`; low-confidence rejects are accepted and listed at
+   * `GET /admin/moderation/names`. Default judge: `judgeFromEnv()` (Jev with
+   * JEV_API_KEY, else the rules); `judge: null` = word list only, and every
+   * audit goes to staff. Reports → audits → sanctions: moderation/audit.ts.
+   */
+  moderation?: {
+    judge?: ModerationJudge | null;
+    /** A judge's name reject is enforced only above this probability (default 0.80). */
+    nameThreshold?: number;
+    /** The game's reserved names — its NPCs and bosses (`reservedNamesFromEntities`). */
+    reservedNames?: Iterable<string>;
+    /** When reports open an audit (default: weighted reporters >= 3 within 24 h; new or blocked reporters count 0.5). */
+    audit?: Partial<AuditRule>;
+    /** Probability a judge's audit answer must clear to be applied (default warn 0.70, mutes 0.85, bans 0.95, no_action 0.70). */
+    thresholds?: Partial<VerdictThresholds>;
+  };
 }
 
 export interface MainHandle {
   port: number;
   url: string;
   registry: ServerRegistry;
+  /** The item log: store, dupe flag, claims (docs/moderation.md §4). */
+  itemsLog: ItemsLogMain;
+  /** Audits, verdicts and sanctions (docs/moderation.md §3). */
+  moderation: ModerationDesk;
   /** Public gateway base url (http://host:port). */
   close(): Promise<void>;
 }
@@ -196,6 +240,16 @@ function partyCode(): string {
 
 export async function startMain(opts: MainOptions): Promise<MainHandle> {
   const log = opts.log ?? ((line: string) => console.log(line));
+  const judge = opts.moderation?.judge !== undefined ? opts.moderation.judge : judgeFromEnv({ log, ...(opts.moderation?.reservedNames ? { reservedNames: opts.moderation.reservedNames } : {}) });
+  // escalations + the name review list: one cluster-level record staff read (docs/moderation.md §3)
+  const moderationQueue = new ModerationQueue(opts.playerData, opts.experienceId);
+  const names = new NameModeration({
+    judge,
+    ...(opts.moderation?.nameThreshold !== undefined ? { threshold: opts.moderation.nameThreshold } : {}),
+    ...(opts.moderation?.reservedNames ? { reserved: opts.moderation.reservedNames } : {}),
+    onReview: (review) => moderationQueue.addName(review).then(() => undefined),
+    log,
+  });
   const registry = new ServerRegistry();
   const regions: ReadonlyArray<RegionDoc> = opts.zones?.regions ?? [];
   const zoned = regions.length > 0;
@@ -211,10 +265,12 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
   const parties = new Map<string, Party>();
   const partyOf = new Map<string, Party>();
   /** characterId → owner, learned from /play (a ticket needs the account id). */
-  const owners = new Map<string, { playerId: string; name: string }>();
+  const owners = new Map<string, { playerId: string; name: string; saveId?: string }>();
   const recipes = new Map<string, WorldRecipe>();
   const booting = new Map<string, Waiter<ServerEntry>>();
   const terraformWaiters = new Map<string, Waiter<unknown>>();
+  const worldId = opts.world.id ?? opts.experienceId;
+  const worldName = opts.world.name ?? worldId.replace(/[-_]+/g, " ").split(" ").map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(" ");
   const world = {
     scene: opts.world.scene,
     cap: opts.world.cap ?? 40,
@@ -259,13 +315,17 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
       booting.set(id, { resolve, reject, timer });
     });
 
+  /** Layers started as dedicated zone copies: they loaded only their zones, so they never inherit "all". */
+  const zoneLoaded = new Set<string>();
   const spawnLayer = (hosted: HostedZones = "all"): Promise<ServerEntry> => {
     if (!supervisor) return Promise.reject(new Error("no supervisor: start another layer externally"));
     const id = `layer-${++layerCounter}`;
     pendingHosted.set(id, hosted);
     const wait = waitForRegister(id);
     log(`[main] starting ${id} for zones ${hosted === "all" ? "all" : hosted.join(", ")}`);
-    supervisor.spawn("layer", world.scene, id, { cap: world.cap, persist: false });
+    // a dedicated copy loads only its zones (and a band): it cannot later be asked to host the rest
+    if (hosted !== "all") zoneLoaded.add(id);
+    supervisor.spawn("layer", world.scene, id, { cap: world.cap, persist: false, ...(hosted !== "all" ? { zones: hosted } : {}) });
     return wait;
   };
 
@@ -322,6 +382,13 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
 
   // -- friends and party events (docs/hosting.md → "Parties and friends") --------------
   const social = new SocialStore(opts.playerData, opts.experienceId);
+  // -- the item log (docs/moderation.md §4): per-character log, dupe flag, claims -----
+  const itemsLog = new ItemsLogMain({ backend: opts.playerData, experienceId: opts.experienceId, log });
+  // -- reports (docs/moderation.md §2): main's buffer of bridged lines + intake ------
+  const bridgedChat = new ChatBuffer({ maxLines: MAIN_CHAT_BUFFER_LINES });
+  const evidenceRequests = new EvidenceRequests(sendTo);
+  const reports = new ReportStore(opts.playerData, opts.experienceId);
+  const reportIntake = new ReportIntake({ store: reports, mainBuffer: bridgedChat, requests: evidenceRequests, whereIs: (characterId) => registry.whereIs.get(characterId) });
   /** Party invitations waiting on a character — session state, like parties. */
   const invites = new Map<string, Array<{ code: string; from: FriendRef; at: number }>>();
   /** Where a character is right now, as a party list shows it. */
@@ -377,6 +444,79 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
       for (const c of account?.characters ?? []) blocked.push(c.id);
     }
     sendTo(srv, { t: "blocks", characterId, blocked });
+  };
+  // -- audits, verdicts and sanctions (docs/moderation.md §3) ---------------------------
+  /** A banned player's old ticket may still be in hand: the layer that removed them refuses it this long (new ones need /play). */
+  const refuseMs = (ticketTtl + 30) * 1000;
+  const kickText = (until: number | undefined, reason: string): string => `${banLine(until, reason)} You have been disconnected.`;
+  /** Tell one character's layer their mute state (and show `notices`); false when they are not on a layer. */
+  const pushSanctionTo = async (playerId: string, characterId: string, srv = registry.whereIs.get(characterId), notices: string[] = []): Promise<boolean> => {
+    if (!srv) return false;
+    const active = activeSanctions(await reports.load(playerId), Date.now());
+    if (active.ban) return sendTo(srv, { t: "kick", characterId, text: kickText(active.ban.until, active.ban.reason), refuseUntil: Math.min(active.ban.until ?? Infinity, Date.now() + refuseMs) });
+    return sendTo(srv, { t: "sanction", characterId, muteUntil: active.mute?.until ?? null, ...(active.mute ? { reason: active.mute.reason } : {}), ...(notices.length > 0 ? { notice: notices.join(" ") } : {}) });
+  };
+  /** On every arrival (join, transfer): the mute state, a ban that slipped through, and warns never shown. */
+  const pushSanctions = async (characterId: string, srv: string): Promise<void> => {
+    const owner = owners.get(characterId);
+    if (!owner) return;
+    const active = activeSanctions(await reports.load(owner.playerId), Date.now());
+    const notices = active.undeliveredWarns.map((w) => warnLine(w.reason));
+    if ((await pushSanctionTo(owner.playerId, characterId, srv, notices)) && notices.length > 0) await moderation.delivered(owner.playerId, active.undeliveredWarns.map((w) => w.id));
+  };
+  /** A sanction was given or lifted: make it true wherever the account's characters stand. */
+  const enforce: Enforce = async (account, { sanction, lifted }) => {
+    const online = onlineCharactersOf(account);
+    if (sanction.kind === "ban") {
+      if (lifted) return; // /play lets them in again; the layer's refusal outlives no ticket
+      for (const c of online) {
+        const srv = registry.whereIs.get(c.characterId);
+        if (srv) sendTo(srv, { t: "kick", characterId: c.characterId, text: kickText(sanction.until, sanction.reason), refuseUntil: Math.min(sanction.until ?? Infinity, Date.now() + refuseMs) });
+      }
+      return;
+    }
+    let shown = false;
+    for (const c of online) {
+      const notice =
+        sanction.kind === "mute"
+          ? lifted
+            ? "Your mute was lifted."
+            : muteLine(sanction.until, sanction.reason)
+          : sanction.kind === "warn"
+            ? lifted
+              ? null
+              : warnLine(sanction.reason)
+            : !lifted && sanction.characterId === c.characterId
+              ? renameLine(sanction.name ?? c.name)
+              : null;
+      if (sanction.kind === "rename" && !notice) continue;
+      if (await pushSanctionTo(account, c.characterId, undefined, notice ? [notice] : [])) shown = true;
+    }
+    if (shown && sanction.kind === "warn" && !lifted) await moderation.delivered(account, [sanction.id]);
+  };
+  const moderation = new ModerationDesk({
+    store: reports,
+    queue: moderationQueue,
+    judge,
+    names,
+    accountCreatedAt: async (account) => {
+      const created = Date.parse((await opts.accounts.get(account))?.createdAt ?? "");
+      return Number.isFinite(created) ? created : null;
+    },
+    hasBlocked: async (account, other) => isBlocked(await social.load(account), other),
+    enforce,
+    ...(opts.moderation?.audit ? { rule: opts.moderation.audit } : {}),
+    ...(opts.moderation?.thresholds ? { thresholds: opts.moderation.thresholds } : {}),
+    log,
+  });
+  /** Staff routes answer a ModerationError with its status. */
+  const staff = async <T>(fn: () => Promise<T>): Promise<T> => {
+    try {
+      return await fn();
+    } catch (error) {
+      if (error instanceof ModerationError) throw new HttpError(error.status, error.message);
+      throw error;
+    }
   };
   const lastOnline = new Map<string, boolean>();
   /** Friends learn a character came or went (not on a transfer — they never left). */
@@ -445,10 +585,10 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
   };
 
   /** Tell the server a character is on to hand it to `dest`. */
-  const moveCharacter = (characterId: string, dest: ServerEntry, reason: string): boolean => {
+  const moveCharacter = (characterId: string, dest: ServerEntry, reason: string, portal?: PortalHop): boolean => {
     const on = registry.whereIs.get(characterId);
     if (!on || on === dest.id) return false;
-    return sendTo(on, { t: "transfer.begin", characterId, srv: dest.id, url: dest.url, reason });
+    return sendTo(on, { t: "transfer.begin", characterId, srv: dest.id, url: dest.url, reason, scene: dest.scene, ...(portal ? { portal } : {}) });
   };
 
   /**
@@ -516,7 +656,7 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
     // somewhere else that takes them: with zones, a copy of the zone they stand in
     const on = registry.whereIs.get(characterId);
     const presence = on ? registry.servers.get(on)?.players.get(characterId) : undefined;
-    const zone = presence?.position ? registry.zoneAt(presence.position[0], presence.position[2]) : await zoneForCharacter(owners.get(characterId)?.playerId ?? "");
+    const zone = presence?.position ? registry.zoneAt(presence.position[0], presence.position[2]) : await zoneForCharacter(owners.get(characterId)?.saveId ?? owners.get(characterId)?.playerId ?? "");
     return placeOrGrow(characterId, zone, on);
   };
 
@@ -544,9 +684,12 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
       case "ticket.mint": {
         const dest = registry.servers.get(call.srv);
         if (!dest) throw new Error(`no server "${call.srv}"`);
+        const account = await opts.accounts.get(call.playerId);
+        const character = account?.characters.find((c) => c.id === call.characterId && !c.deletedAt);
+        if (!character || worldOf(character, worldId) !== worldId) throw new Error("character does not belong to this world");
         registry.reserve(dest.id, call.characterId, call.playerId, call.name);
         return {
-          ticket: signTicket(opts.secret, { sub: call.playerId, chr: call.characterId, name: call.name, srv: call.srv, rev: call.rev, reason: call.reason, ttlSeconds: ticketTtl }),
+          ticket: signTicket(opts.secret, { sub: call.playerId, chr: call.characterId, saveId: character.saveId ?? call.playerId, name: call.name, srv: call.srv, rev: call.rev, reason: call.reason, ttlSeconds: ticketTtl }),
         };
       }
       case "transfer.request": {
@@ -564,11 +707,13 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
         }
         const dest = await resolveTarget(call.characterId, call.target);
         if (call.target.party) {
+          // a portal trip pulls the party into the SAME instance; each member's
+          // layer records that member's own arrival and way back (PortalHop)
           for (const member of partyMembersOf(call.characterId)) {
-            if (member !== call.characterId) moveCharacter(member, dest, "party");
+            if (member !== call.characterId) moveCharacter(member, dest, "party", call.target.portal);
           }
         }
-        return { srv: dest.id, url: dest.url };
+        return { srv: dest.id, url: dest.url, scene: dest.scene } satisfies TransferAnswer;
       }
       case "recipe.changed": {
         recipes.set(call.id, call.recipe);
@@ -576,6 +721,11 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
         for (const id of sockets.keys()) if (id !== layerId) sendTo(id, { t: "recipe", id: call.id, recipe: call.recipe });
         return { fanned: sockets.size - 1 };
       }
+      case "evidence.result":
+        evidenceRequests.resolve(call.requestId, call.evidence);
+        return null;
+      case "items.log":
+        return itemsLog.ingest(layerId, { batchId: call.batchId, batches: call.batches });
       case "arrival.result": {
         const w = arrivalWaiters.get(call.requestId);
         if (w) {
@@ -643,6 +793,7 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
         registry.joined(id, msg.player);
         pushParty(msg.player.characterId, id);
         void pushBlocks(msg.player.characterId, id).catch(() => undefined);
+        void pushSanctions(msg.player.characterId, id).catch((error: unknown) => log(`[main] sanctions push: ${error instanceof Error ? error.message : String(error)}`));
         void loadGuildOf(msg.player.characterId, id).catch(() => undefined);
         void announcePresence(msg.player.characterId, true).catch((error: unknown) => log(`[main] presence: ${error instanceof Error ? error.message : String(error)}`));
         return;
@@ -664,6 +815,8 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
             : msg.line.channel === "guild"
               ? { ...msg.line, guild: guildOf.get(msg.line.from)?.id ?? null }
               : msg.line;
+        // kept 15 minutes for reports (docs/moderation.md §2), never written down on its own
+        bridgedChat.push({ id: line.id, channel: line.channel, from: line.from, account: owners.get(line.from)?.playerId ?? null, name: line.name, text: line.text, at: line.at, position: null, zone: line.zone, origin: id, to: null });
         if (line.channel === "party" && line.party === null) return;
         if (line.channel === "guild" && line.guild === null) return;
         for (const other of sockets.keys()) if (other !== id) sendTo(other, { t: "chat", line, origin: id });
@@ -686,6 +839,21 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
     return h.slice(7).trim();
   };
 
+  const accountVersions = new WeakMap<AccountRecord, AccountRecord>();
+  const saveAccount = async (account: AccountRecord): Promise<void> => {
+    if (!(await opts.accounts.update(account, accountVersions.get(account)))) throw new HttpError(409, "Your characters changed on another world. Refresh and try again.");
+    accountVersions.set(account, structuredClone(account));
+  };
+  const bindLegacyWorld = async (account: AccountRecord): Promise<AccountRecord> => {
+    accountVersions.set(account, structuredClone(account));
+    let changed = false;
+    for (const character of account.characters) {
+      if (!character.world) { character.world = worldId; character.saveId = account.id; changed = true; }
+    }
+    if (changed) await saveAccount(account);
+    return account;
+  };
+
   const requireAccount = async (req: http.IncomingMessage): Promise<AccountRecord> => {
     const token = bearer(req);
     if (!token) throw new HttpError(401, "sign in first");
@@ -693,7 +861,7 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
     if (!v.ok) throw new HttpError(401, v.reason);
     const account = await opts.accounts.get(v.sub);
     if (!account) throw new HttpError(401, "unknown account");
-    return account;
+    return bindLegacyWorld(account);
   };
 
   const requireAdmin = (req: http.IncomingMessage): void => {
@@ -702,16 +870,23 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
 
   const characterOf = (account: AccountRecord, characterId: unknown): CharacterRecord => {
     if (typeof characterId !== "string") throw new HttpError(400, "characterId required");
-    const c = account.characters.find((x) => x.id === characterId);
+    const c = account.characters.find((x) => x.id === characterId && !x.deletedAt);
     if (!c) throw new HttpError(404, "no such character on this account");
+    if (worldOf(c, worldId) !== worldId) throw new HttpError(409, `${c.name} lives on another world`);
     return c;
   };
 
+  /** Characters on THIS world (an account's others live on theirs). */
+  const here = (list: CharacterRecord[]): CharacterRecord[] => list.filter((c) => worldOf(c, worldId) === worldId).map((c) => ({ ...c, world: worldOf(c, worldId) }));
   const sessionFor = (account: AccountRecord): unknown => ({
     session: signSession(opts.secret, account.id, sessionTtl),
     account: { id: account.id, name: account.name },
-    characters: account.characters,
+    world: { id: worldId, name: worldName },
+    characters: here(liveCharacters(account)),
+    deleted: here(restorableCharacters(account)),
   });
+  /** The roster a client draws: playable characters, and the deleted ones it may still restore. */
+  const rosterOf = (account: AccountRecord): unknown => ({ world: { id: worldId, name: worldName }, characters: here(liveCharacters(account)), deleted: here(restorableCharacters(account)), graceDays: DELETE_GRACE_DAYS });
 
   const publicStatus = (): unknown => ({
     scene: world.scene,
@@ -726,7 +901,7 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
     const method = req.method ?? "GET";
     if (method === "OPTIONS") {
       res.setHeader("access-control-allow-origin", "*");
-      res.setHeader("access-control-allow-methods", "GET,POST,OPTIONS");
+      res.setHeader("access-control-allow-methods", "GET,POST,DELETE,OPTIONS");
       res.setHeader("access-control-allow-headers", "content-type,authorization");
       res.statusCode = 204;
       res.end();
@@ -752,13 +927,87 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
       const password = typeof body?.password === "string" ? body.password : "";
       const account = await opts.accounts.find(name);
       if (!account || !(await checkPassword(account, password))) throw new HttpError(401, "wrong name or password");
-      return send(res, 200, sessionFor(account));
+      return send(res, 200, sessionFor(await bindLegacyWorld(account)));
     }
     // the rules the creation screen draws and /characters validates against — one source for both
     if (p === "/creation" && method === "GET") return send(res, 200, { creation: opts.creation ?? null });
+    // the server-select screen: this world (its population, the caller's character on it) and any others listed
+    if (p === "/worlds" && method === "GET") {
+      const account = await requireAccount(req);
+      const mine = (id: string): unknown => {
+        const c = liveCharacters(account).find((x) => worldOf(x, worldId) === id);
+        return c ? { id: c.id, name: c.name, ...(c.build ? { archetype: c.build.archetype } : {}) } : null;
+      };
+      const layers = registry.layersFor(world.scene);
+      const players = layers.reduce((n, s) => n + s.players.size, 0);
+      const capacity = Math.max(world.cap, layers.reduce((n, s) => n + s.cap, 0));
+      return send(res, 200, {
+        current: worldId,
+        worlds: [
+          { id: worldId, name: worldName, url: null, status: "online", players, capacity, character: mine(worldId) },
+          ...(opts.world.others ?? []).map((o) => ({ id: o.id, name: o.name, url: o.url, status: "unknown", players: null, capacity: null, character: mine(o.id) })),
+        ],
+      });
+    }
     if (p === "/characters" && method === "GET") {
       const account = await requireAccount(req);
-      return send(res, 200, { characters: account.characters });
+      if (purgeDeleted(account)) await saveAccount(account);
+      return send(res, 200, rosterOf(account));
+    }
+    // is a name free for a new character? (the creation screen asks as you type; POST /characters decides)
+    if (p === "/characters/name" && method === "GET") {
+      await requireAccount(req);
+      const name = (url.searchParams.get("name") ?? "").trim();
+      if (!CHARACTER_NAME.test(name)) return send(res, 200, { ok: false, reason: "3-20 letters (spaces, ' and - inside)" });
+      if (await opts.accounts.findCharacter(name)) return send(res, 200, { ok: false, reason: "taken" });
+      const listed = names.checkList(name); // the cheap stage only; POST /characters also asks the judge
+      if (listed) return send(res, 200, { ok: false, reason: listed.message });
+      return send(res, 200, { ok: true });
+    }
+    // delete (restorable for DELETE_GRACE_DAYS; the name stays reserved meanwhile) and restore
+    const charRoute = /^\/characters\/([A-Za-z0-9_-]{3,64})(\/restore)?$/.exec(p);
+    if (charRoute && method === "DELETE" && !charRoute[2]) {
+      const account = await requireAccount(req);
+      const character = characterOf(account, charRoute[1]);
+      const body = (await readJson(req)) as { confirm?: unknown } | null;
+      if (typeof body?.confirm !== "string" || body.confirm.trim().toLowerCase() !== character.name.toLowerCase()) {
+        throw new HttpError(400, `type the character's name (${character.name}) to delete it`);
+      }
+      if (registry.whereIs.has(character.id)) throw new HttpError(409, "Camp and leave the world before deleting this character. A disconnected body may remain for 60 seconds.");
+      character.deletedAt = new Date().toISOString();
+      await saveAccount(account);
+      return send(res, 200, rosterOf(account));
+    }
+    if (charRoute && method === "POST" && charRoute[2]) {
+      const account = await requireAccount(req);
+      const character = restorableCharacters(account).find((c) => c.id === charRoute[1]);
+      if (!character) throw new HttpError(404, "no deleted character to restore (past the grace period?)");
+      if (worldOf(character, worldId) !== worldId) throw new HttpError(409, `${character.name} lives on another world`);
+      if (liveCharacters(account).length >= MAX_CHARACTERS) throw new HttpError(400, `at most ${MAX_CHARACTERS} characters — delete one first`);
+      if (worldOf(character, worldId) === worldId && liveCharacters(account).some((c) => worldOf(c, worldId) === worldId)) {
+        throw new HttpError(409, `you already have a character on ${worldName} — delete it before restoring this one`);
+      }
+      delete character.deletedAt;
+      await saveAccount(account);
+      return send(res, 200, rosterOf(account));
+    }
+    // a refused name (a `rename` sanction) is cleared by choosing a new one — the full name check, as at creation
+    const renameRoute = /^\/characters\/([A-Za-z0-9_-]{3,64})\/rename$/.exec(p);
+    if (renameRoute && method === "POST") {
+      const account = await requireAccount(req);
+      const character = characterOf(account, renameRoute[1]);
+      if (!(await moderation.active(account.id)).renames.some((s) => s.characterId === character.id)) throw new HttpError(400, `${character.name} does not need a new name`);
+      const body = (await readJson(req)) as { name?: unknown } | null;
+      const name = typeof body?.name === "string" ? body.name.trim() : "";
+      if (!CHARACTER_NAME.test(name)) throw new HttpError(400, "character name: 3-20 letters");
+      if (await opts.accounts.findCharacter(name)) throw new HttpError(409, `a character called "${name}" already exists — pick another name`);
+      const verdict = await names.check(name, { accountId: account.id, characterId: character.id });
+      if (!verdict.ok) throw new HttpError(400, verdict.message);
+      character.name = name;
+      await saveAccount(account);
+      await moderation.renamed(account.id, character.id, name);
+      if (owners.has(character.id)) owners.set(character.id, { playerId: account.id, name, saveId: character.saveId ?? account.id });
+      return send(res, 200, { character, ...(rosterOf(account) as object) });
     }
     if (p === "/characters" && method === "POST") {
       const account = await requireAccount(req);
@@ -779,24 +1028,71 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
       } else if (opts.creation) {
         throw new HttpError(400, "choose an archetype, a birth trait and a look first");
       }
-      if (account.characters.length >= MAX_CHARACTERS) throw new HttpError(400, `at most ${MAX_CHARACTERS} characters`);
+      if (liveCharacters(account).length >= MAX_CHARACTERS) throw new HttpError(400, `at most ${MAX_CHARACTERS} characters`);
+      // one character per account per world: start over by deleting the one here
+      const already = liveCharacters(account).find((c) => worldOf(c, worldId) === worldId);
+      if (already) throw new HttpError(409, `you already have a character on ${worldName} (${already.name}) — delete it to start over`);
       // names are how players find each other (/friend, /invite): one character per name, world-wide
       if (await opts.accounts.findCharacter(name)) throw new HttpError(409, `a character called "${name}" already exists — pick another name`);
-      const character: CharacterRecord = { id: newId("chr"), name, createdAt: new Date().toISOString(), ...(build ? { build } : {}) };
+      const verdict = await names.check(name, { accountId: account.id });
+      if (!verdict.ok) throw new HttpError(400, verdict.message);
+      const characterId = newId("chr");
+      const character: CharacterRecord = { id: characterId, saveId: characterId, name, createdAt: new Date().toISOString(), world: worldId, ...(build ? { build } : {}) };
       account.characters.push(character);
-      await opts.accounts.update(account);
-      return send(res, 200, { character, characters: account.characters });
+      await saveAccount(account);
+      return send(res, 200, { character, characters: here(liveCharacters(account)), deleted: here(restorableCharacters(account)) });
     }
     if (p === "/play" && method === "POST") {
       const account = await requireAccount(req);
       const body = (await readJson(req)) as { characterId?: unknown } | null;
       const character = characterOf(account, body?.characterId);
-      owners.set(character.id, { playerId: account.id, name: character.name });
-      const zone = await zoneForCharacter(account.id);
-      const server = await placeOrGrow(character.id, zone);
+      // moderation (docs/moderation.md §3): a ban keeps the account out; a refused name must be changed first
+      const sanctions = await moderation.active(account.id);
+      if (sanctions.ban) throw new HttpError(403, banLine(sanctions.ban.until, sanctions.ban.reason));
+      const rename = sanctions.renames.find((s) => s.characterId === character.id);
+      if (rename) {
+        return send(res, 409, {
+          ok: false,
+          code: "rename_required",
+          renameRequired: true,
+          characterId: character.id,
+          name: character.name,
+          error: `The name "${character.name}" was refused: ${rename.reason}. Choose a new name to keep playing.`,
+        });
+      }
+      owners.set(character.id, { playerId: account.id, name: character.name, saveId: character.saveId ?? account.id });
+      const zone = await zoneForCharacter(character.saveId ?? account.id);
+      // still standing on a layer (a reconnect grace, or a body held while it is being looted): back to THAT body,
+      // never a second one elsewhere spawned from an older save
+      const held = registry.whereIs.get(character.id);
+      const heldOn = held ? registry.servers.get(held) : undefined;
+      const server = heldOn && heldOn.accepting ? heldOn : await placeOrGrow(character.id, zone);
       registry.reserve(server.id, character.id, account.id, character.name, Date.now(), zone);
-      const ticket = signTicket(opts.secret, { sub: account.id, chr: character.id, name: character.name, srv: server.id, reason: "join", ...(character.build ? { build: character.build } : {}), ttlSeconds: ticketTtl });
+      const ticket = signTicket(opts.secret, { sub: account.id, chr: character.id, saveId: character.saveId ?? account.id, name: character.name, srv: server.id, reason: "join", ...(character.build ? { build: character.build } : {}), ttlSeconds: ticketTtl });
       return send(res, 200, { url: server.url, ticket, server: server.id, scene: server.scene });
+    }
+    // a player reports another (docs/moderation.md §2): evidence gathered now, stored with the report
+    if (p === "/reports" && method === "POST") {
+      const account = await requireAccount(req);
+      const body = (await readJson(req)) as Record<string, unknown> | null;
+      const character = characterOf(account, body?.["characterId"]);
+      const name = typeof body?.["target"] === "string" ? body["target"].trim() : "";
+      if (!name) throw new HttpError(400, "who are you reporting? give their character name");
+      const target = await refByName(name);
+      try {
+        const { report } = await reportIntake.file({
+          reporter: { account: account.id, characterId: character.id, name: character.name },
+          target: { account: target.playerId, characterId: target.characterId, name: target.characterName },
+          kind: body?.["kind"] ?? "other",
+          reason: body?.["reason"],
+        });
+        // the audit rule (or, for a name, the name check) runs after the reply: a judge may take seconds
+        void moderation.afterReport(report, target.playerId).catch((error: unknown) => log(`[main] audit of ${target.playerId} failed: ${error instanceof Error ? error.message : String(error)}`));
+        return send(res, 200, { ok: true, id: report.id, name: target.characterName });
+      } catch (error) {
+        if (error instanceof ReportError) throw new HttpError(error.status, error.message);
+        throw error;
+      }
     }
     if (p.startsWith("/party") || p.startsWith("/social") || p.startsWith("/guild")) {
       const account = await requireAccount(req);
@@ -804,7 +1100,7 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
       const characterId = method === "POST" ? body?.["characterId"] : url.searchParams.get("characterId");
       const character = characterOf(account, characterId);
       const me: FriendRef = { playerId: account.id, characterId: character.id, characterName: character.name };
-      owners.set(me.characterId, { playerId: account.id, name: character.name });
+      owners.set(me.characterId, { playerId: account.id, name: character.name, saveId: character.saveId ?? account.id });
       const str = (key: string): string => (typeof body?.[key] === "string" ? (body[key] as string).trim() : "");
       /** The other character named in the request: by `name`, or by an id field. */
       const other = async (...keys: string[]): Promise<FriendRef> => {
@@ -1135,6 +1431,61 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
 
     if (p.startsWith("/admin/")) {
       requireAdmin(req);
+      // names the judge leaned against below the threshold, or could not judge — accepted, for staff to look at
+      if (p === "/admin/moderation/names" && method === "GET") return send(res, 200, { threshold: names.threshold, names: (await moderationQueue.load()).names });
+      // -- the staff surface (docs/moderation.md §3) --
+      if (p === "/admin/moderation/queue" && method === "GET") {
+        const q = await moderationQueue.load();
+        return send(res, 200, { escalations: q.escalations, names: q.names, nameThreshold: names.threshold, thresholds: moderation.thresholds, audit: moderation.rule });
+      }
+      if (p === "/admin/moderation/decide" && method === "POST") {
+        const body = (await readJson(req)) as { auditId?: unknown; action?: unknown } | null;
+        if (typeof body?.auditId !== "string") throw new HttpError(400, "auditId required");
+        if (typeof body.action !== "string" || !(AUDIT_ACTIONS as readonly string[]).includes(body.action)) throw new HttpError(400, `action must be one of: ${AUDIT_ACTIONS.join(", ")}`);
+        const { audit, sanction } = await staff(() => moderation.decide(body.auditId as string, body.action as AuditAction));
+        return send(res, 200, { ok: true, audit, sanction });
+      }
+      if (p === "/admin/moderation/sanction" && (method === "POST" || method === "DELETE")) {
+        const body = (await readJson(req)) as { account?: unknown; character?: unknown; characterId?: unknown; kind?: unknown; minutes?: unknown; reason?: unknown } | null;
+        // the account by id, or through one of its characters (by id or name)
+        let accountId = typeof body?.account === "string" ? body.account : "";
+        let target: CharacterRecord | null = null;
+        const who = typeof body?.characterId === "string" ? body.characterId : typeof body?.character === "string" ? body.character : "";
+        if (who) {
+          const found = (await opts.accounts.findCharacterById(who)) ?? (await opts.accounts.findCharacter(who));
+          if (!found) throw new HttpError(404, `no character "${who}"`);
+          accountId ||= found.account.id;
+          if (found.account.id !== accountId) throw new HttpError(400, `${found.character.name} is not on account ${accountId}`);
+          target = found.character;
+        }
+        if (!accountId || !(await opts.accounts.get(accountId))) throw new HttpError(404, "no such account (give account, or characterId / character)");
+        const kind = body?.kind;
+        if (typeof kind !== "string" || !(SANCTION_KINDS as readonly string[]).includes(kind)) throw new HttpError(400, `kind must be one of: ${SANCTION_KINDS.join(", ")}`);
+        if (method === "DELETE") return send(res, 200, { ok: true, lifted: await staff(() => moderation.lift(accountId, kind as SanctionKind)) });
+        const reason = typeof body?.reason === "string" ? body.reason.trim() : "";
+        if (!reason) throw new HttpError(400, "reason required (the player reads it)");
+        const sanction = await staff(() =>
+          moderation.sanction(accountId, {
+            kind: kind as SanctionKind,
+            reason,
+            ...(typeof body?.minutes === "number" ? { minutes: body.minutes } : {}),
+            ...(target ? { characterId: target.id, name: target.name } : {}),
+          }),
+        );
+        return send(res, 200, { ok: true, sanction });
+      }
+      const accountRoute = /^\/admin\/moderation\/account\/([A-Za-z0-9_.-]{1,64})$/.exec(p);
+      if (accountRoute && method === "GET") {
+        const account = await opts.accounts.get(accountRoute[1]!);
+        if (!account) throw new HttpError(404, "no such account");
+        const record = await reports.load(account.id);
+        return send(res, 200, {
+          account: { id: account.id, name: account.name, createdAt: account.createdAt, characters: account.characters.map((c) => ({ id: c.id, name: c.name, ...(c.deletedAt ? { deletedAt: c.deletedAt } : {}) })) },
+          active: activeSanctions(record, Date.now()),
+          online: onlineCharactersOf(account.id),
+          record,
+        });
+      }
       if (p === "/admin/status" && method === "GET") {
         return send(res, 200, {
           scene: world.scene,
@@ -1242,6 +1593,9 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
         for (const id of sockets.keys()) if (sendTo(id, { t: "recipe", id: body.id, recipe })) fanned++;
         return send(res, 200, { ok: true, fanned });
       }
+      // the item log: GET /admin/items-log/:characterId?item=…, GET /admin/moderation/dupes, POST …/dupes/:id/close
+      const itemsAnswer = await itemsLog.admin(method, p, url.searchParams);
+      if (itemsAnswer) return send(res, itemsAnswer.status, itemsAnswer.body);
       throw new HttpError(404, `no such admin route: ${method} ${p}`);
     }
     throw new HttpError(404, "not found");
@@ -1306,8 +1660,8 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
     if (idle) {
       // never retire the only whole-world host: somebody has to take the quiet zones
       if (idle.hosted === "all" && !layers.some((s) => s.id !== idle.id && s.hosted === "all" && !s.draining)) {
-        const heir = layers.filter((s) => s.id !== idle.id && !s.draining).sort((a, b) => a.registeredAt - b.registeredAt)[0];
-        if (!heir) return;
+        const heir = layers.filter((s) => s.id !== idle.id && !s.draining && !zoneLoaded.has(s.id)).sort((a, b) => a.registeredAt - b.registeredAt)[0];
+        if (!heir) return; // only zone copies left: the whole-world layer stays
         registry.setHosted(heir.id, "all");
         sendTo(heir.id, { t: "zones", hosted: "all" });
         log(`[main] "${heir.id}" now hosts all zones (taking over from idle "${idle.id}")`);
@@ -1334,9 +1688,12 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
     port,
     url: `http://${host === "0.0.0.0" ? "127.0.0.1" : host}:${port}`,
     registry,
+    itemsLog,
+    moderation,
     close: async () => {
       closed = true;
       clearInterval(scaleTimer);
+      evidenceRequests.dispose();
       for (const w of booting.values()) {
         clearTimeout(w.timer);
         w.reject(new Error("main closing"));

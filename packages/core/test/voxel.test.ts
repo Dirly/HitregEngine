@@ -20,6 +20,8 @@ import {
   scatterCell,
   voxelChunkDoc,
   MAX_SURFACES,
+  MAX_INDEXED_SURFACES,
+  recipeSplatIndexed,
   type SampledBlock,
   type WorldField,
   type WorldRecipe,
@@ -572,6 +574,7 @@ describe("terrain features", () => {
       testRecipe({
         features: {
           // no bedY: the field solves one through these points (a hand-written river)
+          heightPatches: [], passages: [],
           rivers: [{ id: "r", points: [[-200, 0], [-100, 0], [0, 0], [100, 0], [200, 0]], width: 10, depth: 6, bank: 20, maxGrade: 0.05, water: true, surface: "", surfaceEdge: 3, taper: 0 }],
           canyons: [],
           ridges: [],
@@ -601,6 +604,7 @@ describe("terrain features", () => {
     const carved = createWorldField(
       testRecipe({
         features: {
+          heightPatches: [], passages: [],
           rivers: [{ id: "r", points: [[-200, 500], [200, 500]], width: 10, depth: 3, bank: 10, bedY: [9000, 9000], maxGrade: 0.05, water: true, surface: "", surfaceEdge: 3, taper: 0 }],
           canyons: [],
           ridges: [],
@@ -621,7 +625,7 @@ describe("terrain features", () => {
   });
 
   it("solves a descending bed for a river written by hand, and a tributary meets its trunk", () => {
-    const empty = { canyons: [], ridges: [], roads: [], tunnels: [], towns: [], blobs: [], pois: [], camps: [], lakes: [], bridges: [], fills: [], riverPaths: [] };
+    const empty = { heightPatches: [], passages: [], canyons: [], ridges: [], roads: [], tunnels: [], towns: [], blobs: [], pois: [], camps: [], lakes: [], bridges: [], fills: [], riverPaths: [] };
     const trunk = { id: "trunk", points: [[-300, 400], [-100, 420], [100, 380], [300, 400]] as [number, number][], width: 12, depth: 4, bank: 10, maxGrade: 0.05, water: true, surface: "", surfaceEdge: 3, taper: 0 };
     const branch = { id: "branch", points: [[0, 100], [0, 250], [0, 380]] as [number, number][], width: 6, depth: 2, bank: 8, maxGrade: 0.05, water: true, surface: "", surfaceEdge: 3, taper: 0 };
     const bare = createWorldField(testRecipe());
@@ -650,6 +654,7 @@ describe("terrain features", () => {
     const field = createWorldField(
       testRecipe({
         features: {
+          heightPatches: [], passages: [],
           rivers: [],
           canyons: [],
           ridges: [],
@@ -672,6 +677,7 @@ describe("terrain features", () => {
     const field = createWorldField(
       testRecipe({
         features: {
+          heightPatches: [], passages: [],
           rivers: [],
           canyons: [],
           ridges: [],
@@ -749,12 +755,23 @@ describe("terrain features", () => {
       testRecipe({ features: { ...noFeatures(), roads: [{ ...road, leftY: undefined, rightY: undefined }] } }),
     );
     expect(plain.height(0, 40 + half + 6 + 0.5)).toBeCloseTo(bare.height(0, 40 + half + 6 + 0.5), 5);
+    // Past the END of a road there is no seam along its extended centreline:
+    // either side of that line, a hair apart, reads the same ground. The hard
+    // left/right pick used to put the left bank on one side and the right on
+    // the other — a wall 22 m tall here, and at Brinehold a rock rib through
+    // the gate court where the ramp stopped 16 m short of the gate.
+    for (const ahead of [2, 6, 12]) {
+      const a = field.height(100 + ahead, 40 + 0.05);
+      const b = field.height(100 + ahead, 40 - 0.05);
+      expect(Math.abs(a - b)).toBeLessThan(0.1);
+    }
   });
 
   it("reports clearance to the nearest feature so scatter can keep off it", () => {
     const field = createWorldField(
       testRecipe({
         features: {
+          heightPatches: [], passages: [],
           rivers: [],
           canyons: [],
           ridges: [],
@@ -856,7 +873,7 @@ function paletteIndex(name: string): number {
 }
 
 function noFeatures(): WorldRecipe["features"] {
-  return { rivers: [], canyons: [], ridges: [], roads: [], towns: [], lakes: [], bridges: [], fills: [], riverPaths: [], tunnels: [], blobs: [], pois: [], camps: [] };
+  return { heightPatches: [], passages: [], rivers: [], canyons: [], ridges: [], roads: [], towns: [], lakes: [], bridges: [], fills: [], riverPaths: [], tunnels: [], blobs: [], pois: [], camps: [] };
 }
 
 describe("surface decoration", () => {
@@ -1493,6 +1510,66 @@ describe("scatter", () => {
   const withRule = (patch: Record<string, unknown>): ReturnType<typeof createWorldField> =>
     createWorldField(worldRecipeSchema.parse({ ...recipe, scatter: [{ ...recipe.scatter![0], ...patch }] }));
 
+  it("selects stable weighted size cohorts without rerolling placement", () => {
+    const options = { footprint: 0.001, colliderSize: [0, 2, 0], spacing: 0, yOffset: -0.2 };
+    const plain = withRule(options);
+    const varied = withRule({ ...options, scaleVariants: [
+      { weight: 20, multiplier: 1 }, { weight: 78, multiplier: 2 }, { weight: 2, multiplier: 2.35 },
+    ] });
+    const counts = [0, 0, 0];
+    for (let cz = -3; cz <= 3; cz++) for (let cx = -3; cx <= 3; cx++) {
+      const before = new Map(scatterCell(plain, cx, cz).map(i => [i.id, i]));
+      const after = scatterCell(varied, cx, cz);
+      expect(after).toEqual(scatterCell(varied, cx, cz));
+      expect(after.length).toBe(before.size);
+      for (const instance of after) {
+        const original = before.get(instance.id)!;
+        const ratio = instance.scale / original.scale;
+        const cohort = [1, 2, 2.35].findIndex(m => Math.abs(m - ratio) < 1e-10);
+        expect(cohort).toBeGreaterThanOrEqual(0);
+        counts[cohort]!++;
+        expect(instance.rotation).toEqual(original.rotation);
+        expect([instance.position[0], instance.position[2]]).toEqual([original.position[0], original.position[2]]);
+        expect(instance.position[1] - original.position[1]).toBeCloseTo(-0.2 * (instance.scale - original.scale), 10);
+      }
+    }
+    const total = counts.reduce((a, b) => a + b, 0);
+    expect(counts[0]! / total).toBeGreaterThan(0.15);
+    expect(counts[0]! / total).toBeLessThan(0.25);
+    expect(counts[1]! / total).toBeGreaterThan(0.7);
+    expect(counts[2]! / total).toBeGreaterThan(0.005);
+    expect(counts[2]! / total).toBeLessThan(0.05);
+  });
+
+  it("adds deterministic bark/leaf colour without changing placement or scale", () => {
+    const plain = scatterCell(withRule({}), 1, 1);
+    const colors = [{ weight: 1, tint: { bark: [0.9, 1, 1], leaves: [1, 0.9, 1] } },
+      { weight: 1, tint: { bark: [1, 0.9, 1], leaves: [0.9, 1, 1] } }];
+    const field = withRule({ colorVariants: colors });
+    const varied = scatterCell(field, 1, 1);
+    expect(varied.length).toBeGreaterThan(0);
+    expect(varied).toEqual(scatterCell(field, 1, 1));
+    expect(varied.map(({ vegetationTint, ...instance }) => instance)).toEqual(plain);
+    expect(new Set(varied.map(i => JSON.stringify(i.vegetationTint))).size).toBe(2);
+    const doc = voxelChunkDoc(withRule({ model: "trees/pine.gltf", prefab: undefined, colorVariants: colors }), "test", 1, 1);
+    const props = Object.values(doc.entities).filter(e => e.tags?.includes("scatter"));
+    expect(props.length).toBeGreaterThan(0);
+    expect(props.every(e => (e.components["mesh"] as { source: { vegetationTint?: unknown } }).source.vegetationTint)).toBe(true);
+  });
+
+  it("reserves the multiplied footprint for larger size cohorts", () => {
+    const f = withRule({ scale: [1, 1], footprint: 2, spacing: 1, scaleVariants: [{ weight: 1, multiplier: 3 }] });
+    const instances = scatterCell(f, 1, 1);
+    expect(instances.length).toBeGreaterThan(0);
+    for (let i = 0; i < instances.length; i++) for (let j = i + 1; j < instances.length; j++) {
+      const a = instances[i]!, b = instances[j]!;
+      expect(a.scale).toBe(3);
+      expect(Math.hypot(a.position[0] - b.position[0], a.position[2] - b.position[2])).toBeGreaterThanOrEqual(13 - 1e-6);
+    }
+    expect(worldRecipeSchema.safeParse({ ...recipe, scatter: [{ ...recipe.scatter![0], scaleVariants: [] }] }).success).toBe(false);
+    expect(worldRecipeSchema.safeParse({ ...recipe, scatter: [{ ...recipe.scatter![0], scaleVariants: [{ weight: 0, multiplier: 2 }] }] }).success).toBe(false);
+  });
+
   it("thins a rule into clumps without moving the props that survive", () => {
     const plain = withRule({});
     const clumped = withRule({
@@ -1612,6 +1689,7 @@ describe("scatter", () => {
         ...recipe,
         scatter: [{ ...recipe.scatter![0], clearance: 5 }],
         features: {
+          heightPatches: [], passages: [],
           rivers: [],
           canyons: [],
           ridges: [],
@@ -1731,7 +1809,11 @@ describe("generated chunk documents", () => {
   // floating at twice the right height. Nothing draws a collider, so the only
   // thing that catches this is an assertion.
   it("emits collider size and offset in MODEL space — the transform's scale is applied once, by physics", () => {
-    const doc = voxelChunkDoc(field, "overworld", 3, -3);
+    const giantField = createWorldField(worldRecipeSchema.parse({
+      ...recipe,
+      scatter: recipe.scatter.map(r => ({ ...r, scaleVariants: [{ weight: 1, multiplier: 3 }] })),
+    }));
+    const doc = voxelChunkDoc(giantField, "overworld", 3, -3);
     const props = Object.values(doc.entities).filter((e) => e.tags?.includes("scatter"));
     expect(props.length).toBeGreaterThan(0);
     let sawScaled = false;
@@ -1740,6 +1822,8 @@ describe("generated chunk documents", () => {
       const transform = entity.components["transform"] as { scale: number[] };
       expect(collider.size).toEqual([1.2, 1, 1.2]);
       expect(collider.offset).toEqual([0, 0.5, 0]);
+      expect(transform.scale[0]).toBeGreaterThanOrEqual(2.4);
+      expect(transform.scale[0]).toBeLessThanOrEqual(4.2);
       if (Math.abs(transform.scale[0]! - 1) > 0.01) sawScaled = true;
     }
     // the assertions above only mean anything if some instance is NOT at scale 1
@@ -1774,6 +1858,7 @@ describe("generated chunk documents", () => {
       worldRecipeSchema.parse({
         ...recipe,
         features: {
+          heightPatches: [], passages: [],
           rivers: [],
           canyons: [],
           ridges: [],
@@ -1801,13 +1886,16 @@ describe("world recipe", () => {
     expect(recipe.biomes.length).toBeGreaterThan(3);
   });
 
-  it("accepts a palette up to MAX_SURFACES and rejects one past it", () => {
-    // The cap is a cost budget, not a limit of the idea: each ACTIVE surface
-    // is three more triplanar fragment fetches. Past it the answer is a
-    // texture array with per-vertex layer indices, not more fixed channels.
+  it("meshes a palette past MAX_SURFACES indexed, and rejects one past the array cap", () => {
+    // MAX_SURFACES is the DENSE cost budget (each surface is three triplanar
+    // fetches). Past it the world is meshed indexed: per-vertex layer ids into
+    // one texture array, four layers per fragment, capped by the array depth.
     const ok = { ...defaultWorldRecipe(), surfaces: new Array(MAX_SURFACES).fill({ name: "x" }) };
     expect(worldRecipeSchema.safeParse(ok).success).toBe(true);
-    const bad = { ...defaultWorldRecipe(), surfaces: new Array(MAX_SURFACES + 1).fill({ name: "x" }) };
+    expect(recipeSplatIndexed(worldRecipeSchema.parse(ok))).toBe(false);
+    const deep = worldRecipeSchema.parse({ ...defaultWorldRecipe(), surfaces: new Array(MAX_SURFACES + 1).fill({ name: "x" }) });
+    expect(recipeSplatIndexed(deep)).toBe(true);
+    const bad = { ...defaultWorldRecipe(), surfaces: new Array(MAX_INDEXED_SURFACES + 1).fill({ name: "x" }) };
     expect(worldRecipeSchema.safeParse(bad).success).toBe(false);
   });
 

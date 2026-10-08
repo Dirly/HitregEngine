@@ -49,6 +49,12 @@ tools/*
 !tools/wfc-3d/
 !tools/texture-intake/
 !tools/mesh-dc/
+!tools/statue-maker/
+!tools/poi-review/
+!tools/dungeon-pipeline/
+!tools/dungeon-room-kit/
+tools/dungeon-room-kit/**/__pycache__/
+tools/dungeon-room-kit/examples/kit-out/
 
 # the 1254 generator sheets an atlas is registered FROM. ~1.7 MB each, and
 # disposable once the atlas exists — the atlas is what ships, and a sheet is
@@ -67,3 +73,7 @@ tools/*/out-*/
 # worldgen overview renders (`pnpm -F playground worldgen map`) — derived from
 # the recipe, multi-MB, and regenerated on demand.
 apps/playground/*-map.png
+
+# runtime / crash files
+.hitreg-live-context.json
+*.stackdump

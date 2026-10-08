@@ -5,6 +5,7 @@ import {
   clamp,
   color as tslColor,
   float,
+  int,
   max,
   mix,
   mul,
@@ -12,9 +13,11 @@ import {
   mx_fractal_noise_vec3,
   normalWorld,
   positionWorld,
+  round,
   sin,
   smoothstep,
   sub,
+  uniformArray,
   vec3,
   vec4,
 } from "three/tsl";
@@ -88,7 +91,7 @@ export interface MacroNoiseData {
 
 export interface SplatData {
   dominantAxis?: boolean;
-  source?: "height" | "vertex";
+  source?: "height" | "vertex" | "indexed";
   layers: SplatLayerData[];
   slopeRock?: { color: string; roughness: number; start: number; end: number };
   tintByVertexColor?: boolean;
@@ -110,6 +113,15 @@ export const SPLAT_ATTRIBUTE = SPLAT_ATTRIBUTES[0];
 export const SPLAT_ATTRIBUTE_HI = SPLAT_ATTRIBUTES[1];
 /** Palette channels one vertex attribute can carry. */
 export const SPLAT_ATTRIBUTE_WIDTH = 4;
+
+/**
+ * Indexed splat (`source: "indexed"`): the four palette ids each vertex blends,
+ * unorm8 (id / 255). The voxel mesher keeps them identical across a triangle,
+ * so the interpolated value is the id itself and `round()` recovers it exactly.
+ */
+export const SPLAT_INDEX_ATTRIBUTE = "splatIndex";
+/** Indexed splat: the weights of `splatIndex`'s four layers, unorm8. */
+export const SPLAT_TOP_ATTRIBUTE = "splatTop";
 
 /**
  * Normalized layer weights, whichever source the material declares.
@@ -244,6 +256,58 @@ function macroTintValue(noise: MacroNoiseData): N | null {
   ).mul(float(noise.colorStrength));
 }
 
+/**
+ * Colour and roughness of an INDEXED splat: four layers per fragment, chosen
+ * by the vertex's `splatIndex`, however deep the palette.
+ *
+ * Every per-layer constant the dense path bakes into the graph (tile scale,
+ * tint, roughness) is looked up from a uniform array by the layer id instead,
+ * so the graph is the same size for 12 layers or 60. The albedo comes from one
+ * texture array whose slice index IS the palette index. Unused slots carry
+ * weight 0 (their id is clamped into range so the lookup stays legal).
+ */
+function indexedBlend(
+  splat: SplatData,
+  packed: THREE.DataArrayTexture | undefined,
+  warpNoise: N | null,
+  warpFraction: number,
+): { color: N; roughness: N } {
+  const layers = splat.layers;
+  const last = Math.max(0, layers.length - 1);
+  const scales: N = uniformArray(layers.map((l) => Math.max(l.uvScale ?? 4, 1e-3)), "float");
+  const roughs: N = uniformArray(layers.map((l) => l.roughness), "float");
+  const tints: N = uniformArray(
+    layers.map((l) => {
+      const c = new THREE.Color(l.color);
+      return new THREE.Vector4(c.r, c.g, c.b, l.grassy && !l.map ? 1 : 0);
+    }),
+    "vec4",
+  );
+  const ids: N = round(mul(attribute(SPLAT_INDEX_ATTRIBUTE, "vec4") as N, float(255)));
+  const top: N = attribute(SPLAT_TOP_ATTRIBUTE, "vec4");
+  const sum: N = add(add(top.x, top.y), add(top.z, top.w));
+  // missing or all-zero attribute: slot 0 alone, never a divide by zero (black ground)
+  const present: N = smoothstep(float(0), float(1e-3), sum);
+  const w: N = mix(vec4(1, 0, 0, 0), top.div(max(sum, float(1e-4))), present);
+  let color: N = vec3(0, 0, 0);
+  let roughness: N = float(0);
+  for (const c of ["x", "y", "z", "w"] as const) {
+    const id: N = int(clamp(ids[c], float(0), float(last)));
+    const tint: N = tints.element(id);
+    let albedo: N;
+    if (packed) {
+      const scale: N = scales.element(id);
+      const basis = worldTriplanarBasis(scale, warpNoise ? warpNoise.mul(scale.mul(float(warpFraction))) : null, splat.dominantAxis);
+      albedo = mul(sampleTriplanarLayer(basis, packed, id).xyz, tint.xyz);
+    } else {
+      albedo = mix(tint.xyz, mul(tint.xyz, grassyTone()), tint.w);
+    }
+    color = add(color, mul(albedo, w[c]));
+    roughness = add(roughness, mul(roughs.element(id), w[c]));
+  }
+  return { color, roughness };
+}
+
 /** Blend a list of per-layer nodes by the weights, as a weighted sum. */
 function blend(values: N[], weights: N[]): N {
   let out: N = mul(values[0], weights[0]);
@@ -296,13 +360,18 @@ interface LayerArray {
 
 /**
  * Above this many albedo maps the layers are packed into an array texture.
- * Twelve separate maps plus the shadow map and the material's own bindings
- * sit exactly at the 16-per-stage limit, which is the most the proven
- * per-map path can bind. EXPERIMENTAL past that: the first headless run with
- * the packed path compiled but wired no textures at all (ground rendered
- * black) and the cause is not yet found — keep palettes at twelve until it is.
+ * ELEVEN is the most the per-map path can bind: twelve separate maps measured
+ * 17 sampled textures in the fragment stage (shadow map, noise and the rest
+ * take five) against WebGPU's 16, so a twelve-map palette must already pack.
+ * (The array path's old "black ground" was the mesher dropping the biome tint
+ * past 13 surfaces — fixed in marching-cubes/dual-contouring, not here.)
  */
-export const SPLAT_ARRAY_THRESHOLD = 12;
+export const SPLAT_ARRAY_THRESHOLD = 11;
+
+/** Whether a palette's albedo maps go into one array texture rather than one binding each. */
+export function shouldPackSplatLayers(albedoMaps: number, hasNormalMaps: boolean): boolean {
+  return albedoMaps > SPLAT_ARRAY_THRESHOLD && !hasNormalMaps;
+}
 /** Longest edge a packed slice is resampled to; every slice must share one size. */
 const SPLAT_ARRAY_MAX_SIZE = 1024;
 
@@ -315,7 +384,8 @@ function wireSplat(
   packed?: LayerArray,
 ): void {
   const layers = splat.layers;
-  const weights = layerWeights(splat, layers.length);
+  const indexed = splat.source === "indexed";
+  const weights = indexed ? [] : layerWeights(splat, layers.length);
   const bases = new Map<number, TriplanarBasis>();
   // ONE warp for every layer, in world units, built once. Per-layer warps would
   // slide the layers against each other and turn every biome border into a
@@ -337,18 +407,23 @@ function wireSplat(
     return basis;
   };
 
-  const colors: N[] = layers.map((layer, i) => {
-    const tint: N = tslColor(layer.color);
-    const slice = packed?.slice.get(i);
-    if (packed && slice !== undefined) return mul(sampleTriplanarLayer(basisFor(i), packed.texture, slice).xyz, tint);
-    const map = textures[i]?.map;
-    if (map) return mul(sampleTriplanar(basisFor(i), map).xyz, tint);
-    return layer.grassy ? mul(tint, grassyTone()) : tint;
-  });
-  const roughnesses: N[] = layers.map((layer) => float(layer.roughness));
-
-  let colorNode: N = blend(colors, weights);
-  let roughnessNode: N = blend(roughnesses, weights);
+  let colorNode: N;
+  let roughnessNode: N;
+  if (indexed) {
+    ({ color: colorNode, roughness: roughnessNode } = indexedBlend(splat, packed?.texture, warpNoise, warpFraction));
+  } else {
+    const colors: N[] = layers.map((layer, i) => {
+      const tint: N = tslColor(layer.color);
+      const slice = packed?.slice.get(i);
+      if (packed && slice !== undefined) return mul(sampleTriplanarLayer(basisFor(i), packed.texture, slice).xyz, tint);
+      const map = textures[i]?.map;
+      if (map) return mul(sampleTriplanar(basisFor(i), map).xyz, tint);
+      return layer.grassy ? mul(tint, grassyTone()) : tint;
+    });
+    const roughnesses: N[] = layers.map((layer) => float(layer.roughness));
+    colorNode = blend(colors, weights);
+    roughnessNode = blend(roughnesses, weights);
+  }
 
   const slope = splat.slopeRock;
   if (slope) {
@@ -390,7 +465,7 @@ function wireSplat(
   // normals only if at least one layer supplied one; blending a normal map
   // across layers that mostly lack one just flattens the ones that have it
   const normalLayers = layers.map((_, i) => textures[i]?.normalMap);
-  if (normalLayers.some(Boolean)) {
+  if (!indexed && normalLayers.some(Boolean)) {
     const strength = float(data.normalScale ?? 1);
     const worldNormals: N[] = layers.map((_, i) => {
       const tex = normalLayers[i];
@@ -464,10 +539,12 @@ async function loadLayerTextures(
     .filter(([, entry]) => entry.map)
     .map(([index, entry]) => ({ index: Number(index), texture: entry.map! }));
   const hasNormals = Object.values(textures).some((entry) => entry.normalMap);
+  const indexed = splat.source === "indexed";
   let packed: LayerArray | undefined;
-  if (albedo.length > SPLAT_ARRAY_THRESHOLD && !hasNormals) {
+  // an indexed palette ALWAYS packs, one slice per palette entry (slice = id)
+  if (indexed || shouldPackSplatLayers(albedo.length, hasNormals)) {
     try {
-      packed = packLayerArray(albedo, filter, maxAnisotropy);
+      packed = packLayerArray(albedo, filter, maxAnisotropy, indexed ? splat.layers.length : undefined);
       console.info(
         `[render] packed ${albedo.length} splat layers into a ${packed.texture.image.width}² array texture (one binding instead of ${albedo.length})`,
       );
@@ -490,6 +567,8 @@ function packLayerArray(
   layers: { index: number; texture: THREE.Texture }[],
   filter: TextureFilter,
   maxAnisotropy: number,
+  /** Indexed palettes: one slice PER PALETTE ENTRY, slice = layer index, untextured ones white. */
+  paletteDepth?: number,
 ): LayerArray {
   const images = layers.map((l) => l.texture.image as { width?: number; height?: number } | undefined);
   let size = 0;
@@ -505,15 +584,24 @@ function packLayerArray(
     | CanvasRenderingContext2D
     | null;
   if (!ctx) throw new Error("no 2D canvas context to resample with");
-  const depth = layers.length;
+  // A 128px PSX tile upscaled to the array's size must stay blocky: with the
+  // canvas's default bilinear smoothing every texel edge blurs (defeating
+  // `filter: "nearest"`), and the resample also clamps at the image border, so
+  // each tile gains a visible seam line where it repeats.
+  ctx.imageSmoothingEnabled = filter !== "nearest";
+  const depth = paletteDepth ?? layers.length;
   const data = new Uint8Array(size * size * 4 * depth);
+  // white under every slice no texture fills, so an untextured layer is its tint
+  if (paletteDepth !== undefined) data.fill(255);
   const slice = new Map<number, number>();
   layers.forEach((layer, k) => {
+    const at = paletteDepth !== undefined ? layer.index : k;
+    if (at >= depth) return;
     ctx.clearRect(0, 0, size, size);
     ctx.drawImage(layer.texture.image as CanvasImageSource, 0, 0, size, size);
     const pixels = ctx.getImageData(0, 0, size, size).data;
-    data.set(pixels, k * size * size * 4);
-    slice.set(layer.index, k);
+    data.set(pixels, at * size * size * 4);
+    slice.set(layer.index, at);
   });
   const texture = new THREE.DataArrayTexture(data, size, size, depth);
   texture.format = THREE.RGBAFormat;

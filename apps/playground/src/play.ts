@@ -4,7 +4,14 @@
  * Boots a scene from a STATIC bundle (manifest.json + assets-index.json +
  * assets/ + the scene) and runs it: buildScene + physics + scripts + fixed
  * loop + a follow/chase camera rig. No editor overlay, no dev bridge, no
- * live-sync. Single-player (v1) — multiplayer is additive (re-add NetPresence).
+ * live-sync.
+ *
+ * Multiplayer: a project whose project.json says `multiplayer: "server"` joins
+ * its dedicated server — sign in at the gateway, pick or create a character,
+ * play on the layer main chose, with chat, voice, friends and party — through
+ * the SAME session code the editor host uses (net-session.ts, net-client.ts).
+ * Where the server is: net-session.ts `resolveNetEndpoint`. Every other
+ * project plays alone, as before.
  *
  * Bundle layout it expects (produced by tools/export-game.mjs), all relative to
  * this file's page:
@@ -33,26 +40,32 @@ import {
   registerTransferLockNetState,
   Profiler,
   getVoxelWorld,
+  findCreation,
+  regionAt,
   type SceneDoc,
   type GameManifest,
   type ChunkStreamerData,
   type SpritesheetDoc,
 } from "@hitreg/core";
-import { MovingInstanceSystem, EngineRenderer, buildScene, type PostFxData, makeMeshGeometryProvider, AnimationSystem, ParticleSystem, BillboardSystem, LightBudgetSystem, FoliageLodSystem, ClusterLodSystem, GrassSystem, PortraitView, ThirdPersonCameraRig, fitRigToBody, type RigBodyCollider, type BuildOptions, type RigVec3 } from "@hitreg/render";
+import { MovingInstanceSystem, EngineRenderer, buildScene, gltfLoadingCount, type PostFxData, makeMeshGeometryProvider, AnimationSystem, CROWD_POSE_LOD, ParticleSystem, BillboardSystem, LightBudgetSystem, FoliageLodSystem, ClusterLodSystem, GrassSystem, PortraitView, ThirdPersonCameraRig, fitRigToBody, type RigBodyCollider, type BuildOptions, type RigVec3 } from "@hitreg/render";
 import { createAmbientVfx, createVfx, makeVfxHost, warmVfx } from "./vfx-host.js";
 
 /** The `camera` component, straight off the schema. */
 type CameraComponentData = ReturnType<typeof cameraSchema.parse>;
 import { ScriptRegistry, registerBuiltinScripts, ScriptRuntime, InputService, EventBus } from "@hitreg/scripting";
 import { createModelLooks } from "./model-looks.js";
+import { createFaceShotHost } from "./face-shot-host.js";
+import { mountLoadScreen } from "./load-screen.js";
 import { Layers, PhysicsSim, initPhysics } from "@hitreg/physics";
 import { applyBodyState } from "./physics-sync.js";
 import { initProjectScripts } from "./project-scripts.js";
 import { startDevConsole } from "./dev-console.js";
+import { createWorldMapOverlay } from "./world-map.js";
 import { ChunkManager } from "./chunk-manager.js";
 import { bakeImpostorAtlas } from "./impostor-bake.js";
 import { syncWorldCover, voxelGroundProbes } from "./voxel-ground.js";
 import {
+  applyWorldRecipeEdit,
   loadVolumes,
   loadWorldRecipes,
   resolveVoxelWorld,
@@ -60,6 +73,27 @@ import {
   voxelMeshViaWorker,
   voxelSupercellViaWorker,
 } from "./voxel-world.js";
+import { registerCommsEvents, type Comms } from "@hitreg/comms";
+import { NetPresence } from "./net-presence.js";
+import {
+  NetRuntimeWorld,
+  planSuspension,
+  resolveNetEndpoint,
+  savePendingGrant,
+  stripServerPlayers,
+  takePendingGrant,
+} from "./net-session.js";
+import {
+  createSessionComms,
+  mountConnectionOverlay,
+  mountGatewayFlow,
+  peerPresenceHooks,
+  registerSessionNetState,
+  type GatewayFlow,
+} from "./net-client.js";
+import type { GatewayCharacter, PlayGrant } from "./gateway.js";
+import { createCreationPreview } from "./creation-preview.js";
+import { loadingArtOf, mountPortalCurtain, type PortalCurtain } from "./portal-curtain.js";
 
 CameraControls.install({ THREE: THREE as unknown as Parameters<typeof CameraControls.install>[0]["THREE"] });
 
@@ -67,10 +101,33 @@ CameraControls.install({ THREE: THREE as unknown as Parameters<typeof CameraCont
 const BASE = new URL(new URLSearchParams(location.search).get("base") ?? ".", location.href).href;
 const url = (p: string) => new URL(p, BASE).href;
 
-async function loadBundleAssets(assets: AssetLibrary, entryScene: string): Promise<SceneDoc> {
+/**
+ * `preferredScene`: a scene NAME to boot instead of the entry, when the bundle
+ * carries it (`?scene=`, or the scene a server grant names); ignored otherwise.
+ */
+async function loadBundleAssets(assets: AssetLibrary, entryScene: string, preferredScene: string | null = null): Promise<SceneDoc> {
   const index = (await fetch(url("assets-index.json")).then((r) => r.json())) as Record<string, string[]>;
+  if (preferredScene && (index["scenes"] ?? []).includes(`${preferredScene}.scene.json`)) entryScene = `${preferredScene}.scene.json`;
   const fileUrl = (kind: string, file: string) => url(`content/${kind}/${file}`);
-  const readJson = (kind: string, file: string) => fetch(fileUrl(kind, file)).then((r) => r.json());
+  // At most 24 requests in flight: a project ships thousands of data files, and Chrome refuses
+  // a few thousand simultaneous fetches outright (net::ERR_INSUFFICIENT_RESOURCES — the game
+  // never started). Same files, same order of registration; only the concurrency is bounded.
+  let inFlight = 0;
+  const queued: Array<() => void> = [];
+  const slot = (): Promise<void> => (inFlight < 24 ? (inFlight++, Promise.resolve()) : new Promise((r) => queued.push(r)));
+  const release = (): void => {
+    const next = queued.shift();
+    if (next) next();
+    else inFlight--;
+  };
+  const readJson = async (kind: string, file: string): Promise<unknown> => {
+    await slot();
+    try {
+      return await fetch(fileUrl(kind, file)).then((r) => r.json());
+    } finally {
+      release();
+    }
+  };
 
   const jsonKinds: { kind: string; type?: string }[] = [
     { kind: "prefabs" },
@@ -128,9 +185,54 @@ async function main(): Promise<void> {
   registerCoreAssetTypes(assets);
   const meshGeometry = makeMeshGeometryProvider((assetId: string) => assets.getModel(assetId)?.url);
 
-  // 2. assets + scene doc
-  const doc = await loadBundleAssets(assets, manifest.entry.scene);
+  // 1b. multiplayer: does this bundle join a dedicated server, and where
+  // (net-session.ts resolveNetEndpoint: ?gateway / ?server, then the manifest,
+  // then this page's origin as the gateway — "server" projects only)
+  const query = new URLSearchParams(location.search);
+  const netEndpoint = resolveNetEndpoint({
+    query,
+    host: "published",
+    mode: manifest.multiplayer.mode ?? "solo",
+    manifest: manifest.multiplayer,
+    origin: location.origin,
+  });
+  const networked = netEndpoint.kind !== "none";
+  if (manifest.multiplayer.mode === "server" && !networked) console.warn(`[net] ${netEndpoint.reason}`);
+  if (networked) console.log(`[net] ${netEndpoint.kind} ${netEndpoint.url} (from ${netEndpoint.source})`);
+  const sessionStore = ((): Storage | null => {
+    try {
+      return sessionStorage;
+    } catch {
+      return null;
+    }
+  })();
+  // a page reloaded onto the scene a grant named carries that grant across
+  const resumed = netEndpoint.kind === "gateway" ? takePendingGrant<PlayGrant, GatewayCharacter>(sessionStore) : null;
+  if (networked) registerCommsEvents(events); // "chat.message" — local-only, what THIS tab was allowed to see
 
+  // Loading art (docs/hosting.md → "Loading art"): a scene this page boots on —
+  // the reload a server transfer makes, or a direct ?scene= — shows its
+  // loadingScreen until its near ground is in. Not over the gateway's sign-in
+  // card (a fresh visit), which it would hide.
+  let bootCurtain: PortalCurtain | null = null;
+  if (netEndpoint.kind !== "gateway" || resumed) {
+    const bootScene = resumed?.grant.scene ?? query.get("scene");
+    const file = bootScene ? `${bootScene}.scene.json` : manifest.entry.scene;
+    const text = await fetch(url(`content/scenes/${file}`)).then((r) => (r.ok ? r.text() : null)).catch(() => null);
+    const art = loadingArtOf(text, (rel) => url(`content/${rel}`));
+    if (art) {
+      const title = art.title ?? file.replace(/.scene.json$/, "").replace(/-/g, " ").replace(/w/g, (c) => c.toUpperCase());
+      bootCurtain = mountPortalCurtain();
+      void bootCurtain.show(title);
+      bootCurtain.setProgress(0.05);
+      await bootCurtain.setArt({ url: art.url, title });
+    }
+  }
+
+  // 2. assets + scene doc
+  const doc = await loadBundleAssets(assets, manifest.entry.scene, resumed?.grant.scene ?? query.get("scene"));
+
+  bootCurtain?.setProgress(0.4);
   // 3. canvas + renderer + physics
   const canvas = document.getElementById("game") as HTMLCanvasElement;
   const renderer = new EngineRenderer(canvas);
@@ -152,6 +254,8 @@ async function main(): Promise<void> {
 
   // 6. render systems
   const animations = new AnimationSystem();
+  // mobs and townsfolk with no authored poseLod still pose less often far away
+  animations.defaultPoseLod = CROWD_POSE_LOD;
   const particles = new ParticleSystem();
   const billboards = new BillboardSystem();
   // composed effects + spells (ctx.vfx); its slot lights join the scene at
@@ -178,6 +282,8 @@ async function main(): Promise<void> {
 
   // 7. build the scene
   const expanded = expandScene(doc, assets, registry);
+  // the server owns players: its per-joiner body replaces the authored one
+  if (networked) stripServerPlayers(expanded);
   // held weapons / worn gear: every moving instance of an asset is one draw
   const movingInstances = new MovingInstanceSystem({ resolveModel: (id: string) => assets.getModel(id)?.url });
   // ctx.setModelLook — an ubermesh's runtime parts + theme (equipped gear)
@@ -187,6 +293,18 @@ async function main(): Promise<void> {
     resolveModel: (assetId) => assets.getModel(assetId)?.url,
     moving: movingInstances,
     effects: () => ambientVfx, // item effects are standing vfx plays, batched with every other
+  });
+  // unit-frame face pictures (ctx.faceShot): shot once per look through this renderer, cached
+  const faceShots = createFaceShotHost({
+    renderer: renderer.renderer,
+    objectOf: (entityId) => built?.objects.get(entityId),
+    meshOf: (entityId) => {
+      const doc = expanded.entities[entityId] ?? netWorld?.docs.get(entityId);
+      const mesh = doc?.components["mesh"] as { source?: { assetId?: string }; material?: string } | undefined;
+      return mesh ? { ...(mesh.source?.assetId ? { assetId: mesh.source.assetId } : {}), ...(mesh.material ? { material: mesh.material } : {}) } : undefined;
+    },
+    modelLooks,
+    clipsOf: (entityId) => animations.clipsOf(entityId),
   });
   const buildOptions: BuildOptions = {
     movingInstances,
@@ -211,7 +329,8 @@ async function main(): Promise<void> {
     bakeImpostor: (object, bounds) => bakeImpostorAtlas(renderer, object, bounds),
     onModelLoaded: (entityId, root, clips) => {
       modelLooks.modelLoaded(entityId, root);
-      const entity = expanded.entities[entityId];
+      // a server-spawned body's model: its doc lives in the session's runtime registry
+      const entity = expanded.entities[entityId] ?? netWorld?.docs.get(entityId);
       const animator = entity?.components["animator"];
       // the parent id matters: a character's script sits on the physics body
       // and its model on a child, and that is how the body's animation calls
@@ -245,14 +364,12 @@ async function main(): Promise<void> {
   });
 
   // 8. play session — physics + event bus + script runtime
-  const sim = new PhysicsSim(expanded, undefined, { meshGeometry });
+  // props and buildings collide only near the bodies this session simulates (as in the editor's play
+  // mode and on the server): wasm memory never shrinks, and the whole world's colliders were most of it
+  const sim = new PhysicsSim(expanded, undefined, { meshGeometry, streamStatics: { radius: 96 } });
+  let staticsStreamStep = 0;
   const eventBus = new EventBus(events);
   eventBus.setNetRole("local");
-  // single-player: a local netState store IS the authority (default). Scripts
-  // built on netState (like the mall manager) need this to run at all.
-  const netState = new NetStateStore();
-  registerCharacterNetState(netState);
-  registerTransferLockNetState(netState);
   // the rig's AIM, not the camera's direction: a middle-button free look turns
   // the camera away from it and the character must keep its heading
   const viewForward = (): [number, number] => {
@@ -263,6 +380,18 @@ async function main(): Promise<void> {
     d.normalize();
     return [d.x, d.z];
   };
+  // the same aim in 3D (pitch included) and where it starts: the crosshair's ray
+  const viewDirection = (): [number, number, number] => {
+    const d = followId && rigMode === "follow"
+      ? cameraRig.aimDirection(new THREE.Vector3())
+      : camera.getWorldDirection(new THREE.Vector3());
+    d.normalize();
+    return [d.x, d.y, d.z];
+  };
+  const viewOrigin = (): [number, number, number] => {
+    const p = camera.getWorldPosition(new THREE.Vector3());
+    return [p.x, p.y, p.z];
+  };
   // a world point on screen for DOM overlays (ctx.worldToScreen)
   const screenPoint = new THREE.Vector3();
   const worldToScreen = (x: number, y: number, z: number): { x: number; y: number; distance: number } | null => {
@@ -271,6 +400,217 @@ async function main(): Promise<void> {
     const rect = canvas.getBoundingClientRect();
     return { x: rect.left + ((screenPoint.x + 1) / 2) * rect.width, y: rect.top + ((1 - screenPoint.y) / 2) * rect.height, distance: camera.position.distanceTo(screenPoint.set(x, y, z)) };
   };
+
+  // 8a. the networked session — the editor host's code, not a copy of it
+  // (net-session.ts + net-client.ts). The server spawns every player's body
+  // and sends its docs over the `world` module; OUR body gets physics +
+  // scripts (prediction, reconciled against the server), everyone else's and
+  // the server's creatures run suspended and are driven by snapshots.
+  let presence: NetPresence | null = null;
+  let netWorld: NetRuntimeWorld | null = null;
+  let gatewayFlow: GatewayFlow | null = null;
+  let comms: Comms | null = null;
+  let notifyRoster: () => void = () => undefined;
+  /** Whichever camera rendered last frame — voice is heard from there. */
+  let listenerCamera: THREE.Camera = camera;
+  /** Ids whose local sim is suspended: the server simulates them. */
+  const netSuspended = new Set<string>();
+  const localPlayerId = (): string | null => {
+    const self = netWorld?.selfId ?? null;
+    return self && built.objects.has(self) ? self : null;
+  };
+  /** The camera rig re-aims at our body once the server has spawned it (set in the rig section below). */
+  let configureRig: () => void = () => undefined;
+  /** A grant for a scene this page does not host: reload on that scene and pick the grant up there. */
+  const reloadOnScene = (scene: string, grant: PlayGrant, character: GatewayCharacter): boolean => {
+    if (!savePendingGrant(sessionStore, grant, character)) return false;
+    console.log(`[net] the server sends us to "${scene}" — reloading this page on it`);
+    const next = new URL(location.href);
+    next.searchParams.set("scene", scene);
+    location.replace(next.href);
+    return true;
+  };
+  function suspendForHost(ids: string[]): void {
+    const world = netWorld;
+    if (!world) return;
+    const own = world.ownSubtree();
+    const { toSuspend, toResume, next } = planSuspension(ids, netSuspended, (id) => world.isForeign(id, own));
+    if (toSuspend.length > 0) {
+      // scripts SUSPEND (entities stay registered — still targetable); physics bodies come off entirely
+      scripts.suspendEntities(toSuspend);
+      sim.removeEntities(toSuspend);
+      // stale smoothing entries would keep writing old positions over the interpolator's
+      for (const id of toSuspend) forgetBody(id);
+    }
+    if (toResume.length > 0) {
+      const entities: SceneDoc["entities"] = {};
+      for (const id of toResume) {
+        const e = expanded.entities[id];
+        if (e) entities[id] = e;
+      }
+      sim.addEntities({ ...expanded, entities });
+      scripts.resumeEntities(toResume);
+      // continuity: resume each body where its ghost stood, not at its authored spawn
+      for (const id of toResume) {
+        const object = built.objects.get(id);
+        if (object) sim.setPosition(id, [object.position.x, object.position.y, object.position.z]);
+      }
+    }
+    netSuspended.clear();
+    for (const id of next) netSuspended.add(id);
+  }
+  if (networked) {
+    const world = new NetRuntimeWorld({
+      build: (docs) => {
+        const result = buildScene({ ...expanded, entities: docs }, buildOptions);
+        built.scene.add(result.scene);
+        for (const [id, object] of result.objects) built.objects.set(id, object);
+      },
+      attach: (ids) => {
+        const own = world.ownSubtree();
+        const ownDocs: SceneDoc["entities"] = {};
+        const otherDocs: SceneDoc["entities"] = {};
+        const objects = new Map<string, THREE.Object3D>();
+        for (const id of ids) {
+          const entity = world.docs.get(id);
+          const object = built.objects.get(id);
+          if (!entity || !object) continue;
+          objects.set(id, object);
+          if (own.has(id)) ownDocs[id] = entity;
+          else otherDocs[id] = entity;
+        }
+        if (Object.keys(ownDocs).length > 0) {
+          sim.addEntities({ ...expanded, entities: ownDocs });
+          scripts.addEntities({ ...expanded, entities: ownDocs }, objects, { silent: true });
+        }
+        const otherIds = Object.keys(otherDocs);
+        if (otherIds.length > 0) {
+          scripts.addEntities({ ...expanded, entities: otherDocs }, objects, { silent: true });
+          scripts.suspendEntities(otherIds);
+          for (const id of otherIds) netSuspended.add(id);
+        }
+      },
+      despawn: (ids) => {
+        sim.removeEntities(ids);
+        scripts.removeEntities(ids, { silent: true });
+        for (const id of ids) {
+          const object = built.objects.get(id);
+          object?.parent?.remove(object);
+          built.objects.delete(id);
+          netSuspended.delete(id);
+          forgetBody(id);
+        }
+      },
+      onSelf: () => {
+        configureRig();
+        gatewayFlow?.arrived();
+      },
+      // the server terraformed the world: re-stream it
+      onRecipe: (id, recipe) => {
+        if (applyWorldRecipeEdit(id, JSON.stringify(recipe))) chunkManager.reloadAll();
+      },
+      onTransfer: (t) => {
+        if (!gatewayFlow) return presence?.rehome(t.url, t.ticket);
+        const flow = gatewayFlow;
+        flow.transfer(t, doc.name, (scene, _label, grant) => {
+          const who = flow.character();
+          return who && reloadOnScene(scene, grant, { id: who.id, name: who.name, createdAt: "" }) ? "reload" : undefined;
+        });
+      },
+    });
+    netWorld = world;
+    const session: NetPresence = new NetPresence({
+      ...peerPresenceHooks({
+        playing: () => true, // a published game is always playing
+        localPlayerId,
+        objectOf: (id) => built.objects.get(id),
+        docOf: (id) => expanded.entities[id] ?? world.docs.get(id),
+        sim: () => sim,
+        isDown: (code) => input.isDown(code),
+        viewForward,
+        animations,
+        eventBus: () => eventBus,
+      }),
+      getSceneName: () => doc.name,
+      serverUrl: netEndpoint.kind === "gateway" ? "gateway" : netEndpoint.url,
+      allowP2P: () => false,
+      // gateway: nothing to dial until main has placed us
+      wantsSession: () => netEndpoint.kind === "server" || (gatewayFlow?.grant() ?? null) !== null,
+      // a server-spawned body replaces the capsule avatar for that peer
+      hasEntityForPeer: (peerId): boolean => {
+        const id = session.netState.get(`player/${peerId}`);
+        return typeof id === "string" && built.objects.has(id);
+      },
+      onRosterChanged: () => notifyRoster(),
+      onWorldEntities: (ids) => suspendForHost(ids),
+      getEntityObject: (id) => built.objects.get(id) ?? null,
+      onRoleChanged: (role) => {
+        eventBus.setNetRole(role === "host" ? "authority" : role === "peer" ? "peer" : "local");
+        // the server session ended: its entities go with it (they come back with the next welcome)
+        if (role === "off") world.clear();
+      },
+    });
+    presence = session;
+    session.onSession((s) => {
+      if (s?.role === "peer") s.client.onModule("world", (data) => world.handle(data));
+    });
+    registerSessionNetState(session.netState);
+    session.attach(built.scene); // capsule stand-ins for peers without a body (none, on a server)
+    const zoneName = (id: string): string => {
+      const field = voxelWorldId ? getVoxelWorld(voxelWorldId) : null;
+      return field?.recipe.regions.find((r) => r.id === id)?.name ?? id;
+    };
+    if (netEndpoint.kind === "gateway") {
+      gatewayFlow = mountGatewayFlow({
+        url: netEndpoint.url,
+        presence: session,
+        localCreation: () => findCreation(assets),
+        textureUrl: (id) => assets.getTexture(id)?.url,
+        preview: (canvas, creation) => createCreationPreview(canvas, creation, (id) => assets.getModel(id)?.url, (id) => assets.getTexture(id)?.url),
+        zoneName,
+        say: (text) => comms?.chat.system(text),
+        // a grant for another scene reloads the page on it — once: a bundle without that scene plays this one
+        accept: (grant, character) =>
+          grant.scene === doc.name || resumed?.grant.scene === grant.scene || !reloadOnScene(grant.scene, grant, character),
+        resume: resumed ?? undefined,
+      });
+      const social = gatewayFlow.social;
+      window.addEventListener("keydown", (e) => {
+        if (e.code !== "KeyO" || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+        if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+        social.toggle(); // friends, party & guild
+      });
+    }
+    mountConnectionOverlay({
+      presence: session,
+      world,
+      wanted: () => netEndpoint.kind === "server" || (gatewayFlow?.grant() ?? null) !== null,
+      gateway: gatewayFlow,
+    });
+    const sessionComms = createSessionComms({
+      presence: session,
+      eventBus: () => eventBus,
+      playing: () => true,
+      listenerCamera: () => listenerCamera,
+      zoneOf: (p) => {
+        const field = voxelWorldId ? getVoxelWorld(voxelWorldId) : null;
+        return (field ? regionAt(field.recipe.regions, p[0], p[2])?.id : undefined) ?? doc.name;
+      },
+      social: gatewayFlow?.social ?? null,
+      runPlayerCommand: (name, args) => scripts.runPlayerCommand(name, args),
+    });
+    comms = sessionComms.comms;
+    notifyRoster = () => sessionComms.notifyRoster();
+  }
+  // single-player: a local netState store IS the authority (default). Scripts
+  // built on netState (like the mall manager) need this to run at all.
+  // Networked: the presence's replica of the server's state.
+  const netState = presence?.netState ?? new NetStateStore();
+  if (!presence) {
+    registerCharacterNetState(netState);
+    registerTransferLockNetState(netState);
+  }
+
   const scripts = new ScriptRuntime({
     doc: expanded,
     objects: built.objects,
@@ -280,6 +620,8 @@ async function main(): Promise<void> {
     input,
     worldToScreen,
     viewForward,
+    viewDirection,
+    viewOrigin,
     recenterView: () => cameraRig.returnToAim(),
     renderPortrait: (entityId, canvas, opts) => {
       const object = built.objects.get(entityId);
@@ -289,7 +631,11 @@ async function main(): Promise<void> {
       modelLooks.dressPortrait(object, view.model, () => view.refit());
       return () => view.dispose();
     },
+    faceShot: (entityId) => faceShots.faceShot(entityId),
     netState,
+    // networked: "me" is the body the server said is ours, not any player-tagged one; ctx.chat is the session's
+    ...(networked ? { localPlayer: localPlayerId } : {}),
+    ...(comms ? { chat: comms.chat } : {}),
     setAnimation: (id, clip, fade, opts) =>
       animations.play(id, clip, fade ?? 0.3, opts?.loop ?? true, opts?.restart ?? false, opts?.sync ?? false),
     setAnimationLayer: (id, clip, opts) => animations.playLayer(id, clip, opts),
@@ -409,6 +755,24 @@ async function main(): Promise<void> {
   chunkManager.setProvider(voxelWorld ? voxelChunkProvider(voxelWorld, assets) : null);
   if (voxelWorld) streamer = voxelWorld.streamer;
   const voxelWorldId = voxelWorld?.data.world ?? null;
+  // the load-in screen: painted, until the world around the player is in and the frame rate has settled
+  mountLoadScreen({
+    creation: () => findCreation(assets),
+    textureUrl: (id) => assets.getTexture(id)?.url,
+    signals: {
+      wanted: () => !networked || netEndpoint.kind === "server" || (gatewayFlow?.grant() ?? null) !== null,
+      connected: () => !networked || presence?.serverLink().phase === "connected",
+      hasBody: () => !networked || localPlayerId() !== null,
+      loading: () => chunkManager.stats.loading,
+      switching: () => false,
+      place: () => {
+        const id = localPlayerId();
+        const body = id ? built.objects.get(id) : undefined;
+        const field = voxelWorldId ? getVoxelWorld(voxelWorldId) : null;
+        return (body && field ? regionAt(field.recipe.regions, body.position.x, body.position.z)?.name : undefined) ?? "";
+      },
+    },
+  });
   await chunkManager.configure(streamer, built.scene);
   // ground probes for the `grass` component; null world -> no cover, no throw
   const ground = voxelGroundProbes(() => (voxelWorldId ? getVoxelWorld(voxelWorldId) : null));
@@ -432,33 +796,41 @@ async function main(): Promise<void> {
   const cameraRig = new ThirdPersonCameraRig();
   const PLAY_CAM_MIN = 0.25;
   const PLAY_CAM_MAX = 14;
-  for (const entity of Object.values(expanded.entities)) {
-    const cam = entity.components["camera"] as CameraComponentData | undefined;
-    if (cam?.active && (cam.rig?.mode === "follow" || cam.rig?.mode === "chase")) {
-      followId = Object.entries(expanded.entities).find(([, e]) => e.tags.includes(cam.rig!.targetTag))?.[0] ?? null;
-      rigMode = cam.rig.mode as "follow" | "chase";
-      rigCollision = cam.rig.collision !== false;
-      // A rigged camera is DRIVEN, so its own scene object is never what
-      // renders — the rig moves this one instead. Its lens settings still
-      // belong to the author though, and in a streamed world the far plane is
-      // not a detail: a scene asking for 4000 rendered through the default 500
-      // clips the outer LOD rings away and the world ends in mid-air.
-      if (cam.fov !== undefined) camera.fov = cam.fov;
-      if (cam.near !== undefined) camera.near = cam.near;
-      if (cam.far !== undefined) camera.far = cam.far;
-      camera.updateProjectionMatrix();
-      // the pivot is authored from the body's ORIGIN, which on a capsule
-      // character is its waist: keep it inside the body's own collider
-      const body = followId ? expanded.entities[followId] : undefined;
-      cameraRig.applyAuthored({
-        ...fitRigToBody(cam.rig, body?.components["collider"] as RigBodyCollider | undefined),
-        minDistance: cam.rig.minDistance ?? PLAY_CAM_MIN,
-        maxDistance: cam.rig.maxDistance ?? PLAY_CAM_MAX,
-      });
-      cameraRig.reset();
-      break;
+  // Networked, the body arrives later (the server spawns it) and every
+  // player's body carries the tag: follow OUR body, so this runs again when it lands.
+  configureRig = (): void => {
+    for (const entity of Object.values(expanded.entities)) {
+      const cam = entity.components["camera"] as CameraComponentData | undefined;
+      if (cam?.active && (cam.rig?.mode === "follow" || cam.rig?.mode === "chase")) {
+        const self = netWorld?.selfId ?? null;
+        followId = netWorld
+          ? (self && netWorld.docs.get(self)?.tags.includes(cam.rig.targetTag) ? self : null)
+          : (Object.entries(expanded.entities).find(([, e]) => e.tags.includes(cam.rig!.targetTag))?.[0] ?? null);
+        rigMode = cam.rig.mode as "follow" | "chase";
+        rigCollision = cam.rig.collision !== false;
+        // A rigged camera is DRIVEN, so its own scene object is never what
+        // renders — the rig moves this one instead. Its lens settings still
+        // belong to the author though, and in a streamed world the far plane is
+        // not a detail: a scene asking for 4000 rendered through the default 500
+        // clips the outer LOD rings away and the world ends in mid-air.
+        if (cam.fov !== undefined) camera.fov = cam.fov;
+        if (cam.near !== undefined) camera.near = cam.near;
+        if (cam.far !== undefined) camera.far = cam.far;
+        camera.updateProjectionMatrix();
+        // the pivot is authored from the body's ORIGIN, which on a capsule
+        // character is its waist: keep it inside the body's own collider
+        const body = followId ? (expanded.entities[followId] ?? netWorld?.docs.get(followId)) : undefined;
+        cameraRig.applyAuthored({
+          ...fitRigToBody(cam.rig, body?.components["collider"] as RigBodyCollider | undefined),
+          minDistance: cam.rig.minDistance ?? PLAY_CAM_MIN,
+          maxDistance: cam.rig.maxDistance ?? PLAY_CAM_MAX,
+        });
+        cameraRig.reset();
+        break;
+      }
     }
-  }
+  };
+  configureRig();
 
   /**
    * The rig's collision query: masked to the static world, never to actors, so
@@ -545,12 +917,46 @@ async function main(): Promise<void> {
   // 9. the loop
   const prev = new Map<string, THREE.Vector3>();
   const curr = new Map<string, THREE.Vector3>();
+  /** Drop a body's smoothing entries (the server took it over, or it left). */
+  function forgetBody(id: string): void {
+    prev.delete(id);
+    curr.delete(id);
+  }
   const lerp = new THREE.Vector3();
   const followPos = new THREE.Vector3();
   /** Scratch: the followed body's world rotation, which a chase rig sits behind. */
   const rigTargetQuat = new THREE.Quaternion();
   const streamFocus = new THREE.Vector3();
   const camWorldPos = new THREE.Vector3();
+
+  /**
+   * The PLAYER map (M) and the minimap service for a project HUD: terrain,
+   * zones, roads, towns, the player and their own markers — nothing else.
+   * `devLayers` stays false here, so named places, dungeon entrances, quest
+   * givers and the DEV layer cannot be drawn in a published game, and there is
+   * no click-to-travel. Markers are kept per signed-in character.
+   */
+  const mapPos = new THREE.Vector3();
+  const mapDir = new THREE.Vector3();
+  const worldMap = createWorldMapOverlay({
+    devLayers: false,
+    fileUrl: (path) => url(`content/${path}`),
+    owner: () => gatewayFlow?.character()?.id ?? null,
+    world: () => voxelWorldId,
+    recipe: () => (voxelWorldId ? (getVoxelWorld(voxelWorldId)?.recipe ?? null) : null),
+    position: () => {
+      const target = followId ? built.objects.get(followId) : null;
+      if (target) target.getWorldPosition(mapPos);
+      else camera.getWorldPosition(mapPos);
+      camera.getWorldDirection(mapDir);
+      return { x: mapPos.x, z: mapPos.z, yaw: Math.atan2(-mapDir.x, -mapDir.z) };
+    },
+  });
+  window.addEventListener("keydown", (e) => {
+    if (e.code !== "KeyM" || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || (e.target instanceof HTMLElement && e.target.isContentEditable)) return;
+    worldMap.toggle();
+  });
 
   /**
    * Stats overlay for the PUBLISHED runtime.
@@ -603,6 +1009,7 @@ async function main(): Promise<void> {
 
   const loop = new FixedTimestepLoop({
     fixedUpdate: (dt) => {
+      if (++staticsStreamStep % 6 === 0) sim.updateStaticsAroundBodies();
       sim.step(dt);
       for (const [id, state] of sim.states()) {
         const obj = built.objects.get(id);
@@ -612,6 +1019,9 @@ async function main(): Promise<void> {
         prev.get(id)!.copy(p);
         p.fromArray(state.position);
       }
+      // a dedicated server's client reads deadlines stamped on the server's clock
+      const hostMs = presence?.hostSimNow() ?? null;
+      if (hostMs !== null) scripts.syncClock(hostMs);
       scripts.fixedUpdate(dt);
     },
     update: (dt, alpha) => {
@@ -621,6 +1031,7 @@ async function main(): Promise<void> {
         const p = prev.get(id);
         if (obj && p) { lerp.copy(p).lerp(c, alpha); obj.position.copy(lerp); }
       }
+      presence?.update(dt); // dial / re-dial; remote bodies and creatures lerp toward their snapshots
       if (followId) {
         const target = built.objects.get(followId);
         if (target) {
@@ -644,7 +1055,6 @@ async function main(): Promise<void> {
         chunkManager.update(p.x, p.z);
       }
       if (!followId) controls.update(dt); // the rig owns the camera when there is one
-      animations.update(dt);
       // Camera priority: a script-switched camera wins, then a RIGLESS active
       // scene camera, then the rig camera. The `rigless` half matters: a
       // camera entity with a follow/chase rig is DRIVEN by the rig above,
@@ -654,6 +1064,7 @@ async function main(): Promise<void> {
       const activeId = scripts.getActiveCameraId();
       const renderCam =
         (activeId && built.cameras.get(activeId)) || (!followId && built.activeCamera) || camera;
+      animations.update(dt, renderCam, followId);
       movingInstances.update(); // held weapons follow their sockets (after animation)
       particles.update(dt, renderCam);
       billboards.update(dt); // flipbook VFX frames
@@ -679,6 +1090,8 @@ async function main(): Promise<void> {
       vfx.applyShake(renderCam); // the rig owns the camera; the offset lives only inside the draw
       renderer.render(built.scene, renderCam);
       vfx.restoreShake(renderCam);
+      listenerCamera = renderCam;
+      comms?.update(); // voice: gate outgoing tracks, VAD, spatial gains
       profiler.end();
       const gpu = renderer.gpuFrameMs();
       if (gpu !== null) profiler.setGpuMs(gpu);
@@ -697,10 +1110,31 @@ async function main(): Promise<void> {
   };
   window.addEventListener("resize", resize);
   resize();
+  if (bootCurtain) {
+    // hold until the near ground (and the body, under a server) is in: three quiet checks in a row, 30 s at most
+    const curtain = bootCurtain;
+    const started = performance.now();
+    let progress = 0.6;
+    let quiet = 0;
+    const poll = setInterval(() => {
+      const ready = chunkManager.stats.loading === 0 && gltfLoadingCount() === 0 && chunkManager.isViewReady() && (!networked || localPlayerId() !== null);
+      quiet = ready ? quiet + 1 : 0;
+      curtain.setProgress((progress += (0.95 - progress) * 0.05));
+      if (quiet < 3 && performance.now() - started < 30000) return;
+      clearInterval(poll);
+      curtain.setProgress(1);
+      setTimeout(() => curtain.hide(), 160);
+    }, 100);
+  }
   // Probe handle for headless measurement (see docs/perf-investigation-2026-09-02.md):
   // the published build has no editor, so this is the only way a script can
   // read draw calls, chunk state and the pipeline caches behind a stall.
   Object.assign(probe, { renderer, chunkManager, profiler, controls, camera, built, sim, lightBudget, foliageLod, grass, ambientVfx });
+  // read-only session facts for headless checks (no admin, no script runtime)
+  if (presence) {
+    const session = presence;
+    probe["net"] = { stats: () => session.stats(), link: () => session.serverLink(), self: () => netWorld?.selfId ?? null, positionOf: (peerId: string) => session.positionOf(peerId) };
+  }
   (window as unknown as { __hitreg: unknown }).__hitreg = probe;
 }
 

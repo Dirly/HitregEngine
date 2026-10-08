@@ -17,7 +17,7 @@ export type {
   StateMessage,
   ModuleMessage,
 } from "./protocol.js";
-export { FORMAT_JSON, encodeMessage, decodeMessage } from "./protocol.js";
+export { FORMAT_JSON, encodeJson, encodeMessage, decodeMessage } from "./protocol.js";
 
 export type { RtcSignal, SignalingChannel, WebRtcTransportOptions } from "./webrtc.js";
 export { parseRtcSignal, WebRtcClientTransport, WebRtcHostTransport } from "./webrtc.js";

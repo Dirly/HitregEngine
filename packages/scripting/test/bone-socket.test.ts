@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import * as THREE from "three";
 import { applyOps, ComponentRegistry, createScene, registerCoreComponents, type Op } from "@hitreg/core";
 import { registerBuiltinScripts, ScriptRegistry, ScriptRuntime } from "../src/index.js";
@@ -121,5 +121,26 @@ describe("bone-socket second pose", () => {
     expect(h.shield.position.x).toBeCloseTo(0, 5); // still where the last tick left it
     h.runtime.lateUpdate(1 / 60);
     expect(h.shield.position.x).toBeCloseTo(0.5, 5);
+  });
+
+  it("refreshes a bone chain only once and preserves the pose under moving, scaled ancestors", () => {
+    const h = harness({ bone: "Hand", offset: [0.2, -0.3, 0.1], rotationDeg: [15, 30, -10] });
+    const scene = new THREE.Group(); scene.position.set(20, 3, -12); scene.rotation.y = 0.7; scene.scale.set(2, 2, 2);
+    scene.add(h.char); h.char.rotation.x = 0.3; h.char.scale.set(1.3, 0.8, 1.1);
+    const hand = h.char.getObjectByName("Hand")!;
+    const walk = vi.spyOn(h.char, "updateWorldMatrix");
+    for (let i = 0; i < 3; i++) {
+      scene.position.x += 3; hand.rotation.z += 0.2;
+      walk.mockClear(); h.runtime.lateUpdate(1 / 60);
+      expect(walk).toHaveBeenCalledTimes(1);
+      const worldQ = hand.getWorldQuaternion(new THREE.Quaternion());
+      const expectedP = hand.getWorldPosition(new THREE.Vector3()).add(new THREE.Vector3(0.2, -0.3, 0.1).applyQuaternion(worldQ));
+      h.char.worldToLocal(expectedP);
+      const expectedQ = h.char.getWorldQuaternion(new THREE.Quaternion()).invert().multiply(worldQ)
+        .multiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(15 * Math.PI / 180, 30 * Math.PI / 180, -10 * Math.PI / 180)));
+      expect(h.shield.position.distanceTo(expectedP)).toBeLessThan(1e-8);
+      h.shield.quaternion.toArray().forEach((value, index) => expect(value).toBeCloseTo(expectedQ.toArray()[index]!, 8));
+    }
+    h.runtime.dispose();
   });
 });

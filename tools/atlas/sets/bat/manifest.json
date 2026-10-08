@@ -1,0 +1,48 @@
+{
+  "size": 242,
+  "bleed": 2,
+  "bgLum": 236,
+  "keyColor": "#00ffff",
+  "groundFringe": 1,
+  "fitSearch": 1.6,
+  "slots": {
+    "#ff0000": {
+      "name": "head",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#00ff00": {
+      "name": "body",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#0000ff": {
+      "name": "wing",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#ff00ff": {
+      "name": "crown",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "head"
+    },
+    "#ff8000": {
+      "name": "snout",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "head"
+    },
+    "#ffff00": {
+      "name": "ear-inner",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    }
+  }
+}

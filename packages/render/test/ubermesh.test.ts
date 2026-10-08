@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as THREE from "three/webgpu";
-import { applyModelMap, applyModelPartMask, modelPartIndex, partMaskFromNames } from "../src/ubermesh.js";
+import { applyModelEmissive, applyModelMap, applyModelPartMask, modelPartIndex, partMaskFromNames } from "../src/ubermesh.js";
 
 /** Three one-triangle parts in one geometry, part index in uv1 — what unwrap-weapon writes. */
 function uberModel(indexed: boolean): { root: THREE.Group; mesh: THREE.Mesh; shared: THREE.BufferGeometry } {
@@ -73,5 +73,23 @@ describe("ubermesh looks on a single model", () => {
     // the second swap reuses the copy rather than cloning again
     applyModelMap(root, new THREE.Texture());
     expect(mesh.material).toBe(swapped);
+  });
+
+  it("clears a glow back to the material's own emissive, not to black (a ghost keeps its glow after a tell)", () => {
+    const { root, mesh } = uberModel(true);
+    const original = mesh.material as THREE.MeshStandardMaterial;
+    original.emissive.set("#c88cff");
+    original.emissiveIntensity = 0.8;
+    applyModelEmissive(root, { color: "#ff7a1a", intensity: 1.4 });
+    const glowing = mesh.material as THREE.MeshStandardMaterial;
+    expect(glowing.emissive.getHexString()).toBe("ff7a1a");
+    expect(glowing.emissiveIntensity).toBe(1.4);
+    applyModelEmissive(root, { color: "#ffe9a8", intensity: 0.5 });
+    applyModelEmissive(root, null);
+    expect(mesh.material).toBe(glowing);
+    expect(glowing.emissive.getHexString()).toBe("c88cff");
+    expect(glowing.emissiveIntensity).toBe(0.8);
+    // the shared original was never touched
+    expect(original.emissive.getHexString()).toBe("c88cff");
   });
 });

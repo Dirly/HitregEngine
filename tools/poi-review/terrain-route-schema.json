@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "start": {
+      "type": "array",
+      "prefixItems": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "number"
+        }
+      ]
+    },
+    "goal": {
+      "type": "array",
+      "prefixItems": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "number"
+        }
+      ]
+    },
+    "bounds": {
+      "type": "array",
+      "prefixItems": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "number"
+        }
+      ],
+      "description": "[minX,minZ,maxX,maxZ]"
+    },
+    "step": {
+      "default": 8,
+      "type": "number",
+      "minimum": 1
+    },
+    "heightStep": {
+      "default": 4,
+      "type": "number",
+      "minimum": 0.25
+    },
+    "maxEarthwork": {
+      "default": 10,
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "maxGrade": {
+      "default": 0.35,
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 1
+    },
+    "earthworkCost": {
+      "default": 0.06,
+      "type": "number",
+      "minimum": 0
+    },
+    "trailWidth": {
+      "default": 4,
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "voxelSize": {
+      "default": 2,
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "maxExpanded": {
+      "default": 180000,
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 500000
+    },
+    "avoid": {
+      "default": [],
+      "description": "Forbidden XZ rectangles [minX,minZ,maxX,maxZ], padded for trail width and voxel footprint. Include existing foundations and protected POIs; plan to an exterior entry landing.",
+      "type": "array",
+      "items": {
+        "type": "array",
+        "prefixItems": [
+          {
+            "type": "number"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "number"
+          }
+        ]
+      }
+    }
+  },
+  "required": [
+    "start",
+    "goal",
+    "bounds"
+  ],
+  "additionalProperties": false
+}

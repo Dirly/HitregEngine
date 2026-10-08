@@ -1,0 +1,49 @@
+{
+  "size": 540,
+  "bleed": 2,
+  "bgLum": 236,
+  "keyColor": "#00ffff",
+  "groundFringe": 1,
+  "fitSearch": 1.6,
+  "slots": {
+    "#ff0000": {
+      "name": "head",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#00ff00": {
+      "name": "body",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#008c00": {
+      "name": "tail",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "body"
+    },
+    "#0000ff": {
+      "name": "leg-front",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "body"
+    },
+    "#00008c": {
+      "name": "leg-back",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "body"
+    },
+    "#ff8000": {
+      "name": "sail",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    }
+  }
+}

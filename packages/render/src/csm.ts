@@ -1,6 +1,7 @@
 import * as THREE from "three/webgpu";
 import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
 import { CSMFrustum } from "three/addons/csm/CSMFrustum.js";
+import { SHADOW_CAMERA_LAYERS } from "./horizon.js";
 
 /**
  * Cascaded shadow maps for directional lights, plus the one place that turns
@@ -291,6 +292,9 @@ export function applyShadowSettings(
   shadow.radius = settings.radius;
 
   const camera = shadow.camera;
+  // shadows keep drawing what the culling system hid from the MAIN camera
+  // only (behind terrain): see OCCLUDED_LAYER
+  camera.layers.mask = SHADOW_CAMERA_LAYERS;
   if ((camera as THREE.OrthographicCamera).isOrthographicCamera) {
     const ortho = camera as THREE.OrthographicCamera;
     ortho.left = -shadowSize;
@@ -409,6 +413,7 @@ class EngineCascadeShadowNode extends CSMShadowNode {
       const shadow = cascadeLight?.shadow;
       if (!cascadeLight || !shadow) continue;
       const shadowCamera = shadow.camera;
+      shadowCamera.layers.mask = SHADOW_CAMERA_LAYERS; // see OCCLUDED_LAYER
       // Texel snapping: without it the cascade slides continuously with the
       // camera and every shadow edge crawls. Same trick as three's.
       const texelWidth = (shadowCamera.right - shadowCamera.left) / shadow.mapSize.width;

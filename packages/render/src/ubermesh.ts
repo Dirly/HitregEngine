@@ -150,10 +150,13 @@ export function applyModelMap(root: THREE.Object3D, map: THREE.Texture): number 
   return touched;
 }
 
+const AUTHORED_EMISSIVE = "uberAuthoredEmissive";
+
 /**
  * Glow on a NON-batched model (the fallback for a host without moving
  * batches): the emissive of the model's own material copy. Whole model, steady
- * — per-part and pulsing glow are the batched path's. Null clears it.
+ * — per-part and pulsing glow are the batched path's. Null clears it back to
+ * the material's AUTHORED emissive (a ghost's own glow), not to black.
  */
 export function applyModelEmissive(root: THREE.Object3D, glow: { color: string; intensity: number } | null): number {
   let touched = 0;
@@ -165,8 +168,13 @@ export function applyModelEmissive(root: THREE.Object3D, glow: { color: string; 
     const next = materials.map((material) => {
       const target = (own ? material : cloneMaterial(material)) as THREE.MeshStandardMaterial;
       if (target.emissive) {
-        target.emissive.set(glow ? glow.color : "#000000");
-        target.emissiveIntensity = glow ? glow.intensity : 1;
+        // what the material was authored with, kept from before the first glow
+        const authored = (target.userData[AUTHORED_EMISSIVE] ??= {
+          color: `#${target.emissive.getHexString()}`,
+          intensity: target.emissiveIntensity,
+        }) as { color: string; intensity: number };
+        target.emissive.set(glow ? glow.color : authored.color);
+        target.emissiveIntensity = glow ? glow.intensity : authored.intensity;
       }
       return target;
     });

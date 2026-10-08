@@ -105,6 +105,7 @@ export class ShellLive extends LiveModule<ShellModule> {
     const expand = m.expand[0] + (m.expand[1] - m.expand[0]) * Math.min(1, t);
     const s = Math.max(0.001, m.radius * expand * this.sizeAt(t));
     this.mesh.scale.set(s, s * m.squash, s);
+    this.uPixel.value = this.cellsAcross(2 * s);
     this.mesh.position.copy(this.pose.position);
     roll.setFromAxisAngle(Y, m.spin * (now - this.startedAt));
     this.mesh.quaternion.copy(roll);

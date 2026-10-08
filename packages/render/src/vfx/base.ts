@@ -3,6 +3,7 @@ import { dot, fract, sin, vec3 } from "three/tsl";
 import type { Anchor, Palette, SpritesheetDoc, VfxModule, VfxModuleKind } from "@hitreg/core";
 import { resolveColor } from "@hitreg/core";
 import type { N } from "./shaders.js";
+import type { TrailBatch } from "./modules/trail-batch.js";
 
 /**
  * Shared runtime contract for VFX modules.
@@ -61,6 +62,8 @@ export interface PlayContext {
   phaseLength: number;
   /** The projectile, for `path` anchors — driven by the sequencer or the host. */
   path: { pos: THREE.Vector3; vel: THREE.Vector3; active: boolean };
+  /** The spell's world texel (metres), for modules that leave their own at 0. */
+  texel?: number;
   /**
    * Hand a `light` module a light of its OWN instead of a borrowed slot. A
    * standing effect (a torch) holds its light for its whole life, so on the
@@ -80,6 +83,7 @@ const Z = new THREE.Vector3(0, 0, 1);
 const tmpFwd = new THREE.Vector3();
 const tmpRight = new THREE.Vector3();
 const tmpVec = new THREE.Vector3();
+const tmpScale = new THREE.Vector3();
 
 /** Resolved anchor: a world position, a facing, and (for path) a velocity. */
 export class AnchorPose {
@@ -115,6 +119,16 @@ export function resolveAnchor(anchor: Anchor, ctx: PlayContext, out: AnchorPose)
     case "target": {
       const body = anchor.at === "caster" ? f.caster : f.targetObject;
       const socket = anchor.socket ? f.socket?.(anchor.at, anchor.socket) : null;
+      const object = socket ?? body;
+      if (anchor.local && object) {
+        // a point in the object's own axes (a held weapon's tip): it turns with the object
+        object.updateWorldMatrix(true, false);
+        object.matrixWorld.decompose(out.position, out.facing, tmpScale);
+        const [lx, ly, lz] = anchor.offset;
+        out.position.add(tmpVec.set(lx, ly, lz).applyQuaternion(out.facing));
+        out.forward.set(0, 0, 1).applyQuaternion(out.facing);
+        return;
+      }
       if (socket) {
         socket.updateWorldMatrix(true, false);
         out.position.setFromMatrixPosition(socket.matrixWorld);
@@ -206,6 +220,8 @@ export interface LiveModuleHost {
    * camera's distance, so a fight across the map is not felt.
    */
   addShake(strength: number, duration: number, frequency: number, at?: THREE.Vector3, range?: number): void;
+  /** Every trail's strip goes here: one draw per blend mode for all of them (absent = trails draw nothing). */
+  readonly trails?: TrailBatch;
   /** Particle emitters live in the host's ParticleSystem, keyed by id. */
   particles: {
     register(id: string, group: THREE.Object3D, data: unknown): void;
@@ -289,6 +305,21 @@ export abstract class LiveModule<M extends VfxModule = VfxModule> {
     return o;
   }
 
+  /** World metres per texel for this module: its own, else the spell's, else 0 (off). */
+  protected texelSize(): number {
+    return this.module.texel > 0 ? this.module.texel : (this.ctx.texel ?? 0);
+  }
+
+  /**
+   * PSX cells across a shape `extent` metres wide. With a texel size every
+   * module lands on the same world grid (a 12 m ring and a 1 m slash get the
+   * same block size); without one it is the legacy per-shape `pixel` count.
+   */
+  protected cellsAcross(extent: number): number {
+    const texel = this.texelSize();
+    return texel > 0 ? Math.max(1, extent / texel) : this.module.pixel;
+  }
+
   protected sizeAt(t: number): number {
     const m = this.module;
     return m.sizeCurve ? sampleCurve(m.sizeCurve, Math.min(1, t)) : 1;
@@ -366,10 +397,12 @@ const texPending = new Map<string, Array<(t: THREE.Texture) => void>>();
  * Load-once texture cache; `onLoad` fires immediately when cached. `nearest`
  * asks for the pixel-art copy (no bilinear, no mips) — a second GPU texture
  * of the same image, cached under its own key, because a symbol sheet is
- * both a flipbook source and a set of hard-edged sigils.
+ * both a flipbook source and a set of hard-edged sigils. `data` loads the
+ * channels as raw numbers (no sRGB decode) — a decal page stores timing in
+ * them, not colour.
  */
-export function loadTexture(url: string, onLoad: (t: THREE.Texture) => void, nearest = false): void {
-  const key = nearest ? `${url}#nearest` : url;
+export function loadTexture(url: string, onLoad: (t: THREE.Texture) => void, nearest = false, data = false): void {
+  const key = `${url}${nearest ? "#nearest" : ""}${data ? "#data" : ""}`;
   const cached = texCache.get(key);
   if (cached) {
     onLoad(cached);
@@ -384,7 +417,7 @@ export function loadTexture(url: string, onLoad: (t: THREE.Texture) => void, nea
   new THREE.TextureLoader().load(
     url,
     (t) => {
-      t.colorSpace = THREE.SRGBColorSpace;
+      t.colorSpace = data ? THREE.NoColorSpace : THREE.SRGBColorSpace;
       if (nearest) {
         t.magFilter = THREE.NearestFilter;
         t.minFilter = THREE.NearestFilter;

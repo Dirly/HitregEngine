@@ -46,6 +46,15 @@ follows is the map and the judgment the schema can't encode.
 
 **Judgment the spec can't tell you:**
 
+- **Tree colour variety can share the existing instanced batches.** Multiply
+  the original bark and leaf colours per instance rather than cloning model,
+  texture or material assets for each shade. Keep the palette subtle: a tint
+  multiplies the source texture and cannot recover detail or replace its hue
+  freely. Material/texture role names identify bark and foliage. Distant
+  impostors need a role mask; the playground baker packs it into normal-atlas
+  alpha, so both colours survive distance changes without extra textures.
+  These colours do not remove the existing species, material or LOD draw
+  boundaries. See the generated mesh/scatter schemas for the supported path.
 - **Zero-config multiplayer:** any entity with a `script` + `rigidbody` and no
   `netObject` replicates as `netObject: {}` automatically (host-simulated). Add
   the component only to opt out of a field or tune relevancy/send rate. In a
@@ -198,6 +207,28 @@ app mounts `@hitreg/comms`) — `send(channel, text)`, `announce(text)` (authori
 lines this tab was allowed to see; team/party membership is plain netState
 (`comms.team/<peerId>`, `comms.party/<peerId>`) — see `docs/comms.md`.
 
+**Ragdoll deaths.** A prefab opts in with a child entity carrying the
+`ragdoll` builtin (params in the spec; voxel-demo mob prefabs do by default,
+see `docs/mob-ai.md` "Death: ragdoll or clip" for the flow and which families).
+Defaults are the shipped tuning: `rig: auto` picks the upright (biped) or
+horizontal (quadruped) per-axis joint limits from the skeleton, `selfCollide`
+keeps limbs out of the trunk and corpses apart, damping grows once it lies
+still, `maxDistance` 30 m from the camera, `maxActive` 8, `spawnsPerFrame` 4;
+no ground collider under the feet = the clip. It is presentation only:
+each tab builds its own capsule bodies from its own animated pose, on the
+DEBRIS layer (default queries and character controllers never see them), and
+removes them once they settle, leaving the bones where they fell (the mixer is
+held through `userData.poseHoldUntil`). A death starts it three ways: a
+`userData.ragdollKick = { at, dir?, strength? }` stamp on the BODY (`at` must
+change per death; `dir` is the blow's direction — voxel-demo's combat-actor
+sets it in `die()` and clears it on respawn), the controller's death convention
+(`frozen` + `actionClip === deathClip`), or a `deadKey` netState flag for tabs
+that do not simulate the body. Clearing the signal restores the pose. The sim
+side is `ctx.sim.addRagdoll/ragdollPoses/ragdollSettled/removeRagdoll/
+ragdollStats` over a plan from `planRagdoll` (both in `@hitreg/scripting`
+ragdoll.ts / `@hitreg/physics` ragdoll.ts). Costs and screenshots: voxel-demo
+scenes `ragdoll-lab` (flat) and `ragdoll-slope` (real voxel terrain).
+
 ## Prefabs (React-style)
 
 Definition = entity subtree + declared props bound by path into it:
@@ -321,6 +352,60 @@ migration-proof combat in ~30 lines.
 The `events` block of GET /__hitreg/spec is the AI-facing payload spec; the
 context bridge posts `recentEvents` (last delivered `{ tick, name, payload }`)
 while playing.
+
+## Portals (a door into another scene)
+
+A dungeon entrance is a `portal` script (params in the spec). In `interact`
+mode (the default) it sits on an entity tagged `interactable` — the player
+presses E at it; in `trigger` mode the player walks into it (below). Either
+way the AUTHORITY moves them
+to the `anchor` entity in the target `scene` (any project folder's scene; an
+instance on a cluster). Three pieces per entrance:
+
+- outside: `portal { scene, anchor, prompt, name, party, condition, refusal }`
+  on the door; `condition` is a dialogue `if` (quest state, flag, item…);
+- inside: an anchor entity (tag `instance-entry`) rotated to face INTO the
+  dungeon — the body lands on it, lifted 1.2 m, facing its yaw;
+- inside: `portal { back: true }` on the exit anchor: it returns the player to
+  where they entered (`portal/<bodyId>.return`), so one dungeon can have
+  several entrances. Its own `scene`/`anchor` are only a fallback.
+
+The dungeon scene needs an `npc-ui` entity or nothing shows the exit's prompt
+(an interact exit; a walk-through one needs none). The far side need not match
+the facade. Hosting, carried state and the test harness: docs/hosting.md →
+"Portals".
+
+**Walk-through portals (`mode: "trigger"`) — an entrance that sells depth.**
+The space must seem to carry on past its bounds: the player walks on into the
+dark and is simply somewhere else. No key press; the portal is a box in its own
+local space (`halfExtents` [across, up, along], `offset` its centre; default
+2.4 x 2.6 x 1.5 m standing on the entity's origin). Build it like this:
+
+- **No door on a wall's edge.** The passage carries on past the trigger at
+  least **8 m** into unlit black — a stair or ramp down, a turn, or a closed
+  end wall in a black material out of every light's reach — so what the player
+  sees from the door is the way continuing, never a wall at the frame.
+- **The trigger 4–5 m in**, spanning the passage wall to wall (no gap to walk
+  round it). Lights stay near the door so the light falls off toward it; the
+  screen darkens over the last `fade` metres (default 2.5) before the box.
+- **The arrival anchor inside the matching passage** on the other side,
+  rotated to face on INTO the space (the camera turns to it too). Give it
+  `portalAnchor { corridor: <width> }` in a narrow passage: a party lines up
+  along its forward line instead of a ring that puts bodies in the walls. The
+  return portal on the exit anchor gets a box sized from that width
+  (`portalVolumeForCorridor`); the arrival may stand inside or beside it —
+  an arrival is ignored for `arrivalGrace` seconds AND until it has been
+  outside the box once, so nothing bounces.
+- **The way back**: `returnAnchor` on the entering portal, an anchor between
+  the frame and the trigger facing the door. Without it the return lands a
+  metre outside the box where the body walked in, at the height it had there —
+  fine on a level floor, not on stairs.
+
+Terrain-cut passages (voxel worlds): keep the cuts off chunk borders and at
+least 8 m of ground over every cut (a cut crossing a border gets its roof edge
+pushed up to 6 m), step the passage down or raise the ground where the hill is
+thin; line it with closed solids that overlap the cut. Worked example:
+voxel-demo's `fieldfast-mound/portal-v2`.
 
 ## Placement (settle props, don't eyeball them)
 
@@ -620,6 +705,14 @@ simply absent — a published game has no console rather than a disabled one.
 that ship regardless), but nothing can reach them: there is no console, and the
 published runtime's `window.__hitreg` probe exposes no script runtime.
 
+**Player commands are a different thing** (`/dance`): `static playerCommands`
+plus `onPlayerCommand(name, args)`, returning null when the script does not
+take the name (so a handler may accept names that come from data) and the line
+to show otherwise. They ship in published builds, run on the typing player's
+own tab, and must only ASK the authority (an event) — never change state. The
+host routes chat slash words to them before the console; that routing is a stopgap
+until the chat overhaul owns command dispatch.
+
 ## Weather
 
 The `weather` builtin script (attach it to any entity; the demo uses the
@@ -692,11 +785,18 @@ Six things make the difference between "there are particles" and weather:
   `gloom` dims the lights, `cloudDark` darkens the deck itself, and the dome's
   own gradient darkens with it (`SceneLighting`, from `cloudDark`) — the sky is
   most of what you SEE when you look up, and with only the first two a full
-  overcast was a bright grey card over a dim world. Coverage closes to ~0.85,
-  not 1: at near-total the deck stops having shapes in it and reads as flat
-  fog-coloured card, which is weaker than the overcast it replaced. A sandstorm
-  drives all of this too, less and for a different reason — there is no cloud up
-  there, but the sun is not getting through either.
+  overcast was a bright grey card over a dim world. **`overcast`** (0..1) closes
+  the sky over the authored coverage: rain and snow drive it to 1 by the time a
+  drizzle has properly started, a dry roll can be a grey day (`overcast` param:
+  `auto` or a pinned 0..1, `overcastMax`; console `/overcast 0.6 | auto`). At 1
+  the dome is wall-to-wall cloud — a painted deck closes with a second, higher
+  layer of its own tile, then procedural fill in the same tones, so it keeps its
+  shapes as shading — the sun disc and its dawn/dusk glow go, fog loses the sun
+  scatter, god rays dim to nothing (never planned out, so no chain rebuild) and
+  the sun falls to a quarter with the fill lifted 30%. Author `clouds.coverage`
+  as the CLEAR-day deck; weather owns the rest. A sandstorm drives all of this
+  too, less and for a different reason — there is no cloud up there, but the
+  sun is not getting through either.
 - **A sandstorm is on the LENS, not in the world** (`postfx.sandstorm`, driven
   through `ctx.setPostFx`). A world-space bank of quads can only ever be a
   cloud you look at — at the density a storm needs, the quads either swallow

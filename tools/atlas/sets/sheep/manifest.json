@@ -1,0 +1,74 @@
+{
+  "size": 542,
+  "bleed": 2,
+  "bgLum": 236,
+  "keyColor": "#00ffff",
+  "groundFringe": 1,
+  "fitSearch": 1.6,
+  "slots": {
+    "#ff0000": {
+      "name": "head",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#00ff00": {
+      "name": "crown",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#0000ff": {
+      "name": "snout",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#ffff00": {
+      "name": "body",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#ff00ff": {
+      "name": "chest",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "body"
+    },
+    "#ff8000": {
+      "name": "rump",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "body"
+    },
+    "#8000ff": {
+      "name": "back",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "body"
+    },
+    "#008c00": {
+      "name": "leg-front",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#00008c": {
+      "name": "tail",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "body"
+    },
+    "#8c0000": {
+      "name": "leg-back",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    }
+  }
+}

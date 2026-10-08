@@ -1,0 +1,609 @@
+{
+ "source": "MMO/3d/Mobs/FrogKin/FrogKin-parts.obj",
+ "sourceScale": 1,
+ "objScale": 1,
+ "outMesh": "MMO/3d/Mobs/FrogKin/FrogKin-unwrapped",
+ "sheet": 1254,
+ "keyStroke": 8,
+ "smooth": 48,
+ "margin": 22,
+ "gutter": 40,
+ "atlas": {
+  "size": 778,
+  "bleed": 2,
+  "bgLum": 236
+ },
+ "slots": {
+  "head": {
+   "color": "#ff0000",
+   "fit": "contain",
+   "labelMax": 1,
+   "symmetric": true,
+   "mirror": true
+  },
+  "crown": {
+   "color": "#8c0000",
+   "fit": "contain",
+   "matchTo": "head",
+   "label": "head top",
+   "mirror": true
+  },
+  "jaw": {
+   "color": "#c04040",
+   "fit": "contain",
+   "label": "throat",
+   "mirror": true
+  },
+  "arm": {
+   "color": "#0000ff",
+   "fit": "contain",
+   "matchTo": "torso",
+   "label": "upper arm"
+  },
+  "hand": {
+   "color": "#8000ff",
+   "fit": "contain",
+   "matchTo": "forearm"
+  },
+  "leg": {
+   "color": "#00ff00",
+   "fit": "contain",
+   "matchTo": "torso",
+   "label": "thigh"
+  },
+  "foot": {
+   "color": "#008c46",
+   "fit": "contain"
+  },
+  "belt": {
+   "color": "#ff0080",
+   "fit": "contain"
+  },
+  "buckle": {
+   "color": "#80ff00",
+   "fit": "contain"
+  },
+  "robes-front": {
+   "color": "#8c8c00",
+   "fit": "contain",
+   "transparency": true,
+   "cut": "bottom",
+   "anchor": "top",
+   "fitPadding": 0,
+   "hem": {
+    "depth": 2,
+    "jag": 5,
+    "wave": 4
+   },
+   "label": "robe front"
+  },
+  "robes-back": {
+   "color": "#008c8c",
+   "fit": "contain",
+   "transparency": true,
+   "cut": "bottom",
+   "anchor": "top",
+   "fitPadding": 0,
+   "hem": {
+    "depth": 2,
+    "jag": 5,
+    "wave": 4
+   },
+   "matchTo": "robes-front",
+   "label": "robe back"
+  },
+  "tasset-front": {
+   "color": "#468c00",
+   "fit": "contain",
+   "transparency": true,
+   "cut": "bottom",
+   "anchor": "top",
+   "fitPadding": 0,
+   "hem": {
+    "depth": 2,
+    "jag": 4,
+    "wave": 3
+   },
+   "label": "tasset front"
+  },
+  "tasset-back": {
+   "color": "#4040c0",
+   "fit": "contain",
+   "transparency": true,
+   "cut": "bottom",
+   "anchor": "top",
+   "fitPadding": 0,
+   "hem": {
+    "depth": 2,
+    "jag": 4,
+    "wave": 3
+   },
+   "matchTo": "tasset-front",
+   "label": "tasset back"
+  },
+  "torso": {
+   "color": "#ff8000",
+   "fit": "contain",
+   "symmetric": true,
+   "mirror": true,
+   "labelMax": 2
+  },
+  "shoulders": {
+   "color": "#ff00ff",
+   "fit": "contain",
+   "matchTo": "torso",
+   "label": "shoulders top"
+  },
+  "forearm": {
+   "color": "#00008c",
+   "fit": "contain",
+   "matchTo": "arm",
+   "label": "forearm"
+  },
+  "shin": {
+   "color": "#008c00",
+   "fit": "contain",
+   "matchTo": "leg",
+   "label": "shin"
+  },
+  "feather1": {
+   "color": "#a0a0ff",
+   "label": "feather 1",
+   "fit": "contain-uniform",
+   "fitPadding": 4,
+   "anchor": "bottom",
+   "anchorPad": 0,
+   "transparency": true,
+   "cut": true,
+   "openEnclosed": 0.01,
+   "keepFit": true
+  },
+  "feather2": {
+   "color": "#c0a0ff",
+   "label": "feather 2",
+   "fit": "contain-uniform",
+   "fitPadding": 4,
+   "anchor": "bottom",
+   "anchorPad": 0,
+   "transparency": true,
+   "cut": true,
+   "openEnclosed": 0.01,
+   "keepFit": true
+  },
+  "feather3": {
+   "color": "#a0c0ff",
+   "label": "feather 3",
+   "fit": "contain-uniform",
+   "fitPadding": 4,
+   "anchor": "bottom",
+   "anchorPad": 0,
+   "transparency": true,
+   "cut": true,
+   "openEnclosed": 0.01,
+   "keepFit": true
+  },
+  "feather4": {
+   "color": "#ffa0c0",
+   "label": "feather 4",
+   "fit": "contain-uniform",
+   "fitPadding": 4,
+   "anchor": "bottom",
+   "anchorPad": 0,
+   "transparency": true,
+   "cut": true,
+   "openEnclosed": 0.01,
+   "keepFit": true
+  },
+  "feather5": {
+   "color": "#a0ffc0",
+   "label": "feather 5",
+   "fit": "contain-uniform",
+   "fitPadding": 4,
+   "anchor": "bottom",
+   "anchorPad": 0,
+   "transparency": true,
+   "cut": true,
+   "openEnclosed": 0.01,
+   "keepFit": true
+  }
+ },
+ "parts": {
+  "FrogKin_Head": {
+   "slot": "head",
+   "method": "sphere",
+   "front": "+x",
+   "v": "height",
+   "centered": true,
+   "split": [
+    {
+     "slot": "crown",
+     "facing": "+y",
+     "above": 0.7,
+     "u": "-z",
+     "v": "+x",
+     "flare": 0.15
+    },
+    {
+     "slot": "jaw",
+     "facing": "-y",
+     "above": 0.6,
+     "u": "+z",
+     "v": "-x",
+     "flare": 0.15
+    }
+   ]
+  },
+  "FrogKin_Torso": {
+   "slot": "torso",
+   "method": "sphere",
+   "front": "+x",
+   "v": "height",
+   "centered": true
+  },
+  "FrogKin_Arm": {
+   "slot": "arm",
+   "method": "plane",
+   "view": [
+    0.15,
+    0.2,
+    0.97
+   ],
+   "flare": 0.5
+  },
+  "FrogKin_Hand": {
+   "slot": "hand",
+   "method": "unroll",
+   "axis": "y",
+   "seam": "-z",
+   "u": "arc",
+   "v": "-y"
+  },
+  "FrogKin_Leg": {
+   "slot": "leg",
+   "method": "unroll",
+   "axis": "y",
+   "seam": "-z",
+   "u": "arc",
+   "v": "-y"
+  },
+  "FrogKin_Foot": {
+   "slot": "foot",
+   "method": "plane",
+   "u": "+x",
+   "v": "+z",
+   "flare": 0.3
+  },
+  "FrogKin_Belt": {
+   "slot": "belt",
+   "method": "tube",
+   "seam": "-x"
+  },
+  "FrogKin_Buckle": {
+   "slot": "buckle",
+   "method": "plane",
+   "u": "+z",
+   "v": "-y",
+   "flare": 0.3
+  },
+  "FrogKin_RobeFront": {
+   "slot": "robes-front",
+   "method": "plane",
+   "u": "+z",
+   "v": "-y",
+   "flare": 0.3
+  },
+  "FrogKin_RobeBack": {
+   "slot": "robes-back",
+   "method": "plane",
+   "u": "+z",
+   "v": "-y",
+   "flare": 0.3
+  },
+  "FrogKin_TassetFront": {
+   "slot": "tasset-front",
+   "method": "plane",
+   "u": "+z",
+   "v": "-y",
+   "flare": 0.1
+  },
+  "FrogKin_TassetBack": {
+   "slot": "tasset-back",
+   "method": "plane",
+   "u": "+z",
+   "v": "-y",
+   "flare": 0.1
+  },
+  "FrogKin_Forearm": {
+   "slot": "forearm",
+   "method": "unroll",
+   "axis": "y",
+   "seam": "-z",
+   "u": "arc",
+   "v": "-y"
+  },
+  "FrogKin_Shin": {
+   "slot": "shin",
+   "method": "unroll",
+   "axis": "y",
+   "seam": "-z",
+   "u": "arc",
+   "v": "-y"
+  },
+  "FrogKin_Shoulders": {
+   "slot": "shoulders",
+   "method": "plane",
+   "u": "+x",
+   "v": "+z",
+   "flare": 0.2
+  },
+  "FrogKin_Feather1": {
+   "slot": "feather1",
+   "method": "plane",
+   "view": [
+    1,
+    0,
+    0
+   ],
+   "viewUp": [
+    0,
+    1,
+    0
+   ],
+   "flare": 0,
+   "smooth": 0
+  },
+  "FrogKin_Feather2": {
+   "slot": "feather2",
+   "method": "plane",
+   "view": [
+    0.9394,
+    0,
+    0.3429
+   ],
+   "viewUp": [
+    0,
+    1,
+    0
+   ],
+   "flare": 0,
+   "smooth": 0
+  },
+  "FrogKin_Feather3": {
+   "slot": "feather3",
+   "method": "plane",
+   "view": [
+    0.9394,
+    0,
+    -0.3429
+   ],
+   "viewUp": [
+    0,
+    1,
+    0
+   ],
+   "flare": 0,
+   "smooth": 0
+  },
+  "FrogKin_Feather4": {
+   "slot": "feather4",
+   "method": "plane",
+   "view": [
+    0.219,
+    0,
+    0.9757
+   ],
+   "viewUp": [
+    0,
+    1,
+    0
+   ],
+   "flare": 0,
+   "smooth": 0
+  },
+  "FrogKin_Feather5": {
+   "slot": "feather5",
+   "method": "plane",
+   "view": [
+    0.219,
+    0,
+    -0.9757
+   ],
+   "viewUp": [
+    0,
+    1,
+    0
+   ],
+   "flare": 0,
+   "smooth": 0
+  }
+ },
+ "mirrorCopy": {
+  "axis": "z",
+  "parts": [
+   "FrogKin_Arm",
+   "FrogKin_Hand",
+   "FrogKin_Leg",
+   "FrogKin_Foot",
+   "FrogKin_Forearm",
+   "FrogKin_Shin",
+   "FrogKin_Shoulders"
+  ]
+ },
+ "layout": {
+  "col": [
+   {
+    "row": [
+     "torso",
+     {
+      "col": [
+       "crown",
+       "head",
+       "jaw"
+      ],
+      "align": "center"
+     }
+    ]
+   },
+   {
+    "row": [
+     {
+      "col": [
+       "arm",
+       "forearm",
+       "hand"
+      ]
+     },
+     {
+      "col": [
+       "leg",
+       "shin",
+       "foot"
+      ]
+     },
+     {
+      "col": [
+       "robes-front",
+       "robes-back",
+       {
+        "row": [
+         "tasset-front",
+         "tasset-back",
+         {
+          "col": [
+           "buckle",
+           "shoulders"
+          ]
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "col": [
+       "feather1",
+       {
+        "row": [
+         "feather2",
+         "feather3"
+        ]
+       },
+       {
+        "row": [
+         "feather4",
+         "feather5"
+        ]
+       }
+      ]
+     }
+    ]
+   },
+   "belt"
+  ]
+ },
+ "marks": [
+  {
+   "slot": "head",
+   "at": [
+    0.2,
+    1.66,
+    0.16
+   ],
+   "shape": "eye",
+   "size": 12
+  },
+  {
+   "slot": "head",
+   "at": [
+    0.2,
+    1.66,
+    -0.16
+   ],
+   "shape": "eye",
+   "size": 12
+  }
+ ],
+ "cutoutSlots": [
+  "robes-front",
+  "robes-back",
+  "tasset-front",
+  "tasset-back",
+  "feather1",
+  "feather2",
+  "feather3",
+  "feather4",
+  "feather5"
+ ],
+ "combos": [
+  [
+   "FrogKin_Head",
+   "FrogKin_Torso",
+   "FrogKin_Shoulders",
+   "FrogKin_Arm",
+   "FrogKin_Forearm",
+   "FrogKin_Hand",
+   "FrogKin_Leg",
+   "FrogKin_Shin",
+   "FrogKin_Foot"
+  ],
+  [
+   "FrogKin_Head",
+   "FrogKin_Torso",
+   "FrogKin_Shoulders",
+   "FrogKin_Arm",
+   "FrogKin_Forearm",
+   "FrogKin_Hand",
+   "FrogKin_Leg",
+   "FrogKin_Shin",
+   "FrogKin_Foot",
+   "FrogKin_Belt",
+   "FrogKin_Buckle",
+   "FrogKin_TassetFront",
+   "FrogKin_TassetBack"
+  ],
+  [
+   "FrogKin_Head",
+   "FrogKin_Torso",
+   "FrogKin_Shoulders",
+   "FrogKin_Arm",
+   "FrogKin_Forearm",
+   "FrogKin_Hand",
+   "FrogKin_Leg",
+   "FrogKin_Shin",
+   "FrogKin_Foot",
+   "FrogKin_Belt",
+   "FrogKin_Buckle",
+   "FrogKin_RobeFront",
+   "FrogKin_RobeBack",
+   "FrogKin_TassetFront",
+   "FrogKin_Feather1",
+   "FrogKin_Feather2",
+   "FrogKin_Feather3",
+   "FrogKin_Feather4",
+   "FrogKin_Feather5"
+  ]
+ ],
+ "rules": {
+  "requires": {
+   "FrogKin_Buckle": [
+    "FrogKin_Belt"
+   ],
+   "FrogKin_RobeFront": [
+    "FrogKin_Belt"
+   ],
+   "FrogKin_RobeBack": [
+    "FrogKin_RobeFront"
+   ],
+   "FrogKin_TassetFront": [
+    "FrogKin_Belt"
+   ],
+   "FrogKin_TassetBack": [
+    "FrogKin_Belt"
+   ]
+  },
+  "excludes": {
+   "FrogKin_RobeBack": [
+    "FrogKin_TassetBack"
+   ]
+  }
+ }
+}

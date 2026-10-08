@@ -28,6 +28,8 @@ export interface RuntimeOptions {
   viewForward?: () => [number, number];
   /** Host camera hook: the same aim in 3D, pitch included (see ScriptContext.viewDirection). */
   viewDirection?: () => [number, number, number];
+  /** Host camera hook: the camera's world position, the view ray's start (see ScriptContext.viewOrigin). */
+  viewOrigin?: () => [number, number, number];
   /** Host camera hook: a world point on screen (see ScriptContext.worldToScreen). */
   worldToScreen?: (x: number, y: number, z: number) => { x: number; y: number; distance: number } | null;
   /** Host camera hook: the local player acted, bring the view back behind the aim (see ScriptContext.recenterView). */
@@ -136,6 +138,8 @@ export interface RuntimeOptions {
     canvas: HTMLCanvasElement,
     opts?: { spin?: number; clip?: string },
   ) => (() => void) | null;
+  /** Host face-picture hook (cached head shots per look); see ScriptContext.faceShot. Absent on headless hosts. */
+  faceShot?: (entityId: string) => string | null;
   /**
    * Session event bus. The runtime emits the built-in engine events on it
    * (entity.spawned/destroyed, collision, trigger.enter/exit), exposes it to
@@ -154,8 +158,8 @@ export interface RuntimeOptions {
    */
   chat?: ScriptChatHost;
   /**
-   * Optional frame profiler. When enabled, each script's onFixedUpdate is
-   * timed under its own scope name (`scripts/<script-name>`) rather than
+   * Optional frame profiler. When enabled, each script's fixed and late updates
+   * are timed under its own scope name (inside the host's phase scope) rather than
    * lumped into one "scripts" number — with dozens of NPCs running the same
    * handful of behaviors, "which script" is the entire question, and a single
    * aggregate can never answer it.
@@ -225,6 +229,8 @@ export class ScriptRuntime {
    * tick per AI — the single largest allocation source in play.
    */
   private readonly tagIndex = new Map<string, Set<string>>();
+  /** Ids of entities with a dynamic or kinematic rigidbody (bodiesNear), kept in step with `entities`. */
+  private readonly bodyIndex = new Set<string>();
   private readonly objects: Map<string, THREE.Object3D>;
   /** Per-script event unsubscribers — cleared when the script disposes. */
   private readonly subscriptions = new Map<string, Set<() => void>>();
@@ -237,7 +243,7 @@ export class ScriptRuntime {
 
   constructor(private readonly opts: RuntimeOptions) {
     this.entities = new Map(Object.entries(opts.doc.entities));
-    for (const [id, entity] of this.entities) this.indexTags(id, entity.tags);
+    for (const [id, entity] of this.entities) this.indexTags(id, entity.tags, entity);
     // COPY, never alias: the runtime deletes from this map when entities are
     // removed/suspended — aliasing the caller's render-object map would
     // silently destroy renderer/net entries too (a suspended NPC's ghost
@@ -270,7 +276,7 @@ export class ScriptRuntime {
       const previous = this.entities.get(id);
       if (previous) this.unindexTags(id, previous.tags);
       this.entities.set(id, entity);
-      this.indexTags(id, entity.tags);
+      this.indexTags(id, entity.tags, entity);
       const object = objects.get(id);
       if (object) this.objects.set(id, object);
       if (this.started) {
@@ -374,14 +380,27 @@ export class ScriptRuntime {
    * Script.onLateUpdate). Hosts without animation never call it.
    */
   lateUpdate(dt: number): void {
+    const profiler = this.opts.profiler?.enabled ? this.opts.profiler : null;
+    // one scope per RUN of same-named instances (they sit together: a pack's
+    // scripts are added in a row), not one per instance — see fixedUpdate
+    let open: string | null = null;
     for (const [id, script] of this.instances) {
       if (!script.onLateUpdate) continue;
+      if (profiler) {
+        const name = this.instanceNames.get(id) ?? "unknown";
+        if (name !== open) {
+          if (open !== null) profiler.end();
+          profiler.begin(name);
+          open = name;
+        }
+      }
       try {
         script.onLateUpdate(dt);
       } catch (error) {
         console.error(`[scripts] ${id}: onLateUpdate threw`, error);
       }
     }
+    if (profiler && open !== null) profiler.end();
   }
 
   /** Whether `entityId` is running `scriptName` right now. */
@@ -401,6 +420,30 @@ export class ScriptRuntime {
       console.error(`[scripts] ${entityId}: onParamsChanged threw`, error);
     }
     return true;
+  }
+
+  /** Player chat commands the live scripts declare (for help). */
+  playerCommands(): ScriptCommandDecl[] {
+    const out = new Map<string, ScriptCommandDecl>();
+    for (const script of this.instances.values()) for (const d of (script.constructor as ScriptClass).playerCommands ?? []) if (!out.has(d.name)) out.set(d.name, d);
+    return [...out.values()];
+  }
+
+  /**
+   * A player chat command ("/dance"): the first live script that takes it
+   * answers. Null = nobody did (the chat then says "unknown command").
+   */
+  runPlayerCommand(name: string, args: string[]): { ok: boolean; text: string } | null {
+    for (const script of this.instances.values()) {
+      if (!((script.constructor as ScriptClass).playerCommands ?? []).length || !script.onPlayerCommand) continue;
+      try {
+        const text = script.onPlayerCommand(name, args);
+        if (text !== null) return { ok: true, text };
+      } catch (error) {
+        return { ok: false, text: error instanceof Error ? error.message : String(error) };
+      }
+    }
+    return null;
   }
 
   runConsoleCommand(name: string, args: string[]): { ok: boolean; text: string } | null {
@@ -423,7 +466,25 @@ export class ScriptRuntime {
     return ids ? [...ids] : [];
   }
 
-  private indexTags(id: string, tags: readonly string[]): void {
+  /** Bodies near a point on the ground plane (ScriptContext.bodiesNear). */
+  bodiesNear(x: number, z: number, radius: number): string[] {
+    const out: string[] = [];
+    for (const id of this.bodyIndex) {
+      const object = this.objects.get(id);
+      if (!object) continue;
+      // a body is a root object: its own position is its world position (a
+      // child's falls back to the last rendered matrix)
+      const e = object.parent && object.parent.parent ? object.matrixWorld.elements : null;
+      const ox = e ? e[12]! : object.position.x;
+      const oz = e ? e[14]! : object.position.z;
+      if (Math.hypot(ox - x, oz - z) <= radius) out.push(id);
+    }
+    return out;
+  }
+
+  private indexTags(id: string, tags: readonly string[], entity?: SceneDoc["entities"][string]): void {
+    const kind = (entity?.components["rigidbody"] as { kind?: string } | undefined)?.kind;
+    if (kind === "dynamic" || kind === "kinematic") this.bodyIndex.add(id);
     for (const tag of tags) {
       let ids = this.tagIndex.get(tag);
       if (!ids) this.tagIndex.set(tag, (ids = new Set()));
@@ -432,6 +493,7 @@ export class ScriptRuntime {
   }
 
   private unindexTags(id: string, tags: readonly string[]): void {
+    this.bodyIndex.delete(id);
     for (const tag of tags) {
       const ids = this.tagIndex.get(tag);
       if (!ids) continue;
@@ -508,11 +570,13 @@ export class ScriptRuntime {
         getEntity: (eid) => this.entities.get(eid),
         getObject: (eid) => this.objects.get(eid),
         findByTag: (tag) => this.findByTag(tag),
+        bodiesNear: (x, z, radius) => this.bodiesNear(x, z, radius),
         now: () => this.timeMs,
         after: (seconds, cb) => this.scheduleTimer(id, seconds, cb, false),
         every: (seconds, cb) => this.scheduleTimer(id, seconds, cb, true),
         ...(this.opts.viewForward ? { viewForward: this.opts.viewForward } : {}),
         ...(this.opts.viewDirection ? { viewDirection: this.opts.viewDirection } : {}),
+        ...(this.opts.viewOrigin ? { viewOrigin: this.opts.viewOrigin } : {}),
         ...(this.opts.worldToScreen ? { worldToScreen: this.opts.worldToScreen } : {}),
         ...(this.opts.recenterView ? { recenterView: this.opts.recenterView } : {}),
         ...(this.opts.localPlayer ? { localPlayer: this.opts.localPlayer } : {}),
@@ -625,6 +689,7 @@ export class ScriptRuntime {
                 this.opts.renderPortrait!(entityId, canvas, opts),
             }
           : {}),
+        ...(this.opts.faceShot ? { faceShot: (entityId: string) => this.opts.faceShot!(entityId) } : {}),
         ...(this.opts.events ? { events: this.scopedEvents(id, this.opts.events) } : {}),
         ...(this.opts.netState ? { netState: this.scopedNetState(id, this.opts.netState) } : {}),
         ...(this.opts.chat ? { chat: this.scopedChat(id, this.opts.chat) } : {}),
@@ -801,6 +866,8 @@ export class ScriptRuntime {
       increment: (key, delta) => store.increment(key, delta),
       delete: (key) => store.delete(key),
       onChange: (cb) => track(store.onChange(cb)),
+      namespaceVersion: (namespace) => store.namespaceVersion(namespace),
+      identity: store,
     };
   }
 
@@ -875,6 +942,21 @@ export class ScriptRuntime {
     return this.timeMs;
   }
 
+  /**
+   * Put this runtime's clock on the AUTHORITY's: a client of a dedicated
+   * server reads deadlines the server stamped in its own sim time (a stagger,
+   * a cast's end, a guard), so a clock that started when this tab pressed play
+   * holds every one of them open or shut for the difference. Moves only when
+   * the gap exceeds `toleranceMs` (snapshot jitter), and carries pending timers
+   * with it so each keeps the time it had left.
+   */
+  syncClock(authorityMs: number, toleranceMs = 100): void {
+    const delta = authorityMs - this.timeMs;
+    if (!Number.isFinite(delta) || Math.abs(delta) <= toleranceMs) return;
+    this.timeMs = authorityMs;
+    for (const timer of this.timers) timer.dueAtMs += delta;
+  }
+
   fixedUpdate(dt: number): void {
     this.timeMs += dt * 1000;
     this.tickCount++;
@@ -904,18 +986,31 @@ export class ScriptRuntime {
       }
     }
     const profiler = this.opts.profiler;
+    let openScope: string | null = null;
     for (const [id, script] of this.instances) {
+      // most scripts have no fixed step: skip them before paying two clock
+      // reads and a scope lookup each (500 instances = 1,000 calls a tick)
+      if (!script.onFixedUpdate) continue;
       // one scope per SCRIPT NAME, not per entity: 200 traffic cars are one
       // useful row ("traffic-car: 4.1ms over 200 calls"), 200 rows of noise
-      // otherwise — and per-entity interning would exhaust the scope budget
-      if (profiler?.enabled) profiler.begin(this.instanceNames.get(id) ?? "unknown");
+      // otherwise — and per-entity interning would exhaust the scope budget.
+      // Opened once per RUN of same-named instances rather than per instance:
+      // the clock reads alone were ~0.6 ms a frame with a few hundred scripts.
+      if (profiler?.enabled) {
+        const name = this.instanceNames.get(id) ?? "unknown";
+        if (name !== openScope) {
+          if (openScope !== null) profiler.end();
+          profiler.begin(name);
+          openScope = name;
+        }
+      }
       try {
         script.onFixedUpdate?.(dt);
       } catch (error) {
         console.warn(`[scripts] ${id} onFixedUpdate failed:`, error);
       }
-      if (profiler?.enabled) profiler.end();
     }
+    if (profiler?.enabled && openScope !== null) profiler.end();
     // fixed drain point: everything emitted up to here delivers this tick, FIFO
     if (profiler?.enabled) profiler.begin("events.drain");
     bus?.drain(this.tickCount);

@@ -1,4 +1,6 @@
 import * as THREE from "three/webgpu";
+import type { VegetationTint } from "@hitreg/core";
+import { encodeVegetationTint } from "./vegetation-tint.js";
 import type { GLTF } from "three/addons/loaders/GLTFLoader.js";
 import type { FoliageLodSystem, InstancedPropBatch } from "./foliage-lod.js";
 import { InstancedProps } from "./instancing.js";
@@ -59,6 +61,8 @@ const PAGE_CAPACITY = 2048;
 
 interface Page {
   batch: InstancedPropBatch;
+  /** The model's bounds in its own space — what an instance covers, placed by its matrix. */
+  bounds: THREE.Box3;
   ids: (string | undefined)[];
   free: number[];
   used: number;
@@ -72,7 +76,7 @@ interface Group {
   node: string | undefined;
   submeshes: GltfSubmesh[];
   gltf: GLTF;
-  flags: { castShadow: boolean; receiveShadow: boolean; lod: boolean };
+  flags: { castShadow: boolean; receiveShadow: boolean; lod: boolean; lodDistance?: number };
   pages: Page[];
 }
 
@@ -80,6 +84,7 @@ export interface PoolEntry {
   id: string;
   /** World matrix of the placed entity (the model root's transform). */
   matrix: THREE.Matrix4;
+  vegetationTint?: VegetationTint;
 }
 
 export interface PoolStats {
@@ -94,6 +99,14 @@ export class InstancedPropPool {
   private readonly groups = new Map<string, Group>();
   private readonly owners = new Map<object, Array<{ page: Page; index: number }>>();
   private readonly released = new WeakSet<object>();
+  /**
+   * Culling units currently hiding (part of) an owner: `null` hides all of
+   * its instances, a set only those entity ids. Kept so an instance added
+   * AFTER its unit went hidden (its model was still loading) starts hidden.
+   */
+  private readonly hides = new Map<object, Array<ReadonlySet<string> | null>>();
+  /** Bumped per owner on every add, so cached bounds know they are stale. */
+  private readonly ownerVersions = new Map<object, number>();
 
   constructor(private readonly lod: FoliageLodSystem) {
     this.group.name = "prop-pool";
@@ -116,13 +129,13 @@ export class InstancedPropPool {
     node: string | undefined,
     gltf: GLTF,
     submeshes: GltfSubmesh[],
-    flags: { castShadow: boolean; receiveShadow: boolean; lod: boolean },
+    flags: { castShadow: boolean; receiveShadow: boolean; lod: boolean; lodDistance?: number },
     entries: readonly PoolEntry[],
     owner: object,
     options: BuildOptions,
   ): void {
     if (this.released.has(owner) || entries.length === 0) return;
-    const key = `${assetId}#${node ?? ""}#${flags.castShadow ? "s" : "-"}${flags.lod ? "l" : "-"}`;
+    const key = JSON.stringify([assetId, node, flags.castShadow, flags.receiveShadow, flags.lod, flags.lodDistance]);
     let group = this.groups.get(key);
     if (!group) {
       group = { key, assetId, node, submeshes, gltf, flags, pages: [] };
@@ -139,20 +152,71 @@ export class InstancedPropPool {
       const batch = page.batch;
       batch.matrices[index]!.copy(entry.matrix);
       batch.positions[index]!.setFromMatrixPosition(entry.matrix);
+      batch.vegetationTints!.set(encodeVegetationTint(entry.vegetationTint), index * 6);
       if (page.impostor) {
         const one = impostorInstanceData([entry.matrix]);
         page.impostor.rotations.set(one.rotations, index * 4);
         page.impostor.scales[index] = one.scales[0]!;
       }
       page.ids[index] = entry.id;
-      this.lod.addInstance(batch, index);
+      let hidden = 0;
+      for (const ids of this.hides.get(owner) ?? []) if (ids === null || ids.has(entry.id)) hidden++;
+      this.lod.addInstance(batch, index, hidden);
       owned.push({ page, index });
     }
+    this.ownerVersions.set(owner, (this.ownerVersions.get(owner) ?? 0) + 1);
+  }
+
+  /**
+   * A culling unit hides (or stops hiding) `owner`'s instances — all of them,
+   * or only those placed for the entity ids in `ids`. Calls must pair: every
+   * hide is undone by an unhide with the SAME `ids` object.
+   */
+  setHidden(owner: object, ids: ReadonlySet<string> | null, hidden: boolean): void {
+    if (this.released.has(owner)) return;
+    let list = this.hides.get(owner);
+    if (hidden) {
+      if (!list) this.hides.set(owner, (list = []));
+      list.push(ids);
+    } else {
+      const at = list ? list.indexOf(ids) : -1;
+      if (at < 0) return;
+      list!.splice(at, 1);
+    }
+    const owned = this.owners.get(owner);
+    if (!owned) return;
+    for (const { page, index } of owned) {
+      if (ids !== null && !ids.has(page.ids[index] ?? "")) continue;
+      this.lod.setInstanceHidden(page.batch, index, hidden ? 1 : -1);
+    }
+  }
+
+  /** Changes whenever `owner` places more instances (see `boundsOf`). */
+  ownerVersion(owner: object): number {
+    return this.ownerVersions.get(owner) ?? 0;
+  }
+
+  /**
+   * World bounds of `owner`'s instances (only `ids`' when given), written
+   * into `target`. False when there are none.
+   */
+  boundsOf(owner: object, ids: ReadonlySet<string> | null, target: THREE.Box3): boolean {
+    target.makeEmpty();
+    const owned = this.owners.get(owner);
+    if (!owned) return false;
+    for (const { page, index } of owned) {
+      if (ids !== null && !ids.has(page.ids[index] ?? "")) continue;
+      boundsScratch.copy(page.bounds).applyMatrix4(page.batch.matrices[index]!);
+      target.union(boundsScratch);
+    }
+    return !target.isEmpty();
   }
 
   /** Free every instance `owner` placed; later `add`s for it are ignored. */
   release(owner: object): void {
     this.released.add(owner);
+    this.hides.delete(owner);
+    this.ownerVersions.delete(owner);
     const owned = this.owners.get(owner);
     if (!owned) return;
     this.owners.delete(owner);
@@ -200,6 +264,8 @@ export class InstancedPropPool {
     this.groups.clear();
     for (const owner of this.owners.keys()) this.released.add(owner);
     this.owners.clear();
+    this.hides.clear();
+    this.ownerVersions.clear();
     this.group.clear();
   }
 
@@ -228,14 +294,16 @@ export class InstancedPropPool {
       positions.push(new THREE.Vector3());
     }
     const nearLocals = submeshes.map((sub) => sub.localMatrix);
+    const modelBounds = submeshBounds(submeshes);
     const anyLocal = nearLocals.some((m) => !m.equals(IDENTITY));
     const near: InstancedProps[] = submeshes.map((sub, index) => {
       const mesh = new InstancedProps(
         sub.geometry,
-        cachedInstancedMaterial(`${assetId}#${node ?? ""}#${index}`, sub.material),
+        cachedInstancedMaterial(`${assetId}#${node ?? ""}#${index}#vegetation`, sub.material, { vegetationTint: true }),
         capacity,
       );
       mesh.castShadow = flags.castShadow;
+      mesh.enableVegetationTint();
       mesh.receiveShadow = flags.receiveShadow;
       return mesh;
     });
@@ -250,10 +318,11 @@ export class InstancedPropPool {
         mid = submeshes.map((sub, index) => {
           const mesh = new InstancedProps(
             midTiers[index]?.geometry ?? sub.geometry,
-            cachedInstancedMaterial(`${assetId}#${node ?? ""}#${index}`, sub.material),
+            cachedInstancedMaterial(`${assetId}#${node ?? ""}#${index}#vegetation`, sub.material, { vegetationTint: true }),
             capacity,
           );
           mesh.castShadow = false;
+          mesh.enableVegetationTint();
           mesh.receiveShadow = flags.receiveShadow;
           return mesh;
         });
@@ -281,14 +350,18 @@ export class InstancedPropPool {
       far = new InstancedProps(near[0]!.geometry, near[0]!.material, 1);
     }
     far.castShadow = false;
+    far.enableVegetationTint();
     far.receiveShadow = flags.receiveShadow;
 
     const batch: InstancedPropBatch = {
       near,
+      lodDistance: flags.lodDistance,
       ...(mid ? { mid } : {}),
       far,
       positions,
       matrices,
+      vegetationTints: new Float32Array(capacity * 6).fill(1),
+      radius: modelBounds.getBoundingSphere(new THREE.Sphere()).radius,
       dynamic: true,
       ...(flags.lod ? {} : { alwaysNear: true }),
       ...(anyLocal ? { localMatrices: nearLocals } : {}),
@@ -307,10 +380,11 @@ export class InstancedPropPool {
       this.group.add(mesh);
     }
     this.lod.register(batch);
-    return { batch, ids: new Array<string | undefined>(capacity), free: [], used: 0, impostor, nearLocals };
+    return { batch, bounds: modelBounds, ids: new Array<string | undefined>(capacity), free: [], used: 0, impostor, nearLocals };
   }
 }
 
 const IDENTITY = new THREE.Matrix4();
+const boundsScratch = new THREE.Box3();
 /** Beyond any world's streamed radius; only the per-instance test after it does work. */
 const POOL_SPHERE_RADIUS = 1e6;

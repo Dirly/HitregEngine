@@ -84,6 +84,7 @@ export const SYMBOL_ROLES = [
   "head", // rides the front of a projectile (arrows, spears, shards — drawn pointing UP)
   "stuck", // the projectile embedded in the ground after impact (drawn with its base at the bottom)
   "mark", // a ground mark left by an impact or a debuff
+  "object", // a summoned BODY drawn upright, base at the bottom (spike, crystal, rock, orb, blade) — a mesh module's billboard
 ] as const;
 export type SymbolRole = (typeof SYMBOL_ROLES)[number];
 
@@ -114,6 +115,37 @@ export interface SymbolEntry {
   enabled: boolean;
   /** Width / height of the drawn symbol inside its cell (1 = square). */
   aspect?: number;
+  /**
+   * The school(s) this symbol belongs to. A school's own symbols are the only
+   * ones its spells draw; unschooled symbols are the fallback for a school
+   * that has none for the asked role, and are never mixed in otherwise.
+   */
+  elements?: Element[];
+}
+
+/**
+ * One ground decal: a cell of a decal page (`fx.mjs decals`) — cracks, frost,
+ * sprouting leaves — that a `decal` module grows in from the strike point.
+ */
+export interface DecalEntry {
+  /** Stable id, "<sheet>:<index>". */
+  id: string;
+  /** Decal-sheet data-asset id. */
+  sheet: string;
+  cell: [col: number, row: number];
+  /** What it looks like: crack, frost, vine, flower, splash, scorch, ray… */
+  tags: string[];
+  /** The school(s) it belongs to; same rule as symbols (own first, unschooled as fallback). */
+  elements?: Element[];
+  enabled: boolean;
+  /** Width / depth of the drawn mark inside its cell. */
+  aspect?: number;
+}
+
+/** The decal catalog document a project saves (assets/fx-catalog/decals.json). */
+export interface DecalCatalogDoc {
+  version: 1;
+  decals: DecalEntry[];
 }
 
 /** The symbol catalog document a project saves (assets/fx-catalog/symbols.json). */
@@ -127,15 +159,44 @@ export type SpriteCatalog = Partial<Record<SpriteRole, SpriteEntry[]>> & {
   masks?: MaskEntry[];
   /** Static symbols by role — sigils, glyphs, projectile heads, stuck projectiles — each with its own rules. */
   symbols?: SymbolEntry[];
+  /** Ground decals that grow in (cracks, frost, sprouting growth), by school. */
+  decals?: DecalEntry[];
+  /**
+   * Preset ids the project never wants generated (the lab's "ban" button,
+   * saved in assets/fx-catalog/presets.json). Hand-added modules still play.
+   */
+  disabledPresets?: string[];
 };
 
+/** The preset rules document a project saves (assets/fx-catalog/presets.json). */
+export interface PresetRulesDoc {
+  version: 1;
+  disabled: string[];
+}
+
+/**
+ * Entries usable by this school: its own when it has any, else the
+ * unschooled ones — never another school's. Symbols and decals share it.
+ */
+export function forSchool<T extends { elements?: Element[] }>(list: readonly T[], element: Element): T[] {
+  const own = list.filter((e) => e.elements?.includes(element));
+  return own.length > 0 ? own : list.filter((e) => !e.elements?.length);
+}
+
+/** Decals this school may draw (enabled; its own first, unschooled as fallback). */
+export function decalsFor(catalog: SpriteCatalog, element: Element): DecalEntry[] {
+  return forSchool((catalog.decals ?? []).filter((d) => d.enabled), element);
+}
+
 /** Symbols the catalog offers for these roles, at this orientation, enabled. */
-export function symbolsFor(catalog: SpriteCatalog, roles: readonly SymbolRole[], orient: SymbolOrient): SymbolEntry[] {
-  return (catalog.symbols ?? []).filter((s) => s.enabled && s.roles.some((r) => roles.includes(r)) && s.orient.includes(orient));
+export function symbolsFor(catalog: SpriteCatalog, roles: readonly SymbolRole[], orient: SymbolOrient | "world"): SymbolEntry[] {
+  // a world-fixed quad is allowed wherever the symbol may ride a motion or stand up
+  const ok = (s: SymbolEntry): boolean => (orient === "world" ? s.orient.includes("velocity") || s.orient.includes("vertical") : s.orient.includes(orient));
+  return (catalog.symbols ?? []).filter((s) => s.enabled && s.roles.some((r) => roles.includes(r)) && ok(s));
 }
 
 /** The spin a symbol permits at this orientation: its rule clips what the preset wants. */
-export function symbolSpin(entry: SymbolEntry, orient: SymbolOrient, wanted: number): number {
+export function symbolSpin(entry: SymbolEntry, orient: SymbolOrient | "world", wanted: number): number {
   if (entry.spin === "none") return 0;
   if (entry.spin === "ground" && orient !== "ground") return 0;
   return wanted;
@@ -153,6 +214,7 @@ export const SLOTS = [
   "core", // the main body of a moment: the flash, the bloom, the pop
   "release", // the cast moment at the hands
   "ground", // a ground ring / mark
+  "scar", // a ground decal that grows in: cracks, frost, sprouting growth
   "debris", // particles thrown or drifting
   "light", // the secondary light
   "tower", // a pillar / sky strike — the vertical exclamation mark
@@ -213,6 +275,8 @@ export interface Preset {
   needsMask?: readonly string[];
   /** Symbol roles the catalog must offer one of (enabled, any orientation). */
   needsSymbol?: readonly SymbolRole[];
+  /** The catalog must offer this school a ground decal. */
+  needsDecal?: boolean;
   weight?: number;
   /** Minimum intensity before this is eligible. */
   minI?: number;
@@ -233,7 +297,7 @@ export function anchor(at: AnchorAt, extra: { socket?: string; offset?: [number,
 }
 
 /** A sprite from the catalog, or null when the role is missing. */
-export function sprite(ctx: PresetContext, role: SpriteRole, opts: { size: number; orient?: string; loop?: boolean; fps?: number; duration?: number; at?: M; delay?: number; color?: string; opacity?: number; spin?: number; randomYaw?: boolean; blend?: string; sizeCurve?: number[][]; opacityCurve?: number[][]; repeat?: M }): M | null {
+export function sprite(ctx: PresetContext, role: SpriteRole, opts: { size: number; orient?: string; crossed?: boolean; loop?: boolean; fps?: number; duration?: number; at?: M; delay?: number; color?: string; opacity?: number; spin?: number; randomYaw?: boolean; blend?: string; sizeCurve?: number[][]; opacityCurve?: number[][]; repeat?: M }): M | null {
   const list = ctx.catalog[role];
   if (!list || list.length === 0) return null;
   const weighted = list.map((e) => ({
@@ -250,6 +314,7 @@ export function sprite(ctx: PresetContext, role: SpriteRole, opts: { size: numbe
     size: opts.size,
     aspect: e.aspect ?? 1,
     orient: opts.orient ?? "billboard",
+    ...(opts.crossed ? { crossed: true } : {}),
     spin: opts.spin ?? 0,
     randomYaw: opts.randomYaw ?? false,
     anchor: opts.at ?? anchor(ctx.at, { follow: ctx.follow }),
@@ -270,12 +335,21 @@ export function sprite(ctx: PresetContext, role: SpriteRole, opts: { size: numbe
  * null when the catalog has nothing for the roles at this orientation — the
  * preset then declines and the procedural modules carry the moment.
  */
+/**
+ * How strongly each school's symbols glow: holy blazes, destruction burns,
+ * water and nature shine, shadow smoulders. A preset may scale it (`glow`).
+ */
+export const SCHOOL_GLOW: Record<Element, number> = { holy: 1.4, destruction: 1.1, water: 0.9, nature: 0.8, shadow: 0.7 };
+
 export function symbolSprite(
   ctx: PresetContext,
   roles: readonly SymbolRole[],
   opts: {
+    /** Multiplier on the school's symbol glow (0 = none). */
+    glow?: number;
     size: number;
-    orient: SymbolOrient;
+    /** `world` = fixed in the world (projectiles, stuck pieces), always drawn crossed. */
+    orient: SymbolOrient | "world";
     tags?: readonly string[];
     spin?: number;
     at?: M;
@@ -293,7 +367,7 @@ export function symbolSprite(
     repeat?: M;
   },
 ): M | null {
-  const list = symbolsFor(ctx.catalog, roles, opts.orient);
+  const list = forSchool(symbolsFor(ctx.catalog, roles, opts.orient), ctx.element);
   if (list.length === 0) return null;
   const weighted = list.map((e) => ({
     w: 1 + (opts.tags ? e.tags.filter((t) => opts.tags!.includes(t)).length * 2 : 0),
@@ -309,7 +383,10 @@ export function symbolSprite(
     size: opts.size,
     aspect: e.aspect ?? 1,
     orient: opts.orient,
-    spin: symbolSpin(e, opts.orient, opts.spin ?? 0),
+    crossed: opts.orient === "world",
+    // Derek: a symbol lying on the ground never spins — circles turning under
+    // the feet read wrong. Orbiting AROUND a body is fine; that is `orbit`.
+    spin: opts.orient === "ground" ? 0 : symbolSpin(e, opts.orient, opts.spin ?? 0),
     yaw: opts.yaw ?? 0,
     randomYaw: opts.randomYaw ?? false,
     orbit: opts.orbit ?? 0,
@@ -322,6 +399,11 @@ export function symbolSprite(
     blend: opts.blend ?? "additive",
     // symbols are pixel art: never bilinear
     pixel: Math.max(1, ctx.pixel),
+    // no halo on anything lying on the ground: under the caster the offset
+    // taps read as a second, ghosted copy of the sigil (Derek: "that double effect")
+    glow: opts.orient === "ground" ? 0 : Math.round(SCHOOL_GLOW[ctx.element] * (opts.glow ?? 1) * 100) / 100,
+    glowSize: 0.06,
+    glowColor: "glow",
     ...(opts.sizeCurve ? { sizeCurve: opts.sizeCurve } : {}),
     ...(opts.opacityCurve ? { opacityCurve: opts.opacityCurve } : {}),
     ...(opts.repeat ? { repeat: opts.repeat } : {}),
@@ -329,7 +411,7 @@ export function symbolSprite(
 }
 
 /**
- * Element-flavoured particle debris. One function, ten looks: what a hit
+ * Element-flavoured particle debris. One function, five looks: what a hit
  * throws off is the single strongest element cue after colour, so it is
  * tuned per element rather than picked at random.
  */
@@ -343,16 +425,10 @@ export function debris(ctx: PresetContext, style: DebrisStyle, opts: { count?: n
   const radial = style === "burst" ? "out" : style === "gather" ? "in" : "none";
   // Per-element particle character.
   const E: Record<Element, Partial<M>> = {
-    fire: { speed: [1.5, 4.5], gravity: -1.4, drag: 0.9, turbulence: 3, sizeStart: 0.16, sizeEnd: 0.02, lifetime: [0.5, 1.3] },
-    arcane: { speed: [1.5, 5], gravity: 0, drag: 1.4, turbulence: 2.4, spin: 3, sizeStart: 0.1, sizeEnd: 0.01, lifetime: [0.5, 1.2] },
-    ice: { speed: [3, 8], gravity: 8, drag: 1.4, spin: 4, stretch: 0.06, sizeStart: 0.11, sizeEnd: 0.02, lifetime: [0.45, 1.0] },
+    destruction: { speed: [2, 6], gravity: -1.2, drag: 0.8, turbulence: 3, sizeStart: 0.16, sizeEnd: 0.02, lifetime: [0.4, 1.2] },
+    water: { speed: [2.5, 6.5], gravity: 9, drag: 1.1, stretch: 0.05, sizeStart: 0.12, sizeEnd: 0.03, lifetime: [0.45, 1.0] },
     nature: { speed: [0.8, 2.6], gravity: -0.3, drag: 1.5, turbulence: 2.6, turbulenceSpeed: 0.8, sizeStart: 0.13, sizeEnd: 0.03, lifetime: [0.9, 1.9] },
-    earth: { speed: [2, 6], gravity: 12, drag: 0.6, sizeStart: 0.22, sizeEnd: 0.08, lifetime: [0.5, 1.2], blending: "normal", opacityStart: 0.9 },
     holy: { speed: [0.6, 2.2], gravity: -1.1, drag: 1.2, turbulence: 1.2, sizeStart: 0.12, sizeEnd: 0.02, lifetime: [0.8, 1.8], fadeIn: 0.1 },
-    rose: { speed: [0.8, 2.6], gravity: 0.8, drag: 2.2, turbulence: 2.2, spin: 2, sizeStart: 0.16, sizeEnd: 0.05, lifetime: [0.9, 1.8] },
-    blood: { speed: [3, 7], gravity: 14, drag: 0.5, stretch: 0.07, sizeStart: 0.1, sizeEnd: 0.05, lifetime: [0.35, 0.8], blending: "normal", opacityStart: 0.95 },
-    void: { speed: [0.8, 3], gravity: -0.4, drag: 1.6, turbulence: 4.5, turbulenceSpeed: 1.6, sizeStart: 0.2, sizeEnd: 0.03, lifetime: [0.7, 1.6], fadeIn: 0.15 },
-    storm: { speed: [5, 12], gravity: 10, drag: 1.1, stretch: 0.11, sizeStart: 0.08, sizeEnd: 0.005, lifetime: [0.2, 0.5] },
     shadow: { speed: [0.5, 2], gravity: -0.3, drag: 1.8, turbulence: 3.5, turbulenceSpeed: 1.2, sizeStart: 0.26, sizeEnd: 0.05, lifetime: [0.8, 1.8], fadeIn: 0.2, blending: "normal", opacityStart: 0.85 },
   };
   const e = { ...E[element] };
@@ -515,19 +591,19 @@ export const BASE_PRESETS: readonly Preset[] = [
     slot: "thing",
     phases: ["telegraph"],
     kinds: ["area"],
-    elements: ["earth", "fire"],
+    elements: ["destruction"],
     only: true,
     minI: 0.45,
     build: (ctx) => ({
       kind: "mesh",
       anchor: anchor("origin"),
       duration: ctx.a.windup,
-      primitive: ctx.element === "fire" ? "rock" : "rock",
+      primitive: "rock",
       size: clamp(ctx.R * 0.5, 0.5, 2.6),
       motion: "drop",
       from: clamp(12 + ctx.R * 3, 12, 30),
       spin: 2.5,
-      emissive: ctx.element === "fire" ? 2.5 : 0.8,
+      emissive: ctx.element === "destruction" ? 2.5 : 0.8,
       color: "primary",
     }),
   },
@@ -537,7 +613,7 @@ export const BASE_PRESETS: readonly Preset[] = [
     slot: "tower",
     phases: ["telegraph"],
     kinds: ["area", "summon"],
-    elements: ["holy", "storm", "arcane", "void"],
+    elements: ["holy", "destruction", "shadow"],
     minI: 0.5,
     weight: 0.7,
     build: (ctx) => ({
@@ -667,7 +743,7 @@ export const BASE_PRESETS: readonly Preset[] = [
     kind: "bolt",
     slot: "debris",
     phases: ["charge"],
-    elements: ["storm", "arcane", "void"],
+    elements: ["destruction", "shadow"],
     only: true,
     build: (ctx) => ({
       kind: "bolt",
@@ -910,7 +986,9 @@ export const BASE_PRESETS: readonly Preset[] = [
       sprite(ctx, "bolt", {
         size: clamp(0.5 + ctx.R * 0.3, 0.5, 1.6),
         loop: true,
-        orient: "velocity",
+        // Derek: a projectile lives in the world, it does not turn to the camera
+        orient: "world",
+        crossed: true,
         duration: ctx.phaseLength,
         at: anchor("path", { follow: true }),
         color: "glow",
@@ -968,6 +1046,54 @@ export const BASE_PRESETS: readonly Preset[] = [
       }),
   },
   {
+    // What streams off the projectile, in its school's own matter: flames lick
+    // up off destruction, droplets drip off water, leaves tumble off nature,
+    // motes float off holy, smoke rolls off shadow. `debris("drift")` flattens
+    // every school into the same slow cloud; a wake keeps them apart.
+    id: "travel.wake",
+    kind: "particles",
+    slot: "tail",
+    phases: ["travel"],
+    kinds: ["projectile"],
+    weight: 2.2,
+    build: (ctx) => {
+      const s = clamp(0.7 + ctx.R * 0.2, 0.7, 1.4);
+      const rate = Math.round((40 + 50 * ctx.I) * s);
+      const W: Record<Element, Partial<M>> = {
+        destruction: { sprite: "flame", speed: [0.2, 0.8], gravity: -3, drag: 1.2, turbulence: 2, sizeStart: 0.22 * s, sizeEnd: 0.03, lifetime: [0.22, 0.45] },
+        water: { sprite: "square", speed: [0.2, 0.9], gravity: 7, drag: 0.6, stretch: 0.05, sizeStart: 0.08 * s, sizeEnd: 0.03, lifetime: [0.3, 0.6] },
+        nature: { sprite: "pixel", speed: [0.3, 1.1], gravity: 0.9, drag: 2.2, turbulence: 2.6, turbulenceSpeed: 1.1, spin: 5, sizeStart: 0.13 * s, sizeEnd: 0.07, lifetime: [0.6, 1.1] },
+        holy: { sprite: "square", speed: [0.1, 0.5], gravity: -1.2, drag: 1.4, turbulence: 0.8, sizeStart: 0.07 * s, sizeEnd: 0.01, lifetime: [0.4, 0.8], fadeIn: 0.1 },
+        shadow: { sprite: "soft", speed: [0.1, 0.5], gravity: -0.2, drag: 2, turbulence: 3, turbulenceSpeed: 1.4, sizeStart: 0.3 * s, sizeEnd: 0.55 * s, lifetime: [0.45, 0.85], blending: "normal", opacityStart: 0.7 },
+      };
+      const e = W[ctx.element];
+      const life = e.lifetime as [number, number];
+      return {
+        kind: "particles",
+        anchor: anchor("path", { follow: true }),
+        duration: ctx.phaseLength,
+        color: ctx.element === "holy" ? "glow" : "primary",
+        colorEnd: "secondary",
+        blend: (e.blending as string | undefined) ?? "additive",
+        emitter: {
+          emitting: false,
+          rate,
+          max: clamp(Math.ceil(rate * life[1] + 4), 8, 160),
+          shape: "sphere",
+          shapeSize: [0.12 * s, 0.12 * s, 0.12 * s],
+          spread: 180,
+          direction: [0, 1, 0],
+          space: "world",
+          opacityStart: 1,
+          opacityEnd: 0,
+          ...e,
+        },
+        burst: 0,
+        stream: true,
+      };
+    },
+  },
+  {
     id: "travel.headlight",
     kind: "light",
     slot: "light",
@@ -1012,7 +1138,7 @@ export const BASE_PRESETS: readonly Preset[] = [
     slot: "line",
     phases: ["travel"],
     kinds: ["beam"],
-    elements: ["storm", "arcane", "void"],
+    elements: ["destruction", "shadow"],
     only: true,
     build: (ctx) => ({
       kind: "bolt",
@@ -1234,7 +1360,7 @@ export const BASE_PRESETS: readonly Preset[] = [
       kind: "particles",
       anchor: anchor(ctx.at === "caster" ? "caster" : "ground", ctx.at === "caster" ? { offset: [0, -0.7, 0] } : { offset: [0, 0.2, 0] }),
       delay: 0.04,
-      color: ctx.element === "earth" ? "#8a6a52" : "secondary",
+      color: ctx.element === "destruction" ? "#8a6a52" : "secondary",
       colorEnd: "#000000",
       blend: "normal",
       emitter: {
@@ -1302,7 +1428,7 @@ export const BASE_PRESETS: readonly Preset[] = [
     kind: "bolt",
     slot: "tower",
     phases: ["impact", "tick"],
-    elements: ["storm", "holy", "arcane"],
+    elements: ["destruction", "holy"],
     only: true,
     build: (ctx) => ({
       kind: "bolt",
@@ -1327,14 +1453,14 @@ export const BASE_PRESETS: readonly Preset[] = [
     kind: "mesh",
     slot: "thing",
     phases: ["impact"],
-    elements: ["ice", "earth", "arcane"],
+    elements: ["water", "destruction"],
     only: true,
     minI: 0.4,
     build: (ctx) => ({
       kind: "mesh",
       anchor: anchor("ground"),
       duration: clamp(1 + ctx.I, 1, 2.2),
-      primitive: ctx.element === "earth" ? "spike" : "crystal",
+      primitive: ctx.element === "destruction" ? "spike" : "crystal",
       size: clamp(ctx.R * 0.5, 0.5, 2.5),
       motion: "rise",
       count: clamp(3 + Math.round(ctx.R * 1.2), 3, 9),
@@ -1529,7 +1655,7 @@ export const BASE_PRESETS: readonly Preset[] = [
     slot: "debris",
     phases: ["linger"],
     build: (ctx) =>
-      debris(ctx, ctx.kind === "portal" ? "gather" : ctx.element === "blood" || ctx.element === "earth" ? "fall" : "rise", {
+      debris(ctx, ctx.kind === "portal" ? "gather" : ctx.element === "destruction" ? "fall" : "rise", {
         at: anchor(ctx.at === "caster" ? "caster" : ctx.at === "target" ? "target" : "ground", ctx.at !== "ground" && ctx.at !== "origin" ? { offset: [0, ctx.at === "caster" ? -0.4 : 0.2, 0], follow: true } : { offset: [0, 0.3, 0] }),
         duration: ctx.phaseLength,
         stream: true,
@@ -1543,7 +1669,7 @@ export const BASE_PRESETS: readonly Preset[] = [
     slot: "body",
     phases: ["linger"],
     kinds: ["zone", "channel"],
-    elements: ["nature", "void", "blood", "earth", "rose"],
+    elements: ["nature", "shadow"],
     only: true,
     weight: 1.4,
     build: (ctx) => {
@@ -1757,7 +1883,7 @@ export const BASE_PRESETS: readonly Preset[] = [
     kind: "bolt",
     slot: "debris",
     phases: ["linger"],
-    elements: ["storm", "arcane", "void"],
+    elements: ["destruction", "shadow"],
     only: true,
     build: (ctx) => ({
       kind: "bolt",
@@ -1880,6 +2006,7 @@ export const GRAMMAR: Record<Phase, SlotRule[]> = {
     { slot: "core", min: 1, max: 1 },
     { slot: "light", min: 1, max: 1 },
     { slot: "sigil", min: 0, max: 1, p: 0.6, byIntensity: true },
+    { slot: "aura", min: 0, max: 1, p: 0.55, byIntensity: true },
     { slot: "debris", min: 0, max: 1, p: 0.6 },
     { slot: "tower", min: 0, max: 1, p: 0.7, byIntensity: true },
   ],
@@ -1888,6 +2015,7 @@ export const GRAMMAR: Record<Phase, SlotRule[]> = {
     { slot: "core", min: 0, max: 1, p: 1 },
     { slot: "light", min: 1, max: 1 },
     { slot: "ground", min: 0, max: 1, p: 0.6, byIntensity: true },
+    { slot: "scar", min: 0, max: 1, p: 0.5, byIntensity: true },
     { slot: "tower", min: 0, max: 1, p: 0.75, byIntensity: true },
     { slot: "shake", min: 0, max: 1, p: 0.8 },
   ],
@@ -1901,6 +2029,7 @@ export const GRAMMAR: Record<Phase, SlotRule[]> = {
   impact: [
     { slot: "core", min: 1, max: 2 },
     { slot: "ground", min: 0, max: 2, p: 0.95 },
+    { slot: "scar", min: 0, max: 1, p: 0.85 },
     { slot: "debris", min: 1, max: 2 },
     { slot: "light", min: 1, max: 1 },
     { slot: "tower", min: 0, max: 1, p: 0.55, byIntensity: true },
@@ -1918,6 +2047,7 @@ export const GRAMMAR: Record<Phase, SlotRule[]> = {
   linger: [
     { slot: "body", min: 0, max: 1, p: 0.95 },
     { slot: "ground", min: 0, max: 1, p: 0.9 },
+    { slot: "scar", min: 0, max: 1, p: 0.9 },
     { slot: "gate", min: 0, max: 2, p: 1 },
     { slot: "aura", min: 0, max: 2, p: 1 },
     { slot: "thing", min: 0, max: 1, p: 1 },

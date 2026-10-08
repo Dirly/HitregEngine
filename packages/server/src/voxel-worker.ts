@@ -30,7 +30,11 @@ export interface VoxelWorkerInit {
   kind: "init";
   /** Bumped on every re-init; results carry it so stale ones can be dropped. */
   generation: number;
-  recipe: WorldRecipe;
+  /**
+   * The recipe as UTF-8 JSON in a SharedArrayBuffer: posting it shares the bytes instead of structured-cloning
+   * a multi-megabyte object on the main thread every time a thread starts (that clone was a 50-150 ms tick).
+   */
+  recipeJson: Uint8Array;
   world: string;
   options: Omit<VoxelChunkOptions, "assetExists">;
   /** `assetExists` cannot be cloned — the answers travel instead. */
@@ -65,7 +69,9 @@ let options: VoxelChunkOptions = {};
 
 function handle(message: VoxelWorkerRequest): VoxelWorkerResponse | null {
   if (message.kind === "init") {
-    field = createWorldField(message.recipe);
+    // copied out of the shared buffer first: a decoder may refuse a shared view
+    const recipe = JSON.parse(new TextDecoder().decode(message.recipeJson.slice())) as WorldRecipe;
+    field = createWorldField(recipe);
     world = message.world;
     generation = message.generation;
     const present = new Set(message.presentAssets);

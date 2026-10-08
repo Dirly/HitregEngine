@@ -1,4 +1,5 @@
 import * as THREE from "three/webgpu";
+import { addRimLight } from "./rim-light.js";
 import { Fn, float, materialReference, mix, texture, uniform, uniformArray, uv, vec2, vec3, vec4, vertexStage } from "three/tsl";
 import { asNodeMaterial, cloneMaterial } from "./node-material.js";
 
@@ -782,7 +783,11 @@ function readPixels(map: THREE.Texture): { data: Uint8ClampedArray; width: numbe
           ? Object.assign(document.createElement("canvas"), { width: image.width, height: image.height })
           : null;
     if (!canvas) return null;
-    const ctx = canvas.getContext("2d") as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
+    // willReadFrequently keeps this scratch canvas in SOFTWARE. A default 2D
+    // canvas is GPU-backed, and getImageData on it waits for the whole GPU
+    // process — which, as play starts, is busy compiling WebGPU pipelines:
+    // measured 5.6 s for a 40x40 read on play entry (docs/performance-lessons.md).
+    const ctx = canvas.getContext("2d", { willReadFrequently: true }) as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
     if (!ctx) return null;
     ctx.drawImage(image, 0, 0);
     return { data: ctx.getImageData(0, 0, image.width, image.height).data, width: image.width, height: image.height };
@@ -1022,6 +1027,7 @@ export function appearanceMaterial(
   const tile = appearanceTileNode(codes, tileTableOf(tiles, fallback), vec3(...fallback));
   // the page is sampled at explicit tile UVs, never through the map's own transform
   material.colorNode = appearanceColorNode(map, tile, tint, page, (material as unknown as { color?: THREE.Color }).color ?? null);
+  addRimLight(material);
   material.name = `${source.name}#appearance`;
   material.userData[APPEARANCE_FLAG] = true;
   material.needsUpdate = true;

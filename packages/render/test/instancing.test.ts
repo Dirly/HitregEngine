@@ -13,6 +13,16 @@ describe("InstancedProps", () => {
   const base = new THREE.BoxGeometry(2, 2, 2);
   const material = new THREE.MeshStandardNodeMaterial();
 
+  it("reports placed instance bounds to Box3, including the parent's transform", () => {
+    const mesh = new InstancedProps(base, material, 2);
+    mesh.setMatrixAt(0, new THREE.Matrix4().makeTranslation(20, 10, -30));
+    mesh.setMatrixAt(1, new THREE.Matrix4().makeTranslation(-40, 50, 60));
+    mesh.position.set(100, 200, 300);
+    const box = new THREE.Box3().setFromObject(mesh);
+    expect(box.min.toArray()).toEqual([59, 209, 269]);
+    expect(box.max.toArray()).toEqual([121, 251, 361]);
+  });
+
   it("never exposes the properties three keys its shader cache on", () => {
     const mesh = new InstancedProps(base, material, 5);
     expect((mesh as unknown as { isInstancedMesh?: boolean }).isInstancedMesh).toBeUndefined();

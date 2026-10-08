@@ -2,7 +2,7 @@ import { Script, type BiomeAt, type ScriptCommandDecl } from "./script.js";
 
 /**
  * The hour the `daynight` script last showed, shared in-process so audio can
- * follow the same clock offline (where there is no replicated world.hour).
+ * follow the same clock offline (where there is no replicated world/hour).
  * NaN until a clock runs.
  */
 export const worldClock = { hour: Number.NaN };
@@ -32,7 +32,7 @@ export class SettleLatch {
 
 /** The world clock as audio hears it: the replicated hour, else the local day-night script's, else noon. */
 function currentHour(ctx: { netState?: { get(key: string): unknown } }): number {
-  const published = ctx.netState?.get("world.hour");
+  const published = ctx.netState?.get("world/hour");
   if (typeof published === "number") return published;
   return Number.isFinite(worldClock.hour) ? worldClock.hour : 12;
 }

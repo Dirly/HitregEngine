@@ -1,8 +1,8 @@
 import * as THREE from "three/webgpu";
-import { texture as tslTexture, uniform, uv } from "three/tsl";
+import { clamp, float, step, texture as tslTexture, uniform, uv, vec2 } from "three/tsl";
 import type { VfxModuleOf } from "@hitreg/core";
-import { LiveModule, loadTexture, presentationOnly, unlitMaterial, type LiveModuleHost } from "../base.js";
-import type { N } from "../shaders.js";
+import { LiveModule, loadTexture, moduleColor, presentationOnly, unlitMaterial, type LiveModuleHost } from "../base.js";
+import { posterize, quantize, type N } from "../shaders.js";
 
 type SpriteModule = VfxModuleOf<"sprite">;
 
@@ -17,6 +17,12 @@ const X = new THREE.Vector3(1, 0, 0);
 const tmpV = new THREE.Vector3();
 const camPos = new THREE.Vector3();
 const at = new THREE.Vector3();
+const axisUp = new THREE.Vector3();
+const axisRight = new THREE.Vector3();
+const axisNormal = new THREE.Vector3();
+const basis = new THREE.Matrix4();
+const basisQ = new THREE.Quaternion();
+const crossRoll = new THREE.Quaternion();
 let quad: THREE.PlaneGeometry | null = null;
 
 /**
@@ -28,15 +34,36 @@ let quad: THREE.PlaneGeometry | null = null;
  *
  * `pixel > 0` samples a nearest-filtered copy of the sheet: symbols and PSX
  * flipbooks keep their hard edges at any size.
+ *
+ * With a world `texel` the quad's UVs snap to that grid and the art is read
+ * from the mip level whose texels match it, so a 5 m sigil and a 0.5 m glyph
+ * show the same block size and thin lines fade rather than drop out.
+ *
+ * `glow` grows the quad around a symbol and builds a halo from the symbol's
+ * own alpha (two rings of taps, confined to its cell so neighbours on the
+ * sheet never bleed in), banded into PSX steps on the texel grid.
  */
 export class SpriteLive extends LiveModule<SpriteModule> {
   readonly kind = "sprite" as const;
   private readonly mesh: THREE.Mesh;
+  /** `world` + `crossed`: the second quad, at 90° around the long axis (same material, same quad). */
+  private readonly cross: THREE.Mesh;
   private readonly material: THREE.MeshBasicNodeMaterial;
   private readonly uOffset = uniform(new THREE.Vector2(0, 0));
   private readonly uScale = uniform(new THREE.Vector2(1, 1));
   private readonly uTint = uniform(new THREE.Color(1, 1, 1));
   private readonly uOpacity = uniform(1, "float");
+  /** texel grid: cells across the quad (x, y) and the mip level matching them */
+  private readonly uCells = uniform(new THREE.Vector2(0, 0));
+  private readonly uLod = uniform(0, "float");
+  /** halo: strength, reach (symbol units), quad enlargement, colour */
+  private readonly uGlow = uniform(0, "float");
+  private readonly uReach = uniform(0.14, "float");
+  private readonly uPad = uniform(1, "float");
+  private readonly uGlowColor = uniform(new THREE.Color(1, 1, 1));
+  /** which shader variant is built: grid (texel) and/or halo */
+  private grid = false;
+  private halo = false;
   private map: THREE.Texture | null = null;
   private mapKey = "";
   private cols = 1;
@@ -53,15 +80,52 @@ export class SpriteLive extends LiveModule<SpriteModule> {
     presentationOnly(this.mesh);
     this.mesh.visible = false;
     host.root.add(this.mesh);
+    this.cross = new THREE.Mesh(quad, this.material);
+    presentationOnly(this.cross);
+    this.cross.visible = false;
+    host.root.add(this.cross);
     this.buildShader();
   }
 
   private buildShader(): void {
     const map = this.map;
     if (map) {
-      const sampled: N = tslTexture(map, (uv() as N).mul(this.uScale).add(this.uOffset));
-      this.material.colorNode = sampled.rgb.mul(this.uTint);
-      this.material.opacityNode = sampled.a.mul(this.uOpacity);
+      const grid = this.grid;
+      // symbol-local coordinates; with a halo the quad is larger than the symbol
+      const l: N = uv() as N;
+      const c: N = this.halo ? l.sub(0.5).mul(this.uPad).add(0.5) : l;
+      const cq: N = grid ? quantize(c, this.uCells) : c;
+      const inside = (p: N): N => step(float(0), p.x).mul(step(p.x, float(1))).mul(step(float(0), p.y)).mul(step(p.y, float(1)));
+      const at = (p: N): N => {
+        const t = tslTexture(map, (clamp(p, 0, 1) as N).mul(this.uScale).add(this.uOffset)) as N;
+        return grid ? (t.level(this.uLod) as N) : t;
+      };
+      const s: N = at(cq);
+      const coreA: N = this.halo ? s.a.mul(inside(cq)) : s.a;
+      let color: N = s.rgb.mul(this.uTint);
+      let alpha: N = coreA;
+      if (this.halo) {
+        // a neon band: the STRONGEST line within reach, full near, half at the
+        // outer ring. (An average reads nothing on thin line art; a boosted
+        // average fills a sigil's interior into one white disc.)
+        // three rings of taps, each ring weighted by its distance and rotated
+        // off the last, so no single offset copy of the art stands out as a
+        // ghost outline
+        let halo: N = float(0);
+        for (const [k, w, phase] of [[0.34, 1, 0], [0.67, 0.6, 0.33], [1, 0.3, 0.66]] as const) {
+          for (let i = 0; i < 8; i++) {
+            const a = ((i + phase) / 8) * Math.PI * 2;
+            const p: N = cq.add(vec2(Math.cos(a), Math.sin(a)).mul(this.uReach.mul(k)));
+            halo = halo.max(at(p).a.mul(inside(p)).mul(w));
+          }
+        }
+        if (grid) halo = posterize(halo, float(3));
+        const h: N = halo.mul(this.uGlow).mul(0.6).min(0.85).mul(float(1).sub(coreA));
+        alpha = coreA.add(h);
+        color = color.mul(coreA).add(this.uGlowColor.mul(h)).div(alpha.max(1e-3));
+      }
+      this.material.colorNode = color;
+      this.material.opacityNode = alpha.mul(this.uOpacity);
     } else {
       this.material.colorNode = this.uTint;
       this.material.opacityNode = this.uOpacity;
@@ -77,8 +141,14 @@ export class SpriteLive extends LiveModule<SpriteModule> {
     this.rows = grid?.rows ?? 1;
     this.frames = this.cols;
     const url = sheet ? this.host.resolvers.texture?.(sheet.texture) : undefined;
-    const nearest = module.pixel > 0;
+    // the texel grid reads mipmapped art at a chosen level; legacy `pixel` reads nearest
+    const onGrid = (module.texel > 0 ? module.texel : (ctx.texel ?? 0)) > 0;
+    const halo = !!module.cell && module.glow > 0;
+    const nearest = !onGrid && module.pixel > 0;
     const key = url ? `${url}#${nearest ? "nearest" : "linear"}` : "";
+    const variantChanged = onGrid !== this.grid || halo !== this.halo;
+    this.grid = onGrid;
+    this.halo = halo;
     this.ready = false;
     if (url && key !== this.mapKey) {
       this.mapKey = key;
@@ -94,6 +164,7 @@ export class SpriteLive extends LiveModule<SpriteModule> {
         nearest,
       );
     } else if (url) {
+      if (variantChanged && this.map) this.buildShader();
       this.ready = this.map !== null;
     } else {
       console.warn(`[vfx] sprite sheet "${module.sheet}" has no texture — module skipped`);
@@ -113,13 +184,19 @@ export class SpriteLive extends LiveModule<SpriteModule> {
     this.uTint.value.copy(this.color);
     this.uScale.value.set(1 / this.cols, 1 / this.rows);
     this.yaw = m.randomYaw ? Math.random() * Math.PI * 2 : m.yaw;
+    this.uGlow.value = this.halo ? m.glow : 0;
+    this.uReach.value = m.glowSize;
+    this.uPad.value = this.halo ? 1 + 2 * m.glowSize : 1;
+    moduleColor(m.glowColor, this.ctx.frame.palette, this.uGlowColor.value);
     this.mesh.visible = false;
+    this.cross.visible = false;
   }
 
   protected onUpdate(t: number, _dt: number, camera: THREE.Camera): void {
     const m = this.module;
     if (!this.ready || !this.map) {
       this.mesh.visible = false;
+      this.cross.visible = false;
       return;
     }
     const age = this.now - this.startedAt;
@@ -136,7 +213,16 @@ export class SpriteLive extends LiveModule<SpriteModule> {
     this.uOpacity.value = this.opacityAt(t, this.now);
 
     const size = m.size * this.sizeAt(t);
-    this.mesh.scale.set(size, size / Math.max(1e-3, m.aspect), 1);
+    const pad = this.uPad.value;
+    this.mesh.scale.set(size * pad, (size / Math.max(1e-3, m.aspect)) * pad, 1);
+    if (this.grid) {
+      // cells across the symbol on the world grid, and the mip whose texels match
+      const cx = this.cellsAcross(size);
+      this.uCells.value.set(cx, cx / Math.max(1e-3, m.aspect));
+      const img = this.map.image as { width?: number } | undefined;
+      const cellPx = (img?.width ?? 256) / this.cols;
+      this.uLod.value = Math.max(0, Math.log2(cellPx / Math.max(1, cx)));
+    }
 
     // orbit: circle the anchor around its up axis, phase 0 in front of it
     at.copy(this.pose.position);
@@ -179,6 +265,24 @@ export class SpriteLive extends LiveModule<SpriteModule> {
         roll.setFromAxisAngle(Z, spin);
         this.mesh.quaternion.copy(this.pose.facing).multiply(roll);
         break;
+      case "world": {
+        // fixed in the world: the art's top runs along the motion; at rest it
+        // stands upright, square to the spell direction (a stuck spear)
+        const v = this.pose.velocity;
+        const f = this.pose.forward;
+        if (v.lengthSq() > 1e-4) axisUp.copy(v).normalize();
+        else axisUp.set(0, 1, 0);
+        axisRight.crossVectors(axisUp, Y);
+        if (axisRight.lengthSq() < 1e-4) axisRight.crossVectors(axisUp, f);
+        if (axisRight.lengthSq() < 1e-4) axisRight.set(1, 0, 0);
+        axisRight.normalize();
+        axisNormal.crossVectors(axisRight, axisUp).normalize();
+        basisQ.setFromRotationMatrix(basis.makeBasis(axisRight, axisUp, axisNormal));
+        // spin rolls around the long axis — a spinning spear, never a cartwheel
+        roll.setFromAxisAngle(Y, spin);
+        this.mesh.quaternion.copy(basisQ).multiply(roll);
+        break;
+      }
       case "velocity": {
         const v = this.pose.velocity;
         if (v.lengthSq() > 1e-4) {
@@ -194,13 +298,23 @@ export class SpriteLive extends LiveModule<SpriteModule> {
       }
     }
     this.mesh.visible = true;
+    const crossed = m.orient === "world" && m.crossed;
+    this.cross.visible = crossed;
+    if (crossed) {
+      this.cross.position.copy(this.mesh.position);
+      this.cross.scale.copy(this.mesh.scale);
+      crossRoll.setFromAxisAngle(Y, Math.PI / 2);
+      this.cross.quaternion.copy(this.mesh.quaternion).multiply(crossRoll);
+    }
   }
 
   protected onEnd(): void {
     this.mesh.visible = false;
+    this.cross.visible = false;
   }
 
   dispose(): void {
+    this.cross.removeFromParent();
     this.mesh.removeFromParent();
     this.material.dispose();
   }

@@ -25,6 +25,8 @@ export class AudioSystem {
   private readonly maxVoices = 24;
   /** A one-shot that took longer than this to load/decode is skipped (see play). */
   private readonly maxLateMs = 900;
+  /** Invalidates pending play requests when leaving/restarting a play session. */
+  private generation = 0;
   /** Long-lived, script-driven loops (weather, machinery, local ambience). */
   private loops = new Map<
     string,
@@ -102,9 +104,10 @@ export class AudioSystem {
     opts: Partial<AudioComponentData> = {},
     anchor?: THREE.Object3D,
   ): Promise<boolean> {
+    const generation = this.generation;
     const asked = performance.now();
     const buffer = await this.load(soundId);
-    if (!buffer) return false;
+    if (!buffer || generation !== this.generation) return false;
     // A one-shot is tied to its moment. One whose file only decoded after a
     // hitch (terrain streaming in, a first load) would play out of time, and
     // a stall releases them all at once: drop it instead.
@@ -115,8 +118,7 @@ export class AudioSystem {
       for (let i = 1; i < this.live.length; i++) if (this.live[i]!.priority < this.live[quietest]!.priority) quietest = i;
       if (this.live[quietest]!.priority > priority) return false;
       const [evicted] = this.live.splice(quietest, 1);
-      if (evicted!.audio.isPlaying) evicted!.audio.stop();
-      evicted!.audio.removeFromParent();
+      this.release(evicted!.audio);
       evicted!.anchor?.removeFromParent();
     }
     const positional = (opts.positional ?? true) && object !== null;
@@ -136,9 +138,11 @@ export class AudioSystem {
     // Releasing naturally ended foley is essential: otherwise a long session
     // fills the priority budget with already-silent footsteps.
     audio.onEnded = () => {
+      // Preserve Three's state bookkeeping before releasing the audio graph.
+      THREE.Audio.prototype.onEnded.call(audio);
       const index = this.live.indexOf(voice);
       if (index >= 0) this.live.splice(index, 1);
-      audio.removeFromParent();
+      this.release(audio);
       anchor?.removeFromParent();
     };
     audio.play();
@@ -155,18 +159,19 @@ export class AudioSystem {
   ): void {
     const current = this.loops.get(key);
     if (!soundId) {
-      if (current?.audio?.isPlaying) current.audio.stop();
-      current?.audio?.removeFromParent();
+      if (current?.audio) this.release(current.audio);
       this.loops.delete(key);
       return;
     }
     if (current?.soundId === soundId) {
-      current.volume = opts.volume ?? current.volume;
-      current.audio?.setVolume(current.volume);
+      const volume = opts.volume ?? current.volume;
+      if (volume !== current.volume) {
+        current.volume = volume;
+        current.audio?.setVolume(volume);
+      }
       return;
     }
-    if (current?.audio?.isPlaying) current.audio.stop();
-    current?.audio?.removeFromParent();
+    if (current?.audio) this.release(current.audio);
     const loop = { soundId, volume: opts.volume ?? 1, audio: null as THREE.Audio | THREE.PositionalAudio | null };
     this.loops.set(key, loop);
     void this.load(soundId).then((buffer) => {
@@ -187,24 +192,24 @@ export class AudioSystem {
     });
   }
 
+  /** Scene removal alone does not disconnect Web Audio nodes. */
+  private release(audio: THREE.Audio | THREE.PositionalAudio): void {
+    if (audio.isPlaying) audio.stop();
+    if (audio.source && "onended" in audio.source) audio.source.onended = null;
+    audio.disconnect();
+    audio.gain.disconnect();
+    audio.removeFromParent();
+  }
+
   stopAll(): void {
+    this.generation++;
     for (const { audio, anchor } of this.live) {
-      try {
-        if (audio.isPlaying) audio.stop();
-      } catch {
-        /* already ended */
-      }
-      audio.removeFromParent();
+      this.release(audio);
       anchor?.removeFromParent();
     }
     this.live = [];
     for (const loop of this.loops.values()) {
-      try {
-        if (loop.audio?.isPlaying) loop.audio.stop();
-      } catch {
-        /* already ended */
-      }
-      loop.audio?.removeFromParent();
+      if (loop.audio) this.release(loop.audio);
     }
     this.loops.clear();
   }

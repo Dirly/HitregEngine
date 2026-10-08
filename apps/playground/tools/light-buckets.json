@@ -1,0 +1,83 @@
+{
+  "about": "One place draws its lights from ONE bucket, so its fire reads as one place. Mixing fixtures inside a bucket is wanted (a tomb has candles in niches, a cluster by the dead, a brazier in the great hall); mixing buckets is what reads wrong (a street lamp-post in a barrow). A dressing plan names its bucket with \"lights\": \"<bucket>\"; `dress check` warns about a light from outside it, and about a plan whose lights fit no single bucket. A project may replace this file with authoring/light-buckets.json.",
+  "buckets": {
+    "tomb": {
+      "for": "barrows, crypts, chapels, shrines, anything of the dead",
+      "use": [
+        "poi-props/candle",
+        "poi-props/candle-cluster",
+        "fixtures/niche-candle-lit",
+        "fixtures/candle-a-lit",
+        "fixtures/candle-b-lit",
+        "fixtures/candles-lit",
+        "interior-props/candle-shelf",
+        "poi-props/brazier"
+      ],
+      "note": "candles carry it: niches, ledges, round the dead, on the altar. A brazier only in a great hall or before the boss."
+    },
+    "manor": {
+      "for": "manors, halls, houses, taverns, a haunted house",
+      "use": [
+        "fixtures/chandelier-a-lit",
+        "poi-props/chandelier",
+        "fixtures/sconce-fire",
+        "fixtures/hearth-fire",
+        "fixtures/candles-lit",
+        "fixtures/candle-a-lit",
+        "fixtures/candle-b-lit",
+        "fixtures/lamp-lit",
+        "poi-props/candle-cluster"
+      ],
+      "note": "chandeliers and hearths in the big rooms, sconces along passages, candles and lamps on furniture."
+    },
+    "delve": {
+      "for": "caves, mines, dens, cellars, sewers",
+      "use": [
+        "poi-props/standing-torch",
+        "fixtures/sconce-fire",
+        "fixtures/lantern-glow",
+        "poi-props/hanging-lantern",
+        "poi-props/campfire",
+        "poi-props/cold-campfire"
+      ],
+      "note": "what someone carried in: torches, lanterns, a fire where they camp."
+    },
+    "camp": {
+      "for": "camps, landings, ruins someone is living in",
+      "use": [
+        "poi-props/campfire",
+        "camp-props/bonfire",
+        "poi-props/cold-campfire",
+        "poi-props/standing-torch",
+        "poi-props/hanging-lantern",
+        "fixtures/lantern-glow",
+        "poi-props/brazier"
+      ],
+      "note": "one fire at the heart (camp-props/bonfire for giants, ogres or any big camp), torches or lanterns at the edge."
+    },
+    "street": {
+      "for": "towns, quays, roads, gates",
+      "use": [
+        "town-lights/lamp-post-lit",
+        "town-lights/hanging-lantern-lit",
+        "interior-props/lamp-post",
+        "poi-props/hanging-lantern",
+        "fixtures/lantern-glow",
+        "fixtures/sconce-fire",
+        "poi-props/brazier",
+        "poi-props/standing-torch"
+      ],
+      "note": "the town's own fittings. Streets, plazas, gates, quays and the roads out are lit by tools/town-lights.mts (tools/street-lights.json), not by hand."
+    },
+    "rime": {
+      "for": "ice halls, glacier galleries, frozen tombs (blue-white cold light)",
+      "use": [
+        "fixtures/lantern-glow",
+        "poi-props/hanging-lantern",
+        "camp-props/bonfire",
+        "poi-props/brazier"
+      ],
+      "note": "cold blue-white glow carries it: lanterns and glows tinted ice-blue (#b8d0ff) in niches and along the galleries; ONE fire, the bonfire in a hearth hall where the living gather. Detail pass: cold-tinted variants of lantern-glow / hanging-lantern."
+    }
+  }
+}

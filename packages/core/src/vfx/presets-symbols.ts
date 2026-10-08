@@ -33,17 +33,11 @@ const marching = (ctx: PresetContext): boolean => ctx.a.shape === "cone" || ctx.
 /** Symbol tags that suit the element, for marks and sigils. */
 function elementSymbolTags(ctx: PresetContext): string[] {
   const byElement: Record<string, string[]> = {
-    fire: ["flame", "sun", "burst", "star"],
-    arcane: ["rune", "circle", "eye", "spiral"],
-    ice: ["star", "circle", "crystal"],
-    nature: ["spiral", "leaf", "circle"],
-    earth: ["triangle", "circle", "square"],
-    holy: ["sun", "star", "cross", "circle"],
-    rose: ["circle", "spiral", "moon"],
-    blood: ["moon", "crescent", "hand"],
-    void: ["eye", "moon", "spiral"],
-    storm: ["star", "bolt", "spiral"],
     shadow: ["eye", "moon", "hand"],
+    holy: ["sun", "star", "cross", "circle"],
+    nature: ["spiral", "leaf", "circle"],
+    water: ["spiral", "circle", "crystal", "star"],
+    destruction: ["flame", "burst", "star", "bolt"],
   };
   return byElement[ctx.element] ?? [];
 }
@@ -110,6 +104,37 @@ export const SYMBOL_PRESETS: readonly Preset[] = [
         sizeCurve: [[0, 0.3], [0.25, 1], [1, 1]],
         opacityCurve: [[0, 0], [0.15, 1], [0.9, 1], [1, 0]],
       }),
+  },
+  {
+    // a crown of glyphs revolving above the caster's head while the spell is
+    // being worked: the charge, and the whole of a channel or a held buff
+    id: "crown.glyphs",
+    kind: "sprite",
+    slot: "aura",
+    phases: ["charge", "linger"],
+    kinds: ["channel", "buff", "shout", "summon", "zone", "area", "projectile", "bolt", "beam", "pulse", "debuff"],
+    needsSymbol: ["glyph", "star"],
+    weight: 2.4,
+    build: (ctx) => {
+      // linger: only while the caster is still holding the spell
+      if (ctx.phase === "linger" && !(ctx.kind === "channel" || ctx.kind === "buff")) return null;
+      const count = 3 + Math.round(ctx.I * 3);
+      return symbolSprite(ctx, ["glyph", "star"], {
+        tags: elementSymbolTags(ctx),
+        size: 0.32,
+        orient: "billboard",
+        at: anchor("caster", { offset: [0, 1.35, 0], follow: true }),
+        orbit: 0.55,
+        orbitSpeed: feelOf(ctx, "sharp") ? 2.4 : 1.5,
+        duration: ctx.phaseLength,
+        opacity: 0.95,
+        color: "glow",
+        glow: 1.2,
+        sizeCurve: [[0, 0.4], [0.2, 1], [1, 1]],
+        opacityCurve: [[0, 0], [0.12, 1], [0.9, 1], [1, 0]],
+        repeat: { count, turn: 360 / count },
+      });
+    },
   },
   {
     id: "charge.orbitGlyphs",
@@ -215,7 +240,8 @@ export const SYMBOL_PRESETS: readonly Preset[] = [
       symbolSprite(ctx, ["head"], {
         tags: elementSymbolTags(ctx),
         size: clamp(0.7 + ctx.R * 0.35, 0.7, 1.8),
-        orient: "velocity",
+        // Derek: a projectile lives in the world, it does not turn to the camera
+        orient: "world",
         at: anchor("path", { follow: true }),
         duration: ctx.phaseLength,
         color: "glow",
@@ -234,11 +260,12 @@ export const SYMBOL_PRESETS: readonly Preset[] = [
       return symbolSprite(ctx, ["stuck"], {
         tags: elementSymbolTags(ctx),
         size,
-        orient: "vertical",
+        orient: "world",
         at: anchor("ground", { offset: [0, size * 0.48, 0] }),
         duration: clamp(1.2 + ctx.I * 1.2, 1.2, 2.4),
         opacityCurve: [[0, 1], [0.7, 1], [1, 0]],
         color: "primary",
+        glow: 0.4,
       });
     },
   },
@@ -353,7 +380,7 @@ export const SYMBOL_PRESETS: readonly Preset[] = [
     kind: "mesh",
     slot: "thing",
     phases: ["impact"],
-    elements: ["earth", "ice", "nature", "arcane", "shadow"],
+    elements: ["destruction", "water", "nature", "shadow"],
     only: true,
     weight: 2.5,
     build: (ctx) => {
@@ -367,7 +394,7 @@ export const SYMBOL_PRESETS: readonly Preset[] = [
         kind: "mesh",
         anchor: march ? anchor("caster", { offset: [0, -0.9, 0.9] }) : anchor("ground"),
         duration: clamp(0.9 + ctx.I * 0.6, 0.9, 1.6),
-        primitive: ctx.element === "ice" || ctx.element === "arcane" ? "crystal" : "spike",
+        primitive: ctx.element === "water" ? "crystal" : "spike",
         size: clamp(ctx.R * 0.45, 0.5, 1.8),
         motion: "rise",
         count: 2,
@@ -386,7 +413,7 @@ export const SYMBOL_PRESETS: readonly Preset[] = [
     slot: "core",
     phases: ["impact"],
     needs: "burst",
-    elements: ["fire", "holy", "arcane", "void", "rose", "storm"],
+    elements: ["destruction", "holy", "shadow"],
     weight: 1.6,
     build: (ctx) => {
       if (ctx.a.shape === "point") return null;
@@ -438,7 +465,7 @@ export const SYMBOL_PRESETS: readonly Preset[] = [
     phases: ["linger"],
     kinds: ["zone", "channel", "pulse"],
     needs: "burst",
-    elements: ["fire", "holy", "arcane", "void", "storm", "rose"],
+    elements: ["destruction", "holy", "shadow"],
     weight: 1.3,
     build: (ctx) => {
       const R = volumeR(ctx);

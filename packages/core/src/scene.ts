@@ -63,6 +63,9 @@ export function validateScene(
   registry: ComponentRegistry,
 ): SceneIssue[] {
   const issues: SceneIssue[] = [];
+  // hoisted: per entity this allocated a key array of the WHOLE doc — O(n²)
+  // on a 12k-entity expanded world, seconds of every editor rebuild
+  const max = Object.keys(doc.entities).length;
   for (const [id, entity] of Object.entries(doc.entities)) {
     if (entity.parent !== null && !(entity.parent in doc.entities)) {
       issues.push({ entity: id, message: `parent ${entity.parent} does not exist` });
@@ -70,7 +73,6 @@ export function validateScene(
     // cycle check: walk up, bounded by entity count
     let cursor = entity.parent;
     let hops = 0;
-    const max = Object.keys(doc.entities).length;
     while (cursor !== null && hops <= max) {
       if (cursor === id) {
         issues.push({ entity: id, message: "parent chain forms a cycle" });

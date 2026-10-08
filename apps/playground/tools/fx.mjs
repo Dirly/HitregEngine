@@ -208,6 +208,9 @@ else if (cmd === "masks") {
   const at = rest.indexOf("--embers");
   const embers = at >= 0 ? rest[at + 1] : undefined;
   cmdFire(rest.find((a, i) => !a.startsWith("--") && rest[i - 1] !== "--embers"), rest.includes("--force"), embers);
+} else if (cmd === "decals") {
+  const { cmdDecals } = await import("./fx-decals.mjs");
+  cmdDecals(rest[0], rest[1], rest[2], rest.slice(3));
 } else if (cmd === "symbols") {
   const { cmdSymbols } = await import("./fx-symbols.mjs");
   cmdSymbols(rest[0], rest[1], rest[2], rest.slice(3));
@@ -221,7 +224,9 @@ else if (cmd === "masks") {
   node tools/fx.mjs masks <project> [--size 48]     # PSX black/white masks for ring textures
   node tools/fx.mjs fire <project> [--force] [--embers <png>]
                                                     # the standard fire set: vfx/env/fire-* + materials/fx/fire* + fx/ember-bed
-  node tools/fx.mjs symbols <project> <name> <sheet.png> [--roles sigil,glyph] [--rows 0-2=head,3-5=stuck] [--tags ...]
-                                                    # slice a hand-drawn symbol sheet into a grid + catalog entries`);
+  node tools/fx.mjs symbols <project> <name> <sheet.png> [--roles sigil,glyph] [--rows 0-2=head,3-5=stuck] [--tags ...] [--elements shadow] [--downsample 2]
+                                                    # slice a hand-drawn symbol sheet into a grid + catalog entries
+  node tools/fx.mjs decals <project> <name> <sheet.png> [--grid 3x3] [--downsample 2] [--elements nature] [--cells "crack;vine,leaf;..."]
+                                                    # a grid of ground marks -> a decal page (R = reveal time along the mark, G = shade, A = coverage)`);
   process.exit(1);
 }

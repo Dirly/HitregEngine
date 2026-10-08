@@ -1,0 +1,105 @@
+{
+ "source": "MMO/3d/Mobs/Dragon/Scorpion-parts.obj",
+ "sourceScale": 1,
+ "objScale": 1,
+ "outMesh": "MMO/3d/Mobs/Dragon/Scorpion-unwrapped",
+ "sheet": 1254,
+ "keyStroke": 8,
+ "smooth": 48,
+ "margin": 22,
+ "gutter": 48,
+ "atlas": {
+  "size": 278,
+  "bleed": 2,
+  "bgLum": 236
+ },
+ "mirrorCopy": {
+  "axis": "z",
+  "parts": [
+   "Scorpion_Leg",
+   "Scorpion_Body",
+   "Scorpion_Tail",
+   "Scorpion_Claw"
+  ]
+ },
+ "slots": {
+  "leg": {
+   "color": "#ff0000",
+   "fit": "contain",
+   "matchTo": "body"
+  },
+  "body": {
+   "color": "#00ff00",
+   "fit": "contain"
+  },
+  "tail": {
+   "color": "#0000ff",
+   "fit": "contain",
+   "matchTo": "body"
+  },
+  "claw": {
+   "color": "#ffff00",
+   "fit": "contain"
+  }
+ },
+ "parts": {
+  "Scorpion_Leg": {
+   "slot": "leg",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Scorpion_Body": {
+   "slot": "body",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.35
+  },
+  "Scorpion_Tail": {
+   "slot": "tail",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Scorpion_Claw": {
+   "slot": "claw",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  }
+ },
+ "layout": {
+  "col": [
+   {
+    "row": [
+     "body"
+    ]
+   },
+   {
+    "row": [
+     "claw"
+    ]
+   },
+   {
+    "row": [
+     "tail",
+     "leg"
+    ]
+   }
+  ]
+ },
+ "marks": [],
+ "cutoutSlots": [],
+ "combos": [
+  [
+   "Scorpion_Leg",
+   "Scorpion_Body",
+   "Scorpion_Tail",
+   "Scorpion_Claw"
+  ]
+ ]
+}

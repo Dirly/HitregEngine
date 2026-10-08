@@ -101,4 +101,43 @@ describe("NetStateStore", () => {
     store.define("enemyHp", z.number());
     expect(Object.keys(store.jsonSchemas())).toEqual(["enemyHp"]);
   });
+
+  it("an unchanged primitive write sends nothing; a changed one and an object rewrite do", () => {
+    const store = new NetStateStore();
+    store.set("combat/a.hp", 10);
+    store.set("combat/a.pos", [1, 2]);
+    store.takeDelta();
+    expect(store.set("combat/a.hp", 10)).toBe(true);
+    expect(store.takeDelta()).toBeNull();
+    store.set("combat/a.hp", 9);
+    store.set("combat/a.pos", [1, 2]); // a new array: by reference, so it goes
+    expect(store.takeDelta()).toEqual({ set: { "combat/a.hp": 9, "combat/a.pos": [1, 2] }, removed: [] });
+    // deleted then set back to the old value: a real change
+    store.delete("combat/a.hp");
+    store.set("combat/a.hp", 9);
+    expect(store.takeDelta()).toEqual({ set: { "combat/a.hp": 9 }, removed: [] });
+  });
+
+  it("keys(prefix) reads one namespace, in insertion order; keyVersion moves only with the key set", () => {
+    const store = new NetStateStore();
+    store.set("combat/b.hp", 1);
+    store.set("other/x", 1);
+    store.set("combat/a.hp", 1);
+    store.set("combat/b.mana", 1);
+    expect(store.keys("combat/")).toEqual(["combat/b.hp", "combat/a.hp", "combat/b.mana"]);
+    expect(store.keys("combat/b.")).toEqual(["combat/b.hp", "combat/b.mana"]);
+    expect(store.keys("comb")).toEqual(["combat/b.hp", "combat/a.hp", "combat/b.mana"]);
+    expect(store.keys("nothing/")).toEqual([]);
+    const v = store.keyVersion;
+    store.set("combat/a.hp", 5);
+    expect(store.keyVersion).toBe(v);
+    store.delete("combat/a.hp");
+    expect(store.keyVersion).toBeGreaterThan(v);
+    expect(store.keys("combat/")).toEqual(["combat/b.hp", "combat/b.mana"]);
+    const replica = new NetStateStore();
+    replica.setAuthority(false);
+    replica.applyRemote({ full: { "combat/q.hp": 1, "x/y": 2 } });
+    replica.applyRemote({ delta: { set: { "combat/r.hp": 1 }, removed: ["combat/q.hp"] } });
+    expect(replica.keys("combat/")).toEqual(["combat/r.hp"]);
+  });
 });

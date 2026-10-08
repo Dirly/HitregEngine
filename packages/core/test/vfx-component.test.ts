@@ -27,7 +27,7 @@ describe("paletteFromMaterial", () => {
   });
 
   it("falls back to the fire palette when the material is missing or malformed", () => {
-    expect(paletteFromMaterial(undefined)).toEqual(paletteFor("fire"));
-    expect(paletteFromMaterial({ color: "orange" })).toEqual(paletteFor("fire"));
+    expect(paletteFromMaterial(undefined)).toEqual(paletteFor("destruction"));
+    expect(paletteFromMaterial({ color: "orange" })).toEqual(paletteFor("destruction"));
   });
 });

@@ -35,8 +35,13 @@ export interface CreationPreview {
   update(build: CharacterBuild): void;
   /** Turn the model (radians) — the screen drags it. */
   setYaw(radians: number): void;
+  /** Whole body, or a close-up of the face. */
+  setFocus?(focus: "body" | "face"): void;
+  /** Zoom from the whole body (0) to the face (1) — the mouse wheel over the model. */
+  setZoom?(t: number): void;
   dispose(): void;
 }
+
 
 export interface CreationScreenOptions {
   creation: CharacterCreation;
@@ -44,6 +49,8 @@ export interface CreationScreenOptions {
   name?: string;
   /** Texture asset id → URL, for the skin and the icons. Without it the screen is unskinned. */
   textureUrl?: (id: string) => string | undefined;
+  /** Ask whether a name is free (the gateway asks main); absent = only the shape is checked here. */
+  nameCheck?: (name: string) => Promise<{ ok: boolean; reason?: string }>;
   /** Mount the preview into the canvas; null/absent = the screen runs without one. */
   preview?: (canvas: HTMLCanvasElement) => CreationPreview | null;
   /** Make the character. Reject with a readable error to show it on the screen. */
@@ -103,6 +110,9 @@ position:fixed;inset:0;z-index:20001;display:flex;flex-direction:column;backgrou
 .hg-cc-btn:disabled{opacity:.55;cursor:default;filter:none}
 .hg-cc-name{width:100%;background:var(--cc-surface);border:1px solid #30363d;border-radius:6px;color:var(--cc-heading);padding:9px 11px;font:inherit;font-size:15px;outline:none}
 .hg-cc-name:focus{border-color:var(--cc-accent)}
+.hg-cc-namenote{min-height:1.3em;margin-top:4px;font-size:12px;color:var(--cc-muted)}
+.hg-cc-namenote.ok{color:#9fd28a}
+.hg-cc-namenote.bad{color:#eeb88a}
 .hg-cc-rows{display:flex;flex-direction:column;gap:8px}
 .hg-cc-row{display:grid;grid-template-columns:62px 1fr;align-items:center;gap:8px}
 .hg-cc-row .hg-cc-label{color:var(--cc-muted);font-size:12px}
@@ -123,6 +133,27 @@ position:fixed;inset:0;z-index:20001;display:flex;flex-direction:column;backgrou
 .hg-cc.hg-cc-skin{background:#070606;text-shadow:0 1px 2px #000}
 .hg-cc-skin .hg-cc-back{background:radial-gradient(ellipse at 50% 55%,#2a221899 0%,#0a0908f2 62%,#050404 100%),var(--cc-backdrop,none);background-size:auto,198px 176px;image-rendering:pixelated}
 .hg-cc-skin .hg-cc-title{padding:6px 0 0}
+/* a painted scene behind everything: the clearing the character stands in (ui.scene) */
+.hg-cc-skin.hg-cc-painted .hg-cc-back{background:radial-gradient(ellipse at 50% 58%,transparent 0%,transparent 38%,#05040480 78%,#050404d9 100%),var(--cc-scene);background-size:auto,cover;background-position:center,center;image-rendering:auto}
+.hg-cc-skin.hg-cc-painted .hg-cc-plinth{display:none}
+/* layered over the full-screen scene (mountSceneLayer): see-through, only the panels and controls take the pointer */
+.hg-cc.hg-cc-layered{background:transparent;pointer-events:none}
+.hg-cc.hg-cc-layered .hg-cc-back{display:none}
+/* the composition over the clearing: equal side panels (the character stands at the true centre), fixed heights
+   (choosing never resizes a window), the name on a plate under the character */
+.hg-cc.hg-cc-layered .hg-cc-title{padding:22px 0 0}
+.hg-cc.hg-cc-layered .hg-cc-main{grid-template-columns:400px 1fr 400px;max-width:none;gap:0;padding:14px 44px 0}
+.hg-cc.hg-cc-layered .hg-cc-panel{height:min(700px,calc(100vh - 190px));align-self:start;flex:none}
+.hg-cc.hg-cc-layered .hg-cc-detail{min-height:112px}
+.hg-cc.hg-cc-layered .hg-cc-tiles{grid-template-columns:repeat(3,1fr);gap:8px}
+.hg-cc.hg-cc-layered .hg-cc-stage{justify-content:flex-end}
+.hg-cc-nameplate{display:flex;flex-direction:column;align-items:center;gap:2px;margin-bottom:2px}
+.hg-cc-nameplate .hg-cc-name{width:min(420px,32vw);text-align:center;font:28px var(--cc-font);letter-spacing:.06em;color:var(--cc-heading);background:linear-gradient(90deg,transparent,#0b0907d9 18%,#0b0907d9 82%,transparent);border:0;border-top:1px solid #8a6a3a99;border-bottom:1px solid #8a6a3a99;border-radius:0;padding:8px 18px;text-shadow:0 2px 6px #000;outline:none}
+.hg-cc-nameplate .hg-cc-name::placeholder{color:#a69c89;font-style:italic;letter-spacing:.04em}
+.hg-cc-nameplate .hg-cc-name:focus{border-color:#e2b25e;box-shadow:none}
+.hg-cc-nameplate .hg-cc-whosub{font-size:13px;letter-spacing:.16em;text-transform:uppercase;color:#d8bf8c;text-shadow:0 1px 4px #000}
+.hg-cc-nameplate .hg-cc-namenote{font-size:12px;text-shadow:0 1px 3px #000}
+.hg-cc.hg-cc-layered .hg-cc-panel,.hg-cc.hg-cc-layered button,.hg-cc.hg-cc-layered input,.hg-cc.hg-cc-layered select,.hg-cc.hg-cc-layered a{pointer-events:auto}
 .hg-cc-skin .hg-cc-title .hg-cc-crest{display:block;width:45px;height:48px;margin-bottom:-2px;filter:drop-shadow(0 3px 4px #000)}
 .hg-cc-skin .hg-cc-title h1{font-weight:normal;font-size:24px;text-transform:uppercase;letter-spacing:.2em}
 .hg-cc-skin .hg-cc-title .hg-cc-rule{display:block;width:min(380px,60vw);height:auto;margin-top:-8px}
@@ -223,6 +254,34 @@ export function describeLean(bonus: Partial<Record<Attribute, number>>): string 
  * not the same pixels spread thin. Never scaled DOWN — short screens have
  * their own compact rules. Returns the unsubscribe.
  */
+/**
+ * The full-screen scene behind a skinned screen with a painted `ui.scene`:
+ * the painting, and the 3D canvas over it (the model and its clearing),
+ * under the screen's panels. The screen itself goes see-through and only its
+ * panels and controls take the pointer, so the model can be dragged anywhere
+ * else. Sits outside the screen's UI zoom, so the canvas is the real window.
+ */
+export function mountSceneLayer(root: HTMLElement, canvas: HTMLCanvasElement): HTMLElement {
+  const layer = document.createElement("div");
+  layer.className = "hg-scene-layer";
+  const painting = getComputedStyle(root).getPropertyValue("--cc-scene") || root.style.getPropertyValue("--cc-scene");
+  layer.style.cssText =
+    `position:fixed;inset:0;z-index:${Number(getComputedStyle(root).zIndex) || 20000};background:#070606 ${painting} center/cover no-repeat`;
+  // the canvas's old place in the screen's layout keeps its room (the name and buttons stay at the bottom)
+  const spacer = document.createElement("div");
+  spacer.style.cssText = "flex:1;min-height:0;width:100%";
+  canvas.replaceWith(spacer);
+  canvas.style.cssText = "position:absolute;inset:0;width:100%;height:100%;cursor:grab;touch-action:none";
+  layer.appendChild(canvas);
+  // a soft vignette over the painting and the 3D, under the panels
+  const shade = document.createElement("div");
+  shade.style.cssText = "position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse at 50% 55%,transparent 40%,#05040470 80%,#050404c0 100%)";
+  layer.appendChild(shade);
+  root.before(layer);
+  root.classList.add("hg-cc-layered");
+  return layer;
+}
+
 export function watchUiScale(el: HTMLElement): () => void {
   const apply = (): void => {
     const scale = Math.max(1, Math.min(window.innerWidth / 1920, window.innerHeight / 1080));
@@ -265,6 +324,10 @@ function applySkin(root: HTMLElement, creation: CharacterCreation, url: (id: str
   frame("card", ui.card);
   frame("card-on", ui.cardActive, ui.card);
   set("--cc-backdrop", img(ui.backdrop));
+  if (img(ui.scene)) {
+    set("--cc-scene", img(ui.scene));
+    root.classList.add("hg-cc-painted");
+  }
   set("--cc-arrow", img(ui.arrow));
   // the image arrows only when the image exists; otherwise the text chevrons stay
   if (img(ui.arrow)) root.classList.add("hg-cc-arrows");
@@ -304,13 +367,6 @@ export function mountCreationScreen(opts: CreationScreenOptions): CreationScreen
 
   // -- title
   const title = el("header", "hg-cc-title");
-  const crestUrl = skinned ? url(creation.ui?.crest) : undefined;
-  if (crestUrl) {
-    const crest = el("img", "hg-cc-crest");
-    crest.src = crestUrl;
-    crest.alt = "";
-    title.appendChild(crest);
-  }
   title.appendChild(el("h1", "", "Create your character"));
   const ruleUrl = skinned ? url(creation.ui?.divider) : undefined;
   if (ruleUrl) {
@@ -356,7 +412,7 @@ export function mountCreationScreen(opts: CreationScreenOptions): CreationScreen
   canvas.setAttribute("aria-label", "Character preview — drag to turn");
   const who = el("div", "hg-cc-who");
   const whoSub = el("div", "hg-cc-whosub");
-  const hint = el("div", "hg-cc-hint", "drag to turn");
+  const hint = el("div", "hg-cc-hint", "drag to turn · scroll to zoom");
   const err = el("div", "hg-cc-err");
   err.setAttribute("role", "alert");
   const back = el("button", "hg-cc-btn", "Back");
@@ -365,7 +421,9 @@ export function mountCreationScreen(opts: CreationScreenOptions): CreationScreen
   create.type = "button";
   const actions = el("div", "hg-cc-actions");
   actions.append(back, create);
-  stage.append(el("div", "hg-cc-plinth"), canvas, who, whoSub, hint, err, actions);
+  // the name, front and centre under the character: typed straight onto its nameplate
+  const nameplate = el("div", "hg-cc-nameplate");
+  stage.append(el("div", "hg-cc-plinth"), canvas, nameplate, hint, err, actions);
 
   // -- right: name, looks, what the lean does
   const right = el("section", "hg-cc-panel");
@@ -374,13 +432,14 @@ export function mountCreationScreen(opts: CreationScreenOptions): CreationScreen
   right.appendChild(rightScroll);
   const nameSec = el("section", "hg-cc-sec");
   const name = el("input", "hg-cc-name");
-  name.placeholder = "3–20 letters";
+  name.placeholder = "Name your character";
   name.maxLength = 20;
   name.value = opts.name ?? "";
   name.setAttribute("aria-label", "Character name");
   name.autocomplete = "off";
   name.spellcheck = false;
-  nameSec.append(el("h2", "", "Name"), name);
+  nameplate.append(name, whoSub);
+  void who;
   const lookSec = el("section", "hg-cc-sec");
   const lookRows = el("div", "hg-cc-rows");
   lookSec.append(el("h2", "", "Appearance"), lookRows);
@@ -389,14 +448,17 @@ export function mountCreationScreen(opts: CreationScreenOptions): CreationScreen
   const sum = el("div", "hg-cc-sum");
   sum.setAttribute("aria-live", "polite");
   sumSec.append(el("h2", "", "Born"), sum);
-  rightScroll.append(nameSec, lookSec, sumSec);
+  void nameSec;
+  rightScroll.append(lookSec, sumSec);
 
   const main = el("div", "hg-cc-main");
   main.append(left, stage, right);
-  root.append(title, close, main);
+  // Back is the one way out (no close box as well)
+  root.append(title, main);
   document.body.appendChild(root);
 
-  // -- preview
+  // -- preview: with a painted scene, the model and its clearing fill the whole screen behind the panels
+  const sceneLayer = root.classList.contains("hg-cc-painted") ? mountSceneLayer(root, canvas) : null;
   const preview = opts.preview?.(canvas) ?? null;
   let yaw = 0;
   let dragX: number | null = null;
@@ -415,6 +477,18 @@ export function mountCreationScreen(opts: CreationScreenOptions): CreationScreen
   };
   canvas.addEventListener("pointerup", endDrag);
   canvas.addEventListener("pointercancel", endDrag);
+
+  // the mouse wheel over the model zooms from the whole body to the face — the player's choice, never automatic
+  let zoom = 0;
+  canvas.addEventListener(
+    "wheel",
+    (e) => {
+      e.preventDefault();
+      zoom = Math.max(0, Math.min(1, zoom - e.deltaY * 0.0012));
+      preview?.setZoom?.(zoom);
+    },
+    { passive: false },
+  );
 
   // -- render
   /**
@@ -529,6 +603,7 @@ export function mountCreationScreen(opts: CreationScreenOptions): CreationScreen
         if (offered.every((o) => o.color)) {
           // colour choices: swatches, the chosen one named beside the label
           const row = el("div", "hg-cc-row hg-cc-swatchrow");
+          row.dataset["slot"] = slot.id;
           const chosen = offered.find((o) => o.id === build.appearance[slot.id]);
           row.append(el("span", "hg-cc-label", slot.label), el("span", "hg-cc-swatchname", chosen?.label ?? ""));
           const swatches = el("div", "hg-cc-swatches");
@@ -553,6 +628,7 @@ export function mountCreationScreen(opts: CreationScreenOptions): CreationScreen
           return [row];
         }
         const row = el("div", "hg-cc-row");
+        row.dataset["slot"] = slot.id;
         row.appendChild(el("span", "hg-cc-label", slot.label));
         const step = el("div", "hg-cc-step");
         const at = Math.max(0, offered.findIndex((o) => o.id === build.appearance[slot.id]));
@@ -615,9 +691,44 @@ export function mountCreationScreen(opts: CreationScreenOptions): CreationScreen
     preview?.update(build);
   };
 
+  // the name, checked as it is typed: its shape here, whether it is free on the server (nameCheck)
+  const nameNote = el("div", "hg-cc-namenote");
+  nameNote.setAttribute("aria-live", "polite");
+  name.after(nameNote);
+  let nameTimer: ReturnType<typeof setTimeout> | undefined;
+  let nameAsked = "";
+  const checkName = (): void => {
+    const n = name.value.trim();
+    clearTimeout(nameTimer);
+    nameNote.className = "hg-cc-namenote";
+    if (!n) {
+      nameNote.textContent = "";
+      return;
+    }
+    if (!/^[A-Za-z][A-Za-z' -]{1,18}[A-Za-z]$/.test(n)) {
+      nameNote.textContent = "3–20 letters";
+      nameNote.classList.add("bad");
+      return;
+    }
+    if (!opts.nameCheck) {
+      nameNote.textContent = "";
+      return;
+    }
+    nameNote.textContent = "checking…";
+    nameTimer = setTimeout(() => {
+      nameAsked = n;
+      void opts.nameCheck!(n).then((r) => {
+        if (nameAsked !== name.value.trim()) return;
+        nameNote.textContent = r.ok ? "✓ available" : `✕ ${r.reason === "taken" ? "already taken" : (r.reason ?? "not allowed")}`;
+        nameNote.classList.toggle("ok", r.ok);
+        nameNote.classList.toggle("bad", !r.ok);
+      });
+    }, 350);
+  };
   name.addEventListener("input", () => {
     renderSummary();
     err.textContent = "";
+    checkName();
   });
 
   const submit = async (): Promise<void> => {
@@ -660,6 +771,7 @@ export function mountCreationScreen(opts: CreationScreenOptions): CreationScreen
     close: () => {
       unscale();
       preview?.dispose();
+      sceneLayer?.remove();
       root.remove();
     },
   };

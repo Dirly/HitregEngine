@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "number",
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+      "description": "Stable POI job slug, inferred from its name when needed."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "project": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-zA-Z0-9_-]+$",
+      "description": "Active HitReg project folder name; infer from session context."
+    },
+    "adventureSize": {
+      "type": "string",
+      "enum": [
+        "pinpoint",
+        "small",
+        "medium",
+        "large"
+      ],
+      "description": "Size of the complete requested player experience, including described interiors; never silently replace it with an entrance-only scope. Physical targets use the chosen measured small reference."
+    },
+    "hostility": {
+      "type": "string",
+      "enum": [
+        "non-hostile",
+        "hostile",
+        "mixed"
+      ],
+      "description": "Non-hostile: safe activities/discovery. Hostile: appropriate adversaries and retreats. Mixed: explicitly mapped safe-to-hostile transition."
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "description": "What the place is, why it exists, its atmosphere and what the player should experience. Resolve unclear core intent before building."
+    },
+    "location": {
+      "type": "object",
+      "properties": {
+        "hint": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human location description or survey instruction; exact coordinates may be resolved from current focus and map."
+        },
+        "anchor": {
+          "description": "Optional known engine X/Y/Z point in metres; validate against rendered terrain.",
+          "minItems": 3,
+          "maxItems": 3,
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        }
+      },
+      "required": [
+        "hint"
+      ],
+      "additionalProperties": false
+    },
+    "requirements": {
+      "default": [],
+      "description": "Specific requested destinations, activities, enemies, NPCs, rewards or mechanics. Required behavior must work before completion.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "constraints": {
+      "default": [],
+      "description": "User limits and protected content, e.g. safe roads, existing scale, terrain or material choices. Retain verbatim intent.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "mode": {
+      "default": "plan",
+      "description": "Requested work stage, not authorization. Plan produces a surveyed design only; build owns the complete authorized POI through review. Honour current user stop/freeze instructions.",
+      "type": "string",
+      "enum": [
+        "plan",
+        "build"
+      ]
+    }
+  },
+  "required": [
+    "version",
+    "id",
+    "name",
+    "project",
+    "adventureSize",
+    "hostility",
+    "description",
+    "location"
+  ],
+  "additionalProperties": false
+}

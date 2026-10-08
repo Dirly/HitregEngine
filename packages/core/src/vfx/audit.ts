@@ -1,7 +1,8 @@
 import type { Phase, VfxEffect, VfxModule } from "./modules.js";
+import { footprintOverflows } from "./fit.js";
 import { PHASES } from "./modules.js";
 import { repeatCount } from "./repeat.js";
-import { isTelegraphedKind, spellTimeline, type SpellDoc } from "./spell.js";
+import { isTelegraphedKind, spellTimeline, type SpellDoc, shotCount } from "./spell.js";
 
 /**
  * The invariants a generated spell must satisfy before a player sees it.
@@ -22,7 +23,7 @@ export interface SpellViolation {
   phase: Phase | "spell";
   /** Module index within the phase, when one module is to blame. */
   module?: number;
-  rule: "budget" | "readability" | "lifetime" | "structure";
+  rule: "budget" | "readability" | "lifetime" | "structure" | "footprint";
   detail: string;
 }
 
@@ -68,6 +69,8 @@ const ASSUMED_FRAMES = 20;
 /** Best estimate of how long a module stays on screen (its last repeat copy included). */
 export function moduleDuration(m: VfxModule, phaseLength: number): number {
   const last = (repeatCount(m) - 1) * m.repeat.every;
+  // a decal holds its life, then spends `fadeOut` more going away
+  if (m.kind === "decal") return m.delay + last + (m.duration > 0 ? m.duration : Math.max(0.3, phaseLength, m.grow)) + m.fadeOut;
   if (m.duration > 0) return m.delay + last + m.duration;
   switch (m.kind) {
     case "sprite":
@@ -140,7 +143,11 @@ export function spellStats(spell: SpellDoc): SpellStats {
   for (const phase of PHASES) {
     const effect = spell.phases[phase];
     if (!effect) continue;
-    const s = effectStats(effect, phaseLengthOf(spell, phase));
+    let s = effectStats(effect, phaseLengthOf(spell, phase));
+    // a volley plays travel and impact once PER SHOT, and a burst's shots are
+    // in the air together: count them all
+    const shots = phase === "travel" || phase === "impact" ? shotCount(spell.archetype) : 1;
+    if (shots > 1) s = { ...s, instances: s.instances * shots, particles: s.particles * shots, lights: s.lights * shots };
     phases[phase] = s;
     modules += s.modules;
   }
@@ -205,18 +212,20 @@ export function auditSpell(spell: SpellDoc): SpellViolation[] {
     }
   }
 
+  // --- footprint: the visuals on the volume stay inside it ------------------
+  for (const o of footprintOverflows(spell)) {
+    out.push({
+      phase: o.phase,
+      module: o.index,
+      rule: "footprint",
+      detail: `reaches ${o.reach.toFixed(1)} m from its anchor, past the ${o.limit.toFixed(1)} m volume — the player reads it as the danger zone`,
+    });
+  }
+
   // --- readability --------------------------------------------------------
   if (isTelegraphedKind(a.kind) && a.windup > 0) {
-    const tele = spell.phases.telegraph;
-    const has = tele?.modules.some((m) => m.kind === "telegraph");
-    if (!has) {
-      out.push({
-        phase: "telegraph",
-        rule: "readability",
-        detail: `${a.kind} declares a volume but draws no telegraph — the target has nothing to dodge`,
-      });
-    }
-    // Nothing may sit ON the volume during the windup that is opaque enough to
+    // The dodge volume itself is drawn by the host from the ABILITY (its
+    // telegraph pool), not by the spell. Nothing may sit ON the volume during the windup that is opaque enough to
     // hide the rim: the edge is the only number a dodge is judged against.
     const early: Phase[] = ["telegraph", "charge"];
     for (const phase of early) {

@@ -22,7 +22,9 @@
  * disposed — the same `dispose()` three runs for a disposed material. Two
  * sweeps of grace so a prop the pool parks for a moment, or a group
  * re-parented into a rebuilt scene, keeps its state. A culled object inside a
- * drawn scene is never touched: its root is the scene.
+ * drawn scene is never touched: its root is the scene. A render object made
+ * for a scene that is no longer drawn is released the same way, even when its
+ * object lives on in another scene (see the sweep).
  *
  * Disposing one render object is safe with a shared material: shared bind
  * groups, node-builder states and pipelines are reference-counted in three
@@ -35,6 +37,8 @@ export const SWEEP_FRAMES = 120;
 
 interface SweptRenderObject {
   object: THREE.Object3D;
+  /** The scene it was made for (three stores it; not part of its cache key). */
+  scene?: THREE.Object3D | null;
   onDispose: () => void;
   dispose(): void;
 }
@@ -100,7 +104,15 @@ export function trackRenderObjects(renderer: THREE.WebGPURenderer): RenderObject
   const sweep = (): number => {
     let freed = 0;
     for (const renderObject of [...live]) {
-      if (drawn.has(rootOf(renderObject.object))) {
+      // In use = its object is still in a drawn scene AND the scene it was
+      // made for is still drawn. The second half matters on a scene rebuild:
+      // content that survives it (streamed chunks, pools, the VFX root) moves
+      // into the NEW scene and gets new render objects (new lights → new
+      // key), while the old ones still point at the OLD scene — and holding
+      // them here kept every previous scene graph alive, ~18k objects and
+      // ~45 MB per rebuild (each agent edit to the open scene while playing).
+      const madeFor = renderObject.scene;
+      if (drawn.has(rootOf(renderObject.object)) && (!madeFor || drawn.has(madeFor))) {
         marked.delete(renderObject);
       } else if (marked.has(renderObject)) {
         renderObject.dispose(); // onDispose above drops it from both sets

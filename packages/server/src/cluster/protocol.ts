@@ -18,6 +18,8 @@
  */
 
 import type { PlayerDataRecord, PlayerDataScope, WorldRecipe } from "@hitreg/core";
+import type { ChatEvidence } from "../moderation/chat-buffer.js";
+import type { ItemLogFlush } from "../moderation/items-log.js";
 
 export const CLUSTER_PATH = "/cluster";
 
@@ -96,11 +98,27 @@ export type LayerRpc =
   /** Answer to a main-forwarded `terraform` (the admin's HTTP response). */
   | { op: "terraform.result"; requestId: string; ok: boolean; result?: unknown; error?: string }
   /** Answer to `arrival.check`: whether the spot is quiet on this layer. */
-  | { op: "arrival.result"; requestId: string; clear: boolean };
+  | { op: "arrival.result"; requestId: string; clear: boolean }
+  /** Answer to `evidence.request`: this layer's buffered chat involving the two, and where they stand. */
+  | { op: "evidence.result"; requestId: string; evidence: ChatEvidence }
+  /** Item-log entries since the last flush (docs/moderation.md §4), sent from inside the layer's commit. */
+  | ({ op: "items.log" } & ItemLogFlush);
+
+/**
+ * A portal trip riding a transfer (docs/hosting.md → "Portals"): when main
+ * pulls a party member along, their layer writes the member's own
+ * `portal/<bodyId>` record from this before committing — an arrival at
+ * `anchor` in `scene` (entering), or their own recorded way back (`back`).
+ */
+export interface PortalHop {
+  scene: string;
+  anchor?: string;
+  back?: boolean;
+}
 
 export type TransferTarget =
-  | { kind: "instance"; scene: string; party?: boolean }
-  | { kind: "layer"; layerId?: string; party?: boolean }
+  | { kind: "instance"; scene: string; party?: boolean; portal?: PortalHop }
+  | { kind: "layer"; layerId?: string; party?: boolean; portal?: PortalHop }
   /**
    * The character walked into a zone this layer does not host: place them on
    * a copy that does. `position` is where the body stands (main asks the
@@ -110,7 +128,7 @@ export type TransferTarget =
   | { kind: "zone"; zone: string; position: [number, number, number]; force?: boolean };
 
 /** Main's answer to a transfer request: go there, or not yet. */
-export type TransferAnswer = { srv: string; url: string; wait?: undefined } | { wait: true; retryMs: number; srv?: undefined };
+export type TransferAnswer = { srv: string; url: string; scene?: string; wait?: undefined } | { wait: true; retryMs: number; srv?: undefined };
 
 /** Which zones a layer hosts — the set main places players into it for. "all" = every zone (the low-population shape). */
 export type HostedZones = "all" | string[];
@@ -123,7 +141,7 @@ export type MainToLayer =
   | { t: "rpc.result"; id: number; ok: true; result: unknown }
   | { t: "rpc.result"; id: number; ok: false; error: string }
   /** Move this character to `srv` (commit → `ticket.mint` → tell the client). */
-  | { t: "transfer.begin"; characterId: string; srv: string; url: string; reason: string }
+  | { t: "transfer.begin"; characterId: string; srv: string; url: string; reason: string; scene?: string; portal?: PortalHop }
   /** The world recipe changed elsewhere: apply without persisting. */
   | { t: "recipe"; id: string; recipe: WorldRecipe }
   /** Apply a terraform batch here (the primary layer persists) and answer over `recipe.changed`. */
@@ -134,6 +152,12 @@ export type MainToLayer =
   | { t: "zones"; hosted: HostedZones }
   /** Is this spot quiet here (no awake pack in aggro range)? Answer with rpc `arrival.result`. */
   | { t: "arrival.check"; requestId: string; position: [number, number, number] }
+  /**
+   * A player reported another (docs/moderation.md §2): send the buffered chat
+   * lines either character spoke in the last `minutes`, with both positions,
+   * zone and this server's id. Answer with rpc `evidence.result`.
+   */
+  | { t: "evidence.request"; requestId: string; reporter: string; target: string; minutes: number }
   /** A chat line another layer delivered: deliver it here to whoever may hear it (zone / party / everyone). */
   | { t: "chat"; line: BridgedChatLine; origin: string }
   /** This character's party changed (or they just arrived here): write `comms.party/<characterId>` so party chat routes. Main owns parties. */
@@ -143,7 +167,16 @@ export type MainToLayer =
   /** The characters this character must not hear (every character of every account they blocked). */
   | { t: "blocks"; characterId: string; blocked: string[] }
   /** This character's guild (id) changed or they just arrived: write `comms.guild/<characterId>` so guild chat routes. */
-  | { t: "guild"; characterId: string; guild: string | null };
+  | { t: "guild"; characterId: string; guild: string | null }
+  /**
+   * Moderation (docs/moderation.md §3): this character's mute — `muteUntil`
+   * epoch ms, null = not muted. Sent when a mute is given or lifted and on
+   * every arrival (join, transfer). `notice` is a system line to show now
+   * (the mute itself, a warn).
+   */
+  | { t: "sanction"; characterId: string; muteUntil: number | null; reason?: string; notice?: string }
+  /** End this character's session now (a ban): show `text`, disconnect, refuse its tickets until `refuseUntil`. */
+  | { t: "kick"; characterId: string; text: string; refuseUntil?: number };
 
 /** Module id the layer delivers social events on to the client (`sendModule(peerId, SOCIAL_MODULE, event)`). */
 export const SOCIAL_MODULE = "social";

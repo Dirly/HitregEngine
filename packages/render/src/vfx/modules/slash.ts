@@ -99,6 +99,7 @@ export class SlashLive extends LiveModule<SlashModule> {
     this.u.d.value = k * (1 + m.tail);
     const s = Math.max(0.001, m.radius * this.sizeAt(t));
     this.mesh.scale.set(s, s, s);
+    this.x.b.value = this.cellsAcross(2 * s);
     const p = this.pose.position;
     this.mesh.position.set(p.x, p.y + m.height, p.z);
     // facing puts +Z on the spell direction; roll the cutting plane around

@@ -57,6 +57,8 @@ export interface SpawnChildOptions {
   idleExitSeconds?: number;
   /** Persist terraformed recipes (only the primary layer should). */
   persist?: boolean;
+  /** A dedicated copy: load only these zones (serve --zones). */
+  zones?: string[];
 }
 
 export class Supervisor {
@@ -110,6 +112,7 @@ export class Supervisor {
       ...(options.instanceOf ? ["--instance-of", options.instanceOf] : []),
       ...(options.idleExitSeconds !== undefined ? ["--idle-exit", String(options.idleExitSeconds)] : []),
       ...(options.persist === false ? ["--no-persist"] : []),
+      ...(options.zones && options.zones.length > 0 ? ["--zones", options.zones.join(",")] : []),
       ...(this.opts.extraArgs ?? []),
     ];
     const proc = spawn(process.execPath, args, {

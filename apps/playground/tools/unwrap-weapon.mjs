@@ -94,8 +94,10 @@ const HELD_GEAR_TEXELS_PER_M = 109;
 
 // Part names of the player's hair and head models (carry-mesh's human-hair,
 // the merged human-head), for the headgear's `hides` table.
-const HAIR = ["HairBase1", "HairBase2", "HairStyle1", "HairStyle2"];
-const BEARDS = ["BeardBase1", "BeardBase2", "Mustache"];
+const HAIR = ["HairBase1", "HairBase3", "FemaleBase1", "HairStyle1", "HairStyle2", "FemaleStyle1", "Bangs", "PonyTail1", "Braids"];
+// the side braids were modelled to hang out from under the hood (Derek, 2026-09-28)
+const HAIR_UNDER_HOOD = HAIR.filter((p) => p !== "Braids");
+const BEARDS = ["BeardBase1", "BeardBase2", "Mustache", "Chops"];
 const HEAD_SKIN = ["HeadFace", "HeadSides/Back", "HeadBottom", "HeadCrown", "F_HeadFace", "F_HeadSides/Back", "F_HeadBottom", "F_HeadCrown"];
 
 const RECIPES = {
@@ -1209,6 +1211,427 @@ const RECIPES = {
       ],
     ],
   },
+  // A low-poly alligator (622 tris, obj2gltf, no usable UVs and its texture
+  // lost). Cut into named half-body parts by Mobs/Dragon/work/split-gator.mjs:
+  // the source is one closed shell with a centre seam, so only the near half
+  // (-Z, front +X) is kept and mirrorCopy rebuilds the far one sharing the
+  // paint. Every half shell is one height field seen from its side, the
+  // anansi abdomen's cut, with flare unfolding the back and the belly.
+  alligator: {
+    source: "MMO/3d/Mobs/Dragon/Alligator-parts.obj",
+    sourceScale: 1,
+    objScale: 1,
+    outMesh: "MMO/3d/Mobs/Dragon/Alligator-unwrapped",
+    sheet: 1254,
+    keyStroke: 8,
+    smooth: 48,
+    margin: 22,
+    gutter: 48,
+    atlas: { size: 540, bleed: 2, bgLum: 236 },
+    mirrorCopy: { axis: "z", parts: ["Gator_Head", "Gator_Body", "Gator_Tail", "Gator_LegFront", "Gator_LegBack", "Gator_Sail"] },
+    slots: {
+      // small lettering, so it cannot sit on the eye mark
+      head: { color: "#ff0000", fit: "contain", labelMax: 1 },
+      body: { color: "#00ff00", fit: "contain" },
+      tail: { color: "#008c00", fit: "contain", matchTo: "body" },
+      "leg-front": { color: "#0000ff", fit: "contain", matchTo: "body" },
+      "leg-back": { color: "#00008c", fit: "contain", matchTo: "body" },
+      sail: { color: "#ff8000", fit: "contain" },
+    },
+    parts: {
+      Gator_Head: { slot: "head", method: "plane", u: "+x", v: "-y", flare: 0.5 },
+      Gator_Body: { slot: "body", method: "plane", u: "+x", v: "-y", flare: 0.4 },
+      Gator_Tail: { slot: "tail", method: "plane", u: "+x", v: "-y", flare: 0.4 },
+      Gator_LegFront: { slot: "leg-front", method: "plane", view: [0.23, 0.42, -0.88], flare: 0.2 },
+      Gator_LegBack: { slot: "leg-back", method: "plane", view: [0.31, 0.42, -0.85], flare: 0.2 },
+      // the sail seen flat from its side, painted once for both faces
+      Gator_Sail: { slot: "sail", method: "plane", u: "+x", v: "-y", flare: 0.05 },
+    },
+    layout: { row: [{ col: ["tail", "body", { row: ["head", "sail"] }] }, { col: ["leg-front", "leg-back"] }] },
+    // the eye is painted (Derek): its mark on the key sits where the old eye mesh sat
+    marks: [{ slot: "head", at: [1.3035, 0.18, -0.0642], shape: "eye", size: 9 }],
+    cutoutSlots: [],
+    combos: [
+      ["Gator_Head", "Gator_Body", "Gator_Tail", "Gator_LegFront", "Gator_LegBack"],
+      ["Gator_Head", "Gator_Body", "Gator_Tail", "Gator_LegFront", "Gator_LegBack", "Gator_Sail"],
+    ],
+  },
+  // A low-poly spider (504 tris, a Maya OBJ whose skin data and texture did not
+  // survive). Cut by Mobs/Dragon/work/split-spider.mjs into the near half's
+  // cephalothorax, abdomen and four legs (front to back); mirrorCopy builds
+  // the far side. Body halves are side-on height fields like the anansi's
+  // abdomen; each leg is a closed bent prism.
+  spider: {
+    source: "MMO/3d/Mobs/Dragon/Spider-parts.obj",
+    sourceScale: 1,
+    objScale: 1,
+    outMesh: "MMO/3d/Mobs/Dragon/Spider-unwrapped",
+    sheet: 1254,
+    keyStroke: 8,
+    smooth: 48,
+    margin: 22,
+    gutter: 48,
+    atlas: { size: 470, bleed: 2, bgLum: 236 },
+    mirrorCopy: { axis: "z", parts: ["Spider_Head", "Spider_Abdomen", "Spider_Leg1", "Spider_Leg2", "Spider_Leg3", "Spider_Leg4"] },
+    slots: {
+      head: { color: "#ff0000", fit: "contain", label: "head + fangs" },
+      abdomen: { color: "#00ff00", fit: "contain" },
+      leg1: { color: "#0000ff", fit: "contain", label: "leg-front", matchTo: "head" },
+      leg2: { color: "#8000ff", fit: "contain", label: "leg 2", matchTo: "leg1" },
+      leg3: { color: "#ff8000", fit: "contain", label: "leg 3", matchTo: "leg1" },
+      leg4: { color: "#8c4600", fit: "contain", label: "leg-back", matchTo: "leg1" },
+    },
+    parts: {
+      Spider_Head: { slot: "head", method: "plane", u: "+x", v: "+z", flare: 0.3 },
+      Spider_Abdomen: { slot: "abdomen", method: "plane", u: "+x", v: "-y", flare: 0.4 },
+      Spider_Leg1: { slot: "leg1", method: "tube", seam: "-y", taper: true },
+      Spider_Leg2: { slot: "leg2", method: "tube", seam: "-y", taper: true },
+      Spider_Leg3: { slot: "leg3", method: "tube", seam: "-y", taper: true },
+      Spider_Leg4: { slot: "leg4", method: "tube", seam: "-y", taper: true },
+    },
+    layout: { col: [{ row: ["abdomen", "head"] }, { row: ["leg1", "leg2", "leg3", "leg4"] }] },
+    cutoutSlots: [],
+    combos: [["Spider_Head", "Spider_Abdomen", "Spider_Leg1", "Spider_Leg2", "Spider_Leg3", "Spider_Leg4"]],
+  },
+  // A low-poly dragon (1028 tris, Mesh_Dragon.gltf, its texture lost), cut by
+  // Mobs/Dragon/work/split-dragon.mjs into the near half's head, neck, body,
+  // tail and legs plus the loose wing, horn, back spike and eye; mirrorCopy
+  // builds the far side. Metres (7 m long). Wings, horns and spikes are their
+  // own parts, so the ubermesh shows or hides each (a wingless drake).
+  dragon: {
+    source: "MMO/3d/Mobs/Dragon/Dragon-parts.obj",
+    sourceScale: 1,
+    objScale: 1,
+    outMesh: "MMO/3d/Mobs/Dragon/Dragon-unwrapped",
+    sheet: 1254,
+    keyStroke: 8,
+    smooth: 48,
+    margin: 22,
+    gutter: 48,
+    atlas: { size: 512, bleed: 2, bgLum: 236 },
+    mirrorCopy: { axis: "z", parts: ["Dragon_Head","Dragon_Neck","Dragon_Body","Dragon_Tail","Dragon_LegFront","Dragon_LegBack","Dragon_Wing","Dragon_Horn","Dragon_Spike"] },
+    slots: {
+      // small lettering, so it cannot sit on the eye mark
+      head: { color: "#ff0000", fit: "contain", labelMax: 1 },
+      "head-under": { color: "#c05050", fit: "contain", label: "under jaw", matchTo: "neck" },
+      neck: { color: "#8c0000", fit: "contain", matchTo: "body" },
+      body: { color: "#00ff00", fit: "contain" },
+      tail: { color: "#008c00", fit: "contain", matchTo: "body" },
+      "leg-front": { color: "#0000ff", fit: "contain", matchTo: "body" },
+      "leg-back": { color: "#00008c", fit: "contain", matchTo: "body" },
+      wing: { color: "#ff8000", fit: "contain" },
+      horn: { color: "#8000ff", fit: "contain" },
+      spike: { color: "#c0c060", fit: "contain", matchTo: "horn" },
+    },
+    parts: {
+      // the half shells seen from their side, the anansi abdomen's cut
+      // the underside of the jaw on its own island, seen from below: left in the
+      // profile it folded into a hook the generator painted teeth onto
+      Dragon_Head: {
+        slot: "head", method: "plane", u: "+x", v: "-y", flare: 0.5,
+        split: [{ slot: "head-under", facing: "-y", above: 0.5, u: "+x", v: "+z", flare: 0.15 }],
+      },
+      Dragon_Neck: { slot: "neck", method: "plane", u: "+x", v: "-y", flare: 0.4 },
+      Dragon_Body: { slot: "body", method: "plane", u: "+x", v: "-y", flare: 0.4 },
+      Dragon_Tail: { slot: "tail", method: "plane", u: "+x", v: "-y", flare: 0.4 },
+      Dragon_LegFront: { slot: "leg-front", method: "plane", u: "+x", v: "-y", flare: 0.25 },
+      Dragon_LegBack: { slot: "leg-back", method: "plane", u: "+x", v: "-y", flare: 0.25 },
+      // a two-sided membrane, seen square-on: both faces share the paint
+      Dragon_Wing: { slot: "wing", method: "plane", view: [0, 0.5, -0.87], flare: 0.05 },
+      Dragon_Horn: { slot: "horn", method: "plane", u: "+x", v: "-y", flare: 0.2 },
+      Dragon_Spike: { slot: "spike", method: "plane", u: "+x", v: "-y", flare: 0.2 },
+    },
+    layout: { col: [{ row: ["tail", "wing"] }, { row: ["body", "neck", { col: ["head", "head-under"] }] }, { row: ["leg-front", "leg-back", "horn", { col: ["spike"] }] }] },
+    // painted eye and mouth: the eye where the old eye mesh sat, the mouth a line
+    // along the side of the snout (the old sheets put the teeth under the jaw)
+    marks: [
+      { slot: "head", at: [3.1331, 0.644, -0.2266], shape: "eye", size: 8 },
+      { slot: "head", from: [3.47, 0.3, -0.12], to: [3.0, 0.45, -0.22], shape: "line" },
+    ],
+    cutoutSlots: [],
+    combos: [
+      ["Dragon_Head","Dragon_Neck","Dragon_Body","Dragon_Tail","Dragon_LegFront","Dragon_LegBack","Dragon_Wing","Dragon_Horn","Dragon_Spike"],
+      ["Dragon_Head","Dragon_Neck","Dragon_Body","Dragon_Tail","Dragon_LegFront","Dragon_LegBack","Dragon_Horn","Dragon_Spike"],
+    ],
+  },
+  // A low-poly lion (1350 tris, Lion.gltf, its texture lost), cut by
+  // Mobs/Dragon/work/split-lion.mjs into the near half's head, body, tail and
+  // legs plus the mane, which stays its own part: hidden, it is a lioness.
+  // Metres (2.8 m snout to tail tip); mirrorCopy builds the far side.
+  lion: {
+    source: "MMO/3d/Mobs/Dragon/Lion-parts.obj",
+    sourceScale: 1,
+    objScale: 1,
+    outMesh: "MMO/3d/Mobs/Dragon/Lion-unwrapped",
+    sheet: 1254,
+    keyStroke: 8,
+    smooth: 48,
+    margin: 22,
+    gutter: 48,
+    atlas: { size: 628, bleed: 2, bgLum: 236 },
+    mirrorCopy: { axis: "z", parts: ["Lion_Head","Lion_Mane","Lion_Body","Lion_Tail","Lion_LegFront","Lion_LegBack"] },
+    slots: {
+      // small lettering, so it cannot sit on the eye mark
+      head: { color: "#ff0000", fit: "contain", labelMax: 1 },
+      mane: { color: "#ff8000", fit: "contain" },
+      body: { color: "#00ff00", fit: "contain" },
+      // no matchTo: the dark tuft is meant to pull the tail darker than the body
+      tail: { color: "#008c00", fit: "contain" },
+      "leg-front": { color: "#0000ff", fit: "contain", matchTo: "body" },
+      "leg-back": { color: "#00008c", fit: "contain", matchTo: "body" },
+    },
+    parts: {
+      Lion_Head: { slot: "head", method: "plane", u: "+x", v: "-y", flare: 0.5 },
+      Lion_Mane: { slot: "mane", method: "plane", u: "+x", v: "-y", flare: 0.4 },
+      Lion_Body: { slot: "body", method: "plane", u: "+x", v: "-y", flare: 0.4 },
+      Lion_Tail: { slot: "tail", method: "plane", u: "+x", v: "-y", flare: 0.4 },
+      Lion_LegFront: { slot: "leg-front", method: "plane", u: "+x", v: "-y", flare: 0.25 },
+      Lion_LegBack: { slot: "leg-back", method: "plane", u: "+x", v: "-y", flare: 0.25 },
+    },
+    layout: { row: [{ col: ["body", "tail", { row: ["leg-back", "leg-front"] }] }, { col: ["mane", "head"] }] },
+    // the eye where the cave lion's sheet painted it (Derek: the best of the three)
+    marks: [{ slot: "head", at: [0.9712, 0.9634, -0.0489], shape: "eye", size: 6 }],
+    cutoutSlots: [],
+    combos: [
+      ["Lion_Head","Lion_Mane","Lion_Body","Lion_Tail","Lion_LegFront","Lion_LegBack"],
+      ["Lion_Head","Lion_Body","Lion_Tail","Lion_LegFront","Lion_LegBack"],
+    ],
+  },
+  // A low-poly goat (622 tris, Mesh_Goat.gltf, its texture lost), cut by
+  // Mobs/Dragon/work/split-goat.mjs into the near half's head, neck, body, tail
+  // and legs plus the loose horn, ear, eye and beard. Metres (1.6 m); horns
+  // and beard are their own parts, so a nanny or a kid is the same mesh.
+  goat: {
+    source: "MMO/3d/Mobs/Dragon/Goat-parts.obj",
+    sourceScale: 1,
+    objScale: 1,
+    outMesh: "MMO/3d/Mobs/Dragon/Goat-unwrapped",
+    sheet: 1254,
+    keyStroke: 8,
+    smooth: 48,
+    margin: 22,
+    gutter: 48,
+    atlas: { size: 400, bleed: 2, bgLum: 236 },
+    mirrorCopy: { axis: "z", parts: ["Goat_Head","Goat_Neck","Goat_Body","Goat_Tail","Goat_LegFront","Goat_LegBack","Goat_Horn","Goat_Ear","Goat_Beard"] },
+    slots: {
+      // small lettering, so it cannot sit on the eye mark
+      head: { color: "#ff0000", fit: "contain", labelMax: 1 },
+      neck: { color: "#8c0000", fit: "contain", matchTo: "body" },
+      body: { color: "#00ff00", fit: "contain" },
+      tail: { color: "#008c00", fit: "contain", matchTo: "body" },
+      "leg-front": { color: "#0000ff", fit: "contain", matchTo: "body" },
+      "leg-back": { color: "#00008c", fit: "contain", matchTo: "body" },
+      horn: { color: "#8000ff", fit: "contain" },
+      ear: { color: "#ff8000", fit: "contain", matchTo: "head" },
+      beard: { color: "#c0c060", fit: "contain" },
+    },
+    parts: {
+      Goat_Head: { slot: "head", method: "plane", u: "+x", v: "-y", flare: 0.5 },
+      Goat_Neck: { slot: "neck", method: "plane", u: "+x", v: "-y", flare: 0.4 },
+      Goat_Body: { slot: "body", method: "plane", u: "+x", v: "-y", flare: 0.4 },
+      Goat_Tail: { slot: "tail", method: "plane", u: "+x", v: "-y", flare: 0.4 },
+      Goat_LegFront: { slot: "leg-front", method: "plane", u: "+x", v: "-y", flare: 0.25 },
+      Goat_LegBack: { slot: "leg-back", method: "plane", u: "+x", v: "-y", flare: 0.25 },
+      Goat_Horn: { slot: "horn", method: "plane", u: "+x", v: "-y", flare: 0.2 },
+      Goat_Ear: { slot: "ear", method: "plane", u: "+x", v: "-y", flare: 0.2 },
+      Goat_Beard: { slot: "beard", method: "plane", u: "+x", v: "-y", flare: 0.2 },
+    },
+    layout: { row: [{ col: ["body", { row: ["neck", "head"] }] }, { col: ["leg-back", "leg-front", { row: ["tail", "horn"] }, { row: ["ear", "beard"] }] }] },
+    marks: [{ slot: "head", at: [0.6143, 0.4944, -0.0693], shape: "eye", size: 7 }],
+    cutoutSlots: [],
+    combos: [
+      ["Goat_Head","Goat_Neck","Goat_Body","Goat_Tail","Goat_LegFront","Goat_LegBack","Goat_Horn","Goat_Ear","Goat_Beard"],
+      ["Goat_Head","Goat_Neck","Goat_Body","Goat_Tail","Goat_LegFront","Goat_LegBack","Goat_Ear"],
+    ],
+  },
+  // A low-poly giant ant (720 tris, Mesh_Ant.gltf, its texture lost), cut by
+  // Mobs/Dragon/work/split-ant.mjs into the near half's head, thorax (with
+  // its neck and waist) and gaster, plus the loose legs, antenna, mandible and
+  // eye. Metres (1.8 m overall); mirrorCopy builds the far side.
+  ant: {
+    source: "MMO/3d/Mobs/Dragon/Ant-parts.obj",
+    sourceScale: 1,
+    objScale: 1,
+    outMesh: "MMO/3d/Mobs/Dragon/Ant-unwrapped",
+    sheet: 1254,
+    keyStroke: 8,
+    smooth: 48,
+    margin: 22,
+    gutter: 48,
+    atlas: { size: 456, bleed: 2, bgLum: 236 },
+    mirrorCopy: { axis: "z", parts: ["Ant_Head","Ant_Thorax","Ant_Abdomen","Ant_Leg1","Ant_Leg2","Ant_Leg3","Ant_Antenna","Ant_Mandible", "Ant_AbdomenQueen", "Ant_MandibleSoldier", "Ant_MandibleArmy"] },
+    slots: {
+      // small lettering, so it cannot sit on the eye mark
+      head: { color: "#ff0000", fit: "contain", labelMax: 1 },
+      thorax: { color: "#00ff00", fit: "contain", matchTo: "head" },
+      abdomen: { color: "#008c00", fit: "contain" },
+      leg1: { color: "#0000ff", fit: "contain", label: "leg-front", matchTo: "thorax" },
+      leg2: { color: "#8000ff", fit: "contain", label: "leg 2", matchTo: "leg1" },
+      leg3: { color: "#00008c", fit: "contain", label: "leg-back", matchTo: "leg1" },
+      antenna: { color: "#ff8000", fit: "contain" },
+      mandible: { color: "#c0c060", fit: "contain" },
+      "abdomen-queen": { color: "#46c846", fit: "contain", label: "queen abdomen", matchTo: "abdomen" },
+      "mandible-soldier": { color: "#e0e090", fit: "contain", label: "soldier jaw", matchTo: "mandible" },
+      // the army ant's stag-beetle pincer (split-ant.mjs takes it from Beetle-parts.obj)
+      "mandible-army": { color: "#a05a28", fit: "contain", label: "army jaw", matchTo: "mandible" },
+    },
+    parts: {
+      Ant_Head: { slot: "head", method: "plane", u: "+x", v: "-y", flare: 0.4 },
+      Ant_Thorax: { slot: "thorax", method: "plane", u: "+x", v: "-y", flare: 0.4 },
+      Ant_Abdomen: { slot: "abdomen", method: "plane", u: "+x", v: "-y", flare: 0.4 },
+      Ant_Leg1: { slot: "leg1", method: "tube", seam: "-y", taper: true },
+      Ant_Leg2: { slot: "leg2", method: "tube", seam: "-y", taper: true },
+      Ant_Leg3: { slot: "leg3", method: "tube", seam: "-y", taper: true },
+      Ant_Antenna: { slot: "antenna", method: "tube", seam: "-y", taper: true },
+      Ant_AbdomenQueen: { slot: "abdomen-queen", method: "plane", u: "+x", v: "-y", flare: 0.4 },
+      Ant_MandibleSoldier: { slot: "mandible-soldier", method: "plane", u: "+x", v: "+z", flare: 0.2 },
+      Ant_Mandible: { slot: "mandible", method: "plane", u: "+x", v: "+z", flare: 0.2 },
+      Ant_MandibleArmy: { slot: "mandible-army", method: "plane", u: "+x", v: "+z", flare: 0.2 },
+    },
+    layout: { col: [{ row: ["abdomen", "thorax", "head"] }, { row: ["abdomen-queen", "mandible-army"] }, { row: ["leg1", "leg2", "leg3", "antenna", { col: ["mandible", "mandible-soldier"] }] }] },
+    marks: [{ slot: "head", at: [0.5131, 0.0472, -0.1298], shape: "eye", size: 9 }],
+    cutoutSlots: [],
+    combos: [
+      ["Ant_Head","Ant_Thorax","Ant_Leg1","Ant_Leg2","Ant_Leg3","Ant_Antenna","Ant_Abdomen","Ant_Mandible"],
+      ["Ant_Head","Ant_Thorax","Ant_Leg1","Ant_Leg2","Ant_Leg3","Ant_Antenna","Ant_AbdomenQueen","Ant_Mandible"],
+      ["Ant_Head","Ant_Thorax","Ant_Leg1","Ant_Leg2","Ant_Leg3","Ant_Antenna","Ant_Abdomen","Ant_MandibleSoldier"],
+      ["Ant_Head","Ant_Thorax","Ant_Leg1","Ant_Leg2","Ant_Leg3","Ant_Antenna","Ant_Abdomen","Ant_MandibleArmy"],
+    ],
+  },
+  // A low-poly trout (268 tris, Mesh_Trout.gltf, its texture lost), cut by
+  // Mobs/Dragon/work/split-trout.mjs into the near half's body (head to tail
+  // fin) plus every fin on one island and the eye. Metres (a 1.2 m giant
+  // trout); mirrorCopy builds the far side.
+  trout: {
+    source: "MMO/3d/Mobs/Dragon/Trout-parts.obj",
+    sourceScale: 1,
+    objScale: 1,
+    outMesh: "MMO/3d/Mobs/Dragon/Trout-unwrapped",
+    sheet: 1254,
+    keyStroke: 8,
+    smooth: 48,
+    margin: 22,
+    gutter: 48,
+    atlas: { size: 256, bleed: 2, bgLum: 236 },
+    mirrorCopy: { axis: "z", parts: ["Trout_Body","Trout_Fins"] },
+    slots: {
+      body: { color: "#00ff00", fit: "contain" },
+      fins: { color: "#ff8000", fit: "contain" },
+    },
+    parts: {
+      // a fish IS its side profile
+      Trout_Body: { slot: "body", method: "plane", u: "+x", v: "-y", flare: 0.4 },
+      Trout_Fins: { slot: "fins", method: "plane", u: "+x", v: "-y", flare: 0.05 },
+    },
+    layout: { col: ["body", { row: ["fins"] }] },
+    marks: [{ slot: "body", at: [0.5111, 0.0256, -0.0413], shape: "eye", size: 8 }],
+    cutoutSlots: [],
+    combos: [["Trout_Body","Trout_Fins"]],
+  },
+  // The Blockbench rat (Rat.fbx, 619 tris, one shell with a centre seam), re-cut
+  // through the atlas system (Derek: "your system did way better than mine"):
+  // Mobs/Dragon/work/split-ratwolf.mjs keeps the near half in metres (a 0.5 m
+  // giant rat); mirrorCopy builds the far side. The eye is painted at its mark.
+  rat: {
+    source: "MMO/3d/Mobs/Dragon/Rat-parts.obj",
+    sourceScale: 1,
+    objScale: 1,
+    outMesh: "MMO/3d/Mobs/Dragon/Rat-unwrapped",
+    sheet: 1254,
+    keyStroke: 8,
+    smooth: 48,
+    margin: 22,
+    gutter: 48,
+    atlas: { size: 288, bleed: 2, bgLum: 236 },
+    mirrorCopy: { axis: "z", parts: ["Rat_Head","Rat_Body","Rat_Tail","Rat_LegFront","Rat_LegBack"] },
+    slots: {
+      head: { color: "#ff0000", fit: "contain", labelMax: 1 },
+      body: { color: "#00ff00", fit: "contain" },
+      // the faces a side view sees edge-on, each square-on on its own island
+      chest: { color: "#00a000", fit: "contain", matchTo: "body", label: "chest" },
+      rump: { color: "#80ff80", fit: "contain", matchTo: "body", label: "rump" },
+      back: { color: "#40c040", fit: "contain", matchTo: "body", label: "back top" },
+      crown: { color: "#c00000", fit: "contain", matchTo: "head", label: "head top" },
+      snout: { color: "#ff6060", fit: "contain", matchTo: "head", label: "snout front" },
+      tail: { color: "#ff8000", fit: "contain" },
+      ear: { color: "#ffff00", fit: "contain", matchTo: "head", label: "ear" },
+      "leg-front": { color: "#0000ff", fit: "contain", matchTo: "body" },
+      "leg-back": { color: "#00008c", fit: "contain", matchTo: "body" },
+    },
+    parts: {
+      Rat_Head: { slot: "head", method: "plane", u: "+x", v: "-y", flare: 0.4,
+        split: [
+          { slot: "snout", facing: "+x", above: 0.7, u: "-z", v: "-y", flare: 0.15 },
+          { slot: "crown", facing: "+y", above: 0.7, u: "+x", v: "+z", flare: 0.15 },
+        ] },
+      Rat_Body: { slot: "body", method: "plane", u: "+x", v: "-y", flare: 0.35,
+        split: [
+          { slot: "ear", facing: "+x", above: 0.3, where: { x: [0.8, 1], y: [0.75, 1] }, u: "-z", v: "-y", flare: 0.1 },
+          { slot: "chest", facing: "+x", above: 0.6, u: "-z", v: "-y", flare: 0.15 },
+          { slot: "rump", facing: "-x", above: 0.6, u: "+z", v: "-y", flare: 0.15 },
+          { slot: "back", facing: "+y", above: 0.62, u: "+x", v: "+z", flare: 0.1 },
+        ] },
+      Rat_Tail: { slot: "tail", method: "plane", u: "+x", v: "-y", flare: 0.3 },
+      Rat_LegFront: { slot: "leg-front", method: "plane", u: "+x", v: "-y", flare: 0.25 },
+      Rat_LegBack: { slot: "leg-back", method: "plane", u: "+x", v: "-y", flare: 0.25 },
+    },
+    layout: { row: [{ col: ["body", "back", "tail", "leg-back"] }, { col: [{ row: ["head", { col: ["crown", "snout"] }] }, { row: ["chest", "rump", "ear"] }, "leg-front"] }] },
+    marks: [{ slot: "head", at: [0.345, 0.415, 0.06], shape: "eye", size: 10 }],
+    cutoutSlots: [],
+    combos: [["Rat_Head","Rat_Body","Rat_Tail","Rat_LegFront","Rat_LegBack"]],
+  },
+  // The Blockbench wolf (WolfPestilence.obj, 597 tris: a body shell with a centre
+  // seam and two ears), re-cut through the atlas system: split-ratwolf.mjs
+  // keeps the near half in metres (0.95 m tall); mirrorCopy builds the far side.
+  // The eye is painted at its mark.
+  wolf: {
+    source: "MMO/3d/Mobs/Dragon/Wolf-parts.obj",
+    sourceScale: 1,
+    objScale: 1,
+    outMesh: "MMO/3d/Mobs/Dragon/Wolf-unwrapped",
+    sheet: 1254,
+    keyStroke: 8,
+    smooth: 48,
+    margin: 22,
+    gutter: 48,
+    atlas: { size: 416, bleed: 2, bgLum: 236 },
+    mirrorCopy: { axis: "z", parts: ["Wolf_Head","Wolf_Body","Wolf_Tail","Wolf_LegFront","Wolf_LegBack","Wolf_Ear"] },
+    slots: {
+      head: { color: "#ff0000", fit: "contain", labelMax: 1 },
+      body: { color: "#00ff00", fit: "contain" },
+      // the faces a side view sees edge-on, each square-on on its own island
+      chest: { color: "#00a000", fit: "contain", matchTo: "body", label: "chest" },
+      rump: { color: "#80ff80", fit: "contain", matchTo: "body", label: "rump" },
+      back: { color: "#40c040", fit: "contain", matchTo: "body", label: "back top" },
+      crown: { color: "#c00000", fit: "contain", matchTo: "head", label: "head top" },
+      snout: { color: "#ff6060", fit: "contain", matchTo: "head", label: "snout front" },
+      tail: { color: "#008c00", fit: "contain", matchTo: "body" },
+      "leg-front": { color: "#0000ff", fit: "contain", matchTo: "body" },
+      "leg-back": { color: "#00008c", fit: "contain", matchTo: "body" },
+      ear: { color: "#ff8000", fit: "contain", matchTo: "head" },
+    },
+    parts: {
+      Wolf_Head: { slot: "head", method: "plane", u: "+x", v: "-y", flare: 0.4,
+        split: [
+          { slot: "snout", facing: "+x", above: 0.7, u: "-z", v: "-y", flare: 0.15 },
+          { slot: "crown", facing: "+y", above: 0.7, u: "+x", v: "+z", flare: 0.15 },
+        ] },
+      Wolf_Body: { slot: "body", method: "plane", u: "+x", v: "-y", flare: 0.35,
+        split: [
+          { slot: "chest", facing: "+x", above: 0.6, where: { x: [0.5, 1] }, u: "-z", v: "-y", flare: 0.15 },
+          { slot: "rump", facing: "-x", above: 0.6, where: { x: [0, 0.5] }, u: "+z", v: "-y", flare: 0.15 },
+          { slot: "back", facing: "+y", above: 0.62, u: "+x", v: "+z", flare: 0.1 },
+        ] },
+      Wolf_Tail: { slot: "tail", method: "plane", u: "+x", v: "-y", flare: 0.3 },
+      Wolf_LegFront: { slot: "leg-front", method: "plane", u: "+x", v: "-y", flare: 0.25 },
+      Wolf_LegBack: { slot: "leg-back", method: "plane", u: "+x", v: "-y", flare: 0.25 },
+      Wolf_Ear: { slot: "ear", method: "plane", u: "+x", v: "-y", flare: 0.2 },
+    },
+    layout: { row: [{ col: ["body", { row: ["chest", "rump"] }, "back"] }, { col: [{ row: ["head", { col: ["crown", "snout"] }] }, "tail", { row: ["leg-front", "leg-back"] }, "ear"] }] },
+    marks: [{ slot: "head", at: [0.667, 0.811, 0.048], shape: "eye", size: 10 }],
+    cutoutSlots: [],
+    combos: [["Wolf_Head","Wolf_Body","Wolf_Tail","Wolf_LegFront","Wolf_LegBack","Wolf_Ear"]],
+  },
   // The player's HEAD, one module worn by every human character. Its skin is
   // four shells: a face panel, a band round the sides and back, a flat crown
   // and a jaw piece under the chin that wraps to the nape. The hair, beard
@@ -1480,12 +1903,12 @@ const RECIPES = {
         HeadBand1: ["NoseGuard1", "NoseGuard2", "OrnateTop", "OrnateTop2"],
       },
       // What each piece covers on the OTHER models worn with it (human-hair,
-      // human-head). Helms and the hood hide every hair style; the NoBeard
+      // human-head). Helms hide every hair piece, the hood all but the braids; the NoBeard
       // plates and the bandana hide the beards; the face cover sits ON the
       // head's own surface (it would z-fight with the skin), so it hides the
       // whole head, both sexes, and the hair and beards with it.
       hides: {
-        Helm1_Base: HAIR, Helm2_Base: HAIR, Helm3_base: HAIR, Hood: HAIR,
+        Helm1_Base: HAIR, Helm2_Base: HAIR, Helm3_base: HAIR, Hood: HAIR_UNDER_HOOD,
         Helm1_NoBeard: BEARDS, Helm2_NoBeard: BEARDS, Bandana: BEARDS,
         FacecoverTotal: [...HAIR, ...BEARDS, ...HEAD_SKIN],
         // tall styles poke through a crown (Derek): the mohawk and the spiked crest
@@ -1630,6 +2053,12 @@ function parseArgs(argv) {
 const args = parseArgs(process.argv.slice(2));
 const SURVEY = args.survey === true;
 const recipeName = String(args.recipe ?? "longsword");
+// a recipe may also live as data beside its set: tools/atlas/sets/<name>/recipe.json
+// (generated recipes, e.g. MMO/3d/Mobs/Dragon/work/make-recipes.mjs)
+{
+  const file = path.join(STUDIO, "Engine", "tools", "atlas", "sets", recipeName, "recipe.json");
+  if (!RECIPES[recipeName] && fs.existsSync(file)) RECIPES[recipeName] = JSON.parse(fs.readFileSync(file, "utf8"));
+}
 const recipe = RECIPES[recipeName];
 // A survey runs on a mesh that has no recipe yet — that is the point of it.
 if (!recipe && !SURVEY) {
@@ -2495,6 +2924,15 @@ function authoredUnwrap(part, spec) {
  * (`g` = {}) is the part's own projection; the others are its `split` entries,
  * each taking the faces that point along `facing`.
  */
+function inBand(part, where, c) {
+  if (!where || !c) return true;
+  part.bounds ??= new THREE.Box3().setFromPoints(part.world);
+  for (const [k, [lo, hi]] of Object.entries(where)) {
+    const t = (c[k] - part.bounds.min[k]) / (part.bounds.max[k] - part.bounds.min[k] || 1);
+    if (t < lo || t > hi) return false;
+  }
+  return true;
+}
 function projectionGroup(part, spec, g, base) {
   const view = g.view ?? (g.u || g.v ? null : spec.view);
   const { du, dv, drop, axis } = basisOf(
@@ -2537,7 +2975,9 @@ function projectionGroup(part, spec, g, base) {
     dv,
     drop,
     dropped: axis,
-    takes: (n) => base || n.dot(want.vec) > (g.above ?? 0.25),
+    // `where: { x|y|z: [lo, hi] }` limits a split group to a band of the part,
+    // as fractions of its bounds (a neck front apart from the chest below it)
+    takes: (n, c) => base || (n.dot(want.vec) > (g.above ?? 0.25) && inBand(part, g.where, c)),
     straddles,
     project: (v0, unfolded = false) => {
       const v = unfolded ? v0 : folded(v0);
@@ -2584,7 +3024,7 @@ function planeUnwrap(part, spec) {
       rimTris.push({ t, p });
       continue;
     }
-    const g = groups.find((x) => x.takes(n));
+    const g = groups.find((x) => x.takes(n, p[0].clone().add(p[1]).add(p[2]).multiplyScalar(1 / 3)));
     const tri = {
       part: part.name,
       idx: [0, 1, 2].map((k) => t * 3 + k),
@@ -2953,7 +3393,8 @@ function sphereUnwrap(part, spec) {
     const p = idx.map((i) => part.world[i]);
     if (groups.length) {
       const n = new THREE.Vector3().subVectors(p[1], p[0]).cross(new THREE.Vector3().subVectors(p[2], p[0])).normalize();
-      const g = groups.find((x) => x.takes(n));
+      const c = p[0].clone().add(p[1]).add(p[2]).multiplyScalar(1 / 3);
+      const g = groups.find((x) => x.takes(n, c));
       if (g) {
         g.slot.tris.push({ part: part.name, idx, uv: p.map(g.project), front: n.dot(g.drop) > 0, p });
         moved.set(g.name, (moved.get(g.name) ?? 0) + 1);
@@ -3381,6 +3822,13 @@ if (AUTHORED) {
 } else {
   let lo = 0.1;
   let hi = 200;
+  // a source in metres needs far more than 200 px per unit; raise the
+  // ceiling until the layout no longer fits
+  while (hi < 1e7) {
+    const m = measure(recipe.layout, hi);
+    if (m.w > SHEET - 2 * MAR || m.h > SHEET - 2 * MAR) break;
+    hi *= 2;
+  }
   for (let i = 0; i < 60; i++) {
     const mid = (lo + hi) / 2;
     const m = measure(recipe.layout, mid);
@@ -4500,6 +4948,33 @@ if (recipe.mirrorCopy) {
     part.uv = uv;
     if (uvKey) part.uvKey = uvKey;
   }
+}
+
+// `scaledCopy` adds an ALTERNATIVE to a part: the same triangles scaled about
+// an anchor on the part's bounds ("min" | "mid" | "max" | a number, per axis),
+// wearing the same UVs — a queen's swollen gaster, a soldier's oversized jaws.
+// It is a part of its own (its own bit in the ubermesh), so a look shows it
+// instead of the original, and every theme already painted covers it.
+for (const c of recipe.scaledCopy ?? []) {
+  const src = parts.find((p) => p.name === c.from);
+  if (!src) {
+    console.warn(`! scaledCopy: no part ${c.from}`);
+    continue;
+  }
+  const box = new THREE.Box3().setFromPoints(src.world);
+  const pivot = ["x", "y", "z"].map((k, a) => {
+    const at = c.anchor?.[a] ?? "mid";
+    return typeof at === "number" ? at : at === "min" ? box.min[k] : at === "max" ? box.max[k] : (box.min[k] + box.max[k]) / 2;
+  });
+  parts.push({
+    ...src,
+    name: c.name,
+    world: src.world.map((v) => new THREE.Vector3(...[0, 1, 2].map((a) => pivot[a] + (v.getComponent(a) - pivot[a]) * c.scale[a]))),
+    uv: src.uv.slice(),
+    uvKey: src.uvKey?.slice(),
+    normal: undefined,
+  });
+  console.log(`  scaledCopy: ${c.name} = ${c.from} x${c.scale.join("/")}, sharing its paint`);
 }
 
 if (recipe.smooth) {

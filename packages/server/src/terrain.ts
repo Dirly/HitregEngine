@@ -109,6 +109,12 @@ export class TerrainStreamer {
   private readonly loadBudgetMs: number;
   /** Cost of the last cell load, for diagnostics. */
   lastLoadMs = 0;
+  /**
+   * Running totals (diagnostics; a host diffs them per tick): cells generated INLINE on this thread (spawn
+   * ensures, the no-worker fallback — the expensive kind) and cells integrated (doc → scene → physics, every
+   * cell pays it), with the milliseconds each took.
+   */
+  readonly counters = { inlineLoads: 0, inlineMs: 0, integrated: 0, integrateMs: 0, uncovered: 0 };
   private pool: VoxelPool | null = null;
   /** Cells requested from the pool and not yet landed. */
   private readonly inflight = new Set<string>();
@@ -118,6 +124,8 @@ export class TerrainStreamer {
   private readonly loaded = new Map<string, string[]>();
   /** Per-cell representation from the last residency pass (hysteresis input). */
   private prev = new Map<string, ChunkRep>();
+  /** Prefetched cells and when their hold ends (performance.now ms). */
+  private readonly pins = new Map<string, number>();
   private limitCells: number;
 
   constructor(world: HeadlessWorld, resolved: ResolvedServerWorld, opts: TerrainStreamerOptions = {}) {
@@ -152,6 +160,11 @@ export class TerrainStreamer {
   /** Threads generating cells (0 = inline). */
   get workers(): number {
     return this.pool?.size ?? 0;
+  }
+
+  /** Generation threads running right now (they start on demand and exit when idle). */
+  get liveWorkers(): number {
+    return this.pool?.live ?? 0;
   }
 
   private initPool(): void {
@@ -194,12 +207,44 @@ export class TerrainStreamer {
   update(foci: ReadonlyArray<readonly [number, number, number]>): void {
     const s = this.resolved.streamer;
     const next = new Map<string, ChunkRep>();
+    // computeChunkStates reads only the focus's ROUNDED cell, so foci sharing one are one computation (a crowd
+    // in a town is a handful); and only previous states inside a focus's reach square can come out resident for
+    // it, so each call is handed just those — it walked (and parsed) every resident cell once per focus
+    const reach = this.reachCells();
+    const centres = new Set<string>();
+    const prevNear = new Map<string, ChunkRep>();
     for (const [x, , z] of foci) {
-      for (const [key, rep] of computeChunkStates({ x, z }, s, this.prev)) {
+      const fcx = Math.round(x / s.cellSize);
+      const fcz = Math.round(z / s.cellSize);
+      const centre = chunkKey(fcx, fcz);
+      if (centres.has(centre)) continue;
+      centres.add(centre);
+      prevNear.clear();
+      for (let dz = -reach; dz <= reach; dz++) {
+        for (let dx = -reach; dx <= reach; dx++) {
+          const key = chunkKey(fcx + dx, fcz + dz);
+          const rep = this.prev.get(key);
+          if (rep) prevNear.set(key, rep);
+        }
+      }
+      for (const [key, rep] of computeChunkStates({ x, z }, s, prevNear)) {
         if (!next.has(key)) next.set(key, rep);
       }
     }
     this.prev = next;
+    // a focus standing in a cell that is not resident has no ground under it on this side (`uncovered`:
+    // counted per focus per update — the evidence for "did the player run off the loaded world")
+    for (const [x, , z] of foci) {
+      const cx = Math.floor(x / s.cellSize);
+      const cz = Math.floor(z / s.cellSize);
+      if (this.inWorld(cx, cz) && !this.loaded.has(chunkKey(cx, cz))) this.counters.uncovered++;
+    }
+    // prefetched cells stay wanted until their hold runs out, whoever stands there (see prefetch)
+    const now = performance.now();
+    for (const [key, until] of this.pins) {
+      if (until < now) this.pins.delete(key);
+      else if (!next.has(key)) next.set(key, "simulation");
+    }
     // loads: nearest to any focus first
     const wanted: Array<{ key: string; d: number }> = [];
     for (const key of next.keys()) {
@@ -239,6 +284,42 @@ export class TerrainStreamer {
     }
   }
 
+  /**
+   * Ask for the ground within `metres` of a point AHEAD of need, on the worker threads: nothing is generated on
+   * this thread. The cells are held resident for `holdSeconds` (from the last ask) whoever stands there, so
+   * whoever is about to put weight on the spot — a pack about to wake, a joiner about to land — finds them.
+   * True when every cell is resident now (then its props and buildings are ensured too). Without workers
+   * this generates inline, as {@link ensureAround} does, and answers true.
+   *
+   * The pattern: `if (!terrain.prefetch(x, z)) return; // try again next pass` before spawning or resuming
+   * a body — so the tick never waits ~60 ms per cell for generation and marching on its own thread.
+   */
+  prefetch(x: number, z: number, metres = this.resolved.streamer.cellSize, holdSeconds = 10): boolean {
+    const size = this.resolved.streamer.cellSize;
+    const until = performance.now() + holdSeconds * 1000;
+    const async = !!this.pool && !this.pool.broken;
+    let ready = true;
+    for (let cz = Math.floor((z - metres) / size); cz <= Math.floor((z + metres) / size); cz++) {
+      for (let cx = Math.floor((x - metres) / size); cx <= Math.floor((x + metres) / size); cx++) {
+        if (!this.inWorld(cx, cz)) continue;
+        const key = chunkKey(cx, cz);
+        this.pins.set(key, Math.max(until, this.pins.get(key) ?? 0));
+        if (this.loaded.has(key)) continue;
+        if (async) {
+          ready = false;
+          this.request(key);
+        } else this.load(key);
+      }
+    }
+    if (ready) this.world.sim.ensureStaticsAround(x, z);
+    return ready;
+  }
+
+  /** Cells held by {@link prefetch} right now (diagnostics). */
+  get pinned(): number {
+    return this.pins.size;
+  }
+
   /** Force-load a cell now (spawn points want ground before a body lands). */
   ensure(cx: number, cz: number): void {
     const key = chunkKey(cx, cz);
@@ -253,6 +334,15 @@ export class TerrainStreamer {
     for (let dz = -radius; dz <= radius; dz++) {
       for (let dx = -radius; dx <= radius; dx++) this.ensure(cx + dx, cz + dz);
     }
+    // the props and buildings standing on it too (when they stream, see HeadlessWorldOptions.streamStatics)
+    this.world.sim.ensureStaticsAround(x, z);
+  }
+
+  /** Cells from a focus's cell that computeChunkStates can mark resident (its own square: far ring + padding). */
+  private reachCells(): number {
+    const s = this.resolved.streamer;
+    const far = Math.max(s.radius, s.rings?.simulation ?? 0, s.rings?.fullRender ?? 0, s.rings?.hlod ?? 0, s.rings?.farTerrain ?? 0);
+    return Math.ceil(far + (s.keepPadding ?? 0)) + 1;
   }
 
   /** Ask a worker for the cell; the result lands on a later update. */
@@ -289,6 +379,8 @@ export class TerrainStreamer {
       const cell = voxelChunkDoc(field, data.world, cx, cz, this.options);
       this.integrate(key, cell);
       this.lastLoadMs = performance.now() - started;
+      this.counters.inlineLoads++;
+      this.counters.inlineMs += this.lastLoadMs;
     } catch (error) {
       console.warn(`[server:terrain] cell ${key} failed to load:`, error);
       this.loaded.set(key, []); // don't retry every step
@@ -300,6 +392,7 @@ export class TerrainStreamer {
     const coords = parseChunkKey(key);
     if (!coords) return;
     const { streamer } = this.resolved;
+    const started = performance.now();
     try {
       const { doc } = chunkToSceneDoc(streamer.source, coords[0], coords[1], streamer.cellSize, cell);
       const expanded = expandScene(doc, this.world.assets, this.world.registry);
@@ -309,6 +402,8 @@ export class TerrainStreamer {
       console.warn(`[server:terrain] cell ${key} failed to integrate:`, error);
       this.loaded.set(key, []);
     }
+    this.counters.integrated++;
+    this.counters.integrateMs += performance.now() - started;
   }
 
   private unload(key: string): void {
@@ -327,6 +422,22 @@ export class TerrainStreamer {
   groundHeight(x: number, z: number): number {
     const field = this.resolved.field;
     return field.surfaceCast(x, z) ?? field.height(x, z);
+  }
+
+  /**
+   * Ground under a point that may be UNDERGROUND (a cave floor under a mountain). Where the open-air surface is within
+   * 4 m above `y` this is `groundHeight`; where it is well above, the floor is found by casting down from the air just
+   * over `y`. null = the column is solid rock around `y` (a spot past the cave wall): the caller picks another spot.
+   */
+  groundNear(x: number, z: number, y: number): number | null {
+    const top = this.groundHeight(x, z);
+    if (top - y <= 4) return top;
+    const field = this.resolved.field;
+    for (const up of [2, 1, 3, 0.5]) {
+      const hit = field.surfaceCast(x, z, y + up, y - 6);
+      if (hit !== null && hit < y + up - 0.01) return hit; // a cast that starts inside rock returns its own start
+    }
+    return null;
   }
 
   /**

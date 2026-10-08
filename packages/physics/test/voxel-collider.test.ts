@@ -87,6 +87,34 @@ function settle(sim: PhysicsSim, steps = 300): void {
 }
 
 describe("voxel terrain colliders", () => {
+  it("supports bodies across collapsed ocean-floor interiors, edges and corners", () => {
+    const id = "collapsed-ocean-floor";
+    const flatRecipe = worldRecipeSchema.parse({
+      ...recipe,
+      bounds: { continents: [{ center: [0, 0], radius: 100, falloff: 60, warp: 0 }], oceanFloor: -45, landFloor: 4 },
+      terrain: { ...recipe.terrain, caves: { ...recipe.terrain.caves, enabled: false } },
+      biomes: [{ id: "seabed", surface: [0, 1, 0, 0, 0, 0, 0, 0] }], patches: [], features: {},
+    });
+    const flat = registerVoxelField(id, flatRecipe), size = flatRecipe.cellSize;
+    const doc: SceneDoc = { version: 1, name: id, entities: {} };
+    for (let z = 20; z <= 21; z++) for (let x = 20; x <= 21; x++) {
+      const chunk = voxelChunkDoc(flat, id, x, z, { scatter: false });
+      Object.assign(doc.entities, chunkToSceneDoc(id, x, z, size, chunk).doc.entities);
+      expect(voxelMesh({ kind: "voxel", world: id, cell: [x, z] }).triangleCount).toBe(12 * flatRecipe.resolution);
+    }
+    const positions = [[20.5, 20.5], [21, 20.5], [20.5, 21], [21, 21]];
+    positions.forEach(([x, z], i) => addProbe(doc, `probe-${i}`, x! * size, z! * size, -36));
+    const sim = new PhysicsSim(doc, [0, -9.81, 0]);
+    try {
+      settle(sim, 360);
+      positions.forEach(([x, z], i) => {
+        const rest = sim.states().get(`probe-${i}`)!.position;
+        expect(rest[1]).toBeCloseTo(-44.5, 1);
+        expect(Math.hypot(rest[0] - x! * size, rest[2] - z! * size)).toBeLessThan(0.1);
+      });
+    } finally { sim.free(); }
+  });
+
   it("cooks a trimesh from the same mesh the renderer draws", () => {
     const mesh = voxelMesh({ kind: "voxel", world: WORLD, cell: [0, 0] });
     expect(mesh.triangleCount).toBeGreaterThan(0);

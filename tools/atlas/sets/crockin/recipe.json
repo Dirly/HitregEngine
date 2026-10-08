@@ -1,0 +1,469 @@
+{
+ "source": "MMO/3d/Mobs/CrocKin/CrocKin-parts.obj",
+ "sourceScale": 1,
+ "objScale": 1,
+ "outMesh": "MMO/3d/Mobs/CrocKin/CrocKin-unwrapped",
+ "sheet": 1254,
+ "keyStroke": 8,
+ "smooth": 48,
+ "margin": 22,
+ "gutter": 40,
+ "atlas": {
+  "size": 1038,
+  "bleed": 2,
+  "bgLum": 236
+ },
+ "slots": {
+  "head": {
+   "color": "#ff0000",
+   "fit": "contain",
+   "labelMax": 1
+  },
+  "crown": {
+   "color": "#8c0000",
+   "fit": "contain",
+   "matchTo": "head",
+   "label": "head top"
+  },
+  "jaw": {
+   "color": "#c04040",
+   "fit": "contain",
+   "label": "under jaw"
+  },
+  "arm": {
+   "color": "#0000ff",
+   "fit": "contain",
+   "matchTo": "torso",
+   "label": "upper arm"
+  },
+  "hand": {
+   "color": "#8000ff",
+   "fit": "contain",
+   "matchTo": "forearm"
+  },
+  "leg": {
+   "color": "#00ff00",
+   "fit": "contain",
+   "matchTo": "torso",
+   "label": "thigh"
+  },
+  "foot": {
+   "color": "#008c46",
+   "fit": "contain"
+  },
+  "tail": {
+   "color": "#ffff00",
+   "fit": "contain",
+   "matchTo": "torso"
+  },
+  "shoulders": {
+   "color": "#ff00ff",
+   "fit": "contain",
+   "matchTo": "torso",
+   "label": "shoulders top"
+  },
+  "ridge": {
+   "color": "#00ffff",
+   "fit": "contain",
+   "label": "spine ridge"
+  },
+  "belt": {
+   "color": "#ff0080",
+   "fit": "contain"
+  },
+  "buckle": {
+   "color": "#80ff00",
+   "fit": "contain"
+  },
+  "robes-front": {
+   "color": "#8c8c00",
+   "fit": "contain",
+   "transparency": true,
+   "cut": "bottom",
+   "anchor": "top",
+   "fitPadding": 0,
+   "hem": {
+    "depth": 2,
+    "jag": 5,
+    "wave": 4
+   },
+   "label": "robe front"
+  },
+  "robes-back": {
+   "color": "#008c8c",
+   "fit": "contain",
+   "transparency": true,
+   "cut": "bottom",
+   "anchor": "top",
+   "fitPadding": 0,
+   "hem": {
+    "depth": 2,
+    "jag": 5,
+    "wave": 4
+   },
+   "matchTo": "robes-front",
+   "label": "robe back"
+  },
+  "tasset-front": {
+   "color": "#468c00",
+   "fit": "contain",
+   "transparency": true,
+   "cut": "bottom",
+   "anchor": "top",
+   "fitPadding": 0,
+   "hem": {
+    "depth": 2,
+    "jag": 4,
+    "wave": 3
+   },
+   "label": "tasset front"
+  },
+  "torso": {
+   "color": "#ff8000",
+   "fit": "contain",
+   "labelMax": 2,
+   "symmetric": true,
+   "mirror": true
+  },
+  "forearm": {
+   "color": "#00008c",
+   "fit": "contain",
+   "matchTo": "arm",
+   "label": "forearm"
+  },
+  "shin": {
+   "color": "#008c00",
+   "fit": "contain",
+   "matchTo": "leg",
+   "label": "shin"
+  },
+  "crest": {
+   "color": "#ffc080",
+   "fit": "contain",
+   "label": "crest"
+  },
+  "crest-top": {
+   "color": "#a0a0ff",
+   "fit": "contain",
+   "matchTo": "crest",
+   "label": "crest top"
+  }
+ },
+ "parts": {
+  "CrocKin_Head": {
+   "slot": "head",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.4,
+   "split": [
+    {
+     "slot": "crown",
+     "facing": "+y",
+     "above": 0.7,
+     "u": "+x",
+     "v": "+z",
+     "flare": 0.15
+    },
+    {
+     "slot": "jaw",
+     "facing": "-y",
+     "above": 0.6,
+     "u": "+x",
+     "v": "-z",
+     "flare": 0.15
+    }
+   ]
+  },
+  "CrocKin_Torso": {
+   "slot": "torso",
+   "method": "unroll",
+   "axis": "y",
+   "seam": "-x",
+   "u": "arc",
+   "v": "-y"
+  },
+  "CrocKin_Arm": {
+   "slot": "arm",
+   "method": "unroll",
+   "axis": "y",
+   "seam": "-z",
+   "u": "arc",
+   "v": "-y"
+  },
+  "CrocKin_Hand": {
+   "slot": "hand",
+   "method": "unroll",
+   "axis": "y",
+   "seam": "-z",
+   "u": "arc",
+   "v": "-y"
+  },
+  "CrocKin_Leg": {
+   "slot": "leg",
+   "method": "unroll",
+   "axis": "y",
+   "seam": "-z",
+   "u": "arc",
+   "v": "-y"
+  },
+  "CrocKin_Foot": {
+   "slot": "foot",
+   "method": "plane",
+   "u": "+x",
+   "v": "+z",
+   "flare": 0.3
+  },
+  "CrocKin_Tail": {
+   "slot": "tail",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.3
+  },
+  "CrocKin_Ridge": {
+   "slot": "ridge",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.2
+  },
+  "CrocKin_Belt": {
+   "slot": "belt",
+   "method": "tube",
+   "seam": "-x"
+  },
+  "CrocKin_Buckle": {
+   "slot": "buckle",
+   "method": "plane",
+   "u": "+z",
+   "v": "-y",
+   "flare": 0.3
+  },
+  "CrocKin_RobeFront": {
+   "slot": "robes-front",
+   "method": "plane",
+   "u": "+z",
+   "v": "-y",
+   "flare": 0.3
+  },
+  "CrocKin_RobeBack": {
+   "slot": "robes-back",
+   "method": "plane",
+   "u": "+z",
+   "v": "-y",
+   "flare": 0.3
+  },
+  "CrocKin_TassetFront": {
+   "slot": "tasset-front",
+   "method": "plane",
+   "u": "+z",
+   "v": "-y",
+   "flare": 0.1
+  },
+  "CrocKin_Shoulders": {
+   "slot": "shoulders",
+   "method": "plane",
+   "u": "+x",
+   "v": "+z",
+   "flare": 0.2
+  },
+  "CrocKin_Forearm": {
+   "slot": "forearm",
+   "method": "unroll",
+   "axis": "y",
+   "seam": "-z",
+   "u": "arc",
+   "v": "-y"
+  },
+  "CrocKin_Shin": {
+   "slot": "shin",
+   "method": "unroll",
+   "axis": "y",
+   "seam": "-z",
+   "u": "arc",
+   "v": "-y"
+  },
+  "CrocKin_Crest": {
+   "slot": "crest",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.35,
+   "split": [
+    {
+     "slot": "crest-top",
+     "facing": "+y",
+     "above": 0.6,
+     "u": "+x",
+     "v": "+z",
+     "flare": 0.2
+    }
+   ]
+  }
+ },
+ "mirrorCopy": {
+  "axis": "z",
+  "parts": [
+   "CrocKin_Head",
+   "CrocKin_Arm",
+   "CrocKin_Hand",
+   "CrocKin_Leg",
+   "CrocKin_Foot",
+   "CrocKin_Tail",
+   "CrocKin_Ridge",
+   "CrocKin_RobeBack",
+   "CrocKin_Shoulders",
+   "CrocKin_Forearm",
+   "CrocKin_Shin",
+   "CrocKin_Crest"
+  ]
+ },
+ "layout": {
+  "col": [
+   {
+    "row": [
+     "torso",
+     {
+      "col": [
+       "head",
+       "crown",
+       "jaw"
+      ]
+     }
+    ]
+   },
+   {
+    "row": [
+     {
+      "col": [
+       "arm",
+       "forearm",
+       "hand"
+      ]
+     },
+     {
+      "col": [
+       "leg",
+       "shin",
+       "foot"
+      ]
+     },
+     {
+      "col": [
+       "robes-front",
+       "robes-back"
+      ]
+     },
+     {
+      "col": [
+       "shoulders",
+       "ridge",
+       {
+        "row": [
+         "tasset-front",
+         "buckle"
+        ]
+       }
+      ]
+     },
+     {
+      "col": [
+       "crest",
+       "crest-top"
+      ]
+     }
+    ]
+   },
+   {
+    "row": [
+     "tail",
+     "belt"
+    ]
+   }
+  ]
+ },
+ "marks": [
+  {
+   "slot": "head",
+   "at": [
+    0.23,
+    1.99,
+    0.1
+   ],
+   "shape": "eye",
+   "size": 8
+  }
+ ],
+ "cutoutSlots": [
+  "robes-front",
+  "robes-back",
+  "tasset-front"
+ ],
+ "combos": [
+  [
+   "CrocKin_Head",
+   "CrocKin_Torso",
+   "CrocKin_Arm",
+   "CrocKin_Forearm",
+   "CrocKin_Shoulders",
+   "CrocKin_Hand",
+   "CrocKin_Leg",
+   "CrocKin_Shin",
+   "CrocKin_Foot",
+   "CrocKin_Tail",
+   "CrocKin_Ridge"
+  ],
+  [
+   "CrocKin_Head",
+   "CrocKin_Torso",
+   "CrocKin_Arm",
+   "CrocKin_Forearm",
+   "CrocKin_Shoulders",
+   "CrocKin_Hand",
+   "CrocKin_Leg",
+   "CrocKin_Shin",
+   "CrocKin_Foot",
+   "CrocKin_Tail",
+   "CrocKin_Ridge",
+   "CrocKin_Belt",
+   "CrocKin_Buckle",
+   "CrocKin_TassetFront"
+  ],
+  [
+   "CrocKin_Head",
+   "CrocKin_Torso",
+   "CrocKin_Arm",
+   "CrocKin_Forearm",
+   "CrocKin_Shoulders",
+   "CrocKin_Hand",
+   "CrocKin_Leg",
+   "CrocKin_Shin",
+   "CrocKin_Foot",
+   "CrocKin_Tail",
+   "CrocKin_Ridge",
+   "CrocKin_Belt",
+   "CrocKin_Buckle",
+   "CrocKin_RobeFront",
+   "CrocKin_RobeBack",
+   "CrocKin_TassetFront",
+   "CrocKin_Crest"
+  ]
+ ],
+ "rules": {
+  "requires": {
+   "CrocKin_Buckle": [
+    "CrocKin_Belt"
+   ],
+   "CrocKin_RobeFront": [
+    "CrocKin_Belt"
+   ],
+   "CrocKin_RobeBack": [
+    "CrocKin_RobeFront"
+   ],
+   "CrocKin_TassetFront": [
+    "CrocKin_Belt"
+   ]
+  }
+ }
+}

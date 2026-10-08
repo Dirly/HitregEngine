@@ -1,6 +1,6 @@
 import * as THREE from "three/webgpu";
 import { csgMesh, voxelMesh, type CsgMeshSource, type VoxelMesh, type VoxelMeshSource } from "@hitreg/core";
-import { SPLAT_ATTRIBUTES } from "./terrain-splat.js";
+import { SPLAT_ATTRIBUTES, SPLAT_INDEX_ATTRIBUTE, SPLAT_TOP_ATTRIBUTE } from "./terrain-splat.js";
 
 /**
  * `{ kind: "voxel" }` mesh source -> a `BufferGeometry`.
@@ -66,6 +66,14 @@ export function voxelGeometryFromMesh(mesh: VoxelMesh): THREE.BufferGeometry | n
 function setSplatAttributes(geometry: THREE.BufferGeometry, mesh: VoxelMesh): void {
   const stride = mesh.surfaceCount;
   if (stride < 1 || mesh.vertexCount === 0) return;
+  if (mesh.layerIndex && mesh.layerWeight) {
+    // An INDEXED world: two 4-byte attributes (the four layer ids and their
+    // weights, both unorm8) instead of ceil(N/4) float vec4s — and, as below,
+    // every cell of the world declares exactly these, so HLOD still merges.
+    geometry.setAttribute(SPLAT_INDEX_ATTRIBUTE, new THREE.BufferAttribute(mesh.layerIndex, 4, true));
+    geometry.setAttribute(SPLAT_TOP_ATTRIBUTE, new THREE.BufferAttribute(mesh.layerWeight, 4, true));
+    return;
+  }
   // ALWAYS emit every vec4 the palette needs, even where the upper ones are
   // entirely zero. Skipping an empty one to save a buffer looked free and was
   // not: HLOD merges many cells into one geometry, and `mergeGeometries`

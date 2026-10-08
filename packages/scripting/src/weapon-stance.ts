@@ -1,4 +1,4 @@
-import type { EquipmentSlot, Item } from "@hitreg/core";
+import { CHARACTER_EVENTS, handKey, readHand, type EquipmentSlot, type Item } from "@hitreg/core";
 import { z } from "zod";
 import { Script, type ScriptCommandDecl, type ScriptEventDecl } from "./script.js";
 import { catalogOf, readSheet, sheetKey, sheetStoreOf, type SheetStoreLike } from "./character-store.js";
@@ -19,7 +19,9 @@ import { catalogOf, readSheet, sheetKey, sheetStoreOf, type SheetStoreLike } fro
  * clip it has no shield version of.
  *
  * Every tab runs it off the same sheet, so every tab dresses every character
- * the same way with no event of its own. Presentation only.
+ * the same way with no event of its own. Presentation only. It also publishes
+ * the main hand's item id as `userData.heldItem`, for presentation that draws
+ * from the item itself (a weapon trail's shape and glow colour).
  *
  * HOLSTERING. `holsterKey` sheathes and draws. The state is replicated
  * (`holster/<actor>` in netState, written by the authority on a
@@ -28,9 +30,15 @@ import { catalogOf, readSheet, sheetKey, sheetStoreOf, type SheetStoreLike } fro
  * reads as its `altWhen`: a holstered weapon takes its SECOND pose, on the
  * back. Fighting draws — anything that marks the body `combatUntil` (a swing,
  * a block, a hit) asks to unholster. A `Sheathe`/`Draw` clip plays on the
- * arms (dressed per stance: SwordShield_Draw, TwoHanded_Draw), and the
+ * the arms (dressed per stance: SwordShield_Draw, TwoHanded_Draw), and the
  * weapons change slot `swapDelay` seconds in — when the hand reaches the back,
  * not the moment the key goes down.
+ *
+ * WEAPON SETS. The doll holds two sets: `mainSlot` + `offSlot` (set 0) and
+ * `secondSlot` alone (set 1). Which one is in hand is netState `hand/<actor>`
+ * (core `handStateSchema`), timed and written by the `character-sheet`
+ * authority on a `character.swap` request; `swapKey` sends that request. The
+ * stance follows the set in hand, and plays the Draw clip when it lands.
  */
 export class WeaponStance extends Script {
   static override scriptName = "weapon-stance";
@@ -54,6 +62,11 @@ export class WeaponStance extends Script {
       min: 0,
       max: 2,
       description: "seconds into the draw/sheathe clip at which the weapons move between hand and back",
+    },
+    secondSlot: { default: "secondary", description: "equipment slot of the secondary weapon set (set 1, held alone)" },
+    swapKey: {
+      default: "",
+      description: "key that swaps weapon sets (e.g. KeyX), a character.swap request; allowed in combat. Empty = none. Set it on the LOCAL player only.",
     },
     console: {
       default: false,
@@ -82,11 +95,15 @@ export class WeaponStance extends Script {
   private bodyId = "";
   private forced: string[] | null = null;
   private equipped: string[] = [];
+  /** Item id in the main hand (null = empty), published as `userData.heldItem`. */
+  private heldItem: string | null = null;
   private unsubscribe: (() => void) | null = null;
   private unsubscribeHolster: (() => void) | null = null;
   /** What the body shows right now (lags the replicated state by swapDelay). */
   private shownHolstered = false;
   private keyWasDown = false;
+  private swapWasDown = false;
+  private shownSet: 0 | 1 = 0;
   private cancelSwap: (() => void) | null = null;
   /** combatUntil when the weapons went away: only a NEWER fight draws them. */
   private holsteredDuring = 0;
@@ -96,8 +113,10 @@ export class WeaponStance extends Script {
     this.bodyId = this.param<string>("body") || this.ctx.getEntity(this.entityId)?.parent || "";
     const actor = this.param<string>("actor");
     this.refresh();
+    this.shownSet = readHand(this.store, actor).set;
     this.unsubscribe = this.store.onChange((key) => {
       if (key === sheetKey(actor)) this.refresh();
+      else if (key === handKey(actor)) this.handChanged();
     });
     // holstering: the authority takes requests from the body's owner; every
     // tab follows the replicated flag
@@ -121,6 +140,12 @@ export class WeaponStance extends Script {
       const down = this.ctx.input.isDown(key);
       if (down && !this.keyWasDown) this.request(!this.holstered());
       this.keyWasDown = down;
+    }
+    const swapKey = this.param<string>("swapKey");
+    if (swapKey && actor) {
+      const down = this.ctx.input.isDown(swapKey);
+      if (down && !this.swapWasDown) this.ctx.events?.emit(CHARACTER_EVENTS.swap, { actorId: actor });
+      this.swapWasDown = down;
     }
     // fighting draws: a swing, a block or a hit marks the body in combat
     const body = this.bodyId ? this.ctx.getObject(this.bodyId) : undefined;
@@ -218,10 +243,32 @@ export class WeaponStance extends Script {
       const itemId = uid ? sheet?.items[uid]?.itemId : undefined;
       return itemId ? catalog(itemId) : undefined;
     };
-    const main = itemIn(this.param<string>("mainSlot"));
-    // a two-hander leaves no hand for the (still worn, inactive) off-hand item
-    this.equipped = WeaponStance.combine(main, main?.twoHanded ? undefined : itemIn(this.param<string>("offSlot")));
+    const second = readHand(this.store, this.param<string>("actor")).set === 1;
+    const mainSlot = this.param<string>(second ? "secondSlot" : "mainSlot");
+    const main = itemIn(mainSlot);
+    const mainUid = sheet?.equipment[mainSlot as EquipmentSlot];
+    this.heldItem = (mainUid ? sheet?.items[mainUid]?.itemId : undefined) ?? null;
+    // a two-hander leaves no hand for the (still worn, inactive) off-hand item;
+    // the secondary set is held alone
+    this.equipped = WeaponStance.combine(main, main?.twoHanded || second ? undefined : itemIn(this.param<string>("offSlot")));
     this.apply();
+  }
+
+  /** The hand state moved: re-dress, and draw the new set once a swap lands. */
+  private handChanged(): void {
+    const set = readHand(this.store, this.param<string>("actor")).set;
+    if (set !== this.shownSet) {
+      this.shownSet = set;
+      const body = this.bodyId ? this.ctx.getObject(this.bodyId) : undefined;
+      if (body) {
+        body.userData["actionClip"] = "Draw";
+        body.userData["actionUntil"] = this.ctx.now() / 1000 + 0.8;
+        body.userData["actionHold"] = false;
+        body.userData["actionLoop"] = false;
+        body.userData["actionUpperBody"] = true;
+      }
+    }
+    this.refresh();
   }
 
   private shown(): string[] {
@@ -234,5 +281,8 @@ export class WeaponStance extends Script {
     const stance = this.shown();
     if (stance.length) body.userData["stance"] = stance;
     else delete body.userData["stance"];
+    // which item the main hand holds, for presentation that draws FROM it (a weapon trail's colour and shape)
+    if (this.heldItem) body.userData["heldItem"] = this.heldItem;
+    else delete body.userData["heldItem"];
   }
 }

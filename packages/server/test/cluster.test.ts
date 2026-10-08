@@ -166,7 +166,7 @@ describe.skipIf(!main || !layer1 || !layer2)("cluster: main + two layers", { tim
     await until(() => !layer.server.players.has(characterId));
     // the final save is asynchronous (layer → main → backend): wait for it to land
     let saved: Awaited<ReturnType<typeof playerData.load>> = null;
-    const scope = { playerId: session.account.id, experienceId: "test-world" };
+    const scope = { playerId: characterId, experienceId: "test-world" };
     for (let i = 0; i < 100 && !saved?.data["sheet"]; i++) {
       await wait(50);
       saved = await playerData.load(scope, "character");
@@ -177,7 +177,7 @@ describe.skipIf(!main || !layer1 || !layer2)("cluster: main + two layers", { tim
     let world: Awaited<ReturnType<typeof playerData.load>> = null;
     for (let i = 0; i < 100 && !world?.data["pos:field"]; i++) {
       await wait(50);
-      world = await playerData.load({ playerId: session.account.id, experienceId: "test-world" }, "world");
+      world = await playerData.load({ playerId: characterId, experienceId: "test-world" }, "world");
     }
     expect((world?.data["pos:field"] as { position: number[] }).position[0]).toBeCloseTo(at[0], 1);
 

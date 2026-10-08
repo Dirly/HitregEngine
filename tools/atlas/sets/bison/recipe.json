@@ -1,0 +1,225 @@
+{
+ "source": "MMO/3d/Mobs/Dragon/Bison-parts.obj",
+ "sourceScale": 1,
+ "objScale": 1,
+ "outMesh": "MMO/3d/Mobs/Dragon/Bison-unwrapped",
+ "sheet": 1254,
+ "keyStroke": 8,
+ "smooth": 48,
+ "margin": 22,
+ "gutter": 48,
+ "atlas": {
+  "size": 1120,
+  "bleed": 2,
+  "bgLum": 236
+ },
+ "mirrorCopy": {
+  "axis": "z",
+  "parts": [
+   "Bison_Horn",
+   "Bison_Body",
+   "Bison_Tail",
+   "Bison_LegFront",
+   "Bison_LegBack",
+   "Bison_Head"
+  ]
+ },
+ "slots": {
+  "horn": {
+   "color": "#ff0000",
+   "fit": "contain"
+  },
+  "body": {
+   "color": "#00ff00",
+   "fit": "contain"
+  },
+  "chest": {
+   "color": "#0000ff",
+   "fit": "contain",
+   "matchTo": "body",
+   "label": "chest"
+  },
+  "rump": {
+   "color": "#ffff00",
+   "fit": "contain",
+   "matchTo": "body",
+   "label": "rump"
+  },
+  "back": {
+   "color": "#ff00ff",
+   "fit": "contain",
+   "matchTo": "body",
+   "label": "back top"
+  },
+  "tail": {
+   "color": "#ff8000",
+   "fit": "contain",
+   "matchTo": "body"
+  },
+  "leg-front": {
+   "color": "#8000ff",
+   "fit": "contain",
+   "matchTo": "body"
+  },
+  "leg-back": {
+   "color": "#008c00",
+   "fit": "contain",
+   "matchTo": "body"
+  },
+  "head": {
+   "color": "#00008c",
+   "fit": "contain",
+   "labelMax": 1
+  },
+  "crown": {
+   "color": "#8c0000",
+   "fit": "contain",
+   "matchTo": "head",
+   "label": "head top"
+  },
+  "snout": {
+   "color": "#c0c060",
+   "fit": "contain",
+   "matchTo": "head",
+   "label": "snout front"
+  }
+ },
+ "parts": {
+  "Bison_Horn": {
+   "slot": "horn",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Bison_Body": {
+   "slot": "body",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.35,
+   "split": [
+    {
+     "slot": "chest",
+     "facing": "+x",
+     "above": 0.6,
+     "u": "-z",
+     "v": "-y",
+     "flare": 0.15
+    },
+    {
+     "slot": "rump",
+     "facing": "-x",
+     "above": 0.6,
+     "u": "+z",
+     "v": "-y",
+     "flare": 0.15
+    },
+    {
+     "slot": "back",
+     "facing": "+y",
+     "above": 0.62,
+     "u": "+x",
+     "v": "+z",
+     "flare": 0.1
+    }
+   ]
+  },
+  "Bison_Tail": {
+   "slot": "tail",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Bison_LegFront": {
+   "slot": "leg-front",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Bison_LegBack": {
+   "slot": "leg-back",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Bison_Head": {
+   "slot": "head",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.4,
+   "split": [
+    {
+     "slot": "snout",
+     "facing": "+x",
+     "above": 0.7,
+     "u": "-z",
+     "v": "-y",
+     "flare": 0.15
+    },
+    {
+     "slot": "crown",
+     "facing": "+y",
+     "above": 0.7,
+     "u": "+x",
+     "v": "+z",
+     "flare": 0.15
+    }
+   ]
+  }
+ },
+ "layout": {
+  "row": [
+   {
+    "col": [
+     "body",
+     "back"
+    ]
+   },
+   {
+    "col": [
+     "leg-front",
+     "leg-back",
+     "tail",
+     "crown"
+    ]
+   },
+   {
+    "col": [
+     "head",
+     "chest",
+     "rump",
+     "snout",
+     "horn"
+    ]
+   }
+  ]
+ },
+ "marks": [
+  {
+   "slot": "head",
+   "at": [
+    1.4065,
+    1.4219,
+    -0.1871
+   ],
+   "shape": "eye",
+   "size": 12
+  }
+ ],
+ "cutoutSlots": [],
+ "combos": [
+  [
+   "Bison_Horn",
+   "Bison_Body",
+   "Bison_Tail",
+   "Bison_LegFront",
+   "Bison_LegBack",
+   "Bison_Head"
+  ]
+ ]
+}

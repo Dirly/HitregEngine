@@ -41,8 +41,25 @@ export interface PortraitOptions {
    * dark warm skin grey-violet — its diffuse is too dim to outweigh the blue —
    * so the character creator asks for a neutral-warm one.
    */
-  lights?: { sky?: THREE.ColorRepresentation; ground?: THREE.ColorRepresentation; rim?: THREE.ColorRepresentation };
+  lights?: { sky?: THREE.ColorRepresentation; ground?: THREE.ColorRepresentation; rim?: THREE.ColorRepresentation; key?: THREE.ColorRepresentation; scale?: number };
+  /**
+   * Set dressing around the model (a creation screen's clearing: ground,
+   * trees, light shafts), added to the portrait's private scene once; the
+   * model stands at the origin, feet at y 0. `update` runs every frame
+   * (drifting fog, swaying shafts), `dispose` when the view goes.
+   */
+  stage?: (scene: THREE.Scene, camera: THREE.PerspectiveCamera) => { update?(dt: number): void; dispose?(): void } | void;
+  /**
+   * Aim this share of the model's height BELOW its centre, so it stands higher in the frame (room under its feet
+   * for a name and buttons). 0 = centred.
+   */
+  aimLow?: number;
+  /** Distance fog in the portrait scene (the stage fades into a painted backdrop behind the canvas). */
+  fog?: { color: THREE.ColorRepresentation; near: number; far: number };
 }
+
+/** The head bone a face close-up frames on (Head, mixamorig:Head, …, never HeadTop_End). */
+const HEAD_BONE = /(^|[:_ .-])head$/i;
 
 export class PortraitView {
   private renderer: THREE.WebGPURenderer | null = null;
@@ -62,6 +79,17 @@ export class PortraitView {
   private readonly spin: number;
   private readonly padding: number;
   private readonly forward: -1 | 1;
+  private readonly aimLow: number;
+  /** The whole-body framing (frame()), and how far the camera has eased toward the face (0 body .. 1 face). */
+  private readonly bodyPos = new THREE.Vector3();
+  private readonly bodyLook = new THREE.Vector3();
+  /** Where the camera is heading between the whole body (0) and the face (1), and where it is now. */
+  private zoomWant = 0;
+  private focusT = 0;
+  private head: THREE.Object3D | null = null;
+  private readonly tmpA = new THREE.Vector3();
+  private readonly tmpB = new THREE.Vector3();
+  private stageHooks: { update?(dt: number): void; dispose?(): void } | null = null;
 
   constructor(
     private readonly source: THREE.Object3D,
@@ -71,6 +99,7 @@ export class PortraitView {
     this.spin = opts.spin ?? 0;
     this.padding = opts.padding ?? 1.25;
     this.forward = opts.forward ?? 1;
+    this.aimLow = opts.aimLow ?? 0;
     this.camera = new THREE.PerspectiveCamera(opts.fov ?? 28, 1, 0.05, 100);
     this.clone = skeletonClone(source);
     this.clone.position.set(0, 0, 0);
@@ -97,12 +126,18 @@ export class PortraitView {
       }
     });
     this.scene.add(this.clone);
-    const hemi = new THREE.HemisphereLight(opts.lights?.sky ?? 0xdfe6f5, opts.lights?.ground ?? 0x2a3040, 2.0);
-    const key = new THREE.DirectionalLight(0xffffff, 3.2);
+    const level = opts.lights?.scale ?? 1;
+    const hemi = new THREE.HemisphereLight(opts.lights?.sky ?? 0xdfe6f5, opts.lights?.ground ?? 0x2a3040, 2.0 * level);
+    const key = new THREE.DirectionalLight(opts.lights?.key ?? 0xffffff, 3.2 * level);
     key.position.set(1.5, 3, 2.5 * this.forward);
-    const rim = new THREE.DirectionalLight(opts.lights?.rim ?? 0x9fb3ff, 0.8);
+    const rim = new THREE.DirectionalLight(opts.lights?.rim ?? 0x9fb3ff, 0.8 * Math.max(1, level));
     rim.position.set(-2, 2, -2.5 * this.forward);
     this.scene.add(hemi, key, rim);
+    if (opts.fog) this.scene.fog = new THREE.Fog(opts.fog.color, opts.fog.near, opts.fog.far);
+    this.clone.traverse((n) => {
+      if (!this.head && (n as THREE.Bone).isBone && HEAD_BONE.test(n.name)) this.head = n;
+    });
+    if (opts.stage) this.stageHooks = opts.stage(this.scene, this.camera) ?? null;
 
     const clip = pickClip(opts.clips ?? [], opts.clip ?? "Idle");
     if (clip) {
@@ -147,6 +182,8 @@ export class PortraitView {
     if (this.spin !== 0) this.clone.rotation.y += this.spin * dt;
     this.clone.updateMatrixWorld(true);
     if (!this.framed) this.frame();
+    this.stageHooks?.update?.(dt);
+    this.aim(dt);
     const w = this.canvas.clientWidth || 1;
     const h = this.canvas.clientHeight || 1;
     const size = this.renderer.getSize(new THREE.Vector2());
@@ -198,12 +235,63 @@ export class PortraitView {
     if (height < 0.3) return;
     const halfFov = (this.camera.fov * Math.PI) / 360;
     const dist = ((height / 2) / Math.tan(halfFov)) * this.padding;
-    this.camera.position.set(this.center.x, this.center.y + height * 0.04, this.center.z + this.forward * dist);
-    this.camera.lookAt(this.center);
-    this.camera.near = Math.max(0.02, dist * 0.1);
-    this.camera.far = dist * 10;
+    this.bodyPos.set(this.center.x, this.center.y + height * 0.04, this.center.z + this.forward * dist);
+    this.bodyLook.copy(this.center);
+    // the face close-up aims at a FIXED point: on the turning axis, at the head's height as framed — never at the
+    // live head bone, which sways with the idle and swings round as the model turns
+    if (this.head) this.headY = this.head.getWorldPosition(this.tmpA).y;
+    this.bodyLook.y -= height * this.aimLow;
+    this.bodyPos.y -= height * this.aimLow;
+    this.camera.position.copy(this.bodyPos);
+    this.camera.lookAt(this.bodyLook);
+    this.camera.near = Math.max(0.02, dist * 0.02);
+    // far enough for a stage around the model (trees, fog) as well as the model
+    this.camera.far = Math.max(dist * 10, 200);
     this.camera.updateProjectionMatrix();
     this.framed = true;
+  }
+
+  /**
+   * Ease the camera between the whole-body framing and a close-up of the face
+   * (the head bone, head-and-shoulders), smoothly both ways.
+   */
+  private aim(dt: number): void {
+    if (!this.framed) return;
+    const want = this.head ? this.zoomWant : 0;
+    if (want === this.focusT && want === 0 && this.settledAt0) return;
+    this.settledAt0 = want === 0 && this.focusT === 0;
+    const k = 1 - Math.exp(-dt * 5);
+    this.focusT += (want - this.focusT) * k;
+    if (Math.abs(want - this.focusT) < 1e-3) this.focusT = want;
+    const t = this.focusT * this.focusT * (3 - 2 * this.focusT);
+    let facePos = this.bodyPos;
+    let faceLook = this.bodyLook;
+    if (this.head) {
+      // aimed a little under the head: the face sits in the upper middle, clear of a nameplate under it
+      faceLook = this.tmpA.set(this.center.x, this.headY - 0.18, this.center.z);
+      const halfFov = (this.camera.fov * Math.PI) / 360;
+      // head and shoulders, not a nose
+      const dist = (1.0 / 2 / Math.tan(halfFov)) * 1.05;
+      facePos = this.tmpB.set(faceLook.x, faceLook.y + 0.02, faceLook.z + this.forward * dist);
+    }
+    this.camera.position.lerpVectors(this.bodyPos, facePos, t);
+    const look = new THREE.Vector3().lerpVectors(this.bodyLook, faceLook, t);
+    this.camera.lookAt(look);
+  }
+
+  private settledAt0 = false;
+  /** The head's height when the model was framed (the face close-up's fixed aim). */
+  private headY = 0;
+
+  /** Frame the whole body, or ease in on the face. */
+  setFocus(focus: "body" | "face"): void {
+    this.setZoom(focus === "face" ? 1 : 0);
+  }
+
+  /** Zoom between the whole body (0) and a head-and-shoulders close-up (1); eased, e.g. from a mouse wheel. */
+  setZoom(t: number): void {
+    this.zoomWant = Math.max(0, Math.min(1, t));
+    this.settledAt0 = false;
   }
 
   /** Re-fit the camera on the next frame (the source swapped models). */
@@ -223,6 +311,8 @@ export class PortraitView {
 
   dispose(): void {
     this.alive = false;
+    this.stageHooks?.dispose?.();
+    this.stageHooks = null;
     cancelAnimationFrame(this.raf);
     this.mixer?.stopAllAction();
     this.mixer = null;

@@ -13,6 +13,12 @@
  * `/social`) are the keyboard route to the same calls. Friends are per
  * ACCOUNT: the list shows whichever character a friend is playing, else the
  * one the friendship was made through.
+ *
+ * `/report <name> <reason…>` and the "report" button on every player row
+ * send a report to main (`POST /reports`, docs/moderation.md §2); main
+ * gathers the recent chat between the two and keeps it with the report. A
+ * reason that starts with a kind word (`name`, `cheating`, `other`) files
+ * it as that kind; anything else is a chat report.
  */
 
 import type { GatewayClient } from "./gateway.js";
@@ -92,7 +98,15 @@ const CSS = `
 .hg-social input:focus{border-color:#58a6ff}
 .hg-social .muted{color:#8b949e;font-size:12px;padding:4px 0}
 .hg-social .err{color:#f85149;font-size:12px;min-height:1em;margin-top:6px}
+.hg-social .hg-report{margin-top:10px;padding:8px;border:1px solid #30363d;border-radius:8px;background:#161b22}
+.hg-social .hg-report[hidden]{display:none}
+.hg-social .hg-report .what{font-size:12px;font-weight:600;margin-bottom:6px}
+.hg-social select{background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#e6edf3;padding:4px 6px;font:inherit;font-size:12px}
 `;
+
+/** What a report is about — main's `kind` (docs/moderation.md §2). */
+const REPORT_KINDS = ["chat", "name", "cheating", "other"] as const;
+type ReportKind = (typeof REPORT_KINDS)[number];
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, props: Partial<HTMLElementTagNameMap[K]> & { text?: string } = {}, ...children: (Node | string)[]): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
@@ -119,7 +133,17 @@ export function mountSocialPanel(opts: SocialPanelOptions): SocialPanel {
   const addBtn = el("button", { text: "Add friend" });
   const inviteBtn = el("button", { text: "Invite" });
   const err = el("div", { className: "err" });
-  root.append(title, body, el("div", { className: "row" }, nameInput, addBtn, inviteBtn), err);
+  // the report form a row's "report" button opens: what kind, and what happened
+  const reportWhat = el("div", { className: "what" });
+  const reportKind = el("select", { title: "what the report is about" });
+  for (const k of REPORT_KINDS) reportKind.append(el("option", { value: k, text: k === "chat" ? "Chat" : k === "name" ? "Name" : k === "cheating" ? "Cheating" : "Other" }));
+  const reportReason = el("input", { placeholder: "what happened?", maxLength: 500 });
+  const reportSend = el("button", { className: "hg-danger", text: "Send report" });
+  const reportCancel = el("button", { text: "Cancel" });
+  const reportForm = el("div", { className: "hg-report" }, reportWhat, el("div", { className: "row" }, reportKind, reportReason), el("div", { className: "row" }, reportSend, reportCancel));
+  reportForm.hidden = true;
+  let reportTarget: string | null = null;
+  root.append(title, body, el("div", { className: "row" }, nameInput, addBtn, inviteBtn), reportForm, err);
   document.body.appendChild(root);
 
   let view: SocialView | null = null;
@@ -150,6 +174,57 @@ export function mountSocialPanel(opts: SocialPanelOptions): SocialPanel {
     } finally {
       busy = false;
     }
+  };
+
+  /** File a report with main; its refusal (rate limit, unknown name) is shown exactly as main words it. */
+  const report = async (name: string, reason: string, kind: ReportKind): Promise<boolean> => {
+    err.textContent = "";
+    try {
+      const r = await api("/reports", { target: name, reason, kind });
+      opts.say(`Reported ${r.name ?? name}. Thanks — a moderator will look into it.`);
+      return true;
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      err.textContent = text;
+      opts.say(text);
+      return false;
+    }
+  };
+  const openReport = (name: string): void => {
+    reportTarget = name;
+    reportWhat.textContent = `Report ${name}`;
+    reportKind.value = "chat";
+    reportReason.value = "";
+    reportForm.hidden = false;
+    reportReason.focus();
+  };
+  const closeReport = (): void => {
+    reportTarget = null;
+    reportForm.hidden = true;
+  };
+  reportSend.onclick = () => {
+    const reason = reportReason.value.trim();
+    if (!reportTarget) return;
+    if (!reason) {
+      err.textContent = "Say what happened — a report needs a reason.";
+      reportReason.focus();
+      return;
+    }
+    void report(reportTarget, reason, reportKind.value as ReportKind).then((ok) => {
+      if (ok) closeReport();
+    });
+  };
+  reportCancel.onclick = closeReport;
+  reportReason.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") reportSend.click();
+    if (e.key === "Escape") closeReport();
+    e.stopPropagation();
+  });
+  /** The "report" item every player row carries. */
+  const reportButton = (name: string): HTMLButtonElement => {
+    const b = el("button", { text: "report", title: `report ${name} to the moderators` });
+    b.onclick = () => openReport(name);
+    return b;
   };
 
   // -- the calls, shared by buttons and slash commands --------------------------------
@@ -262,6 +337,7 @@ export function mountSocialPanel(opts: SocialPanelOptions): SocialPanel {
           kick.onclick = () => void calls.kick(m.name);
           li.append(lead, kick);
         }
+        if (m.characterId !== me.id) li.append(reportButton(m.name));
         list.append(li);
       }
       body.append(list);
@@ -297,7 +373,7 @@ export function mountSocialPanel(opts: SocialPanelOptions): SocialPanel {
         }
         const rm = el("button", { className: "hg-danger", text: "×", title: "remove friend" });
         rm.onclick = () => void calls.unfriend(f.name);
-        li.append(rm);
+        li.append(reportButton(f.name), rm);
         list.append(li);
       }
       body.append(list);
@@ -324,6 +400,7 @@ export function mountSocialPanel(opts: SocialPanelOptions): SocialPanel {
             kick.onclick = () => void calls.gkick(m.name);
             li.append(kick);
           }
+          li.append(reportButton(m.name));
         }
         list.append(li);
       }
@@ -376,7 +453,7 @@ export function mountSocialPanel(opts: SocialPanelOptions): SocialPanel {
         no.onclick = () => void calls.declineFriend(r.name);
         const block = el("button", { className: "hg-danger", text: "block" });
         block.onclick = () => void calls.block(r.name);
-        list.append(el("li", {}, el("span", { className: "who", text: r.name }), yes, no, block));
+        list.append(el("li", {}, el("span", { className: "who", text: r.name }), yes, no, block, reportButton(r.name)));
       }
       body.append(list);
     }
@@ -490,6 +567,19 @@ export function mountSocialPanel(opts: SocialPanelOptions): SocialPanel {
       case "unblock": {
         const n = need("character name");
         if (n) void calls.unblock(n);
+        return true;
+      }
+      case "report": {
+        // /report <name> <reason…> — a reason opening with a kind word files it as that kind
+        const [who = "", ...words] = args;
+        const reason = words.join(" ").trim();
+        if (!who || !reason) {
+          opts.say("/report <name> <what happened> — e.g. /report Finn threats in zone chat, /report Finn name offensive name, /report Finn cheating flying");
+          return true;
+        }
+        const first = words[0]!.toLowerCase();
+        const kind: ReportKind = (REPORT_KINDS as readonly string[]).includes(first) ? (first as ReportKind) : "chat";
+        void report(who, reason, kind);
         return true;
       }
       case "social":

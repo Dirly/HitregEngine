@@ -3,9 +3,9 @@
  * An ubermesh of parts that keep the modeller's OWN UVs onto one small tiling
  * texture — the player's hair, beards and moustache on their hair swatch.
  *
- *   node tools/carry-mesh.mjs --in MMO/3d/HumanRig/Head/Face.obj \
- *     --parts BeardBase1,BeardBase2,Mustache,HairBase1,HairBase2,HairStyle1,HairStyle2 \
- *     --repeat BeardBase1=BeardBase1,BeardBase2 \
+ *   node tools/carry-mesh.mjs --in MMO/3d/HumanRig/Hair.obj \
+ *     --parts HairBase1,HairBase3,FemaleBase1,HairStyle1,HairStyle2,FemaleStyle1,Bangs,PonyTail1,Braids,BeardBase1,BeardBase2,Mustache,Chops \
+ *     --hang HairBase1,HairBase3,FemaleBase1,FemaleStyle1,Braids \
  *     --texture MMO/3d/HumanRig/Head/pasted.png --size 40 \
  *     --out projects/voxel-demo/assets/models/mmo/human-hair.glb
  *
@@ -21,6 +21,14 @@
  * character shows a style by its part mask and every hairstyle is one draw.
  * Positions are the file's, times `--source-scale` (100 for a Blockbench OBJ,
  * like unwrap-weapon's recipes), so it sockets with the head's numbers.
+ *
+ * `--hang Braids,PonyTail1 --hang-top 0.81 --hang-bottom 0.73` bakes a HANG
+ * weight into uv1.y for those parts: 0 at or above `--hang-top` (file units,
+ * +Y up — the scalp, which rides the head), easing to 1 at `--hang-bottom` (the
+ * ends resting on the chest and back, which follow the mount's `hang` bone).
+ * Parts not named keep 0 and ride the head whole (beards, bangs). Only hang
+ * what RESTS on the body: the ponytail sticks out from the back of the head,
+ * and hung it swung against the head on every step (Derek: "too bouncy").
  */
 import "./node-dom-shim.mjs";
 import fs from "node:fs";
@@ -53,6 +61,20 @@ const SCALE = Number(args["source-scale"] ?? 100);
 const SIZE = Number(args.size ?? 40);
 const M_PER_UNIT = Number(args["metres-per-unit"] ?? 0.019);
 const wanted = String(args.parts).split(",");
+const hanging = new Set(args.hang ? String(args.hang).split(",") : []);
+const HANG_TOP = Number(args["hang-top"] ?? 0.81);
+const HANG_BOTTOM = Number(args["hang-bottom"] ?? 0.73);
+/** 0 at the top, 1 at the bottom, smoothstepped so the bend has no crease. */
+const hangWeight = (y) => {
+  const t = Math.min(1, Math.max(0, (HANG_TOP - y) / (HANG_TOP - HANG_BOTTOM)));
+  return t * t * (3 - 2 * t);
+};
+for (const h of hanging) {
+  if (!wanted.includes(h)) {
+    console.error(`! --hang names "${h}", which is not in --parts`);
+    process.exit(1);
+  }
+}
 
 // --- parts, with Blockbench's repeated names numbered in order of appearance
 const group = new OBJLoader().parse(fs.readFileSync(fromStudio(String(args.in)), "utf8"));
@@ -110,6 +132,7 @@ for (const [index, p] of parts.entries()) {
     // glTF V runs from the top, OBJ's from the bottom
     uv.set([U.getX(i), 1 - U.getY(i)], (at + i) * 2);
     uv1[(at + i) * 2] = index;
+    if (hanging.has(p.name)) uv1[(at + i) * 2 + 1] = hangWeight(P.getY(i));
   }
   for (let t = 0; t < P.count; t += 3) {
     const a = new THREE.Vector3().fromBufferAttribute(P, t), b = new THREE.Vector3().fromBufferAttribute(P, t + 1), c = new THREE.Vector3().fromBufferAttribute(P, t + 2);
@@ -118,7 +141,10 @@ for (const [index, p] of parts.entries()) {
   }
   const metres = SCALE * M_PER_UNIT;
   const perMetre = (SIZE * Math.sqrt(uvArea / world)) / metres;
-  console.log(`  ${p.name.padEnd(12)} ${String(P.count / 3).padStart(4)} tris  ${perMetre.toFixed(0)} texels/m`);
+  let hangMax = 0;
+  for (let i = 0; i < P.count; i++) hangMax = Math.max(hangMax, uv1[(at + i) * 2 + 1]);
+  const hangNote = hanging.has(p.name) ? `  hangs (weight up to ${hangMax.toFixed(2)})` : "";
+  console.log(`  ${p.name.padEnd(12)} ${String(P.count / 3).padStart(4)} tris  ${perMetre.toFixed(0)} texels/m${hangNote}`);
   at += P.count;
 }
 const geo = new THREE.BufferGeometry();

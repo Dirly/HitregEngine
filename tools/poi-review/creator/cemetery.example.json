@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "id": "salt-road-cemetery",
+  "name": "Salt Road Cemetery",
+  "project": "voxel-demo",
+  "adventureSize": "small",
+  "hostility": "non-hostile",
+  "description": "An established cemetery beside the safe road. Settled older grave rows and a few recent burials surround a small chapel. A low wrought-iron enclosure, clear gate and maintained paths give it the character of a place used by the nearby settlement.",
+  "location": {
+    "hint": "Survey the existing cemetery beside the Salt Road and protect the current road corridor."
+  },
+  "requirements": [
+    "A small chapel with a reachable entrance and measured interior.",
+    "A low wrought-iron boundary set back from the road, with a clear working entrance.",
+    "Mostly older settled graves; reserve fresh earth for a few recent or disturbed burials.",
+    "Religious markers and any basin must have a clear use and relationship to the chapel or burial activity."
+  ],
+  "constraints": [
+    "Preserve the established road and its usable travel width.",
+    "Use fitted planes and generated fence artwork if suitable for the game's art style; otherwise choose an appropriate mesh construction.",
+    "Respect current character, building and prop scale.",
+    "This is an illustrative plan brief, not an instruction to alter the frozen world. Size and hostility are example values, not newly accepted choices for the live cemetery."
+  ],
+  "mode": "plan"
+}

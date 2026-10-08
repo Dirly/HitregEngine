@@ -104,3 +104,25 @@ preservation, and the separate extraction/traversal gates are explained in
 [`tools/mesh-dc/README.md`](../tools/mesh-dc/README.md). Import validation establishes
 valid source solids; it does not certify the extracted dungeon's topology or
 walkability.
+
+`hitreg.statue-maker` freezes rigged or static character/creature geometry into
+a smooth-shaded static model and an anchored collision prefab. Its shared
+library, CLI and registered host use the same recipe. Human catalog profiles
+select male/female parts, hair or hood, robes and plain shoulders; custom rigs
+can freeze an existing clip or source pose. See
+[`tools/statue-maker/README.md`](../tools/statue-maker/README.md) for replay,
+portable source bundles and the limits of the explicit human arm mapping.
+
+`hitreg.poi-review` includes an agent-agnostic POI work-plan generator (`plan-poi`),
+plus a read-only terrain planner and construction reviewer. Its shared CLI/API
+turns a sized brief into construction handoffs and an incomplete review template;
+it does not install content or certify an unbuilt site. See
+[`tools/poi-review/README.md`](../tools/poi-review/README.md) for the end-to-end process.
+It surveys
+actual voxel collision triangles and checks supplied POI routes with the engine
+capsule, plus headroom, support, burial, coplanar assembly overlaps and declared
+material scale. Its route-planning mode searches elevation choices within grade
+and cut/fill limits; that heightfield candidate requires terrain editing and final
+collision review. Its successful numeric result still requires visual review.
+See [`tools/poi-review/SKILL.md`](../tools/poi-review/SKILL.md); the colocated
+Zod schema validates the manifest shared by the CLI and registered host.

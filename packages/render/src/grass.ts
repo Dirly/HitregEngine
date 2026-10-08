@@ -950,6 +950,10 @@ class GrassPatch {
     const span = Math.max(0.001, this.data.heightFadeEnd - this.data.heightFadeStart);
     const t = Math.min(1, Math.max(0, (camHeight - this.data.heightFadeStart) / span));
     this.heightFadeUniform.value = 1 - t;
+    // A fully height-faded layer contributes no pixels, but transparent
+    // instances still cost a submission and vertex work unless hidden.
+    // Re-evaluate every frame so descending reveals the retained placement.
+    this.mesh.visible = this.mesh.count > 0 && t < 1;
     // How far cover actually reaches from the camera, this frame: the sampled
     // disc, less however far the camera has drifted from its centre. Capped at
     // the authored radius, which is what it sits at whenever the pad has
@@ -1056,6 +1060,19 @@ export class GrassSystem {
   ): void {
     const patches = this.order;
     if (patches.length === 0) return;
+    // Every layer asks for the same camera-ground height for its altitude
+    // fade. A terrain ray query per layer made 27 layers spend ~1 ms/frame
+    // even while standing still. Share only within this update, so terrain
+    // edits, camera movement and a changed sampler take effect next frame.
+    let probed = false, probeX = 0, probeZ = 0;
+    let probeHeight: number | null = null;
+    const frameGround: GroundSampler = (x, z) => {
+      if (!probed || x !== probeX || z !== probeZ) {
+        probeHeight = sampleGround(x, z);
+        probeX = x; probeZ = z; probed = true;
+      }
+      return probeHeight;
+    };
     // ONE budget for the frame, shared: two layers re-placing at once must
     // cost what one does, or a scene with a grass and a fern layer spikes
     // exactly where a single layer was tuned not to
@@ -1063,7 +1080,7 @@ export class GrassSystem {
     this.turn = (this.turn + 1) % patches.length;
     for (let i = 0; i < patches.length; i++) {
       const patch = patches[(this.turn + i) % patches.length]!;
-      left -= patch.update(camera, sampleGround, sampleGrassy, Math.max(0, left), this.regionTest);
+      left -= patch.update(camera, frameGround, sampleGrassy, Math.max(0, left), this.regionTest);
     }
   }
 

@@ -4,7 +4,8 @@ import { sheetStoreOf, type SheetStoreLike } from "./character-store.js";
 
 /**
  * Local-play saves for the per-character records a dedicated server commits
- * beside the sheet — the quest journal (`quests/`), NPC memory (`npc/`) and the
+ * beside the sheet — the quest journal (`quests/`), NPC memory (`npc/`), the soul
+ * bind (`bind/`, the respawn point) and the
  * vault (`vault/`): restored into netState on start, written back through
  * ctx.playerData (namespace "records") a moment after each change.
  *

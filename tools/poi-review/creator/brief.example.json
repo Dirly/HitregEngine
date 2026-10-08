@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "id": "ironcut-gorge",
+  "name": "Ironcut Gorge",
+  "project": "voxel-demo",
+  "adventureSize": "large",
+  "hostility": "mixed",
+  "description": "A substantial iron-mining adventure built around the gorge. A safe loading yard leads into branching underground workings, larger excavations and routes between elevations. The lower gorge contains another meaningful part of the adventure.",
+  "location": {
+    "hint": "Survey the existing mine entrance and the gorge below it; choose the network and exits from the rendered terrain.",
+    "anchor": [4359, 34.2474, -2526]
+  },
+  "requirements": [
+    "A connected mine network with meaningful branch destinations and a way back.",
+    "Appropriate hostile inhabitants deeper in the workings, with safe retreat from the entry.",
+    "Use the lower gorge as part of the playable experience."
+  ],
+  "constraints": [
+    "Keep the starting town and nearby established roads relatively safe.",
+    "Respect existing character and prop scale.",
+    "The current world is frozen; this example authorizes no content changes."
+  ],
+  "mode": "plan"
+}

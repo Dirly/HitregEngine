@@ -98,6 +98,47 @@ describe("world-anchored foliage placement", () => {
     heightFadeEnd: 200,
   };
 
+  it("shares the camera-ground query across layers, refreshing it on each update", () => {
+    const system = new GrassSystem(), camera = new THREE.PerspectiveCamera();
+    for (let i = 0; i < 5; i++) system.register(`layer-${i}`, new THREE.Group(), { ...data, radius: 1, density: 0.1 });
+    const calls: number[][] = [];
+    let height: number | null = 2;
+    const sample = (x: number, z: number) => { calls.push([x, z]); return height; };
+    camera.position.set(10, 40, 20); camera.updateMatrixWorld(true);
+    system.update(camera, sample, () => 0);
+    expect(calls).toEqual([[10, 20]]);
+    height = null;
+    system.update(camera, sample, () => 0);
+    expect(calls).toHaveLength(2); // unchanged camera still sees changed terrain
+    camera.position.x = 15; camera.updateMatrixWorld(true);
+    system.update(camera, sample, () => 0);
+    expect(calls[2]).toEqual([15, 20]);
+    system.clear();
+    system.update(camera, sample, () => 0);
+    expect(calls).toHaveLength(3); // no layers, no query
+  });
+
+  it("submits no fully height-faded cover and restores the same placement on descent", () => {
+    const group = new THREE.Group(), system = new GrassSystem();
+    const camera = new THREE.PerspectiveCamera();
+    system.register("cover", group, { ...data, radius: 2 });
+    camera.position.set(0, 40, 0); camera.updateMatrixWorld(true);
+    system.update(camera, () => 0, () => 0);
+    const mesh = group.children[0] as THREE.InstancedMesh;
+    const count = mesh.count;
+    expect(count).toBeGreaterThan(0);
+    expect(mesh.visible).toBe(true);
+    camera.position.y = 200; camera.updateMatrixWorld(true);
+    system.update(camera, () => 0, () => 0);
+    expect(mesh.visible).toBe(false);
+    expect(mesh.count).toBe(count);
+    camera.position.y = 40; camera.updateMatrixWorld(true);
+    system.update(camera, () => 0, () => 0);
+    expect(mesh.visible).toBe(true);
+    expect(mesh.count).toBe(count);
+    system.clear();
+  });
+
   /** Every instance's world position and yaw, for a camera at (x, z). */
   function placements(x: number, z: number): Map<string, string> {
     const group = new THREE.Object3D();

@@ -84,7 +84,7 @@ out without anyone typing sockets. Tile weights are observed counts.
 Re-run the import after any change to parts or examples; the derived files
 are regenerated (the prefab folder is replaced wholesale).
 
-### The atlas: one page per project, not per kit
+### The atlas: shared project pages, not private kit textures
 
 Every texture every module embeds is pulled out, deduplicated by content, and
 packed onto one 2048px page (a second page opens only when the first is
@@ -96,7 +96,8 @@ anything that is not a WFC part, the town's barrels and carts — join it with
 file, rewritten to `models/<folder>/<name>.gltf`; the sources stay where
 they are, so `--out` cannot be the source folder). Every module on the page
 embeds it under the same `hitreg-shared:<hash>` image name, and the
-renderer dedupes by that name, so a whole town costs ONE GPU texture.
+renderer dedupes by that name, so modules share one GPU texture per atlas page
+for compatible texture usage.
 
 The layout file records every module on the page. Whenever the page changes
 (a new texture arrives), every recorded module is re-emitted with the new
@@ -107,12 +108,16 @@ NAMES are kept on the rewritten modules (one output material per distinct
 source material), so `wind.materials: "Leaves"` still matches after
 atlasing — name the material, because the texture name becomes the shared
 hash. What the atlas buys is one texture binding and one shader program per
-material kind; draw calls stay one per (module, submesh) instanced batch,
-which is already the right granularity. Two rules fall out of atlasing:
+material kind; draw calls still depend on (module, submesh) instanced batches.
+This step does not consolidate material slots or compile a finished building.
+For static town output, follow [town-baking.md](../../docs/town-baking.md):
+compatible materials per building shell, independent interior units, and
+preserved editable sources. Two rules fall out of atlasing:
 
 - A face cannot rely on UV WRAP to repeat a texture: an island can't tile
   inside the page. The importer clamps and warns naming the part. Subdivide
-  the face or pre-tile the texture.
+  the face or pre-tile the texture. Resolve these warnings before installing a
+  finished town; clamping a repeating wall is not an acceptable conversion.
 - Islands bleed by copying the OPPOSITE edge (wrap bleed), so a floor
   texture that continues from cell to cell samples its own continuation in
   the mip chain, not a neighbouring island.

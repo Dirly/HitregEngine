@@ -1,0 +1,89 @@
+{
+ "source": "MMO/3d/Mobs/Dragon/Cobra-parts.obj",
+ "sourceScale": 1,
+ "objScale": 1,
+ "outMesh": "MMO/3d/Mobs/Dragon/Cobra-unwrapped",
+ "sheet": 1254,
+ "keyStroke": 8,
+ "smooth": 48,
+ "margin": 22,
+ "gutter": 48,
+ "atlas": {
+  "size": 774,
+  "bleed": 2,
+  "bgLum": 236
+ },
+ "slots": {
+  "body": {
+   "color": "#ff0000",
+   "fit": "contain"
+  },
+  "head": {
+   "color": "#00ff00",
+   "fit": "contain",
+   "labelMax": 1
+  },
+  "hood": {
+   "color": "#0000ff",
+   "fit": "contain"
+  }
+ },
+ "parts": {
+  "Cobra_Body": {
+   "slot": "body",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.35
+  },
+  "Cobra_Head": {
+   "slot": "head",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.4
+  },
+  "Cobra_Hood": {
+   "slot": "hood",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  }
+ },
+ "layout": {
+  "col": [
+   {
+    "row": [
+     "body"
+    ]
+   },
+   {
+    "row": [
+     "head",
+     "hood"
+    ]
+   }
+  ]
+ },
+ "marks": [
+  {
+   "slot": "head",
+   "at": [
+    1.2302,
+    1.3719,
+    0.0125
+   ],
+   "shape": "eye",
+   "size": 10
+  }
+ ],
+ "cutoutSlots": [],
+ "combos": [
+  [
+   "Cobra_Body",
+   "Cobra_Head",
+   "Cobra_Hood"
+  ]
+ ]
+}

@@ -8,7 +8,10 @@
 // the PNG to `target`, then sets status "done". Prompts live in the request file, never in a project folder.
 //
 //   node tools/image-request.mjs gen --id flagstone --target projects/x/assets/textures/flagstone.png \
-//        --size 512x512 --prompt-file prompt.txt [--ref existing.png] [--alpha] [--timeout 600] [--force]
+//        --size 512x512 --prompt-file prompt.txt [--ref a.png [--ref b.png …]] [--alpha] [--timeout 600] [--force]
+//        (every --ref is attached, in order; the prompt names them by position)
+//        --paint: the one --ref is a screenshot whose COMPOSITION is repainted, resampled smooth (loading art)
+//   gen / gen-set --dry-run   print the codex command and the stdin brief it would send, then exit (no request, no call)
 //   node tools/image-request.mjs gen-set --manifest set.json [--timeout 1800]   # N images in ONE codex session
 //   node tools/image-request.mjs new --id plan --target … --size 1024x1280 --prompt "…"   # queue only
 //   node tools/image-request.mjs wait --id plan --timeout 900                   # blocks until done/failed
@@ -94,10 +97,14 @@ async function flattenOntoWhite(file) {
 }
 
 // One codex exec session. The prompt goes in on stdin so a variadic -i cannot swallow it.
-function runCodex(cwd, prompt, refs, timeoutSec) {
+function codexArgs(cwd, refs) {
   const args = ["exec", "--cd", cwd, "-s", "workspace-write", "--skip-git-repo-check"];
   for (const r of refs) args.push("-i", path.resolve(r));
   args.push("-");
+  return args;
+}
+function runCodex(cwd, prompt, refs, timeoutSec) {
+  const args = codexArgs(cwd, refs);
   const res = spawnSync("codex", args, { input: prompt, encoding: "utf8", shell: true, timeout: timeoutSec * 1000, maxBuffer: 1 << 26 });
   if (res.error?.code === "ENOENT") { console.error("codex CLI not found on PATH — queue the request with `new` instead"); process.exit(4); }
   return res;
@@ -116,12 +123,15 @@ function brief(items) {
     lines.push(`Exact output size: ${it.size} pixels. Save as exactly "${it.file}" in the cwd.`);
     if (it.alpha) lines.push("Background MUST be fully transparent (a real PNG alpha channel, not white, not a checkerboard pattern).");
     const n = [].concat(it.ref ?? []).length;
-    if (n === 1) lines.push("A reference image is attached: match its palette, grain and pixel density. Follow the text below for subject and layout.");
+    // paint: the reference is a SCREENSHOT to repaint (its composition kept), not a style sample (tools/loading-art.mts)
+    if (n === 1 && it.paint) lines.push("A reference image is attached: it is the COMPOSITION to repaint. Keep its camera, layout and the shapes in it; follow the text below for the painting style.");
+    else if (n === 1) lines.push("A reference image is attached: match its palette, grain and pixel density. Follow the text below for subject and layout.");
     // several: the text below says what each one is for, by its order
     if (n > 1) lines.push(`${n} reference images are attached, in the order the text below names them.`);
     lines.push("", it.prompt.trim(), "");
   }
-  lines.push(`Resize to the exact pixel size with nearest-neighbour (never bilinear) so pixel art stays crisp${items.some((i) => i.alpha) ? ", preserving alpha" : ""}.`);
+  if (items.every((i) => i.paint)) lines.push("Resize to the exact pixel size with a high-quality smooth filter (area / Lanczos): this is a painting, not pixel art.");
+  else lines.push(`Resize to the exact pixel size with nearest-neighbour (never bilinear) so pixel art stays crisp${items.some((i) => i.alpha) ? ", preserving alpha" : ""}.`);
   lines.push("Reply with only the filename and byte size of each PNG you wrote.");
   return lines.join("\n");
 }
@@ -129,6 +139,16 @@ function brief(items) {
 // gen / gen-set: record the request, generate, verify, install, record the outcome.
 async function generate(items, timeoutSec) {
   const stage = path.join(stageRoot, Date.now().toString(36));
+  // every item's references, once each, in first-seen order — a set whose
+  // images share a key and a style reference attaches each file once, and the
+  // prompts can name them by position
+  const refs = [...new Set(items.flatMap((i) => [].concat(i.ref ?? [])).map((r) => path.resolve(r)))];
+  const missing = refs.filter((r) => !fs.existsSync(r));
+  if (missing.length) { console.error(`reference image not found: ${missing.join(", ")}`); process.exit(2); }
+  if (flag("dry-run")) {
+    console.log(JSON.stringify({ command: "codex", args: codexArgs(stage, refs), refs, stdin: brief(items) }, null, 2));
+    process.exit(0);
+  }
   fs.mkdirSync(stage, { recursive: true });
 
   for (const it of items) {
@@ -144,10 +164,6 @@ async function generate(items, timeoutSec) {
     });
   }
 
-  // every item's references, once each, in first-seen order — a set whose
-  // images share a key and a style reference attaches each file once, and the
-  // prompts can name them by position
-  const refs = [...new Set(items.flatMap((i) => [].concat(i.ref ?? [])).map((r) => path.resolve(r)))];
   const t0 = Date.now();
   const res = runCodex(stage, brief(items), refs, timeoutSec);
   const secs = Number(((Date.now() - t0) / 1000).toFixed(0));
@@ -192,7 +208,7 @@ if (cmd === "gen") {
   if (!prompt) usage();
   await generate([{
     id, file: `${id}.png`, target: path.resolve(root, target), size: opt("size", "1024x1024"),
-    prompt, alpha: flag("alpha"), ref: opts("ref")[0], purpose: opt("purpose", ""),
+    prompt, alpha: flag("alpha"), ref: opts("ref"), purpose: opt("purpose", ""), paint: flag("paint"),
   }], Number(opt("timeout", 900)));
 } else if (cmd === "gen-set") {
   const m = opt("manifest"); if (!m) usage();
@@ -205,7 +221,7 @@ if (cmd === "gen") {
     return {
       id: it.id, file: `${it.id}.png`, target: path.resolve(root, it.target), size: it.size ?? "1024x1024",
       prompt: shared ? `${shared}\n\n${it.prompt}` : it.prompt, alpha: !!it.alpha,
-      ref: it.ref ? [].concat(it.ref).map((r) => path.resolve(root, r)) : undefined, purpose: it.purpose ?? "",
+      ref: it.ref ? [].concat(it.ref).map((r) => path.resolve(root, r)) : undefined, purpose: it.purpose ?? "", paint: !!it.paint,
     };
   }), Number(opt("timeout", 1800)));
 } else if (cmd === "new") {

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ATTRIBUTES, DERIVED_STATS, gridSizeSchema, type Attribute, type DerivedStat } from "./items.js";
+import { ATTRIBUTES, DERIVED_STAT_DESCRIPTIONS, DERIVED_STATS, gridSizeSchema, type Attribute, type DerivedStat } from "./items.js";
 
 /**
  * Progression rules — the numbers behind levels, points and derived stats,
@@ -31,10 +31,16 @@ const DEFAULT_FORMULAS: Record<DerivedStat, z.input<typeof statFormulaSchema>> =
   maxMana: { base: 50, intelligence: 8, wisdom: 4 },
   armor: { base: 0 },
   capacity: { base: 20, strength: 2 },
+  // Percent points. Everyone starts at 5 (World of Warcraft's base); ten points
+  // of the feeding attribute buy one more. Linear on purpose, like the rest:
+  // a level-scaled curve (the stat buying less as you level) belongs in a
+  // game's own damage rules, not in this file.
+  crit: { base: 5, dexterity: 0.1 },
+  spellCrit: { base: 5, intelligence: 0.1 },
 };
 
 const derivedFormulas = Object.fromEntries(
-  DERIVED_STATS.map((s) => [s, statFormulaSchema.prefault(DEFAULT_FORMULAS[s])]),
+  DERIVED_STATS.map((s) => [s, statFormulaSchema.prefault(DEFAULT_FORMULAS[s]).describe(DERIVED_STAT_DESCRIPTIONS[s])]),
 ) as Record<DerivedStat, z.ZodPrefault<typeof statFormulaSchema>>;
 
 export const progressionSchema = z
@@ -72,7 +78,10 @@ export const progressionSchema = z
       equip: z.number().min(0).max(30).default(0).describe("Seconds before an equipment change takes effect, including replacing worn gear."),
       unequip: z.number().min(0).max(30).default(0).describe("Seconds before removing worn gear takes effect."),
     }).prefault({}).describe("Authority-enforced inventory action times. One action per character; destinations and ownership are rechecked at completion."),
-    derived: z.object(derivedFormulas).prefault({}),
+    derived: z
+      .object(derivedFormulas)
+      .prefault({})
+      .describe("One linear formula per derived stat; a stat the file leaves out keeps the engine default."),
   })
   .describe(
     "Levelling and stat rules (assets/progression/<id>.json). One per game; a character-sheet script names it by id.",

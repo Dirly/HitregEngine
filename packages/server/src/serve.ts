@@ -18,6 +18,8 @@ import fs from "node:fs";
 import http from "node:http";
 import { WebSocketHostTransport } from "@hitreg/net/server";
 import {
+  getVoxelWorld,
+  pointInPolygon,
   polygonEdgeDistance,
   recipeEditSchema,
   regionAt,
@@ -40,8 +42,12 @@ import { mountLayerChat, type LayerChat } from "./chat.js";
 import { handleAdmin } from "./admin.js";
 import { ClusterLink } from "./cluster/link.js";
 import { PlayerStore } from "./cluster/player-store.js";
+import { mountItemsLog } from "./moderation/items-log.js";
+import { muteLine } from "./moderation/sanctions.js";
 import { verifyTicket } from "./cluster/ticket.js";
-import { SOCIAL_MODULE, socialLine, type ServerKind } from "./cluster/protocol.js";
+import { SOCIAL_MODULE, socialLine, type PortalHop, type ServerKind, type TransferTarget } from "./cluster/protocol.js";
+import { Profiler } from "@hitreg/core";
+import { CHARACTER_EVENTS, PORTAL_EVENTS, portalDeparture, portalKey, portalRecordSchema, type PortalTravel } from "@hitreg/core";
 
 export interface ServeOptions {
   /** Playground checkout whose projects/ supply the content. */
@@ -60,6 +66,25 @@ export interface ServeOptions {
   persistRecipe?: boolean;
   /** Cell-generation worker threads (default min(4, cpus-1); 0 = inline). */
   workers?: number;
+  /** Profile every tick (phases + per-script rows) for GET /admin/profile. Off by default. */
+  profile?: boolean;
+  /** permessage-deflate on the game socket (default false: it starves under an overloaded tick; WebSocketHostTransportOptions.compress). */
+  compress?: boolean;
+  /**
+   * Metres around players and awake bodies within which static prop/building
+   * mesh colliders are built (released 25% further out). Default 96 (two 48 m
+   * terrain cells); 0 builds every one at boot, as before.
+   */
+  staticsRadius?: number;
+  /** NPCs no spawn area owns sleep when no player is near (NpcManagerOptions.dormancy; default on). false keeps every one awake. */
+  npcDormancy?: { sleepRadius?: number; wakeRadius?: number; idleSeconds?: number } | false;
+  /** Metres within which each player is sent what moves around it (GameServerOptions.interestRadius; default 250, 0 = everything to everyone). */
+  interestRadius?: number;
+  /** GameServerOptions.stateInterest / stateEvery / stateHz / farSend (the last three OFF by default: owner decisions). */
+  stateInterest?: boolean;
+  stateEvery?: number;
+  stateHz?: Record<string, number>;
+  farSend?: { beyond: number; every: number };
   log?: (line: string) => void;
 
   // -- hosting ------------------------------------------------------------------
@@ -86,6 +111,19 @@ export interface ServeOptions {
   persistence?: PlayerPersistence;
   /** Extra veto on moving a player (default: no awake spawn area within 60 m). */
   transferGate?: (peerId: string) => boolean;
+  /**
+   * Load only these zones (a copy main started for them): placed things — anything with a mesh, a collider,
+   * a body, a spawn area or a portal — whose root stands outside every one of these zones by more than
+   * `zoneLoadBand` metres are not loaded at all. World-wide entities (the voxel world, water, sky, scripts
+   * with nothing placed) always are. Unset: the whole scene, as before.
+   */
+  zones?: string[];
+  /**
+   * Metres past a loaded zone's border that still load (default 200): what a player can still reach here —
+   * the border band before a crossing (20), a fight that holds a body on this copy for 12 s after the last
+   * hit (~115 m at a sprint) — plus what it can see from there.
+   */
+  zoneLoadBand?: number;
   /** Zones to use instead of the recipe's `regions` (a flat test scene given borders). */
   regions?: RegionDoc[];
   /** POIs to use instead of the recipe's (a flat test scene given a sanctuary). */
@@ -131,14 +169,92 @@ export interface ServeHandle {
    * mints a ticket through main (or signs one locally when standalone),
    * hands the client over. Resolves true when the client was told to go.
    */
-  moveOut(characterId: string, to: { srv: string; url: string }, reason: string): Promise<boolean>;
+  moveOut(characterId: string, to: { srv: string; url: string; scene?: string }, reason: string): Promise<boolean>;
   close(): Promise<void>;
+}
+
+/** Components that make an entity PLACED (it matters where it stands), and ones that make it world-wide. */
+const PLACED = ["mesh", "collider", "rigidbody", "spawnArea", "portalAnchor", "particles"];
+const WORLDWIDE = ["voxelWorld", "water", "sky", "postfx"];
+
+/**
+ * The exclude predicate for a copy that loads only some zones (ServeOptions.zones): a ROOT whose subtree is
+ * placed and not world-wide, standing more than `band` metres outside every loaded zone, is left out (its
+ * descendants go with it). Null when the zones cannot be found (everything loads, with a warning).
+ */
+function zoneFilter(
+  doc: import("@hitreg/core").SceneDoc,
+  zones: string[],
+  band: number,
+  override: RegionDoc[] | undefined,
+  log: (line: string) => void,
+): ((id: string, e: import("@hitreg/core").EntityDoc, entities: Readonly<Record<string, import("@hitreg/core").EntityDoc>>) => boolean) | null {
+  let regions: ReadonlyArray<RegionDoc> = override ?? [];
+  if (!override) {
+    for (const e of Object.values(doc.entities)) {
+      const world = (e.components["voxelWorld"] as { world?: string } | undefined)?.world;
+      if (world) regions = getVoxelWorld(world)?.recipe.regions ?? [];
+    }
+  }
+  const polygons = regions.filter((r) => zones.includes(r.id)).map((r) => r.polygon);
+  if (polygons.length === 0) {
+    log(`[serve] --zones ${zones.join(", ")}: no such zones in this world — loading everything`);
+    return null;
+  }
+  const near = (x: number, z: number): boolean => polygons.some((poly) => pointInPolygon(x, z, poly) || polygonEdgeDistance(x, z, poly) <= band);
+  let children: Map<string, string[]> | null = null;
+  return (id, e, entities) => {
+    if (e.parent !== null) return false; // roots decide for their subtree
+    const p = (e.components["transform"] as { position?: number[] } | undefined)?.position;
+    if (!p || p.length < 3 || near(p[0]!, p[2]!)) return false;
+    if (!children) {
+      children = new Map();
+      for (const [cid, c] of Object.entries(entities)) {
+        if (c.parent === null) continue;
+        const list = children.get(c.parent);
+        if (list) list.push(cid);
+        else children.set(c.parent, [cid]);
+      }
+    }
+    let placed = false;
+    const stack = [id];
+    while (stack.length > 0) {
+      const cid = stack.pop()!;
+      const cur = entities[cid];
+      if (!cur) continue;
+      const keys = Object.keys(cur.components);
+      if (keys.some((k) => WORLDWIDE.includes(k))) return false;
+      if (keys.some((k) => PLACED.includes(k))) placed = true;
+      for (const child of children.get(cid) ?? []) stack.push(child);
+    }
+    return placed;
+  };
+}
+
+/**
+ * This process's cost for /admin/status: CPU as a share of ONE core since the
+ * previous call (a load driver polling every few seconds reads a rolling
+ * figure), resident and heap memory.
+ */
+let lastCpu: { at: number; usage: NodeJS.CpuUsage } | null = null;
+function processStats(): { cpuPct: number | null; rssMb: number; heapUsedMb: number; externalMb: number } {
+  const usage = process.cpuUsage();
+  const at = performance.now();
+  let cpuPct: number | null = null;
+  if (lastCpu && at > lastCpu.at) {
+    const us = usage.user - lastCpu.usage.user + (usage.system - lastCpu.usage.system);
+    cpuPct = Math.round((us / 1000 / (at - lastCpu.at)) * 1000) / 10;
+  }
+  lastCpu = { at, usage };
+  const mem = process.memoryUsage();
+  const mb = (n: number): number => Math.round(n / 1048576);
+  return { cpuPct, rssMb: mb(mem.rss), heapUsedMb: mb(mem.heapUsed), externalMb: mb(mem.external) };
 }
 
 export async function serve(opts: ServeOptions): Promise<ServeHandle> {
   const log = opts.log ?? ((line: string) => console.log(line));
   const started = Date.now();
-  const content = loadContent(playgroundRoots(opts.playground));
+  const content = loadContent(playgroundRoots(opts.playground, opts.scene));
   const doc = content.scenes.get(opts.scene);
   if (!doc) {
     throw new Error(`scene "${opts.scene}" not found. Known: ${[...content.scenes.keys()].join(", ") || "(none)"}`);
@@ -150,14 +266,21 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
   log(`[serve] scripts: ${report.registered.length} registered${report.skipped.length ? `, ${report.skipped.length} skipped` : ""}`);
   for (const s of report.skipped) log(`  - ${s.file}: ${s.reason}`);
 
+  // a copy for some zones loads only what stands in them (plus a band): see ServeOptions.zones
+  const outsideZones = opts.zones && opts.zones.length > 0 ? zoneFilter(doc, opts.zones, opts.zoneLoadBand ?? 200, opts.regions, log) : null;
+  // 600 ticks = 10 s at 60 Hz; a tick past 8 ms (half the 60 Hz budget) is kept whole as a spike
+  const profiler = opts.profile ? Object.assign(new Profiler({ historyFrames: 600, spikeMs: 8 }), { enabled: true }) : null;
+  const staticsRadius = opts.staticsRadius ?? 96;
   const world = await HeadlessWorld.create({
     doc,
+    ...(staticsRadius > 0 ? { streamStatics: { radius: staticsRadius } } : {}),
+    ...(profiler ? { profiler } : {}),
     assets: content.assets,
     registry,
     events,
     scripts,
     ...(opts.fixedHz ? { fixedHz: opts.fixedHz } : {}),
-    exclude: (_id, e) => e.tags.includes("player"),
+    exclude: (id, e, entities) => e.tags.includes("player") || (outsideZones !== null && outsideZones(id, e, entities)),
   });
   const voxel = resolveServerVoxelWorld(world.base, opts.terrainRadius);
   const terrain = voxel
@@ -171,11 +294,14 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
   const serverId = opts.serverId ?? "layer-1";
   const kind: ServerKind = opts.kind ?? "layer";
   const identities = new Map<string, PlayerIdentity>();
+  /** Characters main banned while they stood here: their tickets are refused until then (epoch ms) and why. */
+  const refused = new Map<string, { until: number; text: string }>();
   const secret = opts.secret;
 
   const httpServer = http.createServer();
   const transport = new WebSocketHostTransport({
     server: httpServer,
+    compress: opts.compress ?? false,
     trace: (event, detail) => {
       if (event === "ws-peer" || event === "ws-peer-gone" || event === "ws-reject") log(`[serve] ${event} ${detail ?? ""}`);
     },
@@ -185,9 +311,12 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
             if (!hello.ticket) return { reject: "a ticket is required — join through the gateway" };
             const v = verifyTicket(secret, hello.ticket, { srv: serverId });
             if (!v.ok) return { reject: v.reason };
+            const ban = refused.get(v.claims.chr);
+            if (ban && ban.until > Date.now()) return { reject: ban.text };
             identities.set(v.claims.chr, {
               playerId: v.claims.sub,
               characterId: v.claims.chr,
+              ...(v.claims.saveId ? { saveId: v.claims.saveId } : {}),
               name: v.claims.name,
               ...(v.claims.rev ? { rev: v.claims.rev } : {}),
               ...(v.claims.build ? { build: v.claims.build } : {}),
@@ -235,12 +364,25 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
     if (backend) {
       const store = new PlayerStore(backend, experienceId);
       persistence = {
-        load: (identity, scene) => store.load(identity.playerId, scene, identity.rev ?? {}),
-        commit: (identity, input) => store.commit(identity.playerId, input),
+        load: (identity, scene) => store.load(identity.saveId ?? identity.playerId, scene, identity.rev ?? {}),
+        commit: (identity, input) => store.commit(identity.saveId ?? identity.playerId, input),
       };
     }
   }
   if (secret && !persistence) log("[serve] tickets required but no persistence configured — characters will not be saved");
+  // the item log (docs/moderation.md §4): diffs the sheets and vaults this authority writes; its entries go to main
+  // from inside every commit, so they ride the periodic save and a leave, and reach main before a transfer ticket
+  const itemsLog = link ? mountItemsLog({ netState: world.netState, assets: world.assets, link, serverId, log }) : null;
+  if (itemsLog && persistence) {
+    const inner = persistence;
+    persistence = {
+      load: (identity, scene) => inner.load(identity, scene),
+      commit: (identity, input) => {
+        void itemsLog.flush();
+        return inner.commit(identity, input);
+      },
+    };
+  }
 
   const template = extractPlayerTemplate(world.expanded);
   const authored = (template?.entities[template.rootId]?.components["transform"] as { position?: number[] } | undefined)?.position ?? [0, 2, 0];
@@ -269,10 +411,17 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
     transferGate: opts.transferGate ?? ((peerId) => (spawnAreas ? spawnAreas.clearToTransfer(peerId) : true)),
     ...(opts.landingSeconds !== undefined ? { landingSeconds: opts.landingSeconds } : {}),
     ...(opts.snapshotEvery ? { snapshotEvery: opts.snapshotEvery } : {}),
+    ...(opts.interestRadius !== undefined ? { interestRadius: opts.interestRadius } : {}),
+    ...(opts.stateInterest !== undefined ? { stateInterest: opts.stateInterest } : {}),
+    ...(opts.stateEvery !== undefined ? { stateEvery: opts.stateEvery } : {}),
+    ...(opts.stateHz ? { stateHz: opts.stateHz } : {}),
+    ...(opts.farSend ? { farSend: opts.farSend } : {}),
     ...(opts.maxPlayers !== undefined ? { maxPlayers: opts.maxPlayers } : {}),
     ...(opts.reconnectGraceSeconds !== undefined ? { reconnectGraceSeconds: opts.reconnectGraceSeconds } : {}),
+    ...(profiler ? { profiler } : {}),
     onPlayerJoined: (player) => {
       if (player.identity) link?.playerJoined({ characterId: player.identity.characterId, playerId: player.identity.playerId, name: player.name, position: world.positionOf(player.bodyId) });
+      if (player.identity) itemsLog?.track(player.bodyId, player.identity.characterId);
       lastPopulatedAt = Date.now();
       // where they stand NOW is their first zone: a crossing in the next
       // half-second is still a crossing, not a first sight
@@ -281,8 +430,10 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
     },
     onPlayerLeft: (player, reason) => {
       if (player.identity) link?.playerLeft(player.identity.characterId, reason === "transfer" ? "transfer" : reason === "grace" ? "grace" : reason === "replaced" ? "replaced" : "leave");
+      itemsLog?.untrack(player.bodyId);
       identities.delete(player.peerId);
       blocks.delete(player.peerId);
+      mutes.delete(player.peerId);
       lastPopulatedAt = Date.now();
       if (draining && server.players.size === 0) finish("drained");
     },
@@ -306,7 +457,7 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
       }
     },
   });
-  const npcs = new NpcManager(server, { respawnSeconds: opts.respawnSeconds ?? 20 });
+  const npcs = new NpcManager(server, { respawnSeconds: opts.respawnSeconds ?? 20, ...(opts.npcDormancy !== undefined ? { dormancy: opts.npcDormancy } : {}) });
   spawnAreas = new SpawnAreaManager(server, npcs);
   // text chat routes on the host, and here the host is this process; zone and
   // global lines cross the cluster through main (docs/comms.md, docs/hosting.md)
@@ -322,7 +473,32 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
   const hostsZone = (zone: string): boolean => !link || link.hosted === "all" || link.hosted.includes(zone);
   // block lists, from main: a character never hears anyone it blocked
   const blocks = new Map<string, Set<string>>();
-  const chat = mountLayerChat({ server, scene: opts.scene, link, regions, mayHear: (recipient, sender) => !blocks.get(recipient)?.has(sender), log });
+  // mutes, from main (docs/moderation.md §3): a muted character's lines go nowhere
+  const mutes = new Map<string, { until: number; reason: string }>();
+  const mutedLine = (sender: string): string | null => {
+    const m = mutes.get(sender);
+    if (!m) return null;
+    if (m.until <= Date.now()) {
+      mutes.delete(sender);
+      return null;
+    }
+    return muteLine(m.until, m.reason);
+  };
+  const chat = mountLayerChat({ server, scene: opts.scene, link, regions, serverId, mayHear: (recipient, sender) => !blocks.get(recipient)?.has(sender), muted: mutedLine, log });
+  link?.onSanction((characterId, s) => {
+    if (s.muteUntil !== null && s.muteUntil > Date.now()) mutes.set(characterId, { until: s.muteUntil, reason: s.reason ?? "moderation" });
+    else mutes.delete(characterId);
+    if (s.notice && server.players.has(characterId)) chat.chat.announceTo(characterId, s.notice);
+  });
+  // a ban: tell them, then end the session (a moment later, so the line goes out first) and refuse their tickets
+  link?.onKick((characterId, text, refuseUntil) => {
+    if (refuseUntil !== undefined) refused.set(characterId, { until: refuseUntil, text });
+    if (!server.players.has(characterId)) return;
+    chat.chat.announceTo(characterId, text);
+    setTimeout(() => {
+      if (server.expel(characterId, "banned")) log(`[serve] ${characterId} removed by moderation`);
+    }, 250);
+  });
   link?.onGuild((characterId, guild) => {
     const key = `comms.guild/${characterId}`;
     if (guild === null) world.netState.delete(key);
@@ -411,7 +587,17 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
     const clear = spawnAreas ? spawnAreas.clearAt(position) : true;
     void link!.rpc({ op: "arrival.result", requestId, clear }).catch(() => undefined);
   });
-  link?.onZones((hosted) => log(`[serve] hosting zones: ${hosted === "all" ? "all" : hosted.join(", ") || "(none)"}`));
+  // a report: main wants the buffered chat involving the two (docs/moderation.md §2)
+  link?.onEvidenceRequest((requestId, q) => {
+    const evidence = chat.evidence(q.reporter, q.target, q.minutes);
+    void link!.rpc({ op: "evidence.result", requestId, evidence }).catch(() => undefined);
+  });
+  link?.onZones((hosted) => {
+    log(`[serve] hosting zones: ${hosted === "all" ? "all" : hosted.join(", ") || "(none)"}`);
+    // a copy that loaded only some zones has nothing placed in the others: say so where it shows
+    const loaded = outsideZones !== null ? opts.zones! : null;
+    if (loaded && (hosted === "all" || hosted.some((z) => !loaded.includes(z)))) log(`[serve] WARNING: this copy loaded only ${loaded.join(", ")} — asked to host ${hosted === "all" ? "all" : hosted.join(", ")}`);
+  });
   // main owns parties: it tells this layer each member's party so the party
   // channel routes here (peer id == character id), and stamps the party on
   // bridged lines itself, so a stale copy here can never misroute one
@@ -452,10 +638,10 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
     }
     if (!secret) throw new Error("cannot mint a ticket without a secret");
     const { signTicket } = await import("./cluster/ticket.js");
-    return signTicket(secret, { sub: identity.playerId, chr: identity.characterId, name: identity.name, srv, rev, reason });
+    return signTicket(secret, { sub: identity.playerId, chr: identity.characterId, ...(identity.saveId ? { saveId: identity.saveId } : {}), name: identity.name, srv, rev, reason });
   };
 
-  const moveOut = async (characterId: string, to: { srv: string; url: string }, reason: string): Promise<boolean> => {
+  const moveOut = async (characterId: string, to: { srv: string; url: string; scene?: string }, reason: string): Promise<boolean> => {
     const peerId = characterId;
     const deadline = Date.now() + 60_000;
     while (!server.canTransfer(peerId)) {
@@ -471,12 +657,75 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
     if (!player?.identity) return false;
     const rev = await server.commit(peerId);
     const ticket = await mintTicket(player.identity, to.srv, rev, reason);
-    return server.handoff(peerId, { url: to.url, ticket, reason, srv: to.srv });
+    return server.handoff(peerId, { url: to.url, ticket, reason, srv: to.srv, ...(to.scene && to.scene !== opts.scene ? { scene: to.scene } : {}) });
   };
+
+  // -- portals (docs/hosting.md → "Portals") ----------------------------------------------
+  // The portal builtin checked the traveller and emitted portal.travel on this
+  // authority; here the trip becomes a transfer: write the character's portal
+  // record (arrival anchor + the way back, saved with the commit moveOut makes),
+  // ask main for the instance (or, going back, the layer they came from), go.
+  const refusePortal = (actorId: string, error: string): void => {
+    world.eventBus.emit(CHARACTER_EVENTS.refused, { actorId, request: "portal", error });
+  };
+  const recordTrip = (bodyId: string, travel: PortalTravel): void => {
+    const next = portalDeparture(world.netState.get(portalKey(bodyId)), travel, { scene: opts.scene, ...(kind === "layer" ? { srv: serverId } : {}) });
+    if (!world.netState.set(portalKey(bodyId), next.record)) log(`[serve] portal record for ${bodyId} refused by netState`);
+  };
+  world.eventBus.on(PORTAL_EVENTS.travel, (payload) => {
+    const travel = payload as PortalTravel;
+    const peerId = world.netState.get(`owner/${travel.actorId}`);
+    const player = typeof peerId === "string" ? server.players.get(peerId) : undefined;
+    if (!player || player.transferring !== null) return;
+    if (!link || !player.identity) {
+      refusePortal(travel.actorId, "This server hosts no instances.");
+      log(`[serve] portal ${travel.portalId}: ${player.peerId} cannot travel — no cluster (run under main)`);
+      return;
+    }
+    const characterId = player.identity.characterId;
+    const before = portalRecordSchema.safeParse(world.netState.get(portalKey(travel.actorId)) ?? {});
+    const backTo = travel.back && before.success ? before.data.return?.srv : undefined;
+    recordTrip(travel.actorId, travel);
+    const hop: PortalHop = { scene: travel.scene, ...(travel.anchor ? { anchor: travel.anchor } : {}), ...(travel.back ? { back: true } : {}) };
+    const target: TransferTarget = travel.back
+      ? { kind: "layer", ...(backTo ? { layerId: backTo } : {}), party: travel.party, portal: hop }
+      : { kind: "instance", scene: travel.scene, party: travel.party, portal: hop };
+    const ask = (t: TransferTarget) => link!.rpc<{ srv: string; url: string; scene?: string }>({ op: "transfer.request", characterId, target: t });
+    void ask(target)
+      .catch((error: unknown) => {
+        // the layer they left is gone: any layer of the world takes them back
+        if (target.kind === "layer" && target.layerId) return ask({ ...target, layerId: undefined } as TransferTarget);
+        throw error;
+      })
+      .then(async (dest) => {
+        const sent = await moveOut(characterId, dest, travel.back ? "portal:back" : `portal:${travel.scene}`);
+        if (sent) log(`[serve] ${characterId} took portal ${travel.portalId} → ${dest.srv} (${dest.scene ?? "?"})`);
+        else refusePortal(travel.actorId, "The way will not open right now.");
+      })
+      .catch((error: unknown) => {
+        log(`[serve] portal ${travel.portalId} for ${characterId} failed: ${error instanceof Error ? error.message : String(error)}`);
+        refusePortal(travel.actorId, "The way will not open right now.");
+      });
+  });
 
   if (link) {
     link.onTransferBegin((m) => {
-      void moveOut(m.characterId, { srv: m.srv, url: m.url }, m.reason).catch((error: unknown) => {
+      // pulled along on a party member's portal trip: record this member's own arrival and way back first
+      const bodyId = server.players.get(m.characterId)?.bodyId;
+      if (m.portal && bodyId) {
+        const at = world.positionOf(bodyId);
+        const yaw = world.objects.get(bodyId)?.rotation.y ?? 0;
+        recordTrip(bodyId, {
+          actorId: bodyId,
+          portalId: "party",
+          scene: m.portal.scene,
+          back: m.portal.back === true,
+          party: false,
+          ...(m.portal.anchor ? { anchor: m.portal.anchor } : {}),
+          ...(at && m.portal.back !== true ? { returnTo: { position: at, yaw } } : {}),
+        });
+      }
+      void moveOut(m.characterId, { srv: m.srv, url: m.url, ...(m.scene ? { scene: m.scene } : {}) }, m.reason).catch((error: unknown) => {
         log(`[serve] transfer of ${m.characterId} failed: ${error instanceof Error ? error.message : String(error)}`);
         link?.transferFailed(m.characterId, error instanceof Error ? error.message : String(error));
       });
@@ -525,6 +774,9 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
         spawnAreas,
         terrain,
         status: () => ({
+          process: processStats(),
+          // wire bytes per peer since it connected (after compression): a load driver diffs two polls
+          traffic: transport.traffic(),
           scene: opts.scene,
           serverId,
           kind,

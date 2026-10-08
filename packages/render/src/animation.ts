@@ -4,6 +4,7 @@ export interface AnimatorData {
   play?: string;
   fade: number;
   speed: number;
+  poseLod?: Array<{ distance: number; fps: number }>;
   /**
    * Bone the upper-body layer masks from. Absent means "work it out": the
    * shallowest spine/waist/chest bone in the skeleton, which is where every
@@ -98,12 +99,149 @@ interface Anchored {
   action: THREE.AnimationAction;
 }
 
+/**
+ * A HIT FLINCH: the upper body pushed away from a blow for a moment, laid on
+ * top of whatever the mixer and the anchors wrote, with no clip. Presentation
+ * stamps `userData.poseFlinch` — `{ at, dir, angle, ms, twist?, wobble? }`:
+ * `at` performance.now() ms, `dir` the world direction the blow travels
+ * (x, y, z; y ignored), `angle` radians at the peak, `ms` how long, `twist`
+ * radians about world up (signed: the side it came from), `wobble` 0..1 a
+ * damped sway back past upright (a stagger, a broken guard) — on the model,
+ * its entity or a body up to three levels above it, like poseHoldUntil.
+ *
+ * Same undo-first rule as Anchor: the spine's rotations as left are saved
+ * before the push and put back before the next mixer pass (only where the
+ * bone still holds what the push wrote), so a held pose is never pushed twice.
+ */
+interface Flinch {
+  chain: THREE.Object3D[];
+  raw: THREE.Quaternion[];
+  written: THREE.Quaternion[];
+  applied: boolean;
+}
+
+interface FlinchStamp {
+  at: number;
+  dir: ArrayLike<number>;
+  angle: number;
+  ms: number;
+  twist?: number;
+  wobble?: number;
+}
+
+/** The latest `userData.poseFlinch` on `root` or its first three ancestors (null = none). */
+function flinchStamp(root: THREE.Object3D): FlinchStamp | null {
+  let best: FlinchStamp | null = null;
+  let node: THREE.Object3D | null = root;
+  for (let i = 0; i < 4 && node; i++, node = node.parent) {
+    const v = node.userData["poseFlinch"] as FlinchStamp | undefined;
+    if (v && typeof v.at === "number" && (!best || v.at > best.at)) best = v;
+  }
+  return best;
+}
+
+/** Peak share of a flinch at t (0..1): a snap out in the first 12%, an ease back, an optional damped sway. */
+export function flinchEnvelope(t: number, wobble = 0): number {
+  if (t <= 0 || t >= 1) return 0;
+  if (t < 0.12) return Math.sin((t / 0.12) * (Math.PI / 2));
+  const u = (t - 0.12) / 0.88;
+  const back = 1 - u * u * (3 - 2 * u);
+  // a reel: a damped swing back past upright and in again, blended in by `wobble`
+  return back * (1 - wobble) + wobble * Math.cos(u * Math.PI * 2.5) * (1 - u);
+}
+
+const _fAxis = new THREE.Vector3();
+const _fUp = new THREE.Vector3(0, 1, 0);
+const _fPush = new THREE.Quaternion();
+const _fTwist = new THREE.Quaternion();
+const _fStep = new THREE.Quaternion();
+const _fParent = new THREE.Quaternion();
+const _fParentInv = new THREE.Quaternion();
+const _fLocal = new THREE.Quaternion();
+
+function unflinch(f: Flinch): void {
+  if (!f.applied) return;
+  f.chain.forEach((bone, i) => {
+    if (bone.quaternion.equals(f.written[i]!)) bone.quaternion.copy(f.raw[i]!);
+  });
+  f.applied = false;
+}
+
+/** Push the spine away from the blow (a world rotation split over the chain), per the stamp, now `wall`. */
+function applyFlinch(f: Flinch, stamp: FlinchStamp, wall: number): void {
+  const t = (wall - stamp.at) / Math.max(1, stamp.ms);
+  const k = flinchEnvelope(t, stamp.wobble ?? 0);
+  if (k === 0) return;
+  _fAxis.set(stamp.dir[2] ?? 0, 0, -(stamp.dir[0] ?? 0));
+  if (_fAxis.lengthSq() < 1e-8) return;
+  _fAxis.normalize(); // up × dir: tipping the chest along the blow
+  _fPush.setFromAxisAngle(_fAxis, stamp.angle * k);
+  _fTwist.setFromAxisAngle(_fUp, (stamp.twist ?? 0) * k);
+  _fPush.premultiply(_fTwist);
+  _fStep.identity().slerp(_fPush, 1 / f.chain.length);
+  const first = f.chain[0]!;
+  first.parent?.updateWorldMatrix(true, false);
+  if (first.parent) first.parent.getWorldQuaternion(_fParent);
+  else _fParent.identity();
+  f.chain.forEach((bone, i) => f.raw[i]!.copy(bone.quaternion));
+  for (const bone of f.chain) {
+    // local' = P⁻¹ · S · P · local: the world step S applied at this joint
+    _fParentInv.copy(_fParent).invert();
+    _fLocal.copy(_fParentInv).multiply(_fStep).multiply(_fParent).multiply(bone.quaternion);
+    bone.quaternion.copy(_fLocal);
+    _fParent.multiply(bone.quaternion);
+  }
+  f.chain.forEach((bone, i) => f.written[i]!.copy(bone.quaternion));
+  f.applied = true;
+}
+
+/**
+ * Full-body actions, made on first use. A character model ships every clip of
+ * its rig (a hundred or more), and an action binds an interpolant and a
+ * property binding per track the moment it is made: building them all at
+ * register time cost tens of MB of heap across a town of bodies that each
+ * ever play a handful. The clip set itself is unchanged (`has`/`keys` answer
+ * from it), so callers cannot tell the difference.
+ */
+class LazyActions {
+  private readonly made = new Map<string, THREE.AnimationAction>();
+  constructor(
+    private readonly mixer: THREE.AnimationMixer,
+    private readonly clips: Map<string, THREE.AnimationClip>,
+  ) {}
+  has(name: string): boolean {
+    return this.clips.has(name);
+  }
+  keys(): IterableIterator<string> {
+    return this.clips.keys();
+  }
+  get(name: string): THREE.AnimationAction | undefined {
+    let action = this.made.get(name);
+    if (action) return action;
+    const clip = this.clips.get(name);
+    if (!clip) return undefined;
+    action = this.mixer.clipAction(clip);
+    this.made.set(name, action);
+    return action;
+  }
+  /** Actions made so far (probes). */
+  get size(): number {
+    return this.made.size;
+  }
+  /** The actions made so far; a clip never asked for has no action and cannot be running. */
+  [Symbol.iterator](): IterableIterator<[string, THREE.AnimationAction]> {
+    return this.made.entries();
+  }
+}
+
 interface Entry {
   root: THREE.Object3D;
+  /** Distance steps for pose LOD: the animator's own, else the system default, else none. */
+  poseLod: ReadonlyArray<{ distance: number; fps: number }> | null;
   mixer: THREE.AnimationMixer;
   clips: Map<string, THREE.AnimationClip>;
-  /** Full-body action per clip — the plain, unmasked case. */
-  actions: Map<string, THREE.AnimationAction>;
+  /** Full-body action per clip — the plain, unmasked case (made on first use). */
+  actions: LazyActions;
   /** Derived (masked / additive) actions, keyed by clip + what was done to it. */
   variants: Map<string, THREE.AnimationAction>;
   /** Derived clip -> the name the caller knows it by, for the finished event. */
@@ -120,12 +258,72 @@ interface Entry {
   speedMul: number;
   /** Resolved lazily; null once we have looked and found nothing. */
   maskRoot?: string | null;
-  /** Edit mode: already stood in its clip's first frame (see poseStill). */
-  posedStill?: boolean;
+  /** Edit mode: the clip it was last stood in (see poseStill); undefined = not yet. */
+  posedStill?: string | null;
   fading: Array<{ action: THREE.AnimationAction; until: number }>;
   /** Override layers still showing (the current one, and any fading out) and their anchors. */
   anchored: Anchored[];
   clock: number;
+  pendingDt: number;
+  fullRateUntil: number;
+  poseInterval: number;
+  poseBucket: number;
+  lodPhase: number;
+  /** True on a frame whose pose evaluation pose LOD skipped: the bones still hold last frame's pose. */
+  held: boolean;
+  /** The hit-flinch post-mixer edit (see Flinch); undefined = not built yet, null = no spine. */
+  flinch?: Flinch | null;
+  /** Bones that can skip their matrix walk while held; empty once anything else is parented under them. */
+  holdRoots: THREE.Bone[];
+}
+
+/**
+ * Bump the model's pose version. Attachment scripts (character-look) compare
+ * it to skip their socket upkeep on frames the pose did not change.
+ */
+function bumpPoseVersion(entry: Entry): void {
+  const data = entry.root.userData as { poseVersion?: number };
+  data.poseVersion = (data.poseVersion ?? 0) + 1;
+}
+
+const IDENTITY = new THREE.Matrix4();
+const heldUnder = new WeakMap<THREE.Object3D, THREE.Matrix4>();
+const holdEntry = new WeakMap<THREE.Object3D, Entry>();
+
+/**
+ * A held pose's bone matrices are what they were last frame unless something
+ * above the skeleton moved. Each top-level bone gets its own updateMatrixWorld
+ * that returns early in that case, so the renderer's walk skips the whole
+ * skeleton (82 bones per town resident). Same parent-comparison idea as
+ * static-transforms.ts; anything not a bone parented under the skeleton
+ * (a socketed holder, say) disables the hold for that model.
+ */
+function heldBoneUpdateMatrixWorld(this: THREE.Object3D, force?: boolean): void {
+  const entry = holdEntry.get(this);
+  const parentWorld = this.parent ? this.parent.matrixWorld : IDENTITY;
+  let under = heldUnder.get(this);
+  if (entry && entry.held && entry.holdRoots.length > 0 && under && under.equals(parentWorld)) return;
+  THREE.Object3D.prototype.updateMatrixWorld.call(this, force);
+  if (!under) { under = new THREE.Matrix4(); heldUnder.set(this, under); }
+  under.copy(parentWorld);
+  if (entry && entry.holdRoots.length > 0) {
+    let bonesOnly = true;
+    this.traverse((o) => { if (!(o as THREE.Bone).isBone) bonesOnly = false; });
+    if (!bonesOnly) entry.holdRoots = [];
+  }
+}
+
+function installBoneHold(entry: Entry): void {
+  const roots: THREE.Bone[] = [];
+  entry.root.traverse((o) => {
+    if ((o as THREE.Bone).isBone && !(o.parent as THREE.Bone | null)?.isBone) roots.push(o as THREE.Bone);
+  });
+  for (const bone of roots) {
+    holdEntry.set(bone, entry);
+    heldUnder.delete(bone);
+    Object.defineProperty(bone, "updateMatrixWorld", { value: heldBoneUpdateMatrixWorld, configurable: true, writable: true, enumerable: false });
+  }
+  entry.holdRoots = roots;
 }
 
 /** Node name a track drives ("" for tracks bound to the root itself). */
@@ -154,6 +352,17 @@ function maskClip(
 }
 
 /** Every node at or under `name`, by name. Null when the bone is not there. */
+/** The latest `userData.poseHoldUntil` on `root` or its first three ancestors (0 = none). */
+function poseHeldUntil(root: THREE.Object3D): number {
+  let until = 0;
+  let node: THREE.Object3D | null = root;
+  for (let i = 0; i < 4 && node; i++, node = node.parent) {
+    const v = node.userData["poseHoldUntil"];
+    if (typeof v === "number" && v > until) until = v;
+  }
+  return until;
+}
+
 function subtreeNames(root: THREE.Object3D, name: string): Set<string> | null {
   const wanted = THREE.PropertyBinding.sanitizeNodeName(name);
   let found: THREE.Object3D | null = null;
@@ -291,11 +500,42 @@ function autoMaskRoot(root: THREE.Object3D): string | null {
  * layers (aim offsets, hit reactions, leans) accumulate separately and leave
  * the base alone.
  */
+/**
+ * The hosts' default pose LOD (AnimationSystem.defaultPoseLod): full rate
+ * within 20 m, then 30, 15 and 8 pose evaluations a second. A crowd of mobs
+ * walking loops 50 m away reads the same at 15 Hz; combat clips, blends and
+ * the player never drop (see the update loop's guards).
+ */
+export const CROWD_POSE_LOD: ReadonlyArray<{ distance: number; fps: number }> = [
+  { distance: 20, fps: 30 },
+  { distance: 45, fps: 15 },
+  { distance: 90, fps: 8 },
+];
+
 export class AnimationSystem {
   private readonly entries = new Map<string, Entry>();
   /** Parent entity id -> the child entity whose model answers for it. */
   private readonly delegates = new Map<string, string>();
   private running = false;
+  /**
+   * On frames where pose LOD holds a model's last pose, skip its skeleton's
+   * matrix walk too (and let attachments skip their socket upkeep). Cosmetic
+   * only: gameplay never reads bone matrices. Never applies to the
+   * camera-followed character or to layered/one-shot/blending animation,
+   * which pose LOD already evaluates every frame.
+   */
+  holdBones = true;
+
+  /**
+   * Pose LOD for animators that declare none (`animator.poseLod` wins when
+   * set). Null keeps the old rule: no LOD unless authored. A host running a
+   * world full of mobs sets it so a wolf 80 m away is not posed 60 times a
+   * second; every protection above still applies (one-shots, layers, blends,
+   * the camera-followed character). Read at register time.
+   */
+  defaultPoseLod: ReadonlyArray<{ distance: number; fps: number }> | null = null;
+  /** Master switch for pose LOD (an A/B switch for probes; off = every pose every frame). */
+  poseLodEnabled = true;
 
   /**
    * Fired when a one-shot clip (played with `loop: false`) reaches its end.
@@ -322,13 +562,15 @@ export class AnimationSystem {
       this.delegates.set(parentEntityId, entityId);
     }
     const mixer = new THREE.AnimationMixer(root);
-    const actions = new Map(clips.map((clip) => [clip.name, mixer.clipAction(clip)]));
+    const clipMap = new Map(clips.map((c) => [c.name, c]));
     mixer.timeScale = animator?.speed ?? 1;
+    const poseLod = animator?.poseLod?.length ? animator.poseLod : this.defaultPoseLod?.length ? this.defaultPoseLod : null;
     const entry: Entry = {
       root,
+      poseLod,
       mixer,
-      clips: new Map(clips.map((c) => [c.name, c])),
-      actions,
+      clips: clipMap,
+      actions: new LazyActions(mixer, clipMap),
       variants: new Map(),
       origin: new Map(),
       current: null,
@@ -341,7 +583,18 @@ export class AnimationSystem {
       fading: [],
       anchored: [],
       clock: 0,
+      pendingDt: 0,
+      fullRateUntil: 0,
+      poseInterval: -1,
+      poseBucket: -1,
+      // Deterministic phases spread distant crowd work across frames.
+      lodPhase: [...entityId].reduce((hash, c) => Math.imul(hash ^ c.charCodeAt(0), 16777619) >>> 0, 2166136261) / 4294967296,
+      held: false,
+      holdRoots: [],
     };
+    // Only pose-LOD models ever hold a pose; the player and everything at
+    // full rate keep the ordinary walk.
+    if (poseLod) installBoneHold(entry);
     // LoopOnce actions raise "finished" here; LoopRepeat ones never do. A
     // masked variant reports the name the caller knows, not the derived one.
     mixer.addEventListener("finished", (event) => {
@@ -431,7 +684,8 @@ export class AnimationSystem {
     }
     const duration = action.getClip().duration;
     if (!(duration > 0)) return null;
-    const t01 = (((action.time / duration) % 1) + 1) % 1;
+    const pendingTime = action.enabled && !action.paused ? entry.pendingDt * action.timeScale * entry.mixer.timeScale : 0;
+    const t01 = ((((action.time + pendingTime) / duration) % 1) + 1) % 1;
     return { clip, t01 };
   }
 
@@ -449,6 +703,7 @@ export class AnimationSystem {
   play(entityId: string, clip: string, fade = 0.3, loop = true, restart = false, sync = false): void {
     const entry = this.entryFor(entityId);
     if (!entry) return;
+    if (entry.blend || entry.current !== clip || restart) this.flushPose(entry);
     // asking for one clip ends a held blend (see playBlend)
     if (entry.blend) {
       this.fadeOut(entry, entry.blend.action, fade);
@@ -492,6 +747,7 @@ export class AnimationSystem {
   playBlend(entityId: string, from: string, to: string, weight: number, fade = 0.25): void {
     const entry = this.entryFor(entityId);
     if (!entry) return;
+    this.flushPose(entry);
     const w = Math.max(0, Math.min(1, weight));
     const over = entry.clips.has(to) ? entry.actions.get(to) : undefined;
     if (!over || from === to || (entry.layer && !entry.layer.additive)) {
@@ -547,6 +803,7 @@ export class AnimationSystem {
   playLayer(entityId: string, clip: string, opts: LayerOptions = {}): void {
     const entry = this.entryFor(entityId);
     if (!entry) return;
+    this.flushPose(entry);
     const source = entry.clips.get(clip);
     if (!source) {
       console.warn(
@@ -633,6 +890,7 @@ export class AnimationSystem {
   clearLayer(entityId: string, fade = 0.2): void {
     const entry = this.entryFor(entityId);
     if (!entry?.layer) return;
+    this.flushPose(entry);
     const layer = entry.layer;
     entry.layer = null;
     this.fadeOut(entry, layer.action, fade);
@@ -697,6 +955,7 @@ export class AnimationSystem {
     fade: number,
     opts: { loop: boolean; weight?: number; timeScale?: number; syncTime?: boolean; restart?: boolean },
   ): void {
+    entry.fullRateUntil = Math.max(entry.fullRateUntil, entry.clock + fade);
     if (next === from) {
       // Same action, played again (a repeated one-shot): rewind it in place.
       // Crossfading an action with itself would ramp its own weight from zero
@@ -756,6 +1015,7 @@ export class AnimationSystem {
   setSpeed(entityId: string, multiplier: number): void {
     const entry = this.entryFor(entityId);
     if (!entry) return;
+    if (entry.speedMul !== multiplier) this.flushPose(entry);
     entry.speedMul = multiplier;
     if (entry.baseAction) entry.baseAction.timeScale = multiplier;
   }
@@ -768,26 +1028,38 @@ export class AnimationSystem {
    * evaluation per model (the bones keep it once the action stops), so this
    * is free to call every frame; a model that loads later is posed when it
    * arrives. No-op while running.
+   *
+   * `clipFor` stands a model in another clip instead (null = its own): the
+   * editor holds a character in a weapon's stance idle while that weapon is
+   * selected, so a two-handed grip is placed in the pose that grips it.
    */
-  poseStill(): void {
+  poseStill(clipFor?: (entityId: string) => string | null): void {
     if (this.running) return;
-    for (const entry of this.entries.values()) {
-      if (entry.posedStill) continue;
-      entry.posedStill = true;
-      const clip = entry.animator?.play;
+    for (const [id, entry] of this.entries) {
+      const wanted = clipFor?.(id);
+      const clip = wanted && entry.actions.has(wanted) ? wanted : (entry.animator?.play ?? null);
+      if (entry.posedStill === clip) continue;
+      entry.posedStill = clip;
       const action = clip ? entry.actions.get(clip) : undefined;
       if (!action) continue;
       action.reset().play();
       entry.mixer.update(0);
       action.stop();
+      entry.held = false;
+      bumpPoseVersion(entry);
     }
   }
 
   /** Play mode started: run every animator's declared clip. */
   setRunning(running: boolean): void {
     this.running = running;
-    for (const entry of this.entries.values()) entry.posedStill = false;
+    for (const entry of this.entries.values()) entry.posedStill = undefined;
     for (const [id, entry] of this.entries) {
+      entry.pendingDt = 0;
+      entry.held = false;
+      bumpPoseVersion(entry);
+      entry.poseInterval = -1;
+      entry.poseBucket = -1;
       if (running) {
         if (entry.animator?.play) this.play(id, entry.animator.play, 0);
       } else {
@@ -801,18 +1073,109 @@ export class AnimationSystem {
     }
   }
 
-  update(dt: number): void {
+  private readonly lodCameraPosition = new THREE.Vector3();
+  private readonly lodRootPosition = new THREE.Vector3();
+
+  update(dt: number, camera?: THREE.Camera, fullRateEntityId?: string | null): void {
     if (!this.running) return;
+    if (camera) camera.getWorldPosition(this.lodCameraPosition);
+    const protectedEntry = fullRateEntityId ? this.entryFor(fullRateEntityId) : undefined;
+    const wall = performance.now();
     for (const entry of this.entries.values()) {
-      if (entry.layer && entry.layer.phaseLock !== null) this.lockLayer(entry, entry.layer);
-      // Undo last frame's turns (newest first, they stack) so the mixer and
-      // the anchors both start from the clip's own pose.
-      for (let i = entry.anchored.length - 1; i >= 0; i--) unanchor(entry.anchored[i]!.anchor);
-      entry.mixer.update(dt);
-      if (entry.anchored.length > 0) this.anchorLayers(entry);
-      entry.clock += dt;
-      if (entry.fading.length > 0) this.reapFaded(entry);
+      // HIT-STOP: presentation freezes a pose for a few frames (a heavy blow
+      // landing) by stamping `userData.poseHoldUntil` (performance.now() ms)
+      // on the model, its entity or a body up to three levels above it. The
+      // held time is dropped, not banked: the clip resumes where it stopped,
+      // a beat behind the simulation, which is what a hit-stop is.
+      if (poseHeldUntil(entry.root) > wall) {
+        // the bones hold their pose, but a flinch stamped on this blow still snaps out now
+        this.reflinch(entry, wall);
+        continue;
+      }
+      let interval = 0;
+      // Only stable loops may hold their last pose. Completion callbacks,
+      // combat layers and crossfades keep their existing frame timing.
+      if (camera && dt > 0 && entry !== protectedEntry && entry.poseLod && this.poseLodEnabled &&
+          entry.baseAction && entry.baseLoop && !entry.layer && !entry.blend &&
+          entry.fading.length === 0 && entry.clock >= entry.fullRateUntil) {
+        entry.root.getWorldPosition(this.lodRootPosition);
+        const distanceSq = this.lodRootPosition.distanceToSquared(this.lodCameraPosition);
+        for (const step of entry.poseLod) {
+          if (distanceSq < step.distance * step.distance) break;
+          interval = 1 / step.fps;
+        }
+      }
+      entry.pendingDt += dt;
+      const bucket = interval > 0 ? Math.floor((entry.clock + entry.pendingDt) / interval + entry.lodPhase) : -1;
+      const skip = interval > 0 && interval === entry.poseInterval && bucket === entry.poseBucket;
+      entry.poseInterval = interval;
+      entry.poseBucket = bucket;
+      entry.held = skip && this.holdBones;
+      // hold off: attachments recompute every frame, as before the hold existed
+      if (skip && !this.holdBones) bumpPoseVersion(entry);
+      if (!skip) this.advancePose(entry);
     }
+  }
+
+  private flushPose(entry: Entry): void {
+    if (entry.pendingDt === 0) return;
+    entry.poseInterval = -1;
+    this.advancePose(entry);
+  }
+
+  private advancePose(entry: Entry): void {
+    const elapsed = entry.pendingDt;
+    // Clear before mixer callbacks: a completion handler can start a new clip.
+    entry.pendingDt = 0;
+    entry.held = false;
+    bumpPoseVersion(entry);
+    if (entry.layer && entry.layer.phaseLock !== null) this.lockLayer(entry, entry.layer);
+    // undo in the reverse order of application: the flinch went on last
+    if (entry.flinch) unflinch(entry.flinch);
+    for (let i = entry.anchored.length - 1; i >= 0; i--) unanchor(entry.anchored[i]!.anchor);
+    entry.mixer.update(elapsed);
+    if (entry.anchored.length > 0) this.anchorLayers(entry);
+    this.reflinch(entry, performance.now());
+    entry.clock += elapsed;
+    if (entry.fading.length > 0) this.reapFaded(entry);
+  }
+
+  /**
+   * (Re)apply a live hit flinch (see Flinch) after the pose is written: undo
+   * what is on the bones, push again for `wall`. Nothing stamped (or it ran
+   * out): nothing is touched, and the spine is looked up only once a model is
+   * first flinched.
+   */
+  private reflinch(entry: Entry, wall: number): void {
+    const stamp = flinchStamp(entry.root);
+    if (!stamp || wall >= stamp.at + stamp.ms) {
+      if (entry.flinch?.applied) {
+        unflinch(entry.flinch);
+        bumpPoseVersion(entry);
+      }
+      return;
+    }
+    if (entry.flinch === undefined) entry.flinch = this.flinchChain(entry);
+    if (!entry.flinch) return;
+    unflinch(entry.flinch);
+    applyFlinch(entry.flinch, stamp, wall);
+    entry.held = false;
+    bumpPoseVersion(entry);
+  }
+
+  /** The spine chain a flinch bends: the upper-body split and the spine bones above it. */
+  private flinchChain(entry: Entry): Flinch | null {
+    const name = this.maskRootOf(entry);
+    const top = name ? findNode(entry.root, name) : null;
+    if (!top) return null;
+    const chain = [top];
+    for (let bone = top; chain.length < ANCHOR_CHAIN; ) {
+      const next = bone.children.find((c) => SPINE.test(c.name));
+      if (!next) break;
+      chain.push(next);
+      bone = next;
+    }
+    return { chain, raw: chain.map(() => new THREE.Quaternion()), written: chain.map(() => new THREE.Quaternion()), applied: false };
   }
 
   /**
@@ -865,6 +1228,8 @@ export class AnimationSystem {
 
   /** Drop one entity's mixer (its visuals were rebuilt or removed). */
   unregister(entityId: string): void {
+    const gone = this.entries.get(entityId);
+    if (gone) { gone.held = false; gone.holdRoots = []; }
     this.entries.get(entityId)?.mixer.stopAllAction();
     this.entries.delete(entityId);
     for (const [parent, child] of this.delegates) {

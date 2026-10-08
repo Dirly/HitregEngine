@@ -16,7 +16,9 @@
 import { marchingCubes, type MarchResult, type SampledBlock } from "./marching-cubes.js";
 import { dualContour, type DualContourOptions } from "./dual-contouring.js";
 import { createWorldField, type WorldField } from "./field.js";
-import { worldRecipeSchema, type WorldRecipe } from "./recipe.js";
+import { recipeSplatIndexed, worldRecipeSchema, type WorldRecipe } from "./recipe.js";
+import { reduceSplatTop4 } from "./splat-top4.js";
+import { zoneGroundRoles } from "./zone-ground.js";
 
 /** The `mesh.source` shape for a streamed voxel cell. */
 export interface VoxelMeshSource {
@@ -58,6 +60,14 @@ export interface VoxelMesh {
   surfaceCount: number;
   /** Per-vertex vec3 biome tint, multiplied over the blended surface color. */
   tint: Float32Array;
+  /**
+   * Indexed worlds only (`recipeSplatIndexed`): the four palette ids each
+   * vertex blends (`SPLAT_TOP_UNUSED` in an empty slot), consistent across
+   * every triangle — see `reduceSplatTop4`. Absent on a dense world.
+   */
+  layerIndex?: Uint8Array;
+  /** Indexed worlds only: the weights of `layerIndex`'s four layers, 0..255. */
+  layerWeight?: Uint8Array;
   /** Cell-local AABB. Empty cells report a degenerate box at the origin. */
   min: [number, number, number];
   max: [number, number, number];
@@ -91,7 +101,9 @@ const EMPTY_MESH: VoxelMesh = {
 // it: building every recipe at load had five unused worlds holding ~200 MB of
 // the MMO tab's heap.
 interface WorldEntry {
-  recipe: WorldRecipe;
+  /** Null until a loader-registered recipe is first needed (registerVoxelRecipeLoader). */
+  recipe: WorldRecipe | null;
+  load?: () => unknown;
   field: WorldField | null;
   /** Building threw: warned once, and `getVoxelWorld` answers null until re-registered. */
   failed: boolean;
@@ -124,12 +136,43 @@ export function registerVoxelRecipe(id: string, recipe: unknown): WorldRecipe {
   return parsed;
 }
 
+/**
+ * Register a world by how to READ its recipe, not the recipe: nothing is read
+ * or parsed until something asks for the world (`getVoxelWorld`,
+ * `getVoxelRecipe`). A dedicated server sees every project's recipes (tens of
+ * MB of JSON) and streams one; parsing them all held ~100 MB it never used.
+ * A recipe that fails to read or parse warns at first use and resolves to null.
+ */
+export function registerVoxelRecipeLoader(id: string, load: () => unknown): void {
+  worlds.set(id, { recipe: null, load, field: null, failed: false });
+  invalidateVoxelWorld(id);
+}
+
+/** A registered world's recipe (parsed now if it was registered by loader), or null. */
+export function getVoxelRecipe(id: string): WorldRecipe | null {
+  const entry = worlds.get(id);
+  if (!entry || entry.failed) return null;
+  if (!entry.recipe && entry.load) {
+    try {
+      entry.recipe = worldRecipeSchema.parse(entry.load());
+      entry.load = undefined;
+    } catch (error) {
+      entry.failed = true;
+      console.warn(`[voxel] world recipe "${id}" failed to load:`, error);
+      return null;
+    }
+  }
+  return entry.recipe;
+}
+
 export function getVoxelWorld(id: string): WorldField | null {
   const entry = worlds.get(id);
   if (!entry || entry.failed) return null;
   if (!entry.field) {
+    const recipe = getVoxelRecipe(id);
+    if (!recipe) return null;
     try {
-      entry.field = createWorldField(entry.recipe);
+      entry.field = createWorldField(recipe);
     } catch (error) {
       entry.failed = true;
       console.warn(`[voxel] world recipe "${id}" failed to build:`, error);
@@ -185,7 +228,9 @@ function meshBytes(mesh: VoxelMesh): number {
     mesh.normals.byteLength +
     mesh.indices.byteLength +
     mesh.splat.byteLength +
-    mesh.tint.byteLength
+    mesh.tint.byteLength +
+    (mesh.layerIndex?.byteLength ?? 0) +
+    (mesh.layerWeight?.byteLength ?? 0)
   );
 }
 
@@ -295,9 +340,6 @@ export function buildVoxelMesh(field: WorldField, source: VoxelMeshSource): Voxe
   const x0 = cx * recipe.cellSize;
   const z0 = cz * recipe.cellSize;
 
-  const { yMin, cellsY } = verticalBand(field, source, x0, z0, step);
-  if (cellsY < 1) return EMPTY_MESH;
-
   // One padding sample on every side: marching cubes needs it for
   // central-difference normals, and it is what makes normals match ACROSS a
   // chunk seam without the two chunks ever exchanging geometry. The dual
@@ -306,18 +348,22 @@ export function buildVoxelMesh(field: WorldField, source: VoxelMeshSource): Voxe
   // true central differences, or the two chunks place it differently.
   const mesher = source.mesher ?? "mc";
   const pad = mesher === "mc" ? 1 : 2;
+  const { yMin, cellsY, cut } = verticalBand(field, source, x0, z0, step, pad, cells + 2 * pad + 1);
+  if (cellsY < 1) return EMPTY_MESH;
   const nx = cells + 2 * pad + 1;
   const ny = cellsY + 2 * pad + 1;
   const nz = cells + 2 * pad + 1;
   const origin: [number, number, number] = [x0 - pad * step, yMin - pad * step, z0 - pad * step];
 
   const values = field.sampleBlock({ origin, nx, ny, nz, step });
+  if (cut) applyBandCut(values, nx, ny, nz, origin, step, cut);
   sealVertically(values, nx, ny, nz);
 
   const contour: (block: SampledBlock, options: DualContourOptions) => MarchResult =
     mesher === "mc" ? marchingCubes : dualContour;
-  const result: MarchResult = contour(
-    { values, nx, ny, nz, origin, step },
+  const block = { values, nx, ny, nz, origin, step };
+  const result: MarchResult = (mesher === "mc" ? flatCellMesh(field, block) : null) ?? contour(
+    block,
     {
       ...(mesher === "mc" ? {} : { pad, sharpness: mesher === "nets" ? 0 : 1 }),
       // ONE interleaved stream, split below. Splat weights and biome tint come
@@ -359,7 +405,7 @@ export function buildVoxelMesh(field: WorldField, source: VoxelMeshSource): Voxe
   // limit of the experiment.
   const skirted =
     mesher === "mc"
-      ? addSkirts(result, splat, tint, surfaceCount, x0, z0, recipe.cellSize, step * SKIRT_STEPS)
+      ? addSkirts(result, splat, tint, surfaceCount, x0, z0, recipe.cellSize, step * SKIRT_STEPS, block)
       : { ...result, splat, tint };
   const positions = skirted.positions;
   let minX = Infinity;
@@ -382,7 +428,7 @@ export function buildVoxelMesh(field: WorldField, source: VoxelMeshSource): Voxe
     if (pz > maxZ) maxZ = pz;
   }
 
-  return {
+  const mesh: VoxelMesh = {
     positions,
     normals: skirted.normals,
     indices: skirted.indices,
@@ -394,6 +440,79 @@ export function buildVoxelMesh(field: WorldField, source: VoxelMeshSource): Voxe
     vertexCount: skirted.vertexCount,
     triangleCount: skirted.triangleCount,
   };
+  return recipeSplatIndexed(recipe) ? reduceSplatTop4(mesh, { roleGroup: roleGroupsOf(recipe) }) : mesh;
+}
+
+const roleGroupCache = new WeakMap<object, Int8Array>();
+/** Role group per palette surface (base role or the role it overrides), for `reduceSplatTop4`. */
+function roleGroupsOf(recipe: WorldRecipe): Int8Array {
+  let groups = roleGroupCache.get(recipe);
+  if (!groups) {
+    const roles = zoneGroundRoles(recipe);
+    groups = new Int8Array(recipe.surfaces.length);
+    for (let s = 0; s < groups.length; s++) groups[s] = roles.baseRole[s]! >= 0 ? roles.baseRole[s]! : roles.overrideRole[s]!;
+    roleGroupCache.set(recipe, groups);
+  }
+  return groups;
+}
+
+/**
+ * Collapse a sampled, horizontal, uniformly painted cell to a planar interior.
+ * This is a lossless shortcut over the SAME samples MC would consume, not an
+ * ocean-depth heuristic: every padded column must have the same density profile,
+ * with one upward crossing, and every original surface vertex the same attributes.
+ * Keep the entire boundary lattice so ordinary neighbouring cells still weld.
+ * A cave, slope, edit, paint variation or uncertain value falls back to MC.
+ */
+function flatCellMesh(field: WorldField, block: SampledBlock): MarchResult | null {
+  const { values, nx, ny, nz, origin, step } = block;
+  const cellsX = nx - 3, cellsZ = nz - 3;
+  if (cellsX < 3 || cellsZ < 3) return null; // no useful reduction on tiny LOD grids
+  let crossing = -1;
+  for (let j = 1; j < ny - 2; j++) {
+    const a = values[j * nx]!, b = values[(j + 1) * nx]!;
+    if ((a < 0) === (b < 0)) continue;
+    if (a >= 0 || crossing !== -1) return null;
+    crossing = j;
+  }
+  if (crossing === -1) return null;
+  for (let k = 0; k < nz; k++) {
+    for (let j = 0; j < ny; j++) {
+      const expected = values[j * nx]!;
+      if (!Number.isFinite(expected)) return null;
+      const row = (k * ny + j) * nx;
+      for (let i = 0; i < nx; i++) if (values[row + i] !== expected) return null;
+    }
+  }
+  const a = values[crossing * nx]!, b = values[(crossing + 1) * nx]!;
+  const t = Math.abs(b - a) < 1e-12 ? 0.5 : -a / (b - a);
+  const y = origin[1] + (crossing + t) * step;
+  const stride = field.surfaceCount + 3;
+  const surface = new Float32Array(stride), scratch = new Float32Array(stride);
+  field.surfaceAt(origin[0] + step, y, origin[2] + step, 1, surface, 0);
+  for (let k = 1; k <= cellsZ + 1; k++) {
+    for (let i = 1; i <= cellsX + 1; i++) {
+      field.surfaceAt(origin[0] + i * step, y, origin[2] + k * step, 1, scratch, 0);
+      for (let s = 0; s < stride; s++) if (!Number.isFinite(surface[s]) || scratch[s] !== surface[s]) return null;
+    }
+  }
+  const perimeter = 2 * (cellsX + cellsZ), vertexCount = perimeter + 1;
+  const positions = new Float32Array(vertexCount * 3), normals = new Float32Array(vertexCount * 3);
+  const attributes = new Float32Array(vertexCount * stride), indices = new Uint32Array(perimeter * 3);
+  let vertex = 0;
+  const put = (i: number, k: number): void => {
+    positions.set([origin[0] + i * step, y, origin[2] + k * step], vertex * 3);
+    normals[vertex * 3 + 1] = 1;
+    attributes.set(surface, vertex * stride);
+    vertex++;
+  };
+  put(1 + cellsX / 2, 1 + cellsZ / 2);
+  for (let i = 1; i <= cellsX; i++) put(i, 1);
+  for (let k = 1; k <= cellsZ; k++) put(cellsX + 1, k);
+  for (let i = cellsX + 1; i > 1; i--) put(i, cellsZ + 1);
+  for (let k = cellsZ + 1; k > 1; k--) put(1, k);
+  for (let i = 0; i < perimeter; i++) indices.set([0, 1 + (i + 1) % perimeter, 1 + i], i * 3);
+  return { positions, normals, indices, attributes: { surface: attributes }, vertexCount, triangleCount: perimeter };
 }
 
 /** Skirt depth in lattice steps: a full-detail cell drops 6 m, an HLOD cell (4x lattice) 24 m. */
@@ -426,9 +545,13 @@ interface SkirtInput {
  * normal, splat and tint, so the strip shades as a continuation of the
  * surface rather than as a wall.
  *
- * The skirt is part of the one shared mesh (render, physics, placement): in
- * the simulation ring every neighbour is full detail, so there it is entirely
- * inside rock and nothing can touch it.
+ * The skirt is part of the one shared mesh (render, physics, placement), so
+ * it must be entirely inside rock: an underside edge (normal pointing down)
+ * extrudes UP, everything else down, and each skirt vertex travels at most
+ * as far as the sampled lattice says the rock continues on that boundary
+ * column (a quarter step short of the first air crossing). Where there is
+ * less rock than `depth` the strip is shorter; where there is none it is
+ * omitted. `auditVoxelMesh` (mesh-audit.ts) is the check.
  */
 function addSkirts(
   mesh: SkirtInput,
@@ -439,6 +562,7 @@ function addSkirts(
   z0: number,
   cellSize: number,
   depth: number,
+  block: SampledBlock,
 ): SkirtInput & { splat: Float32Array; tint: Float32Array } {
   const { positions, normals, indices, vertexCount, triangleCount } = mesh;
   const eps = 1e-4;
@@ -460,13 +584,65 @@ function addSkirts(
       const a = on(i0, plane);
       const b = on(i1, plane);
       const c = on(i2, plane);
+      const before = edges.length;
       if (a && b && !c) edges.push(i0, i1, p);
       else if (b && c && !a) edges.push(i1, i2, p);
       else if (c && a && !b) edges.push(i2, i0, p);
+      // A downward skirt from an underside (cave ceiling, passage roof,
+      // overhang) hangs through playable air. Extrude undersides UP into
+      // their backing rock instead. Encode that direction in the plane
+      // index; winding uses the signed drop.
+      if (edges.length > before) {
+        const ea = edges[edges.length - 3]!, eb = edges[edges.length - 2]!;
+        if (normals[ea * 3 + 1]! + normals[eb * 3 + 1]! < -1e-4) edges[edges.length - 1]! += planes.length;
+      }
     }
   }
   const count = edges.length / 3;
   if (count === 0) return { ...mesh, splat, tint };
+
+  // How far a skirt vertex may travel and stay INSIDE rock. A fixed `depth`
+  // was the zone-5/Gnawspur blade: a passage roof with 3 m of cover under a
+  // 6 m upward skirt (or a knife ridge / carved overhang under a 6 m
+  // downward one) pushed the flap out through the far side of the rock as a
+  // pale sliver — rendered, collided and prop-snapped, since it is the one
+  // shared mesh. The run is read from the SAME sampled lattice the surface
+  // came from, on the cell's own boundary plane (so both neighbours see the
+  // same column), and stops a quarter step short of the first air crossing.
+  const { values, nx, ny, origin, step } = block;
+  const strideZ = nx * ny;
+  const sample = (x: number, y: number, z: number): number => {
+    const fx = Math.min(nx - 1.0001, Math.max(0, (x - origin[0]) / step));
+    const fy = (y - origin[1]) / step;
+    const fz = Math.min(block.nz - 1.0001, Math.max(0, (z - origin[2]) / step));
+    if (fy <= 0) return -1; // below the band: rock (sealVertically)
+    if (fy >= ny - 1) return 1; // above the band: sky
+    const i = Math.floor(fx), j = Math.floor(fy), k = Math.floor(fz);
+    const tx = fx - i, ty = fy - j, tz = fz - k;
+    const at = (di: number, dj: number, dk: number): number => values[i + di + (j + dj) * nx + (k + dk) * strideZ]!;
+    const lerp = (p: number, q: number, t: number): number => p + (q - p) * t;
+    const x00 = lerp(at(0, 0, 0), at(1, 0, 0), tx), x10 = lerp(at(0, 1, 0), at(1, 1, 0), tx);
+    const x01 = lerp(at(0, 0, 1), at(1, 0, 1), tx), x11 = lerp(at(0, 1, 1), at(1, 1, 1), tx);
+    return lerp(lerp(x00, x10, ty), lerp(x01, x11, ty), tz);
+  };
+  const probe = step / 4;
+  const buriedRun = (v: number, dir: number): number => {
+    const x = positions[v * 3]!, y = positions[v * 3 + 1]!, z = positions[v * 3 + 2]!;
+    let prevT = 0;
+    let prevD = 0;
+    for (let t = probe; t <= depth + 1e-6; t += probe) {
+      const d = sample(x, y + dir * t, z);
+      if (d >= 0) {
+        // linear crossing between the last rock sample and this air one
+        const cross = prevD < 0 ? prevT + (t - prevT) * (prevD / (prevD - d)) : prevT;
+        const run = cross - probe;
+        return run > probe * 0.5 ? run : 0;
+      }
+      prevT = t;
+      prevD = d;
+    }
+    return depth;
+  };
 
   const outPositions = new Float32Array((vertexCount + count * 2) * 3);
   const outNormals = new Float32Array((vertexCount + count * 2) * 3);
@@ -493,34 +669,59 @@ function addSkirts(
     outTint[to * 3 + 1] = tint[from * 3 + 1]!;
     outTint[to * 3 + 2] = tint[from * 3 + 2]!;
   };
+  // A boundary vertex is shared by two boundary edges; measure each once.
+  const runs = new Map<number, number>();
+  const runOf = (vertex: number, dir: number): number => {
+    const key = dir > 0 ? -1 - vertex : vertex;
+    let run = runs.get(key);
+    if (run === undefined) {
+      run = buriedRun(vertex, dir);
+      runs.set(key, run);
+    }
+    return run;
+  };
   for (let e = 0; e < count; e++) {
     const a = edges[e * 3]!;
     const b = edges[e * 3 + 1]!;
-    const plane = planes[edges[e * 3 + 2]!]!;
-    const a2 = v++;
-    const b2 = v++;
-    copyVertex(a, a2, depth);
-    copyVertex(b, b2, depth);
+    const encodedPlane = edges[e * 3 + 2]!;
+    const plane = planes[encodedPlane % planes.length]!;
+    const up = encodedPlane >= planes.length;
+    const runA = runOf(a, up ? 1 : -1);
+    const runB = runOf(b, up ? 1 : -1);
+    // No rock to hide in on either end (a sliver of rock thinner than half a
+    // probe): no skirt. A crack at an LOD seam is better than a blade.
+    if (runA <= 0 && runB <= 0) continue;
+    const drop = up ? -depth : depth;
+    // one zero end: the strip degenerates to a single triangle
+    const a2 = runA > 0 ? v++ : a;
+    const b2 = runB > 0 ? v++ : b;
+    if (a2 !== a) copyVertex(a, a2, up ? -runA : runA);
+    if (b2 !== b) copyVertex(b, b2, up ? -runB : runB);
     // wind so the strip faces OUT of the cell: (b - a) x (b2 - a) along the plane normal
     const abx = positions[b * 3]! - positions[a * 3]!;
     const abz = positions[b * 3 + 2]! - positions[a * 3 + 2]!;
     // (ab) x (0, -depth, 0): x = abz * depth ... only the plane-axis component matters
-    const nx = -abz * -depth; // (ab_y * c_z - ab_z * c_y) with c = (0,-depth,0): -ab_z * -depth
-    const nz = abx * -depth; // (ab_x * c_y - ab_y * c_x)
+    const nx = -abz * -drop;
+    const nz = abx * -drop;
     const facing = plane.axis === 0 ? nx * plane.outward : nz * plane.outward;
-    if (facing >= 0) {
-      outIndices.set([a, b, b2, a, b2, a2], tri * 3);
-    } else {
-      outIndices.set([a, b2, b, a, a2, b2], tri * 3);
+    const pair = facing >= 0 ? [a, b, b2, a, b2, a2] : [a, b2, b, a, a2, b2];
+    for (let q = 0; q < 6; q += 3) {
+      const p0 = pair[q]!, p1 = pair[q + 1]!, p2 = pair[q + 2]!;
+      if (p0 === p1 || p1 === p2 || p2 === p0) continue; // the collapsed half of a one-ended strip
+      outIndices[tri * 3] = p0;
+      outIndices[tri * 3 + 1] = p1;
+      outIndices[tri * 3 + 2] = p2;
+      tri++;
     }
-    tri += 2;
   }
+  // Clamped strips can be shorter or missing; trim the reserved tail so the
+  // one shared mesh carries no zero-area padding triangles or orphan vertices.
   return {
-    positions: outPositions,
-    normals: outNormals,
-    indices: outIndices,
-    splat: outSplat,
-    tint: outTint,
+    positions: v === vertexCount + count * 2 ? outPositions : outPositions.slice(0, v * 3),
+    normals: v === vertexCount + count * 2 ? outNormals : outNormals.slice(0, v * 3),
+    indices: tri === triangleCount + count * 2 ? outIndices : outIndices.slice(0, tri * 3),
+    splat: v === vertexCount + count * 2 ? outSplat : outSplat.slice(0, v * surfaceCount),
+    tint: v === vertexCount + count * 2 ? outTint : outTint.slice(0, v * 3),
     vertexCount: v,
     triangleCount: tri,
   };
@@ -534,6 +735,17 @@ function addSkirts(
  * boundary plane if both bands sit on multiples of `step`. Without the snap
  * you get a hairline crack along every chunk edge, visible as flickering
  * skybox and felt as a lip the character controller catches on.
+ *
+ * Snapping alone is not enough where something CROSSES a band limit — a cave,
+ * tunnel or carve running below the floor of one cell's band but inside its
+ * neighbour's. Each cell sealed it at its own flat height, and on the shared
+ * plane one side had cave wall where the other had nothing: open edges, a
+ * hole you can see the void through. So the limits are a per-COLUMN pure
+ * function of world (x, z) (`bandLimits`: ceiling from ground, additive blob
+ * tops and passage roofs plus headroom; floor from `floorAt`), applied to the
+ * samples (`applyBandCut`). Both sides of a seam evaluate the same function
+ * on the shared plane, so they seal identically. The band is that function's
+ * range over the block's columns.
  */
 function verticalBand(
   field: WorldField,
@@ -541,23 +753,174 @@ function verticalBand(
   x0: number,
   z0: number,
   step: number,
-): { yMin: number; cellsY: number } {
+  pad: number,
+  columns: number,
+): { yMin: number; cellsY: number; cut: BandCut | null } {
   const recipe = field.recipe;
   let rawMin: number;
   let rawMax: number;
+  let cut: BandCut | null = null;
   if (source.yRange) {
     rawMin = source.yRange[0];
     rawMax = source.yRange[1];
   } else {
-    const range = field.heightRange(x0, z0, x0 + recipe.cellSize, z0 + recipe.cellSize, Math.min(17, recipe.resolution + 1));
-    // headroom must clear the overhang band or a bulge gets flat-capped
-    const above = Math.max(recipe.verticalRange.above, recipe.terrain.overhang.strength * 1.6 + step * 2);
-    rawMin = range.min - recipe.verticalRange.below;
-    rawMax = range.max + above;
+    cut = bandLimits(field, x0 - pad * step, z0 - pad * step, columns, step);
+    rawMin = cut.min;
+    rawMax = cut.max;
   }
   const yMin = Math.max(recipe.minY, Math.floor(rawMin / step) * step);
   const yMax = Math.min(recipe.maxY, Math.ceil(rawMax / step) * step);
-  return { yMin, cellsY: Math.max(0, Math.round((yMax - yMin) / step)) };
+  return { yMin, cellsY: Math.max(0, Math.round((yMax - yMin) / step)), cut };
+}
+
+interface BandCut {
+  /** Per column (i + k * n): rock forced below `lo`, air above `hi`. */
+  lo: Float32Array;
+  hi: Float32Array;
+  n: number;
+  min: number;
+  max: number;
+}
+
+/**
+ * Band limits for every lattice column of a block — the per-column version of
+ * what `field.heightRange` reports per cell, and nothing but a function of
+ * the column's world position, so neighbours agree on shared columns. The
+ * ceiling is per column (ground, additive blob tops, passage roofs + headroom);
+ * the floor is `floorAt`.
+ */
+function bandLimits(field: WorldField, ox: number, oz: number, n: number, step: number): BandCut {
+  const recipe = field.recipe;
+  const below = recipe.verticalRange.below;
+  // headroom must clear the overhang band or a bulge gets flat-capped
+  const above = Math.max(recipe.verticalRange.above, recipe.terrain.overhang.strength * 1.6 + step * 2);
+  const x1 = ox + (n - 1) * step, z1 = oz + (n - 1) * step;
+  // Ceiling raisers whose footprint reaches this block (the boxes heightRange uses).
+  const boxes: { x0: number; z0: number; x1: number; z1: number; hi: number }[] = [];
+  for (const blob of recipe.features.blobs) {
+    if (blob.op !== "add") continue;
+    const reach = Math.max(blob.radius, blob.topRadius ?? blob.radius);
+    const rx = reach * blob.scaleX + blob.falloff, rz = reach * blob.scaleZ + blob.falloff;
+    const b = { x0: blob.center[0] - rx, x1: blob.center[0] + rx, z0: blob.center[2] - rz, z1: blob.center[2] + rz,
+      hi: blob.center[1] + blob.height + reach + blob.falloff };
+    if (b.x1 >= ox && b.x0 <= x1 && b.z1 >= oz && b.z0 <= z1) boxes.push(b);
+  }
+  for (const p of recipe.features.passages) {
+    const end = p.start[p.axis === "x" ? 0 : 2] + p.direction * p.length;
+    const half = p.width / 2 + p.wallNoise + p.falloff;
+    const padP = p.falloff + (p.footprint === "ellipse" ? p.wallNoise : 0);
+    const b = {
+      x0: p.axis === "x" ? Math.min(p.start[0], end) - padP : p.start[0] - half,
+      x1: p.axis === "x" ? Math.max(p.start[0], end) + padP : p.start[0] + half,
+      z0: p.axis === "z" ? Math.min(p.start[2], end) - padP : p.start[2] - half,
+      z1: p.axis === "z" ? Math.max(p.start[2], end) + padP : p.start[2] + half,
+      hi: p.start[1] + p.height + p.roofRise + p.roofNoise + p.falloff,
+    };
+    if (b.x1 >= ox && b.x0 <= x1 && b.z1 >= oz && b.z0 <= z1) boxes.push(b);
+  }
+  const lo = new Float32Array(n * n);
+  const hi = new Float32Array(n * n);
+  let min = Infinity;
+  let max = -Infinity;
+  for (let k = 0; k < n; k++) {
+    const z = oz + k * step;
+    for (let i = 0; i < n; i++) {
+      const x = ox + i * step;
+      const ground = field.height(x, z);
+      let b = ground;
+      for (const box of boxes) {
+        if (x < box.x0 || x > box.x1 || z < box.z0 || z > box.z1) continue;
+        if (box.hi > b) b = box.hi;
+      }
+      b += above;
+      const a = floorAt(field, x, z, ground);
+      lo[i + k * n] = a;
+      hi[i + k * n] = b;
+      if (a < min) min = a;
+      if (b > max) max = b;
+    }
+  }
+  return { lo, hi, n, min, max };
+}
+
+/**
+ * The band FLOOR under a column. Uncarved ground: the column's own height
+ * minus `below` (nothing down there to see). Near a carve: bilinear between
+ * cell-corner nodes, each the lowest floor (`heightRange` min − `below`) of
+ * the carved cells meeting there — a per-column floor alone would cap a
+ * tunnel 28 m into a hillside that the cell's valley floor used to keep open,
+ * and a corner minimum is never above any adjacent carved cell's own floor,
+ * so nothing that used to mesh is lost. Pure in (x, z): seams agree.
+ */
+function floorAt(field: WorldField, x: number, z: number, ground: number): number {
+  const S = field.recipe.cellSize;
+  const column = ground - field.recipe.verticalRange.below;
+  const ix = Math.floor(x / S), iz = Math.floor(z / S);
+  const tx = x / S - ix, tz = z / S - iz;
+  // a corner with no carve in any of its cells contributes this column's own floor
+  const c = (v: number): number => (v === Infinity ? column : v);
+  const n00 = c(floorNode(field, ix, iz)), n10 = c(floorNode(field, ix + 1, iz));
+  const n01 = c(floorNode(field, ix, iz + 1)), n11 = c(floorNode(field, ix + 1, iz + 1));
+  return Math.min(column, (n00 * (1 - tx) + n10 * tx) * (1 - tz) + (n01 * (1 - tx) + n11 * tx) * tz);
+}
+
+const floorCache = new WeakMap<WorldField, Map<string, number>>();
+function cellFloor(field: WorldField, cx: number, cz: number): number {
+  let cache = floorCache.get(field);
+  if (!cache) floorCache.set(field, (cache = new Map()));
+  const key = `${cx},${cz}`;
+  let floor = cache.get(key);
+  if (floor === undefined) {
+    const recipe = field.recipe;
+    const S = recipe.cellSize;
+    floor = carved(field, cx, cz) ? field.heightRange(cx * S, cz * S, (cx + 1) * S, (cz + 1) * S, Math.min(17, recipe.resolution + 1)).min - recipe.verticalRange.below : Infinity;
+    if (cache.size > 50000) cache.clear();
+    cache.set(key, floor);
+  }
+  return floor;
+}
+
+/** Does anything carve rock out of this cell (passage, tunnel, subtracting blob, noise caves)? */
+function carved(field: WorldField, cx: number, cz: number): boolean {
+  const recipe = field.recipe;
+  if (recipe.terrain.caves.enabled) return true;
+  const S = recipe.cellSize;
+  return field.carveSpan(cx * S, cz * S, (cx + 1) * S, (cz + 1) * S) !== null;
+}
+
+/** Lowest floor of the four cells meeting at corner (ix, iz); Infinity when none of them is carved. */
+function floorNode(field: WorldField, ix: number, iz: number): number {
+  return Math.min(cellFloor(field, ix - 1, iz - 1), cellFloor(field, ix, iz - 1), cellFloor(field, ix - 1, iz), cellFloor(field, ix, iz));
+}
+
+/**
+ * Force rock below each column's band floor and air above its ceiling (see
+ * `verticalBand`). Inclusive, with a sliver of margin: a limit landing exactly
+ * on a lattice row must not be left to `sealVertically`, which only sees THIS
+ * cell's band and could seal it differently from the neighbour.
+ */
+function applyBandCut(
+  values: Float32Array,
+  nx: number,
+  ny: number,
+  nz: number,
+  origin: readonly [number, number, number],
+  step: number,
+  cut: BandCut,
+): void {
+  const strideZ = nx * ny;
+  for (let k = 0; k < nz; k++) {
+    for (let i = 0; i < nx; i++) {
+      const lo = cut.lo[i + k * cut.n]!;
+      const hi = cut.hi[i + k * cut.n]!;
+      for (let j = 0; j < ny; j++) {
+        const y = origin[1] + j * step;
+        const at = i + j * nx + k * strideZ;
+        if (y <= lo) values[at] = Math.min(values[at]!, y - lo - step * 1e-3);
+        else if (y >= hi) values[at] = Math.max(values[at]!, y - hi + step * 1e-3);
+      }
+    }
+  }
 }
 
 /**

@@ -40,7 +40,8 @@ export {
   type LeaveReason,
 } from "./server.js";
 export { NpcManager, type NpcManagerOptions, type NpcRecord, type NpcTemplate } from "./npcs.js";
-export { SpawnAreaManager, type SpawnAreaRecord, type SpawnAreaManagerOptions } from "./spawn-areas.js";
+export { SpawnAreaManager, type SpawnAreaRecord, type SpawnAreaManagerOptions, type MixRow, type RoamingState, resolveSpawnArea, spawnTable, populationOf, rollMix, hiddenFromAll, pickHiddenPoint, pointOnRoute, pickRoutePoint, rollRare, rareKey, type RareState } from "./spawn-areas.js";
+export { sightRadius, colliderHeight, SIGHT_MAX, SIGHT_REFERENCE_HEIGHT } from "./sight.js";
 export { handleAdmin, type AdminDeps } from "./admin.js";
 export { serve, type ServeOptions, type ServeHandle } from "./serve.js";
 // -- hosting: cluster, persistence, main --------------------------------------
@@ -74,6 +75,29 @@ export { PostgresStore } from "./persistence/postgres.js";
 export { ServerRegistry, type ServerEntry, type Placement, type PlacementOptions } from "./main/registry.js";
 export { Supervisor, type SupervisorOptions, type ChildInfo, type SpawnChildOptions } from "./main/supervisor.js";
 export { startMain, type MainOptions, type MainHandle } from "./main/main.js";
+export { RuleJudge, JevJudge, judgeFromEnv, withDecisionLog, type ModerationJudge, type JudgeQuestion, type JudgeDecision } from "./moderation/judge.js";
+export { NameModeration, foldName, listHit, reservedNamesFromEntities, NAME_OPTIONS, type NameVerdict, type NameReview } from "./moderation/names.js";
+export { ModerationDesk, DEFAULT_AUDIT_RULE, DEFAULT_VERDICT_THRESHOLDS, AUDIT_QUESTION, type AuditRule, type VerdictThresholds, type AuditResult } from "./moderation/audit.js";
+export { AUDIT_OPTIONS, SANCTION_KINDS, ModerationQueue, activeSanctions, type Sanction, type SanctionKind, type Audit, type Escalation } from "./moderation/sanctions.js";
+export {
+  ItemsLogCollector,
+  ItemsLogStore,
+  ItemsLogMain,
+  mountItemsLog,
+  itemClaimEvidence,
+  itemClaimEvidenceFrom,
+  ITEM_LOG_EVENTS,
+  ITEMS_LOG_NAMESPACE,
+  type ItemLogEvent,
+  type ItemLogEntry,
+  type ItemLogBatch,
+  type ItemLogFlush,
+  type ItemClaimEvidence,
+  type DupeCase,
+} from "./moderation/items-log.js";
 export { VoxelPool, defaultWorkerCount, type VoxelPoolOptions, type GeneratedCell } from "./voxel-pool.js";
 export { SOCIAL_MODULE, socialLine, type SocialEvent } from "./cluster/protocol.js";
 export { SocialStore, isBlocked, normalizeSocial, SOCIAL_NAMESPACE, type FriendRef, type SocialRecord, type GuildMembership } from "./main/social.js";
+export { arrivalFor, seedPlayerState, playerSnapshot, clearPlayerState } from "./server.js";
+export { PortalHarness, type PortalHarnessOptions, type PortalTrip } from "./portal-harness.js";
+export type { PortalHop } from "./cluster/protocol.js";

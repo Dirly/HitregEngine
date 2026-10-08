@@ -19,6 +19,9 @@
  *   --database <url>        Postgres connection string — or HITREG_DATABASE_URL
  *   --experience <id>       persistence scope (default: the scene name)
  *   --creation <id>         character-creation asset (default: the only `creation` asset installed, if exactly one)
+ *   --world-id <id>         this world's id (characters are bound to it, one per account; default: the experience)
+ *   --world-name <name>     its name on the server-select screen (default: the id, title-cased)
+ *   --worlds <file.json>    other worlds to list there: [{ "id", "name", "url" }] (their own mains, a shared --database)
  *   --cap <n>               players per layer (default 40)
  *   --headroom <n>          free slots to keep before starting a layer (default 5)
  *   --min <n> / --max <n>   layers to keep / at most (default 1 / 4)
@@ -42,6 +45,7 @@ import { FileAccountStore, FilePlayerDataBackend } from "../src/persistence/file
 import { PostgresStore } from "../src/persistence/postgres.js";
 import { Supervisor } from "../src/main/supervisor.js";
 import { startMain } from "../src/main/main.js";
+import { reservedNamesFromEntities } from "../src/moderation/names.js";
 
 function arg(name: string, fallback?: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -87,7 +91,7 @@ async function main(): Promise<void> {
     console.log(`[main] persistence: files under ${dataDir}`);
   }
 
-  const content = loadContent(playgroundRoots(playground));
+  const content = loadContent(playgroundRoots(playground, scene));
   if (!content.scenes.has(scene)) {
     console.error(`scene "${scene}" not found. Known: ${[...content.scenes.keys()].join(", ") || "(none)"}`);
     process.exit(2);
@@ -114,6 +118,9 @@ async function main(): Promise<void> {
     console.log(regions.length > 0 ? `[main] zones: ${regions.length} regions, spawn zone ${spawnZone ?? "(none)"}` : "[main] zones: none (whole-world layers)");
   }
   const creation = findCreation(content.assets, arg("creation"));
+  // the game's own NPC / boss names are reserved: no player may take one
+  const reservedNames = reservedNamesFromEntities(Object.values(sceneDoc.entities));
+  console.log(`[main] reserved names: ${reservedNames.length} from the scene's NPCs`);
   console.log(creation ? `[main] character creation: ${creation.archetypes.length} archetypes, ${creation.traits.length} birth traits, ${creation.appearance.length} appearance slots` : "[main] character creation: none (name-only characters)");
   const mainUrl = `ws://127.0.0.1:${port}`;
   const supervisor = flag("no-supervisor")
@@ -140,6 +147,10 @@ async function main(): Promise<void> {
     playerData,
     world: {
       scene,
+      ...(arg("world-id") ? { id: arg("world-id")! } : {}),
+      ...(arg("world-name") ? { name: arg("world-name")! } : {}),
+      // other worlds for the server-select screen: a JSON file of [{ id, name, url }] (each its own main, one account database)
+      ...(arg("worlds") ? { others: JSON.parse(fs.readFileSync(arg("worlds")!, "utf8")) as Array<{ id: string; name: string; url: string }> } : {}),
       cap: num("cap") ?? 40,
       headroom: num("headroom") ?? 5,
       min: num("min") ?? 1,
@@ -153,6 +164,7 @@ async function main(): Promise<void> {
     supervisor,
     worldFiles: content.worldFiles,
     ...(creation ? { creation } : {}),
+    moderation: { reservedNames },
     ...(regions.length > 0 ? { zones: { regions, spawnZone, ...(num("zone-cap") !== undefined ? { zoneCap: num("zone-cap")! } : {}) } } : {}),
   });
   console.log(`[main] gateway ${handle.url} · layers dial ${mainUrl}/cluster · clients will be sent to ${publicHost}:${from}-${to}`);

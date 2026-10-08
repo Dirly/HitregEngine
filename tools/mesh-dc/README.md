@@ -10,7 +10,8 @@ manifest and the engine spec describe the exact input and output schemas.
 
 Model walls, floors, roofs, columns, and architectural supports with thickness.
 Each connected part must enclose a volume. Independent closed parts may touch or
-overlap: they are combined as solid material. An open room is made from closed
+overlap: within a single group they are combined as solid material. Separate
+groups remain independent fields and meshes, even when imported together. An open room is made from closed
 walls and floors around an empty interior, not from an open surface shell.
 
 Keep furniture, doors, treasure, and other props separate. Mark those objects
@@ -19,6 +20,11 @@ of the structure. The exporter uses selected meshes unless objects are explicitl
 tagged `dc_export = True`. Assign `dc_group` to combine nearby structural parts
 into a room or passage. Group size controls extraction cost, so avoid one giant
 bounding box around a branching dungeon.
+
+Partition at buried interfaces. Overlapping groups with exposed coplanar walls
+or floors can still z-fight; checking each mesh for closed topology does not
+check the assembled surfaces. Union pieces that share those surfaces before
+extraction, and verify the final assembly as well as its individual meshes.
 
 Run `export_blender.py` inside Blender through MCP or its Text Editor, then call
 the exported function. For example, with the entry point already loaded:
@@ -105,3 +111,19 @@ the source for later painting; changing a baked prefab requires a fresh bake.
 runner. `pnpm test` includes these checks and the core mesh-field tests. Source
 audits, extracted topology checks, traversal, and visual evidence are still
 required for each authored dungeon.
+
+## Role noise and shaped volumes
+
+Natural rock can be roughened on import while built work stays crisp: tag
+solids with `dc_noise` (or rely on their palette role), keep the role table as
+project data and embed it in the stamp (`export_mesh_stamp(noise=...)`, or
+`source.noise`; `convertMeshStamp(..., { noise })` overrides it). The converter
+splits each group into a crisp mesh node and one csg-`noise` node per noised
+key, with walk-lane and doorway protection zones (`noise.mjs`: `routeProtect`,
+`openingProtect`). Every noised role except `floor: true` roles also gets a
+floor band by default: no noise from 0.2 m under to 0.6 m over each walkable
+floor, which fades back to full over 0.4 m. The floors come from the stamp's
+own floors (`floorGrid`). Set it per table or per role with `band`. Decimate noised bakes after the exact planar merge with
+`decimate.mjs`. `shapes_blender.py` holds shared primitives for shaped natural
+volumes (domed cave ceilings, lofted irregular tunnels, ring walls). The full
+procedure and lessons are in `docs/blender-dc-authoring.md` ("DC role noise").

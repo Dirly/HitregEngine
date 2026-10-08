@@ -1,0 +1,12 @@
+{
+  "id": "warren-gnawed",
+  "about": "A gnawed natural cave: rough mitred rock walls and a domed uneven roof (shapes_blender.cave_ceiling) carrying role-noise keys, an earth floor, and by rule rock pillars (one per pillarArea m2, clear of walls and walk lanes), stalactite clusters near the crown with tips above the springing, stalagmites at the wall foot, and a raised rock shelf along the longest blind wall. No box lumps: the noise does the surface.",
+  "construction": "natural",
+  "height": 3.6,
+  "roles": { "rock": "basalt", "ceiling": "basalt", "floor": "silt" },
+  "wall": { "thickness": 0.9 },
+  "door": { "arch": "segmental", "width": 2.6, "height": 3.4, "minSpring": 2.6, "frame": false },
+  "natural": { "rise": 1.6, "jitter": 0.35, "pillarArea": 60, "pillarRadius": [0.7, 1.1], "pillarWall": 2.4, "lane": 2.2,
+               "clusters": 2, "stalagmites": 5, "shelf": { "depth": 1.6, "height": 0.75 },
+               "wallNoise": "rock-wall", "roofNoise": "rock-roof", "floorNoise": "earth-floor" }
+}

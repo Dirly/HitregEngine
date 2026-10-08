@@ -169,10 +169,15 @@ describe.skipIf(!main || !layer1 || !layer2)("friends, blocks and parties across
     // durable: in the player-data store, not main's memory
     const saved = await playerData.load({ playerId: eve.account.id, experienceId: "test-social" }, "social");
     expect((saved!.data as { friends: unknown[] }).friends).toHaveLength(1);
-    // account-wide: Eve's second character sees Finn without asking again
-    const eva = (await post(`${main!.url}/characters`, { name: "Eva" }, eve.session)).json.character as { id: string };
-    expect((await get(`${main!.url}/social?characterId=${eva.id}`, eve.session)).friends.map((f: { name: string }) => f.name)).toEqual(["Finn"]);
-    expect((await post(`${main!.url}/social/friend/request`, { characterId: eva.id, name: "Finn" }, eve.session)).json.outcome).toBe("already-friends");
+    // Account-wide: a character on another world sees Finn without asking again.
+    const otherWorld = await startMain({ port: 0, host: "127.0.0.1", secret: SECRET, experienceId: "test-social", accounts, playerData, world: { id: "other-world", scene: "field", min: 0, max: 0 }, supervisor: null, scaleEverySeconds: 3600, log: () => undefined });
+    try {
+      const created = await post(`${otherWorld.url}/characters`, { name: "Eva" }, eve.session);
+      expect(created.status).toBe(200);
+      const eva = created.json.character as { id: string };
+      expect((await get(`${otherWorld.url}/social?characterId=${eva.id}`, eve.session)).friends.map((f: { name: string }) => f.name)).toEqual(["Finn"]);
+      expect((await post(`${otherWorld.url}/social/friend/request`, { characterId: eva.id, name: "Finn" }, eve.session)).json.outcome).toBe("already-friends");
+    } finally { await otherWorld.close(); }
     // a request the other way round while one is pending is an acceptance
     await post(`${main!.url}/social/friend/request`, { characterId: gus.id, name: "Eve" }, gus.session);
     expect((await post(`${main!.url}/social/friend/request`, { characterId: eve.id, name: "Gus" }, eve.session)).json.outcome).toBe("accepted");

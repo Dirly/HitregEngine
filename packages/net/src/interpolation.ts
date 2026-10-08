@@ -26,6 +26,13 @@ export interface TransformSnap {
   yaw?: number;
   /** Opaque extras (animation clip, display name…) — newest snapshot wins. */
   data?: unknown;
+  /**
+   * The entity was UNCHANGED up to this tick (a host that only sends what
+   * moved skipped it): the stream's last sample is repeated here before this
+   * one goes in, so motion that resumes interpolates from where it stood at
+   * `hold`, not from the last sample it happened to receive seconds earlier.
+   */
+  hold?: number;
 }
 
 export interface SampledTransform {
@@ -113,6 +120,10 @@ export class TransformInterpolator {
       if (!stream) {
         stream = [];
         this.streams.set(id, stream);
+      }
+      const last = stream[stream.length - 1];
+      if (snap.hold !== undefined && last && last.tick < snap.hold && snap.hold < tick) {
+        stream.push({ tick: snap.hold, snap: last.snap });
       }
       const i = stream.findIndex((s) => s.tick >= tick);
       if (i === -1) stream.push({ tick, snap });

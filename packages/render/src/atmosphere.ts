@@ -1,5 +1,5 @@
 import * as THREE from "three/webgpu";
-import { cameraPosition, fog, float, positionWorld, uniform } from "three/tsl";
+import { cameraPosition, clamp, dot, floor, fog, float, fract, Fn, hash, If, Loop, max, mix, normalize, positionWorld, pow, screenCoordinate, screenUV, select, smoothstep, time, uniform, vec2, vec3, vec4 } from "three/tsl";
 import { godrays } from "three/addons/tsl/display/GodraysNode.js";
 import { bilateralBlur } from "three/addons/tsl/display/BilateralBlurNode.js";
 import { depthAwareBlend } from "three/addons/tsl/display/depthAwareBlend.js";
@@ -28,6 +28,11 @@ export interface FogSettings {
   heightFalloff: number;
   /** height only */
   baseHeight: number;
+  /** exponential/height: glow toward the sun (0 = off — and then not in the shader at all). */
+  sunScatter?: number;
+  sunScatterPower?: number;
+  /** exponential/height: drifting low-lying mist (amount 0 = off, and not in the shader). */
+  mist?: { amount: number; top: number; thickness: number; scale: number; speed: [number, number] } | undefined;
 }
 
 /**
@@ -107,8 +112,44 @@ interface FogNodeState {
   density: THREE.UniformNode<"float", number>;
   heightFalloff: THREE.UniformNode<"float", number>;
   baseHeight: THREE.UniformNode<"float", number>;
+  /** Which optional terms are compiled in — see FogFeatures. */
+  features: string;
   node: THREE.Node<"vec4">;
 }
+
+/**
+ * The optional fog terms. They are decided when the fog is APPLIED (scene
+ * build), never per frame: the fog node is shared by every lit material, so
+ * changing its graph recompiles the whole scene. A term that is off is absent
+ * from the shader rather than multiplied by zero — a scene that never asked
+ * for mist pays nothing for it.
+ */
+interface FogFeatures {
+  scatter: boolean;
+  mist: boolean;
+}
+
+function fogFeatures(settings: FogSettings): FogFeatures {
+  return { scatter: (settings.sunScatter ?? 0) > 0, mist: (settings.mist?.amount ?? 0) > 0 };
+}
+
+/** Live fog uniforms the optional terms read (shared; only bound when compiled in). */
+const fogSun = {
+  direction: uniform(new THREE.Vector3(0.4, 0.55, 0.3).normalize()),
+  /** The sun's colour already scaled by how bright it is (dim moon, dark night). */
+  color: uniform(new THREE.Color(1, 0.9, 0.75)),
+  scatter: uniform(0),
+  power: uniform(6),
+};
+const fogMist = {
+  amount: uniform(0),
+  /** Zone mood multiplier on top of the authored amount. */
+  scale: uniform(1),
+  top: uniform(12),
+  thickness: uniform(10),
+  frequency: uniform(0.02),
+  speed: uniform(new THREE.Vector2(0.6, 0.25)),
+};
 
 /**
  * Owns a scene's fog and retunes it in place.
@@ -150,7 +191,20 @@ export class FogSystem {
 
     const falloff = settings.mode === "height" ? settings.heightFalloff : 0;
     const base = settings.mode === "height" ? settings.baseHeight : 0;
-    const state = this.state ?? (this.state = buildHeightFogNode());
+    const features = fogFeatures(settings);
+    const key = `${features.scatter ? "s" : ""}${features.mist ? "m" : ""}`;
+    if (this.state && this.state.features !== key) this.state = null;
+    const state = this.state ?? (this.state = buildHeightFogNode(features, key));
+    fogSun.scatter.value = settings.sunScatter ?? 0;
+    fogSun.power.value = settings.sunScatterPower ?? 6;
+    const mist = settings.mist;
+    fogMist.amount.value = mist?.amount ?? 0;
+    if (mist) {
+      fogMist.top.value = mist.top;
+      fogMist.thickness.value = Math.max(0.1, mist.thickness);
+      fogMist.frequency.value = mist.scale;
+      fogMist.speed.value.set(mist.speed[0], mist.speed[1]);
+    }
     state.color.value.set(settings.color);
     state.density.value = settings.density;
     state.heightFalloff.value = falloff;
@@ -189,6 +243,22 @@ export class FogSystem {
     }
   }
 
+  /**
+   * Where the sun is and how bright, for the fog's sun-side glow — a uniform
+   * write, every frame if need be. `direction` points TOWARD the sun.
+   */
+  setSun(direction: THREE.Vector3, color: THREE.Color, intensity: number): void {
+    fogSun.direction.value.copy(direction).normalize();
+    // fades with the light itself: a dim moon glows faintly, a dead sky not at all
+    // 0.6: the haze is LIT by the sun, never as bright as the sun itself
+    fogSun.color.value.copy(color).multiplyScalar(0.6 * Math.min(1, Math.max(0, intensity) / 1.5));
+  }
+
+  /** Zone-mood multiplier on the authored mist amount (1 = as authored). */
+  setMistScale(scale: number): void {
+    fogMist.scale.value = Math.max(0, scale);
+  }
+
   dispose(scene?: THREE.Scene): void {
     if (scene) {
       scene.fogNode = null;
@@ -199,7 +269,20 @@ export class FogSystem {
   }
 }
 
-function buildHeightFogNode(): FogNodeState {
+/** 2D value noise from four hashes — far cheaper than Perlin, and mist is low-frequency anyway. */
+/* eslint-disable @typescript-eslint/no-explicit-any */
+function valueNoise2(p: any): any {
+  const i: any = floor(p);
+  const f: any = fract(p);
+  const u: any = f.mul(f).mul(f.mul(-2).add(3));
+  // +65536: TSL hash() converts its seed to an UNSIGNED int, so every negative seed
+  // (any world cell west or north of the origin) would hash to the same value
+  const h = (o: [number, number]): any => hash(dot(i.add(vec2(o[0], o[1])), vec2(127.1, 311.7)).add(65536));
+  return mix(mix(h([0, 0]), h([1, 0]), u.x), mix(h([0, 1]), h([1, 1]), u.x), u.y);
+}
+/* eslint-enable @typescript-eslint/no-explicit-any */
+
+function buildHeightFogNode(features: FogFeatures = { scatter: false, mist: false }, key = ""): FogNodeState {
   const color = uniform(new THREE.Color(0x101522));
   const density = uniform(0.015);
   const heightFalloff = uniform(0);
@@ -216,15 +299,37 @@ function buildHeightFogNode(): FogNodeState {
     .negate()
     .clamp(HEIGHT_FOG_EXPONENT_CLAMP[0], HEIGHT_FOG_EXPONENT_CLAMP[1])
     .exp();
-  const opticalDepth = density.mul(positionWorld.distance(cameraPosition)).mul(altitude).mul(ratio).max(0);
+  const distance = positionWorld.distance(cameraPosition);
+  /* eslint-disable @typescript-eslint/no-explicit-any */
+  let opticalDepth: any = density.mul(distance).mul(altitude).mul(ratio).max(0);
+  if (features.mist) {
+    // Banks of mist: one value-noise octave drifting over the ground, shaped
+    // into patches, confined below `top`. Integrated cheaply as "how much of
+    // this sight line is mist" from the fragment's own height — exact enough
+    // for a layer, and a handful of ALU ops.
+    const p: any = positionWorld.xz.add(fogMist.speed.mul(time)).mul(fogMist.frequency);
+    const patch: any = smoothstep(0.3, 0.75, valueNoise2(p));
+    const below: any = clamp(fogMist.top.sub(positionWorld.y).div(fogMist.thickness), 0, 1);
+    opticalDepth = opticalDepth.add(fogMist.amount.mul(fogMist.scale).mul(patch.mul(0.75).add(0.25)).mul(below).mul(distance.min(400)).mul(0.02));
+  }
   const factor = opticalDepth.negate().exp().oneMinus();
+  let fogColor: any = color;
+  if (features.scatter) {
+    // Looking into the sun the haze is lit by it; looking away it keeps the
+    // cold fog colour. Sun colour pre-scaled by the light's brightness.
+    const view: any = normalize(positionWorld.sub(cameraPosition));
+    const toward: any = pow(max(dot(view, fogSun.direction), 0), fogSun.power);
+    fogColor = mix(color, fogSun.color, clamp(toward.mul(fogSun.scatter), 0, 1));
+  }
+  /* eslint-enable @typescript-eslint/no-explicit-any */
 
   return {
     color,
     density,
     heightFalloff,
     baseHeight,
-    node: fog(color, factor) as THREE.Node<"vec4">,
+    features: key,
+    node: fog(fogColor, factor) as THREE.Node<"vec4">,
   };
 }
 
@@ -333,6 +438,12 @@ export interface VolumetricRequest {
   settings: VolumetricSettings;
   lights: THREE.Light[];
   signature: string;
+  /**
+   * Set when no light can raymarch (`lights` empty — e.g. a CASCADED sun has
+   * no single shadow map): the chain draws cheap screen-space shafts from this
+   * sun instead. `direction` points toward it and is updated in place.
+   */
+  screenSun?: { light: THREE.DirectionalLight; direction: THREE.Vector3 } | undefined;
 }
 
 /**
@@ -342,7 +453,7 @@ export interface VolumetricRequest {
  * between retuning a slider and recompiling every shader in the chain.
  */
 export function volumetricPlanKey(request: VolumetricRequest | null): string {
-  if (!request || !request.settings.enabled || request.lights.length === 0) return "off";
+  if (!request || !request.settings.enabled || (request.lights.length === 0 && !request.screenSun)) return "off";
   if (!(request.settings.intensity > 0)) return "off";
   return `on:${request.signature}`;
 }
@@ -483,4 +594,98 @@ export function volumetricSampleCost(
   const w = Math.round(width * resolutionScale);
   const h = Math.round(height * resolutionScale);
   return w * h * samples;
+}
+
+// ---------------------------------------------------------------------------
+// Screen-space sun shafts
+// ---------------------------------------------------------------------------
+
+/** Taps along each pixel's line to the sun. Fixed at compile time; jittered per pixel so 16 reads as smooth. */
+export const SCREEN_SHAFT_SAMPLES = 16;
+
+/**
+ * Crepuscular rays the cheap way (GPU Gems 3, ch. 13): each pixel walks
+ * SCREEN_SHAFT_SAMPLES steps toward the sun's position on screen, summing how
+ * much bright open SKY it crosses — clouds and terrain block it, gaps in the
+ * cloud deck let it through. No shadow map, so it works with a cascaded sun.
+ *
+ * Cost control: the whole walk sits behind a uniform branch that is false
+ * whenever the sun is off screen, behind the camera or below the horizon, so
+ * looking away from the sun costs one comparison per pixel.
+ */
+export class ScreenShafts {
+  readonly outputNode: THREE.Node<"vec4">;
+  private readonly sunUv = uniform(new THREE.Vector2(0.5, 0.5));
+  private readonly strength = uniform(0);
+  private readonly tint = uniform(new THREE.Color(1, 1, 1));
+  private readonly density = uniform(0.7);
+  private readonly decay = uniform(0.95);
+  private readonly ndc = new THREE.Vector3();
+  private readonly forward = new THREE.Vector3();
+  private readonly eye = new THREE.Vector3();
+
+  /* eslint-disable @typescript-eslint/no-explicit-any */
+  constructor(
+    colorNode: any,
+    depthNode: any,
+    private readonly camera: THREE.Camera,
+    private readonly sun: { light: THREE.DirectionalLight; direction: THREE.Vector3 },
+    private settings: VolumetricSettings,
+  ) {
+    const sunUv = this.sunUv;
+    const strength = this.strength;
+    const density = this.density;
+    const decay = this.decay;
+    const tint = this.tint;
+    const n = SCREEN_SHAFT_SAMPLES;
+    const shafts = Fn(() => {
+      const uv: any = screenUV;
+      const sum: any = float(0).toVar();
+      If(strength.greaterThan(0.001), () => {
+        const step: any = uv.sub(sunUv).mul(density.div(n));
+        // per-pixel jitter (interleaved gradient noise) hides the 16-tap banding
+        const jitter: any = fract(float(52.9829189).mul(fract(dot(screenCoordinate.xy, vec2(0.06711056, 0.00583715)))));
+        const pos: any = uv.sub(step.mul(jitter)).toVar();
+        const weight: any = float(1).toVar();
+        Loop(n, () => {
+          pos.subAssign(step);
+          const sky: any = depthNode.sample(pos).r.greaterThanEqual(0.9999);
+          const lum: any = dot(colorNode.sample(pos).rgb, vec3(0.299, 0.587, 0.114));
+          // linear HDR: the slate sky is ~0.03, lit cloud ~0.2, the sun disc >1 — weight by brightness, capped
+          sum.addAssign(select(sky, lum.min(2), float(0)).mul(weight));
+          weight.mulAssign(decay);
+        });
+      });
+      return sum.mul(strength.mul(2).div(n));
+    })();
+    this.outputNode = vec4(colorNode.rgb.add(tint.mul(shafts)), colorNode.a) as THREE.Node<"vec4">;
+  }
+  /* eslint-enable @typescript-eslint/no-explicit-any */
+
+  setSettings(settings: VolumetricSettings): void {
+    this.settings = settings;
+  }
+
+  /** Per frame: project the sun, fade with how directly we face it and how high it is. */
+  update(): void {
+    const s = this.settings;
+    const dir = this.sun.direction;
+    this.camera.getWorldDirection(this.forward);
+    const facing = this.forward.dot(dir);
+    const light = this.sun.light;
+    const lit = light.visible ? Math.min(1, light.intensity / 1.5) : 0;
+    // above the horizon only (the same light plays the moon at night — let it, dimly)
+    const elevation = THREE.MathUtils.smoothstep(dir.y, -0.02, 0.08);
+    // a point far along the sun direction, projected (no allocation per frame)
+    this.camera.getWorldPosition(this.eye);
+    this.ndc.copy(dir).multiplyScalar(1000).add(this.eye).project(this.camera);
+    // fade as the sun leaves the frame (a little past the edge still streams in)
+    const edge = Math.max(Math.abs(this.ndc.x), Math.abs(this.ndc.y));
+    const onScreen = facing > 0 ? 1 - THREE.MathUtils.smoothstep(edge, 1.0, 1.6) : 0;
+    this.sunUv.value.set(this.ndc.x * 0.5 + 0.5, 0.5 - this.ndc.y * 0.5);
+    this.strength.value = s.intensity * onScreen * elevation * lit;
+    this.density.value = Math.min(1, Math.max(0.05, s.density * 1.4));
+    this.decay.value = Math.min(0.999, Math.max(0.5, s.decay));
+    this.tint.value.copy(light.color);
+  }
 }

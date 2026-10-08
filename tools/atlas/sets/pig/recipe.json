@@ -1,0 +1,214 @@
+{
+ "source": "MMO/3d/Mobs/Dragon/Pig-parts.obj",
+ "sourceScale": 1,
+ "objScale": 1,
+ "outMesh": "MMO/3d/Mobs/Dragon/Pig-unwrapped",
+ "sheet": 1254,
+ "keyStroke": 8,
+ "smooth": 48,
+ "margin": 22,
+ "gutter": 48,
+ "atlas": {
+  "size": 482,
+  "bleed": 2,
+  "bgLum": 236
+ },
+ "mirrorCopy": {
+  "axis": "z",
+  "parts": [
+   "Pig_LegBack",
+   "Pig_Body",
+   "Pig_LegFront",
+   "Pig_Head",
+   "Pig_Tail"
+  ]
+ },
+ "slots": {
+  "leg-back": {
+   "color": "#ff0000",
+   "fit": "contain",
+   "matchTo": "body"
+  },
+  "body": {
+   "color": "#00ff00",
+   "fit": "contain"
+  },
+  "chest": {
+   "color": "#0000ff",
+   "fit": "contain",
+   "matchTo": "body",
+   "label": "chest"
+  },
+  "rump": {
+   "color": "#ffff00",
+   "fit": "contain",
+   "matchTo": "body",
+   "label": "rump"
+  },
+  "back": {
+   "color": "#ff00ff",
+   "fit": "contain",
+   "matchTo": "body",
+   "label": "back top"
+  },
+  "leg-front": {
+   "color": "#ff8000",
+   "fit": "contain",
+   "matchTo": "body"
+  },
+  "head": {
+   "color": "#8000ff",
+   "fit": "contain",
+   "labelMax": 1
+  },
+  "crown": {
+   "color": "#008c00",
+   "fit": "contain",
+   "matchTo": "head",
+   "label": "head top"
+  },
+  "snout": {
+   "color": "#00008c",
+   "fit": "contain",
+   "matchTo": "head",
+   "label": "snout front"
+  },
+  "tail": {
+   "color": "#8c0000",
+   "fit": "contain",
+   "matchTo": "body"
+  }
+ },
+ "parts": {
+  "Pig_LegBack": {
+   "slot": "leg-back",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Pig_Body": {
+   "slot": "body",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.35,
+   "split": [
+    {
+     "slot": "chest",
+     "facing": "+x",
+     "above": 0.6,
+     "u": "-z",
+     "v": "-y",
+     "flare": 0.15
+    },
+    {
+     "slot": "rump",
+     "facing": "-x",
+     "above": 0.6,
+     "u": "+z",
+     "v": "-y",
+     "flare": 0.15
+    },
+    {
+     "slot": "back",
+     "facing": "+y",
+     "above": 0.62,
+     "u": "+x",
+     "v": "+z",
+     "flare": 0.1
+    }
+   ]
+  },
+  "Pig_LegFront": {
+   "slot": "leg-front",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Pig_Head": {
+   "slot": "head",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.4,
+   "split": [
+    {
+     "slot": "snout",
+     "facing": "+x",
+     "above": 0.8,
+     "u": "-z",
+     "v": "-y",
+     "flare": 0.15
+    },
+    {
+     "slot": "crown",
+     "facing": "+y",
+     "above": 0.7,
+     "u": "+x",
+     "v": "+z",
+     "flare": 0.15
+    }
+   ]
+  },
+  "Pig_Tail": {
+   "slot": "tail",
+   "method": "plane",
+   "view": [
+    -0.939,
+    0.012,
+    -0.344
+   ],
+   "flare": 0.1
+  }
+ },
+ "layout": {
+  "col": [
+   {
+    "row": [
+     "body"
+    ]
+   },
+   {
+    "row": [
+     "chest",
+     "leg-back",
+     "rump",
+     "crown",
+     "snout"
+    ]
+   },
+   {
+    "row": [
+     "leg-front",
+     "head",
+     "back",
+     "tail"
+    ]
+   }
+  ]
+ },
+ "marks": [
+  {
+   "slot": "head",
+   "at": [
+    0.6416,
+    0.6229,
+    -0.0959
+   ],
+   "shape": "eye",
+   "size": 14
+  }
+ ],
+ "cutoutSlots": [],
+ "combos": [
+  [
+   "Pig_LegBack",
+   "Pig_Body",
+   "Pig_LegFront",
+   "Pig_Head",
+   "Pig_Tail"
+  ]
+ ]
+}

@@ -1,0 +1,50 @@
+{
+  "size": 470,
+  "bleed": 2,
+  "bgLum": 236,
+  "keyColor": "#00ffff",
+  "groundFringe": 1,
+  "fitSearch": 1.6,
+  "slots": {
+    "#ff0000": {
+      "name": "head",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#00ff00": {
+      "name": "abdomen",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#0000ff": {
+      "name": "leg1",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "head"
+    },
+    "#8000ff": {
+      "name": "leg2",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "leg1"
+    },
+    "#ff8000": {
+      "name": "leg3",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "leg1"
+    },
+    "#8c4600": {
+      "name": "leg4",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "leg1"
+    }
+  }
+}

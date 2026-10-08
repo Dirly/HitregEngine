@@ -24,6 +24,8 @@ import {
 import { setEnvironment as setMaterialEnvironment, setEnvironmentScale } from "./material-maps.js";
 import { refillSkyEnvironmentTexture } from "./environment.js";
 import { setFoliageWindScale } from "./foliage-wind.js";
+import { publishDaylight } from "./daylight.js";
+import { setRimLight, type RimSettings } from "./rim-light.js";
 
 /**
  * The per-scene half of the lighting/atmosphere stack: everything `csm.ts`,
@@ -54,8 +56,21 @@ export interface SkyData extends SkyEnvironmentSource {
   moon?: { direction: [number, number, number]; color: string; size: number; intensity: number } | undefined;
   stars?: { intensity: number; density: number; size: number } | undefined;
   clouds?:
-    | { coverage: number; scale: number; speed: [number, number]; softness: number; color: string; shadow: string; sun?: string; sunAmount?: number }
+    | {
+        coverage: number;
+        scale: number;
+        speed: [number, number];
+        softness: number;
+        color: string;
+        shadow: string;
+        sun?: string;
+        sunAmount?: number;
+        texture?: string | undefined;
+        pixel?: number;
+      }
     | undefined;
+  horizon?: { texture: string; height: number; repeat: number; offset: number; opacity: number; depth: number } | undefined;
+  rim?: RimSettings | undefined;
 }
 
 /** `userData` key under which the gradient dome carries its uniforms. */
@@ -87,6 +102,10 @@ export interface SkyDomeUniforms {
   cloudSun: { value: THREE.Color };
   cloudSunAmount: { value: number };
   cloudLight: { value: number };
+  /** 1 once the painted cloud texture has loaded (until then the layer is the procedural deck alone). */
+  cloudTexOn: { value: number };
+  /** Horizon backdrop opacity, held at 0 until its texture has loaded. */
+  horizonOpacity: { value: number };
 }
 
 /**
@@ -146,8 +165,21 @@ export interface LiveSkyOptions {
    * `flash` (0..1) is lightning — a momentary wash over the sky, fog, fill and
    * ambient. It deliberately adds no light and touches no material, so it
    * cannot trigger a recompile at the worst possible moment.
+   * `overcast` (0..1) is how much of the sky the deck closes, on top of the
+   * authored coverage: 1 fills the whole dome, hides the sun disc and its
+   * dawn/dusk glow on the clouds, takes the sun's scatter out of the fog,
+   * turns god rays off and softens the sun (no hard shadows under a full
+   * deck). Rain drives it to 1; a dry grey day is anywhere in between.
    */
-  weather?: { gloom?: number; tint?: string; tintAmount?: number; wind?: number; cloudDark?: number; flash?: number };
+  weather?: { gloom?: number; tint?: string; tintAmount?: number; wind?: number; cloudDark?: number; flash?: number; overcast?: number };
+  /**
+   * A zone's MOOD, layered over the day/night values and under the weather
+   * (see `regionMoodSchema` in @hitreg/core): `sky`/`haze` pull the zenith and
+   * the horizon+fog toward a colour by `amount`; `light` and `shade` MULTIPLY
+   * the sun's and the fill lights' colours; `lightScale` and `fogDensity`
+   * multiply intensities. Omitted fields are neutral. Pass null to clear.
+   */
+  mood?: { sky?: string; haze?: string; amount?: number; light?: string; lightScale?: number; shade?: string; fogDensity?: number; mist?: number } | null;
   /**
    * How much DAYLIGHT there is here, 0..1 — what a day/night script already
    * computes from the sun elevation, published so the weather layer can be
@@ -172,7 +204,8 @@ export interface LiveSkyBase {
   sun: { direction: [number, number, number]; color: string; intensity: number } | null;
   ambient: { color: string; intensity: number } | null;
   environmentIntensity: number;
-  clouds: { coverage: number; softness: number } | null;
+  /** The authored cloud layer; `color`/`shadow` are its DAY lighting (a day/night script cools them toward night). */
+  clouds: { coverage: number; softness: number; color?: string; shadow?: string } | null;
 }
 
 export interface SceneLightingOptions {
@@ -227,7 +260,9 @@ export class SceneLighting {
 
   /** Shadow-map render passes owed by the lights cascades doesn't own. */
   private readonly otherShadowPasses = new Map<THREE.Light, number>();
-  private volumetric: VolumetricSettings = DEFAULT_VOLUMETRIC_SETTINGS;
+  /** The sky's shafts as authored, and the live copy the post chain reads (`overcast` dims it). */
+  private volumetricAuthored: VolumetricSettings = DEFAULT_VOLUMETRIC_SETTINGS;
+  private volumetric: VolumetricSettings = { ...DEFAULT_VOLUMETRIC_SETTINGS };
   private shaftLights: THREE.Light[] = [];
   private shaftSignature = "";
   private pollCountdown = 0;
@@ -248,12 +283,21 @@ export class SceneLighting {
     sun: null as number | null,
     environment: null as number | null,
     cloudLight: null as number | null,
+    /** Coverage, the sun-side cloud glow and the sun disc as asked for, before `overcast` closed the sky. */
+    cloudCoverage: null as number | null,
+    cloudSunAmount: null as number | null,
+    sunDisc: null as number | null,
     /** Cloud colours as the day/night script asked for them, before weather darkened them. */
     top: null as THREE.Color | null,
     cloudColor: null as THREE.Color | null,
     cloudShadow: null as THREE.Color | null,
     fogColor: null as THREE.Color | null,
     bottom: null as THREE.Color | null,
+    /** Sun and ambient colours as asked for, before a zone mood multiplied them. */
+    sunColor: null as THREE.Color | null,
+    ambientColor: null as THREE.Color | null,
+    /** Fog density as asked for (weather writes it), before a zone mood multiplied it. */
+    fogDensity: null as number | null,
     /**
      * How much DAYLIGHT there is, 0..1, as the day/night script sees it.
      *
@@ -265,7 +309,22 @@ export class SceneLighting {
      */
     daylight: 1,
   };
-  private readonly weather = { gloom: 0, tint: new THREE.Color("#808080"), tintAmount: 0, cloudDark: 0, flash: 0 };
+  /**
+   * The zone mood layer (LiveSkyOptions.mood): over day/night, under weather.
+   * Neutral = no sky/haze colour, white multipliers, scale 1.
+   */
+  private readonly mood = {
+    sky: null as THREE.Color | null,
+    haze: null as THREE.Color | null,
+    amount: 0,
+    light: new THREE.Color(1, 1, 1),
+    lightScale: 1,
+    shade: new THREE.Color(1, 1, 1),
+    fogDensity: 1,
+    mist: 1,
+  };
+  private readonly moodScratch = new THREE.Color();
+  private readonly weather = { gloom: 0, tint: new THREE.Color("#808080"), tintAmount: 0, cloudDark: 0, flash: 0, overcast: 0 };
   /** The colour lightning washes everything toward — a cold, slightly blue white. */
   private readonly flashColor = new THREE.Color("#cfe0ff");
   private readonly cloudScratch = new THREE.Color();
@@ -298,6 +357,9 @@ export class SceneLighting {
     this.otherShadowPasses.delete(light);
     if ((light as THREE.DirectionalLight).isDirectionalLight === true) {
       this.directionalLights.add(light as THREE.DirectionalLight);
+      // can it EVER raymarch? (cascades own separate maps; no shadow, no map)
+      if (!castShadow || !settings.enabled || settings.cascades > 1) this.screenShaftSuns.add(light);
+      else this.screenShaftSuns.delete(light);
       this.cascades.register(light as THREE.DirectionalLight, castShadow, settings, shadowSize);
       return;
     }
@@ -326,6 +388,11 @@ export class SceneLighting {
   /** The builder hands over the gradient dome it made for this scene's sky. */
   attachSkyDome(dome: THREE.Mesh): void {
     this.domeUniforms = (dome.userData[SKY_DOME_UNIFORMS] as SkyDomeUniforms | undefined) ?? null;
+  }
+
+  /** The dome's live uniforms (read-only use: the sea reflects the sky by them), or null without a dome. */
+  skyDomeUniforms(): Readonly<SkyDomeUniforms> | null {
+    return this.domeUniforms;
   }
 
   /** …and the hemisphere fill light, when `sky.light > 0`. */
@@ -364,7 +431,7 @@ export class SceneLighting {
       sun: sunBase,
       ambient: ambient ? { color: "#" + ambient.color.getHexString(), intensity: ambient.intensity } : null,
       environmentIntensity: this.environment.current.intensity,
-      clouds: sky.clouds ? { coverage: sky.clouds.coverage, softness: sky.clouds.softness } : null,
+      clouds: sky.clouds ? { coverage: sky.clouds.coverage, softness: sky.clouds.softness, color: sky.clouds.color, shadow: sky.clouds.shadow } : null,
     };
     return this.liveBase;
   }
@@ -375,7 +442,6 @@ export class SceneLighting {
     const req = this.req;
     if (live.top !== undefined) {
       (req.top ??= new THREE.Color()).set(live.top);
-      this.hemisphere?.color.set(live.top);
       if (this.baseSky) this.baseSky = { ...this.baseSky, top: live.top };
     }
     if (live.bottom !== undefined) {
@@ -384,7 +450,8 @@ export class SceneLighting {
     }
     if (live.fog) {
       if (live.fog.color !== undefined) (req.fogColor ??= new THREE.Color()).set(live.fog.color);
-      const { color: _color, ...rest } = live.fog;
+      if (live.fog.density !== undefined) req.fogDensity = Math.max(0, live.fog.density);
+      const { color: _color, density: _density, ...rest } = live.fog;
       if (Object.keys(rest).length > 0) this.fog.retune(this.scene, rest);
     }
     if (live.hemisphere !== undefined) req.hemisphere = Math.max(0, live.hemisphere);
@@ -396,15 +463,15 @@ export class SceneLighting {
           holder.quaternion.setFromUnitVectors(UP, this.aimVector);
           holder.updateMatrixWorld(true);
         }
-        if (live.sun.color !== undefined) sun.color.set(live.sun.color);
       }
+      if (live.sun.color !== undefined) (req.sunColor ??= new THREE.Color()).set(live.sun.color);
       if (live.sun.intensity !== undefined) req.sun = Math.max(0, live.sun.intensity);
       if (dome) {
         if (live.sun.direction) dome.sunDirection.value.set(live.sun.direction[0], live.sun.direction[1], live.sun.direction[2]).normalize();
         const disc = live.sun.disc;
         if (disc?.color !== undefined) dome.sunColor.value.set(disc.color);
         if (disc?.size !== undefined) dome.sunSize.value = Math.min(0.9999, Math.max(0.9, disc.size));
-        if (disc?.intensity !== undefined) dome.sunIntensity.value = Math.max(0, disc.intensity);
+        if (disc?.intensity !== undefined) req.sunDisc = Math.max(0, disc.intensity);
       }
     }
     if (live.moon && dome) {
@@ -426,20 +493,18 @@ export class SceneLighting {
     }
     if (live.clouds && dome) {
       const c = live.clouds;
-      if (c.coverage !== undefined) dome.cloudCoverage.value = Math.min(1, Math.max(0, c.coverage));
+      if (c.coverage !== undefined) req.cloudCoverage = Math.min(1, Math.max(0, c.coverage));
       if (c.light !== undefined) req.cloudLight = Math.max(0, c.light);
       if (c.color !== undefined) (req.cloudColor ??= new THREE.Color()).set(c.color);
       if (c.shadow !== undefined) (req.cloudShadow ??= new THREE.Color()).set(c.shadow);
       if (c.sun !== undefined) dome.cloudSun.value.set(c.sun);
-      if (c.sunAmount !== undefined) dome.cloudSunAmount.value = Math.min(1, Math.max(0, c.sunAmount));
+      if (c.sunAmount !== undefined) req.cloudSunAmount = Math.min(1, Math.max(0, c.sunAmount));
       if (c.speed) dome.cloudSpeed.value.set(c.speed[0], c.speed[1]);
       if (c.scale !== undefined) dome.cloudScale.value = Math.max(0.05, c.scale);
       if (c.softness !== undefined) dome.cloudSoftness.value = Math.min(1, Math.max(0.01, c.softness));
     }
     if (live.ambient) {
-      for (const ambient of this.findAmbientLights()) {
-        if (live.ambient.color !== undefined) ambient.color.set(live.ambient.color);
-      }
+      if (live.ambient.color !== undefined) (req.ambientColor ??= new THREE.Color()).set(live.ambient.color);
       if (live.ambient.intensity !== undefined) req.ambient = Math.max(0, live.ambient.intensity);
     }
     if (live.environmentIntensity !== undefined) req.environment = Math.max(0, live.environmentIntensity);
@@ -451,7 +516,16 @@ export class SceneLighting {
       if (w.wind !== undefined) setFoliageWindScale(w.wind);
       if (w.cloudDark !== undefined) this.weather.cloudDark = Math.min(1, Math.max(0, w.cloudDark));
       if (w.flash !== undefined) this.weather.flash = Math.min(1, Math.max(0, w.flash));
+      if (w.overcast !== undefined) this.weather.overcast = Math.min(1, Math.max(0, w.overcast));
+      // Weather modulates the sun and the fill, so it needs their unmodulated
+      // values even in a scene no day/night script drives (else they never move).
+      const sun = this.directionalLights.values().next().value as THREE.DirectionalLight | undefined;
+      if (sun) req.sun ??= sun.intensity;
+      if (this.hemisphere) req.hemisphere ??= this.hemisphere.intensity;
+      const ambient = this.findAmbientLights()[0];
+      if (ambient) req.ambient ??= ambient.intensity;
     }
+    if (live.mood !== undefined) this.setMood(live.mood);
     if (live.daylight !== undefined) this.req.daylight = Math.min(1, Math.max(0, live.daylight));
     this.applyEffective();
     if (live.refreshEnvironment && this.baseSky) {
@@ -479,10 +553,30 @@ export class SceneLighting {
     const flash = this.weather.flash;
     const lift = 1 + 3.5 * flash;
     const dim = (1 - 0.75 * gloom) * lift; // fill, ambient, IBL, cloud light
-    const sunDim = (1 - 0.85 * gloom) * lift; // the sun goes further: hard shadows vanish under cloud
-    if (req.hemisphere !== null && this.hemisphere) this.hemisphere.intensity = req.hemisphere * dim;
-    if (req.sun !== null) for (const sun of this.directionalLights) sun.intensity = req.sun * sunDim;
-    if (req.ambient !== null) for (const ambient of this.findAmbientLights()) ambient.intensity = req.ambient * dim;
+    // Overcast. A closed deck is a sky with no sun in it: the disc and the
+    // sun-side glow go, and the direct light falls to a faint remainder so
+    // shadows all but vanish. The fill RISES a little to carry the light the
+    // sun lost — an overcast day is flat, not dark (zone moods hold the house
+    // brightness; weather must not quietly undo that).
+    const overcast = this.weather.overcast;
+    const open = 1 - overcast;
+    const fillLift = 1 + 0.3 * overcast;
+    const sunDim = (1 - 0.85 * gloom) * (1 - 0.75 * overcast) * lift; // the sun goes further: hard shadows vanish under cloud
+    if (dome) {
+      const sky = this.baseSky;
+      const coverage = req.cloudCoverage ?? sky?.clouds?.coverage ?? 0;
+      dome.cloudCoverage.value = coverage + (1 - coverage) * overcast;
+      dome.cloudSunAmount.value = (req.cloudSunAmount ?? sky?.clouds?.sunAmount ?? 0) * open;
+      dome.sunIntensity.value = (req.sunDisc ?? sky?.sun?.intensity ?? 0) * open * open;
+    }
+    if (req.hemisphere !== null && this.hemisphere) this.hemisphere.intensity = req.hemisphere * dim * fillLift;
+    const mood = this.mood;
+    if (req.sun !== null) for (const sun of this.directionalLights) sun.intensity = req.sun * sunDim * mood.lightScale;
+    if (req.ambient !== null) for (const ambient of this.findAmbientLights()) ambient.intensity = req.ambient * dim * fillLift;
+    // colours a mood multiplies (white = as asked)
+    if (req.sunColor) for (const sun of this.directionalLights) sun.color.copy(req.sunColor).multiply(mood.light);
+    if (req.ambientColor) for (const ambient of this.findAmbientLights()) ambient.color.copy(req.ambientColor).multiply(mood.shade);
+    if (req.top && this.hemisphere) this.hemisphere.color.copy(req.top).multiply(mood.shade);
     if (req.cloudLight !== null && dome) dome.cloudLight.value = req.cloudLight * dim;
     // The deck itself: storm grey, and lit from inside by a strike. Derived
     // from what the day/night script asked for, so the two stay independent.
@@ -524,24 +618,67 @@ export class SceneLighting {
     // neither. It is the first thing anyone reads the weather off.
     const skyDim = 1 - 0.65 * this.weather.cloudDark;
     if (req.top) {
-      this.tintScratch.copy(req.top).multiplyScalar(skyDim).lerp(this.litTint, amount * 0.6);
+      this.tintScratch.copy(req.top);
+      if (mood.sky) this.tintScratch.lerp(mood.sky, mood.amount);
+      this.tintScratch.multiplyScalar(skyDim).lerp(this.litTint, amount * 0.6);
       if (flash > 0) this.tintScratch.lerp(this.flashColor, 0.45 * flash);
       dome?.top.value.copy(this.tintScratch);
     }
     if (req.bottom) {
-      this.tintScratch.copy(req.bottom).multiplyScalar(skyDim).lerp(this.litTint, amount);
+      this.tintScratch.copy(req.bottom);
+      if (mood.haze) this.tintScratch.lerp(mood.haze, mood.amount);
+      this.tintScratch.multiplyScalar(skyDim).lerp(this.litTint, amount);
       if (flash > 0) this.tintScratch.lerp(this.flashColor, 0.55 * flash);
       dome?.bottom.value.copy(this.tintScratch);
       this.hemisphere?.groundColor.copy(this.tintScratch);
       if (this.scene.background instanceof THREE.Color) this.scene.background.copy(this.tintScratch);
     }
+    if (req.fogDensity !== null) this.fog.retune(this.scene, { density: req.fogDensity * mood.fogDensity });
     if (req.fogColor) {
-      this.tintScratch.copy(req.fogColor).lerp(this.litTint, amount);
+      this.tintScratch.copy(req.fogColor);
+      if (mood.haze) this.tintScratch.lerp(mood.haze, mood.amount);
+      this.tintScratch.lerp(this.litTint, amount);
       // Fog IS the air, so a strike has to light it too — without this the
       // flash reads as the sky blinking behind a scene that never noticed.
       if (flash > 0) this.tintScratch.lerp(this.flashColor, 0.6 * flash);
       this.fog.retune(this.scene, { color: "#" + this.tintScratch.getHexString() });
     }
+  }
+
+  /**
+   * Take a zone mood. The layer can only modulate values it knows the
+   * unmodulated form of, so the first mood also seeds those from the scene
+   * as authored — which is what keeps a scene with no day/night script
+   * returning EXACTLY to its own look when the mood clears.
+   */
+  private setMood(next: NonNullable<LiveSkyOptions["mood"]> | null): void {
+    const m = this.mood;
+    const req = this.req;
+    m.sky = next?.sky ? (m.sky ?? new THREE.Color()).set(next.sky) : null;
+    m.haze = next?.haze ? (m.haze ?? new THREE.Color()).set(next.haze) : null;
+    m.amount = Math.min(1, Math.max(0, next?.amount ?? 0));
+    m.light.set(next?.light ?? "#ffffff");
+    m.lightScale = Math.max(0, next?.lightScale ?? 1);
+    m.shade.set(next?.shade ?? "#ffffff");
+    m.fogDensity = Math.max(0, next?.fogDensity ?? 1);
+    m.mist = Math.max(0, next?.mist ?? 1);
+    this.fog.setMistScale(m.mist);
+    const sky = this.baseSky;
+    if (sky) {
+      req.top ??= new THREE.Color(sky.top);
+      req.bottom ??= new THREE.Color(sky.bottom);
+      if (sky.fog) {
+        req.fogColor ??= new THREE.Color(sky.fog.color);
+        req.fogDensity ??= sky.fog.density;
+      }
+    }
+    const sun = this.directionalLights.values().next().value as THREE.DirectionalLight | undefined;
+    if (sun) {
+      req.sunColor ??= sun.color.clone();
+      req.sun ??= sun.intensity;
+    }
+    const ambient = this.findAmbientLights()[0];
+    if (ambient) req.ambientColor ??= ambient.color.clone();
   }
 
   /**
@@ -578,7 +715,9 @@ export class SceneLighting {
     this.liveBase = null;
     this.ambientLights = null;
     this.fog.apply(this.scene, sky?.fog ?? null);
-    this.volumetric = sky?.volumetric ?? DEFAULT_VOLUMETRIC_SETTINGS;
+    setRimLight(sky?.rim ?? null);
+    this.volumetricAuthored = sky?.volumetric ?? DEFAULT_VOLUMETRIC_SETTINGS;
+    this.volumetric = { ...this.volumetricAuthored };
     // Re-query on the next frame rather than keeping a set that was chosen for
     // the previous sky.
     this.pollCountdown = 0;
@@ -603,6 +742,8 @@ export class SceneLighting {
   frame(camera: THREE.Camera): void {
     this.cascades.update(camera);
     this.claimMaterialEnvironment();
+    this.syncSun();
+    publishDaylight(this.req.daylight);
 
     if (!this.volumetric.enabled) {
       if (this.shaftLights.length > 0) {
@@ -631,10 +772,45 @@ export class SceneLighting {
     this.shaftSignature = signature;
   }
 
+  /**
+   * The sun as the atmosphere sees it this frame: the first directional
+   * light's direction (TOWARD it — local +Y rotated, the same convention as
+   * liveSkyBase) and its colour/intensity, pushed to the fog's sun-side glow.
+   * One quaternion transform per frame.
+   */
+  private syncSun(): void {
+    const sun = this.directionalLights.values().next().value as THREE.DirectionalLight | undefined;
+    if (!sun) return;
+    const holder = sun.parent ?? sun;
+    this.sunDirection.set(0, 1, 0).applyQuaternion(holder.getWorldQuaternion(this.aimQuaternion)).normalize();
+    // no sun-side glow in the fog when the sun is behind a closed deck
+    this.fog.setSun(this.sunDirection, sun.color, sun.visible ? sun.intensity * (1 - this.weather.overcast) : 0);
+  }
+
+  /** Directional lights that can never raymarch shafts — they get screen-space ones. */
+  private readonly screenShaftSuns = new WeakSet<THREE.Light>();
+
+  /** Toward the sun, world space, as of the last frame(). */
+  readonly sunDirection = new THREE.Vector3(0, 1, 0);
+
   /** What the post chain needs to build/retune shafts, or null when they're off. */
   volumetricRequest(): VolumetricRequest | null {
-    if (!this.volumetric.enabled || this.shaftLights.length === 0) return null;
-    return { settings: this.volumetric, lights: this.shaftLights, signature: this.shaftSignature };
+    if (!this.volumetric.enabled) return null;
+    // Overcast takes the shafts away — there is no sun to stream from. Never
+    // all the way to 0: an intensity of 0 plans the pass OUT, and the chain
+    // rebuild that costs is a hitch every time a storm arrives. Below 0.001
+    // the screen-space walk skips its loop, so a closed sky costs nothing.
+    const open = 1 - this.weather.overcast;
+    const authored = this.volumetricAuthored.intensity;
+    this.volumetric.intensity = authored > 0 ? Math.max(1e-4, authored * open * open) : 0;
+    if (this.shaftLights.length > 0) return { settings: this.volumetric, lights: this.shaftLights, signature: this.shaftSignature };
+    // No light can raymarch (a cascaded sun has no single shadow map): fall
+    // back to SCREEN-SPACE shafts streaming from the sun across bright sky.
+    const sun = this.directionalLights.values().next().value as THREE.DirectionalLight | undefined;
+    // only a sun that can NEVER raymarch: one merely waiting for its first
+    // shadow render must not flip the chain screen -> raymarch (a rebuild)
+    if (!sun || !this.screenShaftSuns.has(sun)) return null;
+    return { settings: this.volumetric, lights: [], signature: `screen:${sun.uuid}`, screenSun: { light: sun, direction: this.sunDirection } };
   }
 
   stats(): SceneLightingStats {

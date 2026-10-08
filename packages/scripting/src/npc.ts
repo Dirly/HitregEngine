@@ -1,15 +1,24 @@
 import {
   acceptQuest,
   addItem,
+  attuneSoulSlots,
+  takeEntrusted,
+  type EquipmentSlot,
   availableChoices,
   CHARACTER_EVENTS,
   fillPlaces,
   freshShopState,
+  isDowned,
+  isLootLocked,
   NPC_EVENTS,
   nodeText,
+  QUEST_EVENTS,
   npcEventDecls,
   npcMemorySchema,
+  repairAll,
+  repairItem,
   shopBuy,
+  soulBindSchema,
   shopSell,
   startNode,
   takeCarried,
@@ -31,15 +40,19 @@ import {
   type SheetEnv,
   type Shop,
   type ShopState,
+  type SoulBind,
   type GridTarget,
   type Vault,
 } from "@hitreg/core";
 import { Script, type ScriptEventDecl } from "./script.js";
 import { catalogOf, readSheet, sheetKey, sheetStoreOf, type SheetStoreLike } from "./character-store.js";
+import { worldFactsAt } from "./world-facts.js";
+import { presentFor, showIfPresent } from "./presence.js";
 
 /** What a choice's actions leave behind, applied all-or-nothing. */
 interface Draft {
   sheet: CharacterSheet;
+  bind: SoulBind | null;
   journal: QuestJournal | undefined;
   memory: NpcMemory;
   panel: Conversation["panel"];
@@ -48,7 +61,9 @@ interface Draft {
 
 /**
  * A townsperson you can talk to: its conversation (a `dialogue` asset), and
- * optionally a shop (a `shop` asset) and the bank vault.
+ * optionally a shop (a `shop` asset), the bank vault, a repair bench, the
+ * hearth bind (an innkeeper: `bindSoul`, where the character respawns) and
+ * soulbound slots (a soul binder: `openSoulbind`).
  *
  * The server half: every request a player sends this NPC (`npc.talk`,
  * `npc.choose`, `shop.buy`, `vault.deposit` …) is decided HERE, on the session
@@ -80,12 +95,29 @@ export class NpcScript extends Script {
     },
     shop: { default: "", description: "shop data-asset id (assets/shops/<id>.json) its `openShop` actions may open; empty = sells nothing" },
     vault: { default: false, description: "a banker: its dialogue may `openVault` (the character's own vault, the same at every banker)" },
+    bindPoint: {
+      default: [] as number[],
+      description:
+        "[x, y, z] world point a `bindSoul` action binds the talker's respawn (HEARTH) to (an innkeeper: the inn's hearth, its door); empty = this NPC's own position",
+    },
+    bindName: { default: "", description: "place name the hearth bind is known by (\"Brinehold\"); empty = this NPC's name" },
     radius: { default: 3.5, min: 1, max: 20, description: "metres a player must be within to talk (and to keep talking: walking 3 m past it ends the conversation)" },
     holstered: {
       default: false,
       description: "carry held items in their SECOND pose (sheathed on the hip or back): sets userData.holstered on this body, which the weapon sockets read as `altWhen`",
     },
-    face: { default: true, description: "turn toward the local player while talking (presentation only)" },
+    face: { default: true, description: "turn toward the local player while talking (presentation only); false for an object (a notice board, a stone) that offers quests" },
+    presence: {
+      default: {} as Record<string, unknown>,
+      description:
+        "only THERE while this condition holds (an hour window, weather at this spot, a flag of the character looking): hidden " +
+        "per player and refusing talk otherwise, never removed, and an open conversation holds it. {} = always there (a `presence` quest source)",
+    },
+    readable: {
+      default: false,
+      description:
+        "a thing to READ (a sign, a slab, a book): opening it also emits player.read, which counts `read` objectives aimed at it. Its text is the dialogue's, tokens resolved the same way",
+    },
     turn: { default: "", description: "entity turned to face the talker; empty = <this id>-visual when it exists (the body model)" },
   };
   static override events: ScriptEventDecl[] = [...npcEventDecls];
@@ -123,8 +155,8 @@ export class NpcScript extends Script {
     on<{ actorId: string; npcId: string }>(NPC_EVENTS.talk, (p) => this.talk(p.actorId));
     on<{ actorId: string; npcId: string; node: string; index: number }>(NPC_EVENTS.choose, (p) => this.choose(p.actorId, p.node, p.index));
     on<{ actorId: string; npcId: string }>(NPC_EVENTS.leave, (p) => this.end(p.actorId));
-    on<{ actorId: string; npcId: string; itemId: string; qty?: number }>(NPC_EVENTS.buy, (p) =>
-      this.trade(p.actorId, (sheet, state, shop) => shopBuy(sheet, state, shop, p.itemId, p.qty ?? 1, this.env)),
+    on<{ actorId: string; npcId: string; itemId: string; qty?: number; resale?: number }>(NPC_EVENTS.buy, (p) =>
+      this.trade(p.actorId, (sheet, state, shop) => shopBuy(sheet, state, shop, p.itemId, p.qty ?? 1, this.env, p.resale)),
     );
     on<{ actorId: string; npcId: string; uid: string; qty?: number }>(NPC_EVENTS.sell, (p) =>
       this.trade(p.actorId, (sheet, state, shop) => shopSell(sheet, state, shop, p.uid, p.qty, this.env)),
@@ -142,6 +174,9 @@ export class NpcScript extends Script {
       }),
     );
     on<{ actorId: string; npcId: string; amount: number }>(NPC_EVENTS.coins, (p) => this.bank(p.actorId, (sheet, vault) => vaultCoins(sheet, vault, p.amount)));
+    on<{ actorId: string; npcId: string; uid: string }>(NPC_EVENTS.repair, (p) => this.mend(p.actorId, (sheet, rate) => repairItem(sheet, p.uid, this.env, rate)));
+    on<{ actorId: string; npcId: string }>(NPC_EVENTS.repairAll, (p) => this.mend(p.actorId, (sheet, rate) => repairAll(sheet, this.env, rate)));
+    on<{ actorId: string; npcId: string; slots: EquipmentSlot[] }>(NPC_EVENTS.attune, (p) => this.attune(p.actorId, p.slots));
   }
 
   private asset(param: string, type: string): unknown {
@@ -190,8 +225,37 @@ export class NpcScript extends Script {
     return c && c.npc === this.entityId ? c : null;
   }
 
-  private facts(actorId: string, memory: NpcMemory, sheet: CharacterSheet | null, journal: QuestJournal | undefined, metBefore: boolean): DialogueFacts {
-    return { npcId: this.entityId, memory, sheet, journal, quest: (id) => this.quest(id), metBefore };
+  private facts(actorId: string, memory: NpcMemory, sheet: CharacterSheet | null, journal: QuestJournal | undefined, metBefore: boolean, bind?: SoulBind | null): DialogueFacts {
+    return {
+      npcId: this.entityId,
+      memory,
+      sheet,
+      journal,
+      quest: (id) => this.quest(id),
+      metBefore,
+      bind: bind === undefined ? this.bindOf(actorId) : bind,
+      bindPoint: this.bindPoint(),
+      world: this.worldFacts(actorId),
+    };
+  }
+
+  /** Clock, weather and the biome under the talker, for `clock` / `weather` conditions. */
+  private worldFacts(actorId: string): DialogueFacts["world"] {
+    const body = this.ctx.getObject(actorId);
+    return body ? worldFactsAt(this.ctx, this.store, body.position.x, body.position.z) : null;
+  }
+
+  private bindOf(actorId: string): SoulBind | null {
+    const r = soulBindSchema.safeParse(this.store.get(`bind/${actorId}`));
+    return r.success ? r.data : null;
+  }
+
+  /** Where a bindSoul here binds to: the `bindPoint` param, else this NPC's world position. */
+  private bindPoint(): [number, number, number] {
+    const p = this.param<unknown>("bindPoint");
+    if (Array.isArray(p) && p.length === 3 && p.every((n) => typeof n === "number" && Number.isFinite(n))) return [p[0], p[1], p[2]];
+    const at = this.object.getWorldPosition(this.object.position.clone());
+    return [at.x, at.y, at.z];
   }
 
   /** The conversation value for `node` as this character sees it now. */
@@ -205,9 +269,27 @@ export class NpcScript extends Script {
     if (!this.store.set(`dialogue/${actorId}`, value)) console.warn(`[npc] ${this.entityId}: conversation for ${actorId} failed validation`);
   }
 
+  /**
+   * A character DOWNED, or being looted (lootlock/<actorId>: killed by a player, inside the looter's window), gets no NPC service at
+   * all — no shop, vault, repair or quest hand-in — so nothing they carry can be sold, banked or spent out of reach.
+   */
+  private looted(actorId: string): boolean {
+    // a DOWNED character (core isDowned: out of the fight, not dead) gets no service either: no shopping while bleeding out
+    if (isDowned(this.store, actorId)) {
+      this.ctx.events?.emit(CHARACTER_EVENTS.refused, { actorId, request: "talk", error: "you are down: nobody will deal with you until you are back on your feet" });
+      return true;
+    }
+    if (!isLootLocked(this.store, actorId, this.ctx.now())) return false;
+    this.ctx.events?.emit(CHARACTER_EVENTS.refused, { actorId, request: "talk", error: "you are being looted: nobody will deal with you until it is over" });
+    return true;
+  }
+
   private talk(actorId: string): void {
     if (!this.dialogue) return;
+    if (this.looted(actorId)) return;
     if (!this.inRange(actorId, 1)) return;
+    // a `presence` that is not there for this character cannot be spoken to
+    if (!presentFor(this.ctx, this.store, this.entityId, actorId)) return;
     const memory = this.memoryOf(actorId);
     const metBefore = (memory.met[this.entityId] ?? 0) > 0;
     const sheet = readSheet(this.store, actorId);
@@ -218,6 +300,7 @@ export class NpcScript extends Script {
     const nextMemory: NpcMemory = { ...memory, met: { ...memory.met, [this.entityId]: (memory.met[this.entityId] ?? 0) + 1 } };
     this.store.set(`npc/${actorId}`, nextMemory);
     this.ctx.events?.emit(NPC_EVENTS.talked, { actorId, npcId: this.entityId });
+    if (this.param<boolean>("readable")) this.ctx.events?.emit(QUEST_EVENTS.read, { actorId, entityId: this.entityId });
     // `met` inside the conversation keeps meaning "before it began"
     this.show(actorId, node, { ...facts, memory: nextMemory }, this.store.get(`dialogue/${actorId}`) as Conversation | null, null);
   }
@@ -229,7 +312,7 @@ export class NpcScript extends Script {
   private choose(actorId: string, node: string, index: number): void {
     const conv = this.conversation(actorId);
     const d = this.dialogue;
-    if (!conv || !d || conv.node !== node || !this.inRange(actorId, 3)) return;
+    if (!conv || !d || conv.node !== node || !this.inRange(actorId, 3) || this.looted(actorId)) return;
     const memory = this.memoryOf(actorId);
     const metBefore = (memory.met[this.entityId] ?? 0) > 1;
     const sheet = readSheet(this.store, actorId);
@@ -238,7 +321,8 @@ export class NpcScript extends Script {
     const facts = this.facts(actorId, memory, sheet, journal, metBefore);
     if (!availableChoices(d, node, facts).includes(index)) return;
     const choice = d.nodes[node]!.choices[index]!;
-    let draft: Draft = { sheet, journal, memory, panel: null, xp: 0 };
+    const bind = this.bindOf(actorId);
+    let draft: Draft = { sheet, bind, journal, memory, panel: null, xp: 0 };
     for (const action of choice.do) {
       const r = this.act(draft, action);
       if (typeof r === "string") {
@@ -251,8 +335,9 @@ export class NpcScript extends Script {
     if (draft.sheet !== sheet) this.store.set(sheetKey(actorId), draft.sheet);
     if (draft.journal !== journal && draft.journal) this.store.set(`quests/${actorId}`, draft.journal);
     if (draft.memory !== memory) this.store.set(`npc/${actorId}`, draft.memory);
+    if (draft.bind !== bind && draft.bind) this.store.set(`bind/${actorId}`, draft.bind);
     if (draft.xp > 0) this.ctx.events?.emit(CHARACTER_EVENTS.xp, { actorId, amount: draft.xp });
-    const after = this.facts(actorId, draft.memory, draft.sheet, draft.journal, metBefore);
+    const after = this.facts(actorId, draft.memory, draft.sheet, draft.journal, metBefore, draft.bind);
     if (choice.goto === "end") {
       // a service window outlives the talk that opened it
       if (draft.panel) this.show(actorId, node, after, conv, draft.panel);
@@ -298,6 +383,8 @@ export class NpcScript extends Script {
           sheet = given.sheet;
         }
         sheet = { ...sheet, coins: sheet.coins + q.rewardCoins };
+        // what the quest entrusted to the character goes back with it (item `entrustedQuest`)
+        sheet = takeEntrusted(sheet, action.quest, this.env);
         return { ...draft, sheet, journal: r.journal, xp: draft.xp + q.rewardXp };
       }
       case "openShop":
@@ -306,6 +393,12 @@ export class NpcScript extends Script {
       case "openVault":
         if (!this.param<boolean>("vault")) return "There is no vault here.";
         return { ...draft, panel: { kind: "vault" } };
+      case "bindSoul":
+        return { ...draft, bind: { at: this.bindPoint(), name: this.param<string>("bindName") || this.displayName() } };
+      case "openRepair":
+        return { ...draft, panel: { kind: "repair", rate: action.rate } };
+      case "openSoulbind":
+        return { ...draft, panel: { kind: "soulbind", slots: action.slots, price: action.price, exclude: [...action.exclude] } };
       case "give": {
         const r = addItem(draft.sheet, action.item, action.qty, this.env);
         if (!r.ok || r.placed < action.qty) return "Make room in your bags first.";
@@ -330,7 +423,7 @@ export class NpcScript extends Script {
 
   private trade(actorId: string, fn: (sheet: CharacterSheet, state: ShopState, shop: Shop) => { ok: true; sheet: CharacterSheet; state: ShopState } | { ok: false; error: string }): void {
     const conv = this.conversation(actorId);
-    if (!conv || conv.panel?.kind !== "shop" || !this.shop || !this.inRange(actorId, 3)) return;
+    if (!conv || conv.panel?.kind !== "shop" || !this.shop || !this.inRange(actorId, 3) || this.looted(actorId)) return;
     const sheet = readSheet(this.store, actorId);
     if (!sheet) return;
     const r = fn(sheet, this.shelf(), this.shop);
@@ -342,13 +435,37 @@ export class NpcScript extends Script {
 
   private bank(actorId: string, fn: (sheet: CharacterSheet, vault: Vault) => { ok: true; sheet: CharacterSheet; vault: Vault } | { ok: false; error: string }): void {
     const conv = this.conversation(actorId);
-    if (!conv || conv.panel?.kind !== "vault" || !this.param<boolean>("vault") || !this.inRange(actorId, 3)) return;
+    if (!conv || conv.panel?.kind !== "vault" || !this.param<boolean>("vault") || !this.inRange(actorId, 3) || this.looted(actorId)) return;
     const sheet = readSheet(this.store, actorId);
     if (!sheet) return;
     const r = fn(sheet, this.vaultOf(actorId));
     if (!r.ok) return this.notice(actorId, conv, r.error);
     this.store.set(sheetKey(actorId), r.sheet);
     this.store.set(`vault/${actorId}`, r.vault);
+    if (conv.notice) this.notice(actorId, conv, "");
+  }
+
+  /** A repair request at this NPC's open repair window, priced at the rate the window was opened with. */
+  private mend(actorId: string, fn: (sheet: CharacterSheet, rate: number) => { ok: true; sheet: CharacterSheet } | { ok: false; error: string }): void {
+    const conv = this.conversation(actorId);
+    if (!conv || conv.panel?.kind !== "repair" || !this.inRange(actorId, 3) || this.looted(actorId)) return;
+    const sheet = readSheet(this.store, actorId);
+    if (!sheet) return;
+    const r = fn(sheet, conv.panel.rate);
+    if (!r.ok) return this.notice(actorId, conv, r.error);
+    this.store.set(sheetKey(actorId), r.sheet);
+    if (conv.notice) this.notice(actorId, conv, "");
+  }
+
+  /** `soul.attune` at this NPC's open soul binder window: soulbind these slots to what is worn there now. */
+  private attune(actorId: string, slots: EquipmentSlot[]): void {
+    const conv = this.conversation(actorId);
+    if (!conv || conv.panel?.kind !== "soulbind" || !this.inRange(actorId, 3) || this.looted(actorId)) return;
+    const sheet = readSheet(this.store, actorId);
+    if (!sheet) return;
+    const r = attuneSoulSlots(sheet, slots, { max: conv.panel.slots, price: conv.panel.price, exclude: conv.panel.exclude });
+    if (!r.ok) return this.notice(actorId, conv, r.error);
+    this.store.set(sheetKey(actorId), r.sheet);
     if (conv.notice) this.notice(actorId, conv, "");
   }
 
@@ -393,8 +510,15 @@ export class NpcScript extends Script {
     if (next) this.store.set(`shop/${id}`, next);
   }
 
-  /** Presentation: face the local player while they talk to this NPC. */
+  private presenceScan = 0;
+
+  /** Presentation: hidden while a `presence` keeps it away; face the local player while they talk to this NPC. */
   override onLateUpdate(dt: number): void {
+    this.presenceScan -= dt;
+    if (this.presenceScan <= 0) {
+      this.presenceScan = 0.25;
+      showIfPresent(this.ctx, this.store, this.entityId, this.object);
+    }
     if (!this.param<boolean>("face") || !this.turnId) return;
     const me = this.ctx.localPlayer?.();
     const target = this.ctx.getObject(this.turnId);

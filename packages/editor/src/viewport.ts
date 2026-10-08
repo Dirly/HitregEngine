@@ -770,11 +770,13 @@ export class ViewportTools {
    * A dragged held item, written back as its socket: the offset and rotation
    * that put it where it was dropped, in the bone's axes. When the socket was
    * showing its second pose (a shield in a guard — the socket marks
-   * `userData.socketPose`), that pose is the one edited.
+   * `userData.socketPose`), that pose is the one edited. A socket with no
+   * second pose yet, dragged in the editor's holstered view, gets one: off
+   * its own bone, shown while the character is holstered.
    */
   private commitSocket(socket: { id: string; params: Record<string, unknown> }, object: THREE.Object3D): void {
     const p = socket.params;
-    const alt = object.userData["socketPose"] === "alt" && Array.isArray(p["altRotationDeg"]) && (p["altRotationDeg"] as unknown[]).length === 3;
+    const alt = object.userData["socketPose"] === "alt";
     const boneName = String((alt && p["altBone"]) || p["bone"] || "");
     const bone = object.parent && boneName ? findSocketBone(object.parent, boneName) : null;
     if (!bone) {
@@ -788,7 +790,7 @@ export class ViewportTools {
       object.getWorldQuaternion(new THREE.Quaternion()),
     );
     const next = alt
-      ? { ...p, altOffset: fitted.offset, altRotationDeg: fitted.rotationDeg }
+      ? { ...p, altOffset: fitted.offset, altRotationDeg: fitted.rotationDeg, altWhen: p["altWhen"] || "holstered" }
       : { ...p, offset: fitted.offset, rotationDeg: fitted.rotationDeg };
     const script = this.opts.store.doc.entities[socket.id]!.components["script"] as Record<string, unknown>;
     this.opts.store.apply([{ op: "set-component", id: socket.id, component: "script", data: { ...script, params: next } }]);

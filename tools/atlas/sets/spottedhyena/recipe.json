@@ -1,0 +1,211 @@
+{
+ "source": "MMO/3d/Mobs/Dragon/SpottedHyena-parts.obj",
+ "sourceScale": 1,
+ "objScale": 1,
+ "outMesh": "MMO/3d/Mobs/Dragon/SpottedHyena-unwrapped",
+ "sheet": 1254,
+ "keyStroke": 8,
+ "smooth": 48,
+ "margin": 22,
+ "gutter": 48,
+ "atlas": {
+  "size": 474,
+  "bleed": 2,
+  "bgLum": 236
+ },
+ "mirrorCopy": {
+  "axis": "z",
+  "parts": [
+   "SpottedHyena_Head",
+   "SpottedHyena_LegFront",
+   "SpottedHyena_Body",
+   "SpottedHyena_LegBack",
+   "SpottedHyena_Tail"
+  ]
+ },
+ "slots": {
+  "head": {
+   "color": "#ff0000",
+   "fit": "contain",
+   "labelMax": 1
+  },
+  "crown": {
+   "color": "#00ff00",
+   "fit": "contain",
+   "matchTo": "head",
+   "label": "head top"
+  },
+  "snout": {
+   "color": "#0000ff",
+   "fit": "contain",
+   "matchTo": "head",
+   "label": "snout front"
+  },
+  "leg-front": {
+   "color": "#ffff00",
+   "fit": "contain",
+   "matchTo": "body"
+  },
+  "body": {
+   "color": "#ff00ff",
+   "fit": "contain"
+  },
+  "chest": {
+   "color": "#ff8000",
+   "fit": "contain",
+   "matchTo": "body",
+   "label": "chest"
+  },
+  "rump": {
+   "color": "#8000ff",
+   "fit": "contain",
+   "matchTo": "body",
+   "label": "rump"
+  },
+  "back": {
+   "color": "#008c00",
+   "fit": "contain",
+   "matchTo": "body",
+   "label": "back top"
+  },
+  "leg-back": {
+   "color": "#00008c",
+   "fit": "contain",
+   "matchTo": "body"
+  },
+  "tail": {
+   "color": "#8c0000",
+   "fit": "contain",
+   "matchTo": "body"
+  }
+ },
+ "parts": {
+  "SpottedHyena_Head": {
+   "slot": "head",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.4,
+   "split": [
+    {
+     "slot": "snout",
+     "facing": "+x",
+     "above": 0.9,
+     "u": "-z",
+     "v": "-y",
+     "flare": 0.15
+    },
+    {
+     "slot": "crown",
+     "facing": "+y",
+     "above": 0.7,
+     "u": "+x",
+     "v": "+z",
+     "flare": 0.15
+    }
+   ]
+  },
+  "SpottedHyena_LegFront": {
+   "slot": "leg-front",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "SpottedHyena_Body": {
+   "slot": "body",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.35,
+   "split": [
+    {
+     "slot": "chest",
+     "facing": "+x",
+     "above": 0.6,
+     "u": "-z",
+     "v": "-y",
+     "flare": 0.15
+    },
+    {
+     "slot": "rump",
+     "facing": "-x",
+     "above": 0.6,
+     "u": "+z",
+     "v": "-y",
+     "flare": 0.15
+    },
+    {
+     "slot": "back",
+     "facing": "+y",
+     "above": 0.62,
+     "u": "+x",
+     "v": "+z",
+     "flare": 0.1
+    }
+   ]
+  },
+  "SpottedHyena_LegBack": {
+   "slot": "leg-back",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "SpottedHyena_Tail": {
+   "slot": "tail",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  }
+ },
+ "layout": {
+  "col": [
+   {
+    "row": [
+     "body",
+     "tail"
+    ]
+   },
+   {
+    "row": [
+     "leg-back",
+     "head",
+     "rump",
+     "snout"
+    ]
+   },
+   {
+    "row": [
+     "leg-front",
+     "chest",
+     "back",
+     "crown"
+    ]
+   }
+  ]
+ },
+ "marks": [
+  {
+   "slot": "head",
+   "at": [
+    0.6804,
+    1.1004,
+    -0.0554
+   ],
+   "shape": "eye",
+   "size": 10
+  }
+ ],
+ "cutoutSlots": [],
+ "combos": [
+  [
+   "SpottedHyena_Head",
+   "SpottedHyena_LegFront",
+   "SpottedHyena_Body",
+   "SpottedHyena_LegBack",
+   "SpottedHyena_Tail"
+  ]
+ ]
+}

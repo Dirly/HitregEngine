@@ -87,6 +87,12 @@ describe("town zones (a town is a zone of its own)", () => {
     expect(townRegionOf([vale, town1], "town-2")).toBeNull();
   });
 
+  it("a region tagged `place` is look only: skipped unless asked for", () => {
+    const den: RegionDoc = regionSchema.parse({ id: "wolf-den", name: "The Den", polygon: circle(1500, 1500, 80), within: "hollow-vale", tags: ["place"], mood: { sky: "#334455" } });
+    expect(regionAt([vale, den], 1500, 1500)?.id).toBe("hollow-vale"); // hosting, chat, spawning see the zone
+    expect(regionAt([vale, den], 1500, 1500, { places: true })?.id).toBe("wolf-den"); // the mood lookup sees the place
+  });
+
   it("the audit treats a cut-out as a neighbour, not an overlap, and still credits the parent with the town", () => {
     const report = auditRegions([vale, rim, town1, town2], { towns, pois: [] });
     expect(report.findings.filter((f) => f.includes("overlaps"))).toEqual([]);

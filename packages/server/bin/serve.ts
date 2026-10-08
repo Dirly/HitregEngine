@@ -13,11 +13,20 @@
  *   --hz <n>              sim rate (default 60)
  *   --snapshot-every <n>  ticks per snapshot (default 3)
  *   --respawn <seconds>   NPC respawn delay, 0 disables (default 20)
- *   --grace <seconds>     keep a dropped player's body this long for a reconnect (default 30)
+ *   --grace <seconds>     keep a dropped player's body this long for a reconnect (default 60)
  *   --terrain-radius <n>  simulated cells around each player (default: the scene's rings.simulation)
  *   --max-players <n>
  *   --no-persist          do not write terraformed recipes back to their file
  *   --workers <n>         cell-generation worker threads (default min(4, cpus-1); 0 = inline)
+ *   --compress            permessage-deflate on the game socket (off by default: see WebSocketHostTransportOptions.compress)
+ *   --profile             profile every tick for GET /admin/profile (phases, per-script rows, spikes)
+ *   --interest <m>        send each player what moves within this many metres (default 250; 0 = everything to everyone)
+ *   --no-state-interest   netState/events to everyone (default: about an entity only to those who see it)
+ *   --state-every <n>     OFF by default: ship netState + events every n ticks (3 = with the 20 Hz snapshot)
+ *   --state-hz <f=hz,…>   OFF by default: deliver these fields at most hz/s, e.g. stamina=10,mana=10,stability=10
+ *   --far <m>:<n>         OFF by default: entities beyond m metres every n-th snapshot, e.g. 40:2
+ *   --zones <a,b>         load only these zones (+ --zone-load-band m, default 200): what main starts a dedicated copy with
+ *   --statics-radius <m>  build prop/building mesh colliders only this near players and awake bodies (default 96; 0 = all at boot)
  *
  * Hosting (docs/hosting.md) — a layer in a cluster is started by main, but by hand:
  *   --secret <s>          require gateway tickets (or HITREG_SECRET); --id <serverId> what they are bound to
@@ -65,6 +74,16 @@ async function main(): Promise<void> {
     maxPlayers: num("max-players"),
     persistRecipe: !process.argv.includes("--no-persist"),
     workers: num("workers"),
+    profile: process.argv.includes("--profile"),
+    compress: process.argv.includes("--compress"),
+    ...(process.argv.includes("--no-state-interest") ? { stateInterest: false } : {}),
+    ...(num("state-every") !== undefined ? { stateEvery: num("state-every")! } : {}),
+    ...(arg("state-hz") ? { stateHz: Object.fromEntries(arg("state-hz")!.split(",").map((kv) => kv.split("=")).map(([k, v]) => [k!.trim(), Number(v)])) } : {}),
+    ...(arg("far") ? { farSend: { beyond: Number(arg("far")!.split(":")[0]), every: Number(arg("far")!.split(":")[1] ?? 2) } } : {}),
+    ...(arg("zones") ? { zones: arg("zones")!.split(",").map((z) => z.trim()).filter(Boolean) } : {}),
+    ...(num("zone-load-band") !== undefined ? { zoneLoadBand: num("zone-load-band")! } : {}),
+    ...(num("interest") !== undefined ? { interestRadius: num("interest")! } : {}),
+    ...(num("statics-radius") !== undefined ? { staticsRadius: num("statics-radius")! } : {}),
     // hosting (docs/hosting.md): a secret makes tickets mandatory; --main joins a cluster
     ...(arg("secret", process.env["HITREG_SECRET"]) ? { secret: arg("secret", process.env["HITREG_SECRET"])! } : {}),
     ...(arg("id") ? { serverId: arg("id")! } : {}),

@@ -1,5 +1,5 @@
 import * as THREE from "three/webgpu";
-import { NetStateStore } from "@hitreg/core";
+import { NetStateStore, PLAYER_LOGOUT_EVENT } from "@hitreg/core";
 import {
   computeView,
   dueThisTick,
@@ -18,6 +18,7 @@ import {
   type Transport,
   type TransformSnap,
 } from "@hitreg/net";
+import { INITIAL_LINK, linkAfter, redialDelayMs, type ServerLink, type ServerLinkEvent } from "./net-session.js";
 
 /**
  * NetPresence — dev multiplayer presence for the playground.
@@ -94,9 +95,18 @@ export interface NetPresenceOptions {
   /**
    * Peer: the host's authoritative position for OUR player arrived.
    * The app reconciles its local prediction against it (dead-band →
-   * soft nudge → hard snap).
+   * soft nudge → hard snap). `then` is where our prediction had the body
+   * at the moment the authority's position describes (the input it applied,
+   * sent that long ago plus the time it has been in force there): compare
+   * against it, not the present, or every snapshot of a running body reads
+   * as an error of speed × round trip. Null when it cannot be told.
+   * Returns how far it moved the body (a nudge or a snap), or nothing: the
+   * logged predictions move by the same amount, so the snapshots already in
+   * flight, measured against the old ones, do not apply it again (a server
+   * teleport — a respawn at the hearth — otherwise re-applied its jump every
+   * snapshot and flung the body kilometres away).
    */
-  reconcileLocalPlayer?(p: [number, number, number]): void;
+  reconcileLocalPlayer?(p: [number, number, number], then?: [number, number, number] | null): [number, number, number] | void;
 
   // -- world replication (host-authoritative NPCs) ----------------------------
   /**
@@ -297,6 +307,9 @@ export class NetPresence {
   /** Play ticket presented in the handshake (gateway mode). */
   private ticket: string | null = null;
   private nextDialAt = 0;
+  /** Dedicated server: where the link stands, for the connection overlay (net-session.ts `linkAfter`). */
+  private link: ServerLink = INITIAL_LINK;
+  private readonly linkHandlers = new Set<(link: ServerLink) => void>();
   private readonly selfId = `p-${Math.random().toString(36).slice(2, 10)}`;
   private readonly selfName = `guest-${this.selfId.slice(-4)}`;
 
@@ -333,6 +346,8 @@ export class NetPresence {
   /** Host only: each peer's latest movement command. */
   private readonly remoteInputs = new Map<string, RemoteInput>();
   private inputSeq = 0;
+  /** Recent sends (seq, when, where the prediction had the body): what a snapshot's `seq`/`sa` is matched against. */
+  private readonly sendLog: Array<{ seq: number; at: number; p: [number, number, number] }> = [];
   /** Host only: this tick's replica states + each peer's interest view. */
   private lastReplicas: NetReplica[] | null = null;
   private readonly peerViews = new Map<string, Set<string>>();
@@ -344,11 +359,17 @@ export class NetPresence {
 
   // peer side: snapshot interpolation buffers (players + host-simulated NPCs)
   private readonly playersInterp = new TransformInterpolator();
+  /** Ghosts hidden because they left our interest view (shown again with their next update). */
+  private readonly hiddenByInterest = new Set<string>();
   private readonly entitiesInterp = new TransformInterpolator();
   private clock: InterpolationClock | null = null; // per client session
+  /** A dedicated server's script clock off its newest snapshot, and when that arrived (performance.now). */
+  private hostSim: { ms: number; at: number } | null = null;
   private lastRenderTick: number | null = null;
   private reportedPlaying = false;
   private replicatedKey = ""; // sorted id-set fingerprint, to detect set changes
+  /** Tick of the previous snapshot that carried an entities block (the hold point for `h`). */
+  private lastEntitiesTick: number | null = null;
   private replicatedNow: string[] = [];
 
   constructor(opts: NetPresenceOptions) {
@@ -443,6 +464,57 @@ export class NetPresence {
     return this.serverUrl;
   }
 
+  /** Dedicated server: the link's state (dialing, connected, retrying, refused). */
+  serverLink(): ServerLink {
+    return this.link;
+  }
+
+  /** Dedicated server: link changes, for the connection overlay. Called immediately with the current state. */
+  onServerLink(cb: (link: ServerLink) => void): () => void {
+    this.linkHandlers.add(cb);
+    cb(this.link);
+    return () => {
+      this.linkHandlers.delete(cb);
+    };
+  }
+
+  /** Request/cancel an intentional camp. The dedicated authority owns its timer and save. */
+  requestLogout(cancel = false): boolean {
+    if (this.serverUrl === null || this.role !== "peer" || !this.roomClient) return false;
+    this.roomClient.sendCommand({ t: "event", name: PLAYER_LOGOUT_EVENT, payload: { cancel } });
+    return true;
+  }
+
+  /** Dial now: skips the backoff, and lifts a refusal (an open server may let us in on a second try). */
+  retryNow(): void {
+    if (this.link.phase === "refused" || this.link.phase === "retrying") this.setLink({ kind: "bye" });
+    this.nextDialAt = 0;
+  }
+
+  private setLink(event: ServerLinkEvent): void {
+    const next = linkAfter(this.link, event);
+    if (next === this.link) return;
+    this.link = next;
+    if (next.retryAt !== null) this.nextDialAt = next.retryAt;
+    for (const cb of [...this.linkHandlers]) {
+      try {
+        cb(next);
+      } catch (error) {
+        console.warn("[net] link handler failed:", error);
+      }
+    }
+  }
+
+  /**
+   * The dedicated server's script clock now (ms), estimated from its newest
+   * snapshot plus the wall time since it arrived; null with no server session
+   * (a P2P host's snapshots carry no clock).
+   */
+  hostSimNow(): number | null {
+    if (this.role !== "peer" || this.hostSim === null) return null;
+    return this.hostSim.ms + (performance.now() - this.hostSim.at);
+  }
+
   stats(): { role: "host" | "peer" | "off"; players: number; via: string | null } {
     if (this.role === "off") return { role: "off", players: 0, via: null };
     const self = this.opts.getLocalPlayer() ? 1 : 0;
@@ -483,10 +555,12 @@ export class NetPresence {
     if (this.serverUrl !== null) {
       // dedicated server: keep a client session up while wanted; re-dial after a drop
       const wanted = this.opts.wantsSession?.() ?? true;
-      if (wanted && this.role === "off" && performance.now() >= this.nextDialAt) this.dialServer();
+      // a refusal is not re-dialed on its own: the same ticket would be refused again
+      if (wanted && this.role === "off" && this.link.phase !== "refused" && performance.now() >= this.nextDialAt) this.dialServer();
       if (!wanted && this.role !== "off") {
         this.teardownSession(); // sends bye; the server's grace window takes it from here
         this.sessionHost = null;
+        this.setLink({ kind: "bye" });
       }
     } else if (this.opts.allowP2P?.() === false) {
       // a "server" project: no peer room for this scene — play alone
@@ -573,6 +647,7 @@ export class NetPresence {
     for (const [id, s] of this.entitiesInterp.sample(renderTick)) {
       const object = this.opts.getEntityObject?.(id);
       if (!object) continue;
+      if (this.hiddenByInterest.delete(id)) object.visible = true;
       object.position.set(s.p[0], s.p[1], s.p[2]);
       if (s.q) object.quaternion.set(s.q[0], s.q[1], s.q[2], s.q[3]);
       const state = s.data as
@@ -886,20 +961,40 @@ export class NetPresence {
     this.serverUrl = url;
     this.ticket = ticket;
     this.nextDialAt = 0;
+    this.setLink({ kind: "rehome", url });
   }
 
   private dialServer(): void {
     if (this.serverUrl === null || !/^wss?:\/\//.test(this.serverUrl)) return; // gateway mode, not placed yet
-    this.nextDialAt = performance.now() + 2000; // backoff if this attempt dies
-    let transport: WebSocketClientTransport;
+    this.nextDialAt = performance.now() + redialDelayMs(this.link.failures + 1); // backoff if this attempt dies
+    this.setLink({ kind: "dial", url: this.serverUrl });
+    let transport: WebSocketClientTransport | null = null;
+    // The transport reports "disconnected" only after a welcome; a socket that
+    // never got one (nothing listening, a refusal) would otherwise leave this
+    // tab a "peer" of nobody forever. The trace sees every close.
+    const trace = (event: string, detail?: string): void => {
+      if (transport === null || this.transport !== transport) return; // a bye we said ourselves
+      if (event === "ws-welcome") this.setLink({ kind: "welcome" });
+      else if (event === "ws-reject") this.setLink({ kind: "refused", reason: detail ?? "refused" });
+      else if (event === "ws-close" && this.link.phase === "dialing") {
+        this.setLink({ kind: "closed", reason: "could not reach the server", now: performance.now() });
+        this.teardownSession();
+        this.sessionHost = null;
+      } else if (event === "ws-close" && this.link.phase === "refused") {
+        this.teardownSession();
+        this.sessionHost = null;
+      }
+    };
     try {
       transport = new WebSocketClientTransport(this.serverUrl, {
         peerId: this.selfId,
         name: this.selfName,
         ...(this.ticket ? { ticket: this.ticket } : {}),
+        trace,
       });
     } catch (error) {
       console.warn("[net] cannot dial the server:", error);
+      this.setLink({ kind: "closed", reason: error instanceof Error ? error.message : String(error), now: performance.now() });
       return;
     }
     this.sessionHost = WS_HOST_ID;
@@ -937,9 +1032,9 @@ export class NetPresence {
         if (state === "disconnected") {
           if (this.serverUrl !== null) {
             console.warn("[net] lost the server — re-dialing shortly");
+            this.setLink({ kind: "closed", reason: "connection lost", now: performance.now() }); // sets the backoff
             this.teardownSession();
             this.sessionHost = null;
-            this.nextDialAt = performance.now() + 2000;
             return;
           }
           console.warn("[net] lost the host — waiting for a members update");
@@ -962,9 +1057,12 @@ export class NetPresence {
       if (!local) return;
       const input = this.opts.getLocalInput?.() ?? null;
       this.inputSeq += 1;
+      this.sendLog.push({ seq: this.inputSeq, at: performance.now(), p: [local.position[0], local.position[1], local.position[2]] });
+      if (this.sendLog.length > 80) this.sendLog.shift(); // 4 s at 20 Hz
       client.sendCommand({
         t: "input",
         seq: this.inputSeq,
+        ct: performance.now(), // our clock at send: the authority measures how long it applied each input against it
         v: input?.v ?? [0, 0],
         jump: input?.jump ?? false,
         vy: input?.vy ?? 0,
@@ -996,6 +1094,7 @@ export class NetPresence {
     this.rtcDiag = null;
     this.relayTransport = null;
     this.remoteInputs.clear();
+    this.hostSim = null;
     this.lastReplicas = null;
     this.peerViews.clear();
     this.tick = 0;
@@ -1010,7 +1109,9 @@ export class NetPresence {
     this.opts.onRosterChanged?.();
     // hand every ghost back to the local sim and drop the buffers
     this.playersInterp.clear();
+    this.hiddenByInterest.clear();
     this.entitiesInterp.clear();
+    this.lastEntitiesTick = null;
     this.clock = null;
     this.lastRenderTick = null;
     if (this.replicatedKey !== "") {
@@ -1080,12 +1181,42 @@ export class NetPresence {
 
   // -- snapshots (peer) ------------------------------------------------------------
 
+  /**
+   * Where our prediction had the body `sinceMs` after we sent input `seq` — interpolated between the positions
+   * logged at each send; the present position when that moment is after the last send. Null when `seq` is
+   * no longer (or never was) in the log.
+   */
+  private predictedAt(seq: number, sinceMs: number): [number, number, number] | null {
+    const log = this.sendLog;
+    const i = log.findIndex((e) => e.seq === seq);
+    if (i < 0) return null;
+    const t = log[i]!.at + sinceMs;
+    for (let k = i; k < log.length - 1; k++) {
+      const a = log[k]!;
+      const b = log[k + 1]!;
+      if (t <= b.at) {
+        const f = b.at > a.at ? Math.max(0, Math.min(1, (t - a.at) / (b.at - a.at))) : 1;
+        return [a.p[0] + (b.p[0] - a.p[0]) * f, a.p[1] + (b.p[1] - a.p[1]) * f, a.p[2] + (b.p[2] - a.p[2]) * f];
+      }
+    }
+    const now = this.opts.getLocalPlayer()?.position;
+    const last = log[log.length - 1]!;
+    if (!now) return [...last.p];
+    const span = performance.now() - last.at;
+    const f = span > 0 ? Math.max(0, Math.min(1, (t - last.at) / span)) : 1;
+    return [last.p[0] + (now[0] - last.p[0]) * f, last.p[1] + (now[1] - last.p[1]) * f, last.p[2] + (now[2] - last.p[2]) * f];
+  }
+
   /** Buffer a host snapshot for interpolation; reconcile our own player. */
   private ingestSnapshot(tick: number, state: unknown): void {
     const s = state as { players?: unknown; entities?: unknown } | null;
     const players = s?.players;
     if (!players || typeof players !== "object") return;
     this.clock?.onSnapshot(tick);
+    const simMs = (s as { simMs?: unknown }).simMs;
+    if (typeof simMs === "number" && Number.isFinite(simMs) && (this.hostSim === null || simMs >= this.hostSim.ms)) {
+      this.hostSim = { ms: simMs, at: performance.now() };
+    }
 
     const playerSnaps: Record<string, TransformSnap> = {};
     for (const [peerId, raw] of Object.entries(players)) {
@@ -1098,7 +1229,9 @@ export class NetPresence {
       ];
       if (peerId === this.selfId) {
         // the host's authoritative verdict on OUR predicted movement
-        this.opts.reconcileLocalPlayer?.(position);
+        const r = raw as { seq?: unknown; sa?: unknown };
+        const moved = this.opts.reconcileLocalPlayer?.(position, typeof r.seq === "number" && typeof r.sa === "number" ? this.predictedAt(r.seq, r.sa) : null);
+        if (moved) for (const e of this.sendLog) for (let k = 0; k < 3; k++) e.p[k] = e.p[k]! + moved[k]!;
         continue;
       }
       const e = raw as { yaw?: unknown; name?: unknown };
@@ -1121,7 +1254,12 @@ export class NetPresence {
     if (!entities || typeof entities !== "object") return;
 
     // updates: this peer's in-view slice, gated by per-entity cadence —
-    // entities absent this snapshot simply carry forward in their streams
+    // entities absent this snapshot simply carry forward in their streams.
+    // A dedicated server also leaves out what did not change; `h: 1` marks one
+    // that moves again after such a gap, so its stream holds still up to the
+    // previous snapshot instead of drifting across the whole gap.
+    const holdAt = this.lastEntitiesTick;
+    this.lastEntitiesTick = tick;
     const updates =
       entities.updates && typeof entities.updates === "object"
         ? (entities.updates as Record<string, unknown>)
@@ -1129,7 +1267,7 @@ export class NetPresence {
     const entitySnaps: Record<string, TransformSnap> = {};
     for (const [id, raw] of Object.entries(updates)) {
       const e = raw as
-        | { p?: unknown; q?: unknown; anim?: unknown; animL?: unknown; animR?: unknown; animD?: unknown; animM?: unknown; animO?: unknown }
+        | { p?: unknown; q?: unknown; h?: unknown; anim?: unknown; animL?: unknown; animR?: unknown; animD?: unknown; animM?: unknown; animO?: unknown }
         | null;
       if (!isFiniteVec(e?.p, 3) || !isFiniteVec(e?.q, 4)) continue;
       const p = e!.p as number[];
@@ -1137,6 +1275,7 @@ export class NetPresence {
       entitySnaps[id] = {
         p: [p[0]!, p[1]!, p[2]!],
         q: [q[0]!, q[1]!, q[2]!, q[3]!],
+        ...(e!.h === 1 && holdAt !== null && holdAt < tick ? { hold: holdAt } : {}),
         data:
           typeof e!.anim === "string"
             ? {
@@ -1156,18 +1295,27 @@ export class NetPresence {
     }
     this.entitiesInterp.push(tick, entitySnaps);
 
-    // removed: left our interest view — drop the stream (ghost freezes; it
-    // stays suspended because it is still in the managed set)
+    // removed: left our interest view — drop the stream and hide the ghost (it
+    // stays suspended because it is still in the managed set); it shows again
+    // with its next update. A frozen body standing where it was last seen is
+    // wrong in a way an absent one is not.
     if (Array.isArray(entities.removed)) {
       for (const id of entities.removed) {
-        if (typeof id === "string") this.entitiesInterp.remove(id);
+        if (typeof id !== "string") continue;
+        this.entitiesInterp.remove(id);
+        const object = this.opts.getEntityObject?.(id);
+        if (object && object.visible) {
+          object.visible = false;
+          this.hiddenByInterest.add(id);
+        }
       }
     }
 
-    // managed SET changed → the app suspends/resumes local simulation
-    const managed = Array.isArray(entities.managed)
-      ? entities.managed.filter((x): x is string => typeof x === "string")
-      : [];
+    // managed SET changed → the app suspends/resumes local simulation. A
+    // dedicated server sends the set only when it changed (and now and then
+    // to be safe): absent means "as before".
+    if (!Array.isArray(entities.managed)) return;
+    const managed = entities.managed.filter((x): x is string => typeof x === "string");
     const key = [...managed].sort().join("\n");
     if (key !== this.replicatedKey) {
       this.replicatedKey = key;

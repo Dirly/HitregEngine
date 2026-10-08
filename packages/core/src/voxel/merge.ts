@@ -41,6 +41,11 @@ export function mergeVoxelMeshes(
   // width is not negotiable — this is Uint32 for the same reason `VoxelMesh`'s
   // is.
   const indices = new Uint32Array(indexCount);
+  // indexed worlds: every cell carries the layer ids/weights (the palette is
+  // the world's, so either all do or none do); ids are global, so they concatenate
+  const layered = live.every((e) => e.mesh.layerIndex && e.mesh.layerWeight);
+  const layerIndex = layered ? new Uint8Array(vertexCount * 4) : undefined;
+  const layerWeight = layered ? new Uint8Array(vertexCount * 4) : undefined;
 
   const min: [number, number, number] = [Infinity, Infinity, Infinity];
   const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
@@ -87,6 +92,10 @@ export function mergeVoxelMeshes(
       normals[o + 2] = tz;
     }
     splat.set(mesh.splat.subarray(0, mesh.vertexCount * surfaceCount), vertexBase * surfaceCount);
+    if (layerIndex && layerWeight) {
+      layerIndex.set(mesh.layerIndex!.subarray(0, mesh.vertexCount * 4), vertexBase * 4);
+      layerWeight.set(mesh.layerWeight!.subarray(0, mesh.vertexCount * 4), vertexBase * 4);
+    }
     if (mesh.tint.length >= mesh.vertexCount * 3) {
       tint.set(mesh.tint.subarray(0, mesh.vertexCount * 3), vertexBase * 3);
     }
@@ -108,6 +117,7 @@ export function mergeVoxelMeshes(
     max,
     vertexCount,
     triangleCount: indexCount / 3,
+    ...(layerIndex && layerWeight ? { layerIndex, layerWeight } : {}),
   };
 }
 

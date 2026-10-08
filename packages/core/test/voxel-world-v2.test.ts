@@ -23,7 +23,7 @@ function recipe(overrides: Record<string, unknown> = {}): WorldRecipe {
 }
 
 function noFeatures(): WorldRecipe["features"] {
-  return { rivers: [], canyons: [], ridges: [], roads: [], towns: [], lakes: [], bridges: [], fills: [], riverPaths: [], tunnels: [], blobs: [], pois: [], camps: [] };
+  return { heightPatches: [], passages: [], rivers: [], canyons: [], ridges: [], roads: [], towns: [], lakes: [], bridges: [], fills: [], riverPaths: [], tunnels: [], blobs: [], pois: [], camps: [] };
 }
 
 const ZONES = {

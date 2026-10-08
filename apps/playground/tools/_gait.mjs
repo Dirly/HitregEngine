@@ -158,6 +158,13 @@ export function discoverLimbs(nodes, T, exclude = new Set()) {
     }
     if (chain.length >= 3) limbs.push({ root, foot, chain });
   }
+  // A grazer's lowered head (a rhino's chin, a bison's beard) or an un-hung
+  // tail tip can also end near the floor. The legs are the four that end
+  // LOWEST: a foot stands on the ground, a chin only comes near it.
+  if (limbs.length > 4) {
+    limbs.sort((a, b) => a.foot.worldPos.y - b.foot.worldPos.y);
+    limbs.length = 4;
+  }
   if (limbs.length !== 4) return null;
 
   // Front from back by how far along the travel axis the leg hangs; left from

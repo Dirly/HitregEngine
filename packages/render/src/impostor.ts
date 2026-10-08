@@ -24,6 +24,7 @@ import {
   vec4,
 } from "three/tsl";
 import { instanceMatrixNode, instancedPositionLocal } from "./instancing.js";
+import { vegetationMaskTintNode } from "./vegetation-tint.js";
 
 /**
  * Octahedral impostors for the instanced-prop far tier — the second piece of
@@ -73,6 +74,8 @@ export interface ImpostorAtlas {
   albedo: THREE.Texture;
   /** Model-space normals encoded `n * 0.5 + 0.5`, same frame layout. */
   normal: THREE.Texture;
+  /** Normal atlas alpha encodes 0=other, .5=bark, 1=leaves; albedo alpha still carries coverage. */
+  vegetationMask?: boolean;
   grid: number;
   /** Whether each frame's V axis runs top-down in texel order (true for
    * WebGPU render targets, false for WebGL ones) — the baker knows which
@@ -259,20 +262,20 @@ export function writeImpostorSlot(
   i: number,
 ): void {
   if (!data) return;
-  const rotation = far.geometry.getAttribute("impostorRotation") as THREE.InstancedBufferAttribute | undefined;
-  const scale = far.geometry.getAttribute("impostorScale") as THREE.InstancedBufferAttribute | undefined;
+  const rotation = far.geometry.getAttribute("impostorRotation");
+  const scale = far.geometry.getAttribute("impostorScale");
   if (!rotation || !scale) return;
-  (rotation.array as Float32Array).set(data.rotations.subarray(i * 4, i * 4 + 4), slot * 4);
-  (scale.array as Float32Array)[slot] = data.scales[i]!;
+  rotation.setXYZW(slot, data.rotations[i * 4]!, data.rotations[i * 4 + 1]!, data.rotations[i * 4 + 2]!, data.rotations[i * 4 + 3]!);
+  scale.setX(slot, data.scales[i]!);
   rotation.needsUpdate = true;
   scale.needsUpdate = true;
-  const region = far.geometry.getAttribute("impostorRegion") as THREE.InstancedBufferAttribute | undefined;
+  const region = far.geometry.getAttribute("impostorRegion");
   if (region && data.regions && data.radii && data.centers) {
-    const radius = far.geometry.getAttribute("impostorRadius") as THREE.InstancedBufferAttribute;
-    const center = far.geometry.getAttribute("impostorCenter") as THREE.InstancedBufferAttribute;
-    (region.array as Float32Array).set(data.regions.subarray(i * 3, i * 3 + 3), slot * 3);
-    (radius.array as Float32Array)[slot] = data.radii[i]!;
-    (center.array as Float32Array).set(data.centers.subarray(i * 3, i * 3 + 3), slot * 3);
+    const radius = far.geometry.getAttribute("impostorRadius");
+    const center = far.geometry.getAttribute("impostorCenter");
+    region.setXYZ(slot, data.regions[i * 3]!, data.regions[i * 3 + 1]!, data.regions[i * 3 + 2]!);
+    radius.setX(slot, data.radii[i]!);
+    center.setXYZ(slot, data.centers[i * 3]!, data.centers[i * 3 + 1]!, data.centers[i * 3 + 2]!);
     region.needsUpdate = true;
     radius.needsUpdate = true;
     center.needsUpdate = true;
@@ -292,8 +295,13 @@ export function impostorPageGeometry(count: number): THREE.BufferGeometry {
   geometry.setAttribute("uv", new THREE.BufferAttribute(new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]), 2));
   geometry.setIndex([0, 1, 2, 0, 2, 3]);
   const n = Math.max(count, 1);
+  // One buffer for all page metadata leaves room for colour attributes under
+  // WebGPU's guaranteed eight-vertex-buffer limit.
+  const buffer = new THREE.InstancedInterleavedBuffer(new Float32Array(n * 12), 12, 1);
+  let offset = 0;
   const add = (name: string, size: number): void => {
-    const attr = new THREE.InstancedBufferAttribute(new Float32Array(n * size), size);
+    const attr = new THREE.InterleavedBufferAttribute(buffer, size, offset);
+    offset += size;
     // writeImpostorSlot marks changes; a camera-facing shader needs no CPU
     // re-upload when only the camera or the wind moves.
     attr.name = name;
@@ -357,7 +365,7 @@ export function impostorPageMaterial(page: ImpostorAtlas): THREE.MeshLambertNode
  * (the instance's placed bounds centre) are what the two entry points vary.
  */
 function buildImpostorMaterial(
-  atlas: Pick<ImpostorAtlas, "albedo" | "normal" | "grid" | "flipFrames">,
+  atlas: Pick<ImpostorAtlas, "albedo" | "normal" | "grid" | "flipFrames" | "vegetationMask">,
   region: any,
   half: any,
   anchor: any,
@@ -406,9 +414,12 @@ function buildImpostorMaterial(
   const a1 = tslTexture(atlas.albedo, uv1);
   const a2 = tslTexture(atlas.albedo, uv2);
   const albedo = a0.mul(w0).add(a1.mul(w1)).add(a2.mul(w2));
-  const n0 = tslTexture(atlas.normal, uv0).xyz;
-  const n1 = tslTexture(atlas.normal, uv1).xyz;
-  const n2 = tslTexture(atlas.normal, uv2).xyz;
+  const normal0 = tslTexture(atlas.normal, uv0);
+  const normal1 = tslTexture(atlas.normal, uv1);
+  const normal2 = tslTexture(atlas.normal, uv2);
+  const n0 = normal0.xyz;
+  const n1 = normal1.xyz;
+  const n2 = normal2.xyz;
   const normalModel = n0.mul(w0).add(n1.mul(w1)).add(n2.mul(w2)).mul(2).sub(1);
   const normalLocal = normalize(rotateByQuat(normalModel, qxyz, qw));
 
@@ -420,6 +431,11 @@ function buildImpostorMaterial(
   });
   material.positionNode = quadPosition;
   material.colorNode = albedo.rgb;
+  if (atlas.vegetationMask) {
+    material.colorNode = a0.rgb.mul(vegetationMaskTintNode(normal0.a)).mul(w0)
+      .add(a1.rgb.mul(vegetationMaskTintNode(normal1.a)).mul(w1))
+      .add(a2.rgb.mul(vegetationMaskTintNode(normal2.a)).mul(w2));
+  }
   material.opacityNode = albedo.a;
   material.normalNode = transformNormalToView(normalLocal);
   return material;

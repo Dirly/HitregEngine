@@ -1,0 +1,276 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "number",
+      "const": 1
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "tier": {
+      "type": "string",
+      "enum": [
+        "pinpoint",
+        "small",
+        "medium",
+        "large"
+      ],
+      "description": "Pinpoint: cache/camp/Seven Whispers. Small: grove. Medium: twice small usable area. Large: twice medium usable area. Dungeon presence is independent."
+    },
+    "smallReference": {
+      "description": "One explicitly chosen small-grove reference, shared by all area multipliers. Required except for pinpoint. Deferred expansions must not be counted as built.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "usableAreaM2": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      },
+      "required": [
+        "name",
+        "usableAreaM2"
+      ],
+      "additionalProperties": false
+    },
+    "pinpointAreaM2": {
+      "description": "Optional compact discovery footprint. Pinpoints have no grove-size quota.",
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "site": {
+      "type": "object",
+      "properties": {
+        "anchor": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ]
+        },
+        "bounds": {
+          "type": "object",
+          "properties": {
+            "min": {
+              "type": "array",
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                }
+              ]
+            },
+            "max": {
+              "type": "array",
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                }
+              ]
+            }
+          },
+          "required": [
+            "min",
+            "max"
+          ],
+          "additionalProperties": false
+        },
+        "approachOrigin": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ]
+        },
+        "originDescription": {
+          "type": "string",
+          "minLength": 1
+        },
+        "zone": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "anchor",
+        "bounds",
+        "approachOrigin",
+        "originDescription",
+        "zone"
+      ],
+      "additionalProperties": false,
+      "description": "Proposed survey envelope and established playable approach origin. Bounds must include both, air above terrain, and the whole intended route."
+    },
+    "intent": {
+      "type": "object",
+      "properties": {
+        "purpose": {
+          "type": "string",
+          "minLength": 1
+        },
+        "discovery": {
+          "type": "string",
+          "minLength": 1
+        },
+        "storySources": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "pacing": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "purpose",
+        "discovery",
+        "pacing"
+      ],
+      "additionalProperties": false,
+      "description": "Tie the site to terrain and nearby dialogue/quests; explain discovery and zone spacing before building."
+    },
+    "dungeon": {
+      "default": {
+        "mode": "none"
+      },
+      "description": "Entrance is a proposed physical entrance; instance also needs an actual transfer destination and end-to-end test. Neither is installed by the planner.",
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "none",
+            "entrance",
+            "instance"
+          ]
+        },
+        "destination": {
+          "type": "string",
+          "minLength": 1
+        },
+        "spatialLogic": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "additionalProperties": false
+    },
+    "features": {
+      "default": {
+        "terrain": false,
+        "grove": false,
+        "groundedWebs": false,
+        "building": false,
+        "statue": false
+      },
+      "type": "object",
+      "properties": {
+        "terrain": {
+          "default": false,
+          "type": "boolean"
+        },
+        "grove": {
+          "default": false,
+          "type": "boolean"
+        },
+        "groundedWebs": {
+          "default": false,
+          "type": "boolean"
+        },
+        "building": {
+          "default": false,
+          "type": "boolean"
+        },
+        "statue": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "neighbours": {
+      "default": [],
+      "description": "Site-specific protected spacing from the surrounding survey. No universal dungeon-distance quota.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "position": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ]
+          },
+          "minDistance": {
+            "type": "number",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "id",
+          "position",
+          "minDistance"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "version",
+    "name",
+    "tier",
+    "site",
+    "intent"
+  ],
+  "additionalProperties": false
+}

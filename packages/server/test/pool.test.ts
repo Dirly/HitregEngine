@@ -73,10 +73,15 @@ describe.skipIf(!scene)("voxel worker pool", () => {
     });
     // expanded the same way the streamer expands it (scatter prefabs unfold into children)
     const { doc } = chunkToSceneDoc(terrain.resolved.streamer.source, cx, cz, cellSize, inline);
-    const expected = Object.keys(expandScene(doc, world.assets, world.registry).entities).sort();
+    const expandedCell = expandScene(doc, world.assets, world.registry).entities;
     const prefix = `__chunk:${terrain.resolved.data.world}:${chunkKey(cx, cz)}`;
-    const live = [...world.entities.keys()].filter((id) => id === prefix || id.startsWith(prefix + "/")).sort();
-    expect(live).toEqual(expected);
+    const live = new Set([...world.entities.keys()].filter((id) => id === prefix || id.startsWith(prefix + "/")));
+    // the server builds no drawing-only entities (HeadlessWorld.presentationOnly): everything it did build came
+    // out of the same expansion, and everything that collides or thinks is there
+    for (const id of live) expect(expandedCell[id], id).toBeDefined();
+    const mustLive = Object.entries(expandedCell).filter(([, e]) => e.components["collider"] || e.components["script"] || e.components["rigidbody"]).map(([id]) => id);
+    expect(mustLive.length).toBeGreaterThan(0);
+    for (const id of mustLive) expect(live.has(id), id).toBe(true);
     // the collider cooked against the worker's mesh: the cache holds it
     expect(voxelMeshCacheStats().entries).toBeGreaterThan(0);
     // and there is ground: a probe from above hits the cell's terrain

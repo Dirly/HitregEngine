@@ -41,8 +41,8 @@ export function createVfx(assets: AssetLibrary): VfxSystem {
 
 /**
  * Compile the VFX pipelines at load instead of on the first cast (see
- * VfxSystem.warmup). Picks any PSX mask and any spritesheet the project has
- * so the textured variants compile too; awaiting is optional.
+ * VfxSystem.warmup). Picks any PSX mask and every spritesheet and decal page
+ * the project has so the textured variants compile too; awaiting is optional.
  */
 export function warmVfx(
   vfx: VfxSystem,
@@ -51,9 +51,13 @@ export function warmVfx(
   camera?: THREE.Camera,
 ): Promise<void> {
   const mask = assets.textureIds().find((id) => id.startsWith("fx/masks/"));
-  const sheets = assets.dataAssetsOfType("spritesheet").map((d) => d.id);
+  const all = assets.dataAssetsOfType("spritesheet");
+  // decal pages (fx.mjs decals) are data textures drawn by the decal module, not sprites
+  const isDecal = (d: (typeof all)[number]): boolean => String((d.data as { texture?: unknown }).texture ?? "").startsWith("fx/decals/");
+  const sheets = all.filter((d) => !isDecal(d)).map((d) => d.id);
+  const decals = all.filter(isDecal).map((d) => d.id);
   const sheet = sheets[0];
-  return vfx.warmup(precompile, { ...(mask ? { mask } : {}), ...(sheet ? { sheet } : {}), sheets, ...(camera ? { camera } : {}) });
+  return vfx.warmup(precompile, { ...(mask ? { mask } : {}), ...(sheet ? { sheet } : {}), sheets, decals, ...(camera ? { camera } : {}) });
 }
 
 /**
@@ -73,7 +77,7 @@ export function createAmbientVfx(vfx: VfxSystem, assets: AssetLibrary, lightBudg
   });
 }
 
-const NEUTRAL = paletteFor("arcane");
+const NEUTRAL = paletteFor("water");
 
 export function makeVfxHost(vfx: VfxSystem): RuntimeVfxHost {
   const toFrame = (f: RuntimeVfxFrame, palette: VfxFrame["palette"]): VfxFrame => ({

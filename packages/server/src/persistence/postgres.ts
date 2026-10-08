@@ -109,9 +109,13 @@ class PostgresAccountStore implements AccountStore {
     );
     return r.rowCount === 1 ? "ok" : "taken";
   }
-  async update(record: AccountRecord): Promise<void> {
+  async update(record: AccountRecord, expected?: AccountRecord): Promise<boolean> {
     await this.db.migrate();
-    await this.db.pool.query("UPDATE hitreg_accounts SET record=$2, updated_at=now() WHERE id=$1", [record.id, JSON.stringify(record)]);
+    const r = await this.db.pool.query(
+      "UPDATE hitreg_accounts SET record=$2, updated_at=now() WHERE id=$1" + (expected ? " AND record=$3::jsonb" : ""),
+      [record.id, JSON.stringify(record), ...(expected ? [JSON.stringify(expected)] : [])],
+    );
+    return r.rowCount === 1;
   }
   async findCharacter(name: string): Promise<CharacterMatch | null> {
     await this.db.migrate();

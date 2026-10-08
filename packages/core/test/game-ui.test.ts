@@ -14,6 +14,16 @@ describe("MMO navigation and quest contracts", () => {
     state = advanceQuest(state, quest, "b"); expect(state.quests.q?.status).toBe("complete"); expect(state.tracked).toBeNull();
     expect(advanceQuest(state, quest, "a")).toBe(state);
   });
+  it("an objective may name the instance scene it happens in; counting ignores it", () => {
+    const quest = questSchema.parse({ id: "q", title: "Q", description: "", objectives: [{ id: "k", label: "Boss", kind: "kill", target: "tag:creature:boss", scene: "barrow" }, { id: "v", label: "Home", kind: "visit", area: { label: "Home", center: [0, 0], radius: 50 } }] });
+    expect(quest.objectives[0]!.scene).toBe("barrow");
+    expect(quest.objectives[1]!.scene).toBeUndefined();
+    expect(() => questSchema.parse({ id: "q", title: "Q", description: "", objectives: [{ id: "k", label: "B", kind: "kill", target: "x", scene: "" }] })).toThrow();
+    let state = questJournalSchema.parse({ quests: { q: { status: "active", progress: {} } } });
+    state = advanceQuest(state, quest, "k");
+    state = advanceQuest(state, quest, "v");
+    expect(state.quests.q?.status).toBe("complete");
+  });
   it("rejects quest minimap markers and exact waypoint policies", () => {
     const base = { frames: Object.fromEntries(["panel", "slot", "button"].map(k => [k, { texture: "frame.png", slice: 8, border: 8 }])), equipmentSlots: ["helm"], icons: {}, sounds: Object.fromEntries(["hover", "click", "open", "close", "equip", "unequip", "drop", "error", "quest"].map(k => [k, "sound.mp3"])) };
     expect(gameHudSchema.safeParse(base).success).toBe(true);

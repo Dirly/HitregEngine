@@ -85,9 +85,15 @@ function isDynamic(entity: EntityDoc): boolean {
   return rb != null && rb.kind !== "static";
 }
 
+/**
+ * Hidden authored state, or an interior (`culling.interior`): neither is ever
+ * seen from HLOD distance, so neither belongs in a distant bake.
+ */
 function isInitiallyHidden(entity: EntityDoc): boolean {
   const visibility = entity.components["visibility"] as { visible?: boolean } | undefined;
-  return visibility?.visible === false;
+  if (visibility?.visible === false) return true;
+  const culling = entity.components["culling"] as { interior?: boolean } | undefined;
+  return culling?.interior === true;
 }
 
 /**
@@ -319,7 +325,7 @@ function collectTextureDeps(materials: ReadonlySet<string>, assets: AssetLibrary
  * Bump when the HLOD bake algorithm changes in a way that invalidates cached
  * output regardless of source. Part of every cache key (§8).
  */
-export const HLOD_GENERATOR_VERSION = "hlod-core-1";
+export const HLOD_GENERATOR_VERSION = "hlod-core-2";
 
 export interface HlodCacheKeyInput {
   /** Defaults to HLOD_GENERATOR_VERSION; override to force-bust a range. */

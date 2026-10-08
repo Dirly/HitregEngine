@@ -1,8 +1,13 @@
 import {
   COPPER_PER_GOLD,
   COPPER_PER_SILVER,
+  damagedItems,
+  EQUIPMENT_SLOTS,
   formatCoins,
+  type EquipmentSlot,
+  INTERACT_RANGE,
   NPC_EVENTS,
+  QUEST_EVENTS,
   RARITY_TINT,
   shopBuyPrice,
   shopSellPrice,
@@ -16,19 +21,105 @@ import {
 } from "@hitreg/core";
 import { Script } from "./script.js";
 import { catalogOf, readSheet, sheetStoreOf, type SheetStoreLike } from "./character-store.js";
+import { presentFor } from "./presence.js";
 
 interface Talker {
   id: string;
   name: string;
   title: string;
   radius: number;
+  /** talk: an `npc`; read: an `npc` with readable: true; enter: a `portal`; use: any other `interactable` (player.interact). */
+  kind: "talk" | "read" | "enter" | "use";
+  /** A portal's own verb (its `prompt` param); absent = the kind's. */
+  verb?: string;
 }
+
+/**
+ * An interactable's visible bounds as offsets from its origin (world axes): the centre the
+ * inspect hover aims at, the bounding-sphere radius that sizes the hit, and the top a thing's
+ * icon sits on. Measured from its meshes' geometry boxes during the proximity scan, never per frame.
+ */
+export interface Extent {
+  cx: number;
+  cy: number;
+  cz: number;
+  r: number;
+  top: number;
+}
+
+type Obj = import("three").Object3D;
+
+/** An object's WORLD origin (its matrixWorld translation): an interactable parented under a POI root has a local `position` that says nothing about where it stands. */
+function worldOrigin(o: Obj): { x: number; y: number; z: number } {
+  const e = o.matrixWorld.elements;
+  return { x: e[12]!, y: e[13]!, z: e[14]! };
+}
+
+/** World AABB of an object's visible, non-instanced meshes, relative to its world origin; null when it has none. */
+export function extentOf(o: Obj): Extent | null {
+  const wo = o.matrixWorld.elements;
+  const bx = wo[12]!, by = wo[13]!, bz = wo[14]!;
+  let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
+  const visit = (n: Obj): void => {
+    if (!n.visible) return;
+    const m = n as Obj & { isMesh?: boolean; isInstancedMesh?: boolean; geometry?: import("three").BufferGeometry };
+    if (m.isMesh && !m.isInstancedMesh && m.geometry) {
+      if (!m.geometry.boundingBox) m.geometry.computeBoundingBox();
+      const b = m.geometry.boundingBox;
+      if (b && b.min.x <= b.max.x) {
+        const e = m.matrixWorld.elements;
+        for (let i = 0; i < 8; i++) {
+          const x = i & 1 ? b.max.x : b.min.x, y = i & 2 ? b.max.y : b.min.y, z = i & 4 ? b.max.z : b.min.z;
+          const wx = e[0]! * x + e[4]! * y + e[8]! * z + e[12]!;
+          const wy = e[1]! * x + e[5]! * y + e[9]! * z + e[13]!;
+          const wz = e[2]! * x + e[6]! * y + e[10]! * z + e[14]!;
+          if (wx < x0) x0 = wx;
+          if (wx > x1) x1 = wx;
+          if (wy < y0) y0 = wy;
+          if (wy > y1) y1 = wy;
+          if (wz < z0) z0 = wz;
+          if (wz > z1) z1 = wz;
+        }
+      }
+    }
+    for (const c of n.children) visit(c);
+  };
+  visit(o);
+  if (!(x1 >= x0)) return null;
+  const r = Math.max(0.05, Math.hypot(x1 - x0, y1 - y0, z1 - z0) / 2);
+  return { cx: (x0 + x1) / 2 - bx, cy: (y0 + y1) / 2 - by, cz: (z0 + z1) / 2 - bz, r, top: y1 - by };
+}
+
+/** Screen radius (px) within which the pointer hovers a thing of bounding radius `r` m at `distance` m. */
+export function hitRadiusPx(r: number, distance: number): number {
+  return Math.min(90, Math.max(24, (1400 * r) / Math.max(1, distance)));
+}
+
+/** Where the nameplates builtin hangs an NPC's tag above its origin (its `height` default). */
+const PLATE_LIFT = 1.1;
+/** Gap between the inspect icon and what it labels (DESIGN.md 4px base, 8px step). */
+const ICON_GAP = 8;
+/** A nameplate's stacked height in px (quest-mark slot + name + title), at the nameplate's own distance scale. */
+export function plateHeightPx(distance: number, hasTitle: boolean): number {
+  const scale = Math.max(0.7, Math.min(1.15, 9 / Math.max(distance, 1)));
+  return (22 + 15 + (hasTitle && distance <= 14 ? 13 : 0)) * scale;
+}
+
+const VERB: Record<Talker["kind"], string> = { talk: "Talk to", read: "Read", enter: "Enter", use: "Use" };
+const verbOf = (t: Talker): string => t.verb || VERB[t.kind];
+/** 8×8 pixel glyphs (PSX-stepped, drawn crisp): a speech bubble, a page, an arched doorway, a hand. Shape carries the meaning, not colour. */
+const GLYPH: Record<Talker["kind"], string> = {
+  talk: "M1 1h6v4H4L2 7V5H1z",
+  read: "M2 0h4l1 1v7H2zM3 2h3v1H3zM3 4h3v1H3z",
+  enter: "M2 0h4l1 1h1v7H5V3H3v5H0V1h1z",
+  use: "M3 0h1v4h1V1h1v4h1V2h1v4l-1 2H3L1 5h1l1 1z",
+};
 
 /**
  * The player's side of talking to townsfolk: a "[E] Talk" prompt near an
  * `interactable` NPC (one running the `npc` builtin), the conversation
  * (`dialogue/<bodyId>`, decided on the server), and the shop and vault
- * windows a conversation opens. It never changes state itself — every click
+ * windows a conversation opens (shop, vault, repair). It never changes state itself — every click
  * is a request (`npc.choose`, `shop.buy`, `vault.deposit` …) the NPC's
  * authority re-checks.
  *
@@ -38,7 +129,15 @@ interface Talker {
  * double-click a stack to send it across (shift = just one); drag inside the
  * vault to rearrange it.
  *
- * Keys: `key` (E) talks / closes, 1–9 pick a line, Escape leaves. Walking away
+ * Inspecting: hovering the mouse (or, while the mouse is captured, the screen
+ * centre) over an `interactable` shows a small animated inspect icon with
+ * what it does ("Talk to", "Read", "Use") — click it to act. Out of reach the
+ * icon is muted and says "Too far"; nothing is sent. The keyboard path to the
+ * same thing: `key` acts on the hovered one in reach, else the nearest. Any
+ * `interactable` without an `npc` script is USED (`player.interact`, the
+ * authority checks owner and range); a `presence` not there shows nothing.
+ *
+ * Keys: `key` (E) talks / uses / closes, 1–9 pick a line, Escape leaves. Walking away
  * ends the conversation (the server does it). Shift-click buys ten / sells a
  * whole stack.
  */
@@ -66,11 +165,23 @@ export class NpcUi extends Script {
   private near: Talker | null = null;
   private scan = 0;
   private shown = "";
+  /** The soul binder window's pending choice of slots (null = start from the sheet's). */
+  private soulPick: EquipmentSlot[] | null = null;
+  private soulPickFor = "";
   private offs: Array<() => void> = [];
   /** npc id of the vault currently linked to the bags, or "". */
   private stashFor = "";
   private tip!: HTMLDivElement;
   private drag: VaultDrag | null = null;
+  private inspect!: HTMLDivElement;
+  private pointer: { x: number; y: number } | null = null;
+  private hover: { t: Talker; inRange: boolean } | null = null;
+  private hoverShown = "";
+  /** Interactables within inspecting distance (refreshed with the proximity scan). */
+  private candidates: Talker[] = [];
+  /** Measured visible bounds per interactable (absent/null = none known: origin + 1 m rule). */
+  private extents = new Map<string, Extent | null>();
+  private swallowMouse = false;
 
   override onStart(): void {
     if (typeof document === "undefined") return;
@@ -95,7 +206,10 @@ export class NpcUi extends Script {
     this.tip = el("div", "hr-npc-tip");
     this.tip.setAttribute("role", "tooltip");
     this.tip.hidden = true;
-    root.append(this.prompt, this.service, this.talk, this.tip);
+    this.inspect = el("div", "hr-npc-inspect");
+    this.inspect.hidden = true;
+    this.inspect.setAttribute("role", "status");
+    root.append(this.prompt, this.service, this.talk, this.tip, this.inspect);
     document.body.append(root);
     this.root = root;
 
@@ -103,8 +217,9 @@ export class NpcUi extends Script {
       if (e.repeat || isTyping(e.target)) return;
       const conv = this.conv();
       if (e.code === this.param<string>("key")) {
+        const target = this.hover?.inRange ? this.hover.t : this.near;
         if (conv) this.leave(conv);
-        else if (this.near) this.ctx.events?.emit(NPC_EVENTS.talk, { actorId: this.me(), npcId: this.near.id });
+        else if (target) this.act(target);
         else return;
         e.preventDefault();
       } else if (e.code === "Escape" && conv) {
@@ -127,6 +242,29 @@ export class NpcUi extends Script {
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
     window.addEventListener("pointercancel", onCancel);
+    // inspecting: track the pointer; a click on a hovered interactable in reach acts on it and never reaches gameplay (no swing)
+    const onPoint = (e: PointerEvent): void => void (this.pointer = { x: e.clientX, y: e.clientY });
+    const onDown = (e: PointerEvent): void => {
+      if (e.button !== 0 || !this.hover?.inRange || this.conv() || !(e.target instanceof HTMLCanvasElement)) return;
+      this.act(this.hover.t);
+      this.swallowMouse = true;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    };
+    const onMouseDown = (e: MouseEvent): void => {
+      if (!this.swallowMouse) return;
+      this.swallowMouse = false;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    };
+    window.addEventListener("pointermove", onPoint, { passive: true });
+    window.addEventListener("pointerdown", onDown, true);
+    window.addEventListener("mousedown", onMouseDown, true);
+    this.offs.push(
+      () => window.removeEventListener("pointermove", onPoint),
+      () => window.removeEventListener("pointerdown", onDown, true),
+      () => window.removeEventListener("mousedown", onMouseDown, true),
+    );
     this.offs.push(
       () => window.removeEventListener("pointermove", onMove),
       () => window.removeEventListener("pointerup", onUp),
@@ -160,38 +298,123 @@ export class NpcUi extends Script {
     this.ctx.events?.emit(NPC_EVENTS.choose, { actorId: this.me(), npcId: conv.npc, node: conv.node, index });
   }
 
+  /** What the player can do with an `interactable` entity, or null (not there for this player, or gone). */
   private talker(id: string): Talker | null {
     const doc = this.ctx.getEntity(id);
-    const script = doc?.components["script"] as { name?: string; params?: Record<string, unknown> } | undefined;
-    if (!doc || script?.name !== "npc") return null;
+    if (!doc || !presentFor(this.ctx, this.store, id, this.me() || null)) return null;
+    const script = doc.components["script"] as { name?: string; params?: Record<string, unknown> } | undefined;
+    if (script?.name === "portal") {
+      const p = script.params ?? {};
+      return {
+        id,
+        name: (p["name"] as string) || doc.name || id,
+        title: "",
+        radius: typeof p["radius"] === "number" ? p["radius"] : 3,
+        kind: "enter",
+        verb: typeof p["prompt"] === "string" && p["prompt"] ? p["prompt"] : "Enter",
+      };
+    }
+    if (script?.name !== "npc") return { id, name: doc.name || id, title: "", radius: INTERACT_RANGE, kind: "use" };
     const p = script.params ?? {};
     return {
       id,
       name: (p["name"] as string) || doc.name || id,
       title: (p["title"] as string) || "",
       radius: typeof p["radius"] === "number" ? p["radius"] : 3.5,
+      kind: p["readable"] === true ? "read" : "talk",
     };
+  }
+
+  /** Ask the authority: open the conversation (talk, read) or use the thing (player.interact). */
+  private act(t: Talker): void {
+    if (t.kind === "use" || t.kind === "enter") this.ctx.events?.emit(QUEST_EVENTS.interact, { actorId: this.me(), entityId: t.id });
+    else this.ctx.events?.emit(NPC_EVENTS.talk, { actorId: this.me(), npcId: t.id });
+  }
+
+  /** The hovered interactable: nearest on screen to the pointer (the screen centre while the mouse is captured). */
+  private updateHover(): void {
+    const body = this.ctx.getObject(this.me());
+    const project = this.ctx.worldToScreen;
+    let best: { t: Talker; inRange: boolean; x: number; y: number; px: number } | null = null;
+    if (body && project && !this.conv() && typeof document !== "undefined") {
+      const locked = !!document.pointerLockElement;
+      const aim = locked ? { x: innerWidth / 2, y: innerHeight / 2 } : this.pointer;
+      if (aim) {
+        for (const t of this.candidates) {
+          const o = this.ctx.getObject(t.id);
+          if (!o) continue;
+          const p = worldOrigin(o);
+          const ext = this.extents.get(t.id);
+          const at = ext ? project(p.x + ext.cx, p.y + ext.cy, p.z + ext.cz) : project(p.x, p.y + 1, p.z);
+          if (!at) continue;
+          const px = Math.hypot(at.x - aim.x, at.y - aim.y);
+          if (px > hitRadiusPx(ext ? ext.r : 1, at.distance)) continue;
+          if (best && px >= best.px) continue;
+          const d = Math.hypot(p.x - body.position.x, p.z - body.position.z);
+          best = { t, inRange: d <= t.radius && Math.abs(p.y - body.position.y) < 4, x: at.x, y: at.y, px };
+        }
+        // anchor: an NPC's icon sits above its nameplate (both read); a thing's sits on top of the thing
+        if (best) {
+          const p = this.ctx.getObject(best.t.id)!.position;
+          const ext = this.extents.get(best.t.id);
+          const plate = best.t.kind !== "use" && best.t.kind !== "enter";
+          const at = plate
+            ? project(p.x, p.y + PLATE_LIFT, p.z)
+            : project(p.x + (ext?.cx ?? 0), p.y + (ext ? ext.top : 1), p.z + (ext?.cz ?? 0));
+          if (at) {
+            best.x = at.x;
+            best.y = at.y - ICON_GAP - (plate ? plateHeightPx(at.distance, !!best.t.title) : 0);
+          }
+        }
+      }
+    }
+    this.hover = best ? { t: best.t, inRange: best.inRange } : null;
+    const key = best ? `${best.t.id}|${best.inRange}` : "";
+    if (key !== this.hoverShown) {
+      this.hoverShown = key;
+      this.inspect.hidden = !best;
+      if (best) {
+        const svg = `<svg viewBox="0 0 8 8" width="16" height="16" shape-rendering="crispEdges" aria-hidden="true"><path fill="currentColor" d="${GLYPH[best.t.kind]}"/></svg>`;
+        this.inspect.className = `hr-npc-inspect ${best.inRange ? "live" : "far"}`;
+        this.inspect.innerHTML = `<span class="hr-npc-glyph">${svg}</span>`;
+        this.inspect.append(el("span", "", best.inRange ? `${verbOf(best.t)} ${best.t.name}` : `${best.t.name} · too far`));
+        if (best.inRange) this.inspect.append(el("kbd", "", keyLabel(this.param<string>("key"))));
+      }
+    }
+    if (best) this.inspect.style.transform = `translate(${Math.round(best.x)}px, ${Math.round(best.y)}px) translate(-50%, -100%)`;
   }
 
   override onLateUpdate(dt: number): void {
     if (!this.root) return;
+    this.updateHover();
     this.scan += dt;
     if (this.scan < 0.15) return;
     this.scan = 0;
     const body = this.ctx.getObject(this.me());
     let best: Talker | null = null;
     let bestD = Infinity;
+    this.candidates = [];
     if (body) {
       for (const id of this.ctx.findByTag("interactable")) {
         const t = this.talker(id);
         const o = this.ctx.getObject(id);
         if (!t || !o) continue;
-        const d = Math.hypot(o.position.x - body.position.x, o.position.z - body.position.z);
-        if (d <= t.radius && d < bestD && Math.abs(o.position.y - body.position.y) < 4) {
+        const p = worldOrigin(o);
+        const d = Math.hypot(p.x - body.position.x, p.z - body.position.z);
+        if (d <= 30) {
+          this.candidates.push(t);
+          // measured once; retried each scan while the model has not loaded (no meshes yet)
+          if (!this.extents.get(id)) this.extents.set(id, extentOf(o));
+        }
+        if (d <= t.radius && d < bestD && Math.abs(p.y - body.position.y) < 4) {
           best = t;
           bestD = d;
         }
       }
+    }
+    if (this.extents.size > this.candidates.length + 64) {
+      const keep = new Set(this.candidates.map((c) => c.id));
+      for (const id of this.extents.keys()) if (!keep.has(id)) this.extents.delete(id);
     }
     if (best?.id !== this.near?.id) {
       this.near = best;
@@ -221,7 +444,7 @@ export class NpcUi extends Script {
     const key0 = keyLabel(this.param<string>("key"));
     this.prompt.hidden = !!conv || !this.near;
     if (this.near && !conv) {
-      this.prompt.replaceChildren(el("kbd", "", key0), el("span", "", ` Talk to ${this.near.name}`));
+      this.prompt.replaceChildren(el("kbd", "", key0), el("span", "", ` ${verbOf(this.near)} ${this.near.name}`));
       if (this.near.title) this.prompt.append(el("small", "", this.near.title));
     }
 
@@ -229,6 +452,8 @@ export class NpcUi extends Script {
     this.talk.hidden = !conv || !!conv.panel;
     this.service.hidden = !conv?.panel;
     this.service.classList.toggle("hr-npc-vault", conv?.panel?.kind === "vault");
+    this.service.classList.toggle("hr-npc-repair", conv?.panel?.kind === "repair" || conv?.panel?.kind === "soulbind");
+    if (conv?.panel?.kind !== "soulbind") this.soulPick = null; // a window opened again starts from the sheet
     this.tip.hidden = true; // its stack may be gone; pointerenter shows it again
     if (!conv) return;
     const who = this.talker(conv.npc);
@@ -255,6 +480,101 @@ export class NpcUi extends Script {
 
     if (conv.panel?.kind === "shop") this.drawShop(conv, sheet);
     else if (conv.panel?.kind === "vault") this.drawVault(conv, sheet);
+    else if (conv.panel?.kind === "repair") this.drawRepair(conv, sheet);
+    else if (conv.panel?.kind === "soulbind") this.drawSoulbind(conv, sheet);
+  }
+
+  /**
+   * The soul binder: every worn slot that may be soulbound, the ones chosen
+   * marked with a rune AND the word (never colour alone), a pending choice the
+   * player toggles here, and one Attune button priced by the rule the server
+   * uses (a different set of slots costs the price; the same set is free).
+   */
+  private drawSoulbind(conv: Conversation, sheet: CharacterSheet | null): void {
+    if (conv.panel?.kind !== "soulbind") return;
+    const panel = conv.panel;
+    const me = this.me();
+    const current = (Object.keys(sheet?.soulslots ?? {}) as EquipmentSlot[]).sort();
+    if (this.soulPickFor !== conv.npc || this.soulPick === null) {
+      this.soulPick = [...current];
+      this.soulPickFor = conv.npc;
+    }
+    const pick = this.soulPick;
+    const col = el("section", "hr-npc-col");
+    col.append(
+      el(
+        "p",
+        "hr-npc-empty",
+        `Choose up to ${panel.slots} slots. What you wear in a soulbound slot cannot be taken from you when you fall, as long as it stays worn there; put something else on and the slot protects nothing until you come back. Attuning the same slots again is free; changing which slots costs ${formatCoins(panel.price)}.`,
+      ),
+    );
+    const slots = EQUIPMENT_SLOTS.filter((slot) => !panel.exclude.includes(slot) && sheet?.equipment[slot]);
+    for (const slot of slots) {
+      const uid = sheet!.equipment[slot]!;
+      const stack = sheet!.items[uid];
+      const attuned = sheet?.soulslots?.[slot];
+      const chosen = pick.includes(slot);
+      const state = attuned === undefined ? "" : attuned === uid ? "◆ soulbound" : "◇ soulbound to another item";
+      const row = this.row(stack?.itemId ?? uid, 1, chosen ? "✓ chosen" : "", chosen ? "Unchoose" : "Choose", () => {
+        const next = chosen ? pick.filter((s) => s !== slot) : [...pick, slot];
+        if (next.length > panel.slots) return;
+        this.soulPick = next;
+        this.shown = "";
+        this.render();
+      }, !chosen && pick.length >= panel.slots);
+      row.setAttribute("aria-pressed", String(chosen));
+      row.classList.toggle("hr-npc-chosen", chosen);
+      row.querySelector(".hr-npc-name")?.append(el("small", "hr-npc-wear", `${slot}${state ? ` · ${state}` : ""}`));
+      col.append(row);
+    }
+    if (slots.length === 0) col.append(el("p", "hr-npc-empty", "You wear nothing that could be soulbound."));
+    const after = [...pick].sort();
+    const changed = current.length > 0 && (current.length !== after.length || current.some((s, i) => s !== after[i]));
+    const cost = changed ? panel.price : 0;
+    const coins = sheet?.coins ?? 0;
+    const head = el("header", "");
+    head.append(el("h3", "", "Soulbound slots"), button("Close", () => this.leave(conv)));
+    const foot = el("footer", "");
+    const go = button(`${after.length === 0 && current.length > 0 ? "Free all slots" : "Attune"} · ${cost > 0 ? formatCoins(cost) : "free"}`, () =>
+      this.ctx.events?.emit(NPC_EVENTS.attune, { actorId: me, npcId: conv.npc, slots: after }),
+    );
+    go.disabled = coins < cost || (after.length === 0 && current.length === 0);
+    foot.append(el("span", "hr-npc-coins", `Purse ${formatCoins(coins)} · ${after.length} / ${panel.slots} chosen`), go);
+    const parts: HTMLElement[] = [head, col];
+    if (conv.notice) parts.push(el("p", "hr-npc-notice", conv.notice));
+    parts.push(foot);
+    this.service.replaceChildren(...parts);
+  }
+
+  /** The repair bench: every damaged item (worn first) with its price, and Repair all. */
+  private drawRepair(conv: Conversation, sheet: CharacterSheet | null): void {
+    const rate = conv.panel?.kind === "repair" ? conv.panel.rate : 0.25;
+    const me = this.me();
+    const coins = sheet?.coins ?? 0;
+    const list = sheet ? damagedItems(sheet, { catalog: this.catalog }, rate) : [];
+    const col = el("section", "hr-npc-col");
+    col.append(el("h4", "", "Needs mending"));
+    for (const e of list) {
+      const broken = e.current === 0;
+      const state = `${broken ? "Broken · " : ""}${e.current} / ${e.max}${e.worn ? " · worn" : ""}`;
+      const row = this.row(e.itemId, 1, formatCoins(e.cost), "Repair", () => this.ctx.events?.emit(NPC_EVENTS.repair, { actorId: me, npcId: conv.npc, uid: e.uid }), coins < e.cost);
+      row.classList.toggle("hr-npc-broken", broken);
+      row.querySelector(".hr-npc-name")?.append(el("small", "hr-npc-wear", state));
+      row.setAttribute("aria-label", `${row.getAttribute("aria-label") ?? ""}, durability ${state}`);
+      col.append(row);
+    }
+    if (list.length === 0) col.append(el("p", "hr-npc-empty", "Nothing you carry needs mending."));
+    const total = list.reduce((n, e) => n + e.cost, 0);
+    const head = el("header", "");
+    head.append(el("h3", "", "Repairs"), button("Close", () => this.leave(conv)));
+    const foot = el("footer", "");
+    const all = button(`Repair all · ${formatCoins(total)}`, () => this.ctx.events?.emit(NPC_EVENTS.repairAll, { actorId: me, npcId: conv.npc }));
+    all.disabled = list.length === 0 || coins < total;
+    foot.append(el("span", "hr-npc-coins", `Purse ${formatCoins(coins)}`), all);
+    const parts: HTMLElement[] = [head, col];
+    if (conv.notice) parts.push(el("p", "hr-npc-notice", conv.notice));
+    parts.push(foot);
+    this.service.replaceChildren(...parts);
   }
 
   private icon(item: Item | undefined): HTMLElement {
@@ -308,15 +628,16 @@ export class NpcUi extends Script {
       const price = shopSellPrice(shop, entry.itemId, env);
       if (price === null) continue;
       const left = entry.qty === undefined ? Infinity : (state?.stock[entry.itemId] ?? entry.qty);
-      const tag = `${formatCoins(price)}${left === Infinity ? "" : ` · ${left} left`}`;
+      const tag = `${formatCoins(price)}${left === Infinity ? "" : left <= 0 ? " · sold out" : ` · ${left} left`}`;
       buy.append(
         this.row(entry.itemId, 1, tag, "Buy", (e) => this.ctx.events?.emit(NPC_EVENTS.buy, { actorId: me, npcId: conv.npc, itemId: entry.itemId, qty: e.shiftKey ? Math.max(1, Math.min(10, left)) : 1 }), left === 0 || coins < price),
       );
     }
-    for (const r of state?.resale ?? []) {
+    for (const [index, r] of (state?.resale ?? []).entries()) {
       const price = shopSellPrice(shop, r.itemId, env);
       if (price === null) continue;
-      buy.append(this.row(r.itemId, r.qty, `${formatCoins(price)} · sold by players`, "Buy", () => this.ctx.events?.emit(NPC_EVENTS.buy, { actorId: me, npcId: conv.npc, itemId: r.itemId, qty: 1 }), coins < price));
+      // buying names the entry: that exact instance (its wear, its twists) is what comes back
+      buy.append(this.row(r.itemId, r.qty, `${formatCoins(price)} · sold by players`, "Buy", () => this.ctx.events?.emit(NPC_EVENTS.buy, { actorId: me, npcId: conv.npc, itemId: r.itemId, qty: 1, resale: index }), coins < price));
     }
 
     const sell = el("section", "hr-npc-col");
@@ -394,7 +715,7 @@ export class NpcUi extends Script {
             withdraw(i, e.shiftKey && s.qty > 1 ? 1 : undefined);
           }
         });
-        node.addEventListener("pointerenter", (e) => this.showTip(item, s.itemId, s.qty, e));
+        node.addEventListener("pointerenter", (e) => this.showTip(item, s.itemId, s.qty, e, s.durability));
         node.addEventListener("pointermove", (e) => this.placeTip(e));
         node.addEventListener("pointerleave", () => (this.tip.hidden = true));
         node.addEventListener("pointerdown", (e) => this.dragStart(e, node, i, conv.npc));
@@ -435,12 +756,16 @@ export class NpcUi extends Script {
     this.ctx.after(2.5, () => note.remove());
   }
 
-  private showTip(item: Item | undefined, itemId: string, qty: number, e: PointerEvent): void {
+  private showTip(item: Item | undefined, itemId: string, qty: number, e: PointerEvent, durability?: number): void {
     if (this.drag?.moved) return;
     const name = el("div", "nm", item?.name ?? itemId);
     if (item) name.style.color = item.tint ?? RARITY_TINT[item.rarity];
     const parts: HTMLElement[] = [name];
     if (item) parts.push(el("div", "meta", [item.rarity, item.kind, qty > 1 ? `${qty} stacked` : ""].filter(Boolean).join(" · ")));
+    if (item?.durability !== undefined) {
+      const cur = Math.min(item.durability, durability ?? item.durability);
+      parts.push(el("div", cur === 0 ? "broken" : "meta", `${cur === 0 ? "Broken · " : ""}Durability ${cur} / ${item.durability}`));
+    }
     if (item?.description) parts.push(el("div", "desc", item.description));
     parts.push(el("div", "meta", "Right-click: take · Drag to move"));
     this.tip.replaceChildren(...parts);
@@ -594,6 +919,13 @@ const CSS = `
 .hr-npc-prompt{position:absolute;left:50%;bottom:22%;transform:translateX(-50%);display:flex;gap:8px;align-items:baseline;padding:6px 14px;background:#0b0e14d9;border:1px solid #39425a;border-radius:4px;white-space:nowrap}
 .hr-npc-prompt kbd{font:600 13px/1 ui-monospace,monospace;padding:3px 7px;border:1px solid #8a93a8;border-radius:3px;background:#1a2030}
 .hr-npc-prompt small{color:#9aa3b8;margin-left:6px}
+.hr-npc-inspect{position:absolute;left:0;top:0;display:flex;align-items:center;gap:6px;padding:3px 8px 3px 4px;background:#0b0e14e6;border:1px solid #30363d;border-radius:3px;white-space:nowrap;font-size:12px;color:#e6edf3;image-rendering:pixelated}
+.hr-npc-inspect .hr-npc-glyph{display:grid;place-items:center;width:20px;height:20px;border:1px solid #8b949e;border-radius:2px;color:#e6edf3;animation:hr-npc-bob 1s steps(2,jump-none) infinite}
+.hr-npc-inspect kbd{font:600 11px/1 ui-monospace,monospace;padding:2px 5px;border:1px solid #8b949e;border-radius:2px;background:#161b22}
+.hr-npc-inspect.far{color:#8b949e;border-style:dashed}
+.hr-npc-inspect.far .hr-npc-glyph{border-style:dashed;color:#8b949e;animation:none}
+@keyframes hr-npc-bob{from{transform:translateY(0)}to{transform:translateY(-2px)}}
+@media (prefers-reduced-motion:reduce){.hr-npc-inspect .hr-npc-glyph{animation:none}}
 .hr-npc-talk{left:50%;bottom:6%;transform:translateX(-50%);width:min(620px,94vw);padding:10px 16px 12px}
 .hr-npc-talk header{display:flex;align-items:baseline;gap:10px;border-bottom:1px solid #39425a88;padding-bottom:6px}
 .hr-npc h3{margin:0;font-size:16px;font-weight:600;color:#f1dcab}.hr-npc header small{color:#9aa3b8}
@@ -629,6 +961,12 @@ const CSS = `
 .hr-npc-ghost .hr-npc-qty{position:absolute;right:3px;bottom:1px;font-size:10px;text-shadow:0 0 3px #000}
 .hr-npc-coins{font-variant-numeric:tabular-nums;color:#d8c38e}
 .hr-npc-tip{position:fixed;z-index:90;max-width:240px;padding:8px 10px;background:rgba(13,16,22,.96);border:1px solid #2a3040;border-radius:6px;pointer-events:none;font-size:11px}
+.hr-npc-tip .broken{color:#ff6b5a;font-weight:600}
+.hr-npc-service.hr-npc-repair{width:min(460px,96vw)}
+.hr-npc-service.hr-npc-repair .hr-npc-col{overflow:auto;min-height:0}
+.hr-npc-name small.hr-npc-wear{display:block;font-size:11px;color:#9aa3b8}
+.hr-npc-row.hr-npc-chosen{border-color:#b49cff;background:#1d1a2e}
+.hr-npc-row.hr-npc-broken{border-color:#8a2f28}.hr-npc-row.hr-npc-broken small.hr-npc-wear{color:#ff6b5a;font-weight:600}
 .hr-npc-tip .nm{font-weight:600;font-size:12px}.hr-npc-tip .meta{color:#8b93a7}.hr-npc-tip .desc{color:#b9c0d0;margin-top:4px;font-style:italic}
 @media (max-width:760px){.hr-npc-service.hr-npc-vault{right:auto;left:50%;top:8px;transform:translateX(-50%);max-width:96vw;max-height:46vh}}
 @media (max-width:640px){.hr-npc-cols{grid-template-columns:1fr}}

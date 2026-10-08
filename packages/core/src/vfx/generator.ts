@@ -1,11 +1,14 @@
 import { ELEMENTS, ELEMENT_PALETTES, paletteFor, type Element, type Feel } from "./elements.js";
-import { vfxModuleSchema, type AnchorAt, type Phase, type VfxEffect, type VfxModule } from "./modules.js";
-import { GRAMMAR, type Preset, type PresetContext, type SpriteCatalog } from "./presets.js";
+import { vfxModuleSchema, type AnchorAt, type Phase, type VfxEffect, type VfxModule, type VfxModuleOf } from "./modules.js";
+import { GRAMMAR, decalsFor, forSchool, type Preset, type PresetContext, type SpriteCatalog } from "./presets.js";
 import { PRESETS, presetById, presetsFor } from "./library.js";
 import { makeRng, type Rng } from "./rng.js";
+import { fitSpellToVolume } from "./fit.js";
+import { BUDGET } from "./audit.js";
 import {
   SPELL_KINDS,
   phasesForKind,
+  shotCount,
   spellArchetypeSchema,
   spellSchema,
   spellTimeline,
@@ -38,8 +41,10 @@ export interface GenerateOptions {
   /** Provenance label for the catalog used (a project name, usually). */
   catalogId?: string;
   name?: string;
-  /** PSX quantisation applied to every module (0 = smooth, 16–32 = pixel art). */
+  /** PSX quantisation applied to every module (0 = smooth, 16–32 = pixel art). Cells per SHAPE — prefer `texel`. */
   pixel?: number;
+  /** PSX look in world metres per texel, shared by every module (0 = off). Wins over `pixel`. */
+  texel?: number;
   /** Alpha steps applied with `pixel` (default 4 when pixel > 0). */
   posterize?: number;
 }
@@ -61,17 +66,11 @@ const KIND_NOUN: Record<SpellKind, string[]> = {
 };
 
 const ELEMENT_ADJ: Record<Element, string[]> = {
-  fire: ["Ember", "Cinder", "Pyre", "Ashen"],
-  arcane: ["Arcane", "Astral", "Runic", "Prismatic"],
-  ice: ["Frost", "Glacial", "Rime", "Hoar"],
-  nature: ["Verdant", "Thorn", "Spore", "Bramble"],
-  earth: ["Stone", "Quake", "Basalt", "Dust"],
+  shadow: ["Shadow", "Dusk", "Umbral", "Veiled", "Hollow"],
   holy: ["Radiant", "Sacred", "Dawn", "Hallowed"],
-  rose: ["Rose", "Petal", "Blush", "Velvet"],
-  blood: ["Blood", "Crimson", "Gore", "Vein"],
-  void: ["Void", "Umbral", "Null", "Abyss"],
-  storm: ["Storm", "Thunder", "Tempest", "Static"],
-  shadow: ["Shadow", "Dusk", "Veiled", "Hollow"],
+  nature: ["Verdant", "Thorn", "Spore", "Bramble"],
+  water: ["Tidal", "Frost", "Brine", "Glacial", "Torrent"],
+  destruction: ["Ember", "Cinder", "Storm", "Ruin", "Cataclysm"],
 };
 
 const EFFECT_NOUN: Partial<Record<StatusEffect, string[]>> = {
@@ -106,9 +105,23 @@ export function randomArchetype(rng: Rng, kind?: SpellKind, intensity?: number):
     case "melee":
       a = { shape: "cone", radius: r(2, 3.5), angle: r(40, 80, 5), range: 0, windup: r(0.15, 0.5) };
       break;
-    case "projectile":
+    case "projectile": {
       a = { shape: "circle", radius: r(0.8, 2.2), range: r(12, 24, 1), speed: r(16, 30, 1), windup: r(0.25, 0.5) };
+      // rapid fire: several lighter shots, a small blast each
+      if (rng.chance(0.35)) {
+        // a BARRAGE: many small shots in a fast rhythm, scattered at the hand
+        a.volley = { count: rng.int(5, 12), interval: r(0.04, 0.09, 0.01), spread: r(6, 18, 1), jitter: r(0.15, 0.4, 0.05) };
+        a.radius = r(0.6, 1.2);
+        // rapid fire weaves: a burst of dead-straight shots reads as a laser
+        a.wiggle = { amplitude: r(0.2, 0.6), wavelength: r(3, 7, 0.5), vertical: r(0.1, 0.4) };
+      }
+      // seekers: slower, so the steering is something you can watch and out-run
+      if (rng.chance(0.3)) {
+        a.homing = { turnRate: r(90, 220, 10), acquire: r(18, 28, 1), cone: r(30, 50, 5) };
+        a.speed = r(12, 20, 1);
+      }
       break;
+    }
     case "bolt":
       a = { shape: "point", radius: r(0.8, 1.5), range: r(10, 20, 1), windup: r(0.2, 0.6) };
       break;
@@ -232,13 +245,21 @@ function makeContext(spell: SpellDoc, phase: Phase, rng: Rng, catalog: SpriteCat
 }
 
 function eligible(preset: Preset, ctx: PresetContext): boolean {
+  if (ctx.catalog.disabledPresets?.includes(preset.id)) return false;
   if (preset.kinds && !preset.kinds.includes(ctx.kind)) return false;
   if (preset.only && preset.elements && !preset.elements.includes(ctx.element)) return false;
   if (preset.needs && !(ctx.catalog[preset.needs]?.length)) return false;
   if (preset.minI !== undefined && ctx.I < preset.minI) return false;
   if (preset.effects && !preset.effects.includes(ctx.effect)) return false;
   if (preset.needsMask && !ctx.catalog.masks?.some((m) => m.tags.some((tag) => preset.needsMask!.includes(tag)))) return false;
-  if (preset.needsSymbol && !ctx.catalog.symbols?.some((s) => s.enabled && s.roles.some((r) => preset.needsSymbol!.includes(r)))) return false;
+  if (
+    preset.needsSymbol &&
+    !ctx.catalog.symbols?.some(
+      (s) => s.enabled && s.roles.some((r) => preset.needsSymbol!.includes(r)) && (!s.elements?.length || s.elements.includes(ctx.element)),
+    )
+  )
+    return false;
+  if (preset.needsDecal && decalsFor(ctx.catalog, ctx.element).length === 0) return false;
   return true;
 }
 
@@ -247,13 +268,15 @@ function eligible(preset: Preset, ctx: PresetContext): boolean {
  * square sprites; flipbooks and symbols go nearest-filtered; trails and
  * telegraphs dither on a world grid.
  */
-function applyPixel(modules: VfxModule[], pixel: number, steps: number): void {
+function applyPixel(modules: VfxModule[], pixel: number, steps: number, texel = 0): void {
   for (const m of modules) {
     if (m.kind === "ring" || m.kind === "shell" || m.kind === "column" || m.kind === "beam" || m.kind === "slash" || m.kind === "trail" || m.kind === "telegraph") {
       m.pixel = pixel;
       m.posterize = steps;
     }
     if (m.kind === "sprite") m.pixel = pixel;
+    // one world texel for the whole spell: every textured and procedural kind
+    if (texel > 0 && m.kind !== "particles" && m.kind !== "light" && m.kind !== "shake" && m.kind !== "sound") m.texel = texel;
     if (m.kind === "particles" && !m.emitter.texture && m.emitter.sprite === "soft") {
       m.emitter.sprite = m.emitter.stretch > 0 ? "square" : "pixel";
     }
@@ -274,12 +297,46 @@ function weightOf(preset: Preset, ctx: PresetContext): number {
 export function buildFromPreset(preset: Preset, ctx: PresetContext): VfxModule | null {
   const raw = preset.build(ctx);
   if (!raw) return null;
-  return vfxModuleSchema.parse({ ...raw, preset: preset.id });
+  const m = vfxModuleSchema.parse({ ...raw, preset: preset.id });
+  if (m.kind === "mesh") {
+    drawnBodies(m, ctx);
+    // Derek: no generated cones, diamonds or solid spheres. Without a drawing
+    // for them (or a model asset) those bodies are simply not made.
+    if (!m.asset && !m.sheet && BANNED_PRIMITIVES.has(m.primitive)) return null;
+  }
+  return m;
+}
+
+/** Procedural bodies that are never generated as 3D: they read as placeholder geometry. */
+const BANNED_PRIMITIVES = new Set(["spike", "crystal", "orb"]);
+
+/**
+ * Summoned bodies as DRAWINGS: when the school has `object` symbols, a
+ * procedural mesh (no model asset) becomes camera-facing billboards of the
+ * matching kind — a spike stays a spike, a rock a rock — so what a spell
+ * raises is drawn in the same hand as its sigils. Each body gets its own
+ * cell, picked by the spell's rng.
+ */
+function drawnBodies(m: VfxModuleOf<"mesh">, ctx: PresetContext): void {
+  if (m.asset || m.sheet) return;
+  const pool = forSchool(
+    (ctx.catalog.symbols ?? []).filter((s) => s.enabled && s.roles.includes("object")),
+    ctx.element,
+  );
+  if (pool.length === 0) return;
+  const same = pool.filter((s) => s.tags.includes(m.primitive));
+  const list = same.length > 0 ? same : pool;
+  const sheet = ctx.rng.pick(list).sheet;
+  const onSheet = list.filter((s) => s.sheet === sheet);
+  m.sheet = sheet;
+  m.cells = Array.from({ length: Math.min(12, m.count) }, () => ctx.rng.pick(onSheet).cell);
 }
 
 /** Generate one phase's effect for a spell. */
-export function generatePhase(spell: SpellDoc, phase: Phase, rng: Rng, catalog: SpriteCatalog = {}, style: { pixel?: number; posterize?: number } = {}): VfxEffect {
-  const ctx = makeContext(spell, phase, rng, catalog, style.pixel ?? 0);
+export function generatePhase(spell: SpellDoc, phase: Phase, rng: Rng, catalog: SpriteCatalog = {}, style: SpellStyle = {}): VfxEffect {
+  // presets only ask "is the PSX look on?"; a texel grid counts as on
+  const pixel = style.texel && style.texel > 0 ? Math.max(1, style.pixel ?? 24) : (style.pixel ?? 0);
+  const ctx = makeContext(spell, phase, rng, catalog, pixel);
   const modules: VfxModule[] = [];
   for (const rule of GRAMMAR[phase]) {
     let n = rule.min;
@@ -299,7 +356,7 @@ export function generatePhase(spell: SpellDoc, phase: Phase, rng: Rng, catalog: 
     }
   }
   if (phase === "impact" && spell.archetype.cooldown > 0) fitLifetime(modules, Math.max(0.6, spell.archetype.cooldown));
-  if (style.pixel && style.pixel > 0) applyPixel(modules, style.pixel, style.posterize ?? 4);
+  if (pixel > 0) applyPixel(modules, pixel, style.posterize ?? 4, style.texel ?? 0);
   return { name: phase, tags: { role: phase, feel: spell.feel }, modules };
 }
 
@@ -323,13 +380,26 @@ function fitLifetime(modules: VfxModule[], cap: number): void {
 }
 
 /** Generate every phase the archetype uses, keeping everything else on the spell. */
-export function generatePhases(spell: SpellDoc, catalog: SpriteCatalog = {}, style: { pixel?: number; posterize?: number } = {}): SpellDoc {
+/** The spell-wide look: PSX cells per shape (legacy), world texel size, alpha bands. */
+export interface SpellStyle {
+  pixel?: number;
+  texel?: number;
+  posterize?: number;
+}
+
+export function generatePhases(spell: SpellDoc, catalog: SpriteCatalog = {}, style: SpellStyle = {}): SpellDoc {
   const rng = makeRng(spell.seed);
   const phases: SpellDoc["phases"] = {};
   for (const phase of phasesForKind(spell.archetype)) {
+    // Derek: no generated telegraph. The dodge volume is the GAME's to draw
+    // (the host's telegraph pool reads the ability, not the spell); a second
+    // one baked into the spell only doubled it.
+    if (phase === "telegraph") continue;
     phases[phase] = generatePhase(spell, phase, rng.fork(phase), catalog, style);
   }
-  return { ...spell, phases };
+  shapeVolley(spell.archetype, phases);
+  // every visual on the damage volume stays inside it (see fit.ts)
+  return fitSpellToVolume({ ...spell, phases, texel: style.texel ?? 0 });
 }
 
 export function generateSpell(opts: GenerateOptions): SpellDoc {
@@ -354,7 +424,7 @@ export function generateSpell(opts: GenerateOptions): SpellDoc {
     phases: {},
     ...(opts.catalogId ? { catalog: opts.catalogId } : {}),
   });
-  return generatePhases(spell, opts.catalog ?? {}, { pixel: opts.pixel, posterize: opts.posterize });
+  return generatePhases(spell, opts.catalog ?? {}, { pixel: opts.pixel, texel: opts.texel, posterize: opts.posterize });
 }
 
 /**
@@ -375,7 +445,75 @@ export function rerollModule(spell: SpellDoc, phase: Phase, index: number, seed:
   const pool = others.length > 0 ? others : candidates;
   if (pool.length === 0) return null;
   const pick = rng.weighted(pool.map((p) => ({ w: weightOf(p, ctx), v: p })));
-  return buildFromPreset(pick, ctx);
+  return fitted(spell, phase, buildFromPreset(pick, ctx));
+}
+
+/**
+ * A VOLLEY plays travel and impact once per shot, so what one shot carries is
+ * multiplied by the burst: the per-shot presentation is lightened to keep a
+ * six-shot barrage inside the budget one heavy bolt fits in — no light per
+ * shot (six point lights would each re-light the scene), particles thinned by
+ * √shots, smaller heads — and the CAST repeats with the burst, so every shot
+ * leaves the hand with its own flash instead of one flash for six shots.
+ */
+function shapeVolley(a: SpellArchetype, phases: SpellDoc["phases"]): void {
+  const shots = shotCount(a);
+  if (shots <= 1) return;
+  const thin = 1 / Math.sqrt(shots);
+  // the more shots, the smaller each: 3 → ~0.64×, 6 → ~0.45×
+  const small = Math.max(0.4, 1.1 / Math.sqrt(shots));
+  for (const phase of ["travel", "impact"] as const) {
+    const eff = phases[phase];
+    if (!eff) continue;
+    eff.modules = eff.modules.filter((m) => m.kind !== "light" && m.kind !== "shake");
+    for (const m of eff.modules) {
+      if (m.kind === "particles") {
+        m.burst = Math.max(2, Math.round(m.burst * thin));
+        m.emitter.rate = Math.max(2, Math.round(m.emitter.rate * thin));
+        m.emitter.max = Math.max(6, Math.round(m.emitter.max * thin));
+      }
+      if (phase === "travel") {
+        if (m.kind === "sprite") m.size = Math.round(m.size * small * 100) / 100;
+        if (m.kind === "shell") m.radius = Math.round(m.radius * small * 100) / 100;
+        if (m.kind === "trail") m.width = Math.round(m.width * small * 100) / 100;
+        if (m.kind === "particles") {
+          m.emitter.sizeStart *= small;
+          m.emitter.sizeEnd *= small;
+          m.emitter.shapeSize = [m.emitter.shapeSize[0] * small, m.emitter.shapeSize[1] * small, m.emitter.shapeSize[2] * small];
+        }
+      }
+    }
+  }
+  // each shot's impact is a LEAN one: no stepping repeats, and only the most
+  // telling pieces — the burst, then what it throws, then its mark — until
+  // the whole burst fits the per-phase instance cap
+  const impact = phases.impact;
+  if (impact) {
+    const rank: Record<string, number> = { core: 0, debris: 1, ground: 2, scar: 3, thing: 4 };
+    for (const m of impact.modules) if (m.repeat.count > 1) m.repeat = { ...m.repeat, count: 1 };
+    impact.modules = impact.modules
+      .map((m, i) => ({ m, i, r: rank[presetById(m.preset ?? "")?.slot ?? ""] ?? 9 }))
+      .sort((x, y) => x.r - y.r || x.i - y.i)
+      .slice(0, Math.max(1, Math.floor(BUDGET.instancesPerPhase / shots)))
+      .sort((x, y) => x.i - y.i)
+      .map((x) => x.m);
+  }
+  const cast = phases.cast;
+  if (cast) {
+    for (const m of cast.modules) {
+      if (m.kind === "light" || m.kind === "shake" || m.kind === "sound") continue;
+      if (m.repeat.count > 1) continue;
+      m.repeat = { ...m.repeat, count: shots, every: a.volley.interval };
+      if (m.kind === "particles") m.burst = Math.max(2, Math.round(m.burst * thin));
+    }
+  }
+}
+
+/** One new module, fitted to the spell's volume like everything generated. */
+function fitted(spell: SpellDoc, phase: Phase, m: VfxModule | null): VfxModule | null {
+  if (!m) return null;
+  const probe: SpellDoc = { ...spell, phases: { [phase]: { name: phase, tags: { feel: [] }, modules: [m] } } };
+  return fitSpellToVolume(probe).phases[phase]!.modules[0]!;
 }
 
 /** Build a fresh module of a given preset for a phase (the lab's "add" menu). */
@@ -383,7 +521,7 @@ export function addFromPreset(spell: SpellDoc, phase: Phase, presetId: string, s
   const preset = presetById(presetId);
   if (!preset) return null;
   const rng = makeRng(`${spell.seed}:${phase}:${presetId}:${seed}`);
-  return buildFromPreset(preset, makeContext(spell, phase, rng, catalog));
+  return fitted(spell, phase, buildFromPreset(preset, makeContext(spell, phase, rng, catalog)));
 }
 
 /** Presets that could go in this phase of this spell — for the lab's add menu. */

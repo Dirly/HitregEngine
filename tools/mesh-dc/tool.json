@@ -11,7 +11,7 @@
     "source": {
       "kind": "file",
       "label": "Blender mesh export",
-      "description": "JSON created by the Blender exporter. Each group becomes an editable volume.",
+      "description": "JSON created by the Blender exporter. Each group becomes an editable volume; a role-noise table embedded in it (source.noise) roughens natural-rock roles and leaves built work crisp.",
       "accept": ["application/json"],
       "maxBytes": 33554432
     },

@@ -1,8 +1,10 @@
 import type * as THREE from "three";
 import type { EventRegistry } from "@hitreg/core";
+import { WORLD_HOUR_KEY, WORLD_WEATHER_KEY } from "@hitreg/core";
 import {
   Script,
   type BiomeAt,
+  type RegionAt,
   type WaterAt,
   type LiveSkyBase,
   type ScriptClass,
@@ -15,10 +17,15 @@ import { SettleLatch, SoundEmitter, Soundscape, SoundZone, worldClock } from "./
 import { CharacterUi } from "./character-ui.js";
 import { EquipmentLook } from "./equipment-look.js";
 import { CharacterLook } from "./character-look.js";
+import { RagdollScript } from "./ragdoll.js";
 import { NpcScript } from "./npc.js";
+import { PortalScript } from "./portal.js";
+import { EncounterWavesScript } from "./encounter-waves.js";
 import { NpcUi } from "./npc-ui.js";
+import { LootUi } from "./loot-ui.js";
 import { Nameplates } from "./nameplates.js";
 import { QuestLog } from "./quest-log.js";
+import { PresenceScript } from "./presence.js";
 import { PlayerRecords } from "./player-records.js";
 import { WeaponStance } from "./weapon-stance.js";
 import { stanceCarryFor, type StanceCarry } from "./stance-carry.js";
@@ -59,6 +66,7 @@ import {
   type LoopMode,
 } from "./easing.js";
 import { FootfallTracker } from "./footfalls.js";
+import { AmbientParticles } from "./ambient-particles.js";
 import { advanceVelocity, isClipAdvance } from "./advance.js";
 
 /**
@@ -471,7 +479,9 @@ class Damageable extends Script {
  * launch alone), faceYaw/faceUntil (an external
  * FACING — an AI swinging at a target it has stopped to fight, a cutscene —
  * a separate channel because the controller otherwise only turns a body that
- * is moving).
+ * is moving), crouch (true = hold the low stance: the wade clips, `wadeClip` /
+ * `wadeIdleClip`, play in full on dry ground — a game's sneak; the slower pace
+ * is the game's, through speedMult).
  *
  * The gait is chosen from MEASURED planar velocity, not from which key is
  * held, so a character slowed by a swamp or driven by AI rather than input
@@ -783,6 +793,17 @@ class ThirdPersonController extends Script {
         "Multiplier on clipAdvance travel. 1 keeps the feet planted; 0 turns clip advance off " +
         "(the old stand-still swings); above 1 lunges further than the feet step, which skates.",
     },
+    advanceStop: {
+      default: 0.5,
+      min: 0,
+      max: 3,
+      description:
+        "Metres of clear space clip advance keeps between this capsule and another BODY (an entity with a " +
+        "dynamic or kinematic rigidbody): a step that would come inside it is dropped, and with a body standing " +
+        "in front (within 60° of the facing) inside this gap plus a metre the swinger stands and swings, so a " +
+        "held combo neither shoves through a standing target nor sidles round it. Read from the runtime's " +
+        "bodies (ctx.bodiesNear), so it also sees a body a net peer does not simulate. 0 = off.",
+    },
     footsteps: {
       default: false,
       description:
@@ -996,6 +1017,8 @@ class ThirdPersonController extends Script {
   private actionFit: ActionFit = { rate: 1, loop: true };
   /** The actionUntil the running action was last seen with — see actionStarting. */
   private actionEnds = 0;
+  /** The last `userData.actionSeq` seen — see actionStarting. */
+  private actionSeqSeen: number | null = null;
   /**
    * Clip advance (see clipAdvance): the full-body action whose travel the body
    * follows, its clip-time playhead at the start of the next tick, and the rate
@@ -1234,7 +1257,13 @@ class ThirdPersonController extends Script {
    * pose.
    */
   private actionStarting(action: string | null, until: number, now: number, dt: number): boolean {
-    const renewed = action !== null && action === this.action && until !== this.actionEnds && this.actionEnds <= now + dt;
+    // `actionSeq` (optional): a writer that bumps it says "this is a NEW action" outright —
+    // the same clip again while its previous window is still running (a swing whose clip
+    // was slowed past its cast window so its contact lands on the hit) restarts too
+    const seq = (this.object.userData as { actionSeq?: unknown }).actionSeq;
+    const bumped = typeof seq === "number" && seq !== this.actionSeqSeen;
+    this.actionSeqSeen = typeof seq === "number" ? seq : this.actionSeqSeen;
+    const renewed = action !== null && action === this.action && until !== this.actionEnds && (this.actionEnds <= now + dt || bumped);
     this.actionEnds = action ? until : 0;
     return action !== this.action || renewed;
   }
@@ -1343,6 +1372,8 @@ class ThirdPersonController extends Script {
       waterDepth?: number;
       /** The velocity a swimming body is asking for — what this tab sends its authority. */
       swimVelocity?: [number, number, number];
+      /** The stick velocity this tick decided (world x, z) — what this tab sends its authority on land. */
+      moveVelocity?: [number, number];
       /** Clip advance added this tick (world x, z) — sent to the authority on top of the stick. */
       advanceVel?: [number, number];
     };
@@ -1472,6 +1503,11 @@ class ThirdPersonController extends Script {
       x = (x / len) * speed;
       z = (z / len) * speed;
     }
+    // The stick velocity this tick decided (sprint, walk, strafe/backpedal slow-down, wading drag, speedMult
+    // all applied), published so a networked client sends its authority THIS number instead of deriving one
+    // of its own: a second derivation that missed the sprint key made the server run while the tab sprinted,
+    // and every sprint rubber-banded.
+    ud.moveVelocity = [x, z];
 
     // An external drive — a dash, a knockback, a shove — owns horizontal
     // velocity for as long as it lasts. Without this channel any script that
@@ -1619,7 +1655,10 @@ class ThirdPersonController extends Script {
       // A full-body action that steps carries the body with its feet (see
       // clipAdvance). Added to the gait rather than replacing it, and ahead of
       // ground-following so a lunge down a slope stays on the slope.
-      const [ax, az] = this.takeClipAdvance(grounded && !driven && !lifted && (ud.speedMult ?? 1) > 0, dt);
+      let [ax, az] = this.takeClipAdvance(grounded && !driven && !lifted && (ud.speedMult ?? 1) > 0, dt);
+      // ...but never through somebody: a held combo against a standing target
+      // stops at it rather than walking the swinger past (advanceStop).
+      if ((ax !== 0 || az !== 0) && this.advanceBlocked(sim, ax, az, dt)) [ax, az] = [0, 0];
       if (ax !== 0 || az !== 0) ud.advanceVel = [ax, az];
       this.advanceLastVel = [ax, az];
       vy = this.followGround(x + ax, vy, z + az, grounded && !lifted, now, dt);
@@ -1928,6 +1967,8 @@ class ThirdPersonController extends Script {
    * switched at it. Zero on dry land and while swimming.
    */
   private wadeMix(): number {
+    // a script holding the low stance (a game's sneak): the crouch clips in full, wet or dry
+    if (this.object.userData["crouch"] === true) return 1;
     if (this.swimState !== "wading" || !(this.swimDepth > 0)) return 0;
     const mark = this.param<number>("wadeDeepDepth");
     const band = Math.max(0.05, this.param<number>("wadeBand"));
@@ -2155,6 +2196,58 @@ class ThirdPersonController extends Script {
       yaw: this.yaw,
       scale,
     });
+  }
+
+  /**
+   * Whether this tick's clip advance must stand still for another BODY (an
+   * entity with a dynamic or kinematic rigidbody: a creature, a player, a
+   * training dummy): see `advanceStop`. Only on ticks that advance. Asked of the runtime's bodies
+   * (`ctx.bodiesNear`), not the physics world: on a net peer another player's
+   * or a server creature's body is not in this tab's physics at all, and the
+   * swing walked straight through it. Ground and walls are physics' business,
+   * as before.
+   */
+  private advanceBlocked(sim: SimLike, ax: number, az: number, dt: number): boolean {
+    const gap = this.param<number>("advanceStop");
+    if (!(gap > 0)) return false;
+    const speed = Math.hypot(ax, az);
+    const radius = this.footRadius() || 0.4;
+    const at = (this.scratch ??= this.object.position.clone());
+    this.object.getWorldPosition(at);
+    const reach = radius + gap + speed * dt;
+    if (!this.ctx.bodiesNear) {
+      // a host without the index: the physics world is all there is
+      const dx = ax / speed;
+      const dz = az / speed;
+      const hit = sim.spherecast?.(radius * 0.8, [at.x, at.y, at.z], [at.x + dx * reach, at.y, at.z + dz * reach], { exclude: [this.entityId] });
+      const kind = hit ? (this.ctx.getEntity(hit.entityId)?.components["rigidbody"] as { kind?: string } | undefined)?.kind : undefined;
+      return kind === "dynamic" || kind === "kinematic";
+    }
+    // A combo's curve sways (side steps, a step back between swings), so
+    // "ahead along this tick's travel" misses a body the steps drift into,
+    // and a held combo sidles round it. Asked instead: does this step bring
+    // the capsule inside the gap of a body, or is one already standing in
+    // front (inside 60° of the facing) within a metre past the gap, the
+    // swinger engaged with it? Then the swinger stands and swings.
+    const sx = ax * dt;
+    const sz = az * dt;
+    const fx = Math.sin(this.yaw);
+    const fz = Math.cos(this.yaw);
+    for (const id of this.ctx.bodiesNear(at.x, at.z, reach + 1.5)) {
+      if (id === this.entityId) continue;
+      const other = this.ctx.getObject(id);
+      if (!other) continue;
+      if (Math.abs(other.position.y - at.y) > 1.6) continue; // on another floor
+      const size = (this.ctx.getEntity(id)?.components["collider"] as { size?: number[] } | undefined)?.size;
+      const theirs = size ? Math.min(size[0] ?? 0.8, size[2] ?? size[0] ?? 0.8) / 2 : 0.4;
+      const ox = other.position.x - at.x;
+      const oz = other.position.z - at.z;
+      const before = Math.hypot(ox, oz);
+      const after = Math.hypot(ox - sx, oz - sz);
+      const near = radius + theirs + gap;
+      if ((after < before && after < near) || (before < near + 1 && ox * fx + oz * fz > before * 0.5)) return true;
+    }
+    return false;
   }
 
   /**
@@ -2592,6 +2685,8 @@ class BoneSocket extends Script {
   static override scriptName = "bone-socket";
   // an item on a bone is drawn for every body, simulated here or not
   static override presentation = true;
+  /** Nothing to place or swap on a dedicated server (no skeleton, no meshes, nobody looking): it never runs there. */
+  static clientOnly = true;
   static override params = {
     bone: {
       default: "mixamorig:RightHand",
@@ -2631,25 +2726,54 @@ class BoneSocket extends Script {
    * `@hitreg/scripting` deliberately imports three only as a TYPE (`import type
    * * as THREE`) and must stay runtime-free of it.
    */
+  /**
+   * Recompute world matrices from `top` (already current) down to `node`,
+   * without walking above `top` again. Falls back to the full upward walk
+   * when `node` is not under `top`.
+   */
+  static refreshBelow(node: THREE.Object3D, top: THREE.Object3D): void {
+    const chain: THREE.Object3D[] = [];
+    let at: THREE.Object3D | null = node;
+    while (at && at !== top) { chain.push(at); at = at.parent; }
+    if (at !== top) { node.updateWorldMatrix(true, false); return; }
+    for (let i = chain.length - 1; i >= 0; i--) {
+      const n = chain[i]!;
+      if (n.matrixAutoUpdate) n.updateMatrix();
+      n.matrixWorld.multiplyMatrices(n.parent!.matrixWorld, n.matrix);
+    }
+  }
+
   static sanitizeBoneName(name: string): string {
     return name.replace(/[\s.:[\]/]/g, "");
   }
 
   private bone: THREE.Object3D | null = null;
+  /** What the last placement was computed from (see the skip in onFixedUpdate). */
+  private poseHolder: THREE.Object3D | null = null;
+  private poseHolderFor: THREE.Object3D | null = null;
+  private poseSeen = -1;
+  private syncedSeen: unknown = null;
+  private offsetSeen: [number, number, number] = [NaN, NaN, NaN];
+  private altOffsetSeen = "";
+  private parentSeen: THREE.Matrix4 | null = null;
   private offsetQuat!: THREE.Quaternion;
   private bonePos!: THREE.Vector3;
   private boneQuat!: THREE.Quaternion;
   private parentQuat!: THREE.Quaternion;
   private shift!: THREE.Vector3;
+  private worldScale!: THREE.Vector3;
+  private parentInverse!: THREE.Matrix4;
 
   /** The params the cached rotations and bone lookups were built from. */
-  private synced = "";
+  private synced: { bone: string; altBone: string; rotation: number[]; alt: number[] } | null = null;
 
   override onStart(): void {
     this.offsetQuat = this.object.quaternion.clone();
-    this.synced = "";
+    this.synced = null;
     this.bonePos = this.object.position.clone();
     this.shift = this.object.position.clone();
+    this.worldScale = this.object.scale.clone();
+    this.parentInverse = this.object.matrixWorld.clone();
     this.boneQuat = this.object.quaternion.clone();
     this.parentQuat = this.object.quaternion.clone();
     this.altPos = this.object.position.clone();
@@ -2670,14 +2794,16 @@ class BoneSocket extends Script {
     const alt = this.param<number[]>("altRotationDeg");
     const bone = this.param<string>("bone");
     const altBone = this.param<string>("altBone");
-    const key = JSON.stringify([deg, alt, bone, altBone]);
-    if (key === this.synced) return;
-    if (this.synced) {
-      const [, , prevBone, prevAlt] = JSON.parse(this.synced) as [unknown, unknown, string, string];
-      if (prevBone !== bone) this.bone = null;
-      if (prevAlt !== altBone) this.altBoneObj = null;
+    const previous = this.synced;
+    if (previous && previous.bone === bone && previous.altBone === altBone &&
+        previous.rotation.length === deg.length && previous.alt.length === alt.length &&
+        previous.rotation[0] === deg[0] && previous.rotation[1] === deg[1] && previous.rotation[2] === deg[2] &&
+        previous.alt[0] === alt[0] && previous.alt[1] === alt[1] && previous.alt[2] === alt[2]) return;
+    if (previous) {
+      if (previous.bone !== bone) this.bone = null;
+      if (previous.altBone !== altBone) this.altBoneObj = null;
     }
-    this.synced = key;
+    this.synced = { bone, altBone, rotation: [...deg], alt: [...alt] };
     const toRad = (d: number): number => (d * Math.PI) / 180;
     const euler = this.object.rotation.clone().set(toRad(deg[0]), toRad(deg[1]), toRad(deg[2]));
     this.offsetQuat.setFromEuler(euler);
@@ -2734,10 +2860,32 @@ class BoneSocket extends Script {
         null;
       if (!this.bone) return;
     }
-    this.bone.updateWorldMatrix(true, false);
-    this.bone.getWorldPosition(this.bonePos);
-    this.bone.getWorldQuaternion(this.boneQuat);
+    // Pose LOD holds a distant character's pose between evaluations (the
+    // model root's userData.poseVersion stays put), and most of the time the
+    // body is standing still: then the item is already exactly where this
+    // would put it. Re-deriving the bone's whole ancestor chain twice a tick
+    // for every weapon in a camp of 80 mobs was ~1.5% of the frame.
+    if (this.poseHolderFor !== this.bone) {
+      this.poseHolderFor = this.bone;
+      this.poseHolder = null;
+      for (let o: THREE.Object3D | null = this.bone; o; o = o.parent) {
+        if (typeof o.userData["poseVersion"] === "number") { this.poseHolder = o; break; }
+      }
+      this.poseSeen = -1;
+    }
+    const version = this.poseHolder ? (this.poseHolder.userData["poseVersion"] as number) : -1;
     const off = this.param<[number, number, number]>("offset");
+    const altOff = this.param<number[]>("altOffset");
+    const settled = this.altMix === (this.altWanted() ? 1 : 0);
+    parent.updateWorldMatrix(true, false);
+    if (version >= 0 && version === this.poseSeen && settled && this.syncedSeen === this.synced &&
+        this.offsetSeen[0] === off[0] && this.offsetSeen[1] === off[1] && this.offsetSeen[2] === off[2] &&
+        this.altOffsetSeen === altOff.join(",") && this.parentSeen?.equals(parent.matrixWorld)) return;
+    // the parent's chain is current (just above): refresh only parent -> bone
+    BoneSocket.refreshBelow(this.bone, parent);
+    // The convenience getters each walk the same ancestor chain again.
+    // Decompose the freshly updated matrix once; retain world-oriented offsets.
+    this.bone.matrixWorld.decompose(this.bonePos, this.boneQuat, this.worldScale);
     this.shift.set(off[0], off[1], off[2]).applyQuaternion(this.boneQuat);
     this.bonePos.add(this.shift);
     this.boneQuat.multiply(this.offsetQuat); // world pose of the MAIN socket
@@ -2760,8 +2908,7 @@ class BoneSocket extends Script {
       const altBone = altName ? this.altBoneObj : this.bone;
       if (altBone) {
         altBone.updateWorldMatrix(true, false);
-        altBone.getWorldPosition(this.altPos);
-        altBone.getWorldQuaternion(this.altBoneQuat);
+        altBone.matrixWorld.decompose(this.altPos, this.altBoneQuat, this.worldScale);
         const ao = this.param<number[]>("altOffset");
         if (ao.length === 3) this.altPos.add(this.shift.set(ao[0]!, ao[1]!, ao[2]!).applyQuaternion(this.altBoneQuat));
         this.altBoneQuat.multiply(this.altQuat);
@@ -2770,10 +2917,18 @@ class BoneSocket extends Script {
       }
     }
 
-    parent.updateWorldMatrix(true, false);
-    this.object.position.copy(parent.worldToLocal(this.bonePos));
-    parent.getWorldQuaternion(this.parentQuat).invert();
+    // Updating either bone already refreshed its parent entity. Read that same
+    // snapshot for both local position and rotation, including scaled parents.
+    this.parentInverse.copy(parent.matrixWorld).invert();
+    this.object.position.copy(this.bonePos).applyMatrix4(this.parentInverse);
+    parent.matrixWorld.decompose(this.shift, this.parentQuat, this.worldScale);
+    this.parentQuat.invert();
     this.object.quaternion.copy(this.parentQuat.multiply(this.boneQuat));
+    this.poseSeen = version;
+    this.syncedSeen = this.synced;
+    this.offsetSeen[0] = off[0]; this.offsetSeen[1] = off[1]; this.offsetSeen[2] = off[2];
+    this.altOffsetSeen = altOff.join(",");
+    (this.parentSeen ??= parent.matrixWorld.clone()).copy(parent.matrixWorld);
   }
 }
 
@@ -2795,7 +2950,7 @@ function smooth01(x: number): number {
   const t = Math.min(1, Math.max(0, x));
   return t * t * (3 - 2 * t);
 }
-const NET_HOUR_KEY = "world.hour";
+const NET_HOUR_KEY = WORLD_HOUR_KEY;
 
 /** "2h 30m" / "45s" — console output, where a raw 9000 means nothing to anyone. */
 function describeSeconds(total: number): string {
@@ -2824,7 +2979,7 @@ class DayNight extends Script {
   static override scriptName = "day-night";
   static override params = {
     dayLength: { default: 7200, min: 10, max: 86400, description: "Real seconds per 24-hour game day." },
-    startHour: { default: 9, min: 0, max: 24, description: "Clock at scene start: 6 = sunrise, 12 = noon, 18 = sunset. The live displayed hour is published on this entity's object.userData.dayNightHour (including offline play); multiplayer authority also replicates world.hour." },
+    startHour: { default: 9, min: 0, max: 24, description: "Clock at scene start: 6 = sunrise, 12 = noon, 18 = sunset. The live displayed hour is published on this entity's object.userData.dayNightHour (including offline play); multiplayer authority also replicates netState world/hour." },
     tilt: { default: 30, min: 0, max: 80, description: "Degrees the sun's arc leans away from straight overhead (toward -Z), so noon shadows still fall somewhere." },
     dawnColor: { default: "#ff9d5c", description: "Sun colour at the horizon; blends into the sun light's authored colour by mid-morning." },
     sunsetColor: { default: "#e2593a", description: "Colour the cloud burns on the sun's side of the sky at the exact horizon — deeper and redder than dawnColor, which it eases into as the sun climbs." },
@@ -3008,6 +3163,8 @@ class DayNight extends Script {
 
     const dawn = hexToRgb(this.param<string>("dawnColor"));
     const nightCloud = hexToRgb(this.param<string>("nightCloud"));
+    const dayCloud = hexToRgb(base?.clouds?.color ?? "#ffffff");
+    const dayCloudShadow = hexToRgb(base?.clouds?.shadow ?? "#8a94a8");
     const baseSunColor = hexToRgb(base?.sun?.color ?? "#fff1d6");
     const baseSunIntensity = base?.sun?.intensity ?? 1.2;
     const moonRgb = hexToRgb(this.param<string>("moonColor"));
@@ -3060,10 +3217,12 @@ class DayNight extends Script {
       //    so dusk and dawn both get it) and shut it by mid-morning.
       // `sunset` deepens toward red exactly at the horizon, where the light
       // has the most atmosphere to cross.
+      // The DAY end is the scene's own cloud colours, so a brooding grey deck
+      // stays brooding at noon instead of being bleached to white.
       clouds: {
         light: 0.12 + 0.88 * day,
-        color: rgbToHex(mixRgb(nightCloud, [1, 1, 1], day)),
-        shadow: rgbToHex(mixRgb(mixRgb(nightCloud, [0.08, 0.1, 0.16], 0.5), [0.54, 0.58, 0.66], day)),
+        color: rgbToHex(mixRgb(nightCloud, dayCloud, day)),
+        shadow: rgbToHex(mixRgb(mixRgb(nightCloud, [0.08, 0.1, 0.16], 0.5), dayCloudShadow, day)),
         sun: rgbToHex(mixRgb(hexToRgb(this.param<string>("sunsetColor")), dawn, smooth01((Math.abs(e) - 0.02) / 0.16))),
         sunAmount: this.param<number>("cloudGlow") * horizonBand,
       },
@@ -3088,9 +3247,171 @@ class DayNight extends Script {
   }
 }
 
+// ---- zone mood -------------------------------------------------------------
+
+/** A mood as plain numbers, so two can be eased between: colours are linear 0..1 rgb. */
+interface MoodVec {
+  sky: Rgb;
+  skyAmt: number;
+  haze: Rgb;
+  hazeAmt: number;
+  light: Rgb;
+  lightScale: number;
+  shade: Rgb;
+  fogDensity: number;
+  mist: number;
+  saturation: number;
+  contrast: number;
+  temperature: number;
+}
+
+const NEUTRAL_MOOD: MoodVec = {
+  sky: [0.5, 0.5, 0.5],
+  skyAmt: 0,
+  haze: [0.5, 0.5, 0.5],
+  hazeAmt: 0,
+  light: [1, 1, 1],
+  lightScale: 1,
+  shade: [1, 1, 1],
+  fogDensity: 1,
+  mist: 1,
+  saturation: 1,
+  contrast: 1,
+  temperature: 0,
+};
+
+function moodVec(mood: NonNullable<RegionAt["mood"]> | undefined, strength: number): MoodVec {
+  if (!mood) return NEUTRAL_MOOD;
+  const k = Math.max(0, strength);
+  const lerp = (neutral: number, v: number): number => neutral + (v - neutral) * k;
+  const lerpRgb = (neutral: Rgb, hex: string | undefined): Rgb => (hex ? mixRgb(neutral, hexToRgb(hex), k) : neutral);
+  return {
+    sky: mood.sky ? hexToRgb(mood.sky) : NEUTRAL_MOOD.sky,
+    skyAmt: mood.sky ? mood.amount * k : 0,
+    haze: mood.haze ? hexToRgb(mood.haze) : NEUTRAL_MOOD.haze,
+    hazeAmt: mood.haze ? mood.amount * k : 0,
+    light: lerpRgb([1, 1, 1], mood.light),
+    lightScale: lerp(1, mood.lightScale),
+    shade: lerpRgb([1, 1, 1], mood.shade),
+    fogDensity: lerp(1, mood.fogDensity),
+    mist: lerp(1, mood.mist),
+    saturation: lerp(1, mood.saturation),
+    contrast: lerp(1, mood.contrast),
+    temperature: lerp(0, mood.temperature),
+  };
+}
+
+/**
+ * Each zone's own air and light: reads the recipe's `regions[].mood` under
+ * the local player (`ctx.regionAt`) and eases the scene toward it — tinted
+ * sky and haze, sun colour and strength, shadow colour, fog density, and a
+ * lean on the scene's colour grade. A layer between the `day-night` script
+ * (which it never touches) and the weather (which still darkens on top), so
+ * the three run together without knowing about each other.
+ *
+ * Purely cosmetic and per-viewer: it changes what THIS client sees, never
+ * game state, so it does no networking — each player wears the mood of the
+ * zone they are standing in. Uniform writes only (no light added, no pass
+ * switched on), so easing it every tick costs nothing and never recompiles.
+ */
+class ZoneMood extends Script {
+  static override scriptName = "zone-mood";
+  static override params = {
+    blendSeconds: { default: 6, min: 0, max: 60, description: "Seconds to ease from one zone's mood to the next after crossing a border. Borders follow ridges and rivers, so a few seconds reads as the air changing, not a switch." },
+    strength: { default: 1, min: 0, max: 2, description: "Scales every zone's mood at once (0 = moods off, 1 = as authored)." },
+    sampleSeconds: { default: 0.5, min: 0.05, max: 5, description: "How often the zone under the player is looked up." },
+  };
+  private current: MoodVec = NEUTRAL_MOOD;
+  private target: MoodVec = NEUTRAL_MOOD;
+  private sinceSample = Infinity;
+  private zoneId: string | null = null;
+  private settled = true;
+
+  override onFixedUpdate(dt: number): void {
+    if (!this.ctx.setSky) return; // a dedicated server has no sky to tint
+    this.sinceSample += dt;
+    if (this.sinceSample >= this.param<number>("sampleSeconds")) {
+      this.sinceSample = 0;
+      this.sample();
+    }
+    if (this.settled) return;
+    const blend = this.param<number>("blendSeconds");
+    const t = blend > 0 ? Math.min(1, dt / (blend / 4)) : 1; // exponential ease: ~98% there after `blend` seconds
+    const a = this.current;
+    const b = this.target;
+    const n = (x: number, y: number): number => x + (y - x) * t;
+    const r = (x: Rgb, y: Rgb): Rgb => mixRgb(x, y, t);
+    this.current = {
+      sky: r(a.sky, b.sky),
+      skyAmt: n(a.skyAmt, b.skyAmt),
+      haze: r(a.haze, b.haze),
+      hazeAmt: n(a.hazeAmt, b.hazeAmt),
+      light: r(a.light, b.light),
+      lightScale: n(a.lightScale, b.lightScale),
+      shade: r(a.shade, b.shade),
+      fogDensity: n(a.fogDensity, b.fogDensity),
+      mist: n(a.mist, b.mist),
+      saturation: n(a.saturation, b.saturation),
+      contrast: n(a.contrast, b.contrast),
+      temperature: n(a.temperature, b.temperature),
+    };
+    const gap = Math.abs(this.current.skyAmt - b.skyAmt) + Math.abs(this.current.hazeAmt - b.hazeAmt) + Math.abs(this.current.lightScale - b.lightScale) +
+      Math.abs(this.current.fogDensity - b.fogDensity) + Math.abs(this.current.mist - b.mist) + Math.abs(this.current.saturation - b.saturation) + Math.abs(this.current.light[0] - b.light[0]) +
+      Math.abs(this.current.shade[2] - b.shade[2]) + Math.abs(this.current.temperature - b.temperature);
+    if (gap < 1e-3) {
+      this.current = b;
+      this.settled = true;
+    }
+    this.apply();
+  }
+
+  override onDispose(): void {
+    // hand the scene back exactly as authored
+    this.ctx.setSky?.({ mood: null });
+    this.ctx.setPostFx?.({ grade: null });
+  }
+
+  /** `/mood` — which zone's mood is on, for checking a border by walking it. */
+  static override commands: ScriptCommandDecl[] = [{ name: "mood", args: "", description: "Say which zone's mood is showing." }];
+  override onCommand(): string | null {
+    return this.zoneId ? `mood: ${this.zoneId}${this.settled ? "" : " (easing in)"}` : "mood: none (scene look)";
+  }
+
+  private sample(): void {
+    const id = this.ctx.localPlayer?.() ?? this.ctx.findByTag("player")[0];
+    const player = id ? (this.ctx.getObject(id) as { position: { x: number; z: number } } | null) : null;
+    if (!player) return;
+    const region = this.ctx.regionAt?.(player.position.x, player.position.z) ?? null;
+    const zoneId = region?.mood ? region.id : null;
+    if (zoneId === this.zoneId) return;
+    this.zoneId = zoneId;
+    this.target = moodVec(region?.mood, this.param<number>("strength"));
+    this.settled = false;
+  }
+
+  private apply(): void {
+    const m = this.current;
+    this.ctx.setSky?.({
+      mood: {
+        ...(m.skyAmt > 0 ? { sky: rgbToHex(m.sky) } : {}),
+        ...(m.hazeAmt > 0 ? { haze: rgbToHex(m.haze) } : {}),
+        // one `amount` on the wire: the two are authored together and only
+        // differ while one of them is fading out of a zone that lacked it
+        amount: Math.max(m.skyAmt, m.hazeAmt),
+        light: rgbToHex(m.light),
+        lightScale: m.lightScale,
+        shade: rgbToHex(m.shade),
+        fogDensity: m.fogDensity,
+        mist: m.mist,
+      },
+    });
+    this.ctx.setPostFx?.({ grade: { saturation: m.saturation, contrast: m.contrast, temperature: m.temperature } });
+  }
+}
+
 // ---- weather ---------------------------------------------------------------
 
-const NET_WEATHER_KEY = "world.weather";
+const NET_WEATHER_KEY = WORLD_WEATHER_KEY;
 
 /**
  * The world's weather, as the authority rolls it: biome-agnostic on purpose.
@@ -3113,6 +3434,8 @@ interface WeatherState {
   strike: number;
   /** Clock time (authority seconds) at which the next roll happens. */
   until: number;
+  /** How closed the sky is with nothing falling, 0..1 — a dry grey day. Rain closes it the rest of the way locally. Absent from older states. */
+  overcast?: number;
 }
 
 type WeatherKind = "rain" | "sand" | "snow";
@@ -3192,7 +3515,7 @@ function angleDelta(from: number, to: number): number {
  * Everything it drives is cheap by construction: player-parented emitters
  * (tagged `weather-rain` / `weather-sand` / `weather-snow` / `weather-dust`)
  * whose rate and AIM it dials, and `ctx.setSky`'s weather layer — gloom, tint,
- * wind, cloud coverage and darkening, fog and the lightning flash — which are
+ * wind, overcast (rain closes the whole sky), cloud darkening, fog and the lightning flash — which are
  * uniforms applied on top of whatever the `day-night` script wrote, so the two
  * scripts never need to know about each other. It never adds a light and never
  * touches the environment texture.
@@ -3299,6 +3622,14 @@ class Weather extends Script {
         "at a few dozen metres. This is the knob that decides whether being caught in one is an event or a " +
         "colour grade.",
     },
+    overcast: {
+      default: "auto",
+      description:
+        "How closed the sky is on a DRY day: auto rolls it with each front (often clear, sometimes grey), or a " +
+        "number 0..1 pins it. Overcast fills the cloud deck, hides the sun and its glow, turns god rays off and " +
+        "softens shadows. Rain and snow close the sky fully whatever this says. Console: /overcast.",
+    },
+    overcastMax: { default: 0.7, min: 0, max: 1, description: "auto only: the greyest a dry roll can be." },
     gloomMax: { default: 0.6, min: 0, max: 1, description: "How much a full storm dims sun, fill, ambient and IBL." },
     cloudDarkMax: { default: 0.85, min: 0, max: 1, description: "How far a full storm drives the cloud deck itself toward slate. Gloom dims what the cloud lights; this darkens the cloud you are looking AT, and a storm needs both or the world goes dim under a bright white sky." },
     windMax: { default: 3, min: 0, max: 10, description: "Foliage wind multiplier at full storm (1 = authored)." },
@@ -3326,8 +3657,18 @@ class Weather extends Script {
       authority: true,
     },
     { name: "lightning", args: "", description: "Strike now.", authority: true },
+    {
+      name: "overcast",
+      args: "[0-1 | auto]",
+      description: "Set or report how closed the sky is on a dry day (1 = full grey deck, no sun, no god rays). Rain closes it fully anyway.",
+      authority: true,
+    },
   ];
-  private state: WeatherState = { precipitation: 0, storm: 0, wind: 0, windAngle: 0, strike: 0, until: 0 };
+  private state: WeatherState = { precipitation: 0, storm: 0, wind: 0, windAngle: 0, strike: 0, until: 0, overcast: 0 };
+  /** Console: pins the dry-day overcast without editing the scene (null = the param decides). */
+  private forcedOvercast: number | null = null;
+  /** The overcast showing here, eased like everything else. */
+  private localOvercast = 0;
   /** Console: overrides the `force` param without editing the scene. */
   private forcedMode: string | null = null;
   /**
@@ -3418,6 +3759,7 @@ class Weather extends Script {
       net?.set(NET_WEATHER_KEY, this.state);
     }
     this.localAngle = this.state.windAngle;
+    this.localOvercast = this.state.overcast ?? 0;
     this.lastStrike = this.state.strike;
     this.sample();
   }
@@ -3468,6 +3810,7 @@ class Weather extends Script {
     }
     this.localStorm += (this.state.storm * this.state.precipitation - this.localStorm) * k;
     this.localDust += (this.dustShare - this.localDust) * k;
+    this.localOvercast += ((this.state.overcast ?? 0) - this.localOvercast) * k;
     // Gusts are the FAST layer and must not be smoothed into the slow one:
     // eased at `fadeSeconds` a gust arrives as a gentle swell, which is the
     // opposite of what a gust is.
@@ -3575,6 +3918,35 @@ class Weather extends Script {
     return smooth01(1 - (u - 0.74) / 0.26);
   }
 
+  /**
+   * The dry sky gets its own roll: half the time clear, otherwise anywhere up
+   * to `overcastMax` — a grey day with nothing falling out of it.
+   */
+  private rollOvercast(): void {
+    this.state.overcast = this.pinnedOvercast() ?? (Math.random() < 0.5 ? 0 : this.param<number>("overcastMax") * Math.random());
+  }
+
+  /**
+   * How closed the sky is HERE: the world's dry-day overcast, or the local
+   * weather closing it. Rain and snow shut it fully by the time a drizzle has
+   * properly started — "it is raining under a blue gap" is the one thing an
+   * overcast system exists to rule out. Blowing sand dims the sun without
+   * there being any cloud, so it only goes part of the way.
+   */
+  private overcastHere(): number {
+    const wet = smooth01(Math.max(this.local.rain, this.local.snow) / 0.25);
+    return Math.min(1, Math.max(this.localOvercast, wet, this.local.sand * 0.6));
+  }
+
+  /** The pinned dry-day overcast: the console's if it set one, else a numeric `overcast` param; null = auto. */
+  private pinnedOvercast(): number | null {
+    if (this.forcedOvercast !== null) return this.forcedOvercast;
+    const raw = this.param<string | number>("overcast");
+    if (raw === undefined || raw === null || String(raw).trim().toLowerCase() === "auto" || String(raw).trim() === "") return null;
+    const value = Number(raw);
+    return Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : null;
+  }
+
   /** The pinned mode: the console's if it set one, else the authored param. */
   private forceMode(): string {
     return (this.forcedMode ?? String(this.param<string>("force") ?? "auto")).toLowerCase();
@@ -3610,6 +3982,7 @@ class Weather extends Script {
     const start = wasPinned && this.pinned ? this.front.start : this.clock;
     this.front = { peak, storm, start, span };
     this.state.until = this.clock + span;
+    this.rollOvercast();
   }
 
   /** Start the flash locally, and line up the thunder behind it. */
@@ -3743,6 +4116,21 @@ class Weather extends Script {
       }
       this.ctx.netState?.set(NET_WEATHER_KEY, { ...this.state });
       return this.windLine();
+    }
+    if (name === "overcast") {
+      const arg = (args[0] ?? "").toLowerCase();
+      if (arg === "auto") {
+        this.forcedOvercast = null;
+        this.rollOvercast();
+      } else if (arg) {
+        const value = Number(arg);
+        if (!Number.isFinite(value)) throw new Error("usage: /overcast [0-1 | auto]");
+        this.forcedOvercast = Math.min(1, Math.max(0, value));
+        this.state.overcast = this.forcedOvercast;
+      }
+      if (arg) this.ctx.netState?.set(NET_WEATHER_KEY, { ...this.state });
+      const pinned = this.pinnedOvercast() !== null ? "pinned" : "auto";
+      return `overcast ${(this.state.overcast ?? 0).toFixed(2)} dry (${pinned}) · showing ${this.overcastHere().toFixed(2)} here`;
     }
     const first = (args[0] ?? "").toLowerCase();
     if (!first || first === "status") return this.weatherLine();
@@ -3896,7 +4284,6 @@ class Weather extends Script {
     for (const kind of KINDS) if (this.local[kind] > this.local[dominant]) dominant = kind;
     const tint = TINTS[dominant];
     const base = this.base;
-    const baseCoverage = base?.clouds?.coverage ?? 0.3;
     const baseSoftness = base?.clouds?.softness ?? 0.35;
     const baseDensity = base?.fog?.density ?? 0.002;
     // sand is not cloud: a sandstorm is fog and wind with an ordinary sky above it
@@ -3909,14 +4296,13 @@ class Weather extends Script {
     const wetDrive = Math.max(this.local.rain, this.local.snow) * (0.4 + 0.6 * storm);
     const dustFog = sandDrive * (0.45 + 0.55 * gust) * (0.4 + 0.6 * storm);
     setSky({
+      // Coverage stays authored: `weather.overcast` below closes the sky. A
+      // closed deck keeps its shapes as SHADING (thick banks fall to the
+      // shadow colour, which `cloudDark` drives to a bruise) rather than as
+      // gaps, so a full sky still reads as weather moving overhead.
       clouds: {
-        // NOT 0.95. At near-total coverage the deck stops having shapes in it
-        // and becomes one flat card the colour of the fog — measured, and the
-        // reason a "full storm" sky read as weaker than an overcast one. 0.85
-        // keeps the gaps that make it look like weather moving overhead.
-        coverage: baseCoverage + (0.85 - baseCoverage) * Math.min(1, cloudDrive + sandDrive * 0.45),
-        // and HARDER edges, not softer: soft cloud is haze, and haze is what
-        // fog is already doing.
+        // HARDER edges, not softer: soft cloud is haze, and haze is what fog
+        // is already doing.
         softness: baseSoftness + (0.28 - baseSoftness) * Math.min(1, cloudDrive + sandDrive * 0.5),
       },
       fog: {
@@ -3938,6 +4324,7 @@ class Weather extends Script {
           this.param<number>("cloudDarkMax") * (cloudDrive * (0.35 + 0.65 * storm) + sandDrive * 0.5 * (0.4 + 0.6 * storm)),
         ),
         flash: this.flashAt >= 0 ? strikeFlash(this.flashAt) : 0,
+        overcast: this.overcastHere(),
       },
     });
   }
@@ -4078,6 +4465,7 @@ export function registerBuiltinScripts(
   const add = (cls: ScriptClass): void => registry.register(cls, events, dataTypes);
   add(DayNight);
   add(Weather);
+  add(ZoneMood);
   add(Spinner);
   add(Oscillator);
   add(PlayerController);
@@ -4097,14 +4485,25 @@ export function registerBuiltinScripts(
   add(CharacterUi);
   add(EquipmentLook);
   add(CharacterLook);
+  // opt-in cosmetic ragdoll deaths (ragdoll.ts): per-client, frozen once settled
+  add(RagdollScript);
   add(NpcScript);
   add(NpcUi);
+  // loot bags the player owns: the ground prop, the prompt and the take window (core loot.ts)
+  add(LootUi);
   add(Nameplates);
   add(QuestLog);
+  add(PresenceScript);
   add(PlayerRecords);
+  // a door into another scene (an instanced dungeon) and back; the host moves the player
+  add(PortalScript);
+  // boss mechanics (docs/mob-ai.md "Boss mechanics"): add waves at the boss's health thresholds
+  add(EncounterWavesScript);
   add(WeaponStance);
   // WoW-style background audio: biome/time beds, spot emitters, zone/town/combat music
   add(Soundscape);
+  // ambient motes around the local player: fireflies, leaves, ash, spores, dust, moths, spray
+  add(AmbientParticles);
   add(SoundZone);
   add(SoundEmitter);
 }

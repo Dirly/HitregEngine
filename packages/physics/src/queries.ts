@@ -41,7 +41,8 @@ export type ShapeHit = RayHit;
 
 export interface QueryOptions {
   /**
-   * Which layers may be hit. Defaults to {@link Layers.ALL}. Use the named
+   * Which layers may be hit. Defaults to {@link DEFAULT_QUERY_LAYERS} (every
+   * layer but DEBRIS: cosmetic ragdolls and gibs are never in the way). Use the named
    * masks (`SOLID_WORLD`, `VISION_BLOCKERS`, `HITTABLE`) rather than hex.
    *
    * This is the cheap filter: it runs inside Rapier's broad phase, so a

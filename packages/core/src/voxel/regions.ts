@@ -1,5 +1,7 @@
 import { z } from "zod";
 import { pointInPolygon, polygonArea, polygonEdgeDistance } from "../scatter.js";
+import { SURFACE_ROLES } from "./roles.js";
+import { regionVegetationSchema } from "./vegetation.js";
 
 /**
  * Regions — the zones players and servers know by name.
@@ -21,6 +23,38 @@ import { pointInPolygon, polygonArea, polygonEdgeDistance } from "../scatter.js"
  *
  * Authoring procedure: docs/world-editing/zones.md.
  */
+const moodHex = z.string().regex(/^#[0-9a-fA-F]{6}$/, "#rrggbb");
+
+/**
+ * A zone's MOOD: how its air and light differ from the world's. Applied as a
+ * layer over the day/night cycle and under the weather (the `zone-mood`
+ * builtin eases it in as a player crosses the border), so a cursed marsh stays
+ * green at noon, at dusk and in a storm without repainting anything.
+ */
+export const regionMoodSchema = z
+  .object({
+    sky: moodHex.optional().describe("Colour the sky's ZENITH leans toward, by `amount` (a sickly marsh: #6f8a62; ash country: #6d625c)."),
+    haze: moodHex
+      .optional()
+      .describe("Colour the HORIZON, the fog and the painted horizon band lean toward, by `amount` — the strongest tone-setter, because distance is drawn in it."),
+    amount: z.number().min(0).max(1).default(0.5).describe("How far `sky` and `haze` go. 0.3 is a hint, 0.6 owns the zone, 1 replaces the world's sky."),
+    light: moodHex.optional().describe("Multiplies the SUN's colour (#ffffff = unchanged; #ffd0a0 = a hot amber zone; #c8d8c0 = sickly)."),
+    lightScale: z.number().min(0).max(3).default(1).describe("Multiplies the sun's intensity. Below 1 for an oppressive zone."),
+    shade: moodHex.optional().describe("Multiplies the ambient fill and sky light — the colour SHADOWS take (#c0d0ff = cold blue shadow; #d0e8b0 = green murk)."),
+    fogDensity: z.number().min(0).max(8).default(1).describe("Multiplies the fog density, on top of whatever the weather is doing."),
+    mist: z.number().min(0).max(8).default(1).describe("Multiplies the scene's ground mist (sky.fog.mist.amount — needs it enabled there). 2-3 drowns a marsh; 0 clears it."),
+    saturation: z.number().min(0).max(3).default(1).describe("Multiplies postfx.grade saturation (needs the scene's grade enabled). 0.7 = drained; 1.2 = lush."),
+    contrast: z.number().min(0).max(3).default(1).describe("Multiplies postfx.grade contrast (needs the scene's grade enabled)."),
+    temperature: z.number().min(-1).max(1).default(0).describe("Added to postfx.grade temperature: + warm, - cold (needs the scene's grade enabled)."),
+  })
+  .describe(
+    "Optional look of this zone: tinted sky/haze, sun colour and strength, shadow colour, fog and colour grade. " +
+      "Read by the `zone-mood` builtin, which eases it in over the day/night cycle and under the weather; a zone " +
+      "without one shows the scene's own look, and a nested town zone without one inherits its parent's.",
+  );
+
+export type RegionMood = z.infer<typeof regionMoodSchema>;
+
 export const regionSchema = z.object({
   id: z
     .string()
@@ -68,6 +102,19 @@ export const regionSchema = z.object({
         "(regionAt prefers the nested zone). How a town is a zone of its own inside the wilderness around it — " +
         "a simple polygon cannot hold a hole, so the cut-out is declared, not drawn. Never overlaps otherwise.",
     ),
+  ground: z
+    .partialRecord(z.enum(SURFACE_ROLES), z.string().min(1))
+    .optional()
+    .describe(
+      "This zone's own ground: ground ROLE -> palette surface NAME (`{ grass: \"shelf-grass\", paving: \"shelf-cobble\" }`). " +
+        "Natural roles (grass, ground, cliff, accent) replace the palette surfaces tagged with that role " +
+        "(`surfaces[].role`); `road` and `paving` replace what roads with that `role` paint. Blended by zone " +
+        "membership across `zoneGround.band`, so a border is a gradient. A zone without it renders the base " +
+        "palette. Written by `worldgen zone-textures` from the cast's ground looks; a nested town zone uses its " +
+        "parent's unless it declares its own.",
+    ),
+  mood: regionMoodSchema.optional(),
+  vegetation: regionVegetationSchema.optional(),
   tags: z
     .array(z.string())
     .default([])
@@ -81,9 +128,14 @@ export type RegionInput = z.input<typeof regionSchema>;
  * The region containing (x, z) — or null. A region cut out of another
  * (`within`) wins over its parent; otherwise the first polygon in recipe
  * order that contains the point.
+ *
+ * Regions tagged `place` (a signature place's own mood, cut out of its zone)
+ * are LOOK only: they are not zones for hosting, chat or spawning, so they are
+ * skipped unless `opts.places` asks for them (the mood lookup does).
  */
-export function regionAt(regions: readonly RegionDoc[], x: number, z: number): RegionDoc | null {
-  for (const region of regions) if (region.within !== undefined && pointInPolygon(x, z, region.polygon)) return region;
+export function regionAt(regions: readonly RegionDoc[], x: number, z: number, opts?: { places?: boolean }): RegionDoc | null {
+  const places = opts?.places === true;
+  for (const region of regions) if (region.within !== undefined && (places || !region.tags.includes("place")) && pointInPolygon(x, z, region.polygon)) return region;
   for (const region of regions) if (region.within === undefined && pointInPolygon(x, z, region.polygon)) return region;
   return null;
 }
@@ -170,12 +222,12 @@ export function auditRegions(
     const hubInside = region.hub ? pointInPolygon(region.hub[0], region.hub[1], region.polygon) : null;
     if (hubInside === false) findings.push(`region "${region.id}": hub is outside its own border`);
     // a town zone is small by design: the town and its outskirts
-    if (area < 0.5 && !region.tags.includes("town")) findings.push(`region "${region.id}": only ${area.toFixed(2)} km² — a zone should take minutes to cross`);
+    if (area < 0.5 && !region.tags.includes("town") && !region.tags.includes("place")) findings.push(`region "${region.id}": only ${area.toFixed(2)} km² — a zone should take minutes to cross`);
     const towns = features.towns.filter((t) => pointInPolygon(t.center[0], t.center[1], region.polygon)).map((t) => t.id);
     const pois = features.pois.filter((p) => pointInPolygon(p.position[0], p.position[2], region.polygon)).length;
     // a town zone holds its town by construction; a wilderness zone holds a
     // town when the town's own zone (or its centre) lies inside it
-    if (towns.length === 0 && !region.tags.includes("town")) findings.push(`region "${region.id}": no town inside — where do players gather?`);
+    if (towns.length === 0 && !region.tags.includes("town") && !region.tags.includes("place")) findings.push(`region "${region.id}": no town inside — where do players gather?`);
     if (region.within !== undefined) {
       const parent = byId.get(region.within);
       if (!parent) findings.push(`region "${region.id}": within "${region.within}", which does not exist`);

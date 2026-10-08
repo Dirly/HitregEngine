@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "about": "The dungeon/interior LIGHTING MODEL as data (owner, zone-3 review 2026-10-06: 'pools of light on black look wrong', 'lighting must feel similar across zones; the difference is colour tone, not brightness'). Two layers: (1) a READABILITY FLOOR, one hemisphere fill per dungeon (light.groundColor: a sky tone from above, a darker ground tone from below) so every surface reads dimly and floors / walls / ceilings read apart; fog that fades distance to the fill-lit tone, never to black; neutral exposure; a mild vignette; (2) the fixtures of the light buckets (tools/light-buckets.json, a project's authoring/light-buckets.json) add the warm or cold pools. Mood comes from TONE (the fill's hue, the fixtures' colour), never from darkness. tools/dungeon-pipeline/lighting.mts applies it as one applyOps batch; the readability gate measures the result. A dungeon that must differ writes authoring/lighting.json with only the keys it changes (and why).",
+  "fill": {
+    "about": "brightness of the floor: the same for every dungeon (owner: similar feel everywhere); only the tone differs. Calibrated 2026-10-06 on rime-hall-light (giant rock + ice halls, dark soot ceilings) against the readability gate; fieldfast-hall's approved flat fill is ambient 3.2 #8a93a8, gnawspur-deeps' 'very bright' one ambient 3.0 #a2ab9c (too pale a colour: flat). A hemisphere at intensity I lights a wall with the mean of the two tones.",
+    "intensity": 5
+  },
+  "tones": {
+    "about": "the fill's colour by the dungeon's dominant light bucket temperature. plan.lights maps warm / cold to a bucket; the bucket most spaces use decides. Equal luminance on purpose (the tone changes, the brightness does not).",
+    "neutral": {
+      "sky": "#a9aebb",
+      "ground": "#6a6662"
+    },
+    "warm": {
+      "sky": "#b8ab9c",
+      "ground": "#70625a"
+    },
+    "cold": {
+      "sky": "#9fb0c8",
+      "ground": "#5e6674"
+    }
+  },
+  "fog": {
+    "about": "distance fades to the fill-lit tone (sky tone x colourScale), never to black; giant halls push near/far out so a 60 m hall is not swallowed. background: the sky dome takes the fog tone too, so whatever is beyond the drawn geometry (a culled section seen through a far door, a gap) reads as fog, never as a black hole.",
+    "colourScale": 0.25,
+    "near": 55,
+    "far": 230,
+    "background": true
+  },
+  "post": {
+    "about": "neutral exposure; vignette capped (a strong vignette turns a dim frame's corners into the black voids the owner flagged)",
+    "exposure": 1,
+    "vignetteMax": 0.25
+  },
+  "cullingProfile": {
+    "about": "an instanced dungeon is all interior (docs/culling.md 'Interior scenes'): reveal from the room's door, nothing hides by size, no terrain horizon. interiorReveal 'auto' = the culling gate's farthest room-entry-to-dressing distance rounded up to 5 m, at least minReveal.",
+    "interiorReveal": "auto",
+    "minReveal": 30,
+    "maxMinScreenPx": 0,
+    "occlusion": false
+  }
+}

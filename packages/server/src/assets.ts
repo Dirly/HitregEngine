@@ -15,8 +15,10 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   AssetLibrary,
+  projectDependencyClosure,
+  projectManifestSchema,
   registerCoreAssetTypes,
-  registerVoxelRecipe,
+  registerVoxelRecipeLoader,
   sceneDocSchema,
   type SceneDoc,
 } from "@hitreg/core";
@@ -34,6 +36,7 @@ export const ASSET_KINDS = [
   "dialogues",
   "shops",
   "places",
+  "perform-actions",
   "worlds",
   "models",
   "textures",
@@ -43,8 +46,13 @@ export const ASSET_KINDS = [
 
 export interface LoadedContent {
   assets: AssetLibrary;
-  /** Scene name -> parsed scene doc (validated). */
-  scenes: Map<string, SceneDoc>;
+  /**
+   * Scene name -> parsed scene doc (validated). Read and parsed on first
+   * `get`: a server hosts one scene, and parsing every scene of every
+   * project (tens of MB of JSON) held hundreds of MB it never used. An
+   * invalid scene warns on that first `get` and reads as absent.
+   */
+  scenes: ReadonlyMap<string, SceneDoc>;
   /** Scene name -> the file it came from. */
   sceneFiles: Map<string, string>;
   /** World recipe ids that registered. */
@@ -76,7 +84,7 @@ export function loadContent(roots: string[], assets = new AssetLibrary()): Loade
     warnings.push(message);
     console.warn(`[server:assets] ${message}`);
   };
-  const scenes = new Map<string, SceneDoc>();
+  const scenes = new LazyScenes(warn);
   const sceneFiles = new Map<string, string>();
   const worlds: string[] = [];
   const worldFiles = new Map<string, string>();
@@ -126,6 +134,8 @@ export function loadContent(roots: string[], assets = new AssetLibrary()): Loade
       ["dialogues", "dialogue"],
       ["shops", "shop"],
       ["places", "places"],
+      // a project's extra /dance-style perform actions (the quest-log's `performActions`)
+      ["perform-actions", "performActions"],
     ];
     for (const [kind, type] of dataKinds) {
       for (const file of files[kind] ?? []) {
@@ -140,8 +150,10 @@ export function loadContent(roots: string[], assets = new AssetLibrary()): Loade
       if (!file.endsWith(".json")) continue;
       const id = file.replace(/\.json$/, "");
       addOrWarn(`worlds/${file}`, () => {
-        // built when the terrain host first asks for it (getVoxelWorld)
-        registerVoxelRecipe(id, readJson(fileOf("worlds", file)));
+        // read, parsed and built only when the terrain host first asks for it
+        // (getVoxelWorld): a server streams one world of the many a checkout holds
+        const full = fileOf("worlds", file);
+        registerVoxelRecipeLoader(id, () => readJson(full));
         worlds.push(id);
         worldFiles.set(id, fileOf("worlds", file));
       });
@@ -162,38 +174,113 @@ export function loadContent(roots: string[], assets = new AssetLibrary()): Loade
     for (const file of files["scenes"] ?? []) {
       if (!file.endsWith(".scene.json")) continue;
       const full = fileOf("scenes", file);
-      try {
-        const parsed = sceneDocSchema.safeParse(readJson(full));
-        if (!parsed.success) {
-          warn(`scene ${file} is invalid: ${JSON.stringify(parsed.error.issues.slice(0, 3))}`);
-          continue;
-        }
-        const name = file.replace(/\.scene\.json$/, "").split("/").pop()!;
-        if (scenes.has(name)) warn(`scene name "${name}" appears twice; keeping the first`);
-        else {
-          scenes.set(name, parsed.data);
-          sceneFiles.set(name, full);
-        }
-      } catch (error) {
-        warn(`scene ${file} unreadable: ${error instanceof Error ? error.message : String(error)}`);
+      const name = file.replace(/\.scene\.json$/, "").split("/").pop()!;
+      if (sceneFiles.has(name)) warn(`scene name "${name}" appears twice; keeping the first`);
+      else {
+        sceneFiles.set(name, full);
+        scenes.add(name, full, file);
       }
     }
   }
   return { assets, scenes, sceneFiles, worlds, worldFiles, scriptDirs, warnings };
 }
 
+/** Scene docs by name, read off disk and validated when first asked for (see LoadedContent.scenes). */
+class LazyScenes implements ReadonlyMap<string, SceneDoc> {
+  private readonly files = new Map<string, { full: string; rel: string }>();
+  private readonly parsed = new Map<string, SceneDoc | null>();
+  constructor(private readonly warn: (message: string) => void) {}
+
+  add(name: string, full: string, rel: string): void {
+    this.files.set(name, { full, rel });
+  }
+
+  get(name: string): SceneDoc | undefined {
+    const done = this.parsed.get(name);
+    if (done !== undefined) return done ?? undefined;
+    const file = this.files.get(name);
+    if (!file) return undefined;
+    let doc: SceneDoc | null = null;
+    try {
+      const parsed = sceneDocSchema.safeParse(JSON.parse(fs.readFileSync(file.full, "utf8")));
+      if (parsed.success) doc = parsed.data;
+      else this.warn(`scene ${file.rel} is invalid: ${JSON.stringify(parsed.error.issues.slice(0, 3))}`);
+    } catch (error) {
+      this.warn(`scene ${file.rel} unreadable: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    this.parsed.set(name, doc);
+    return doc ?? undefined;
+  }
+
+  has(name: string): boolean {
+    return this.get(name) !== undefined;
+  }
+
+  get size(): number {
+    return this.files.size;
+  }
+
+  keys(): MapIterator<string> {
+    return this.files.keys();
+  }
+
+  *entries(): MapIterator<[string, SceneDoc]> {
+    for (const name of this.files.keys()) {
+      const doc = this.get(name);
+      if (doc) yield [name, doc];
+    }
+  }
+
+  *values(): MapIterator<SceneDoc> {
+    for (const [, doc] of this.entries()) yield doc;
+  }
+
+  forEach(cb: (value: SceneDoc, key: string, map: ReadonlyMap<string, SceneDoc>) => void): void {
+    for (const [name, doc] of this.entries()) cb(doc, name, this);
+  }
+
+  [Symbol.iterator](): MapIterator<[string, SceneDoc]> {
+    return this.entries();
+  }
+}
+
+/**
+ * The projects a scene needs: the one owning `scenes/<scene>.scene.json` plus
+ * its project.json `dependsOn`, transitively — the same scope the dev bridge
+ * boots the editor with. null when no project owns the scene (load everything).
+ */
+function projectScopeOf(projectsDir: string, scene: string): string[] | null {
+  if (!fs.existsSync(projectsDir)) return null;
+  const owner = fs
+    .readdirSync(projectsDir, { withFileTypes: true })
+    .find((entry) => entry.isDirectory() && fs.existsSync(path.join(projectsDir, entry.name, "assets", "scenes", `${scene}.scene.json`)));
+  if (!owner) return null;
+  return projectDependencyClosure(owner.name, (name) => {
+    try {
+      const parsed = projectManifestSchema.safeParse(JSON.parse(fs.readFileSync(path.join(projectsDir, name, "project.json"), "utf8")));
+      return parsed.success ? parsed.data : null;
+    } catch {
+      return null;
+    }
+  });
+}
+
 /**
  * Resolve the content roots for a playground checkout: every
  * `projects/<name>/` that has an `assets/` folder, plus the flat playground
  * tree itself (throwaway experiments live there). Order matters only for
- * duplicate ids (first wins), same as the dev server.
+ * duplicate ids (first wins), same as the dev server. With `scene`, only the
+ * project owning it and its `dependsOn` closure load — a server hosting
+ * proving never parses an unrelated project's prefabs.
  */
-export function playgroundRoots(playgroundDir: string): string[] {
+export function playgroundRoots(playgroundDir: string, scene?: string): string[] {
   const roots: string[] = [];
   const projectsDir = path.join(playgroundDir, "projects");
+  const scope = scene ? projectScopeOf(projectsDir, scene) : null;
   if (fs.existsSync(projectsDir)) {
     for (const entry of fs.readdirSync(projectsDir, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
+      if (scope && !scope.includes(entry.name)) continue;
       const dir = path.join(projectsDir, entry.name);
       if (fs.existsSync(path.join(dir, "assets"))) roots.push(dir);
     }

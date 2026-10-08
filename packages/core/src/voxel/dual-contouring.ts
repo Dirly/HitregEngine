@@ -348,7 +348,7 @@ export function dualContour(block: SampledBlock, options: DualContourOptions = {
   const attrSpecs = Object.entries(options.attributes ?? {});
   const attrOut: Record<string, number[]> = {};
   for (const [name] of attrSpecs) attrOut[name] = [];
-  const scratch = new Float32Array(16);
+  const scratch = new Float32Array(Math.max(16, ...attrSpecs.map(([, spec]) => spec.size)));
 
   // Cells that can be solved at all: every corner needs a valid central
   // difference, which bounds the cell index to [1, n-3]. With pad = 2 that is

@@ -39,6 +39,8 @@ import { catalogOf, readSheet, sheetKey, sheetStoreOf, type SheetStoreLike } fro
 export class CharacterLook extends Script {
   static override scriptName = "character-look";
   static override presentation = true;
+  /** Nothing to place or swap on a dedicated server (no skeleton, no meshes, nobody looking): it never runs there. */
+  static clientOnly = true;
   static override params = {
     actor: {
       default: "",
@@ -80,6 +82,17 @@ export class CharacterLook extends Script {
   private placement: ModelPlacement | null = null;
   private bone: THREE.Object3D | null = null;
   private boneName = "";
+  /** The mount's `hang` bone, and the socket bone's bind pose in its frame (inv(C0)·H0). */
+  private hangBone: THREE.Object3D | null = null;
+  private hangName = "";
+  private hangRest: THREE.Matrix4 | null = null;
+  private hangDelta: THREE.Matrix4 | null = null;
+  /** The animated model root above the socket bone (carries userData.poseVersion), and what the last placement was computed from. */
+  private poseHolder: THREE.Object3D | null = null;
+  private poseHolderFor: THREE.Object3D | null = null;
+  private poseSeen = -1;
+  private placementSeen: ModelPlacement | null = null;
+  private parentSeen: THREE.Matrix4 | null = null;
   private tables = new Map<string, ModelTables | null>();
   private asked = new Set<string>();
   private unsubscribe: (() => void) | null = null;
@@ -224,6 +237,20 @@ export class CharacterLook extends Script {
       // what a portrait of the body needs to re-seat this piece on ITS clone's bone
       target.userData["characterPiece"] = { entityId: this.target, model: this.targetModel, socket };
     }
+    // Pose LOD holds a distant resident's pose between evaluations: when the
+    // pose version and the parent's world matrix are unchanged, the piece is
+    // already where this would put it (cosmetic only; nothing reads it in fixedUpdate).
+    if (this.poseHolderFor !== this.bone) {
+      this.poseHolderFor = this.bone;
+      this.poseHolder = null;
+      for (let o: THREE.Object3D | null = this.bone; o; o = o.parent) {
+        if (typeof o.userData["poseVersion"] === "number") { this.poseHolder = o; break; }
+      }
+      this.poseSeen = -1;
+    }
+    const version = this.poseHolder ? (this.poseHolder.userData["poseVersion"] as number) : -1;
+    parent.updateWorldMatrix(true, false);
+    if (version >= 0 && version === this.poseSeen && this.placementSeen === at && this.parentSeen?.equals(parent.matrixWorld)) return;
     const offset = mirrored ? at.mirrorTo!.offset : at.offset;
     const rot = mirrored ? at.mirrorTo!.rotationDeg : at.rotationDeg;
     const d = Math.PI / 180;
@@ -238,5 +265,74 @@ export class CharacterLook extends Script {
     this.inverse.copy(parent.matrixWorld).invert();
     this.world.premultiply(this.inverse);
     this.world.decompose(target.position, target.quaternion, target.scale);
+    this.followHang(at, target, mirrored);
+    this.poseSeen = version;
+    this.placementSeen = at;
+    (this.parentSeen ??= parent.matrixWorld.clone()).copy(parent.matrixWorld);
+  }
+
+  /**
+   * Where the mount's hanging ends go this frame, for the moving batch
+   * (`userData.hangDelta`, WORLD space). A vertex with hang weight w is drawn
+   * at mix(p, D·p, w), D = G · inv(H), H the socket bone now and G where it
+   * would carry the ends:
+   *
+   * - PLUMB (the mount's `hang` names no socket): the socket bone as the bind
+   *   pose holds it on the body's ROOT, moved to where the socket is now. The
+   *   ends keep hanging as modelled whatever the neck does, and ignore the
+   *   chest — a breathing, hunched or arms-folded idle drags nothing.
+   * - A BONE (`hang.socket`): the socket bone carried rigidly on that bone as
+   *   the pair sat at the bind pose, G = C · inv(C0)·H0. Tried for braids on
+   *   the chest and rejected (2026-09-29): the idles move the chest a lot
+   *   against the head, so the ends bobbed, dropped and went through the
+   *   shoulders.
+   */
+  private followHang(at: ModelPlacement, target: THREE.Object3D, mirrored: boolean | undefined): void {
+    const name = mirrored || !at.hang ? null : (at.hang.socket ?? "");
+    if (name === null || !this.bone) {
+      if (target.userData["hangDelta"]) delete target.userData["hangDelta"];
+      return;
+    }
+    if (this.hangName !== name || !this.hangBone?.parent || !this.hangRest) {
+      this.hangName = name;
+      this.hangBone = null;
+      this.hangRest = null;
+      const body = this.ctx.getObject(this.bodyId) ?? target.parent;
+      let skinned: THREE.SkinnedMesh | null = null;
+      body?.traverse((o) => {
+        if (!skinned && (o as THREE.SkinnedMesh).skeleton) skinned = o as THREE.SkinnedMesh;
+      });
+      const mesh = skinned as THREE.SkinnedMesh | null;
+      if (!mesh) return; // the skinned model loads async
+      const sk = mesh.skeleton;
+      const h = sk.bones.findIndex((b) => b.name === this.boneName);
+      const c = name ? sk.bones.findIndex((b) => b.name === name) : -1;
+      if (h < 0 || (name && c < 0)) {
+        console.warn(`[character-look] ${this.entityId}: no bone "${h < 0 ? this.boneName : name}" in the body's skeleton for the hang`);
+        return;
+      }
+      // H0 = inv(boneInverse[h]) is the socket at the bind pose, in the frame the bind was taken in
+      const socketAtBind = this.inverse.copy(sk.boneInverses[h]!).invert();
+      if (name) {
+        this.hangBone = sk.bones[c]!;
+        this.hangRest = sk.boneInverses[c]!.clone().multiply(socketAtBind);
+      } else {
+        this.hangBone = mesh;
+        this.hangRest = mesh.bindMatrix.clone().multiply(socketAtBind);
+      }
+      this.hangDelta = this.hangRest.clone();
+    }
+    const delta = this.hangDelta!;
+    this.hangBone.updateWorldMatrix(true, false);
+    delta.multiplyMatrices(this.hangBone.matrixWorld, this.hangRest);
+    if (!name) {
+      // plumb: the bind pose's orientation, at the socket's position now
+      const e = this.bone.matrixWorld.elements;
+      delta.elements[12] = e[12]!;
+      delta.elements[13] = e[13]!;
+      delta.elements[14] = e[14]!;
+    }
+    delta.multiply(this.inverse.copy(this.bone.matrixWorld).invert());
+    target.userData["hangDelta"] = delta;
   }
 }

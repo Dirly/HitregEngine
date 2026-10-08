@@ -100,10 +100,24 @@ function harness(fixedItem = "") {
   };
   const sheet = () => netState.get("character/player") as CharacterSheet;
   const uidOf = (itemId: string) => Object.entries(sheet().items).find(([, s]) => s.itemId === itemId)![0];
-  return { runtime, bus, tick, looks, uidOf, sheet };
+  return { runtime, bus, tick, looks, uidOf, sheet, netState };
 }
 
 describe("equipment-look builtin", () => {
+  it("shows the secondary item in the main hand while weapon set 1 is in hand", () => {
+    const h = harness();
+    h.bus.emit("inventory.equip", { actorId: "player", uid: h.uidOf("steel"), slot: "secondary" });
+    h.tick(2);
+    expect(h.looks.at(-1)?.look.parts).toEqual(["Handle", "Blade1"]);
+    h.netState.set("hand/player", { set: 1 });
+    h.tick();
+    expect(h.looks.at(-1)?.look.parts).toEqual(["Handle", "Blade4"]);
+    h.netState.set("hand/player", { set: 0 });
+    h.tick();
+    expect(h.looks.at(-1)?.look.parts).toEqual(["Handle", "Blade1"]);
+    h.runtime.dispose();
+  });
+
   it("shows a FIXED item (a townsperson's sword) whatever the sheet holds", () => {
     const h = harness("steel");
     h.tick();

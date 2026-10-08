@@ -40,6 +40,30 @@ export interface WebSocketHostTransportOptions {
    * own stale link); return `{}` to accept the proposal. Absent = open server.
    */
   authenticate?: (hello: WsHello) => WsAuthResult | Promise<WsAuthResult>;
+  /**
+   * permessage-deflate for clients that offer it (every browser does). Game
+   * traffic is JSON with the same keys over and over, so it shrinks several
+   * times; the deflate itself runs on libuv's thread pool, not the tick.
+   * `threshold`: messages smaller than this many bytes go uncompressed (default
+   * 1024). Default OFF until the starvation below is solved (see voxel-demo
+   * docs/combat-build/P-performance.md); `true` turns it on.
+   *
+   * The deflate finishes in a callback on the event loop, and `ws` runs a
+   * bounded number at once across ALL sockets: on a busy tick loop a small
+   * limit becomes a queue that grows without end (measured: 20 players on a
+   * saturated server received almost nothing). So only messages worth it are
+   * compressed (snapshots, joins, big deltas: the per-tick state and events
+   * stay plain) and the limit is high.
+   */
+  compress?: boolean | { threshold?: number; level?: number };
+}
+
+/** Bytes and messages a peer's socket has carried (wire bytes: after compression, with framing). */
+export interface WsPeerTraffic {
+  bytesOut: number;
+  bytesIn: number;
+  messagesOut: number;
+  messagesIn: number;
 }
 
 export interface WsHello {
@@ -53,6 +77,8 @@ export type WsAuthResult = { reject: string; peerId?: undefined } | { reject?: u
 interface PeerSocket {
   socket: WsSocket;
   connected: boolean;
+  messagesOut: number;
+  messagesIn: number;
 }
 
 /**
@@ -82,13 +108,25 @@ export class WebSocketHostTransport implements Transport {
     this.maxPeers = options.maxPeers ?? Infinity;
     this.onHandshake = options.onHandshake;
     this.authenticate = options.authenticate;
-    const wssOptions: ServerOptions = options.server
+    const compress = options.compress ?? false;
+    const deflate: ServerOptions["perMessageDeflate"] = compress
+      ? {
+          threshold: typeof compress === "object" ? (compress.threshold ?? 1024) : 1024,
+          concurrencyLimit: 64,
+          // level 1: most of the gain on repetitive JSON at a fraction of the cost
+          zlibDeflateOptions: { level: typeof compress === "object" ? (compress.level ?? 1) : 1 },
+          // the client keeps no window between messages (cheap for a phone); the
+          // server keeps its own, so consecutive snapshots compress against each other
+          clientNoContextTakeover: true,
+        }
+      : false;
+    const wssOptions: ServerOptions = { perMessageDeflate: deflate, ...(options.server
       ? { server: options.server, ...(options.path ? { path: options.path } : {}) }
       : {
           port: options.port ?? 0,
           ...(options.host ? { host: options.host } : {}),
           ...(options.path ? { path: options.path } : {}),
-        };
+        }) };
     this.wss = new WebSocketServer(wssOptions);
     this.listening = options.server
       ? Promise.resolve()
@@ -129,7 +167,18 @@ export class WebSocketHostTransport implements Transport {
       this.trace("ws-drop", peer);
       return;
     }
+    entry.messagesOut++;
     socket.send(frameData(channel, data), { binary: true });
+  }
+
+  /** Wire traffic per connected peer since it connected (diagnostics, load tests). */
+  traffic(): Record<string, WsPeerTraffic> {
+    const out: Record<string, WsPeerTraffic> = {};
+    for (const [id, peer] of this.peersById) {
+      const raw = (peer.socket as unknown as { _socket?: { bytesWritten?: number; bytesRead?: number } })._socket;
+      out[id] = { bytesOut: raw?.bytesWritten ?? 0, bytesIn: raw?.bytesRead ?? 0, messagesOut: peer.messagesOut, messagesIn: peer.messagesIn };
+    }
+    return out;
   }
 
   broadcast(channel: Channel, data: Uint8Array): void {
@@ -200,7 +249,7 @@ export class WebSocketHostTransport implements Transport {
       } else {
         peerId = this.peersById.has(hs.peerId) ? `${hs.peerId}-${Math.random().toString(36).slice(2, 6)}` : hs.peerId;
       }
-      this.peersById.set(peerId, { socket, connected: true });
+      this.peersById.set(peerId, { socket, connected: true, messagesOut: 0, messagesIn: 0 });
       socket.send(JSON.stringify({ ws: "welcome", peerId } satisfies WsHandshake));
       this.trace("ws-peer", peerId);
       this.onHandshake?.(peerId, auth.name ?? hs.name);
@@ -242,6 +291,8 @@ export class WebSocketHostTransport implements Transport {
         const frame = unframeData(bytes);
         if (!frame) return;
         const from = peerId;
+        const entry = this.peersById.get(from);
+        if (entry) entry.messagesIn++;
         const payload = frame.data.slice();
         for (const cb of [...this.messageHandlers]) cb(from, frame.channel, payload);
       } catch (error) {

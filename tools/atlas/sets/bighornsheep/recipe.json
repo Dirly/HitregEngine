@@ -1,0 +1,210 @@
+{
+ "source": "MMO/3d/Mobs/Dragon/BighornSheep-parts.obj",
+ "sourceScale": 1,
+ "objScale": 1,
+ "outMesh": "MMO/3d/Mobs/Dragon/BighornSheep-unwrapped",
+ "sheet": 1254,
+ "keyStroke": 8,
+ "smooth": 48,
+ "margin": 22,
+ "gutter": 48,
+ "atlas": {
+  "size": 580,
+  "bleed": 2,
+  "bgLum": 236
+ },
+ "mirrorCopy": {
+  "axis": "z",
+  "parts": [
+   "BighornSheep_Head",
+   "BighornSheep_Body",
+   "BighornSheep_LegFront",
+   "BighornSheep_LegBack",
+   "BighornSheep_Horn"
+  ]
+ },
+ "slots": {
+  "head": {
+   "color": "#ff0000",
+   "fit": "contain",
+   "labelMax": 1
+  },
+  "crown": {
+   "color": "#00ff00",
+   "fit": "contain",
+   "matchTo": "head",
+   "label": "head top"
+  },
+  "snout": {
+   "color": "#0000ff",
+   "fit": "contain",
+   "matchTo": "head",
+   "label": "snout front"
+  },
+  "body": {
+   "color": "#ffff00",
+   "fit": "contain"
+  },
+  "chest": {
+   "color": "#ff00ff",
+   "fit": "contain",
+   "matchTo": "body",
+   "label": "chest"
+  },
+  "rump": {
+   "color": "#ff8000",
+   "fit": "contain",
+   "matchTo": "body",
+   "label": "rump"
+  },
+  "back": {
+   "color": "#8000ff",
+   "fit": "contain",
+   "matchTo": "body",
+   "label": "back top"
+  },
+  "leg-front": {
+   "color": "#008c00",
+   "fit": "contain",
+   "matchTo": "body"
+  },
+  "leg-back": {
+   "color": "#00008c",
+   "fit": "contain",
+   "matchTo": "body"
+  },
+  "horn": {
+   "color": "#8c0000",
+   "fit": "contain"
+  }
+ },
+ "parts": {
+  "BighornSheep_Head": {
+   "slot": "head",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.4,
+   "split": [
+    {
+     "slot": "snout",
+     "facing": "+x",
+     "above": 0.7,
+     "u": "-z",
+     "v": "-y",
+     "flare": 0.15
+    },
+    {
+     "slot": "crown",
+     "facing": "+y",
+     "above": 0.7,
+     "u": "+x",
+     "v": "+z",
+     "flare": 0.15
+    }
+   ]
+  },
+  "BighornSheep_Body": {
+   "slot": "body",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.35,
+   "split": [
+    {
+     "slot": "chest",
+     "facing": "+x",
+     "above": 0.6,
+     "u": "-z",
+     "v": "-y",
+     "flare": 0.15
+    },
+    {
+     "slot": "rump",
+     "facing": "-x",
+     "above": 0.6,
+     "u": "+z",
+     "v": "-y",
+     "flare": 0.15
+    },
+    {
+     "slot": "back",
+     "facing": "+y",
+     "above": 0.62,
+     "u": "+x",
+     "v": "+z",
+     "flare": 0.1
+    }
+   ]
+  },
+  "BighornSheep_LegFront": {
+   "slot": "leg-front",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "BighornSheep_LegBack": {
+   "slot": "leg-back",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "BighornSheep_Horn": {
+   "slot": "horn",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  }
+ },
+ "layout": {
+  "col": [
+   {
+    "row": [
+     "body",
+     "crown",
+     "snout"
+    ]
+   },
+   {
+    "row": [
+     "horn",
+     "leg-front",
+     "head"
+    ]
+   },
+   {
+    "row": [
+     "chest",
+     "leg-back",
+     "rump",
+     "back"
+    ]
+   }
+  ]
+ },
+ "marks": [
+  {
+   "slot": "head",
+   "at": [
+    0.6052,
+    1.111,
+    -0.1281
+   ],
+   "shape": "eye",
+   "size": 10
+  }
+ ],
+ "cutoutSlots": [],
+ "combos": [
+  [
+   "BighornSheep_Head",
+   "BighornSheep_Body",
+   "BighornSheep_LegFront",
+   "BighornSheep_LegBack",
+   "BighornSheep_Horn"
+  ]
+ ]
+}

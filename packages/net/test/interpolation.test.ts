@@ -146,3 +146,20 @@ describe("InterpolationClock", () => {
     expect(tick).toBeLessThan(100.5);
   });
 });
+
+describe("TransformInterpolator holds", () => {
+  it("a sample marked `hold` resumes from where the entity stood at that tick, not across the whole gap", () => {
+    const interp = new TransformInterpolator();
+    interp.push(0, { a: { p: [0, 0, 0] } });
+    interp.push(3, { a: { p: [0, 0, 0] } }); // stopped: sent twice, then left out
+    // left out for ticks 6..27; moves again at 30, unchanged up to the previous snapshot (27)
+    interp.push(30, { a: { p: [3, 0, 0], hold: 27 } });
+    expect(interp.sample(20).get("a")!.p[0]).toBeCloseTo(0, 5); // still standing
+    expect(interp.sample(28.5).get("a")!.p[0]).toBeCloseTo(1.5, 5); // moving over 27..30
+    // without the mark the same gap is spread over 3..30
+    const plain = new TransformInterpolator();
+    plain.push(3, { a: { p: [0, 0, 0] } });
+    plain.push(30, { a: { p: [3, 0, 0] } });
+    expect(plain.sample(20).get("a")!.p[0]).toBeGreaterThan(1.5);
+  });
+});

@@ -1,11 +1,15 @@
 import * as THREE from "three/webgpu";
+import { VEGETATION_TINT_ATTRIBUTES } from "./vegetation-tint.js";
+import { addRimLight } from "./rim-light.js";
 import { APPEARANCE_FLOATS, appearanceColorNode, appearanceTileNode, skinPageOf, tileTableOf, type SkinContext } from "./appearance.js";
 import {
   Fn,
   attribute,
   context,
+  cross,
   float,
   mat4,
+  mix,
   materialAO,
   materialColor,
   materialEmissive,
@@ -426,6 +430,56 @@ export function applyInstanceGlow(material: THREE.Material): void {
 }
 
 /**
+ * Per-instance HANG: a second, rigid placement for the ends of a socketed
+ * model that rest on the body — braids on the chest, long hair down the back —
+ * as `instanceHangRotation` (a quaternion) and `instanceHangOffset` (xyz), the
+ * WORLD-space transform from where the socket puts a vertex to where the hang
+ * bone would (character-look's `hangDelta`). Each vertex blends between the
+ * two by its baked weight in `uv1.y` (0 = the socket, 1 = the hang bone), so a
+ * braid's root stays on the head while its tip stays on the chest.
+ *
+ * Why not skin it: a skinned mesh is a draw per character, and hair is one
+ * moving batch for everyone. This costs one 8-float vertex buffer (a moving
+ * worn-look batch binds seven; WebGPU guarantees eight) and two input
+ * locations (15 of 16 with the appearance table). It is a two-bone blend, not
+ * a chain: a long braid bends smoothly but cannot curl.
+ */
+export const INSTANCE_HANG_ATTRIBUTES = ["instanceHangRotation", "instanceHangOffset"] as const;
+const HANG_STRIDE = 8;
+const HANG_FLAG = "isInstanceHangMaterial";
+
+/**
+ * Make an {@link applyInstancedProps} material read the hang attributes.
+ * Call it straight after `applyInstancedProps` and BEFORE
+ * {@link applyInstanceUber}: the uber hook collapses a hidden part's vertices
+ * to one point, and a blend applied after that would spread them out again by
+ * their weights. The batch must {@link InstancedProps.enableHang}. Idempotent.
+ */
+export function applyInstanceHang(material: THREE.Material): void {
+  const node = material as THREE.NodeMaterial;
+  if (node.isNodeMaterial !== true || node.userData[HANG_FLAG] === true) return;
+  const [rotationName, offsetName] = INSTANCE_HANG_ATTRIBUTES;
+  const q = attribute<"vec4">(rotationName, "vec4");
+  const t = attribute<"vec4">(offsetName, "vec4");
+  const inner = node.positionNode as THREE.Node | null | undefined;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  node.positionNode = (Fn as any)((_: unknown, builder: { hasGeometryAttribute(name: string): boolean }) => {
+    const placed = inner ?? positionLocal;
+    if (!builder.hasGeometryAttribute("uv1")) return placed;
+    const w = vec2(uv(1)).y;
+    // v rotated by the unit quaternion q
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rotate = (v: any): any => v.add(cross(q.xyz, cross(q.xyz, v).add(v.mul(q.w))).mul(2));
+    const p = vec3(placed as unknown as ReturnType<typeof vec3>).toVar();
+    positionLocal.assign(mix(p, rotate(p).add(t.xyz), w));
+    if (builder.hasGeometryAttribute("normal")) normalLocal.assign(mix(normalLocal, rotate(normalLocal), w).normalize());
+    return positionLocal;
+  })();
+  node.userData[HANG_FLAG] = true;
+  node.needsUpdate = true;
+}
+
+/**
  * Per-instance APPEARANCE (appearance.ts): each part's tile and a skin tone,
  * as ONE interleaved buffer of 16 floats — `instanceAppearance0..2` the
  * part→tile codes, `instanceAppearance3` the tint (linear rgb, on). One
@@ -463,6 +517,7 @@ export function applyInstanceAppearance(
   const uber = attribute<"vec4">(INSTANCE_UBER_ATTRIBUTE, "vec4");
   const tile = appearanceTileNode([a0, a1, a2], tileTableOf(tiles, [0, 0, 1]), uber.xyz);
   node.colorNode = appearanceColorNode(map, tile, vertexStage(a3), page, (node as unknown as { color?: THREE.Color }).color ?? null);
+  addRimLight(node);
   node.userData[APPEARANCE_FLAG] = true;
   node.needsUpdate = true;
 }
@@ -487,7 +542,13 @@ function instancedGeometryFrom(base: THREE.BufferGeometry): THREE.InstancedBuffe
   const geometry = new THREE.InstancedBufferGeometry();
   if (base.index) geometry.setIndex(new THREE.BufferAttribute(base.index.array, 1));
   for (const [name, attr] of Object.entries(base.attributes)) {
-    if ((attr as THREE.InstancedBufferAttribute).isInstancedBufferAttribute) {
+    const interleaved = attr as THREE.InterleavedBufferAttribute;
+    if ((attr as THREE.InstancedBufferAttribute).isInstancedBufferAttribute ||
+        (interleaved.isInterleavedBufferAttribute &&
+         (interleaved.data as THREE.InterleavedBuffer & { isInstancedInterleavedBuffer?: boolean }).isInstancedInterleavedBuffer)) {
+      // Page metadata is already allocated for this batch. De-interleaving it
+      // through clone() loses the instance divisor: every quad vertex would
+      // then read a DIFFERENT tree's atlas region/scale/rotation.
       geometry.setAttribute(name, attr);
     } else if ((attr as THREE.InterleavedBufferAttribute).isInterleavedBufferAttribute) {
       geometry.setAttribute(name, (attr as THREE.InterleavedBufferAttribute).clone() as unknown as THREE.BufferAttribute);
@@ -525,6 +586,8 @@ export class InstancedProps extends THREE.Mesh {
   readonly capacity: number;
   /** Culling volume over the placed instances; null until computed. */
   boundingSphere: THREE.Sphere | null = null;
+  /** Placed bounds for Box3/culling; base geometry alone omits instance transforms. */
+  boundingBox: THREE.Box3 | null = null;
   /** Per-instance UV rotation (radians); null until {@link enableUvRotation}. */
   private uvRotation: THREE.InstancedBufferAttribute | null = null;
   /** Per-instance tile + part mask; null until {@link enableUber}. */
@@ -539,6 +602,9 @@ export class InstancedProps extends THREE.Mesh {
   private glow: THREE.InstancedInterleavedBuffer | null = null;
   /** Per-instance part tiles + skin tint (16 floats); null until {@link enableAppearance}. */
   private appearance: THREE.InstancedInterleavedBuffer | null = null;
+  /** Per-instance hang placement (8 floats); null until {@link enableHang}. */
+  private hang: THREE.InstancedInterleavedBuffer | null = null;
+  private vegetationTint: THREE.InstancedInterleavedBuffer | null = null;
 
   constructor(base: THREE.BufferGeometry, material: THREE.Material | THREE.Material[], count: number) {
     const capacity = Math.max(count, 1);
@@ -575,6 +641,22 @@ export class InstancedProps extends THREE.Mesh {
 
   getMatrixAt(index: number, matrix: THREE.Matrix4): THREE.Matrix4 {
     return matrix.fromArray(this.instanceMatrix.array as Float32Array, index * FLOATS_PER_INSTANCE);
+  }
+
+  enableVegetationTint(): void {
+    if (this.vegetationTint) return;
+    this.vegetationTint = new THREE.InstancedInterleavedBuffer(new Float32Array(this.capacity * 6).fill(1), 6, 1);
+    VEGETATION_TINT_ATTRIBUTES.forEach((name, i) => {
+      this.geometry.setAttribute(name, new THREE.InterleavedBufferAttribute(this.vegetationTint!, 3, i * 3));
+    });
+  }
+
+  setVegetationTintAt(index: number, data: ArrayLike<number>, offset = 0): void {
+    this.enableVegetationTint();
+    const buffer = this.vegetationTint!;
+    for (let k = 0; k < 6; k++) buffer.array[index * 6 + k] = data[offset + k] ?? 1;
+    buffer.addUpdateRange(index * 6, 6);
+    buffer.needsUpdate = true;
   }
 
   /**
@@ -708,6 +790,43 @@ export class InstancedProps extends THREE.Mesh {
     return this.appearance !== null;
   }
 
+  /**
+   * Allocate the hang buffer (identity = the whole model on its socket). Every
+   * batch drawn with an {@link applyInstanceHang} material must have called this.
+   */
+  enableHang(): void {
+    if (this.hang) return;
+    this.hang = new THREE.InstancedInterleavedBuffer(new Float32Array(this.capacity * HANG_STRIDE), HANG_STRIDE, 1);
+    const a = this.hang.array as Float32Array;
+    for (let i = 0; i < this.capacity; i++) a[i * HANG_STRIDE + 3] = 1;
+    INSTANCE_HANG_ATTRIBUTES.forEach((name, i) => {
+      this.geometry.setAttribute(name, new THREE.InterleavedBufferAttribute(this.hang!, 4, i * 4));
+    });
+  }
+
+  /** True once {@link enableHang} has run. */
+  get hasHang(): boolean {
+    return this.hang !== null;
+  }
+
+  /** One instance's hang: a world-space rigid transform (rotation quaternion + offset); null = identity. */
+  setHangAt(index: number, rotation: THREE.Quaternion | null, offset: THREE.Vector3 | null): void {
+    if (!this.hang) {
+      console.warn("[render] InstancedProps.setHangAt before enableHang(); ignored");
+      return;
+    }
+    const a = this.hang.array as Float32Array;
+    const at = index * HANG_STRIDE;
+    a[at] = rotation?.x ?? 0;
+    a[at + 1] = rotation?.y ?? 0;
+    a[at + 2] = rotation?.z ?? 0;
+    a[at + 3] = rotation?.w ?? 1;
+    a[at + 4] = offset?.x ?? 0;
+    a[at + 5] = offset?.y ?? 0;
+    a[at + 6] = offset?.z ?? 0;
+    this.hang.needsUpdate = true;
+  }
+
   /** True once {@link enableUvRotation} has run. */
   get hasUvRotation(): boolean {
     return this.uvRotation !== null;
@@ -733,6 +852,17 @@ export class InstancedProps extends THREE.Mesh {
    * compacted tier only ever holds a subset of that placement, so the
    * volume stays valid; see scene-builder).
    */
+  computeBoundingBox(): void {
+    const geometry = this.geometry;
+    if (geometry.boundingBox === null) geometry.computeBoundingBox();
+    const box = (this.boundingBox ??= new THREE.Box3()).makeEmpty();
+    const placed = new THREE.Box3();
+    for (let i = 0; i < this.instanceCount; i++) {
+      this.getMatrixAt(i, _matrix);
+      box.union(placed.copy(geometry.boundingBox!).applyMatrix4(_matrix));
+    }
+  }
+
   computeBoundingSphere(): void {
     const geometry = this.geometry;
     if (geometry.boundingSphere === null) geometry.computeBoundingSphere();

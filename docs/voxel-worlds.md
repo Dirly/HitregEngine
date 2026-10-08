@@ -40,6 +40,21 @@ in a text editor, diff it in git, and hand-edit any of it.
 
 ## 2. Files
 
+Raster elevation experiments can use `features.heightPatches` (schema in the
+generated spec). Import brightness into absolute metres before authoring the
+recipe edit; image pixels are data, so do not apply sRGB/gamma conversion or
+automatic contrast normalization. Record the image-to-world transform and keep
+the original generated image. Resample to a spacing appropriate for the voxel
+lattice rather than fitting hand-built terrain features to the picture.
+
+Patches evaluate in the shared world heightfield, so streaming meshes, collision
+and placement use the same elevation source. Their blend is inside the footprint
+and has zero influence and zero blend derivative at its boundary (its width is
+automatic and never under two voxel steps; see "Height-patch edges" below); a separate
+overlapping mesh is not a welded patch. Check shared mesher samples and inspect
+the final shore. Existing 3D density modifiers still apply, and a grayscale image
+can miss the requested sea level even when it resembles a cove visually.
+
 ```text
 assets/worlds/<id>.json          the recipe — the world
 assets/materials/terrain/<id>.json  the terrain material (splat source "vertex")
@@ -127,6 +142,22 @@ out of the world.
 lattice; jitter, species, scale and yaw are pure hashes of its lattice
 coordinate. A tree lands in the same spot whichever direction you walked in
 from, and there is no seam of doubled or missing trees at a cell edge.
+
+**Plants stand on the carved ground, or not at all.** Near a passage, tunnel
+or subtracting blob, scatter and cover go through `editedGround` (section 25b).
+Where no carve reaches, placement is byte-identical to the plain heightfield
+path. Checked by `worldgen scatter-float` and `packages/core/test/voxel-scatter-float.test.ts`.
+
+**Uniform flat cells can collapse without flattening the world.** The MC mesh
+path checks the complete padded sample block for identical vertical profiles
+with one upward surface crossing, then requires identical splat/tint values at
+every original surface vertex. It replaces only that cell's interior grid with
+a planar fan, retaining the complete boundary lattice and normal LOD skirts.
+Render, collision and placement still consume the same mesh. Corners alone are
+insufficient evidence: an interior cave, height patch or painted region must
+prevent collapse. The DC paths are unchanged. Density samples remain temporary;
+this reduces retained mesh arrays, GPU vertices and collision triangles rather
+than introducing a persistent sparse voxel store.
 
 ---
 
@@ -256,7 +287,21 @@ Two related fixes worth remembering because both failed *silently*:
 - **Deep caves need vertical chunk sections.** Today a cell meshes one
   vertical band around the surface (`verticalRange`), so tunnels below it are
   capped rather than streamed. Sections are the fix; the mesh source already
-  takes an explicit `yRange` for it.
+  takes an explicit `yRange` for it. Authored `features.passages` include their
+  floor and complete roof envelope in intersecting cells' band, so bounded deep passage trials can stream
+  without changing the world's resolution. This is not a vertical section system.
+  Their signed exterior samples preserve planar crossings; coarse MC still
+  bevels corners, so certify flat usable width on the actual mesh rather than
+  reading it from the field dimensions. Skirts on any underside (passage
+  roof, cave ceiling, overhang) extrude UP, and every skirt is clamped to the
+  rock actually there (see the LOD-crack entry), so thin cover at a chunk
+  seam no longer makes a blade; `tools/voxel-blades.mts` checks it.
+  These cutters can also make elliptical chambers and add outward wall relief
+  and arched roofs; consult the generated passage schema for their envelope.
+  A measured route graph can union them without sacrificing its floor or base
+  clearance. This is an authored generator, not unconstrained noise caves:
+  certify every junction, chamber connection and seam on the actual collision
+  mesh, then inspect a live avatar for room scale and visible wall relief.
 - **LOD crack at the HLOD boundary — fixed 2026-09-02 with skirts.** Every
   cell hangs a strip three lattice steps deep from each boundary edge (`addSkirts`
   in mesh.ts): the higher side's strip covers the crack, the lower side's is
@@ -265,6 +310,25 @@ Two related fixes worth remembering because both failed *silently*:
   the strip is inside rock and physics never meets it. A test walks the shared
   plane between a fine cell and a 4x-coarser one and checks the higher skirt
   reaches below the lower surface at every sample.
+  **2026-10-06 — skirts are clamped to rock.** A fixed-depth strip poked out
+  through anything thinner than 6 m (a passage roof with 3 m cover, a knife
+  ridge, a carved overhang) as a pale blade that rendered, collided and
+  snapped props. Now undersides extrude up, the rest down, and each skirt
+  vertex travels only as far as the cell's own sampled lattice says rock
+  continues on that boundary column (a quarter step short of the first air
+  crossing); no rock, no strip. Same mesh for render/physics/placement, and
+  the column is on the shared plane, so both neighbours agree. Where cover is
+  thin an HLOD crack can show instead of a blade: the right trade.
+  **Band limits are per column, not per cell.** Each cell used to seal its
+  band at its own flat floor/ceiling, so a tunnel or carve crossing one
+  cell's floor but not its neighbour's was capped at two heights: open edges
+  on the seam (proving caves: 21-116 per cave network). `verticalBand` now
+  applies a pure function of (x, z): ceiling = column ground / add-blob tops /
+  passage roofs + headroom; floor = column ground − `below`, or near a carve
+  the bilinear of cell-corner minima so a tunnel into a hillside is never cut
+  shallower than before. Check with `auditVoxelMesh` (core) /
+  `tools/voxel-blades.mts <recipe> --sites --caves` (skirt ends in air and
+  open edges must be 0; exit 1 otherwise).
 - **Generation now runs in a worker pool.** (Was: "meshing is on the main
   thread ... a worker would remove it from the frame budget entirely"; done
   2026-09-02.) `voxelChunkProvider` hands cells to a pool of
@@ -788,6 +852,50 @@ A boulder in the middle of the highway is the single most obvious way a
 generated world announces that nothing was thought about. Defaults: boulders
 3.5 m, shrubs 2.5 m, trees 4 m.
 
+## 25b. Plants over a carve: stand on what is left, or go
+
+A passage, tunnel or subtracting blob exists only in the density. `height()`
+never sees it, and the overhang-aware `surfaceCast` searches just
+`overhang.strength * 1.5 + 2` metres either side of the heightfield. So a cave
+mouth, a cutting or a hollowed lip leaves the heightfield in mid-air, and
+anything placed from it floats. Traced on `proving` (2026-10): ground cover
+read the 2 m heightfield lattice and hung up to 14 m over cave and tunnel mouths
+(356 blades in its edited cells, 31 at the Undercut mouths). Scatter props
+already used `surfaceCast`, which happened to find every Undercut floor inside
+its window, but a cut deeper than the window fell back to `height()` and
+floated. Nothing checked the trunk's footing beside a lip either.
+
+The rule, in `editedGround` (core `voxel/scatter.ts`), shared by both:
+
+- `field.carveSpan(rect)` says whether any carve reaches a footing at all, and
+  how high and low it goes. A miss, or a carve buried deeper than the cast
+  window plus the footing (a tunnel under a hill), leaves the ORIGINAL code path
+  running, bit for bit. Unedited ground cannot change.
+- Near a live carve the column is cast through the carve's whole span. Nothing
+  solid means drop. The surface found is where the plant stands.
+- The footing must hold: 1.5 m of rock under the base (a lintel over a mouth is
+  not ground), and no point of the trunk ring (`scatterFooting`: the cylinder
+  collider radius, the narrow side of a box, half the footprint of a
+  collider-less bush) may fall more than `1 m + 1.2 x radius` below it.
+  Otherwise the plant is dropped before it claims spacing.
+- Cover (`voxel-ground.ts`) asks the same question once per 2 m probe, with a
+  1 m ring, and caches it. A blade grows only if all four probes around it are
+  unchanged ground. Cover is dropped from carved floors, not moved onto them.
+
+Cost: `scatterCell` on 60 edited cells went from 17.1 to 18.1 ms on `proving`
+and from 18.9 to 20.7 ms on `mmo`. Cells away from carves are unchanged (13.4
+vs 13.7 ms, which is run-to-run noise).
+A cover probe whose carve reaches the surface costs 185 us once.
+
+The check: `npx tsx tools/worldgen.mts scatter-float <world> --project <p>
+[--near x,z,r] [--list]` solves real cells and samples cover on a 1 m grid,
+then measures every instance against the cell's terrain MESH (what is drawn and
+collided with). It fails on a base more than 0.35 m above the mesh, or a footing
+ring that drops away, where a carve or height patch is the cause. Mismatches on
+untouched sharp heightfield edges (the 2 m mesh rounding a fill bank) are
+counted as background and not failed on. With no `--near` it samples every cell
+an edit touches. `proving`: 356 findings before, 0 after.
+
 ## 25a. `density` is a lattice, not an outcome — and a uniform one is an orchard
 
 Two separate traps, and between them they are why a first-cut generated world
@@ -798,12 +906,20 @@ be thick.
 lattice spacing (`1 / sqrt(density)`). Every candidate on it then has to clear
 slope, height, water, clearance, biome — and above all the SPACING test, which
 places nothing closer to its neighbour than the sum of the two footprints. A
-rule whose `footprint * scale[1]` exceeds half its lattice spacing is
+rule whose largest effective footprint exceeds half its lattice spacing is
 **packing-limited**, so raising its density changes nothing at all and nothing
 says so. Measured on the demo world before this pass: three tree rules
 authored at 13,000, 14,000 and 18,000/km² all landed within a few percent of
 5,000, all three footprint-limited. The forest, the meadow and the jungle
 therefore had the *same* tree density — which is exactly what it looked like.
+
+Weighted size cohorts keep saplings among a taller canopy without splitting a
+species into separate placement rules. Their choice uses an independent stable
+hash, so it does not reroll surviving trees' XZ positions or yaw. Larger cohorts
+claim larger footprints and can reduce realized density; measure the resulting
+forest rather than treating candidate weights as final population percentages.
+Collision stays in model space and inherits the final instance scale once.
+The generated scatter schema describes the authoring controls.
 
 `pnpm -F playground worldgen scatter <world>` now solves real cells and
 prints **realized props/km² per rule per biome**, plus what each `clump` mask
@@ -1559,30 +1675,81 @@ strips at one height. Ribbons are now clipped exactly to the cell
 (`clipPolylineToRect`), ending on the border at the same interpolated point
 the neighbour's run starts on.
 
-### The in-game map (M)
+### The in-game map (M) and the minimap
 
-`worldgen map` also writes the overview into the project's `assets/maps/`,
-and the playground draws it full-screen on **M** with the recipe's towns
-labelled, peaks and waterfalls marked, a 1 km scale bar, the nearest town's
-distance, and the player's position and heading (`src/world-map.ts`). It is
-the same picture an agent reads, put in front of the person walking the
-world, so "the river north of town-9" means one thing to both. Re-run
-`worldgen map` after any stage that moves a feature; the overlay reads the
-PNG and the recipe fresh each time it opens.
+One map, for whatever world the scene streams (`voxelWorld.world`), shown on
+**M** in the editor and in play (editor play mode and the published runtime),
+and drawn small by a HUD's minimap (`src/world-map.ts` over
+`src/map-layers.ts`). Its picture is `assets/maps/<world>.base.png` (terrain
++ water + rivers only, 2048 px: `worldgen map <world> --base`); everything
+else is vector layers drawn over it.
 
-The map is navigable and it is a dev-mode fast-travel: the wheel zooms
-about the cursor (to 32×; POIs get their names from 8×), drag pans, `0`
-resets, and a **click travels there** — the player body in play mode, the
-editor camera otherwise, with the status line reporting the cursor's world
-coordinates and its distance from you. The ground height comes from the
-recipe field, and in play mode the body is pinned a couple of metres above
-it until a raycast finds the destination cell's collider (streamed on
-demand, usually within a frame or two, 8 s timeout): a dynamic body dropped
-into a cell that has no collider yet falls straight through the world, the
-same trap as a buried spawn. Travel is refused, with the reason on the map,
-outside the world limit and when a dedicated server owns your position.
-The PNG's own resolution bounds what zoom can show — `worldgen map --size
-1800` is the default the demo ships with, 12 m per pixel.
+**What a player sees (owner's ruling: the map is for towns).** Terrain, zone
+borders + names (1), roads/trails (2), towns by their town-zone name (3),
+labels (7), the player, and the player's own markers — nothing else
+(`PLAYER_LAYERS`). Named places, dungeon entrances and quest givers are
+found by exploring.
+
+**What only the editor sees.** The host decides with `devLayers`: the editor
+(`main.ts`) passes `true`, the published runtime (`play.ts`) passes
+`false`. With it on, **D** shows the layers players do not get: named places
+— the scene's `poi` roots plus quest locations not built yet as "(planned)"
+(4), dungeon entrances = `portal` entities (5), quest givers (6), spawn areas
+coloured by level (8), site packs and placed creatures (9), reservations (R)
+and the generator's sites (G, opt-in); hovering prints kind, level, radius, id
+and coordinates; a **click travels there** (dev fast-travel: the player body
+in play, the editor camera otherwise; refused outside the world limit and when
+a dedicated server owns your position). With it off nothing can bring them
+back: what is drawn is the stored choice INTERSECTED with `PLAYER_LAYERS`,
+the player map builds town marks from the recipe alone (no scene places, no
+`layers.json` fetch), there is no travel, and `export-game.mjs` ships only
+`maps/<world>.base.png` — never `<world>.png` (marks baked in) or
+`<world>.layers.json`. Layer choices are remembered per browser
+(`hitreg-world-map-layers-v2`).
+
+Scene-derived marks (portals, quest givers, spawn areas, built places) come
+from the live scene. Authoring-only data — quest locations, reservations,
+site packs, quest-giver ids — comes from `assets/maps/<world>.layers.json`,
+which `zonegen map` writes; re-run it after a zone's plan changes. The review
+PNG (`zonegen map`) keeps every layer: it is for agents judging placement.
+
+#### Player markers
+
+A player drops their own markers: **right-click** the map, or **Add marker**
+then click, or **Mark my spot** (also the ⚑ button on the voxel-demo minimap,
+which dispatches `hitreg:map-mark-here`). The marker editor takes an optional
+label (≤ 32 characters) and one of five SHAPES — Point (teardrop), Important
+(star), Goal / meet (flag), Danger (cross), Resource (ring). All markers share
+one colour; the shape and its word carry the meaning. Click a marker to
+rename, reshape or delete it (Delete key too), drag it to move it; the panel
+lists them (click one to centre on it). The minimap draws them, and pins
+beyond its edge sit dimmed on the edge in their direction.
+
+Markers are client-side UI state, never gameplay, never replicated. They
+persist per character and world in this browser's localStorage
+(`hitreg-map-pins:<characterId>:<world>`, `src/map-pins.ts`, every access in
+try/catch, at most 100); a session with no signed-in character (local editor
+play) uses the owner `local`. There is no client-side per-character save
+store to use instead, so markers do not follow a character to another
+browser.
+
+**Sharing with the party is not built.** What it needs: party membership is
+`comms.party/<peer>` netState, and the only host-routed party channel is
+chat (`recipientsFor`, packages/comms). A marker share must be its own module
+message (`{k:"pin", x, z, shape, label}`) that the HOST validates,
+rate-limits and delivers to `recipientsFor("party")` — on a dedicated server
+the host is the layer process, so the module needs a handler beside
+`packages/server/src/chat.ts`, and party members on OTHER layers need the same
+main-routed bridge party chat uses. That is server work, so it waits. Clients would keep shared pins in a separate, session-only list
+(drawn with an outlined variant of the same shapes plus the sender's name), and
+never write them into the sharer's own store. Smuggling pins through party
+chat text was rejected: it is sanitized, length-capped and visible as chat.
+
+A project HUD does not draw its own map: it dispatches `hitreg:minimap-draw`
+(`{ canvas, x, z, heading, radius }`, heading a compass bearing in degrees)
+and reads back `handled` and `place` (`{ zone, town }` names at the
+player); `hitreg:world-map-toggle` opens the full map. The minimap samples
+only the part of the cached picture under it, at the HUD's own 10 Hz.
 
 ### POIs at open-world density, and a bigger, more varied world
 
@@ -3104,3 +3271,156 @@ river's plunge off the coastal scarp. River length steeper than 4 % fell from
 26 % to 6 %. Banks stand 2.0 m over the water, 1.2 % of shore vertices hang,
 0 towns and 0 road points are under water, and there are 49 bridges.
 lake-12 lost its river: the only channel through it was a mountain stream.
+
+### Zone ground: roles, membership, indexed top-4
+
+A zone (recipe `regions`) restyles a few ground ROLES with `regions[].ground`
+(role -> palette surface name); `worldgen zone-textures` writes it from the
+cast's palettes (docs/zone-pipeline.md). There is still ONE palette per world.
+
+- **Natural roles** (`grass`, `ground`, `cliff`, `accent`): base surfaces carry
+  `surfaces[].role` (proving: grass+drygrass, dirt+mud, cliff+rock, sand). After
+  biomes and patches, a tagged surface's weight moves to the zone's surface by
+  zone membership. A zone's own surfaces are never tagged.
+- **Paint roles** (`road`, `paving`): a road's `role` (default `road`; town
+  streets `paving`) re-aims what it paints. Rivers and lakes are untouched.
+- **Membership** is a smoothstep of the signed polygon distance over
+  `zoneGround.band` (150 m, half each side, jittered), cached on an 8 m lattice
+  (`zone-ground.ts`). Two zones meet 50/50 on the line: no seam.
+- **Gates follow the role**: a cover layer or footstep naming `grass` also
+  matches a zone's grass (`surfaceAliases`, `surfaceBaseIndex`).
+- **`splat: "indexed"`** (or any palette past 16): the mesher reduces the dense
+  weights to the four heaviest layers per TRIANGLE (`reduceSplatTop4`),
+  duplicating a vertex only where two sets meet, so the ids interpolate to
+  themselves. Geometry carries `splatIndex` + `splatTop` (unorm8 x4 each, 8 B a
+  vertex) instead of ceil(N/4) float vec4s; weight a triangle drops goes to a
+  kept layer of the same role. The material (`source: "indexed"`) packs EVERY
+  layer into one texture array (slice = palette index) and samples four per
+  fragment: 12 fetches however deep the palette (64 max). Normal maps are
+  ignored on this path. HLOD supercells merge it like any cell (`mergeVoxelMeshes`
+  concatenates the ids; every cell of a world declares the same attributes).
+- The packer still resamples every slice to the largest tile (a 512 cliff makes
+  the array 512²): keep one size per role family.
+
+## 31. What grows in a region, and clearings
+
+The scatter rules and cover layers choose plants by climate (biome, slope,
+surface, height). Two data controls sit on top, both in core
+`voxel/vegetation.ts` and both read by the ONE scatter path (`scatterCell`:
+the client worker, the server's collider worker and every CLI audit) and the
+ONE cover gate (`coverVegetationRejects`, called by the shared sampler in
+`apps/playground/src/voxel-ground.ts`), so render, collision and audits agree.
+
+**`regions[].vegetation`** — a zone, town zone or `place` region filters and
+reshapes the foliage inside its polygon:
+
+- `scatter.allow` / `deny` (rule ids), `density` (multiplier), `rules`
+  (per-rule multiplier, replaces `density` for that rule), `replace`
+  (`{ "pine": "dead-dried-tree" }`: the source rule decides WHERE, the target
+  rule decides WHAT — model, scale, collider, tint; a target may be a rule at
+  density 0 kept for this), `lean` (wind-bent stands: degrees, `toward` [x, z],
+  jitter, rules — default the cylinder-collider trees).
+- `cover.allow` / `deny` (layer ids), `density`, `layers`.
+- `margin`: metres OUTSIDE the polygon it still governs where no region
+  contains the point — for a zone whose border runs along the waterline,
+  which leaves its beach outside every zone (that is where Tidewell's palms
+  stood).
+- Resolution: the most specific containing region first (place > town >
+  zone; deeper `within` wins, `place` breaks ties), FIELD BY FIELD — a place
+  that sets only `density` keeps its zone's `replace`; `deny` lists are
+  unioned down the chain, so a place cannot re-allow what its zone denies.
+- Density above 1 only fills back what `clump` and `biomeDensity` thinned:
+  the rule's `density` fixes the lattice and is the ceiling.
+- Filters, never sources: `allow` cannot put a palm in a taiga. A species the
+  biome does not grow comes from `replace`.
+
+**`features.clearings`** — polygon, or `center` + `radius`, with `feather`
+(metres outside the edge over which plants return), `keep` (0 clears, 0.3
+thins), `scatter` / `cover` switches and an `owner`. A scatter prop's whole
+canopy (footprint x max scale, capped at 12 m) is kept off it. Terrain is
+untouched. This replaces burying 20 m-deep additive blobs under a site to
+suppress foliage; it is also the per-plot town exclusion (one clearing per
+building plot, street and door path, the rest of the town keeps its grass).
+
+Commands (from apps/playground):
+
+```
+npx tsx tools/worldgen.mts vegetation <world> --project <p>                         # report, warnings for unknown ids
+npx tsx tools/worldgen.mts vegetation <world> --project <p> --region <id> --set <json|file> [--dry-run]
+npx tsx tools/worldgen.mts vegetation <world> --project <p> --region <id> --count   # scatter per rule inside it
+npx tsx tools/worldgen.mts vegetation <world> --project <p> --clearings <file>      # upsert by id
+npx tsx tools/worldgen.mts vegetation <world> --project <p> --remove-clearings <owner|id,...>
+npx tsx tools/worldgen.mts vegetation <world> --project <p> --at x,z                # which plan / clearing applies
+```
+
+Cost and determinism: a recipe with neither pays one flag test per candidate
+and places bit-for-bit what it placed before. Otherwise each candidate is a
+128 m bucket lookup plus a raster read per overlapping region (`PolygonIndex`,
+the lake-outline structure), all before the first height evaluation; no
+allocation per query. The gates draw new lattice hash channels (12 region
+thinning, 13 clearing, 14 lean jitter) so nothing else moves. A swapped prop
+keeps its SOURCE rule's id (`pine_12_-40`), which stays unique against the
+target rule's own lattice. Cliff-column rules are gated but never swapped.
+Tests: `packages/core/test/voxel-vegetation.test.ts`.
+
+## Height-patch edges
+
+The terrain is drawn from the field sampled on the voxel lattice (2 m in every
+shipped world) and interpolated between samples. **Any height change narrower
+than the lattice cannot be drawn**: each lattice column lands on the top or the
+bottom of it, and along a diagonal the result is a row of 2 m teeth (the
+sawtooth snow ledge, FixJaggies.PNG), a zig-zag wall, or a one-sample rim.
+What the engine now does (packages/core/src/voxel/height-patch.ts):
+
+- **Edge feather is automatic.** `blend` is a minimum. Per edge the feather is
+  the widest of `blend`, two voxel steps, and `1.5 * mismatch / edgeSlope`, where
+  mismatch is the largest height difference between the raster and the ground
+  under that edge (`edgeSlope` default 1 = 45 deg). Capped at half the extent.
+  `feather` overrides it. Nothing outside the footprint changes.
+- **The raster is prefiltered** with a tent of half-width `filter` (default: the
+  voxel step), so a cliff or terrace edge drawn into a 1 m raster no longer
+  aliases into stairs. `filter: 0` = raw.
+- **`maxSlope`** (opt-in) fills the foot of any riser steeper than it into a
+  talus, keeping every top level. Use it on low risers (bench edges, pit rims a
+  few metres high): a riser steeper than ~1.6 between 2 m samples always draws
+  as a zig-zag, but the talus of a tall one is ~height/slope wide and swallows
+  the tier below it.
+- **Roads: `maxCut` / `maxFill`** (opt-in) cap how far the road may sit below /
+  above the ground at every point of the tread, shoulder and band, so a trail
+  rides along the slope instead of trenching into it ("a small curved path up
+  along the edge"). The centreline profile solver's `--max-cut` only limits the
+  centreline; a cross-slope still cut a wall beside it.
+
+**The gate.** `worldgen lips <world> [--near x,z,r] [--list] [--json] [--allow ids]`
+measures every height patch (whole raster + 6 m) and graded road band against
+the same world without patches and roads: `alias` (the drawn ground misses the
+field by > 0.5 m: sawtooth), `step` (neighbouring lattice samples rise faster
+than 1.6: a wall), `lip` (a sample above/below both neighbours by > 0.75 m: a
+rim or slot). Exit 1 on any. Run it with `--near` before installing any POI
+that writes patches or roads; `zonegen status --zone <z>` carries it as the
+`terrain-lips` build row (cached against the recipe). Whole-world runs take
+~1 min on proving.
+
+**Seated slabs.** `worldgen seated <world> --slab x,z,halfX,halfZ,yawDeg,baseY`
+(or `--slabs file.json`) samples the DRAWN ground (`latticeHeight`) round a
+slab's footprint: `gap` > 0.25 m = it hangs, `clip` > 0.6 m = terrain shows
+through. Installers that place walls/platforms on terrain should run it.
+
+Lessons (zt-lips proof, 2026-10-06):
+- Hrimgard's pads already matched the ground at their edges; with the old
+  1.5 m blend they still left one-sample rims (old gate: lip 4-16, worst
+  0.91 m at the bone pits). New default: 0/0/0, no data change.
+- Gnawspur's `gnawspur-brow` raster draws 20 m tier walls 1-3 m wide (23 m/m
+  slopes): old gate alias 866, step 1428, lip 77 around (600,-1660). Defaults
+  + aqueduct track `maxCut/maxFill: 0.4`: alias 370, step 1231, lip 13 (bench
+  edges round off, tiers kept). `maxSlope: 1.2` drives it to ~0 but ERASES the
+  tiers (a 20 m riser's talus is 17 m wide and fills the tier below). Tall tier
+  walls are architecture: a DC/retaining wall, not a heightfield riser
+  ([[terrain is not architecture]]); `--allow` the patch once they are built.
+- Every generated trail and `path-town-*` in proving fails the gate (whole
+  world: alias ~8k, step ~7k; worst trail-peak-35 75 m). The trail writer's
+  centreline max-cut is not enough; a blanket field `maxCut` on those trails
+  measured WORSE (the tread then follows rough ground). Open: the trail
+  router/embankment needs to prefer edges and widen the band; tracked here.
+- The gate measures the heightfield; 3D carves (passages, tunnels, blobs)
+  are `scatter-float` / the mesher audit's business.

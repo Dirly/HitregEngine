@@ -1,5 +1,7 @@
 import * as THREE from "three/webgpu";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
+import { freezeStaticSubtree } from "./static-transforms.js";
+import { ATLAS_RECT_ATTRIBUTE } from "./town-atlas.js";
 
 /**
  * Static draw-call batching.
@@ -29,6 +31,25 @@ export const STATIC_BATCH_FLAG = "staticBatch";
 /** Present on a merged mesh; carries the face→entity table. */
 export const BATCH_OWNERS = "batchOwners";
 
+/** Called after a non-animated model is assembled and attached to its entity.
+ * Freeze the MODEL, not the entity: moving its parent still updates its bounds
+ * and matrices, while fixed exported node hierarchies cost one check per frame.
+ */
+export function prepareStaticModel(root: THREE.Object3D): void {
+  let deforming = false;
+  root.traverse((node) => {
+    const mesh = node as THREE.Mesh;
+    if ((node as THREE.SkinnedMesh).isSkinnedMesh ||
+        (mesh.isMesh && Object.keys(mesh.geometry.morphAttributes).length > 0)) deforming = true;
+  });
+  if (deforming) return;
+  root.traverse((node) => {
+    if ((node as THREE.Mesh).isMesh) node.userData[STATIC_BATCH_FLAG] = true;
+  });
+  root.updateWorldMatrix(true, true);
+  freezeStaticSubtree(root);
+}
+
 export interface BatchOwners {
   /** Triangle index at which each source's faces begin, ascending. */
   starts: Uint32Array;
@@ -50,6 +71,11 @@ export interface StaticBatchStats {
 export interface StaticBatchHandle {
   group: THREE.Group;
   stats: StaticBatchStats;
+  /**
+   * With `groupOf`: the merged meshes of each group, under their own child
+   * of `group` — what a culling unit hides alongside its entity subtree.
+   */
+  groups: Map<string, THREE.Group>;
   /** Restore every source mesh and drop the merged copies. */
   dispose(): void;
 }
@@ -85,6 +111,13 @@ export function ownerOfFace(object: THREE.Object3D, faceIndex: number | undefine
  * sets, and a uv-less primitive sitting next to a uv-bearing one is the common
  * case that trips it.
  */
+/**
+ * Vertex streams a merge carries through. Beyond position/normal/uv only the
+ * town atlas tile rect: it is per-vertex data a world-space merge does not
+ * change, and dropping it would sample the whole page.
+ */
+const MERGED_ATTRIBUTES = new Set(["position", "normal", "uv", ATLAS_RECT_ATTRIBUTE]);
+
 function prepForMerge(geometry: THREE.BufferGeometry): THREE.BufferGeometry {
   const g = (geometry.index ? geometry.toNonIndexed() : geometry.clone()) as THREE.BufferGeometry;
   if (!g.getAttribute("normal")) g.computeVertexNormals();
@@ -93,7 +126,7 @@ function prepForMerge(geometry: THREE.BufferGeometry): THREE.BufferGeometry {
     g.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(count * 2), 2));
   }
   for (const name of Object.keys(g.attributes)) {
-    if (name !== "position" && name !== "normal" && name !== "uv") g.deleteAttribute(name);
+    if (!MERGED_ATTRIBUTES.has(name)) g.deleteAttribute(name);
   }
   return g;
 }
@@ -101,7 +134,7 @@ function prepForMerge(geometry: THREE.BufferGeometry): THREE.BufferGeometry {
 /** Does this geometry carry vertex data a merge would have to throw away? */
 function hasCustomAttributes(geometry: THREE.BufferGeometry): boolean {
   for (const name of Object.keys(geometry.attributes)) {
-    if (name !== "position" && name !== "normal" && name !== "uv") return true;
+    if (!MERGED_ATTRIBUTES.has(name)) return true;
   }
   return false;
 }
@@ -123,14 +156,30 @@ function bucketKey(mesh: THREE.Mesh, material: THREE.Material): string {
 
 export function batchStaticMeshes(
   root: THREE.Object3D,
-  options: { minBatch?: number } = {},
+  options: {
+    minBatch?: number;
+    /**
+     * Keep meshes of different groups (culling units — a POI inside a cell)
+     * out of each other's merges, so each can be hidden on its own. Undefined
+     * = the ungrouped rest.
+     */
+    groupOf?: (mesh: THREE.Mesh) => string | undefined;
+    /**
+     * May this structural ancestor (an entity group above merged models) be
+     * hidden when everything under it is drawn by the batch? The host answers
+     * yes only for content nothing will add to or move — a static entity
+     * subtree. Unset = only complete model hierarchies are hidden.
+     */
+    prunable?: (node: THREE.Object3D) => boolean;
+  } = {},
 ): StaticBatchHandle | null {
   const minBatch = options.minBatch ?? 2;
   const buckets = new Map<string, Candidate[]>();
+  const bucketGroup = new Map<string, string>();
   let skipped = 0;
 
   root.updateMatrixWorld(true);
-  root.traverse((node) => {
+  root.traverseVisible((node) => {
     if (!(node as THREE.Mesh).isMesh) return;
     const mesh = node as THREE.Mesh;
     if (!mesh.userData[STATIC_BATCH_FLAG]) return;
@@ -151,21 +200,30 @@ export function batchStaticMeshes(
     // its shader depends on and render it as a single flat layer. Skip it: the
     // draw call saved is never worth losing what the mesh looks like.
     if (hasCustomAttributes(mesh.geometry)) return void skipped++;
+    // World-baking changes the local coordinates read by wind/displacement.
+    const material = mesh.material as THREE.Material & { positionNode?: unknown; displacementMap?: unknown };
+    if (material.positionNode || material.displacementMap ||
+        Object.keys(mesh.geometry.morphAttributes).length > 0) return void skipped++;
     const entityId = mesh.userData["entityId"] as string | undefined;
     if (!entityId) return void skipped++;
-    const key = bucketKey(mesh, mesh.material);
+    const unit = options.groupOf?.(mesh);
+    const key = unit === undefined ? bucketKey(mesh, mesh.material) : `${bucketKey(mesh, mesh.material)}|${unit}`;
     const list = buckets.get(key);
     if (list) list.push({ mesh, entityId, material: mesh.material });
-    else buckets.set(key, [{ mesh, entityId, material: mesh.material }]);
+    else {
+      buckets.set(key, [{ mesh, entityId, material: mesh.material }]);
+      if (unit !== undefined) bucketGroup.set(key, unit);
+    }
   });
 
   const group = new THREE.Group();
   group.name = "static-batch";
   group.userData["editorOverlay"] = false;
-  const hidden: THREE.Mesh[] = [];
+  const hidden = new Map<THREE.Mesh, boolean>();
   const stats: StaticBatchStats = { batches: 0, merged: 0, drawCallsSaved: 0, skipped };
+  const groups = new Map<string, THREE.Group>();
 
-  for (const list of buckets.values()) {
+  for (const [bucket, list] of buckets) {
     if (list.length < minBatch) continue;
 
     const geoms: THREE.BufferGeometry[] = [];
@@ -206,7 +264,18 @@ export function batchStaticMeshes(
     mesh.userData[BATCH_OWNERS] = { starts: Uint32Array.from(starts), ids } satisfies BatchOwners;
     // No `entityId` on purpose: this mesh represents many. Pickers resolve it
     // through ownerOfFace() instead of by walking up for an id.
-    group.add(mesh);
+    const unit = bucketGroup.get(bucket);
+    if (unit === undefined) group.add(mesh);
+    else {
+      let sub = groups.get(unit);
+      if (!sub) {
+        sub = new THREE.Group();
+        sub.name = `static-batch:${unit}`;
+        groups.set(unit, sub);
+        group.add(sub);
+      }
+      sub.add(mesh);
+    }
 
     for (const c of list) {
       c.mesh.visible = false;
@@ -219,8 +288,8 @@ export function batchStaticMeshes(
       // light-budget recompile bug. A batched source cannot move (any edit
       // disposes the batch and restores it), so its world matrix is already
       // final and recomputing it is pure waste.
+      hidden.set(c.mesh, c.mesh.matrixWorldAutoUpdate);
       c.mesh.matrixWorldAutoUpdate = false;
-      hidden.push(c.mesh);
     }
     stats.batches++;
     stats.merged += list.length;
@@ -229,23 +298,89 @@ export function batchStaticMeshes(
   if (stats.batches === 0) return null;
   stats.drawCallsSaved = stats.merged - stats.batches;
   root.add(group);
+  // merged meshes sit at the origin with their placement baked in: nothing
+  // moves them (culling only flips visibility), so keep them out of the
+  // per-frame matrix walk too
+  freezeStaticSubtree(group);
+
+  // The meshes are gone from the render list, but their exported groups still
+  // get projected once per pass. Prune only complete model hierarchies whose
+  // renderables are ALL represented by the batch. Never hide attached lights,
+  // particles, an unbatched part, or a containing gameplay entity.
+  const modelRoots = new Set<THREE.Object3D>();
+  for (const mesh of hidden.keys()) {
+    for (let node: THREE.Object3D | null = mesh; node && node !== root; node = node.parent) {
+      if (node.userData["modelRoot"]) { modelRoots.add(node); break; }
+    }
+  }
+  const hiddenRoots = new Map<THREE.Object3D, boolean>();
+  for (const model of modelRoots) {
+    let complete = true;
+    model.traverse((node) => {
+      if (hidden.has(node as THREE.Mesh)) return;
+      // An empty Group/Object3D is structural; all other object types may
+      // contribute to rendering or drive it and must remain traversable.
+      if (node.type !== "Group" && node.type !== "Object3D") complete = false;
+    });
+    if (complete) { hiddenRoots.set(model, model.visible); model.visible = false; }
+  }
+
+  // Then the entity groups above them. A town of merged houses otherwise
+  // leaves thousands of visible-but-empty groups that every pass (and the
+  // per-frame empty-branch scan) walks to find nothing. Bottom-up, highest
+  // fully drawn ancestor wins; stops at anything that still renders on its own.
+  if (options.prunable) {
+    const drawnByBatch = new Map<THREE.Object3D, boolean>();
+    const covered = (node: THREE.Object3D): boolean => {
+      const known = drawnByBatch.get(node);
+      if (known !== undefined) return known;
+      let result: boolean;
+      // only what THIS batch hid counts: something hidden for another reason
+      // (a culled interior, an authored-invisible part) can be shown again later
+      if (hidden.has(node as THREE.Mesh) || hiddenRoots.has(node)) result = true;
+      else if (!node.visible) result = false;
+      else if (node.type !== "Group" && node.type !== "Object3D") result = false;
+      else result = node.children.every(covered);
+      drawnByBatch.set(node, result);
+      return result;
+    };
+    const candidates = new Set<THREE.Object3D>();
+    for (const model of hiddenRoots.keys()) {
+      let top: THREE.Object3D | null = null;
+      for (let node = model.parent; node && node !== root && node !== group; node = node.parent) {
+        if (!options.prunable(node) || !covered(node)) break;
+        top = node;
+      }
+      if (top) candidates.add(top);
+    }
+    for (const node of candidates) {
+      // a candidate under another candidate is already covered by it
+      let nested = false;
+      for (let up = node.parent; up && up !== root; up = up.parent) if (candidates.has(up)) { nested = true; break; }
+      if (nested) continue;
+      hiddenRoots.set(node, true);
+      node.visible = false;
+    }
+  }
 
   return {
     group,
     stats,
+    groups,
     dispose(): void {
-      for (const mesh of hidden) {
+      for (const [model, visible] of hiddenRoots) model.visible = visible;
+      for (const [mesh, matrixWorldAutoUpdate] of hidden) {
         mesh.visible = true;
         // hand the matrix pass back: the caller restores these precisely
         // because something is about to move or re-read them
-        mesh.matrixWorldAutoUpdate = true;
+        mesh.matrixWorldAutoUpdate = matrixWorldAutoUpdate;
         mesh.updateMatrixWorld(true);
       }
-      for (const child of [...group.children]) {
+      group.traverse((child) => {
         const m = child as THREE.Mesh;
-        m.geometry?.dispose();
-        group.remove(child);
-      }
+        if (m.isMesh) m.geometry?.dispose();
+      });
+      group.clear();
       group.parent?.remove(group);
     },
   };

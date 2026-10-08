@@ -1,5 +1,7 @@
 import { z } from "zod";
 import { EQUIPMENT_SLOTS } from "./character/items.js";
+import { dialogueConditionSchema } from "./npc/conditions.js";
+import { ACTION_FIELDS, questAreaSchema, questBlocks, questConsequenceSchema, questSourceSchema, type QuestArea, type QuestSource } from "./quest-blocks.js";
 
 export const tooltipSchema = z.object({
   title: z.string(), subtitle: z.string().default(""), description: z.string().default(""),
@@ -53,24 +55,59 @@ export const gameHudSchema = z.object({
 }).describe("Game HUD skin, equipment layout, audio and navigation policy. Quest areas are compass-only; maps never contain quests or other POIs.");
 export type GameHud = z.infer<typeof gameHudSchema>;
 
+const objectiveBase = {
+  id: z.string().min(1),
+  label: z.string().min(1),
+  target: z.string().default("").describe("What the action is aimed at: an entity id (kill, talk, interact, read, deliver, perform) or an item id (collect). A kill may also name a spawn template id (every spawned copy counts) or `tag:<tag>` (every body carrying the tag, e.g. `tag:creature:wolf`)."),
+  required: z.number().int().positive().default(1),
+  area: questAreaSchema
+    .optional()
+    .describe("This step's own region (visit, endure, an untargeted perform); absent = the quest's `area`. A step in another town carries its own."),
+  places: z
+    .string()
+    .default("")
+    .describe("places asset id this step's label tokens resolve against; empty = the quest's `places`. How one quest's steps span several towns."),
+  after: z.array(z.string()).default([]).describe("Objective ids of this quest that must be complete before this one can progress. Empty = no order."),
+  scene: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Scene this step happens in when it is not the quest's world scene: an instance reached through a `portal` (e.g. a dungeon). Informational — progress is counted wherever the character is (the journal travels with it); tools use it to route there. Absent = the world scene.",
+    ),
+  when: dialogueConditionSchema
+    .optional()
+    .describe("Progress counts only while this holds, tested on the authority (clock, weather, flag, item, quest …; `met` and `bound` never hold here)."),
+  then: z.array(questConsequenceSchema).default([]).describe("Consequences run once, on the authority, the moment this objective completes."),
+};
+const actionText = (kind: string): string => questBlocks.get("action", kind)?.description ?? kind;
+
+export const questObjectiveSchema = z
+  .discriminatedUnion("kind", [
+    z.object({ ...objectiveBase, kind: z.literal("visit"), ...ACTION_FIELDS.visit }).describe(actionText("visit")),
+    z.object({ ...objectiveBase, kind: z.literal("kill"), ...ACTION_FIELDS.kill }).describe(actionText("kill")),
+    z.object({ ...objectiveBase, kind: z.literal("collect"), ...ACTION_FIELDS.collect }).describe(actionText("collect")),
+    z.object({ ...objectiveBase, kind: z.literal("talk"), ...ACTION_FIELDS.talk }).describe(actionText("talk")),
+    z.object({ ...objectiveBase, kind: z.literal("interact"), ...ACTION_FIELDS.interact }).describe(actionText("interact")),
+    z.object({ ...objectiveBase, kind: z.literal("read"), ...ACTION_FIELDS.read }).describe(actionText("read")),
+    z.object({ ...objectiveBase, kind: z.literal("deliver"), ...ACTION_FIELDS.deliver }).describe(actionText("deliver")),
+    z.object({ ...objectiveBase, kind: z.literal("endure"), ...ACTION_FIELDS.endure }).describe(actionText("endure")),
+    z.object({ ...objectiveBase, kind: z.literal("perform"), ...ACTION_FIELDS.perform }).describe(actionText("perform")),
+  ])
+  .describe("One step of a quest. `kind` is a registered action block (spec `questBlocks.action`); its extra fields are that block's.");
+export type QuestObjective = z.infer<typeof questObjectiveSchema>;
+
 export const questSchema = z.object({
   id: z.string().min(1), title: z.string().min(1), description: z.string(),
-  objectives: z.array(z.object({
-    id: z.string().min(1), label: z.string().min(1),
-    kind: z.enum(["visit", "kill", "collect", "talk"]).describe(
-      "visit: stand inside `area`; kill: defeat `target` (an entity id or its template prefix); collect: carry `target` " +
-      "(an item id); talk: open a conversation with the NPC whose entity id is `target`.",
-    ),
-    target: z.string().default(""), required: z.number().int().positive().default(1),
-  })).min(1).refine(a => new Set(a.map(o => o.id)).size === a.length, "duplicate objective id"),
-  area: z.object({
-    label: z.string(), center: z.tuple([z.number(), z.number()]), radius: z.number().min(50),
-  }).optional().describe("Approximate search region [world X, world Z], never an exact objective marker. Only the compass may visualize this region. Absent = no compass guidance (an errand inside a town)."),
+  objectives: z.array(questObjectiveSchema).min(1)
+    .refine(a => new Set(a.map(o => o.id)).size === a.length, "duplicate objective id")
+    .refine(a => a.every(o => o.after.every(x => x !== o.id && a.some(p => p.id === x))), "`after` names an objective this quest does not have (or itself)"),
+  area: questAreaSchema.optional().describe("Approximate search region [world X, world Z], never an exact objective marker. Only the compass may visualize this region. Absent = no compass guidance (an errand inside a town)."),
   rewardXp: z.number().int().min(0).default(0),
   rewardCoins: z.number().int().min(0).default(0).describe("Coins paid on completion, in copper (100 copper = 1 silver, 100 silver = 1 gold)."),
   rewardItems: z.array(z.object({ itemId: z.string().min(1), qty: z.number().int().min(1).default(1) })).default([])
     .describe("Items given on completion. A hand-in is refused while they do not fit the bags."),
-  giver: z.string().default("").describe("Entity id of the NPC who offers it (its dialogue's `acceptQuest`). Empty = granted by a script (quest-log `autoStart`)."),
+  giver: z.string().default("").describe("Entity id of the NPC (or object, see `source`) who offers it (its dialogue's `acceptQuest`). Empty = granted by a script (quest-log `autoStart` / `autoOffer`)."),
   turnIn: z.string().default("").describe(
     "Entity id of the NPC it is handed in to. Set = finishing the objectives makes it READY, and it completes (paying its " +
     "rewards) only through that NPC's dialogue (`turnInQuest`). Empty = it completes the moment the objectives do.",
@@ -78,20 +115,64 @@ export const questSchema = z.object({
   requires: z.array(z.string()).default([]).describe("Quest ids that must be COMPLETE before this one can be accepted (a chain)."),
   consume: z.boolean().default(false).describe("On hand-in, take the `collect` objectives' items out of the bags (the ore is handed over)."),
   level: z.number().int().min(1).default(1).describe("Suggested level, shown in the journal; never enforced."),
-  places: z.string().default("").describe("places asset id (assets/places/<town>.json) its text's {dir:id} / {far:id} / {place:id} tokens resolve against — never write a compass word by hand."),
+  places: z.string().default("").describe("places asset id (assets/places/<town>.json) its text's {dir:id} / {far:id} / {place:id} tokens resolve against — never write a compass word by hand. A step in another town names its own (objective `places`)."),
+  source: questSourceSchema.optional(),
 }).describe("Quest definition (assets/quests/<id>.json). Progress belongs to authority-owned quest journals, not this asset.");
 export type Quest = z.infer<typeof questSchema>;
 export type QuestInput = z.input<typeof questSchema>;
 export const QUEST_STATUSES = ["active", "ready", "complete"] as const;
 export type QuestStatus = (typeof QUEST_STATUSES)[number];
+const questStateSchema = z.object({
+  status: z.enum(QUEST_STATUSES).describe("active: objectives open; ready: objectives done, waiting to be handed in to the quest's `turnIn` NPC; complete: rewarded."),
+  progress: z.record(z.string(), z.number().int().min(0)),
+});
+export type QuestState = z.infer<typeof questStateSchema>;
 export const questJournalSchema = z.object({
   version: z.literal(1).default(1), tracked: z.string().nullable().default(null),
-  quests: z.record(z.string(), z.object({
-    status: z.enum(QUEST_STATUSES).describe("active: objectives open; ready: objectives done, waiting to be handed in to the quest's `turnIn` NPC; complete: rewarded."),
-    progress: z.record(z.string(), z.number().int().min(0)),
-  })),
+  quests: z.record(z.string(), questStateSchema).describe("Every quest the character has started: a started quest is always in the journal."),
+  hidden: z.record(z.string(), questStateSchema).optional().describe(
+    "LEGACY, never written: journals saved by an earlier build may carry quests here. `migrateJournal` (the quest-log on load) moves them into `quests`.",
+  ),
 });
 export type QuestJournal = z.infer<typeof questJournalSchema>;
+
+/** A quest's state in the journal (a legacy `hidden` entry included until it is migrated). */
+export function questState(journal: QuestJournal | null | undefined, id: string): QuestState | undefined {
+  return journal?.quests[id] ?? journal?.hidden?.[id];
+}
+
+/** Move a legacy journal's `hidden` quests into `quests`; the same journal when there is nothing to move. */
+export function migrateJournal(journal: QuestJournal): QuestJournal {
+  if (!journal.hidden) return journal;
+  const { hidden, ...rest } = journal;
+  return { ...rest, quests: { ...hidden, ...journal.quests } };
+}
+
+/** How the quest reaches the player: its `source`, else derived from `giver`. */
+export function questSource(quest: Quest): QuestSource {
+  if (quest.source) return quest.source;
+  return quest.giver ? { kind: "npc", ref: quest.giver } : { kind: "auto" };
+}
+
+/** The region an objective counts in: its own `area`, else the quest's. */
+export function objectiveArea(quest: Quest, objective: QuestObjective): QuestArea | undefined {
+  return objective.area ?? quest.area;
+}
+
+/** The places asset an objective's label resolves against: its own, else the quest's. */
+export function objectivePlaces(quest: Quest, objective: QuestObjective): string {
+  return objective.places || quest.places;
+}
+
+/** Whether every objective this one waits on (`after`) is complete. */
+export function objectiveOpen(quest: Quest, progress: Readonly<Record<string, number>>, objectiveId: string): boolean {
+  const o = quest.objectives.find(x => x.id === objectiveId);
+  if (!o) return false;
+  return o.after.every(id => {
+    const before = quest.objectives.find(x => x.id === id);
+    return !!before && (progress[id] ?? 0) >= before.required;
+  });
+}
 
 /** Shared navigation math: north = -Z, clockwise bearings, seam-safe wrap. */
 export const bearing = (dx: number, dz: number): number => (Math.atan2(dx, -dz) * 180 / Math.PI + 360) % 360;
@@ -103,34 +184,43 @@ export function nearbyTowns<T extends { center: readonly [number, number] }>(tow
 /**
  * Monotonic objective progress; completion/rewards can only happen once. A
  * quest with a `turnIn` NPC stops at "ready": only {@link turnInQuest} completes it.
+ * An objective whose `after` steps are not complete does not progress.
  */
 export function advanceQuest(journal: QuestJournal, quest: Quest, objectiveId: string, amount = 1): QuestJournal {
   const state = journal.quests[quest.id];
   const objective = quest.objectives.find(o => o.id === objectiveId);
   if (!state || state.status !== "active" || !objective || !Number.isFinite(amount) || amount <= 0) return journal;
-  const progress = { ...state.progress, [objectiveId]: Math.min(objective.required, (state.progress[objectiveId] ?? 0) + Math.floor(amount)) };
+  if (!objectiveOpen(quest, state.progress, objectiveId)) return journal;
+  const was = state.progress[objectiveId] ?? 0;
+  const now = Math.min(objective.required, was + Math.floor(amount));
+  if (now <= was) return journal;
+  const progress = { ...state.progress, [objectiveId]: now };
   const done = quest.objectives.every(o => (progress[o.id] ?? 0) >= o.required);
   const status: QuestStatus = !done ? "active" : quest.turnIn ? "ready" : "complete";
+  const next: QuestState = { status, progress };
   return { ...journal, tracked: status === "complete" && journal.tracked === quest.id ? null : journal.tracked,
-    quests: { ...journal.quests, [quest.id]: { status, progress } } };
+    quests: { ...journal.quests, [quest.id]: next } };
 }
 
 const emptyJournal = (): QuestJournal => questJournalSchema.parse({ quests: {} });
 
 /** Why `quest` cannot be accepted into `journal` right now, or null when it can. */
 export function questOfferProblem(journal: QuestJournal | null | undefined, quest: Quest): string | null {
-  const state = journal?.quests[quest.id];
+  const state = questState(journal, quest.id);
   if (state) return state.status === "complete" ? "already completed" : "already accepted";
-  for (const need of quest.requires) if (journal?.quests[need]?.status !== "complete") return `requires "${need}" first`;
+  for (const need of quest.requires) if (questState(journal, need)?.status !== "complete") return `requires "${need}" first`;
   return null;
 }
 
-/** Accept a quest (a giver's dialogue, a script's autoStart); it becomes the tracked one when `track`. */
+/**
+ * Accept a quest (a giver's dialogue, a script's autoStart); it becomes the tracked one when `track`.
+ */
 export function acceptQuest(journal: QuestJournal | null | undefined, quest: Quest, track = true): { journal: QuestJournal; error: string | null } {
   const base = journal ?? emptyJournal();
   const problem = questOfferProblem(base, quest);
   if (problem) return { journal: base, error: problem };
-  const quests = { ...base.quests, [quest.id]: { status: "active" as const, progress: {} } };
+  const fresh: QuestState = { status: "active", progress: {} };
+  const quests = { ...base.quests, [quest.id]: fresh };
   return { journal: { ...base, tracked: track || !base.tracked ? quest.id : base.tracked, quests }, error: null };
 }
 

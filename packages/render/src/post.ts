@@ -42,7 +42,7 @@ import { sharpen as sharpenNode } from "three/addons/tsl/display/SharpenNode.js"
 import { chromaticAberration as caNode } from "three/addons/tsl/display/ChromaticAberrationNode.js";
 import { lut3D as lut3DNode } from "three/addons/tsl/display/Lut3DNode.js";
 import { lut3DTextureFrom } from "./post-lut.js";
-import { VolumetricShafts, type VolumetricRequest, type VolumetricSettings } from "./atmosphere.js";
+import { ScreenShafts, VolumetricShafts, type VolumetricRequest, type VolumetricSettings } from "./atmosphere.js";
 
 /* -------------------------------------------------------------------------- */
 /* Data shape (mirrors core's `postfx` component schema)                       */
@@ -117,6 +117,13 @@ export interface SharpenFx {
   enabled: boolean;
   amount: number;
 }
+/** PS1 ordered dither + colour-depth reduction (see the schema). */
+export interface DitherFx {
+  enabled: boolean;
+  levels: number;
+  scale: number;
+  amount: number;
+}
 
 export type PixelateFilter = "nearest" | "linear";
 
@@ -132,6 +139,8 @@ export type PixelateFilter = "nearest" | "linear";
  * (see EngineRenderer.setSandstorm).
  */
 export interface LivePostFxOptions {
+  /** Live adjustment over the authored grade: saturation/contrast multiply, temperature adds (EngineRenderer.setGradeMood). */
+  grade?: { saturation?: number; contrast?: number; temperature?: number } | null;
   sandstorm?: {
     /** 0 = clear air, 1 = the worst this storm does. */
     amount: number;
@@ -194,6 +203,7 @@ export interface PostFxData {
   antialias?: Partial<AntialiasFx>;
   motionBlur?: Partial<MotionBlurFx>;
   sharpen?: Partial<SharpenFx>;
+  dither?: Partial<DitherFx>;
   pixelate?: Partial<PixelateFx>;
   underwater?: Partial<UnderwaterFx>;
   sandstorm?: Partial<SandstormFx>;
@@ -211,6 +221,7 @@ export interface ResolvedPostFx {
   antialias: AntialiasFx;
   motionBlur: MotionBlurFx;
   sharpen: SharpenFx;
+  dither: DitherFx;
   pixelate: PixelateFx;
   underwater: UnderwaterFx;
   sandstorm: SandstormFx;
@@ -307,6 +318,12 @@ export function resolvePostFx(data: PostFxData | null | undefined): ResolvedPost
       enabled: bool(d.sharpen?.enabled, false),
       amount: num(d.sharpen?.amount, 0.4),
     },
+    dither: {
+      enabled: bool(d.dither?.enabled, false),
+      levels: Math.max(2, Math.round(num(d.dither?.levels, 32))),
+      scale: Math.max(1, Math.round(num(d.dither?.scale, 1))),
+      amount: num(d.dither?.amount, 1),
+    },
     pixelate: {
       enabled: bool(d.pixelate?.enabled, false),
       height: Math.round(num(d.pixelate?.height, 240)),
@@ -376,7 +393,8 @@ export type PostPassId =
   | "grain"
   | "sharpen"
   | "fxaa"
-  | "smaa";
+  | "smaa"
+  | "dither";
 
 /**
  * The one authoritative order. Everything before `tonemap` runs on linear HDR
@@ -417,6 +435,8 @@ export const POST_PASS_ORDER: readonly PostPassId[] = [
   "sharpen",
   "fxaa",
   "smaa",
+  // LAST: anti-aliasing would smear the dot pattern into grey mush.
+  "dither",
 ];
 
 /**
@@ -443,6 +463,7 @@ const BLAME_ORDER: readonly PostPassId[] = [
   "fxaa",
   "bloom",
   "grain",
+  "dither",
   "vignette",
   "grade",
   "tonemap",
@@ -499,7 +520,7 @@ export function passPlan(fx: ResolvedPostFx, ctx: PlanContext = {}): PostPassId[
     volumetric &&
     volumetric.settings.enabled &&
     volumetric.settings.intensity > 0 &&
-    volumetric.lights.length > 0
+    (volumetric.lights.length > 0 || volumetric.screenSun)
   ) {
     wanted.add("volumetrics");
   }
@@ -526,6 +547,7 @@ export function passPlan(fx: ResolvedPostFx, ctx: PlanContext = {}): PostPassId[
   const aa = resolveAntialias(fx.antialias.mode);
   if (aa === "fxaa") wanted.add("fxaa");
   if (aa === "smaa") wanted.add("smaa");
+  if (fx.dither.enabled) wanted.add("dither");
   return POST_PASS_ORDER.filter((id) => wanted.has(id) && !off?.has(id));
 }
 
@@ -983,6 +1005,10 @@ export class PostChain {
   private grainSize: Tsl = null;
   private grainSeed: Tsl = null;
   private sharpenAmount: Tsl = null;
+  private ditherLevels: Tsl = null;
+  private ditherScale: Tsl = null;
+  private ditherAmount: Tsl = null;
+  private screenShafts: ScreenShafts | null = null;
 
   constructor(
     renderer: THREE.WebGPURenderer,
@@ -1040,7 +1066,11 @@ export class PostChain {
       // The raymarch reads only the pass's depth ATTACHMENT, which every pass
       // already has — so nothing here touches the MRT, and the {output,
       // emissive} split that fixed the bloom freeze-and-flare is untouched.
-      const shafts = VolumetricShafts.create({
+      if (options.volumetric.lights.length === 0 && options.volumetric.screenSun) {
+        this.screenShafts = new ScreenShafts(sceneColor, scenePass.getTextureNode("depth"), camera, options.volumetric.screenSun, options.volumetric.settings);
+        color = this.screenShafts.outputNode as unknown as Tsl;
+      }
+      const shafts = options.volumetric.lights.length === 0 ? null : VolumetricShafts.create({
         colorNode: sceneColor as unknown as THREE.Node<"vec4">,
         depthNode: scenePass.getTextureNode("depth") as unknown as THREE.Node<"vec4">,
         camera,
@@ -1371,6 +1401,25 @@ export class PostChain {
       color = pass_;
     }
 
+    if (has("dither")) {
+      this.ditherLevels = uniform(fx.dither.levels - 1);
+      this.ditherScale = uniform(fx.dither.scale);
+      this.ditherAmount = uniform(fx.dither.amount);
+      const levels = this.ditherLevels;
+      const scale = this.ditherScale;
+      const amount = this.ditherAmount;
+      const src = color; // see the vignette above: never close over `color`
+      const dither = Fn(() => {
+        // 4x4 Bayer threshold from two nested 2x2 steps (no lookup table)
+        const a = (screenCoordinate as Tsl).xy.div(scale).floor();
+        const bayer2 = (p: Tsl): Tsl => p.x.mul(0.5).add(p.y.mul(p.y).mul(0.75)).fract();
+        const threshold = bayer2(a.mul(0.5).floor()).mul(0.25).add(bayer2(a)).sub(0.46875);
+        const stepped = src.rgb.mul(levels).add(threshold.mul(amount)).add(0.5).floor().div(levels);
+        return vec4(saturate(stepped), src.a);
+      })();
+      color = dither;
+    }
+
     this.outputNode = color;
   }
 
@@ -1458,6 +1507,12 @@ export class PostChain {
       this.grainSize.value = Math.max(fx.grain.size, 0.1);
     }
     if (this.sharpenAmount) this.sharpenAmount.value = sharpenSharpness(fx.sharpen.amount);
+    if (this.ditherLevels) {
+      this.ditherLevels.value = fx.dither.levels - 1;
+      this.ditherScale.value = fx.dither.scale;
+      this.ditherAmount.value = fx.dither.amount;
+    }
+    if (this.screenShafts && volumetric) this.screenShafts.setSettings(volumetric);
   }
 
   /**
@@ -1496,6 +1551,7 @@ export class PostChain {
     // A script recolouring a brazier has to recolour its shaft too; this is a
     // Color copy per shaft, and there is at most one.
     this.shafts?.refreshTints();
+    this.screenShafts?.update();
   }
 
   dispose(): void {
@@ -1509,6 +1565,7 @@ export class PostChain {
     }
     this.disposables.length = 0;
     this.shafts = null;
+    this.screenShafts = null;
   }
 }
 

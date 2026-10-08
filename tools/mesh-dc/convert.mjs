@@ -10,6 +10,7 @@ const { ComponentRegistry } = await tsImport("../../packages/core/src/components
 const { createScene } = await tsImport("../../packages/core/src/scene.ts", import.meta.url);
 const { applyOps } = await tsImport("../../packages/core/src/ops.ts", import.meta.url);
 const { prefabDocSchema, validatePrefab } = await tsImport("../../packages/core/src/prefab.ts", import.meta.url);
+const { normaliseNoiseTable, roleNoiseNodes, floorGrid } = await import(new URL("./noise.mjs", import.meta.url).href);
 const componentRegistry = new ComponentRegistry();
 registerCoreComponents(componentRegistry);
 
@@ -58,7 +59,7 @@ function sourcePalette(value) {
   return structuredClone(value);
 }
 
-function meshBounds(mesh, voxelSize, maxCells) {
+function meshBounds(mesh, voxelSize, maxCells, pad = 0) {
   if (!Array.isArray(mesh.positions) || mesh.positions.length < 12 || mesh.positions.length % 3) throw new Error(`Mesh group ${mesh.name} positions must contain whole XYZ vertices`);
   const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
   for (let i = 0; i < mesh.positions.length; i++) {
@@ -67,8 +68,11 @@ function meshBounds(mesh, voxelSize, maxCells) {
     min[axis] = Math.min(min[axis], n);
     max[axis] = Math.max(max[axis], n);
   }
-  const first = min.map(n => Math.floor(n / voxelSize) - 3);
-  const last = max.map(n => Math.ceil(n / voxelSize) + 3);
+  // Noised (grown) solids reach up to `pad` metres beyond their source; the lattice must too.
+  // Three cells of margin already exist; keep at least one cell of air beyond the grown surface.
+  const extra = pad > 0 ? Math.max(0, Math.ceil((pad - 2 * voxelSize) / voxelSize - 1e-9)) : 0;
+  const first = min.map(n => Math.floor(n / voxelSize) - 3 - extra);
+  const last = max.map(n => Math.ceil(n / voxelSize) + 3 + extra);
   if (![...first, ...last].every(Number.isSafeInteger)) throw new Error(`Mesh group ${mesh.name} coordinates are too large for this voxel size`);
   const bounds = { min: first.map(n => n * voxelSize), max: last.map(n => n * voxelSize) };
   // Match buildVolumeMesh's cell counts exactly, including floating-point ceil.
@@ -107,6 +111,11 @@ export function convertMeshStamp(source, options = {}) {
   if (typeof source.name !== "string" || !source.name.trim()) throw new Error("Source needs a nonempty name");
   if (!Array.isArray(source.meshes) || !source.meshes.length) throw new Error("Source must contain at least one mesh group");
   const palette = sourcePalette(source.palette);
+  // Role noise: natural-rock roles get csg noise, built work stays crisp (tools/mesh-dc/noise.mjs).
+  const noiseTable = normaliseNoiseTable(options.noise !== undefined ? options.noise : source.noise);
+  // Floor band: one grid of the WHOLE stamp's walkable floors (a wall group's feet stand on another group's floor).
+  const bandRoles = noiseTable ? Object.values(noiseTable.roles).filter(r => r?.band) : [];
+  const floors = bandRoles.length ? floorGrid(source.meshes, { cell: Math.min(...bandRoles.map(r => r.band.cell)), minClear: Math.min(...bandRoles.map(r => r.band.minClear)) }) : null;
   const requested = options.meshNames;
   if (requested !== undefined && (!Array.isArray(requested) || !requested.length || requested.some(n => typeof n !== "string" || !n.trim()) || new Set(requested).size !== requested.length)) {
     throw new Error("Selected mesh names must be a nonempty list of distinct group names");
@@ -125,18 +134,16 @@ export function convertMeshStamp(source, options = {}) {
   const selected = groups.filter(({ mesh }) => !requested || requested.includes(mesh.name));
   const reports = [];
   const volumes = selected.map(({ mesh, id }) => {
-    const measurement = meshBounds(mesh, voxelSize, maxCells);
     if (!Array.isArray(mesh.indices) || !mesh.indices.length || mesh.indices.length % 3) throw new Error(`Mesh group ${mesh.name} indices must contain whole triangles`);
     const triangles = mesh.indices.length / 3;
     if (mesh.triangleMaterials !== undefined && (!Array.isArray(mesh.triangleMaterials) || mesh.triangleMaterials.length !== triangles || mesh.triangleMaterials.some(n => !Number.isInteger(n) || n < 0 || n >= palette.length))) {
       throw new Error(`Mesh group ${mesh.name} triangleMaterials must contain one valid palette index per triangle`);
     }
-    const meshData = { positions: [...mesh.positions], indices: [...mesh.indices] };
-    if (mesh.solidTriangleCounts !== undefined) meshData.solidTriangleCounts = structuredClone(mesh.solidTriangleCounts);
-    if (mesh.triangleMaterials !== undefined) meshData.triangleMaterials = [...mesh.triangleMaterials];
+    const split = roleNoiseNodes(mesh, palette, noiseTable, mesh.name, floors);
+    const measurement = meshBounds(mesh, voxelSize, maxCells, split.maxAmount);
     const doc = {
       name: mesh.name, voxelSize, bounds: measurement.bounds, palette: palette.map(p => p.id),
-      nodes: [{ id: "imported-mesh", op: "add", shape: "mesh", position: [0, 0, 0], mesh: meshData }],
+      nodes: split.nodes,
     };
     // The engine owns solid/index/winding validation, including overlapping solids.
     // Compile the distance field now; extraction is explicitly a separate stage.
@@ -147,7 +154,7 @@ export function convertMeshStamp(source, options = {}) {
       throw new Error(`Mesh group ${mesh.name} is not a valid closed solid: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
     }
     reports.push({ id, name: mesh.name, sourceVertices: mesh.positions.length / 3, sourceTriangles: triangles,
-      declaredSolids: mesh.solidTriangleCounts?.length ?? null, ...measurement, sourceValidation: "passed", extraction: "pending" });
+      declaredSolids: mesh.solidTriangleCounts?.length ?? null, ...measurement, ...(noiseTable ? { noiseNodes: split.report } : {}), sourceValidation: "passed", extraction: "pending" });
     return { id, name: mesh.name, doc, bounds: measurement.bounds, cellCount: measurement.cellCount };
   });
   const ops = [{
@@ -174,6 +181,7 @@ export function convertMeshStamp(source, options = {}) {
     version: 1, source: source.name, name, voxelSize, maxCells, materialId,
     anchor: [0, 0, 0], coordinates: "engine-y-up", palette: palette.map(p => p.id),
     sourceGroups: groups.length, selectedGroups: selected.length,
+    ...(noiseTable ? { roleNoise: { roles: noiseTable.roles, protectZones: noiseTable.protect.length, floorCap: noiseTable.floorCap, band: noiseTable.band } } : {}),
     totalCells: volumes.reduce((sum, v) => sum + v.cellCount, 0),
     volumes: reports, extraction: "pending",
     warnings: ["The first load extracts editable volume geometry and may take time. Check the extracted result before placing gameplay."],

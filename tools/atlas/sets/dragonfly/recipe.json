@@ -1,0 +1,135 @@
+{
+ "source": "MMO/3d/Mobs/Dragon/Dragonfly-parts.obj",
+ "sourceScale": 1,
+ "objScale": 1,
+ "outMesh": "MMO/3d/Mobs/Dragon/Dragonfly-unwrapped",
+ "sheet": 1254,
+ "keyStroke": 8,
+ "smooth": 48,
+ "margin": 22,
+ "gutter": 48,
+ "atlas": {
+  "size": 256,
+  "bleed": 2,
+  "bgLum": 236
+ },
+ "mirrorCopy": {
+  "axis": "z",
+  "parts": [
+   "Dragonfly_Head",
+   "Dragonfly_Eye",
+   "Dragonfly_Leg",
+   "Dragonfly_Tail",
+   "Dragonfly_Thorax",
+   "Dragonfly_Wing"
+  ]
+ },
+ "slots": {
+  "head": {
+   "color": "#ff0000",
+   "fit": "contain"
+  },
+  "eyes": {
+   "color": "#00ff00",
+   "fit": "contain",
+   "label": "compound eye"
+  },
+  "leg": {
+   "color": "#0000ff",
+   "fit": "contain"
+  },
+  "tail": {
+   "color": "#ffff00",
+   "fit": "contain"
+  },
+  "thorax": {
+   "color": "#ff00ff",
+   "fit": "contain"
+  },
+  "wing": {
+   "color": "#ff8000",
+   "fit": "contain"
+  }
+ },
+ "parts": {
+  "Dragonfly_Head": {
+   "slot": "head",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.4
+  },
+  "Dragonfly_Eye": {
+   "slot": "eyes",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Dragonfly_Leg": {
+   "slot": "leg",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Dragonfly_Tail": {
+   "slot": "tail",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Dragonfly_Thorax": {
+   "slot": "thorax",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Dragonfly_Wing": {
+   "slot": "wing",
+   "method": "plane",
+   "view": [
+    -0.032,
+    0.993,
+    -0.116
+   ],
+   "flare": 0.1
+  }
+ },
+ "layout": {
+  "col": [
+   {
+    "row": [
+     "wing"
+    ]
+   },
+   {
+    "row": [
+     "tail",
+     "eyes"
+    ]
+   },
+   {
+    "row": [
+     "thorax",
+     "leg",
+     "head"
+    ]
+   }
+  ]
+ },
+ "marks": [],
+ "cutoutSlots": [],
+ "combos": [
+  [
+   "Dragonfly_Head",
+   "Dragonfly_Eye",
+   "Dragonfly_Leg",
+   "Dragonfly_Tail",
+   "Dragonfly_Thorax",
+   "Dragonfly_Wing"
+  ]
+ ]
+}

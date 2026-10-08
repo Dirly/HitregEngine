@@ -82,6 +82,29 @@ export const decalSchema = z
         "Tint multiplied over the texture. #ffffff = the texture as-authored; darken toward the theme's grime tone, " +
           "or tint a grayscale generic (one crack texture serves stone and plaster via tint).",
       ),
+    emissive: hexColor
+      .optional()
+      .describe(
+        "Self-lit color multiplied by the same decal texture, for glowing runes or hot scars. " +
+          "Omit for ordinary non-emissive detail (black). Texture alpha, opacity and depth feathering still " +
+          "clip the glow to the projected mark. Bloom depends on the scene's post-processing; this does not cast light.",
+      ),
+    emissiveIntensity: z
+      .number()
+      .nonnegative()
+      .optional()
+      .describe(
+        "Multiplier for emissive color; defaults to 1 when omitted. Zero disables emission. " +
+          "Has no visible effect without a non-black emissive color; values above 1 can drive scene bloom.",
+      ),
+    filter: z
+      .enum(["linear", "nearest", "pixel"])
+      .optional()
+      .describe(
+        "Texture sampling, matching material filters. Omit for existing smooth linear sampling. " +
+          "Nearest keeps crisp texels up close and mipmaps in the distance; pixel disables mipmaps for " +
+          "hard sampling at every distance. Author the texture resolution relative to size to match world texel density.",
+      ),
     fadeDepth: z
       .number()
       .positive()

@@ -11,6 +11,8 @@ import type { InstancedProps } from "./instancing.js";
  * index means the same placed prop everywhere.
  */
 export interface InstancedPropBatch {
+  /** Per-asset far-proxy switch distance; absent uses the system default. */
+  lodDistance?: number;
   near: InstancedProps[];
   /** Present only for models heavy enough that a decimated middle tier is
    * worth the one-time simplification cost (see scene-builder.ts). Props
@@ -58,6 +60,15 @@ export interface InstancedPropBatch {
    * it; near/mid tiers then carry it as an instanced attribute the shared
    * material reads, and compaction moves it with the instance. */
   uvRotations?: Float32Array;
+  /** Six linear RGB multipliers per logical instance: bark RGB, leaf RGB. */
+  vegetationTints?: Float32Array;
+  /**
+   * Bounding-sphere radius of the model, in model units (before each
+   * instance's own scale). With a `minScreenPx` set on the system, an
+   * instance smaller than that on screen is drawn in no tier at all. Absent =
+   * never culled by size.
+   */
+  radius?: number;
 }
 
 /** Instances re-evaluated per batch, per `update()` call — bounds the worst
@@ -100,6 +111,12 @@ interface BatchState {
   nearMidHystSq: number;
   /** Dynamic batches only: 1 = a placed instance, 0 = an empty logical slot. */
   live: Uint8Array | null;
+  /** Per logical instance: how many culling units currently hide it (0 = drawn by LOD). */
+  hidden: Uint8Array;
+  /** Past this (squared), too small on screen: no tier. Infinity = never. */
+  cullSq: number;
+  /** ...and back inside this before it is drawn again. */
+  cullHystSq: number;
 }
 
 const slotMatrixScratch = new THREE.Matrix4();
@@ -135,6 +152,7 @@ function removeFromTier(state: BatchState, batch: InstancedPropBatch, tierNum: n
       mesh.setMatrixAt(mySlot, slotMatrix(batch, tierNum, k, lastIndex));
       mesh.instanceMatrix.needsUpdate = true;
       if (batch.uvRotations && tierNum !== FAR) mesh.setUvRotationAt(mySlot, batch.uvRotations[lastIndex]!);
+      if (batch.vegetationTints) mesh.setVegetationTintAt(mySlot, batch.vegetationTints, lastIndex * 6);
     }
     if (tierNum === FAR) writeImpostorSlot(batch.far, batch.impostor, mySlot, lastIndex);
   }
@@ -156,6 +174,7 @@ function addToTier(state: BatchState, batch: InstancedPropBatch, tierNum: number
     mesh.instanceCount = slot + 1;
     mesh.instanceMatrix.needsUpdate = true;
     if (batch.uvRotations && tierNum !== FAR) mesh.setUvRotationAt(slot, batch.uvRotations[i]!);
+    if (batch.vegetationTints) mesh.setVegetationTintAt(slot, batch.vegetationTints, i * 6);
   }
   if (tierNum === FAR) writeImpostorSlot(batch.far, batch.impostor, slot, i);
 }
@@ -208,8 +227,11 @@ export class FoliageLodSystem {
   private tanHalfFov = Math.tan((DEFAULT_FOV_DEGREES * Math.PI) / 360);
 
   constructor(
-    /** far threshold: past this, everything collapses to the billboard/box proxy. */
-    private lodDistance = 100,
+    /** far threshold: past this, everything collapses to the billboard/box proxy.
+     * 170 m, not 100: at 100 m the switch to impostors read as trees popping
+     * about a hundred yards out (owner report, 2026-10-07). Instanced, so the
+     * extra near/mid trees cost vertices, not draw calls. */
+    private lodDistance = 170,
     private hysteresis = 0.85,
     /** near threshold for batches with no `midError`: inside this, full-detail
      * geometry; between this and `lodDistance`, the decimated mid tier. */
@@ -217,7 +239,28 @@ export class FoliageLodSystem {
     /** how many pixels of geometric error the mid tier may show before the
      * near tier takes over — the knob behind every error-driven threshold. */
     private screenErrorPx = 2,
+    /** An instance whose bounding sphere would stand fewer than this many
+     * pixels tall is not drawn at all. 0 = never culled by size. */
+    private minScreenPx = 0,
   ) {}
+
+  /** See the constructor's `minScreenPx`. */
+  setMinScreenPx(pixels: number): void {
+    if (pixels === this.minScreenPx) return;
+    this.minScreenPx = pixels;
+    this.refreshThresholds();
+  }
+
+  /**
+   * The distance past which `batch` is smaller than `minScreenPx` on screen:
+   * a sphere of radius r at distance d stands r·H / (d·tan(fov/2)) pixels tall.
+   */
+  cullDistanceFor(batch: InstancedPropBatch): number {
+    const state = this.stateByBatch.get(batch);
+    const radius = batch.radius;
+    if (!state || !(this.minScreenPx > 0) || radius === undefined || !(radius > 0)) return Infinity;
+    return (radius * state.maxInstanceScale * this.viewportHeight) / (this.tanHalfFov * this.minScreenPx);
+  }
 
   setLodDistance(distance: number): void {
     this.lodDistance = distance;
@@ -253,13 +296,16 @@ export class FoliageLodSystem {
     if (!state || error === undefined || !(error > 0)) return this.nearDistance;
     const worldError = error * state.maxInstanceScale;
     const distance = (worldError * this.viewportHeight) / (2 * this.tanHalfFov * this.screenErrorPx);
-    return Math.min(Math.max(distance, MIN_NEAR_DISTANCE), this.lodDistance);
+    return Math.min(Math.max(distance, MIN_NEAR_DISTANCE), batch.lodDistance ?? this.lodDistance);
   }
 
   private applyThreshold(batch: InstancedPropBatch, state: BatchState): void {
     const distance = this.nearThresholdFor(batch);
     state.nearMidThresholdSq = distance * distance;
     state.nearMidHystSq = (distance * this.hysteresis) ** 2;
+    const cull = this.cullDistanceFor(batch);
+    state.cullSq = cull * cull;
+    state.cullHystSq = (cull * this.hysteresis) ** 2;
   }
 
   private refreshThresholds(): void {
@@ -280,6 +326,9 @@ export class FoliageLodSystem {
       nearMidThresholdSq: 0,
       nearMidHystSq: 0,
       live: batch.dynamic ? new Uint8Array(n) : null,
+      hidden: new Uint8Array(n),
+      cullSq: Infinity,
+      cullHystSq: Infinity,
     };
     this.stateByBatch.set(batch, state);
     this.applyThreshold(batch, state);
@@ -297,24 +346,36 @@ export class FoliageLodSystem {
 
   /** Instance counts currently resident in each tier, summed across every
    * registered batch — for the stats HUD, not the hot path. */
-  tierCounts(): { near: number; mid: number; far: number } {
-    const counts = { near: 0, mid: 0, far: 0 };
-    for (const state of this.stateByBatch.values()) {
+  tierCounts(): { near: number; mid: number; far: number; culled: number } {
+    const counts = { near: 0, mid: 0, far: 0, culled: 0 };
+    for (const [batch, state] of this.stateByBatch) {
       counts.near += state.counts[0];
       counts.mid += state.counts[1];
       counts.far += state.counts[2];
+      let placed = batch.positions.length;
+      if (state.live) {
+        placed = 0;
+        for (let i = 0; i < state.live.length; i++) placed += state.live[i]!;
+      }
+      counts.culled += placed - state.counts[0] - state.counts[1] - state.counts[2];
     }
     return counts;
   }
 
   /** The tier logical instance `i` wants from `cameraPosition`, with hysteresis against its current tier. */
   private decide(batch: InstancedPropBatch, state: BatchState, i: number, cameraPosition: THREE.Vector3): number {
-    if (batch.alwaysNear) return NEAR;
-    const midFarThresholdSq = this.lodDistance * this.lodDistance;
-    const midFarHystSq = (this.lodDistance * this.hysteresis) ** 2;
-    const hasMid = !!batch.mid && batch.mid.length > 0;
+    // a culling unit hid it (behind terrain, an interior seen from outside)
+    if (state.hidden[i]! > 0) return UNSET;
     const distSq = batch.positions[i]!.distanceToSquared(cameraPosition);
     const prevTier = state.tier[i]!;
+    // too small on screen to be worth a vertex: no tier at all, until it is
+    // back inside the hysteresis distance
+    if (distSq > (prevTier === UNSET ? state.cullHystSq : state.cullSq)) return UNSET;
+    if (batch.alwaysNear) return NEAR;
+    const farDistance = batch.lodDistance ?? this.lodDistance;
+    const midFarThresholdSq = farDistance * farDistance;
+    const midFarHystSq = (farDistance * this.hysteresis) ** 2;
+    const hasMid = !!batch.mid && batch.mid.length > 0;
     if (!hasMid) {
       // original 2-tier behavior: 1 = near, 3 = far (2 is simply unused)
       const wasNear = prevTier === NEAR;
@@ -332,20 +393,40 @@ export class FoliageLodSystem {
     const prevTier = state.tier[i]!;
     if (prevTier === wantTier) return;
     if (prevTier !== UNSET) removeFromTier(state, batch, prevTier, i);
-    addToTier(state, batch, wantTier, i);
+    if (wantTier !== UNSET) addToTier(state, batch, wantTier, i);
     state.tier[i] = wantTier;
+  }
+
+  /**
+   * A culling unit hid (`delta` 1) or revealed (-1) logical instance `i`.
+   * Counted, because units nest (a cell and a POI inside it). Takes effect
+   * now, not when the round-robin next reaches it: a reveal that waited
+   * would be a pop.
+   */
+  setInstanceHidden(batch: InstancedPropBatch, i: number, delta: 1 | -1): void {
+    const state = this.stateByBatch.get(batch);
+    if (!state) return;
+    const next = state.hidden[i]! + delta;
+    state.hidden[i] = next < 0 ? 0 : next > 255 ? 255 : next;
+    if (state.live && state.live[i] === 0) return;
+    if (!this.lastCamera) return;
+    this.place(batch, state, i, this.decide(batch, state, i, this.lastCamera));
   }
 
   /**
    * A dynamic batch placed logical instance `i` (its `matrices[i]` and
    * `positions[i]` are written): make it live and, when a camera has been
-   * seen, put it straight into the right tier.
+   * seen, put it straight into the right tier. `hidden` is how many culling
+   * units hide it from the start.
    */
-  addInstance(batch: InstancedPropBatch, i: number): void {
+  addInstance(batch: InstancedPropBatch, i: number, hidden = 0): void {
     const state = this.stateByBatch.get(batch);
     if (!state?.live) return;
     state.live[i] = 1;
     state.tier[i] = UNSET;
+    // units already hiding its owner (a model that finished loading after
+    // its cell went behind a ridge) — see InstancedPropPool.setHidden
+    state.hidden[i] = hidden;
     if (this.lastCamera) this.place(batch, state, i, this.decide(batch, state, i, this.lastCamera));
   }
 
@@ -368,6 +449,7 @@ export class FoliageLodSystem {
     if (tier !== UNSET) removeFromTier(state, batch, tier, i);
     state.tier[i] = UNSET;
     state.live[i] = 0;
+    state.hidden[i] = 0;
   }
 
   update(cameraPosition: THREE.Vector3): void {

@@ -63,6 +63,66 @@ over an alerted enemy hangs off. Every `mob.*` event is authority-internal:
 brains run only on the session authority, and one arriving from the wire would
 be a second brain arguing with the first.
 
+The other direction is three more small bridges, each optional:
+
+| Brain says / hears | Means | A game typically |
+|---|---|---|
+| `mob.engaged { engaged }` | it has a target or any threat left (fired on change; the first think always says which) | publishes an "aware" flag, so an opener on an unaware mob can exist |
+| `mob.guard { on }` | `guardBetween` mob wants its guard up / down (on change) | forwards to its own guard request |
+| `mob.interrupt { seconds }` (heard) | the game broke the wind-up (a parry, a stagger) | emits it on every stagger of a mob body |
+
+## Movesets
+
+With no `moves`, a mob swings one of its `abilities` at its threat target every
+`attackInterval` — fine for a training dummy, flat in a party fight. A
+**moveset** is a short list of moves, each WHEN and AT WHOM, never WHAT:
+
+```json
+"moves": [
+  { "ability": "mobClaw",  "target": "threat",   "range": [0, 2.6], "cooldown": 0,  "weight": 3,   "windup": 0.45 },
+  { "ability": "mobSlam",  "target": "threat",   "range": [0, 2.9], "cooldown": 6,  "weight": 2,   "windup": 1.05 },
+  { "ability": "mobLash",  "target": "behind",   "range": [0, 2.6], "cooldown": 6,  "weight": 2.5, "windup": 0.5, "turnRate": 300 },
+  { "ability": "mobLeap",  "target": "furthest", "range": [5, 14],  "cooldown": 10, "weight": 2,   "windup": 1.3, "lunge": true }
+]
+```
+
+The schema is `MobBrain.moveSchema` (a bad moveset is warned about and dropped,
+and the mob falls back to `abilities`). Every `attackInterval` — counted from
+the END of the last wind-up — the brain takes every move that is off its own
+cooldown and whose **target rule** finds someone inside its `range` band, and
+draws one by `weight`:
+
+- `threat` — the current target (the tank, when the tank is doing its job);
+- `nearest` / `furthest` — over every valid enemy within `deaggroRange`;
+- `behind` — the nearest enemy in the mob's rear half (a turn-and-lash).
+
+The last three are the point: a mob that only ever hits the tank lets the rest
+of the party ignore it. Moves are tried while chasing too, so a leap or a shot
+opens a fight from range. A non-threat pick costs one sight ray, for the winner.
+
+A move **commits** the body for its `windup`: no walking, no new move, and it
+turns toward its target only at `windupTurnRate` (or the move's `turnRate`).
+`windup` must equal the ability's own wind-up — the brain cannot know it, and a
+mismatch is a mob that walks off while its swing lands. A `lunge` springs at
+the point the target stood on (`mob.attack.at`) through the last part of the
+wind-up so the body lands as the ability resolves. `mob.interrupt` drops the
+wind-up and holds the body still for its `seconds`.
+
+## Facing and noticing
+
+The brain owns the facing once it has claimed it, and turns it at a FINITE rate
+every tick (`turnRate`, slower `windupTurnRate` mid-move) before handing it to
+the controller's `faceYaw` channel. That is what makes stepping round a heavy
+swing, or a tank holding a mob's facing, possible.
+
+Acquisition has a **sight cone** (`sightAngle`, half-angle) plus a short
+**`hearRadius`** that notices all round, so a mob can be walked up on from
+behind. Only acquisition: a target already held, a grudge and a packmate's
+shout are all-round. The default `sightAngle: 180` is the old omniscient
+behaviour; creatures set ~70. Stealth plugs into ONE place, `noticeScale` in
+`mob-brain.ts` (marked `HOOK(stealth)`), which scales aggro and hearing for the
+approaching body and returns 1 today.
+
 ## Threat: feeding it is the game's job
 
 The engine cannot know what a hit is worth, so nothing generates threat on its
@@ -130,6 +190,56 @@ every area and whether it is awake; `/admin/npcs` now carries an `ai` block per
 NPC — state, target and the whole threat table, straight off `Script.onDebug`.
 That is how you answer "why is it chasing HIM" on a live layer.
 
+## Death: ragdoll or clip
+
+The server decides the death (`combat/<id>.dead`, loot, XP); how the body
+falls is each client's own business. A mob prefab that carries a child entity
+with the `ragdoll` builtin falls as a cosmetic ragdoll; one without it plays
+its death clip. The flow, per tab:
+
+1. The death is seen: `userData.ragdollKick` (combat-actor's `die()` stamps it
+   with the blow's direction on the tab that resolved the hit), or `frozen` +
+   `actionClip === deathClip`, or the replicated `deadKey`
+   (`combat/{actor}.dead`) on a tab that only watches the body. A body already
+   dead the first time a tab sees it (a late join) keeps its clip.
+2. Skips, each leaving the clip: further than `maxDistance` (30 m) from the
+   local camera; `maxActive` (8) ragdolls already falling on this tab; no
+   WORLD/TERRAIN collider under the feet (terrain only collides inside the
+   simulation ring, and a body that falls where nothing was built falls forever).
+3. `leadIn` (0.35 s) of the clip, then at most `spawnsPerFrame` (4) builds per
+   tick: capsules from the pose at that instant, the clip's motion plus the
+   blow. The rig preset comes from the skeleton (`rig: auto`): **upright**
+   (bipeds: the spine bends but hardly twists) or **horizontal** (four legs: the
+   short spine bones merge into a stiff back that hardly rolls, a tip of 1.2 rad/s
+   onto a flank, and a roll guard that turns it back if it goes over onto its back).
+4. The bodies drive the bones until they lie still (every body slow for 0.5 s,
+   or nothing moving more than ~1.5% of the creature's size in 0.5 s), else at
+   `maxSeconds` (5); damping grows the longer it lies, so a body does not roll
+   down a slope forever. Then the bodies go and the bones stay: a corpse costs
+   nothing. A body that drops through the ground (well below where it died, with
+   ground above it) gets its clip back.
+5. Respawn clears the death signal: the bones and the mixer come back.
+
+Which families fall (2026-10-07): ON for zombies, ghouls, ffh-butler and the
+other opaque human-rig mobs, rats, wolves and every Dog-donor mammal (bear,
+bison, rhino, lion/lioness, horse, elk, mule deer, bighorn, goat/nanny, sheep,
+pig, wild dog, hyena) and their skeletal (`-undead`) variants. OFF (clip) for
+spirits (`ghost-*`, the translucent ffh spirits, `-ghost` spectral variants:
+they fade, they do not slump) and the legrig creatures with deaths of their
+own: cobra, dragon/drake, T-Rex, fish and sharks, fliers, insects, spiders,
+scorpion, alligator/sailback, salamander. The opt-in lives in the generators
+(MMO `make-prefabs.mjs` `RAGDOLL`, `rig-ratwolf.sh prefabs`,
+`authoring/mob-intake/zombie-prefabs.mjs`, `spectral-variants.mjs` drops it on
+ghosts); ghoul, ffh and `-undead` prefabs carry it directly. Its `actor` param
+is bound to the prefab's `actor` prop like combat-actor's.
+
+Checking a fall: voxel-demo `tools/ragdoll-bench.mts` (Node, real GLBs + real
+Rapier, flat or `--slope`: rest time, which way up, spine twist, limbs inside
+the trunk, floating/sinking), `tools/ragdoll-strip.mjs` (browser frame strips,
+`--slope` on the voxel-demo world) and `tools/ragdoll-measure.mjs` (cost).
+Cost at the cap of 8: ~0.4 ms physics + ~0.35 ms script per frame while they
+fall; 0 once frozen.
+
 ## Debugging a live mob
 
 Any script can implement `onDebug()` and it shows up wherever the engine
@@ -196,6 +306,11 @@ cliff; it cannot plan around a mountain range. That is the right trade for
 leashed mobs, and a global path (a coarse nav grid derived from the voxel field
 per chunk) belongs on top of this, not instead of it.
 
+A move's wind-up is a number the author repeats from the ability; the brain does
+not read the game's ability table (it must not), so a game should test the two
+against each other. A lunge is a straight spring through the drive channel —
+no terrain probe, no cliff check — so keep lunge bands short.
+
 Threat is a flat number per source — no per-ability modifiers, no threat
 transfer, no split tables for a multi-target pull. Packs share a target and
 nothing else: no formations, no ranged mobs holding a line while melee closes,
@@ -207,9 +322,28 @@ logged in or arrived from another layer is left alone.
 
 At the default `steerHz: 8`, a mob walking in the open costs **three raycasts
 per steering tick** (ground here, ground ahead, obstacle ahead) plus one sight
-ray when it has a candidate target. The fan — up to fifteen — is only paid when
+ray when it has a candidate target (and one more when a move goes for someone
+other than its target). The fan — up to fifteen — is only paid when
 the way ahead is actually blocked. `steerHz` is the lever when a layer has too
 many mobs: it makes them think less often, not move choppily, because the drive
 channel is written every tick regardless.
 
 Background on why raycast budgets matter here: `docs/performance-lessons.md`.
+
+## Patrols
+
+A `spawnArea` may carry `patrol`: points relative to the area, walked in order and back while the pack is idle. Each
+NPC gets them as the mob-brain `patrol` param in world coordinates; the leash, the way home and the server's fence are
+then measured from the nearest point of the route, so a long route needs no long leash.
+
+## Boss mechanics
+
+Boss mechanics are engine builtins in `@hitreg/scripting`, one file each, configured by parameters only. A dungeon
+holds the DATA that uses them (which boss, which thresholds, which spawn markers, which template), never code. The set:
+
+| Builtin | File | What it does |
+|---|---|---|
+| `encounter-waves` | `packages/scripting/src/encounter-waves.ts` | Adds join the fight at the boss's health thresholds: waves `{ atHp, count, mouths }` from named mouths, at most `maxAlive` alive, corpses removed after `corpseSeconds` (adds never respawn), re-armed when the boss dies or heals home. Reads `combat/<boss>.hp`/`.maxHp`/`.dead`; asks the server for bodies with the `npc.spawn` / `npc.despawn` events, which `NpcManager` answers. |
+
+Add the next mechanic (an enrage timer, a shield phase, a summoned totem) as its own builtin beside it, with its own
+tests, and list it here.

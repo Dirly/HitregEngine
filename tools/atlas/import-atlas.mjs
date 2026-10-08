@@ -2435,6 +2435,12 @@ for (const isl of islands) {
     cutPct: +isl.cyanPct.toFixed(1),
     overhang: isl.overhang,
     contained: isl.contained ?? null,
+    // The island's art <- key mapping at full precision, so a later step can
+    // paint in ART space (at the sheet's resolution) and have it come down
+    // through this same resample: key pixel k samples the artwork at
+    //   art = c + (k - c) / s - d        (per axis; inverse k = c + (art + d - c) * s)
+    // with k and art in pixel-index coordinates of the key / art sheet.
+    map: { cx: isl.cx, cy: isl.cy, dx: f.dx, dy: f.dy, sx: f.sx, sy: f.sy, clip: isl.artClip ?? null },
   };
   report.islands.push(row);
   if (isl.overhang.max > OVERHANG_LIMIT) {

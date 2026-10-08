@@ -1273,3 +1273,555 @@ Net at the worst spots: all 25 layers ~52-69 ms per recenter against ~26-38
 for the two base layers alone — which is what the two base layers cost before
 this pass. The bench is noisy between runs on a loaded machine (±40%); compare
 configurations inside one run.
+
+## Culling behind terrain: measure where the frame goes before expecting a win (2026-09-30)
+
+Built horizon occlusion, screen-size culling and POI interiors
+(`docs/culling.md`). On the MMO world it removes 3–5% of draw calls on
+average and 12–16% in hilly views, and changes GPU time by nothing — because
+the GPU was never the cost: 2–4 ms against 15–30 ms frames. Three things
+worth knowing before the next pass at "draw less":
+
+- **Hide by layer, not `visible`.** `visible` has four writers already
+  (visibility component, static batching, scripts, the editor). A culled
+  renderable moves to `OCCLUDED_LAYER`; shadow cameras are given that layer
+  explicitly (three syncs a shadow camera's layers to the main camera's only
+  while it has no layer beyond 0), so a tree behind a crest keeps its shadow.
+- **Merged blocks cannot be partly hidden.** The largest main-pass bucket at a
+  hilly site was 99 HLOD meshes; each is a 4x4 or 8x8-cell merge, hidden only
+  when the whole block sits below the horizon. Finer HLOD parts would cull
+  better and draw more — decide with the draw count, not the cull count.
+- **Async models arrive after registration.** The first use of a glTF lands
+  after its cell was built, so a unit re-walks its subtree (two units a
+  frame) and adopts late meshes; until then they are never hidden, which is
+  the safe direction.
+
+## Animated bounds and thumbnail readback (2026-09-30)
+
+The MMO snapshot `2026-09-30T23-49-22-mmo.json` contained two different
+problems: three startup intervals totaling about 20 seconds, and sustained
+CPU rendering cost after pending cell loads reached zero. GPU time was only
+3.4 ms on average. Do not call the whole report a startup artifact, or compare
+its 15 FPS aggregate directly to the older 93–95 FPS spawn benchmark: the
+camera, scene content, canvas, and loading state differ.
+
+**Skinned models bypassed every frustum.** All 35 loaded character meshes
+drew in the main pass and all three shadow cascades, regardless of location.
+Their bind-pose sphere is unsafe for animation, so merely switching
+`frustumCulled` on is not a fix. `skinned-bounds.ts` caches source-space
+influence boxes, transforms them with the current bones, and includes morph
+delta intervals. It evaluates lazily after the complete scene matrix walk
+(sibling bones must not be a frame behind), reusing results across passes.
+An explicit EngineRenderer render scope avoids repeating bone comparisons in
+every cascade; outside it, tools and raycasts still check dependencies. The
+affine box transform uses center/extents rather than eight transformed corners.
+Index changes, morph weights, teleports, scales, bind matrices and skeleton
+replacement invalidate the relevant cached result. Unknown shader deformation
+or invalid active morphs fail open. Inactive incomplete morphs do not prevent
+culling; the imported MMO body has one with fewer vertices than its body mesh.
+
+In a private WebGPU editor A/B at the human snapshot's position, looking toward
+town, toggling only skinned culling reduced draws **564 to 447** in both pairs.
+That exploratory probe retained the dynamic bounds getter in its baseline, so
+its timings are not a faithful pre-change comparison. The final gameplay
+probe restores the original plain `boundingSphere` property and disables
+culling for its baseline. Two paired comparisons measured **777 to 678/679
+draws**, median intervals **27.0 to 25.2 ms** and **27.2 to 25.1 ms**, with p95
+**33.2 to 31.0 ms** and **34.4 to 30.4 ms**. This is about a 7% frame-time gain,
+not a return to 89 FPS. Before the per-render cache, animated bounds actually
+cancelled the draw savings; do not accept draw count alone as success.
+The original snapshot did not record
+orientation, so this is a controlled regression probe, not its exact replay.
+67,437 indexed character vertices were checked against the world bounds with
+zero escapes, and 79,011 in the gameplay close-view probe. An initial manual
+image comparison reused Three's cached PassNode output: identical screenshots
+are not visual evidence unless its frame epoch advances. When freezing RAF
+for a same-pose comparison, advance Three's NodeFrame before each manual draw.
+The corrected close-view test shows all three NPCs and their shadows retained.
+Mean channel difference on/off was 0.39 of 255, versus 0.78 between the two
+culled captures separated by twice the time (moving shader effects). The
+images and `skinned-close-pixel-diff.json` are saved beside the probe report.
+Unit tests cover blended poses, attached/detached rigs, morph
+extrapolation, nonuniform scale/shear, teleports, index edits and safe fallbacks.
+Probe and reports: the voxel-demo project's
+`authoring/purchased-assets/profile-draw-regression.mjs` and `review/`.
+
+**Async PNG encoding can still block before it starts.** A cold private
+editor CPU trace attributed 8.8 seconds of a 60.9-second capture to the
+synchronous `canvas.toBlob` call in `thumbnails.ts`. The 96px thumbnail
+already had CPU pixels from an async GPU readback, but a default 2D canvas
+could upload those pixels again, then stall waiting for GPU work when making
+the PNG snapshot. Requesting `{ willReadFrequently: true }` keeps this
+temporary canvas in software. In the instrumented cold run, seven synchronous
+toBlob calls took 0–0.1 ms each, with the earlier multi-second self-time gone.
+This does not change the rendering canvas or thumbnail art. It also does not
+prove thumbnails caused the human's particular nine-second gap: that snapshot
+did not contain thumbnail spans. Keep loading stalls and steady-state frame
+cost separate when validating further fixes.
+
+## Imported furnishings: batch arrival and prune source hierarchies (2026-10-01)
+
+The expanded Brinehold furnishings added about 900 meshes sharing only three
+materials. They were submitted separately: their placements did not opt into
+static batching, the glTF load path ignored that flag, and the host's initial
+batch pass ran before asynchronous models arrived. In the busy-town gameplay
+probe this contributed roughly 800 draws even with room culling enabled.
+
+Honor `mesh.static` after model assembly, then coalesce late base-scene model
+arrivals into one batch rebuild after outstanding glTF loads finish. Preserve
+culling-unit boundaries: a room's furniture must never merge with another room
+or the building shell. In this project the fixed furnishing placements opt in
+through prefab overrides; shared prop prefabs remain usable for moving objects.
+
+Draw merging alone left most of the CPU cost. Hide a fully merged model root
+so projection skips its exported groups, and freeze the fixed model subtree so
+matrix traversal skips them too. Freeze the model, not its containing entity:
+an edited entity transform must still propagate through the parent-matrix check.
+Do not prune roots containing lights or unbatched parts, and restore source
+visibility/matrix settings on batch disposal. Animated/skinned/morphing models
+remain unfrozen; world-space batching also rejects vertex-displacement shaders
+and custom attributes. Hidden source parts must never become batch candidates.
+
+Fresh-load WebGPU validation at 1440x1000 automatically produced 36 furnishing
+batches from 899 meshes. Two paired warm comparisons in one gameplay session
+measured median intervals **34.9 -> 25.5 ms** and **33.4 -> 25.0 ms**, p95
+**40.1 -> 30.8 ms** and **40.8 -> 30.2 ms**, draws **1345/1346 -> 536**.
+The baseline restores separate submissions and ordinary source matrix walks;
+the scene, camera, materials, room culling and GPU settings stay the same.
+This is a 25-27% frame-time reduction, not a return to the older 89 FPS scene.
+An interior comparison retained the furniture, with mean RGB error 0.006/255
+(4985 pixels differed in a 1440x1000 frame); the two batched captures matched
+exactly. Manual captures advance Three's frame epoch, as described above.
+Tests cover async arrival, face ownership, parent movement after rebatching,
+matrix-walk pruning, lights/hidden parts, and deformation exclusions.
+
+Project evidence: `authoring/purchased-assets/review/furniture-batch-final.json`
+and `furniture-interior-*.png`. The reversible placement installer is
+`authoring/purchased-assets/batch-town-furnishings.mjs` (`--apply` to install).
+
+## Foliage CPU work and streaming-distance experiments (2026-10-01)
+
+An atlas does not make every plant one draw. Near tree bark/leaves remain
+separate submesh batches; distant impostors share atlas pages. Grass layers
+share texture pages but retain separate placement/draw batches. Reducing
+textures, instances and draw submissions are different optimizations.
+
+**Reuse the camera-ground query across grass layers.** All 27 layers asked
+for the same camera height for altitude fading. Cache that sample within a
+single `GrassSystem.update`, while keeping placement samples and next-frame
+terrain edits independent. Paired loaded-machine measurements reduced the
+grass scope from 1.72/2.17 ms to 0.21/0.27 ms. Do not extrapolate the whole
+frame gain from these runs: another editor was loading POI scenes concurrently.
+
+**An empty instance buffer can still cost CPU.** Three projects zero-instance
+batches and prepares render objects/uniforms before issuing zero GPU draws.
+Hide empty leaf batches only during the synchronous render, restoring their
+visibility in `finally`. Do not hide batches containing child lights/content,
+or overwrite authored visibility between frames. A private cached-list probe
+saved about 1 ms with 26 empty batches out of 116; production uses a fresh
+visible-tree traversal so dynamic additions and removals cannot go stale.
+The integration test checks render failures and repopulation on the next frame.
+The production whole-frame speedup still needs a quiet-machine measurement.
+
+**Check retained assets' LOD flags after an art rollback.** The MMO retained
+fern scatter rule still had `lod: false`, keeping all 250 pooled ferns in
+near geometry at the town probe. Enabling the existing LOD path left 18 near
+and 232 in atlas impostors without changing art, density or scale. Near and
+distant screenshots were reviewed against full geometry. The catalog and
+restoration recipe now record the intended LOD behavior. Logs/stumps remain
+separate retained assets. The original six tree scatter rules were already
+restored; the older world backup also contained the same 25 ground-cover layers.
+
+**Shorter streaming rings are a tradeoff, not an established fix.** At this
+48 m-cell town view, reducing the full-detail radius from 3 to 2 cells reduced
+full cells from 29 to 13 and pooled instances from 413 to 142, but draws only
+from 531 to 528. Also reducing HLOD 7 to 5 and far terrain 28 to 20 gave 502
+draws. The restored baseline was 530. Timing order was inconsistent while
+the other preview loaded, so no reliable FPS gain can be claimed. Live ring
+distances and cell size remain unchanged. Do not shrink voxel cells merely
+to load less: finer cells can increase submissions and streaming overhead.
+
+Evidence lives in voxel-demo `authoring/purchased-assets/review/`:
+`foliage-cpu-final.json`, `streaming-distance-comparison.json`,
+`streaming-fern-lod.json`, and `fern-lod-{near,far,far-full}.png`.
+The private harness blocks authoring POSTs and uses frozen fixture JSON;
+close its browser after testing so it does not compete with the human's game.
+
+## Audio: isolate playback, late scripts and resource lifetime (2026-10-01)
+
+The human reported a large historical loss when audio was introduced. At the
+current warmed town camera, the native AudioContext was confirmed running
+with two non-positional ambience loops. A private same-view sequence suspended
+the audio graph, then also bypassed soundscape/emitter updates, footstep/weather
+audio helpers and playback requests. Repeated normal intervals were 23.2,
+22.3 and 22.0 ms median; bypassed intervals were 23.3 and 23.0 ms. Draw counts
+stayed at 532-533. The first normal sample was slower (26.1 ms), so comparing
+only that first sample with the first suspended one would incorrectly suggest
+a large gain. Listener transform writes remained active during suspension and
+cost only a few hundredths of a millisecond per frame in the instrumented run.
+Soundscape late work averaged about 0.08-0.09 ms per frame, with individual
+sampling peaks up to 1.6 ms. This does not reproduce the historical regression,
+nor test a long session or an area with many positional emitters.
+
+**The old profiler hid late audio work inside animations.** Its per-script
+scopes covered fixed updates only, where soundscape does essentially nothing.
+The host now separates animation, late scripts and cloth; ScriptRuntime
+attributes late updates by script name and closes the scope even on a failure.
+Use those scopes in new snapshots instead of treating the old fixed soundscape
+number as its total cost.
+
+**Scene removal does not disconnect Web Audio nodes.** AudioSystem now
+disconnects source/panner/gain paths on natural completion, eviction, loop
+replacement and stop. Its completion handler preserves Three's playback-state
+bookkeeping. A generation token prevents a pending decode from starting an
+old-session sound after Stop. Repeated identical loop volumes no longer enqueue
+gain automation; changed volumes still update and pending loops retain their
+latest gain. These are lifecycle and redundant-work fixes, not evidence that
+audio caused the reported FPS loss. Offline tests cover each release path and
+pending loads; a native Chrome AudioContext check verifies the operations with
+real audio nodes, 24-voice eviction, natural endings and stop/restart handling.
+
+Project evidence: `authoring/purchased-assets/review/audio-comparison.json`
+and `audio-lifecycle-native.json`; replay scripts are `compare-audio.js` and
+`audio-smoke.mjs` in the parent directory. `HITREG_PERF_AUDIO=1` enables browser
+autoplay in the private benchmark harness so a suspended baseline cannot
+silently masquerade as active audio.
+
+## Town characters: duplicate transforms and distant pose scheduling (2026-10-01)
+
+Bone sockets explicitly updated a bone, then called position/quaternion getters
+that each walked its ancestors again. Parent conversion repeated the work.
+Read the freshly updated matrices directly: one decomposition supplies the bone
+pose and the already-current parent supplies the inverse transform. This retains
+scaled-parent behavior and both fixed/late refreshes. Cached numeric parameters
+replace JSON stringify/parse in the hot path. Tests check moving, rotated and
+scaled ancestors and one ancestor refresh for a single-bone socket.
+
+Animation pose LOD is opt-in through the `animator` schema (`poseLod` in the
+generated spec). Town generation and the installed 25 Brinehold residents use
+full-rate poses nearby, 20 evaluations/second from 40 m, and 10 from 100 m.
+Only stable loops qualify. One-shots, layers, held blends and transitions stay
+full-rate; the camera-followed entity is protected through its visual delegate.
+Both hosts supply their render camera; omitting it preserves the old behavior.
+Physics and AI retain their original schedules.
+
+Skipped evaluations accumulate elapsed time. Phase queries include that debt,
+and clip/rate changes flush it against the OLD action before changing state.
+Returning to the near range evaluates the current pose immediately. Stable
+per-entity phases spread distant crowd work across frames instead of producing
+a synchronized animation hitch. Tests cover near/mid/far rates, parent delegates,
+camera teleports, playback phase, attack completion, layers, fades, speed changes,
+stop/restart and crowd scheduling.
+
+No live benchmark was run: the owner authorized established optimization work
+while reserving their GPU for another game. Functional checks establish behavior,
+not an FPS gain. The project installer and reversible scene ops are in voxel-demo
+`authoring/purchased-assets/enable-town-pose-lod.mjs` and
+`review/town-pose-lod-*.json`. House shells already opt into static batching;
+further exterior draw reduction requires material or spatial changes, not simply
+reapplying that flag.
+
+## Moving equipment: omit hidden holders, retain unchanged uploads (2026-10-01)
+
+Moving item batches skipped the draw when every holder was hidden, but drew
+every registered holder as soon as one was visible. A zero part mask collapsed
+the hidden copies without avoiding their vertex shader work. A character can
+have sockets registered for several weapon types and unworn clothing, so most
+holders in an otherwise visible batch can be inactive.
+
+`MovingInstanceSystem` now packs only holders with a nonzero part mask and a
+visible ancestor chain. Registration and entity-level effect anchor queries
+stay independent of packed GPU indices. A slot move or buffer rebuild uploads
+all attributes together; retaining only the matrix would give the incoming item
+the previous occupant's glow, texture or hang placement.
+
+Shown holders compare current world and hang matrices with their last uploaded
+double-precision snapshots. Unchanged poses skip buffer writes and upload flags;
+hidden holders skip transform work altogether and refresh on reveal. Do not
+compare a double-precision world matrix against its float32 GPU copy: rounding
+alone would make an unchanged item look dirty forever. This also lets reduced
+NPC pose evaluation avoid repeated equipment uploads between pose changes.
+
+Functional tests cover hidden mixed batches, stationary upload versions, ancestor
+movement, visibility restoration, swap removal, re-registration, growth, appearance,
+glow and changing/removed hang transforms. No live FPS benchmark was requested.
+
+## Flat ocean cells: collapse geometry, preserve seams and edits (2026-10-01)
+
+The world stores its recipe, temporary density samples and cached surface meshes;
+it does not retain a dense voxel volume for every loaded cell. There is still
+waste in a perfectly flat sea-floor cell: MC emits its full interior grid.
+`flatCellMesh` in the shared voxel mesher now collapses a proven uniform surface,
+with the full boundary lattice and skirts retained. All padded density columns
+must match, with one upward crossing, and surface attributes must match at every
+original vertex. Slopes, caves, blobs, raster edits, multiple surfaces and paint
+variation fall back to ordinary MC. No depth cutoff removes undersea content.
+
+An offline geometry audit of four deep-ocean cells in the current MMO recipe
+produced 289 vertices / 288 triangles / 26,576 mesh-array bytes per cell. The
+ordinary 24x24 flat MC grid plus skirts is 817 / 1,344 / 81,488: about 79% fewer
+triangles and 67% fewer retained array bytes, excluding GPU/physics overhead.
+That is a geometry count, not an FPS measurement. The full density block is
+still sampled to establish the proof; this is not a sampling-memory reduction.
+
+Tests compare boundary samples, normals and attributes with ordinary MC, check
+LOD joins and fallbacks, and drop physics bodies onto collapsed interiors, edges
+and four-cell corners. The HLOD generator version is bumped so persisted bakes
+do not keep the older dense geometry. Project evidence:
+`authoring/purchased-assets/review/flat-seafloor-geometry.json`.
+
+## Prune non-rendering branches before the shadow passes (2026-10-01)
+
+A clean MMO CPU profile spent about 20% of sampled time in Three's
+`_projectObject`. The visible graph contained 2,755 bones and 4,397 groups;
+the main view and three cascades walked them all. Bone-only rigs, empty
+equipment holders and groups containing only hidden content cannot contribute
+a draw, but still paid those visits. This was CPU work: the GPU took about
+3 ms while the whole frame took over 20 ms.
+
+The renderer's existing empty-instance pruning now also prunes entire empty
+branches after updating world matrices. It restores visibility in `finally`.
+Zero-layer content can be pruned; layer 29 cannot, because shadow cameras see
+it. Attached meshes/lights keep their ancestor paths alive. LOD and bundle
+subtrees retain their own per-camera policies. Bone-only structural results
+use a weak cache invalidated by child attachment/removal/reparent events;
+visibility verdicts are recalculated every frame. Animation, physics and
+matrix updates keep their original schedules.
+
+Alternating baseline/optimized/optimized/baseline runs in one isolated Chrome
+WebGPU session measured 23.30 -> 20.09 ms average frame arrival facing town
+(about 43 -> 50 FPS). A warmed full camera rotation measured 24.79 -> 21.87 ms;
+the first rotation compiled newly visible content and is not a steady-state
+comparison. The viewport was 1440x1000 with the authored pixelation setting
+(692x480 canvas), GPU timestamps enabled. Frozen before/after/before images
+were byte-identical in two headings, with identical draw/triangle counts.
+This removes traversal work; it does not reduce draw distance or geometry.
+
+Project evidence and replay probes: `authoring/purchased-assets/oct1-*.js`
+and `review/oct1-{isolated.cpu,prune-final-ab,town-ab,rotation-ab}.json`.
+The visual reports are `oct1-visual-parity.json` and
+`oct1-town-visual-parity.json`. An experimental transform cache was slower
+and was not installed. Remaining CPU costs include per-draw submission and
+the world-matrix walk; lower texture resolution is not the lever this profile
+points to.
+
+## Town overview: preserve silhouettes with authored 3D proxies (2026-10-01)
+
+An overhead town view sees most buildings at once; frustum culling cannot remove
+visible roofs. Brinehold's base-scene district assets were outside the streamed
+HLOD path and retained 28 material primitives over 96,394 triangles. Texture
+sharing alone does not collapse those draws. The atlas/bake policy is in
+`docs/town-baking.md`.
+
+The static instanced path now accepts an authored single-mesh/material far proxy
+and a per-asset distance (mesh schema/spec). Different distance/shadow policies
+split into separate batches, including pooled assets. Invalid proxy loads retain
+detail, and a delayed load must respect the owner's release. Distance hysteresis
+remains active; neither physics nor the source model is replaced.
+
+An isolated two-district fixture compared actual source and proxy output from a
+hill and above, then approached the buildings. Camera-facing district impostors
+saved draws but changed the roofs too much and were rejected. A simplified 3D
+proxy, retaining source coordinates with averaged source-material vertex colours,
+kept the skyline at the reviewed distance. Installed at 450 m, with return to
+geometry inside the existing hysteresis band. Trees were not changed.
+
+Measured fixture counts: town geometry 28 -> 2 material draws, 96,394 -> 69,508
+triangles. Including the fixture's two other draws: 30 -> 4. This is **not** a
+whole-world FPS measurement; the rest of the scene, shadows and CPU work still
+matter. The proxy is primarily a material/submission saving, not an aggressive
+triangle collapse. Source hashes invalidate derived proxies after rebuilding.
+
+The same audit found fully height-faded grass still being submitted. Its shader
+alpha was zero but its mesh remained visible. Hide that layer until descent,
+retaining placements; empty layers must remain hidden too. Density is separate:
+MMO's added fern layer overlapped the original shrubs. Its placement rebalance
+reduced sampled ferns 580 -> 129 and shrubs 135 -> 93, while sampled tree placements
+were identical. Ground-cover density was reduced 20%; the 25 cover layers still
+use three atlas sheets, with a draw per occupied compatible layer, not one draw
+for the entire atlas. Near imported plants/rocks still have separate material
+batches; distant foliage uses shared impostor pages.
+
+Project evidence: `authoring/towns/distant-town-solid-review/`,
+`authoring/towns/brinehold-lod-catalog.json`, and
+`authoring/purchased-assets/review/{clutter-draw-audit,clutter-rebalance}.json`.
+
+## Atlas-backed POIs still drew one prop at a time (2026-10-01)
+
+The town-overview complaint persisted after the district proxy: the live view
+reported 638 draws with no streaming loads. A matching private overview had 633;
+Packers' Meadow contributed 130 and the cemetery 85 main-pass submissions. Their
+prefab children still declared `mesh.static: false`. The earlier furniture pass
+covered town interiors, not the newer outdoor placements. Both used existing
+atlases, but that did not make them enter the static batcher.
+
+The project installer `authoring/purchased-assets/batch-fixed-world-dressing.mjs`
+marks fixed placement meshes and prefab children static through scene ops. It
+rejects animated/skinned models, behavior-bearing ancestors, nested/behavioral
+prefabs, wind and moving meshes; batching itself preserves shader/deformation
+exclusions and culling-unit boundaries. Original transforms, colliders, effects,
+materials and asset files are retained, with inverse ops for the 503 placements.
+The catalog check also exposed two older uncatalogued variants; their existing
+sources and manifests were registered before installing.
+
+A clean-load comparison at the same camera reduced **631 to 361 draws**. Both
+loads retained 6,278 instances in the distant foliage pages. Main geometry stayed
+essentially unchanged (1.2253M vs 1.2257M submitted triangles); a batch may retain
+a few formerly individually culled triangles. Overview and close meadow images
+were reviewed. This is a private editor reproduction, not a promised player FPS.
+Do not sample immediately after a structural ops rebuild: one attempted sample
+had zero profiler frames and captured rebuild counters. Require a real sampling
+window and use a clean load when validating the installed output.
+
+## Distant foliage: preserve per-instance metadata and placed bounds (2026-10-01)
+
+An interleaved impostor page had become ordinary vertex attributes in
+`instancedGeometryFrom`: `InterleavedBufferAttribute.clone()` without a clone
+context de-interleaves into a plain `BufferAttribute`, losing the instance
+divisor. Quad corners then read different trees' atlas metadata; splitting the
+metadata also negates the shared vertex-buffer layout. The symptom is malformed
+or missing distant trees even though scatter counts and LOD distances never
+changed. Preserve the already per-batch `InstancedInterleavedBuffer` attributes,
+just as the ordinary instanced attributes are preserved. Tests must inspect the
+FINAL `InstancedProps` geometry, not just the page geometry before wrapping it.
+
+`Box3.expandByObject` also needs object-level bounds for custom instancing:
+the base vertices omit placements, and impostor-page vertices are all zero.
+Instanced props now supply placed boxes, and pages explicitly union each canopy's
+bounds. Union complete instance spheres as well; merely copying the first centre
+into an empty sphere left its negative radius intact and could omit that tree.
+Regression tests cover single/multiple trees, translated parents, canopy heights
+and retained per-instance buffer semantics. No tree draw distance was shortened.
+
+Evidence: voxel-demo `authoring/purchased-assets/review/` files
+`overview-draw-audit.json`, `poi-batch-probe.json`, `fixed-dressing-browser.json`,
+`fixed-dressing-*.png`, and `fixed-world-dressing.json`.
+
+## Town residents: skinned bodies, their shadows and held poses (2026-10-02)
+
+"Performance halved when the people came in" (Tidewell, 25 residents, scene `proving`). Scene-copy
+A/B and in-session toggles at the spawn: the residents cost 3.4-4.8 ms of a CPU-bound frame (GPU
+~2.5 ms), almost all of it the 25 SKINNED BODIES (hiding only the bodies saved as much as hiding
+the residents; heads, hair and gear already batch to ~15 draws). Each body draw cost ~50 us against
+~17 us for a static draw (bounds, bone upload, bindings), and its shadow draws were roughly half of
+that. The bone matrix walk added 0.85 ms; furnished interiors and their five unshadowed lights were
+small by comparison.
+
+Three contained savings, each switchable for an A/B:
+- `EngineRenderer.skinnedShadowDistance` (default 40 m, `skinned-shadows.ts`): a skinned mesh's
+  `castShadow` reads false inside a render frame beyond that distance (2 m hysteresis); outside a
+  frame it reads as authored. At the boundary a resident's ground shadow switches off at once.
+- `AnimationSystem.holdBones` (default on): on frames pose LOD skips, the skeleton's matrix walk is
+  skipped too (parent-matrix comparison, like static-transforms), and `character-look` skips socket
+  upkeep while the model's `userData.poseVersion` and its parent's world matrix are unchanged.
+  Off: every frame walks and attachments recompute, as before.
+- `tools/town-npcs.mts` gives each resident `culling.minScreenPx: 6`, and parents a resident with
+  `place.inside` under that building's interior unit.
+
+Measured with the machine busy with other work (frame medians noisy; counters are not):
+shadow draws 381 -> 365, `render/matrices` 1.74 -> 1.38 ms, `character-look` 0.59 -> 0.36 ms,
+`render/draw` 16.5 -> 15.9 ms. The real fix is an instanced skinned-body path (not built).
+Probe: `apps/playground/tools/town-perf.mjs --scene proving [--legacy]` writes a JSON report keyed by
+the scene hash (frame p50/p95, draws, triangles, shadow draws, animated bodies, lights).
+
+## Proving unplayable: a load-everything boot, an 11 s precompile, and a frame spent on objects nobody can see (2026-10-07)
+
+"Opening the engine takes 15 minutes and freezes; walking 10 minutes and the page dies." Measured
+on `proving` (dedicated server, 81 mobs), dev client, headless Chrome with real WebGPU, 1600×900.
+
+**Boot.** The editor's `/__hitreg/assets-index` (and the server's `playgroundRoots`) listed EVERY
+project under `projects/` — 22 of them, ~5,400 JSON files and 200+ MB parsed at boot — when
+proving reaches ~1,100. Projects now declare `project.json` `dependsOn`; the index is scoped with
+`?scene=` to the owning project's closure (same rule on the server), and switching the editor to an
+out-of-scope project reloads the page. Vite also watched every non-`assets/` file under `projects/`
+(one handle per folder; it is what blocked moving a project folder on Windows) — it now watches only
+`projects/*/scripts`. Ten orphaned agent dev servers (each a recursive watcher on the 8 GB tree) were
+part of the "freezes" too: stop stale servers before believing any measurement.
+
+**The 11 s freeze.** `rebuildStaticBatch` called `renderer.precompile(scene)` — "deliberately not
+awaited", but the shader codegen inside `compileInSceneContext` is synchronous per render object, so
+the whole scene was one 10.7 s main-thread block, repeated on every re-batch. Precompile is now
+time-sliced (≤6 ms per frame, subtree units of ~300 objects, after the post chain's first frame), and
+a re-batch compiles only the new batch group. The total compile work is unchanged; it just no longer
+stops the tab.
+
+**The frame (24 → ~57 fps at the spawn, work 40 → ~15.5 ms):** in order of what each was worth —
+- *A screen-size cull* (`EngineRenderer.minScreenRadiusPx`, default 2.5 px of radius, in
+  `hideNonRenderingBranches`): ~250 of 310 main-pass draws were objects >250 m away at <10 px.
+  Hidden per frame only (restored with the empty branches), also skipping shadow passes; static
+  subtrees are culled whole from cached bounds keyed on the frozen root's version. TRAP: an instanced
+  mesh's geometry sphere is ONE instance — judging a forest by it hid every distant tree. Instanced/
+  batched objects are judged only by their own instance-covering sphere, else never culled.
+- *Implicit static* (`BuildOptions.autoStatic`, host rule `STILL_COMPONENTS` in main.ts): an entity
+  whose own and ancestors' components can never move it (no script/rigidbody/animator/billboard…)
+  batches and freezes like `mesh.static`. In play mode whole still subtrees are frozen
+  (`freezeStaticSubtree`), refreshed when a model lands inside, thawed on stop. Batches also prune
+  fully-merged still entity groups so no pass walks a town of empty groups.
+- *Default pose LOD* (`AnimationSystem.defaultPoseLod = CROWD_POSE_LOD`): no prefab had opted in, so
+  all 81 mobs posed at full rate at any distance (−2.4 ms A/B). Same guards as authored poseLod.
+- *Shadow passes skip caster-free branches* (three's ShadowNode walks and frustum-tests the whole
+  scene, filtering castShadow only afterwards): hidden around `render(scene, shadowCamera)` only;
+  lights stay so the light set (pipeline keys) never changes.
+- *Per-frame `getWorldPosition` on frozen objects* (ambient VFX, light budget) re-derived every
+  ancestor matrix; `readWorldPosition` reads `matrixWorld` when a frozen root owns it.
+  `bone-socket` skips when the pose version, parent matrix and offsets are unchanged.
+- *Town kits re-embed the same textures*: 55 town GLBs carried 658 images, 37 distinct. Embedded
+  images are now named by content at load (`gltf-dedupe.ts`, scoped by asset folder) so
+  `shareNamedTextures` applies; identical materials share one object (681 → 252 textures). Batches
+  of POI-tagged shells now merge per 256 m cell instead of per building (each building used every
+  material once, so per-building buckets never merged); authored `culling` units keep their own.
+- Profiler: script loops opened a scope per INSTANCE (two clock reads each, even for scripts with no
+  handler). Skipping non-implementers and one scope per run of same-named scripts: 0.6 → 0.3 ms.
+
+**Measuring.** Headless rAF looked capped at 60 fps with the profiler off; read FRAME WORK instead
+(sum of time inside rAF callbacks — wrap `requestAnimationFrame` in the page) and keep 70 fps = ≤14.3
+ms. Client cost depends on server state: a fresh server (mobs at their spawns, near the player) cost
+~2 ms more than one that had run for an hour. Start a fresh server per measurement, and never run two
+game servers beside the client. The time-sliced precompile occupies the first minute after load —
+settle ~60 s before reading steady state. A/B inside one page session (runtime switches:
+`renderer.minScreenRadiusPx`, `renderer.skipShadowless`, `animations.poseLodEnabled`,
+`__hitreg.freezeStatic(on)`, `__hitreg.rebatch()`).
+
+**Still open** (≈15.5 ms work at proving's spawn; ≈14.5 with the settings below):
+- `proving`'s own settings: `voxelWorld.rings.farTerrain` 28 → 18 and `hlod` 7 → 5 (fog hides most
+  of that range; 2,453 → 1,009 chunks, 64 HLOD draws shrink) plus sun `shadow.cascades` 3 → 2 measured
+  ~1.1–1.7 ms together. A content decision, not applied.
+- Per-draw cost in three's WebGPU renderer (~25–40 µs: bindings `_update`, `updateForRender`) is now
+  the floor: ~200 main-pass draws. Fewer requires a town material ATLAS (one material per kit, not per
+  Blender material) or render bundles (three re-records only on version bumps, so culling/visibility
+  changes need care), or the instanced skinned-body path for crowds.
+
+### Tried and reverted: three's render bundles for static batches (2026-10-07)
+
+`THREE.BundleGroup` records a group's draws once and replays them, but in three r185 replay still
+runs `updateForRender` for every render object whose nodes need a refresh — and every object's
+model-view/normal matrices are camera-dependent, so that is every object, every frame. The bindings
+`_update` cost (the largest per-draw cost left) is NOT skipped. A bundle is also recorded with
+whatever frustum culling applied at record time, so it has to be recorded unculled (members
+`frustumCulled = false`) or re-recorded on every camera turn; unculled, the 269 merged meshes all
+drew where ~23 were visible. In-session A/B: 25.5 ms bundled vs 21.4 ms ordinary. Do not retry
+without a renderer path that keeps per-object uniforms out of the per-frame loop.
+
+Town atlas (`tools/town-atlas.mjs`, see docs/town-baking.md) + farTerrain 28→18: main-pass draws at
+the proving spawn 202 → 142, frame work ~1.1 ms lower.
+
+### Opening the editor on proving: 0.5 fps for a minute and a half (2026-10-07)
+
+Measured as an fps timeline after `?scene=proving` loads (edit mode, editor UI visible). Before:
+1 fps with single frames of 17.8 s for the first ~45 s, steady 60 fps only at ~110 s. Causes:
+- **Shader codegen.** proving holds 430 materials → 561 NodeBuilder runs (≈40 ms of JS each) that
+  collapse to only 175 distinct GPU programs: three keys its builder cache on node IDENTITY, so two
+  identical-looking materials with their own uniform nodes both build. The VFX system makes one
+  material per module instance (101 for the town's torches/braziers), primitives/data materials
+  ~107, world cover 25. The first draw builds everything visible synchronously (the 13–18 s frame).
+  OPEN: share VFX/cover materials per look with per-instance values as attributes or object-scope
+  uniforms — the same cure the particle emitters already got (§ "first cast of every spell").
+- **Precompile units too big.** The time-sliced precompile checks its budget between units; a
+  300-object unit held several new materials and ran for seconds. Units are now ≤24 objects.
+- **`validateScene` was O(n²)** (it rebuilt the doc's key array per entity) — ~2.3 s of every
+  rebuild on the expanded 12k-entity world, and a rebuild runs whenever an agent writes the scene.
+- **Hierarchy panel**: `childrenOf` per row is O(n) — O(n²) per render; now an index per doc version.
+- Noted, not changed: `applyOps` `structuredClone`s the whole doc per batch — on a 2 MB scene that
+  alone can exceed the 50 ms data-op budget.
+After: steady 60 fps at ~80 s, worst frame 12.9 s. Probe: an rAF fps timeline from page load in
+edit mode (play-mode probes that wait 60 s for "settle" never see any of this).

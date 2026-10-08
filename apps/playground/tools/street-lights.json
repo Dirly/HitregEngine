@@ -1,0 +1,33 @@
+{
+  "about": "The street-lighting standard (docs/world-standards/towns.md): every town street and every road near a town carries lanterns. Read by tools/town-lights.mts (plan/check/apply) and by `zonegen status` (row `town <name>: lights`). Schema with every field described: streetLightingSchema in tools/town-lights-rule.mts. A project may replace this file with authoring/street-lights.json.",
+  "streets": {
+    "prefab": "town-lights/lamp-post-lit",
+    "lanePrefab": "town-lights/hanging-lantern-lit",
+    "spacing": 18,
+    "cover": 13,
+    "edgeOffset": 0.5
+  },
+  "plazas": { "prefab": "town-lights/lamp-post-lit", "cover": 3 },
+  "gates": { "prefab": "town-lights/lamp-post-lit", "pair": true, "cover": 7 },
+  "quays": { "prefab": "town-lights/lamp-post-lit", "jettyPrefab": "town-lights/hanging-lantern-lit", "cover": 6 },
+  "roads": {
+    "prefab": "town-lights/lamp-post-lit",
+    "reach": 160,
+    "start": 16,
+    "spacing": 30,
+    "cover": 24,
+    "shoulderOffset": 1.1,
+    "junctionReach": 200,
+    "exclude": ["^trail-"]
+  },
+  "clearance": {
+    "building": 0.6,
+    "door": 1.0,
+    "stair": 1.5,
+    "npc": 1.5,
+    "landmark": 4,
+    "minApart": 8,
+    "maxTilt": 0.35,
+    "groundTolerance": 0.3
+  }
+}

@@ -10,6 +10,21 @@
  *     --merge 5                    pieces closer than this (px) are one symbol
  *     --max 100                    …unless the joined symbol would exceed this (px); default page/5
  *     --min 12                     drop blobs with fewer pixels than this
+ *     --downsample 2               box-filter the page down by this factor first
+ *     --elements shadow            the school(s) these symbols belong to
+ *     --row-tags 0=spike,1=crystal tags by SOURCE row (what each row of drawings IS)
+ *     --align bottom               sit each symbol on the bottom of its cell (drawn
+ *                                  bodies: the base must touch the ground)
+ *
+ * `--downsample` is how a generated sheet is brought to the scale of the
+ * hand-drawn one: school sheets are generated at 1024 px and halved to the
+ * 512 px page the original SpellSheet1 was drawn on, so their big circles
+ * land in the same ~88 px cells. A BOX filter (not nearest): the thin lines
+ * keep their weight as soft alpha instead of breaking into dashes.
+ *
+ * `--elements` stamps every entry with its school; the generator then draws
+ * only that school's symbols for its spells (and unschooled symbols only as
+ * the fallback when a school has none for a role).
  *
  * The source is white-on-black OR black-on-white, symbols anywhere on the
  * page as long as they don't touch. The tool finds every symbol (a
@@ -34,12 +49,16 @@ import path from "node:path";
 import { decodePng, encodePng } from "./_png.mjs";
 
 function parseArgs(rest) {
-  const opts = { roles: ["sigil"], rows: [], tags: [], pad: 4, merge: 5, min: 12, max: 0 };
+  const opts = { roles: ["sigil"], rows: [], tags: [], elements: [], rowTags: new Map(), align: "centre", pad: 4, merge: 5, min: 12, max: 0, downsample: 1 };
   const positional = [];
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a === "--roles") opts.roles = rest[++i].split(",").filter(Boolean);
     else if (a === "--tags") opts.tags = rest[++i].split(",").filter(Boolean);
+    else if (a === "--elements") opts.elements = rest[++i].split(",").filter(Boolean);
+    else if (a === "--row-tags") for (const spec of rest[++i].split(",")) { const [row, tag] = spec.split("="); opts.rowTags.set(Number(row), tag.split("+")); }
+    else if (a === "--align") opts.align = rest[++i];
+    else if (a === "--downsample") opts.downsample = Math.max(1, Math.round(Number(rest[++i])));
     else if (a === "--pad") opts.pad = Number(rest[++i]);
     else if (a === "--merge") opts.merge = Number(rest[++i]);
     else if (a === "--min") opts.min = Number(rest[++i]);
@@ -56,7 +75,7 @@ function parseArgs(rest) {
 }
 
 /** The page colour: the median of the four corners. */
-function background(img) {
+export function background(img) {
   const { width: w, height: h, data } = img;
   const px = (x, y) => [data[(y * w + x) * 4], data[(y * w + x) * 4 + 1], data[(y * w + x) * 4 + 2]];
   const corners = [px(0, 0), px(w - 1, 0), px(0, h - 1), px(w - 1, h - 1)];
@@ -64,7 +83,7 @@ function background(img) {
 }
 
 /** Contrast against the page, 0..255, with the faint halo cleaned off. */
-function alphaMap(img, bg) {
+export function alphaMap(img, bg) {
   const { width: w, height: h, data } = img;
   const out = new Uint8Array(w * h);
   for (let i = 0; i < w * h; i++) {
@@ -201,13 +220,31 @@ function order(list) {
   return out;
 }
 
+/** Box-filter an RGBA image down by an integer factor (edges that don't divide are dropped). */
+export function downsample(img, n) {
+  if (n <= 1) return img;
+  const w = Math.floor(img.width / n);
+  const h = Math.floor(img.height / n);
+  const data = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      for (let c = 0; c < 4; c++) {
+        let sum = 0;
+        for (let dy = 0; dy < n; dy++) for (let dx = 0; dx < n; dx++) sum += img.data[((y * n + dy) * img.width + x * n + dx) * 4 + c];
+        data[(y * w + x) * 4 + c] = Math.round(sum / (n * n));
+      }
+    }
+  }
+  return { width: w, height: h, data };
+}
+
 function roundUp(v, step) {
   return Math.ceil(v / step) * step;
 }
 
 export function cmdSymbols(project, name, source, rest) {
   const { opts } = parseArgs(rest);
-  const img = decodePng(fs.readFileSync(source));
+  const img = downsample(decodePng(fs.readFileSync(source)), opts.downsample);
   const bg = background(img);
   const alpha = alphaMap(img, bg);
   // a symbol is never wider than a fifth of the page unless told otherwise
@@ -225,7 +262,7 @@ export function cmdSymbols(project, name, source, rest) {
     const col = i % cols;
     const row = Math.floor(i / cols);
     const ox = col * cell + Math.floor((cell - b.w) / 2);
-    const oy = row * cell + Math.floor((cell - b.h) / 2);
+    const oy = opts.align === "bottom" ? row * cell + cell - opts.pad - b.h : row * cell + Math.floor((cell - b.h) / 2);
     for (let y = 0; y < b.h; y++) {
       for (let x = 0; x < b.w; x++) {
         const a = alpha[(b.y0 + y) * img.width + (b.x0 + x)];
@@ -269,12 +306,13 @@ export function cmdSymbols(project, name, source, rest) {
     sheet: name,
     cell: b.cell,
     roles: rolesFor(b),
-    tags: [...opts.tags, `row${b.sourceRow}`],
+    tags: [...opts.tags, ...(opts.rowTags.get(b.sourceRow) ?? []), `row${b.sourceRow}`],
     // the safe defaults: any orientation, turning only when lying flat
     orient: ["ground", "facing", "billboard", "vertical", "velocity"],
     spin: "ground",
     enabled: true,
     aspect: Math.round(b.aspect * 100) / 100,
+    ...(opts.elements.length ? { elements: opts.elements } : {}),
   }));
   const catalogPath = path.join(catalogDir, "symbols.json");
   let catalog = { version: 1, symbols: [] };

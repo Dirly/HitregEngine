@@ -64,7 +64,11 @@ async function snapshotObject(renderer: EngineRenderer, backend: Backend, object
   const canvas2d = document.createElement("canvas");
   canvas2d.width = THUMB;
   canvas2d.height = THUMB;
-  const ctx = canvas2d.getContext("2d")!;
+  // Pixels are already on the CPU. A GPU-backed 2D canvas uploads them again
+  // and toBlob can then block synchronously waiting for that GPU queue, even
+  // though PNG encoding itself is async. Keep this readback/encode surface
+  // in software; never apply this policy to the engine's rendering canvas.
+  const ctx = canvas2d.getContext("2d", { willReadFrequently: true })!;
   const image = ctx.createImageData(THUMB, THUMB);
   // WebGPU copies each row into a buffer aligned to 256 bytes;
   // `readRenderTargetPixelsAsync()` returns that padded buffer verbatim.
@@ -93,8 +97,8 @@ async function snapshotObject(renderer: EngineRenderer, backend: Backend, object
  * showed up to the user as Firefox's "this page is slowing down" warning,
  * with no way to yield mid-encode since it's one synchronous call. `toBlob()`
  * does the same PNG encode off the main thread; `FileReader.readAsDataURL`
- * is also async — together they keep the render loop and input responsive
- * during a bake instead of freezing for however long the encode takes.
+ * is also async. The source canvas must ALSO be CPU-backed (above): otherwise
+ * obtaining its snapshot for toBlob can stall before async encoding begins.
  */
 function canvasToDataURLAsync(canvas: HTMLCanvasElement): Promise<string> {
   return new Promise((resolve, reject) => {

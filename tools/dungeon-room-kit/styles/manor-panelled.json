@@ -1,0 +1,13 @@
+{
+  "id": "manor-panelled",
+  "extends": "barrow-masonry",
+  "about": "A house interior below ground: smooth plastered walls on the carved-library wall runs, a panelled wainscot whose stiles REPEAT along each run (repeat-mode 9-slice), slim pilasters, flat-headed doorways with lintels, a boarded ceiling on timber beams carried by corbels. No niches, no dais.",
+  "roles": { "wall": "smooth-stone", "trim": "dressed-trim", "floor": "flagstone", "ceiling": "wood", "pier": "smooth-stone", "timber": "wood", "panel": "wood" },
+  "door": { "arch": "flat", "ring": 0.24, "voussoirs": 0, "jamb": 0.26, "impost": false },
+  "pilasters": { "every": 3.6, "width": 0.45, "proj": 0.12 },
+  "niches": null,
+  "wainscot": { "height": 1.2, "module": 0.75, "proj": 0.06 },
+  "ceiling": { "type": "beams", "thickness": 0.4, "beamWidth": 0.34, "beamDepth": 0.4 },
+  "columns": null,
+  "dais": null
+}

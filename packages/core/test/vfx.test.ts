@@ -7,9 +7,16 @@ import {
   SPELL_KINDS,
   auditSpell,
   completeModule,
+  FOOTPRINT_TOLERANCE,
   expandRepeat,
+  fitSpellToVolume,
+  footprintOverflows,
   generateSpell,
   makeRng,
+  moduleReach,
+  wiggleLift,
+  wiggleOffset,
+  moduleDuration,
   parseSpell,
   phasesForKind,
   randomArchetype,
@@ -19,6 +26,7 @@ import {
   symbolSpin,
   symbolsFor,
   vfxEffectSchema,
+  type DecalEntry,
   type SpriteCatalog,
   type SymbolEntry,
 } from "../src/index.js";
@@ -75,7 +83,8 @@ describe("spell generator", () => {
   it("fills exactly the phases the archetype uses", () => {
     for (const kind of SPELL_KINDS) {
       const spell = generateSpell({ seed: kind, archetype: { kind }, catalog });
-      const expected = phasesForKind(spell.archetype);
+      // every phase the archetype uses except the telegraph (the host draws that)
+      const expected = phasesForKind(spell.archetype).filter((p) => p !== "telegraph");
       const got = PHASES.filter((p) => spell.phases[p]);
       expect(got).toEqual(expected);
       expect(spell.phases.impact?.modules.length ?? 0).toBeGreaterThan(0);
@@ -83,15 +92,13 @@ describe("spell generator", () => {
   });
 
   it("scales the presentation off the archetype radius", () => {
-    const small = generateSpell({ seed: 7, element: "fire", archetype: { kind: "area", radius: 2, range: 6 }, catalog });
-    const big = generateSpell({ seed: 7, element: "fire", archetype: { kind: "area", radius: 6, range: 6 }, catalog });
+    const small = generateSpell({ seed: 7, element: "destruction", archetype: { kind: "area", radius: 2, range: 6 }, catalog });
+    const big = generateSpell({ seed: 7, element: "destruction", archetype: { kind: "area", radius: 6, range: 6 }, catalog });
     const ringOf = (s: typeof small): number => {
       const r = s.phases.impact?.modules.find((m) => m.kind === "ring");
       return r && r.kind === "ring" ? r.radius : 0;
     };
     expect(ringOf(big)).toBeGreaterThan(ringOf(small));
-    const tele = big.phases.telegraph?.modules.find((m) => m.kind === "telegraph");
-    expect(tele && tele.kind === "telegraph" ? tele.radius : 0).toBe(6);
   });
 
   it("random archetypes respect the dodgeability rule", () => {
@@ -120,7 +127,7 @@ describe("spell generator", () => {
   });
 
   it("rerolls a module into another preset of the same slot", () => {
-    const spell = generateSpell({ seed: 5, element: "storm", archetype: { kind: "area", intensity: 0.9 }, catalog });
+    const spell = generateSpell({ seed: 5, element: "destruction", archetype: { kind: "area", intensity: 0.9 }, catalog });
     const idx = spell.phases.impact!.modules.findIndex((m) => m.preset === "impact.debris" || m.preset === "impact.dust");
     expect(idx).toBeGreaterThanOrEqual(0);
     const next = rerollModule(spell, "impact", idx, 1, catalog);
@@ -154,11 +161,12 @@ describe("spell timeline", () => {
 });
 
 describe("audit", () => {
-  it("flags a telegraphed spell that draws no telegraph", () => {
-    const spell = generateSpell({ seed: 11, archetype: { kind: "area" }, catalog });
-    spell.phases.telegraph = { name: "telegraph", tags: { feel: [] }, modules: [] };
-    const v = auditSpell(spell);
-    expect(v.some((x) => x.rule === "readability")).toBe(true);
+  it("generated spells carry no telegraph — the host draws the dodge volume", () => {
+    for (let seed = 0; seed < 40; seed++) {
+      const spell = generateSpell({ seed, archetype: { kind: "area" }, catalog });
+      expect(spell.phases.telegraph).toBeUndefined();
+      expect(auditSpell(spell)).toEqual([]);
+    }
   });
 
   it("flags a budget blowout", () => {
@@ -251,7 +259,9 @@ describe("symbols", () => {
           symbolModules++;
           const entry = symbols.find((s) => s.sheet === m.sheet && s.cell[0] === m.cell![0] && s.cell[1] === m.cell![1])!;
           expect(entry.enabled).toBe(true);
-          expect(entry.orient).toContain(m.orient);
+          // a world-fixed quad rides on a symbol that may travel or stand up
+          if (m.orient === "world") expect(entry.orient.some((o) => o === "velocity" || o === "vertical")).toBe(true);
+          else expect(entry.orient).toContain(m.orient);
           if (entry.spin === "none" || (entry.spin === "ground" && m.orient !== "ground")) expect(m.spin).toBe(0);
           expect(m.pixel).toBeGreaterThan(0);
         }
@@ -270,6 +280,170 @@ describe("symbols", () => {
     }
     expect(heads).toBeGreaterThan(5);
     expect(stuck).toBeGreaterThan(5);
+  });
+
+  it("a school draws only its own symbols, falling back to unschooled ones", () => {
+    const sigil = (id: string, col: number, elements?: SymbolEntry["elements"]): SymbolEntry => ({
+      id,
+      sheet: id.split(":")[0]!,
+      cell: [col, 0],
+      roles: ["sigil", "glyph", "star", "mark"],
+      tags: ["circle"],
+      orient: ["ground", "facing", "billboard", "vertical", "velocity"],
+      spin: "ground",
+      enabled: true,
+      ...(elements ? { elements } : {}),
+    });
+    const schooled: SpriteCatalog = {
+      ...catalog,
+      symbols: [sigil("generic:0", 0), sigil("shadow:0", 1, ["shadow"]), sigil("holy:0", 2, ["holy"])],
+    };
+    const sheetsFor = (element: (typeof ELEMENTS)[number]): Set<string> => {
+      const seen = new Set<string>();
+      for (let seed = 0; seed < 60; seed++) {
+        const spell = generateSpell({ seed, element, catalog: schooled });
+        for (const phase of PHASES) for (const m of spell.phases[phase]?.modules ?? []) if (m.kind === "sprite" && m.cell) seen.add(m.sheet);
+      }
+      return seen;
+    };
+    expect([...sheetsFor("shadow")]).toEqual(["shadow"]);
+    expect([...sheetsFor("holy")]).toEqual(["holy"]);
+    expect([...sheetsFor("water")]).toEqual(["generic"]); // no water sheet yet
+  });
+
+  it("impacts grow a ground decal from the school's own marks, and still pass the audit", () => {
+    const mark = (id: string, col: number, elements?: DecalEntry["elements"]): DecalEntry => ({
+      id,
+      sheet: id.split(":")[0]!,
+      cell: [col, 0],
+      tags: ["crack"],
+      enabled: true,
+      ...(elements ? { elements } : {}),
+    });
+    const withDecals: SpriteCatalog = {
+      ...catalog,
+      decals: [mark("generic-decals:0", 0), mark("nature-decals:0", 1, ["nature"]), mark("destruction-decals:0", 2, ["destruction"])],
+    };
+    for (const element of ["nature", "destruction", "holy"] as const) {
+      let scars = 0;
+      for (let seed = 0; seed < 40; seed++) {
+        const spell = generateSpell({ seed, element, archetype: { kind: "area" }, catalog: withDecals });
+        expect(auditSpell(spell)).toEqual([]);
+        for (const phase of PHASES)
+          for (const m of spell.phases[phase]?.modules ?? []) {
+            if (m.kind !== "decal") continue;
+            scars++;
+            expect(m.sheet).toBe(element === "holy" ? "generic-decals" : `${element}-decals`);
+            expect(m.grow).toBeGreaterThan(0);
+          }
+      }
+      expect(scars).toBeGreaterThan(20);
+    }
+    // no decals in the catalog: no decal modules, nothing breaks
+    const bare = generateSpell({ seed: 1, element: "nature", archetype: { kind: "area" }, catalog });
+    expect(PHASES.flatMap((p) => bare.phases[p]?.modules ?? []).some((m) => m.kind === "decal")).toBe(false);
+  });
+
+  it("a decal module fills its defaults and counts its fade in the audit", () => {
+    const m = completeModule({ kind: "decal", sheet: "x", duration: 2, fadeOut: 0.5 });
+    expect(m.kind).toBe("decal");
+    if (m.kind === "decal") {
+      expect(m.cell).toEqual([0, 0]);
+      expect(m.grow).toBe(0.5);
+      expect(moduleDuration(m, 1)).toBeCloseTo(2.5);
+    }
+  });
+
+  it("symbols lying on the ground never spin; a texel look reaches every piece", () => {
+    const sigils: SymbolEntry[] = [
+      { id: "s:0", sheet: "s", cell: [0, 0], roles: ["sigil", "glyph", "star", "mark"], tags: [], orient: ["ground", "facing", "billboard", "vertical", "velocity"], spin: "any", enabled: true },
+    ];
+    for (let seed = 0; seed < 60; seed++) {
+      const spell = generateSpell({ seed, catalog: { ...catalog, symbols: sigils }, texel: 0.06 });
+      expect(spell.texel).toBe(0.06);
+      for (const p of PHASES)
+        for (const m of spell.phases[p]?.modules ?? []) {
+          if (m.kind === "sprite" && m.orient === "ground") expect(m.spin).toBe(0);
+          if (m.kind !== "particles" && m.kind !== "light" && m.kind !== "shake" && m.kind !== "sound") expect(m.texel).toBe(0.06);
+        }
+    }
+  });
+
+  it("banned presets are never generated", () => {
+    const banned = ["impact.debris", "impact.dust", "travel.wake", "crown.glyphs"];
+    for (let seed = 0; seed < 60; seed++) {
+      const spell = generateSpell({ seed, catalog: { ...catalog, disabledPresets: banned } });
+      for (const p of PHASES) for (const m of spell.phases[p]?.modules ?? []) expect(banned).not.toContain(m.preset);
+    }
+  });
+
+  it("summoned bodies are the school's drawings, and never cones, diamonds or spheres", () => {
+    const objects: SymbolEntry[] = ["spike", "crystal", "rock", "orb", "blade"].map((tag, i) => ({
+      id: `obj:${i}`,
+      sheet: "obj",
+      cell: [i, 0],
+      roles: ["object"],
+      tags: [tag],
+      orient: ["vertical"],
+      spin: "none",
+      enabled: true,
+      elements: ["water"],
+    }));
+    let drawn = 0;
+    for (let seed = 0; seed < 200; seed++) {
+      for (const element of ["water", "holy"] as const) {
+        const spell = generateSpell({ seed, element, catalog: { ...catalog, symbols: objects } });
+        for (const p of PHASES)
+          for (const m of spell.phases[p]?.modules ?? []) {
+            if (m.kind !== "mesh" || m.asset) continue;
+            if (m.sheet) {
+              drawn++;
+              expect(element).toBe("water");
+              expect(m.cells.length).toBeGreaterThan(0);
+            } else expect(["spike", "crystal", "orb"]).not.toContain(m.primitive);
+          }
+      }
+    }
+    expect(drawn).toBeGreaterThan(10);
+  });
+
+  it("fits visuals inside the damage volume, and to a game's own radius", () => {
+    const spell = generateSpell({ seed: 3, element: "water", archetype: { kind: "area", radius: 3 }, catalog });
+    spell.phases.impact!.modules.push(
+      completeModule({ kind: "ring", radius: 9, expand: [0.2, 1.3] }),
+      completeModule({ kind: "particles", burst: 20, emitter: { speed: [6, 9], lifetime: [1, 1.5], spread: 180, shape: "sphere", shapeSize: [2, 2, 2] } }),
+    );
+    expect(footprintOverflows(spell).length).toBeGreaterThanOrEqual(2);
+    const fitted = fitSpellToVolume(spell);
+    expect(footprintOverflows(fitted)).toEqual([]);
+    for (const m of fitted.phases.impact!.modules) {
+      const reach = moduleReach(m);
+      if (reach !== null) expect(reach).toBeLessThanOrEqual(3 * FOOTPRINT_TOLERANCE + 1e-6);
+    }
+    // a game playing this spell for a 1.5 m ability pulls it in further
+    const small = fitSpellToVolume(spell, { radius: 1.5 });
+    for (const m of small.phases.impact!.modules) {
+      const reach = moduleReach(m);
+      if (reach !== null) expect(reach).toBeLessThanOrEqual(1.5 * FOOTPRINT_TOLERANCE + 1e-6);
+    }
+  });
+
+  it("weave and bob start at zero, stay inside their amplitude, and differ shot to shot", () => {
+    const w = { amplitude: 0.4, wavelength: 3, vertical: 0.3 };
+    expect(wiggleOffset(w, 1, 0)).toBe(0);
+    expect(wiggleLift(w, 1, 0)).toBe(0);
+    let differs = false;
+    for (let d = 0; d <= 20; d += 0.25) {
+      expect(Math.abs(wiggleOffset(w, 3, d))).toBeLessThanOrEqual(0.4 + 1e-9);
+      expect(Math.abs(wiggleLift(w, 3, d))).toBeLessThanOrEqual(0.3 + 1e-9);
+      if (Math.abs(wiggleOffset(w, 3, d) - wiggleOffset(w, 4, d)) > 0.05) differs = true;
+    }
+    expect(differs).toBe(true);
+    expect(wiggleLift({ wavelength: 3 }, 1, 5)).toBe(0); // no bob unless asked
+  });
+
+  it("knows exactly the five schools", () => {
+    expect([...ELEMENTS].sort()).toEqual(["destruction", "holy", "nature", "shadow", "water"]);
   });
 
   it("melee spells get real cuts", () => {

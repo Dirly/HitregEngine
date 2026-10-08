@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "id": "sample-rooms",
+  "name": "Room kit sample: one room per style",
+  "anchor": [0, 0, 0],
+  "noise": "sample-noise.json",
+  "rooms": [
+    { "id": "crypt", "kind": "crypt", "style": "barrow-masonry", "x": [-5, 5], "y": [0, 12.8], "floor": 0, "height": 3.4,
+      "doors": [{ "side": "S", "at": 0 }, { "side": "N", "at": 0 }] },
+    { "id": "parlour", "kind": "room", "style": "manor-panelled", "x": [10, 18], "y": [0, 7.2], "floor": 0, "height": 3.4,
+      "doors": [{ "side": "W", "at": 3.6, "width": 1.6, "height": 2.7 }] },
+    { "id": "hall", "kind": "hall", "style": "giant-timber", "x": [-8, 8], "y": [20, 41], "floor": 0, "height": 6.0,
+      "doors": [{ "side": "S", "at": 0 }] },
+    { "id": "den", "kind": "cave", "style": "warren-gnawed", "seed": 4, "floor": -1, "rules": { "natural": { "clusters": 3 } },
+      "outline": [[24, 0], [33, -1.5], [38, 4], [36.5, 11], [29, 13.5], [23, 9]],
+      "doors": [{ "edge": 5, "t": 3.6 }] },
+    { "id": "grotto", "kind": "cave", "style": "ice-cave", "seed": 9, "floor": -1,
+      "outline": [[24, 20], [34, 19], [39, 26], [33, 33], [25, 31]],
+      "doors": [{ "edge": 4, "t": 4 }] }
+  ]
+}

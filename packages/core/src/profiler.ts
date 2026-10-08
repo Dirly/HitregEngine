@@ -376,6 +376,12 @@ export class Profiler implements ProfilerLike {
 
   // -- read side -------------------------------------------------------------
 
+  /** The spike the frame that just ended was captured as, if it was one (a host keeping its own long log). */
+  lastSpike(): SpikeFrame | undefined {
+    const last = this.spikeRing[this.spikeRing.length - 1];
+    return last && last.frame === this.frameSeq ? last : undefined;
+  }
+
   summary(): ProfileSummary {
     const frames = this.filled;
     if (!this.enabled || frames === 0) return emptySummary(this.enabled);

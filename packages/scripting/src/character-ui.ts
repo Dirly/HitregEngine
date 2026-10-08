@@ -6,8 +6,10 @@ import {
   derivedStats,
   firstFit,
   RARITY_TINT,
+  currentDurability,
   formatCoins,
   slotKind,
+  soulStatus,
   twoHanderOf,
   type Attribute,
   type CharacterSheet,
@@ -81,6 +83,7 @@ export class CharacterUi extends Script {
     showDetails: { default: true, description: "Show a permanent selected-item column; false uses floating item tooltips only." },
     showSearch: { default: true, description: "Show the inventory text-search field." },
     equipmentSlots: { default: [...EQUIPMENT_SLOTS], description: "Ordered equipment slot ids to display. Existing occupied slots are always retained so gear cannot become inaccessible." },
+    expandKinds: { default: true, description: "a listed slot also shows its numbered siblings right after it (trinket → trinket2, consumable → consumable2, consumable3)" },
     cssClass: { default: "", description: "Optional game skin class; styles stay owned by the project." },
     cellSize: { default: 44, min: 24, max: 96, description: "pixels per inventory cell and equipment slot" },
     portraitSpin: { default: 0, min: -3, max: 3, description: "turntable speed of the centre portrait, radians/second; 0 faces you" },
@@ -434,7 +437,8 @@ export class CharacterUi extends Script {
     const list = el("div", "hr-derived");
     for (const s of DERIVED_STATS) {
       if (s === "capacity") continue;
-      list.append(el("span", "", STAT_LABEL[s]), el("span", "", fmt(derived.stats[s])));
+      const pct = s === "crit" || s === "spellCrit" ? "%" : "";
+      list.append(el("span", "", STAT_LABEL[s]), el("span", "", fmt(derived.stats[s]) + pct));
     }
     list.append(el("span", "", "weight"));
     list.append(
@@ -451,8 +455,12 @@ export class CharacterUi extends Script {
     const doll = el("div", "hr-doll");
     const portraitWrap = el("div", "hr-portrait-wrap");
     portraitWrap.style.gridColumn = "2";
-    const requested = this.param<string[]>("equipmentSlots") ?? [...EQUIPMENT_SLOTS];
-    const slots = [...new Set([...requested.filter(s => EQUIPMENT_SLOTS.includes(s as EquipmentSlot)), ...Object.keys(sheet.equipment)])] as EquipmentSlot[];
+    const requested = (this.param<string[]>("equipmentSlots") ?? [...EQUIPMENT_SLOTS]).filter(s => EQUIPMENT_SLOTS.includes(s as EquipmentSlot)) as EquipmentSlot[];
+    // a listed slot brings its numbered siblings (trinket → trinket2, consumable → the whole belt)
+    const listed = this.param<boolean>("expandKinds")
+      ? requested.flatMap(s => EQUIPMENT_SLOTS.filter(o => o === s || (/\d$/.test(o) && slotKind(o) === s)))
+      : requested;
+    const slots = [...new Set([...listed, ...Object.keys(sheet.equipment)])] as EquipmentSlot[];
     const rows = Math.ceil(slots.length / 2);
     portraitWrap.style.gridRow = `1 / ${rows + 1}`;
     portraitWrap.append(this.portrait);
@@ -468,6 +476,16 @@ export class CharacterUi extends Script {
       cellEl.append(el("div", "lbl", slotKind(slot)));
       cellEl.title = slotKind(slot);
       const uid = sheet.equipment[slot];
+      // a soulbound slot: a rune, solid while it holds the item attuned to it (protected), hollow and struck through
+      // while something else is worn there (not protected) — shape and words, never colour alone
+      const attuned = sheet.soulslots?.[slot];
+      if (attuned !== undefined) {
+        const holds = !!uid && attuned === uid;
+        const rune = el("span", `hr-soul${holds ? "" : " hr-soul-off"}`, holds ? "◆" : "◇");
+        rune.setAttribute("aria-label", holds ? "soulbound: protected" : "soulbound slot: not protecting this item");
+        cellEl.append(rune);
+        cellEl.title = `${slotKind(slot)} — ${holds ? "soulbound: what you wear here cannot be looted from you" : "soulbound slot, attuned to another item: this one is NOT protected until a soul binder attunes it"}`;
+      }
       const stack = uid ? sheet.items[uid] : undefined;
       if (uid && stack) {
         const item = this.catalog(stack.itemId);
@@ -629,8 +647,11 @@ export class CharacterUi extends Script {
     panel.append(name, el("p", "hr-item-kind", `${item.rarity} · ${item.kind}`));
     for (const [key, value] of Object.entries(item.modifiers)) panel.append(el("p", "hr-modifier", `${value > 0 ? "+" : ""}${value} ${STAT_LABEL[key] ?? key}`));
     if (item.bag) panel.append(el("p", "", `${item.bag.cols * item.bag.rows} bag slots · ${item.bag.cols} × ${item.bag.rows}`));
+    for (const line of skillLines(item, stack.twists)) panel.append(skillLine("p", "hr-skill", line, (icon) => this.iconUrl(icon)));
     panel.append(el("p", "hr-description", item.description || "A trusty companion on the road."), el("p", "hr-muted", `${item.weight} kg · ${stack.qty} owned${item.value > 0 ? ` · worth ${formatCoins(item.value)}` : ""}`));
     for (const [key, value] of Object.entries(item.requires)) panel.append(el("p", "hr-requirement", `Requires ${key} ${value}`));
+    const wear = this.wearLine(item, this.selectedUid, "p");
+    if (wear) panel.append(wear);
     const slot = EQUIPMENT_SLOTS.find(s => sheet.equipment[s] === this.selectedUid);
     const action = (label: string, run: () => void): void => {
       const b = document.createElement("button"); b.textContent = label; b.onclick = run; panel.append(b);
@@ -674,7 +695,12 @@ export class CharacterUi extends Script {
       node.append(el("span", "ini", initials(item?.name ?? itemId)));
     }
     if (qty > 1) node.append(el("span", "qty", String(qty)));
-    node.addEventListener("pointerenter", (e) => this.showTip(item, itemId, e));
+    node.addEventListener("pointerenter", (e) => this.showTip(item, itemId, e, uid));
+    const worn = item ? this.sheet()?.items[uid] : undefined;
+    if (worn && currentDurability(worn, item) === 0) {
+      node.classList.add("hr-broken");
+      node.setAttribute("aria-label", `${item!.name} (broken)`);
+    }
     node.addEventListener("pointermove", (e) => this.placeTip(e));
     node.addEventListener("pointerleave", () => (this.tip.hidden = true));
     node.addEventListener("pointerdown", (e) => this.dragStart(e, node, uid));
@@ -688,36 +714,17 @@ export class CharacterUi extends Script {
 
   // -- tooltip -----------------------------------------------------------------
 
-  private showTip(item: Item | undefined, itemId: string, e: PointerEvent): void {
+  /** "Durability 37 / 80", or "Broken · Durability 0 / 80 — no stats until repaired" (word, not just colour). */
+  private wearLine(item: Item, uid: string, tag = "div"): HTMLElement | null {
+    return wearLineOf(item, uid ? this.sheet()?.items[uid] : undefined, tag);
+  }
+
+  private showTip(item: Item | undefined, itemId: string, e: PointerEvent, uid = ""): void {
     const tip = this.tip;
-    tip.replaceChildren();
-    if (!item) {
-      tip.append(el("div", "nm", itemId), el("div", "req", "unknown item — no assets/items file"));
-    } else {
-      const nm = el("div", "nm", item.name);
-      nm.style.color = item.tint ?? RARITY_TINT[item.rarity];
-      tip.append(nm);
-      const meta = [item.rarity, item.kind, `${fmt(item.weight)} kg`];
-      if (item.stack > 1) meta.push(`stacks to ${item.stack}`);
-      if (item.slots.length > 0) meta.push(item.slots.join(" / "));
-      if (item.bag) meta.push(`bag ${item.bag.cols}×${item.bag.rows}`);
-      tip.append(el("div", "meta", meta.join(" · ")));
-      const mods = Object.entries(item.modifiers).filter(([, v]) => v !== 0);
-      if (mods.length > 0) {
-        tip.append(
-          el(
-            "div",
-            "mods",
-            mods
-              .map(([k, v]) => `${v > 0 ? "+" : ""}${v} ${STAT_LABEL[k as keyof typeof STAT_LABEL] ?? k}`)
-              .join(", "),
-          ),
-        );
-      }
-      const req = Object.entries(item.requires).filter(([, v]) => v !== undefined);
-      if (req.length > 0) tip.append(el("div", "req", "requires " + req.map(([k, v]) => `${k} ${v}`).join(", ")));
-      if (item.description) tip.append(el("div", "desc", item.description));
-    }
+    const sheet = this.sheet();
+    fillItemTip(tip, item, itemId, uid ? sheet?.items[uid] : undefined, (i) => this.iconUrl(i), {
+      soul: uid && sheet ? soulStatus(sheet, uid) : null,
+    });
     if (this.drag?.moved) return;
     tip.append(el("div", "meta", this.stash ? `Right-click: ${this.stash.label} · Drag to move` : "Drag to move · Double-click to equip / unequip · Right-click to split"));
     tip.hidden = false;
@@ -900,11 +907,157 @@ function spotIn(sheet: CharacterSheet, container: Container, env: SheetEnv) {
   return cell ? { container, ...cell } : null;
 }
 
+/** "Durability 37 / 80", or "Broken · Durability 0 / 80 — no stats until repaired", for one instance (or the item's maximum without one). */
+function wearLineOf(item: Item, stack: { durability?: number } | undefined, tag = "div"): HTMLElement | null {
+  const cur = stack ? currentDurability(stack, item) : item.durability ?? null;
+  if (cur === null || item.durability === undefined) return null;
+  if (cur === 0) return el(tag, "hr-broken-line", `Broken · Durability 0 / ${item.durability} — no stats until repaired`);
+  return el(tag, "hr-wear-line", `Durability ${cur} / ${item.durability}`);
+}
+
+/**
+ * The inventory's item tooltip, for any window that shows an item INSTANCE
+ * (the bags, a loot bag, a vault): name in its rarity tint, rarity · kind ·
+ * weight, modifiers, requirements, the skills it puts on the bar as THIS
+ * instance casts them (its rolled twists), its wear, its description. Replaces
+ * `tip`'s children; the caller adds its own hint line and shows it.
+ */
+export function fillItemTip(
+  tip: HTMLElement,
+  item: Item | undefined,
+  itemId: string,
+  stack: { durability?: number; twists?: string[] } | undefined,
+  iconUrl: (icon: string) => string | undefined,
+  extra: { soul?: { slot: string; state: "protected" | "swapped" | "carried" } | null } = {},
+): void {
+  tip.replaceChildren();
+  if (!item) {
+    tip.append(el("div", "nm", itemId), el("div", "req", "unknown item — no assets/items file"));
+    return;
+  }
+  const nm = el("div", "nm", item.name);
+  nm.style.color = item.tint ?? RARITY_TINT[item.rarity];
+  tip.append(nm);
+  // its soulbound slot (core soulStatus), in words: protected only while worn in the slot attuned to it
+  const soul = extra.soul;
+  if (soul?.state === "protected") tip.append(el("div", "soulbound", `◆ Soulbound (${soul.slot}) — cannot be looted from you while worn there`));
+  else if (soul?.state === "swapped") tip.append(el("div", "soulbound hr-soul-off", `◇ In a soulbound slot (${soul.slot}), but NOT protected — attune it at a soul binder`));
+  else if (soul?.state === "carried") tip.append(el("div", "soulbound hr-soul-off", `◇ Attuned to your ${soul.slot} slot — protected only while worn there`));
+  // entrusted to its holder by a quest (item `entrusted`)
+  if (item.entrusted) tip.append(el("div", "entrusted", "Entrusted — cannot be traded, dropped, stored, sold or looted; you keep it if you fall"));
+  const meta = [item.rarity, item.kind, `${fmt(item.weight)} kg`];
+  if (item.stack > 1) meta.push(`stacks to ${item.stack}`);
+  if (item.slots.length > 0) meta.push(item.slots.join(" / "));
+  if (item.bag) meta.push(`bag ${item.bag.cols}×${item.bag.rows}`);
+  tip.append(el("div", "meta", meta.join(" · ")));
+  const mods = Object.entries(item.modifiers).filter(([, v]) => v !== 0);
+  if (mods.length > 0) {
+    tip.append(
+      el(
+        "div",
+        "mods",
+        mods
+          .map(([k, v]) => `${v > 0 ? "+" : ""}${v} ${STAT_LABEL[k as keyof typeof STAT_LABEL] ?? k}`)
+          .join(", "),
+      ),
+    );
+  }
+  const req = Object.entries(item.requires).filter(([, v]) => v !== undefined);
+  if (req.length > 0) tip.append(el("div", "req", "requires " + req.map(([k, v]) => `${k} ${v}`).join(", ")));
+  // the skills it puts on the bar, named and explained when the game says how
+  // ...as THIS instance casts them (its rolled twists, which only the game can read)
+  const twists = stack?.twists;
+  for (const id of item.skills?.bar.slice(0, item.twoHanded ? 2 : 1) ?? []) {
+    const icon = skillIconOf(id, twists);
+    tip.append(skillLine("div", "skill", { text: skillLabel(id, true, twists), ...(icon ? { icon } : {}) }, iconUrl));
+  }
+  const wear = wearLineOf(item, stack);
+  if (wear) tip.append(wear);
+  if (item.description) tip.append(el("div", "desc", item.description));
+}
+
 function el(tag: string, className: string, text?: string): HTMLDivElement {
   const node = document.createElement(tag) as HTMLDivElement;
   if (className) node.className = className;
   if (text !== undefined) node.textContent = text;
   return node;
+}
+
+/**
+ * How a GAME names and explains its ability ids, for the item panels. The
+ * ids are opaque to the engine; a game registers this once (its HUD script)
+ * and the panels show "Name — what it does" instead of the bare id.
+ * `twists` are the item INSTANCE's rolled twists (its stack's `twists`,
+ * opaque here too): a game that rolls them names and explains the skill as
+ * that instance casts it. `icon` (optional) is a texture path the panels
+ * draw beside the line. Reserved `@` verbs (a guard) are asked too; a game
+ * that returns null for one leaves its id as it is.
+ */
+export type SkillDescriber = (abilityId: string, twists?: readonly string[]) => { name: string; text: string; icon?: string } | null;
+let skillDescriber: SkillDescriber | null = null;
+
+/** Register (or with null, clear) the game's skill describer for every character-ui panel. */
+export function setSkillDescriber(fn: SkillDescriber | null): void {
+  skillDescriber = fn;
+}
+
+/** An ability id as a game describes it: "Name — text", or the id itself. */
+function skillLabel(id: string, long: boolean, twists?: readonly string[]): string {
+  const d = skillDescriber?.(id, twists);
+  if (!d) return id;
+  return long && d.text ? `${d.name} — ${d.text}` : d.name;
+}
+
+/** The icon a game gives an ability id, if any (a texture path). */
+function skillIconOf(id: string, twists?: readonly string[]): string | undefined {
+  return skillDescriber?.(id, twists)?.icon;
+}
+
+/** One item-panel line, with the skill's icon in front when the game gives one. */
+function skillLine(tag: string, cls: string, line: { text: string; icon?: string }, url: (icon: string) => string | undefined): HTMLElement {
+  const p = el(tag, cls, line.text);
+  const src = line.icon ? url(line.icon) : undefined;
+  if (src) {
+    const img = document.createElement("img");
+    img.className = "hr-skill-icon";
+    img.src = src;
+    img.alt = "";
+    p.prepend(img);
+  }
+  return p;
+}
+
+/**
+ * The verbs an item carries (`skills`), one line each. Ability ids are the
+ * game's: named and explained by the game's `setSkillDescriber`, or shown as
+ * they are without one.
+ */
+function skillLines(item: Item, twists?: readonly string[]): Array<{ text: string; icon?: string }> {
+  const s = item.skills;
+  const out: Array<{ text: string; icon?: string }> = [];
+  const line = (label: string, id: string, long: boolean): { text: string; icon?: string } => {
+    const icon = skillIconOf(id, twists);
+    return { text: `${label}: ${skillLabel(id, long, twists)}`, ...(icon ? { icon } : {}) };
+  };
+  if (s) {
+    if (s.primary) out.push(line("Left click", s.primary, false));
+    if (s.secondary) out.push(line("Right click", s.secondary, false));
+    const allowed = item.twoHanded ? 2 : 1;
+    for (const id of s.bar.slice(0, allowed)) out.push(line("Skill", id, true));
+    if (s.use) out.push({ text: `Use: ${s.use}` });
+    const g = s.guard;
+    if (g && g.kind !== "none") {
+      const bits: string[] = [g.kind];
+      if (g.school) bits.push(`${g.school} ward`);
+      if (g.wardAlly) bits.push("can be thrown on an ally");
+      if (g.reward) bits.push(`perfect: ${g.reward}`);
+      if (g.blockPower !== undefined) bits.push(`absorbs ${Math.round(g.blockPower * 100)}%`);
+      if (g.parryWindow !== undefined) bits.push(`parry window ${g.parryWindow}s`);
+      out.push({ text: `Guard: ${bits.join(" · ")}` });
+    }
+  }
+  if (item.equipSeconds !== undefined) out.push({ text: `Takes ${item.equipSeconds}s to put on` });
+  return out;
 }
 
 function fmt(n: number): string {
@@ -929,11 +1082,14 @@ const STAT_LABEL: Record<string, string> = {
   maxMana: "mana",
   armor: "armor",
   capacity: "capacity",
+  crit: "crit",
+  spellCrit: "spell crit",
   ...Object.fromEntries(ATTRIBUTES.map((a) => [a, a])),
 };
 
 const CSS = `
 .hr-char .hr-details{min-width:180px;max-width:260px;padding:12px;background:#10131a;border:1px solid #39425a}
+.hr-char .hr-skill-icon{width:20px;height:20px;vertical-align:-5px;margin-right:6px;image-rendering:pixelated}
 .hr-char .hr-details>img{display:block;width:64px;height:80px;object-fit:contain;margin:12px auto;image-rendering:pixelated}
 .hr-char .hr-details button,.hr-char .hr-filters button,.hr-char .hr-close{font:inherit;color:inherit;background:#202735;border:1px solid #45516a;padding:7px 10px;cursor:pointer}
 .hr-char .hr-details button{margin:4px}.hr-char .hr-filters{display:flex;gap:3px;margin-bottom:9px}.hr-char .hr-filters .active{background:#453627}
@@ -996,6 +1152,13 @@ const CSS = `
 .hr-char .hr-tip .mods{color:#5fd07a}
 .hr-char .hr-tip .req{color:#ffb454}
 .hr-char .hr-tip .desc{color:#b9c0d0;margin-top:4px;font-style:italic}
+.hr-char .hr-broken-line{color:#ff6b5a;font-weight:600}.hr-char .hr-wear-line{color:#8b93a7}
+.hr-char .hr-tip .soulbound{color:#c9a7ff;letter-spacing:.04em}.hr-char .hr-tip .soulbound.hr-soul-off{color:#a59bb8;font-style:italic}
+.hr-char .hr-tip .entrusted{color:#e8c66a;letter-spacing:.04em}
+.hr-char .hr-slot .hr-soul{position:absolute;left:-6px;top:-6px;width:18px;height:18px;box-sizing:border-box;display:flex;align-items:center;justify-content:center;
+  font-size:13px;line-height:1;color:#c9a7ff;background:#140f1c;border:1px solid #c9a7ff;border-radius:50%;box-shadow:0 0 4px #000;pointer-events:none;z-index:3}
+.hr-char .hr-slot .hr-soul.hr-soul-off{color:#a59bb8;border-style:dashed;border-color:#8d84a0;text-decoration:line-through}
+.hr-char .hr-item.hr-broken{border-color:#ff5a5a;box-shadow:inset 0 0 0 1px #ff5a5a66}.hr-char .hr-item.hr-broken img{filter:sepia(.6) saturate(2.2) hue-rotate(-30deg) brightness(.8)}
 .hr-char.hr-docked{pointer-events:none}
 .hr-char.hr-docked .hr-panel{pointer-events:auto;left:calc(50% + 8px);top:50%;transform:translateY(-50%);max-width:calc(50vw - 16px)}
 .hr-char.hr-docked .hr-head{min-width:0}

@@ -4,6 +4,7 @@ import {
   DERIVED_STATS,
   EQUIPMENT_SLOTS,
   itemFitsSlot,
+  slotKind,
   type Attribute,
   type DerivedStat,
   type EquipmentSlot,
@@ -17,6 +18,8 @@ import {
   xpForLevel,
   type Progression,
 } from "./progression.js";
+import { isBroken } from "./durability.js";
+import { canMerge, instanceOf } from "./instance.js";
 import { archetypeBonus, characterBuildSchema, type CharacterBuild, type CharacterCreation } from "./creation.js";
 
 /**
@@ -51,8 +54,48 @@ export const itemStackSchema = z.object({
     .describe("Which grid the stack sits in. Absent = worn; find its slot in `equipment`."),
   x: z.number().int().min(0).optional().describe("Column of the stack's cell."),
   y: z.number().int().min(0).optional().describe("Row of the stack's cell."),
+  durability: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe(
+      "This instance's current durability points (its item's `durability` is the maximum). Absent = full (and always for " +
+        "items that never wear); 0 = BROKEN: still worn, but its modifiers do not apply.",
+    ),
+  twists: z
+    .array(z.string().min(1))
+    .max(8)
+    .optional()
+    .describe(
+      "This instance's rolled twists: opaque ids the GAME gives meaning (e.g. a skill and an addition to it), rolled when the " +
+        "item dropped. Kept through the vault, a shop's buy-back shelf, the ground, a trade and saves like durability. Absent = " +
+        "the plain item. Only on items that do not stack.",
+    ),
+  iid: z
+    .string()
+    .min(1)
+    .max(64)
+    .optional()
+    .describe(
+      "This instance's identity across the whole cluster. A dedicated server's item log stamps it on every UNIQUE item " +
+        "(item `stack` 1) a character holds, and it travels with the instance like any instance data: vault, bags, ground, " +
+        "a trade, saves. Gameplay never reads it; lost-item claims and the dupe flag key on it (docs/moderation.md §4). " +
+        "Absent on stackable goods and in local or P2P play.",
+    ),
 });
 export type ItemStack = z.infer<typeof itemStackSchema>;
+
+/**
+ * A stack OUT of a sheet — in the vault, on a shop's buy-back shelf, on the
+ * ground, in a trade: what it is, how many, and every per-instance field
+ * (character/instance.ts), but no cell. Derived from the stack schema, so a new
+ * per-instance field travels everywhere a stack does without touching this.
+ */
+export const looseStackSchema = itemStackSchema
+  .omit({ container: true, x: true, y: true })
+  .describe("An item stack outside a sheet (vault slot, shop buy-back entry, ground item, trade): the item, its quantity and its instance data.");
+export type LooseStack = z.infer<typeof looseStackSchema>;
 
 const actionTarget = z.object({ container: z.enum(CONTAINERS), x: z.number().int().min(0), y: z.number().int().min(0) });
 export const inventoryCommandSchema = z.discriminatedUnion("kind", [
@@ -103,6 +146,28 @@ export const characterSheetSchema = z
       remaining: z.number().min(0),
       requestedBy: z.string().optional(),
     }).optional().describe("Transient authority-owned action progress. Items stay in their source until completion; clients cannot shorten it. Replicates for UI and host migration; omitted from local durable saves."),
+    beltReadyAt: z
+      .number()
+      .min(0)
+      .optional()
+      .describe("Sim time (ctx.now() ms) before which nothing on the belt can be used again — the shared use cooldown. Transient: omitted from local durable saves."),
+    soulslots: z
+      .partialRecord(z.enum(EQUIPMENT_SLOTS), z.string().min(1))
+      .optional()
+      .describe(
+        "SOULBOUND SLOTS: equipment slot → the stack uid attuned to it at a soul binder (dialogue `openSoulbind`). An item is " +
+          "PROTECTED — never looted from its owner, never handed to another character — only while it is WORN in that slot and " +
+          "is the attuned instance (core `soulProtected`). An item swapped into the slot in the field is not protected until it " +
+          "is attuned again; carried items are never protected. Absent = no slots chosen.",
+      ),
+    plunderedUntil: z
+      .number()
+      .min(0)
+      .optional()
+      .describe(
+        "Wall-clock ms (core `lootClock`) until which this character cannot lose another WORN item to a looter: set when a " +
+          "killer takes a worn item from them (a body or corpse bag's `plunder`). Absent or past = not plundered.",
+      ),
   })
   .describe(
     "A character's whole state — level, xp, attributes, worn and carried items — as one replicated value (netState `character/<bodyId>`).",
@@ -256,7 +321,8 @@ function wornItems(sheet: CharacterSheet, env: SheetEnv): Item[] {
     if (uid && uid === blocked) continue;
     const stack = uid ? sheet.items[uid] : undefined;
     const item = stack ? env.catalog(stack.itemId) : undefined;
-    if (item) out.push(item);
+    // a broken item stays worn (and weighs) but adds nothing
+    if (item && !isBroken(stack!, item)) out.push(item);
   }
   return out;
 }
@@ -379,33 +445,75 @@ export function addItem(
   qty: number,
   env: SheetEnv,
 ): SheetResult<{ placed: number; uids: string[] }> {
-  const item = env.catalog(itemId);
-  if (!item) return fail(`unknown item "${itemId}"`);
+  return placeStack(sheet, { itemId, qty }, env, { partial: true });
+}
+
+/**
+ * THE way a stack enters a sheet from outside it (a pickup, the vault, a
+ * shop, a trade, a grant): the stack's instance data (durability, twists, any
+ * per-instance field) goes onto every stack it lands in, and it only tops up
+ * carried stacks with IDENTICAL instance data (`canMerge`) — a twisted or worn
+ * instance never melts into a plain one. With `to` it lands in that cell (an
+ * empty one, or a stack it may merge with); otherwise top-ups first, then
+ * free cells (bag, then pockets). All-or-nothing unless `partial`, in which
+ * case `placed` reports what fit ("no room" is an error only when nothing did).
+ */
+export function placeStack(
+  sheet: CharacterSheet,
+  stack: LooseStack,
+  env: SheetEnv,
+  opts: { to?: GridTarget; partial?: boolean } = {},
+): SheetResult<{ placed: number; uids: string[] }> {
+  const item = env.catalog(stack.itemId);
+  if (!item) return fail(`unknown item "${stack.itemId}"`);
+  const qty = stack.qty;
   if (!Number.isInteger(qty) || qty < 1) return fail("qty must be a positive integer");
+  const instance = instanceOf(stack);
   const next = structuredClone(sheet);
   let remaining = qty;
   const uids: string[] = [];
-  if (item.stack > 1) {
-    for (const [uid, stack] of Object.entries(next.items)) {
-      if (remaining === 0) break;
-      if (stack.itemId !== itemId || stack.container === undefined || stack.qty >= item.stack) continue;
-      const take = Math.min(remaining, item.stack - stack.qty);
-      stack.qty += take;
-      remaining -= take;
+  if (opts.to) {
+    const probe = cellAt(next, opts.to.container, opts.to.x, opts.to.y, env);
+    if (!probe.ok) return probe;
+    if (probe.occupant === null) {
+      const take = Math.min(remaining, item.stack);
+      const uid = nextUid(next);
+      next.items[uid] = { itemId: stack.itemId, qty: take, ...opts.to, ...structuredClone(instance) };
       uids.push(uid);
+      remaining -= take;
+    } else {
+      const other = next.items[probe.occupant]!;
+      if (!canMerge(other, stack, item.stack)) return fail("that cell is taken");
+      const take = Math.min(remaining, item.stack - other.qty);
+      if (take <= 0) return fail(`that ${item.name} stack is full`);
+      other.qty += take;
+      uids.push(probe.occupant);
+      remaining -= take;
     }
-  }
-  while (remaining > 0) {
-    const spot = autoPlace(next, env);
-    if (!spot) break;
-    const take = Math.min(remaining, item.stack);
-    const uid = nextUid(next);
-    next.items[uid] = { itemId, qty: take, ...spot };
-    uids.push(uid);
-    remaining -= take;
+  } else {
+    if (item.stack > 1) {
+      for (const [uid, s] of Object.entries(next.items)) {
+        if (remaining === 0) break;
+        if (s.container === undefined || s.qty >= item.stack || !canMerge(s, stack, item.stack)) continue;
+        const take = Math.min(remaining, item.stack - s.qty);
+        s.qty += take;
+        remaining -= take;
+        uids.push(uid);
+      }
+    }
+    while (remaining > 0) {
+      const spot = autoPlace(next, env);
+      if (!spot) break;
+      const take = Math.min(remaining, item.stack);
+      const uid = nextUid(next);
+      next.items[uid] = { itemId: stack.itemId, qty: take, ...spot, ...structuredClone(instance) };
+      uids.push(uid);
+      remaining -= take;
+    }
   }
   const placed = qty - remaining;
   if (placed === 0) return fail(`no room for ${item.name}`);
+  if (remaining > 0 && !opts.partial) return fail(`not enough room for ${qty} ${item.name}`);
   return { ok: true, sheet: next, placed, uids };
 }
 
@@ -434,7 +542,8 @@ export function moveItem(sheet: CharacterSheet, uid: string, to: GridTarget, env
     return { ok: true, sheet: next };
   }
   const other = next.items[probe.occupant]!;
-  if (other.itemId === moving.itemId && item.stack > 1) {
+  // only identical instances merge; a worn or twisted one swaps with a plain one
+  if (canMerge(other, moving, item.stack)) {
     const take = Math.min(moving.qty, item.stack - other.qty);
     if (take <= 0) return fail(`${item.name} stack is full`);
     other.qty += take;
@@ -467,7 +576,7 @@ export function equip(
   if (slot !== undefined && !itemFitsSlot(item, slot)) return fail(`${item.name} does not go in the ${slot} slot`);
   const accepting = EQUIPMENT_SLOTS.filter((s) => itemFitsSlot(item, s));
   const target = slot ?? accepting.find((s) => !sheet.equipment[s]) ?? accepting[0]!;
-  if (stack.qty !== 1 && target !== "consumable") return fail(`split ${item.name} down to one before wearing it`);
+  if (stack.qty !== 1 && slotKind(target) !== "consumable") return fail(`split ${item.name} down to one before wearing it`);
   const req = requirementError(item, sheet, env);
   if (req) return fail(req);
 
@@ -560,13 +669,18 @@ export function unequip(
   return { ok: true, sheet: next };
 }
 
-/** Remove `qty` (default: the whole stack) — dropped, consumed, sold. */
+/**
+ * Remove `qty` (default: the whole stack) — dropped, consumed, sold, stored,
+ * handed over. `removed` is the loose stack that left, WITH its instance data,
+ * so whatever takes it next (the ground, the vault, a shop, another sheet
+ * through `placeStack`) keeps the same item.
+ */
 export function removeItem(
   sheet: CharacterSheet,
   uid: string,
   qty: number | undefined,
   env: SheetEnv,
-): SheetResult<{ removed: { itemId: string; qty: number } }> {
+): SheetResult<{ removed: LooseStack }> {
   const stack = sheet.items[uid];
   if (!stack) return fail(`no stack "${uid}"`);
   const take = qty === undefined ? stack.qty : qty;
@@ -580,10 +694,10 @@ export function removeItem(
   } else {
     next.items[uid]!.qty -= take;
   }
-  return { ok: true, sheet: next, removed: { itemId: stack.itemId, qty: take } };
+  return { ok: true, sheet: next, removed: { itemId: stack.itemId, qty: take, ...instanceOf(stack) } };
 }
 
-/** Split `qty` off a carried stack into a free cell. */
+/** Split `qty` off a carried stack into a free cell. Both halves keep the stack's instance data. */
 export function splitStack(
   sheet: CharacterSheet,
   uid: string,
@@ -605,6 +719,80 @@ export function splitStack(
   const next = structuredClone(sheet);
   next.items[uid]!.qty -= qty;
   const newUid = nextUid(next);
-  next.items[newUid] = { itemId: stack.itemId, qty, ...to };
+  next.items[newUid] = { itemId: stack.itemId, qty, ...to, ...instanceOf(stack) };
   return { ok: true, sheet: next, uid: newUid };
+}
+
+// -- timed actions and the belt ---------------------------------------------------
+
+/**
+ * Seconds a request takes on the authority before it lands (0 = at once). An
+ * item's own `equipSeconds` beats the progression's `inventoryDurations`;
+ * replacing a worn item takes the longer of putting one on and taking the
+ * other off. Moving a worn item to a cell IS an unequip, and costs one.
+ */
+export function actionSeconds(sheet: CharacterSheet, command: InventoryCommand, env: SheetEnv): number {
+  const times = rules(env).inventoryDurations;
+  const itemOf = (uid: string | undefined): Item | undefined => {
+    const stack = uid ? sheet.items[uid] : undefined;
+    return stack ? env.catalog(stack.itemId) : undefined;
+  };
+  const onTime = (uid: string | undefined): number => itemOf(uid)?.equipSeconds ?? times.equip;
+  const offTime = (uid: string | undefined): number => itemOf(uid)?.equipSeconds ?? times.unequip;
+  switch (command.kind) {
+    case "equip": {
+      const item = itemOf(command.uid);
+      const accepting = item ? EQUIPMENT_SLOTS.filter((s) => itemFitsSlot(item, s)) : [];
+      const target = command.slot ?? accepting.find((s) => !sheet.equipment[s]) ?? accepting[0];
+      const occupant = target ? sheet.equipment[target] : undefined;
+      const on = onTime(command.uid);
+      return occupant && occupant !== command.uid ? Math.max(on, offTime(occupant)) : on;
+    }
+    case "unequip":
+      return offTime(sheet.equipment[command.slot]);
+    case "move":
+      if (sheet.items[command.uid]?.container === undefined) return offTime(command.uid);
+      return sheet.items[command.uid]?.container !== command.to.container ? times.transfer : 0;
+    case "split":
+      return sheet.items[command.uid]?.container !== command.to.container ? times.transfer : 0;
+  }
+}
+
+/**
+ * Whether a request puts gear on or takes it off — what a combat lock
+ * forbids. Rearranging the bags never is; dropping a worn item is.
+ */
+export function changesWornGear(sheet: CharacterSheet, command: InventoryCommand | { kind: "drop"; uid: string }): boolean {
+  if (command.kind === "equip" || command.kind === "unequip") return true;
+  if (command.kind === "move" || command.kind === "drop") return slotOf(sheet, command.uid) !== null;
+  return false;
+}
+
+/**
+ * Use one item from a belt slot: one unit leaves the stack (the slot empties
+ * with the last), and the whole belt goes on a shared cooldown. Returns what
+ * was used and the effect it carries (`skills.use`) — applying it is the
+ * game's business. `now` and `cooldownMs` are sim time, so a replica agrees.
+ */
+export function useItem(
+  sheet: CharacterSheet,
+  slot: EquipmentSlot,
+  env: SheetEnv,
+  timing: { now: number; cooldownMs: number },
+): SheetResult<{ itemId: string; skill: string }> {
+  if (!EQUIPMENT_SLOTS.includes(slot) || slotKind(slot) !== "consumable") return fail(`the ${slot} slot is not on the belt`);
+  const uid = sheet.equipment[slot];
+  if (!uid) return fail("nothing on the belt there");
+  const stack = sheet.items[uid];
+  const item = stack ? env.catalog(stack.itemId) : undefined;
+  if (!stack || !item) return fail(`unknown item "${stack?.itemId ?? uid}"`);
+  if (sheet.beltReadyAt !== undefined && timing.now < sheet.beltReadyAt) {
+    return fail(`not yet (${Math.ceil((sheet.beltReadyAt - timing.now) / 1000)}s)`);
+  }
+  const removed = removeItem(sheet, uid, 1, env);
+  if (!removed.ok) return removed;
+  const next = removed.sheet;
+  if (timing.cooldownMs > 0) next.beltReadyAt = timing.now + timing.cooldownMs;
+  else delete next.beltReadyAt;
+  return { ok: true, sheet: next, itemId: stack.itemId, skill: item.skills?.use ?? "" };
 }

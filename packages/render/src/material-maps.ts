@@ -26,6 +26,7 @@ import {
   vec3,
 } from "three/tsl";
 import type { MaterialData } from "./scene-builder.js";
+import { nightLevel } from "./daylight.js";
 import { posterize, quantize } from "./vfx/shaders.js";
 
 /**
@@ -737,8 +738,8 @@ export function sampleTriplanar(basis: TriplanarBasis, texture: THREE.Texture): 
  * binding and one sampler however deep it is — the fetch count per fragment
  * is unchanged, the binding count is what this fixes.
  */
-export function sampleTriplanarLayer(basis: TriplanarBasis, texture: THREE.DataArrayTexture, layer: number): N {
-  const depth = int(layer);
+export function sampleTriplanarLayer(basis: TriplanarBasis, texture: THREE.DataArrayTexture, layer: number | N): N {
+  const depth = typeof layer === "number" ? int(layer) : layer;
   const x: N = (tslTexture(texture, basis.uvX) as N).depth(depth).mul(basis.blend.x);
   const y: N = (tslTexture(texture, basis.uvY) as N).depth(depth).mul(basis.blend.y);
   const z: N = (tslTexture(texture, basis.uvZ) as N).depth(depth).mul(basis.blend.z);
@@ -923,8 +924,19 @@ function overlayNode(uniforms: MaterialUniforms, data: MaterialData, mapSample: 
  * unlit, and the bloom pipeline samples only emissive, so the heat glows.
  */
 export function emissiveWithOverlay(uniforms: MaterialUniforms, data: MaterialData, mapSample: N | null, base?: N): N {
-  const emissive: N = base ?? (uniforms.emissive as N).mul(uniforms.emissiveIntensity);
+  const emissive: N = nightScaled(base ?? (uniforms.emissive as N).mul(uniforms.emissiveIntensity), data);
   return data.overlay ? emissive.add(overlayNode(uniforms, data, mapSample)) : emissive;
+}
+
+/**
+ * `material.nightGlow`: the emissive term faded by the time of day — full at
+ * night, (1 - nightGlow) by day. One shared uniform multiply; a material
+ * without it is untouched (not multiplied by one).
+ */
+export function nightScaled(emissive: N, data: MaterialData): N {
+  const k = data.nightGlow ?? 0;
+  if (!(k > 0)) return emissive;
+  return emissive.mul(mix(float(1 - k), float(1), nightLevel as N));
 }
 
 // ---------------------------------------------------------------------------
@@ -992,7 +1004,7 @@ export function wireMaterialMaps(
   }
 
   // -- emissive -----------------------------------------------------------
-  if (textures.emissiveMap || data.overlay) {
+  if (textures.emissiveMap || data.overlay || (data.nightGlow ?? 0) > 0) {
     // The bloom pipeline's MRT split (renderer.ts) samples the `emissive`
     // output ONLY. Keep writing it through emissiveNode — a material that
     // stops populating emissive silently drops out of bloom.

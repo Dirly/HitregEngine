@@ -16,6 +16,7 @@ import {
   WORLD_MODULE,
   type WorldModuleMessage,
 } from "../src/index.js";
+import { eventLog } from "./event-log.js";
 
 /**
  * The `field` scene (a streamed voxel world + the combat roster)
@@ -134,12 +135,25 @@ describe.skipIf(!field)("combat field, headless", () => {
     await flush(hub);
     const after = world.positionOf("player:p-alice")!;
     expect(after[0] - settled[0]).toBeGreaterThan(2);
-    const last = snapshots[snapshots.length - 1] as { players: Record<string, { position: number[]; seq: number }>; entities: { managed: string[] } };
+    const last = snapshots[snapshots.length - 1] as { players: Record<string, { position: number[]; seq: number }> };
     expect(last.players["p-alice"]!.position[0]).toBeCloseTo(after[0], 1);
     expect(last.players["p-alice"]!.seq).toBe(60);
-    // own body is never in the managed (suspend) set; NPCs are
-    expect(last.entities.managed).not.toContain("player:p-alice");
-    expect(last.entities.managed).toContain("hero0");
+    // the claimed yaw survives the physics readback (scripts judge arcs on it), and peers see it
+    expect(world.objects.get("player:p-alice")!.rotation.y).toBeCloseTo(0.5, 5);
+    expect((last.players["p-alice"] as unknown as { yaw: number }).yaw).toBeCloseTo(0.5, 5);
+    // the snapshot carries the server's script clock, which a client's runtime follows
+    expect((last as unknown as { simMs: number }).simMs).toBeCloseTo(world.timeMs, 5);
+    // own body is never in the managed (suspend) set; NPCs are. The set rides
+    // only the snapshots where it changed (and a periodic refresh): the newest one that has it
+    const managed = [...snapshots]
+      .reverse()
+      .map((s) => (s as { entities?: { managed?: string[] } }).entities?.managed)
+      .find((m) => Array.isArray(m))!;
+    expect(managed).not.toContain("player:p-alice");
+    expect(managed).toContain("hero0");
+    // ...and an entity that did not change since it was last sent is left out of later snapshots
+    const lastUpdates = (last as unknown as { entities: { updates: Record<string, unknown> } }).entities.updates;
+    expect(Object.keys(lastUpdates).length).toBeLessThan(managed.length);
     // speed is clamped: a claimed 100 m/s intent moves at the sprint cap at most
     const p0 = world.positionOf("player:p-alice")!;
     for (let i = 0; i < 60; i++) {
@@ -184,7 +198,7 @@ describe.skipIf(!field)("combat field, headless", () => {
     for (let i = 0; i < 30; i++) server.tick();
     expect(world.netState.get("combat/dummy1.hp")).toBe(hpBefore);
     // hero0's brain casts cleave/frostNova on its own; a STRIKE by hero0 could only have come from the forged request
-    const forged = world.eventBus.trace().filter((e) => e.name === "combat.cast.accepted" && (e.payload as { casterId: string; abilityId: string }).casterId === "hero0" && (e.payload as { abilityId: string }).abilityId === "strike");
+    const forged = eventLog(() => world.eventBus).entries("combat.cast.accepted").filter((e) => e.name === "combat.cast.accepted" && (e.payload as { casterId: string; abilityId: string }).casterId === "hero0" && (e.payload as { abilityId: string }).abilityId === "strike");
     expect(forged).toEqual([]);
   });
 

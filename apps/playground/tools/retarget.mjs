@@ -36,6 +36,7 @@ import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
 import fs from "node:fs";
 import path from "node:path";
 import { RIG_MAPS, CLIP_PRESETS, detectRigMap } from "./rig-map.mjs";
+import { yawBones, conditionYaw } from "./_yaw.mjs";
 import { sanitizeFbx } from "./_fbx.mjs";
 import { normalizeLoop } from "./_clips.mjs";
 import { reportLocomotion } from "./_locomotion.mjs";
@@ -478,15 +479,20 @@ function twinBone(name) {
 
 /**
  * A clip selector: `source name`, optionally followed by modifiers —
- * `@mirror` (play it with the other hand) and `@<from>-<to>` (seconds; trims a
- * long lead-in or recovery). `great sword slash (3)@0.4-1.5`,
+ * `@mirror` (play it with the other hand), `@<from>-<to>` (seconds; trims a
+ * long lead-in or recovery), `@yaw<deg>` (keep the torso within that many
+ * degrees of forward — a spin becomes a sweep, see _yaw.mjs) and `@arms`
+ * (with @yaw: the shoulders hold the arms where they were while the chest
+ * squares up). `great sword slash (3)@0.4-1.5@yaw60`,
  * `Standing Torch Melee Attack 01@mirror`.
  */
 function parseSelector(spec) {
   const [name, ...mods] = spec.split("@").map((s) => s.trim());
-  const out = { name, mirror: false, start: null, end: null };
+  const out = { name, mirror: false, start: null, end: null, yaw: null, arms: false };
   for (const m of mods) {
     if (m === "mirror") out.mirror = true;
+    else if (m === "arms") out.arms = true;
+    else if (/^yaw\d+$/.test(m)) out.yaw = Number(m.slice(3));
     else if (/^[\d.]*-[\d.]*$/.test(m)) {
       const [a, b] = m.split("-");
       if (a) out.start = Number(a);
@@ -785,6 +791,12 @@ if (sourceClips.size) {
         baked.userData = { travel: travelled };
       }
       loopKinds[closed.kind].push(outName);
+    }
+    if (sel.yaw !== null) {
+      // after the loop is closed, so a cycle's appended frame is turned too
+      const bones = yawBones(meshGroup, src.rigMap.hip);
+      if (!bones) console.log(`  ! "${outName}": @yaw needs hip, upper-arm and thigh bones — left as baked`);
+      else conditionYaw(meshGroup, baked, bones, sel.yaw, { arms: sel.arms });
     }
     outClips.push(baked);
     // the drift is in the TARGET's world units, i.e. before --height scaling

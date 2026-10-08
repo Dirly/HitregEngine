@@ -44,6 +44,20 @@ export const gameManifestSchema = z.object({
       max: z.number().int().min(1).max(64).optional(),
       /** wss:// relay the shipped game dials for signaling; stamped at export. */
       relay: z.string().url().optional(),
+      mode: z
+        .enum(["p2p", "server"])
+        .optional()
+        .describe("project.json `multiplayer`, stamped at export. \"server\" = the game joins a dedicated server; anything else plays as before."),
+      gateway: z
+        .string()
+        .url()
+        .optional()
+        .describe("Server mode: main's gateway (http(s)://host[:port]) the client signs in at. Absent = the page's own origin."),
+      server: z
+        .string()
+        .regex(/^wss?:\/\//, "ws:// or wss:// url")
+        .optional()
+        .describe("Server mode without a gateway: an open dedicated server (ws(s)://host:port) every player dials directly."),
     })
     .default({ enabled: false }),
   build: z

@@ -111,7 +111,14 @@ export class EventRegistry {
  * Physics events stay local-only: each machine's sim emits its own (a
  * peer's partial sim only collides with what it simulates).
  */
+/** An intentional logout request; dedicated servers require an uninterrupted camp before accepting it. */
+export const PLAYER_LOGOUT_EVENT = "player.logout";
+export const CAMP_SECONDS = 20;
+
 export function registerCoreEvents(registry: EventRegistry): void {
+  registry.register(PLAYER_LOGOUT_EVENT, z.object({
+    cancel: z.boolean().default(false).describe("False starts a 20-second camp; true cancels it. The authority chooses the sending peer, requires stillness and no combat/loot lock, saves before acknowledging logout. Closing the connection uses the 60-second disconnect grace instead."),
+  }), { replicate: "to-authority" });
   registry.register("entity.spawned", z.object({ entityId: z.string() }));
   registry.register("entity.destroyed", z.object({ entityId: z.string() }));
   registry.register("collision", z.object({ a: z.string(), b: z.string() }));

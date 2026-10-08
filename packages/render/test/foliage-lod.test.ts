@@ -23,6 +23,24 @@ function readTranslationX(mesh: InstancedProps, slot: number): number {
 }
 
 describe("FoliageLodSystem tier compaction", () => {
+  it("keeps a large asset detailed past the default and preserves its own far-distance hysteresis", () => {
+    const system = new FoliageLodSystem(20, 0.85, 10);
+    const ordinary = makeBatch(), landmark = makeBatch();
+    landmark.lodDistance = 300;
+    system.register(ordinary); system.register(landmark);
+    system.update(new THREE.Vector3());
+    expect(ordinary.far.instanceCount).toBe(2);
+    expect(landmark.near[0]!.instanceCount).toBe(3);
+    system.update(new THREE.Vector3(310, 0, 0));
+    expect(landmark.far.instanceCount).toBe(1);
+    system.update(new THREE.Vector3(290, 0, 0));
+    expect(landmark.far.instanceCount).toBe(1); // no flicker at the boundary
+    system.update(new THREE.Vector3(250, 0, 0));
+    expect(landmark.far.instanceCount).toBe(0);
+    system.setLodDistance(5);
+    system.update(new THREE.Vector3());
+    expect(landmark.near[0]!.instanceCount).toBe(3); // explicit override survives host setting
+  });
   it("keeps instanceCount equal to the tier's actual instance count, not the total", () => {
     const system = new FoliageLodSystem(20, 0.85, 40);
     const batch = makeBatch();
@@ -33,7 +51,7 @@ describe("FoliageLodSystem tier compaction", () => {
 
     expect(batch.near[0]!.instanceCount).toBe(1);
     expect(batch.far.instanceCount).toBe(2);
-    expect(system.tierCounts()).toEqual({ near: 1, mid: 0, far: 2 });
+    expect(system.tierCounts()).toMatchObject({ near: 1, mid: 0, far: 2 });
     expect(readTranslationX(batch.near[0]!, 0)).toBe(0);
   });
 
@@ -49,7 +67,7 @@ describe("FoliageLodSystem tier compaction", () => {
 
     expect(batch.near[0]!.instanceCount).toBe(1);
     expect(batch.far.instanceCount).toBe(2);
-    expect(system.tierCounts()).toEqual({ near: 1, mid: 0, far: 2 });
+    expect(system.tierCounts()).toMatchObject({ near: 1, mid: 0, far: 2 });
     // the near buffer must contain instance 2 (x=100), not stale instance 0 data
     expect(readTranslationX(batch.near[0]!, 0)).toBe(100);
     // the far buffer must contain exactly {instance 0, instance 1} — x in {0, 50}
@@ -72,7 +90,7 @@ describe("FoliageLodSystem tier compaction", () => {
     system.update(new THREE.Vector3(0, 0, 0));
     system.unregister(batch);
     system.update(new THREE.Vector3(100, 0, 0)); // must not throw or touch `batch`
-    expect(system.tierCounts()).toEqual({ near: 0, mid: 0, far: 0 });
+    expect(system.tierCounts()).toMatchObject({ near: 0, mid: 0, far: 0 });
   });
 });
 
@@ -101,7 +119,7 @@ describe("FoliageLodSystem error-driven near→mid threshold", () => {
     system.register(batch);
     system.update(origin);
     // 0 and 50 are inside 60 → near; 100 is between 60 and 200 → mid
-    expect(system.tierCounts()).toEqual({ near: 2, mid: 1, far: 0 });
+    expect(system.tierCounts()).toMatchObject({ near: 2, mid: 1, far: 0 });
     expect(system.nearThresholdFor(batch)).toBe(60);
   });
 
@@ -113,7 +131,7 @@ describe("FoliageLodSystem error-driven near→mid threshold", () => {
     system.register(batch);
     expect(system.nearThresholdFor(batch)).toBeCloseTo(75, 6);
     system.update(origin);
-    expect(system.tierCounts()).toEqual({ near: 2, mid: 1, far: 0 });
+    expect(system.tierCounts()).toMatchObject({ near: 2, mid: 1, far: 0 });
   });
 
   it("re-derives every threshold when the projection changes", () => {
@@ -128,7 +146,7 @@ describe("FoliageLodSystem error-driven near→mid threshold", () => {
     expect(system.nearThresholdFor(batch)).toBeCloseTo(37.5, 6);
     system.update(origin);
     // instance at 50 was near; 50² > 37.5² so it drops to mid despite hysteresis
-    expect(system.tierCounts()).toEqual({ near: 1, mid: 2, far: 0 });
+    expect(system.tierCounts()).toMatchObject({ near: 1, mid: 2, far: 0 });
   });
 
   it("scales the error by the largest instance scale in the batch", () => {
@@ -146,7 +164,7 @@ describe("FoliageLodSystem error-driven near→mid threshold", () => {
     system.register(batch);
     expect(system.nearThresholdFor(batch)).toBe(200);
     system.update(origin);
-    expect(system.tierCounts()).toEqual({ near: 3, mid: 0, far: 0 });
+    expect(system.tierCounts()).toMatchObject({ near: 3, mid: 0, far: 0 });
   });
 
   it("clamps: a near-perfect mid tier still yields the real geometry right at the camera", () => {

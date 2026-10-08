@@ -19,7 +19,7 @@ export { attachPhysicsDebug, detachPhysicsDebug } from "./physics-debug.js";
 export { attachLightDebug, detachLightDebug } from "./light-debug.js";
 export { attachSkeletonDebug, collectBones, countAttachedSkeletonDebug, setSkeletonDebugAttached } from "./skeleton-debug.js";
 export { extractCollisionGeometry, makeMeshGeometryProvider, type CollisionGeometry } from "./collision-geometry.js";
-export { AnimationSystem, type AnimatorData } from "./animation.js";
+export { AnimationSystem, CROWD_POSE_LOD, type AnimatorData } from "./animation.js";
 export { ClothSwaySystem, DEFAULT_CLOTH_SWAY, markClothVertices, type ClothSwayOptions, type IslandReport } from "./cloth-sway.js";
 export { ParticleSystem, type ParticlesData, type ParticleValue } from "./particles.js";
 export {
@@ -83,7 +83,8 @@ export {
   type AppearanceLook,
   type EncodedAppearance,
 } from "./appearance.js";
-export { applyInstanceAppearance, INSTANCE_APPEARANCE_ATTRIBUTES } from "./instancing.js";
+export { applyInstanceAppearance, applyInstanceHang, INSTANCE_APPEARANCE_ATTRIBUTES, INSTANCE_HANG_ATTRIBUTES } from "./instancing.js";
+export { vegetationMaterialRole, VEGETATION_TINT_ATTRIBUTES } from "./vegetation-tint.js";
 export { applyModelEmissive, applyModelMap, applyModelPartMask, modelPartIndex, partBounds, partMaskFromNames, partSize, resolvePartAnchor, type PartAnchor } from "./ubermesh.js";
 export { MovingInstanceSystem, type MovingInstanceEntry, type MovingInstanceGlow, type MovingInstanceLook } from "./moving-instances.js";
 export { findSocketBone, socketParamsFrom, socketWorldPose, type SocketParams } from "./socket-pose.js";
@@ -162,6 +163,7 @@ export { LightBudgetSystem } from "./light-budget.js";
 export { pathGeometry, type PathMeshSource } from "./path-mesh.js";
 export { surfaceGeometry, type SurfaceMeshSource } from "./surface-mesh.js";
 export { WaterWake, waterWakeUniforms, type WaterWakeOptions } from "./water-wake.js";
+export { setSeaStorm, seaSky, type SeaParams } from "./water-sea.js";
 export { polyMeshGeometry, polyFaceForHit } from "./poly-mesh-geometry.js";
 export {
   CASCADE_BIAS_SCALE_CAP,
@@ -253,6 +255,7 @@ export {
   isFrozenStaticSubtree,
 } from "./static-transforms.js";
 export { bumpShadowPassMaterials } from "./shadow-pass-material.js";
+export { DEFAULT_SKINNED_SHADOW_DISTANCE, enableSkinnedShadowRange, beginSkinnedShadowFrame, endSkinnedShadowFrame } from "./skinned-shadows.js";
 export { trackRenderObjects, SWEEP_FRAMES, type RenderObjectSweep } from "./render-object-sweep.js";
 export { InstancedPropPool, type PoolEntry, type PoolStats } from "./prop-pool.js";
 export {
@@ -276,4 +279,25 @@ export {
 
 export { voxelGeometry, csgGeometry, voxelColliderProxyGeometry } from "./voxel-geometry.js";
 export { PortraitView, type PortraitOptions } from "./portrait.js";
-export { buildTerrainSplatMaterial, SPLAT_ATTRIBUTE, SPLAT_ATTRIBUTES, type SplatData } from "./terrain-splat.js";
+export { FaceShots, type FaceShotSource, type FaceShotsOptions } from "./face-shots.js";
+export { buildTerrainSplatMaterial, SPLAT_ATTRIBUTE, SPLAT_ATTRIBUTES, SPLAT_INDEX_ATTRIBUTE, SPLAT_TOP_ATTRIBUTE, type SplatData } from "./terrain-splat.js";
+export {
+  CullingSystem,
+  CullUnit,
+  cullRootsOf,
+  cullingProfileOf,
+  applyCullingProfile,
+  cullRootIndex,
+  registerCullRoots,
+  type CullUnitOptions,
+  type CullingStats,
+  type CullRoot,
+  type CullRootSettings,
+} from "./culling.js";
+export {
+  HorizonCuller,
+  HorizonOccluderMap,
+  OCCLUDED_LAYER,
+  SHADOW_CAMERA_LAYERS,
+  type HorizonOptions,
+} from "./horizon.js";

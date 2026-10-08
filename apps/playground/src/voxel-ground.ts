@@ -1,11 +1,13 @@
 import type * as THREE from "three/webgpu";
 import {
   coverClumpKeep,
-  coverClumpRejects,
   coverEdgeClearance,
   coverScratch,
   coverWaterGate,
+  coverVegetationRejects,
   coverWaterLevel,
+  editedGround,
+  surfaceAliases,
   type CoverLayerDoc,
   type WorldField,
 } from "@hitreg/core";
@@ -135,6 +137,14 @@ export function voxelGroundProbes(field: () => WorldField | null): VoxelGroundPr
   const probeHeight = new Float64Array(FOLIAGE_PROBE_LIMIT);
   /** 1 when the ground at that probe is above the sea and its splat mix is meaningful */
   const probeDry = new Uint8Array(FOLIAGE_PROBE_LIMIT);
+  /**
+   * 1 when a 3D carve (passage, tunnel, subtracting blob) changed the ground
+   * at this probe or left it a lintel: the heightfield `bed` is not
+   * the surface there, so no blade in the four lattice squares around it grows
+   * (`editedGround` in core, the rule scatter props use too). Always 0 where
+   * no carve reaches, which is what keeps unedited cover identical.
+   */
+  const probeCarved = new Uint8Array(FOLIAGE_PROBE_LIMIT);
   /** index into recipe.biomes, or BIOME_UNKNOWN */
   const probeBiome = new Int16Array(FOLIAGE_PROBE_LIMIT).fill(BIOME_UNKNOWN);
   let probeSplat = new Float32Array(0);
@@ -227,6 +237,19 @@ export function voxelGroundProbes(field: () => WorldField | null): VoxelGroundPr
     }
     probeSlope[slot] = steep;
     probeHeight[slot] = y;
+    probeCarved[slot] = 0;
+    if (f.carveSpan(x - FOLIAGE_PROBE, z - FOLIAGE_PROBE, x + FOLIAGE_PROBE, z + FOLIAGE_PROBE)) {
+      // compared with `height`, because that is the bed a blade is given:
+      // NOT with the ordinary `surfaceCast`, which sees a carve within its
+      // few-metre window too and so agrees with the carved floor
+      // a 1 m footing ring per probe: with radius 0 a blade beside a tunnel
+      // mouth still hung 0.4 m over the mesh the 2 m lattice rounds into the
+      // opening. Cost, measured over the Undercut: 185 us per probe whose
+      // carve reaches the surface (58 without the ring), paid once per probe —
+      // the probe cache keeps the answer — and nothing anywhere else.
+      const real = editedGround(f, x, z, 1);
+      probeCarved[slot] = real === null || (real !== undefined && Math.abs(real - y) > 0.3) ? 1 : 0;
+    }
     probeBiome[slot] = BIOME_UNKNOWN;
     for (const levels of shoreLevels.values()) levels[slot] = NaN;
     const dry = y > f.recipe.seaLevel;
@@ -368,7 +391,9 @@ export function voxelGroundProbes(field: () => WorldField | null): VoxelGroundPr
     const f = field();
     if (!f) return null;
     adopt(f);
-    if (data.clump && coverClumpRejects(data as CoverGateData, f.recipe.seed, x, z)) return null;
+    // the layer's clump mask, region vegetation (a zone's or place's species and
+    // density) and clearings: one gate, shared with every audit (core vegetation.ts)
+    if (coverVegetationRejects(f.recipe, data as CoverGateData, x, z)) return null;
     const px = x / FOLIAGE_PROBE;
     const pz = z / FOLIAGE_PROBE;
     const gx = Math.floor(px);
@@ -379,6 +404,9 @@ export function voxelGroundProbes(field: () => WorldField | null): VoxelGroundPr
     const s10 = probeAt(f, gx + 1, gz);
     const s01 = probeAt(f, gx, gz + 1);
     const s11 = probeAt(f, gx + 1, gz + 1);
+    // a carve opened or moved the ground in this lattice square: the bed below
+    // would be the heightfield's, standing in the air over it
+    if (probeCarved[s00]! | probeCarved[s10]! | probeCarved[s01]! | probeCarved[s11]!) return null;
     if (data.biomes && data.biomes.length > 0) {
       const mask = maskFor(f, data);
       const nx = fx < 0.5 ? 0 : 1;
@@ -419,10 +447,10 @@ export function voxelGroundProbes(field: () => WorldField | null): VoxelGroundPr
     }
     if (floating || water?.mode === "bed" || data.surfaces.length === 0) return placed;
     let index = surfaceIndex.get(data);
-    if (!index || index.length !== data.surfaces.length) {
-      index = Int32Array.from(data.surfaces, (name) =>
-        f.recipe.surfaces.findIndex((s) => s.name.toLowerCase() === name.toLowerCase()),
-      );
+    if (!index) {
+      // a name also covers every zone surface that restyles it (a zone's own
+      // grass still grows the grass layer), so this is a flat list of ids
+      index = Int32Array.from(data.surfaces.flatMap((name) => surfaceAliases(f.recipe, name)));
       surfaceIndex.set(data, index);
     }
     const weight =

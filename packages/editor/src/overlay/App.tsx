@@ -394,6 +394,8 @@ export function App(props: AppProps) {
             thumbnails={props.thumbnails}
             onEditPrefab={props.onEditPrefab}
             meshEdit={props.meshEdit}
+            settings={props.settings}
+            editingPrefab={editingPrefab}
           />
         </div>
       </div>

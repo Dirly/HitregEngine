@@ -31,6 +31,12 @@ be requested when needed, within the current schema capacity. Do not drop an ori
 for the three additions. The complete material library need not be painted onto every mesh. Read the current
 material/voxel schemas for layer capacity.
 
+When block joints, courses or carved relief are modeled in geometry, assign a
+continuous stone surface to those faces. A second mortar or brick pattern will
+cut across the modeled blocks and imply a conflicting scale. Use patterned
+masonry on broad surfaces whose joints are represented by the texture; inspect
+that choice on the actual geometry at the project's texel density.
+
 ## Requesting a coordinated set
 
 Define a shared brief covering the dungeon theme, color family, wear, visual style and world scale. Request each

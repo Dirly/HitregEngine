@@ -51,7 +51,7 @@ const creation = {
     { id: "outfit", label: "Outfit", preview: true, options: [{ id: "robe", label: "Robe", model: BODY, texture: "robe.png", parts: ["HumanMale_ChestFront"] }] },
   ],
   mounts: [
-    { model: HEAD, socket: "Head", offset: [0, 2, 0], scale: 0.5 },
+    { model: HEAD, socket: "Head", offset: [0, 2, 0], scale: 0.5, hang: { socket: "Chest" } },
     { model: HELM, socket: "Head", offset: [0, 2, 0], scale: 0.5 },
   ],
 };
@@ -62,12 +62,13 @@ const tables: Record<string, ModelTables> = {
   [HELM]: { parts: {}, tiles: ["helm.png"], rules: { hides: { Visor: ["F_HeadFace"] } } },
 };
 
-function harness() {
+function harness(hang: { socket?: string } = { socket: "Chest" }) {
   const events = new EventRegistry();
   registerCoreEvents(events);
   const assets = new AssetLibrary();
   registerCoreAssetTypes(assets);
-  assets.addDataAsset({ id: "rules", type: "creation", name: "rules", data: creation });
+  const mounts = creation.mounts.map((m) => (m.model === HEAD ? { ...m, hang } : m));
+  assets.addDataAsset({ id: "rules", type: "creation", name: "rules", data: { ...creation, mounts } });
   assets.addDataAsset({
     id: "plate-chest",
     type: "item",
@@ -103,11 +104,19 @@ function harness() {
   scene.add(objects.get("player")!);
   objects.get("player")!.add(objects.get("visual")!);
   for (const id of ["body-look", "head", "helm"]) objects.get("visual")!.add(objects.get(id)!);
-  // the skinned model's head bone, 1.5 up
-  const bone = new THREE.Object3D();
+  // the skinned model: a chest bone 1.2 up, its head bone 0.3 above that (1.5 up)
+  const chest = new THREE.Bone();
+  chest.name = "Chest";
+  chest.position.set(0, 1.2, 0);
+  const bone = new THREE.Bone();
   bone.name = "Head";
-  bone.position.set(0, 1.5, 0);
-  objects.get("visual")!.add(bone);
+  bone.position.set(0, 0.3, 0);
+  chest.add(bone);
+  const skinned = new THREE.SkinnedMesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial());
+  skinned.add(chest);
+  objects.get("visual")!.add(skinned);
+  scene.updateMatrixWorld(true);
+  skinned.bind(new THREE.Skeleton([chest, bone]));
   const netState = new NetStateStore();
   registerCharacterNetState(netState);
   // the server writes the ticket's build before the body spawns
@@ -133,7 +142,7 @@ function harness() {
   };
   const lastLook = (id: string) => looks.filter((l) => l.entityId === id).at(-1)?.look;
   const sheet = () => netState.get("character/player") as CharacterSheet;
-  return { runtime, bus, tick, lastLook, sheet, objects };
+  return { runtime, bus, tick, lastLook, sheet, objects, chest, head: bone };
 }
 
 describe("character-look builtin", () => {
@@ -161,6 +170,85 @@ describe("character-look builtin", () => {
     const head = h.objects.get("head")!;
     expect(head.position.y).toBeCloseTo(3.5);
     expect(head.scale.x).toBeCloseTo(0.5);
+    h.runtime.dispose();
+  });
+
+  it("hands a moving batch the hang placement: a hanging end stays with the chest while the head turns", async () => {
+    const h = harness();
+    h.tick();
+    await new Promise((r) => setTimeout(r, 0));
+    const head = h.objects.get("head")!;
+    // at the bind pose the two placements agree
+    h.runtime.lateUpdate(1 / 60);
+    const identity = new THREE.Matrix4().elements;
+    (head.userData["hangDelta"] as THREE.Matrix4).elements.forEach((e, i) => expect(e).toBeCloseTo(identity[i]!, 5));
+    // a braid tip on the chest, where the socket carries it at rest
+    const tip = new THREE.Vector3(0.1, 1.3, 0.2);
+    const onHead = h.head.matrixWorld.clone().invert();
+    const tipInHead = tip.clone().applyMatrix4(onHead);
+    // the head turns 60° and nods: the socket swings the tip through the body, the hang puts it back
+    h.head.rotation.set(0.4, Math.PI / 3, 0);
+    h.runtime.lateUpdate(1 / 60);
+    const swung = tipInHead.clone().applyMatrix4(h.head.matrixWorld);
+    expect(swung.distanceTo(tip)).toBeGreaterThan(0.1);
+    const hung = swung.applyMatrix4(head.userData["hangDelta"] as THREE.Matrix4);
+    expect(hung.distanceTo(tip)).toBeCloseTo(0, 5);
+    // the body leans: the tip rides the chest, not the head
+    const chestRest = h.chest.matrixWorld.clone();
+    h.chest.rotation.set(0.5, 0, 0);
+    h.runtime.lateUpdate(1 / 60);
+    const tipOnChest = tip.clone().applyMatrix4(chestRest.invert()).applyMatrix4(h.chest.matrixWorld);
+    const viaSocket = tipInHead.clone().applyMatrix4(h.head.matrixWorld);
+    expect(viaSocket.applyMatrix4(head.userData["hangDelta"] as THREE.Matrix4).distanceTo(tipOnChest)).toBeCloseTo(0, 5);
+    h.runtime.dispose();
+  });
+
+  it("skips socket upkeep while the animation system holds the pose, and follows a moved parent or a new pose", async () => {
+    const h = harness();
+    h.tick();
+    await new Promise((r) => setTimeout(r, 0));
+    const head = h.objects.get("head")!;
+    const model = h.chest.parent!;
+    model.userData["poseVersion"] = 1;
+    h.runtime.lateUpdate(1 / 60);
+    const placed = head.quaternion.clone();
+    // the bone changes without a new pose version (only a test does this): held, so the piece stays
+    h.head.rotation.set(0, Math.PI / 2, 0);
+    h.runtime.lateUpdate(1 / 60);
+    expect(head.quaternion.angleTo(placed)).toBeCloseTo(0, 6);
+    // a new pose: followed
+    model.userData["poseVersion"] = 2;
+    h.runtime.lateUpdate(1 / 60);
+    expect(head.quaternion.angleTo(placed)).toBeGreaterThan(1);
+    // the parent moves under a held pose: recomputed in the parent's frame
+    const local = head.position.clone();
+    const hangBefore = (head.userData["hangDelta"] as THREE.Matrix4).clone();
+    h.objects.get("visual")!.position.set(5, 0, 0);
+    h.runtime.lateUpdate(1 / 60);
+    expect(head.position.distanceTo(local)).toBeCloseTo(0, 6);
+    // the world-space hang was recomputed for the moved body, not left behind
+    expect((head.userData["hangDelta"] as THREE.Matrix4).equals(hangBefore)).toBe(false);
+    h.runtime.dispose();
+  });
+
+  it("hangs the ends plumb when the mount names no hang bone: a nod bends them, a hunched chest does not drag them", async () => {
+    const h = harness({});
+    h.tick();
+    await new Promise((r) => setTimeout(r, 0));
+    const head = h.objects.get("head")!;
+    h.runtime.lateUpdate(1 / 60);
+    const identity = new THREE.Matrix4().elements;
+    (head.userData["hangDelta"] as THREE.Matrix4).elements.forEach((e, i) => expect(e).toBeCloseTo(identity[i]!, 5));
+    const tip = new THREE.Vector3(0.1, 1.3, 0.2);
+    const tipInHead = tip.clone().applyMatrix4(h.head.matrixWorld.clone().invert());
+    const pivot = h.head.getWorldPosition(new THREE.Vector3());
+    // the head nods forward and the chest hunches: the tip keeps its offset below the head's pivot, as modelled
+    h.head.rotation.set(0.5, 0, 0);
+    h.chest.rotation.set(0.3, 0, 0);
+    h.runtime.lateUpdate(1 / 60);
+    const pivotNow = h.head.getWorldPosition(new THREE.Vector3());
+    const hung = tipInHead.clone().applyMatrix4(h.head.matrixWorld).applyMatrix4(head.userData["hangDelta"] as THREE.Matrix4);
+    expect(hung.clone().sub(pivotNow).distanceTo(tip.clone().sub(pivot))).toBeCloseTo(0, 5);
     h.runtime.dispose();
   });
 

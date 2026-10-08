@@ -48,6 +48,12 @@ export interface ModelLooks {
    * now) on the clone's bones. `refit` re-frames the portrait once they land.
    */
   dressPortrait(source: THREE.Object3D, clone: THREE.Object3D, refit: () => void): void;
+  /**
+   * The current look of one entity's model as a string — parts, theme, tint,
+   * skin sheets, glow (effects left out: they are not on a face). Two equal
+   * strings draw alike; a face picture's key (FaceShots) is built from these.
+   */
+  lookKey(entityId: string): string;
 }
 
 /** What AmbientVfx needs (the `vfx` component's data) — structural, so no render import. */
@@ -368,9 +374,17 @@ export function createModelLooks(opts: {
     });
   };
 
+  const lookKey = (entityId: string): string => {
+    const look = movingLooks.get(entityId) ?? looks.get(entityId);
+    if (!look) return "";
+    const { effects: _effects, ...shown } = look as ModelLook & { effects?: unknown };
+    return JSON.stringify(shown);
+  };
+
   return {
     tables,
     dressPortrait,
+    lookKey,
     set(entityId, look) {
       if (opts.moving?.has(entityId)) movingLooks.set(entityId, { ...movingLooks.get(entityId), ...look });
       if (look.effects !== undefined) {

@@ -1,0 +1,132 @@
+{
+ "source": "MMO/3d/Mobs/Dragon/Hornet-parts.obj",
+ "sourceScale": 1,
+ "objScale": 1,
+ "outMesh": "MMO/3d/Mobs/Dragon/Hornet-unwrapped",
+ "sheet": 1254,
+ "keyStroke": 8,
+ "smooth": 48,
+ "margin": 22,
+ "gutter": 48,
+ "atlas": {
+  "size": 278,
+  "bleed": 2,
+  "bgLum": 236
+ },
+ "mirrorCopy": {
+  "axis": "z",
+  "parts": [
+   "Hornet_Thorax",
+   "Hornet_Leg",
+   "Hornet_Eye",
+   "Hornet_Head",
+   "Hornet_Abdomen",
+   "Hornet_Wing"
+  ]
+ },
+ "slots": {
+  "thorax": {
+   "color": "#ff0000",
+   "fit": "contain"
+  },
+  "leg": {
+   "color": "#00ff00",
+   "fit": "contain"
+  },
+  "eyes": {
+   "color": "#0000ff",
+   "fit": "contain",
+   "label": "compound eye"
+  },
+  "head": {
+   "color": "#ffff00",
+   "fit": "contain"
+  },
+  "abdomen": {
+   "color": "#ff00ff",
+   "fit": "contain"
+  },
+  "wing": {
+   "color": "#ff8000",
+   "fit": "contain"
+  }
+ },
+ "parts": {
+  "Hornet_Thorax": {
+   "slot": "thorax",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Hornet_Leg": {
+   "slot": "leg",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Hornet_Eye": {
+   "slot": "eyes",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Hornet_Head": {
+   "slot": "head",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.4
+  },
+  "Hornet_Abdomen": {
+   "slot": "abdomen",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Hornet_Wing": {
+   "slot": "wing",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  }
+ },
+ "layout": {
+  "col": [
+   {
+    "row": [
+     "leg",
+     "eyes"
+    ]
+   },
+   {
+    "row": [
+     "wing",
+     "head"
+    ]
+   },
+   {
+    "row": [
+     "abdomen",
+     "thorax"
+    ]
+   }
+  ]
+ },
+ "marks": [],
+ "cutoutSlots": [],
+ "combos": [
+  [
+   "Hornet_Thorax",
+   "Hornet_Leg",
+   "Hornet_Eye",
+   "Hornet_Head",
+   "Hornet_Abdomen",
+   "Hornet_Wing"
+  ]
+ ]
+}

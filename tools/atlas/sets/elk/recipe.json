@@ -1,0 +1,228 @@
+{
+ "source": "MMO/3d/Mobs/Dragon/Elk-parts.obj",
+ "sourceScale": 1,
+ "objScale": 1,
+ "outMesh": "MMO/3d/Mobs/Dragon/Elk-unwrapped",
+ "sheet": 1254,
+ "keyStroke": 8,
+ "smooth": 48,
+ "margin": 22,
+ "gutter": 48,
+ "atlas": {
+  "size": 730,
+  "bleed": 2,
+  "bgLum": 236
+ },
+ "mirrorCopy": {
+  "axis": "z",
+  "parts": [
+   "Elk_Antler",
+   "Elk_Body",
+   "Elk_Head",
+   "Elk_LegFront",
+   "Elk_LegBack",
+   "Elk_Tail"
+  ]
+ },
+ "slots": {
+  "antler": {
+   "color": "#ff0000",
+   "fit": "contain"
+  },
+  "body": {
+   "color": "#00ff00",
+   "fit": "contain"
+  },
+  "chest": {
+   "color": "#0000ff",
+   "fit": "contain",
+   "matchTo": "body",
+   "label": "chest"
+  },
+  "rump": {
+   "color": "#ffff00",
+   "fit": "contain",
+   "matchTo": "body",
+   "label": "rump"
+  },
+  "back": {
+   "color": "#ff00ff",
+   "fit": "contain",
+   "matchTo": "body",
+   "label": "back top"
+  },
+  "head": {
+   "color": "#ff8000",
+   "fit": "contain",
+   "labelMax": 1
+  },
+  "crown": {
+   "color": "#8000ff",
+   "fit": "contain",
+   "matchTo": "head",
+   "label": "head top"
+  },
+  "snout": {
+   "color": "#008c00",
+   "fit": "contain",
+   "matchTo": "head",
+   "label": "snout front"
+  },
+  "leg-front": {
+   "color": "#00008c",
+   "fit": "contain",
+   "matchTo": "body"
+  },
+  "leg-back": {
+   "color": "#8c0000",
+   "fit": "contain",
+   "matchTo": "body"
+  },
+  "tail": {
+   "color": "#c0c060",
+   "fit": "contain",
+   "matchTo": "body"
+  }
+ },
+ "parts": {
+  "Elk_Antler": {
+   "slot": "antler",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Elk_Body": {
+   "slot": "body",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.35,
+   "split": [
+    {
+     "slot": "chest",
+     "facing": "+x",
+     "above": 0.6,
+     "u": "-z",
+     "v": "-y",
+     "flare": 0.15
+    },
+    {
+     "slot": "rump",
+     "facing": "-x",
+     "above": 0.6,
+     "u": "+z",
+     "v": "-y",
+     "flare": 0.15
+    },
+    {
+     "slot": "back",
+     "facing": "+y",
+     "above": 0.62,
+     "u": "+x",
+     "v": "+z",
+     "flare": 0.1
+    }
+   ]
+  },
+  "Elk_Head": {
+   "slot": "head",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.4,
+   "split": [
+    {
+     "slot": "snout",
+     "facing": "+x",
+     "above": 0.7,
+     "u": "-z",
+     "v": "-y",
+     "flare": 0.15
+    },
+    {
+     "slot": "crown",
+     "facing": "+y",
+     "above": 0.7,
+     "u": "+x",
+     "v": "+z",
+     "flare": 0.15
+    }
+   ]
+  },
+  "Elk_LegFront": {
+   "slot": "leg-front",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Elk_LegBack": {
+   "slot": "leg-back",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Elk_Tail": {
+   "slot": "tail",
+   "method": "plane",
+   "view": [
+    -0.925,
+    0.041,
+    -0.377
+   ],
+   "flare": 0.1
+  }
+ },
+ "layout": {
+  "col": [
+   {
+    "row": [
+     "body",
+     "head",
+     "crown"
+    ]
+   },
+   {
+    "row": [
+     "antler",
+     "leg-front",
+     "back",
+     "snout"
+    ]
+   },
+   {
+    "row": [
+     "leg-back",
+     "chest",
+     "rump",
+     "tail"
+    ]
+   }
+  ]
+ },
+ "marks": [
+  {
+   "slot": "head",
+   "at": [
+    0.7888,
+    1.3922,
+    -0.1139
+   ],
+   "shape": "eye",
+   "size": 10
+  }
+ ],
+ "cutoutSlots": [],
+ "combos": [
+  [
+   "Elk_Antler",
+   "Elk_Body",
+   "Elk_Head",
+   "Elk_LegFront",
+   "Elk_LegBack",
+   "Elk_Tail"
+  ]
+ ]
+}

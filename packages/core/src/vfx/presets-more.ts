@@ -28,17 +28,11 @@ export function maskFor(ctx: PresetContext, tags: readonly string[]): string | u
 /** Mask tags that suit the element, for generic ground marks. */
 export function elementMaskTags(ctx: PresetContext): string[] {
   const byElement: Record<string, string[]> = {
-    fire: ["burst", "generic"],
-    arcane: ["rune", "arcane", "generic"],
-    ice: ["spike", "ice", "generic"],
-    nature: ["root", "nature", "drip"],
-    earth: ["spike", "earth", "generic"],
+    shadow: ["shadow", "eye", "void", "chain"],
     holy: ["holy", "cross", "hex", "generic"],
-    rose: ["generic", "rune"],
-    blood: ["blood", "drip", "crescent"],
-    void: ["void", "eye", "chain"],
-    storm: ["storm", "lightning", "chevron"],
-    shadow: ["shadow", "eye", "void"],
+    nature: ["root", "nature", "drip"],
+    water: ["water", "ice", "drip", "generic"],
+    destruction: ["burst", "storm", "lightning", "spike", "generic"],
   };
   return byElement[ctx.element] ?? ["generic"];
 }
@@ -79,7 +73,7 @@ function bodyOf(ctx: PresetContext, y = 0): M {
 function rain(ctx: PresetContext, opts: { count: number; stream: boolean; duration?: number; at?: M; height?: number; scale?: number }): M {
   const R = Math.max(0.6, ctx.a.growTo ?? ctx.R) * (opts.scale ?? 1);
   const h = opts.height ?? clamp(3 + R * 1.5, 4, 12);
-  const storm = ctx.element === "storm" || ctx.element === "holy";
+  const storm = ctx.element === "water" || ctx.element === "holy";
   const life: [number, number] = [h / 14, h / 9];
   const rate = opts.stream ? clamp(opts.count / life[1], 4, 300) : 0;
   return {
@@ -477,7 +471,7 @@ export const EXTRA_PRESETS: readonly Preset[] = [
       kind: "mesh",
       anchor: feetOf(ctx),
       duration: ctx.phaseLength,
-      primitive: ctx.element === "ice" ? "crystal" : "spike",
+      primitive: ctx.element === "water" ? "crystal" : "spike",
       size: 0.9,
       motion: "rise",
       count: 5,
@@ -742,7 +736,7 @@ export const EXTRA_PRESETS: readonly Preset[] = [
     kind: "particles",
     slot: "debris",
     phases: ["impact"],
-    elements: ["ice", "earth", "storm", "holy"],
+    elements: ["water", "destruction", "holy"],
     only: true,
     weight: 1.2,
     build: (ctx) => rain(ctx, { count: Math.round(clamp(14 + ctx.R * 8, 12, 90)), stream: false, height: clamp(2 + ctx.R, 3, 8), scale: 0.8 }),

@@ -5,6 +5,7 @@ import { RoomClient, WebSocketClientTransport, WS_HOST_ID } from "@hitreg/net";
 import { poiSchema, type PoiDoc } from "@hitreg/core";
 import { serve, type ServeHandle } from "../src/serve.js";
 import { WORLD_MODULE, type WorldModuleMessage } from "../src/index.js";
+import { eventLog } from "./event-log.js";
 
 /**
  * The combat wrap-up on a layer, over real sockets, with voxel-demo's
@@ -41,6 +42,9 @@ try {
 } catch (error) {
   console.warn("combat wrap-up test skipped:", error instanceof Error ? error.message : error);
 }
+// Every hit here is about something other than a crit: never roll one (package S's
+// damage-stats.test.ts pins those through the same seam).
+if (layer) (layer.world.scriptRegistry.get("combat-actor") as unknown as { critRoll: () => number }).critRoll = () => 1;
 
 describe.skipIf(!layer)("combat wrap-up: respawn, kill rewards, pvp flag", { timeout: 60_000 }, () => {
   const transports: WebSocketClientTransport[] = [];
@@ -73,7 +77,9 @@ describe.skipIf(!layer)("combat wrap-up: respawn, kill rewards, pvp flag", { tim
   const hit = (targetId: string, sourceId: string, amount: number): void => {
     layer!.world.eventBus.emit("combat.damage", { targetId, sourceId, amount, control: 0, point: [0, 1, 0] });
   };
-  const events = (name: string) => layer!.world.eventBus.trace().filter((e) => e.name === name);
+  // every delivered event of a name (./event-log.ts: never index into the 64-entry trace ring)
+  const log = eventLog(() => layer!.world.eventBus);
+  const events = (name: string) => log.entries(name);
 
   const bodyA = "player:alice";
   const bodyB = "player:bob";
@@ -86,6 +92,9 @@ describe.skipIf(!layer)("combat wrap-up: respawn, kill rewards, pvp flag", { tim
     const full = hp(bodyA);
     // hero0 (an NPC) lands the killing blow: dead, countdown published
     hit(bodyA, "hero0", full + 10);
+    // 0 health is DOWN first (package X1); giving up is the death, still hero0's
+    await until(() => (net().get(`combat/${bodyA}.downed`) as number) > 0, 3000, "down");
+    layer!.world.eventBus.emit("combat.release.request", { casterId: bodyA });
     await until(() => dead(bodyA), 5000, "death");
     await until(() => (net().get(`combat/${bodyA}.respawnAt`) as number) > 0, 2000, "countdown");
     const killed = events("combat.killed").map((e) => e.payload as { victimId: string; killerId: string | null; xp: number });

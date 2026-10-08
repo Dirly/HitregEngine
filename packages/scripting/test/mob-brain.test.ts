@@ -9,6 +9,8 @@ import {
   NetStateStore,
   combatKey,
   landingKey,
+  mobEventDecls,
+  noticeKey,
   registerCoreComponents,
   registerCoreEvents,
   registerLandingNetState,
@@ -24,6 +26,7 @@ import {
   type SimLike,
 } from "../src/index.js";
 import { GROUND_LAYERS, OBSTACLE_LAYERS } from "../src/steering.js";
+import { MOVE_TARGET_RULES } from "../src/mob-brain.js";
 
 const coreRegistry = new ComponentRegistry();
 registerCoreComponents(coreRegistry);
@@ -233,6 +236,28 @@ describe("mob-brain aggro", () => {
     expect(Math.abs(vx)).toBeLessThan(0.5);
   });
 
+  it("scales its drive by driveScale (a slow, a root) and yields it while driveHeldUntil holds (a shove)", () => {
+    const h = harness({ params: { roam: 0, aggroRange: 16 }, playerAt: [0, 0, 10] });
+    h.step(20);
+    const full = h.drive()[1];
+    expect(full).toBeGreaterThan(0);
+    h.mob.userData["driveScale"] = 0.5;
+    h.step(1);
+    expect(h.drive()[1]).toBeCloseTo(full * 0.5, 3);
+    h.mob.userData["driveScale"] = 0;
+    h.step(1);
+    expect(h.drive()).toEqual([0, 0]);
+    // a game's knockback owns the channel until its deadline
+    h.mob.userData["driveScale"] = 1;
+    h.mob.userData["impulseVel"] = [0, -20];
+    h.mob.userData["driveHeldUntil"] = 1e9;
+    h.step(3);
+    expect(h.drive()).toEqual([0, -20]);
+    h.mob.userData["driveHeldUntil"] = 0;
+    h.step(1);
+    expect(h.drive()[1]).toBeGreaterThan(0);
+  });
+
   it("ignores a player outside aggro range", () => {
     const h = harness({ params: { roam: 0, aggroRange: 5, leash: 100 }, playerAt: [0, 0, 30] });
     h.step(60);
@@ -290,6 +315,22 @@ describe("mob-brain aggro", () => {
     h.netState.set(combatKey.dead("player"), true);
     h.step(40);
     expect(h.states()).not.toContain("chase");
+  });
+
+  it("leaves a downed body alone, and drops one that goes down mid-fight", () => {
+    // core isDowned: a downed player is out of the fight — brains never finish it
+    const h = harness({ params: { roam: 0, aggroRange: 16 }, playerAt: [0, 0, 6] });
+    h.netState.set(combatKey.downed("player"), 60);
+    h.step(40);
+    expect(h.states()).not.toContain("chase");
+    h.netState.set(combatKey.downed("player"), 0);
+    h.step(40);
+    expect(h.states()).toContain("chase");
+    const before = h.states().length;
+    h.netState.set(combatKey.downed("player"), 60);
+    h.step(60);
+    expect(h.states().slice(before)).not.toContain("chase");
+    expect(h.states().at(-1)).not.toBe("chase");
   });
 
   it("will not take a fight that would break its leash", () => {
@@ -353,6 +394,20 @@ describe("mob-brain in melee", () => {
     const gap = Math.hypot(h.player.position.z - h.mob.position.z, h.player.position.x - h.mob.position.x);
     expect(gap).toBeGreaterThan(5); // backed off rather than hugging
     expect(h.attacks().length).toBeGreaterThan(0);
+  });
+
+  it("backs away at retreatSpeed, never at its chase speed, so a runner catches it", () => {
+    const fastest = (params: Record<string, unknown>) => {
+      const h = harness({ params: { roam: 0, aggroRange: 20, preferredRange: 9, attackRange: 14, speed: 5, ...params }, playerAt: [0, 0, 3] });
+      let top = 0;
+      for (let i = 0; i < 120; i++) {
+        h.step(1);
+        top = Math.max(top, Math.hypot(...h.drive()));
+      }
+      return top;
+    };
+    expect(fastest({})).toBeCloseTo(3, 1); // the old 0.6 x speed
+    expect(fastest({ retreatSpeed: 1.2 })).toBeCloseTo(1.2, 1);
   });
 });
 
@@ -715,5 +770,379 @@ describe("mob-brain debug", () => {
     h.step(5);
     expect(h.runtime.debugOf("player")).toBeUndefined();
     expect(Object.keys(h.runtime.debugTree(["mob", "player"]))).toEqual(["mob"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// movesets, turn rate, sight cone — the 2026-10 combat model
+// ---------------------------------------------------------------------------
+
+/**
+ * A party around a mob at the origin facing +Z: the tank in front holding
+ * threat, a mage far in front, a rogue just behind. The mob does not walk
+ * (speed 0), so every distance below stays where it was put.
+ */
+function party(params: Record<string, unknown>) {
+  const h = harness({
+    params: { roam: 0, aggroRange: 20, deaggroRange: 30, leash: 100, speed: 0, threatHalfLife: 0, attackInterval: 0.3, ...params },
+    playerAt: [0, 0, 2],
+    extras: [
+      { id: "mage", at: [0, 0, 9], tags: ["player"] },
+      { id: "rogue", at: [0.3, 0, -1.8], tags: ["player"] },
+    ],
+  });
+  h.threat({ sourceId: "player", amount: 500 });
+  const extra: Array<{ name: string; payload: Record<string, unknown> }> = [];
+  for (const name of ["mob.engaged", "mob.guard"]) h.bus.on(name, (p) => extra.push({ name, payload: p as Record<string, unknown> }));
+  return { ...h, extra };
+}
+
+const move = (m: Record<string, unknown>) => ({ cooldown: 30, windup: 0.5, ...m });
+
+/** Step until the first `mob.attack`, then return. */
+function untilAttack(h: { attacks: () => unknown[]; step: (n?: number) => void }): void {
+  for (let i = 0; i < 300 && h.attacks().length === 0; i++) h.step(1);
+}
+
+describe("mob-brain movesets", () => {
+  it("goes for the threat target with a `threat` move", () => {
+    const h = party({ moves: [move({ ability: "slam", range: [0, 3], target: "threat" })] });
+    h.step(120);
+    const a = h.attacks()[0]!.payload;
+    expect(a["abilityId"]).toBe("slam");
+    expect(a["targetId"]).toBe("player");
+    expect(a["rule"]).toBe("threat");
+    expect(a["windup"]).toBe(0.5);
+  });
+
+  it("goes for the furthest player in its band, not the tank", () => {
+    const h = party({ moves: [move({ ability: "leap", range: [4, 14], target: "furthest" })] });
+    h.step(120);
+    expect(h.attacks()[0]!.payload["targetId"]).toBe("mage");
+    const at = h.attacks()[0]!.payload["at"] as number[];
+    expect(at[2]).toBeCloseTo(9);
+  });
+
+  it("goes for the nearest player, whoever holds threat", () => {
+    const h = party({ moves: [move({ ability: "bite", range: [0, 3], target: "nearest" })] });
+    h.step(120);
+    expect(h.attacks()[0]!.payload["targetId"]).toBe("rogue");
+  });
+
+  it("lashes at whoever stands behind it", () => {
+    const h = party({ moves: [move({ ability: "lash", range: [0, 3], target: "behind" })] });
+    h.step(120);
+    const a = h.attacks()[0]!.payload;
+    expect(a["targetId"]).toBe("rogue");
+    expect((a["aim"] as number[])[1]).toBeLessThan(0); // aimed backwards
+  });
+
+  it("does not fire a move whose rule finds nobody in its band", () => {
+    const h = party({ moves: [move({ ability: "leap", range: [20, 30], target: "furthest" })] });
+    h.step(180);
+    expect(h.attacks()).toHaveLength(0);
+  });
+
+  it("respects each move's cooldown and draws among the ready ones", () => {
+    const h = party({
+      attackInterval: 0.1,
+      attackJitter: 0,
+      moves: [
+        move({ ability: "a", range: [0, 3], cooldown: 100, windup: 0.4 }),
+        move({ ability: "b", range: [0, 3], cooldown: 100, windup: 0.4 }),
+      ],
+    });
+    h.step(600);
+    const ids = h.attacks().map((a) => a.payload["abilityId"] as string);
+    expect(ids.sort()).toEqual(["a", "b"]); // each once, then both on cooldown
+  });
+
+  it("stands committed for the wind-up even when its target walks off", () => {
+    const h = party({ speed: 6, moves: [move({ ability: "slam", range: [0, 3], target: "threat", windup: 1, cooldown: 0 })] });
+    untilAttack(h);
+    expect(h.attacks()).toHaveLength(1);
+    h.movePlayer(0, 0, 12); // out of reach: a free mob would chase at once
+    for (let i = 0; i < 50; i++) {
+      h.step(1);
+      expect(h.drive()).toEqual([0, 0]);
+    }
+    expect(h.attacks()).toHaveLength(1); // and nothing new started mid-wind-up
+    h.step(30);
+    expect(h.drive()[1]).toBeGreaterThan(0); // released: after them
+  });
+
+  it("drops the wind-up and stands still when interrupted", () => {
+    const h = party({ speed: 6, moves: [move({ ability: "slam", range: [0, 3], windup: 0.6, cooldown: 0 })] });
+    untilAttack(h);
+    h.bus.emit("mob.interrupt", { mobId: "mob", seconds: 1.5 });
+    h.movePlayer(0, 0, 12);
+    h.step(80); // past where the wind-up would have ended
+    expect(h.drive()).toEqual([0, 0]);
+    expect(h.attacks()).toHaveLength(1);
+    h.step(30);
+    expect(h.drive()[1]).toBeGreaterThan(0);
+  });
+
+  it("springs at the spot of a lunge and lands as the wind-up ends", () => {
+    const h = party({ moves: [move({ ability: "leap", range: [4, 14], target: "furthest", windup: 1.2, lunge: true })] });
+    untilAttack(h);
+    h.step(20);
+    expect(h.mob.position.z).toBeLessThan(0.5); // crouched, not yet gone
+    h.step(55);
+    expect(h.mob.position.z).toBeGreaterThan(6.5); // landed beside the mage
+    expect(h.mob.position.z).toBeLessThan(9);
+  });
+
+  it("keeps today's single swing when it has no moves", () => {
+    const h = party({ abilities: "strike" });
+    h.step(120);
+    const a = h.attacks()[0]!.payload;
+    expect(a["abilityId"]).toBe("strike");
+    expect(a["targetId"]).toBe("player");
+  });
+
+  it("drops an invalid moveset and falls back to its abilities", () => {
+    const h = party({ abilities: "strike", moves: [{ range: [0, 3] }] });
+    h.step(120);
+    expect(h.attacks()[0]!.payload["abilityId"]).toBe("strike");
+  });
+
+  it("names the same target rules as the mob.attack schema", () => {
+    const attack = mobEventDecls.find((d) => d.name === "mob.attack")!.schema as z.ZodObject;
+    const rule = attack.shape["rule"] as z.ZodDefault<z.ZodEnum>;
+    expect([...rule.def.innerType.options]).toEqual([...MOVE_TARGET_RULES]);
+  });
+});
+
+describe("mob-brain turning", () => {
+  const yawOf = (h: { mob: THREE.Object3D }) => h.mob.userData["faceYaw"] as number;
+  const DEG = Math.PI / 180;
+
+  it("turns slowly while winding up", () => {
+    const h = party({ windupTurnRate: 90, moves: [move({ ability: "lash", range: [0, 3], target: "behind", windup: 1 })] });
+    untilAttack(h);
+    const start = yawOf(h);
+    h.step(30); // half a second
+    const turned = Math.abs(yawOf(h) - start);
+    expect(turned).toBeGreaterThan(30 * DEG);
+    expect(turned).toBeLessThanOrEqual(45.5 * DEG);
+  });
+
+  it("lets a move turn faster than the wind-up default", () => {
+    const h = party({ windupTurnRate: 30, moves: [move({ ability: "lash", range: [0, 3], target: "behind", windup: 1, turnRate: 360 })] });
+    untilAttack(h);
+    const start = yawOf(h);
+    h.step(30);
+    expect(Math.abs(yawOf(h) - start)).toBeGreaterThan(150 * DEG);
+  });
+
+  it("turns at a finite rate outside a wind-up too", () => {
+    const h = harness({ params: { roam: 0, aggroRange: 20, speed: 0, turnRate: 180 }, playerAt: [0, 0, -3] });
+    h.step(12); // the first think claims the facing
+    const a = yawOf(h);
+    h.step(1);
+    expect(Math.abs(yawOf(h) - a)).toBeLessThanOrEqual(3.01 * DEG); // 180°/s at 60 Hz
+    h.step(80);
+    expect(Math.abs(Math.abs(yawOf(h)) - Math.PI)).toBeLessThan(0.01); // got there
+  });
+});
+
+describe("mob-brain sight cone", () => {
+  it("does not notice a player walking up behind it", () => {
+    const h = harness({ params: { roam: 0, aggroRange: 16, sightAngle: 60, hearRadius: 3 }, playerAt: [0, 0, -8] });
+    h.step(40);
+    expect(h.states()).not.toContain("chase");
+  });
+
+  it("hears one who gets close, whatever way it faces", () => {
+    const h = harness({ params: { roam: 0, aggroRange: 16, sightAngle: 60, hearRadius: 3, speed: 0, attackRange: 3 }, playerAt: [0, 0, -2.5] });
+    h.step(40);
+    expect(h.states()).toContain("attack");
+  });
+
+  it("sees one in front", () => {
+    const h = harness({ params: { roam: 0, aggroRange: 16, sightAngle: 60, hearRadius: 3 }, playerAt: [1, 0, 8] });
+    h.step(40);
+    expect(h.states()).toContain("chase");
+  });
+
+  it("keeps a grudge all round, cone or no cone", () => {
+    const h = harness({ params: { roam: 0, aggroRange: 16, sightAngle: 30, hearRadius: 1 }, playerAt: [0, 0, -8] });
+    h.threat({ sourceId: "player", amount: 10 });
+    h.step(40);
+    expect(h.states()).toContain("chase");
+  });
+});
+
+describe("mob-brain stealth (notice/<bodyId>)", () => {
+  it("does not hear a sneaking body at a range it hears a walking one", () => {
+    const params = { roam: 0, aggroRange: 16, sightAngle: 60, hearRadius: 4, speed: 0, attackRange: 3 };
+    const walking = harness({ params, playerAt: [0, 0, -3] });
+    walking.step(40);
+    expect(walking.states()).toContain("attack");
+    const sneaking = harness({ params, playerAt: [0, 0, -3] });
+    sneaking.netState.set(noticeKey("player"), 0.3); // hears it inside 1.2 m now
+    sneaking.step(40);
+    expect(sneaking.states()).not.toContain("attack");
+    sneaking.netState.set(noticeKey("player"), 1); // the stealth broke
+    sneaking.step(40);
+    expect(sneaking.states()).toContain("attack");
+  });
+
+  it("shortens its sight too, but keeps a target it already has", () => {
+    const h = harness({ params: { roam: 0, aggroRange: 16, sightAngle: 60, hearRadius: 1 }, playerAt: [0, 0, 8] });
+    h.netState.set(noticeKey("player"), 0.3); // seen inside 4.8 m only
+    h.step(40);
+    expect(h.states()).not.toContain("chase");
+    h.netState.set(noticeKey("player"), 1);
+    h.step(40);
+    expect(h.states()).toContain("chase");
+    h.netState.set(noticeKey("player"), 0.3); // sneaking mid-fight ends nothing
+    h.step(40);
+    expect(h.runtime.debugOf("mob")).toMatchObject({ target: "player" });
+  });
+
+  it("lets go of a forgotten source, which must then be noticed afresh", () => {
+    const h = harness({ params: { roam: 0, aggroRange: 16, sightAngle: 60, hearRadius: 1, speed: 0 }, playerAt: [0, 0, -8] });
+    h.threat({ sourceId: "player", amount: 10 });
+    h.step(20);
+    expect(h.runtime.debugOf("mob")).toMatchObject({ target: "player" });
+    // a hide: dropped from the table AND sneaking (it has turned to face the player by now)
+    h.threat({ sourceId: "player", kind: "forget" });
+    h.netState.set(noticeKey("player"), 0.3);
+    h.step(20);
+    expect(h.runtime.debugOf("mob")).toMatchObject({ target: "", threat: [] });
+    // forgotten but plainly visible in front of it: noticed again, as a stranger would be
+    h.netState.set(noticeKey("player"), 1);
+    h.step(20);
+    expect(h.runtime.debugOf("mob")).toMatchObject({ target: "player" });
+  });
+});
+
+describe("mob-brain signals", () => {
+  it("says when it becomes aware and when it forgets", () => {
+    const h = party({ abilities: "strike" });
+    h.step(20);
+    const said = h.extra.filter((e) => e.name === "mob.engaged").map((e) => e.payload["engaged"]);
+    expect(said).toEqual([true]); // threat was seeded before the first think
+    h.netState.set(combatKey.dead("mob"), true);
+    h.step(5);
+    expect(h.extra.filter((e) => e.name === "mob.engaged").at(-1)!.payload["engaged"]).toBe(false);
+  });
+
+  it("starts unaware and says so once", () => {
+    const h = harness({ params: { roam: 0, aggroRange: 5 }, playerAt: [0, 0, 50] });
+    const said: unknown[] = [];
+    h.bus.on("mob.engaged", (p) => said.push((p as { engaged: boolean }).engaged));
+    h.step(60);
+    expect(said).toEqual([false]);
+  });
+
+  it("raises a guard between moves and drops it to swing", () => {
+    const h = party({ guardBetween: true, attackInterval: 1, moves: [move({ ability: "slam", range: [0, 3], windup: 0.8, cooldown: 0 })] });
+    h.step(300);
+    const guards = h.extra.filter((e) => e.name === "mob.guard").map((e) => e.payload["on"]);
+    expect(guards[0]).toBe(true);
+    expect(guards).toContain(false);
+    expect(guards.lastIndexOf(true)).toBeGreaterThan(guards.indexOf(false)); // and up again after
+    expect(h.attacks().length).toBeGreaterThan(0);
+  });
+});
+
+describe("mob-brain temperament", () => {
+  it("aggroRange 0 on a hostile mob already fights back when hit (and shouts for its pack) — the baseline", () => {
+    const h = harness({ params: { roam: 0, aggroRange: 0, speed: 4, leash: 100 }, playerAt: [0, 0, 3] });
+    h.step(60);
+    expect(h.states()).not.toContain("chase"); // standing next to it is not enough
+    h.threat({ sourceId: "player", amount: 50 });
+    h.step(30);
+    expect(h.states().some((s) => s === "chase" || s === "attack")).toBe(true);
+    expect(h.alerts()).toHaveLength(1); // ...and it shouts: alertRadius defaults to 10 for a hostile mob
+  });
+
+  it("passive: never starts a fight, fights back when hit, never shouts, then goes back to wandering", () => {
+    const h = harness({
+      params: { roam: 4, roamPause: 1, temperament: "passive", speed: 4, leash: 100, threatHalfLife: 1, deaggroRange: 20 },
+      playerAt: [0, 0, 2],
+    });
+    h.step(120);
+    expect(h.states()).not.toContain("chase");
+    expect(h.states()).not.toContain("attack");
+    h.threat({ sourceId: "player", amount: 10 });
+    h.step(30);
+    expect(h.states().some((s) => s === "chase" || s === "attack")).toBe(true);
+    expect(h.alerts()).toHaveLength(0);
+    // the attacker walks off past deaggroRange and the grudge decays: back to roaming, and it stays calm
+    const mark = h.states().length;
+    h.movePlayer(0, 0, 60);
+    h.step(600);
+    const tail = h.states().slice(mark);
+    expect(tail.length).toBeGreaterThan(0);
+    expect(tail).not.toContain("attack");
+    expect(h.states().at(-1) === "roam" || h.states().at(-1) === "idle").toBe(true);
+    h.movePlayer(1, 0, 2); // walking back up to it does not restart the fight
+    const before = h.states().length;
+    h.step(120);
+    expect(h.states().slice(before)).not.toContain("chase");
+  });
+
+  it("passive: neither shouts nor answers a packmate's shout unless alertRadius is set", () => {
+    const h = harness({
+      params: { roam: 0, aggroRange: 16, alertRadius: 20, faction: "deer", speed: 4 },
+      playerAt: [0, 0, 10],
+      extras: [
+        { id: "doe", at: [10, 0, 0], tags: ["npc"], script: { name: "mob-brain", params: { roam: 0, temperament: "passive", faction: "deer", speed: 4, leash: 100 } } },
+        { id: "stag", at: [-10, 0, 0], tags: ["npc"], script: { name: "mob-brain", params: { roam: 0, temperament: "passive", alertRadius: 20, faction: "deer", speed: 4, leash: 100 } } },
+      ],
+    });
+    h.step(60);
+    expect(h.alerts().filter((a) => a.payload["mobId"] === "mob")).toHaveLength(1); // the hostile one pulled
+    expect(h.alerts().filter((a) => a.payload["mobId"] === "doe")).toHaveLength(0);
+    const [dx, dz] = h.driveOf("doe");
+    expect(Math.hypot(dx, dz)).toBeLessThan(0.01); // passive, default: deaf to it
+    const [sx, sz] = h.driveOf("stag");
+    expect(Math.hypot(sx, sz)).toBeGreaterThan(0.5); // passive with alertRadius set: joins in
+  });
+
+  it("territorial: lets a player pass outside its territory, attacks one who steps inside", () => {
+    const h = harness({ params: { roam: 0, temperament: "territorial", territory: 7, aggroRange: 16, speed: 4, leash: 100 }, playerAt: [0, 0, 12] });
+    h.step(60);
+    expect(h.states()).not.toContain("chase");
+    h.movePlayer(0, 0, 5);
+    h.step(20);
+    expect(h.states().some((s) => s === "chase" || s === "attack")).toBe(true);
+  });
+
+  it("territorial: fights back when hit from outside its territory", () => {
+    const h = harness({ params: { roam: 0, temperament: "territorial", territory: 7, speed: 4, leash: 100 }, playerAt: [0, 0, 14] });
+    h.step(30);
+    h.threat({ sourceId: "player", amount: 10 });
+    h.step(20);
+    expect(h.states()).toContain("chase");
+  });
+
+  it("an unknown temperament reads as hostile", () => {
+    const h = harness({ params: { roam: 0, temperament: "grumpy", aggroRange: 16 }, playerAt: [0, 0, 10] });
+    h.step(20);
+    expect(h.states()).toContain("chase");
+  });
+});
+
+describe("mob-brain patrolDir", () => {
+  const route = [[0, 0, 0], [20, 0, 0], [40, 0, 0]];
+  it("sets off forward along the segment it stands on", () => {
+    const h = harness({ params: { patrol: route, patrolDir: 1, roamSpeed: 2 }, mobAt: [25, 0, 0], playerAt: [0, 0, 500] });
+    h.step(30);
+    expect(h.drive()[0]).toBeGreaterThan(0.5);
+  });
+  it("sets off backward with -1", () => {
+    const h = harness({ params: { patrol: route, patrolDir: -1, roamSpeed: 2 }, mobAt: [35, 0, 0], playerAt: [0, 0, 500] });
+    h.step(30);
+    expect(h.drive()[0]).toBeLessThan(-0.5);
+  });
+  it("0 keeps the old rule: start at the nearest route point", () => {
+    const h = harness({ params: { patrol: route, roamSpeed: 2 }, mobAt: [25, 0, 0], playerAt: [0, 0, 500] });
+    h.step(30);
+    expect(h.drive()[0]).toBeLessThan(-0.5); // nearest point is 20: it walks back to it first
   });
 });

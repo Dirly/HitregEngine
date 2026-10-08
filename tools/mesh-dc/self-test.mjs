@@ -197,3 +197,112 @@ test("source limit leaves room for base64 within the host body limit", async t =
   assert.equal(ctx.written.size, 0);
   assert.deepEqual(fs.readdirSync(ctx.runDir), []);
 });
+
+test("role noise groups solids by role: rock noised, built work crisp, tags override roles", async () => {
+  const { routeProtect, openingProtect } = await import("./noise.mjs");
+  const solid = (offset, role) => { const c = cube("x", offset); return { ...c, triangleMaterials: c.triangleMaterials.map(() => role) }; };
+  const parts = [solid([0, 0, 0], 6), solid([1.5, 0, 0], 0), solid([0, 1.5, 0], 6), solid([3, 0, 0], 1)];
+  const merged = { name: "Gnawed room", positions: [], indices: [], solidTriangleCounts: [], triangleMaterials: [], solidNoise: [null, null, "rock-roof", null] };
+  for (const p of parts) { const base = merged.positions.length / 3; merged.positions.push(...p.positions); merged.indices.push(...p.indices.map(i => i + base)); merged.solidTriangleCounts.push(12); merged.triangleMaterials.push(...p.triangleMaterials); }
+  const src = source([merged]);
+  src.palette[6].id = "basalt"; src.palette[0].id = "large-ashlar"; src.palette[1].id = "silt";
+  const noise = { version: 1, roles: { basalt: { amount: 0.3, scale: 2 }, "rock-roof": { amount: 0.45, scale: 2.5, octaves: 3 }, silt: { amount: 0.5, scale: 2, floor: true }, "large-ashlar": null },
+    protect: [openingProtect([0, 0, 0], 1, 2)] };
+  const plain = convertMeshStamp(source([cube()]), { voxelSize: 0.25 });
+  assert.equal(plain.volumes[0].doc.nodes.length, 1, "no table: the old single crisp node");
+  const result = convertMeshStamp(src, { voxelSize: 0.25, noise });
+  const nodes = result.volumes[0].doc.nodes;
+  assert.deepEqual(nodes.map(n => n.id), ["imported-mesh", "noise-basalt", "noise-rock-roof", "noise-silt"]);
+  assert.equal(nodes[0].noise, undefined);
+  assert.equal(nodes[1].noise.amount, 0.3);
+  assert.equal(nodes[1].noise.grow, true);
+  assert.equal(nodes[2].noise.octaves, 3);
+  assert.equal(nodes[3].noise.amount, 0.06, "floor roles are capped");
+  // the opening box + the floor band (basalt is a wall role: banded by default; silt is a floor role: never)
+  assert.equal(nodes[1].noise.protect.length, 2);
+  assert.ok("floors" in nodes[1].noise.protect[1]);
+  assert.equal(nodes[1].noise.protect[1].above, 0.6);
+  assert.ok(!(nodes[3].noise.protect ?? []).some(z => "floors" in z), "floor roles get no band");
+  assert.equal(nodes.reduce((s, n) => s + n.mesh.solidTriangleCounts.length, 0), 4);
+  const mesh = buildVolumeMesh(createVolume(result.volumes[0].doc));
+  assert.ok(mesh.indices.length > 0);
+  assert.ok(result.report.volumes[0].noiseNodes.length === 4);
+  // embedded in the source works the same way
+  assert.equal(convertMeshStamp({ ...src, noise }, { voxelSize: 0.25 }).volumes[0].doc.nodes.length, 4);
+  assert.throws(() => convertMeshStamp(src, { voxelSize: 0.25, noise: { version: 1, roles: { basalt: { amount: 3, scale: 1 } } } }), /amount/);
+  assert.throws(() => convertMeshStamp(src, { voxelSize: 0.25, noise: { version: 1, roles: { basalt: { amount: .2, scale: 1 } } } }), /rock-roof/);
+  // route protection follows the floor (top of the cube at y = 1 under the route)
+  const zones = routeProtect(source([cube("Floor", [0, 0, 0])]), [[-0.9, 0], [0.9, 0]], { startY: 1, height: 1 });
+  assert.equal(zones.length, 1);
+  assert.ok(Math.abs(zones[0].a[1] - 2) < 1e-6 && Math.abs(zones[0].b[1] - 2) < 1e-6);
+});
+
+test("floor band: floors come from exposed up faces, the band is configurable and off for floor roles", async () => {
+  const { floorGrid, normaliseNoiseTable, BAND_DEFAULTS } = await import("./noise.mjs");
+  // a floor slab with a block standing on it: the slab top is floor except under the block; the block's top is floor too
+  const box = (name, min, max) => { const c = cube(name, [0, 0, 0]); return { ...c, positions: c.positions.map((v, i) => min[i % 3] + ((v + 1) / 2) * (max[i % 3] - min[i % 3])) }; };
+  const slab = box("Slab", [-3, -0.5, -3], [3, 0, 3]), block = box("Block", [-1, 0, -1], [1, 2, 1]);
+  const g = floorGrid([slab, block], { cell: 0.5 });
+  const at = (x, z) => g.spans[Math.floor((z - g.origin[1]) / g.cell) * g.columns + Math.floor((x - g.origin[0]) / g.cell)];
+  assert.deepEqual(at(-2.2, -2.2), [0, 0], "open slab is floor");
+  assert.deepEqual(at(0.2, 0.2), [2, 2], "under the block the slab top is buried; the block top is floor");
+  const t = normaliseNoiseTable({ version: 1, roles: { rock: { amount: 0.4, scale: 2 }, crisp: { amount: 0.4, scale: 2, band: false }, low: { amount: 0.4, scale: 2, band: { above: 0.3 } }, earth: { amount: 0.03, scale: 1, floor: true } } });
+  assert.deepEqual(t.roles.rock.band, BAND_DEFAULTS);
+  assert.equal(t.roles.crisp.band, undefined);
+  assert.equal(t.roles.low.band.above, 0.3);
+  assert.equal(t.roles.earth.band, undefined);
+  assert.equal(normaliseNoiseTable({ version: 1, band: null, roles: { rock: { amount: 0.4, scale: 2 } } }).roles.rock.band, undefined, "table band: null turns it off");
+  assert.throws(() => normaliseNoiseTable({ version: 1, band: { fade: 0 }, roles: {} }), /fade/);
+});
+
+test("decimateRough keeps a noised extraction closed and manifold while cutting triangles", async () => {
+  const { decimateRough } = await import("./decimate.mjs");
+  const { meshAudit } = await import("../dc-construction/mesh-audit.mjs");
+  const src = source([cube("Rock", [0, 0, 0])]);
+  src.palette[0].id = "basalt";
+  const noise = { version: 1, roles: Object.fromEntries(src.palette.map(p => [p.id, { amount: 0.3, scale: 0.9 }])) };
+  const doc = convertMeshStamp(src, { voxelSize: 0.08, noise }).volumes[0].doc;
+  const raw = buildVolumeMesh(createVolume(doc));
+  const mesh = { ...raw, surfaceCount: doc.palette.length };
+  const out = decimateRough(mesh, { error: 0.02 });
+  assert.ok(meshAudit(raw).passed);
+  assert.ok(out.triangleCount < raw.triangleCount * 0.6, `${out.triangleCount} of ${raw.triangleCount}`);
+  assert.ok(meshAudit(out).passed, JSON.stringify(meshAudit(out)));
+});
+
+const BLENDER = process.env.BLENDER || "P:/Program Files/Blender Foundation/Blender 5.2/blender.exe";
+test("cave_tunnel: width/height per path point, full width (was half), mitred sharp bends without folds", { skip: !fs.existsSync(BLENDER) && "no Blender" }, async () => {
+  const { spawnSync } = await import("node:child_process");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tunnel-"));
+  const script = path.join(dir, "t.py"), out = path.join(dir, "out.json");
+  fs.writeFileSync(script, `import sys, json, bmesh
+sys.path.insert(0, ${JSON.stringify(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")))})
+import shapes_blender as s
+o = s.cave_tunnel("t", [(0, 0, 0, 6, 5), (10, 0, 0, 3, 3), (20, 0, -1)], width=4, height=4, thickness=0.6, material="basalt", group="g", irregular=0, crown_jitter=0, width_wander=0)
+bm = bmesh.new(); bm.from_mesh(o.data)
+ys = lambda x0, x1: [v.co.y for v in bm.verts if x0 <= v.co.x <= x1]
+zs = lambda x0, x1: [v.co.z for v in bm.verts if x0 <= v.co.x <= x1]
+from mathutils.bvhtree import BVHTree
+def crossings(o):
+    b = bmesh.new(); b.from_mesh(o.data); bmesh.ops.triangulate(b, faces=b.faces[:]); b.faces.ensure_lookup_table()
+    t = BVHTree.FromBMesh(b)
+    return sum(1 for i, j in t.overlap(t) if i < j and not (set(v.index for v in b.faces[i].verts) & set(v.index for v in b.faces[j].verts)))
+bend = [(0, 0, 0), (12, 0, 0), (16, 14, 0), (30, 14, 0)]
+mit = s.cave_tunnel("m", bend, width=8, height=6, thickness=1.0, material="basalt", group="g", corners="mitre")
+smo = s.cave_tunnel("s", bend, width=8, height=6, thickness=1.0, material="basalt", group="g", corners="smooth")
+try:
+    s.cave_tunnel("x", [(0, 0, 0), (3, 0, 0), (3, 6, 0)], width=8, height=6, thickness=1.0, material="basalt", group="g", corners="mitre"); short = False
+except ValueError:
+    short = True
+json.dump({"mitreCross": crossings(mit), "smoothCross": crossings(smo), "shortRaises": short, "closed": all(e.is_manifold for e in bm.edges), "w0": max(ys(-0.01, 0.01)), "w10": max(ys(9.99, 10.01)), "w20": max(ys(19.99, 20.01)), "h0": max(zs(-0.01, 0.01)), "h10": max(zs(9.99, 10.01))}, open(${JSON.stringify(out)}, "w"))
+`);
+  const r = spawnSync(BLENDER, ["--background", "--factory-startup", "--python-exit-code", "1", "--python", script], { encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr || r.stdout);
+  const m = JSON.parse(fs.readFileSync(out, "utf8"));
+  assert.equal(m.closed, true);
+  // half width + shell thickness: 3.6 at the mouth, 2.1 at the neck, back to the default 4 m (2.6) at the end
+  assert.ok(Math.abs(m.w0 - 3.6) < 0.05 && Math.abs(m.w10 - 2.1) < 0.05 && Math.abs(m.w20 - 2.6) < 0.05, JSON.stringify(m));
+  assert.ok(Math.abs(m.h0 - 5.6) < 0.05 && Math.abs(m.h10 - 3.6) < 0.05, JSON.stringify(m));
+  // a sharp bend: the smooth loft folds its inner side, the mitred one closes clean; a leg too short for its mitre raises
+  assert.ok(m.smoothCross > 0 && m.mitreCross === 0 && m.shortRaises, JSON.stringify(m));
+});

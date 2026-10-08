@@ -17,6 +17,9 @@ describe("decalSchema", () => {
     // Optional fields stay absent — an unset fade must never become 0.
     expect(decal).not.toHaveProperty("fadeDepth");
     expect(decal).not.toHaveProperty("sortOffset");
+    expect(decal).not.toHaveProperty("emissive");
+    expect(decal).not.toHaveProperty("emissiveIntensity");
+    expect(decal).not.toHaveProperty("filter");
   });
 
   it("requires a texture id", () => {
@@ -67,6 +70,21 @@ describe("decalSchema", () => {
     expect(all).toMatch(/placement/i);
     expect(all).toMatch(/snap/i);
     expect(all).toMatch(/re-?project|regenerat/i);
+  });
+
+  it("accepts self-lit decals without changing ordinary decal defaults", () => {
+    const authored = { texture: "rune", emissive: "#38b8ac", emissiveIntensity: 0.65 };
+    expect(decalSchema.parse(authored)).toMatchObject(authored);
+    expect(decalSchema.safeParse({ ...authored, emissiveIntensity: 0 }).success).toBe(true);
+    expect(decalSchema.safeParse({ ...authored, emissiveIntensity: -1 }).success).toBe(false);
+    expect(decalSchema.safeParse({ ...authored, emissiveIntensity: Infinity }).success).toBe(false);
+    expect(decalSchema.safeParse({ ...authored, emissive: "teal" }).success).toBe(false);
+  });
+
+  it("supports the existing material sampling choices explicitly", () => {
+    for (const filter of ["linear", "nearest", "pixel"])
+      expect(decalSchema.parse({ texture: "rune", filter }).filter).toBe(filter);
+    expect(decalSchema.safeParse({ texture: "rune", filter: "cubic" }).success).toBe(false);
   });
 });
 

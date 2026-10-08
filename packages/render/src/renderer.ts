@@ -4,6 +4,9 @@ import { GpuUploadProbe } from "./gpu-uploads.js";
 import { cacheUniformUploads } from "./uniform-upload-cache.js";
 import { trackRenderObjects, type RenderObjectSweep } from "./render-object-sweep.js";
 import { materialMapsLoading } from "./material-maps.js";
+import { beginSkinnedBoundsFrame, endSkinnedBoundsFrame } from "./skinned-bounds.js";
+import { beginSkinnedShadowFrame, DEFAULT_SKINNED_SHADOW_DISTANCE, endSkinnedShadowFrame } from "./skinned-shadows.js";
+import { hideNonRenderingBranches, restoreNonRenderingBranches } from "./empty-batches.js";
 import {
   PostChain,
   needsPipeline,
@@ -95,7 +98,52 @@ export interface BloomOptions {
 /** Scratch for the wind's world→view projection; the render loop never allocates. */
 const tmpWind = new THREE.Vector3();
 
+/** Main-thread budget per frame for the time-sliced scene precompile. */
+const PRECOMPILE_SLICE_MS = 6;
+
+const nextFrame = (): Promise<void> =>
+  new Promise((resolve) => {
+    const raf = (globalThis as { requestAnimationFrame?: (cb: () => void) => number }).requestAnimationFrame;
+    if (raf) raf(() => resolve());
+    else setTimeout(resolve, 16);
+  });
+
+/**
+ * Split a scene into precompile units of at most ~PRECOMPILE_UNIT objects:
+ * a child small enough is one unit, a big one is split into its children.
+ * Small on purpose: the budget is checked BETWEEN units, and one unit's new
+ * materials each cost ~60 ms of synchronous codegen — 300-object units held
+ * the editor at 0.5 fps for the whole first minute after load.
+ */
+const PRECOMPILE_UNIT = 24;
+function precompileUnits(scene: THREE.Object3D): THREE.Object3D[] {
+  const sizes = new Map<THREE.Object3D, number>();
+  const size = (node: THREE.Object3D): number => {
+    let n = 1;
+    for (const child of node.children) n += size(child);
+    sizes.set(node, n);
+    return n;
+  };
+  size(scene);
+  const units: THREE.Object3D[] = [];
+  const split = (node: THREE.Object3D): void => {
+    for (const child of node.children) {
+      if ((sizes.get(child) ?? 1) > PRECOMPILE_UNIT && child.children.length > 0) split(child);
+      else units.push(child);
+    }
+  };
+  split(scene);
+  return units;
+}
+
 export class EngineRenderer {
+  /**
+   * Animated (skinned) characters cast shadows only within this many metres
+   * of the render camera; beyond it their shadow switches off and the body
+   * still draws. 0 or Infinity = no limit. See skinned-shadows.ts.
+   */
+  skinnedShadowDistance = DEFAULT_SKINNED_SHADOW_DISTANCE;
+  private readonly shadowEye = new THREE.Vector3();
   readonly renderer: THREE.WebGPURenderer;
   uploadProbe: GpuUploadProbe | null = null;
   uniformUploadStats: ReturnType<typeof cacheUniformUploads> | null = null;
@@ -104,6 +152,8 @@ export class EngineRenderer {
 
   private postFxData: PostFxData | null = null;
   private fx: ResolvedPostFx = resolvePostFx(null);
+  /** A live adjustment over the authored grade (a zone's mood) — see setGradeMood. */
+  private gradeMood: { saturation: number; contrast: number; temperature: number } | null = null;
   private plan: PostPassId[] = [];
   private signature = "";
   private resolveTexture: PostTextureResolver | null = null;
@@ -163,6 +213,17 @@ export class EngineRenderer {
   /** GPU timestamp queries: off unless the profiler asks for them (see setGpuTiming). */
   private gpuTiming = false;
   private gpuResolvePending = false;
+  /** This frame's branches with nothing for a shadow pass (see the constructor). */
+  private shadowless: THREE.Object3D[] = [];
+  /** Skip caster-free branches in shadow passes (an A/B switch for probes). */
+  skipShadowless = true;
+  /**
+   * Don't draw a mesh whose bounding sphere covers fewer than this many pixels
+   * of RADIUS on screen (see hideNonRenderingBranches). 0 = off. At 2.5 px a
+   * 1 m prop goes at ~360 m on a 900-px-tall view and a 10 m house at ~3.6 km.
+   */
+  minScreenRadiusPx = 2.5;
+  private readonly screenCull = { eye: new THREE.Vector3(), pxPerUnit: 0, minRadiusPx: 0 };
 
   constructor(canvas: HTMLCanvasElement) {
     patchShadowPassAlphaTest();
@@ -171,6 +232,22 @@ export class EngineRenderer {
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.applyPostFxState();
+    // Shadow cascades render the whole scene again (three's ShadowNode calls
+    // render(scene, shadow.camera) and filters castShadow only AFTER walking
+    // and frustum-testing every visible object). Skip the branches this
+    // frame's walk found with no caster and no light — the lights stay, so the
+    // shadow pipelines see the same light set and nothing recompiles.
+    const draw = this.renderer.render.bind(this.renderer);
+    this.renderer.render = ((scene: THREE.Object3D, camera: THREE.Camera) => {
+      const skip = this.shadowless;
+      if (!this.skipShadowless || skip.length === 0 || !scene.name.startsWith("Shadow Map [")) return draw(scene, camera);
+      for (const object of skip) object.visible = false;
+      try {
+        return draw(scene, camera);
+      } finally {
+        for (const object of skip) object.visible = true;
+      }
+    }) as typeof this.renderer.render;
   }
 
   async init(): Promise<Backend> {
@@ -191,6 +268,11 @@ export class EngineRenderer {
   setSize(width: number, height: number, pixelRatio = 1): void {
     this.viewport = { width, height, pixelRatio };
     this.applySize();
+  }
+
+  /** Height of the image actually rendered, in pixels (after pixelation), or 0 before the first setSize. */
+  get renderHeight(): number {
+    return this.viewport ? Math.round(this.viewport.height * this.renderer.getPixelRatio()) : 0;
   }
 
   private applySize(): void {
@@ -419,8 +501,35 @@ export class EngineRenderer {
     }
   }
 
+  /**
+   * Lean the authored `postfx.grade` for a zone's mood: saturation and
+   * contrast multiply, temperature adds. A uniform write, never a rebuild —
+   * so a script can ease it every tick — and it only shows when the scene's
+   * grade is enabled (switching a pass on mid-play would recompile the chain).
+   * Null restores the authored grade.
+   */
+  setGradeMood(mood: { saturation?: number; contrast?: number; temperature?: number } | null): void {
+    this.gradeMood = mood ? { saturation: mood.saturation ?? 1, contrast: mood.contrast ?? 1, temperature: mood.temperature ?? 0 } : null;
+    this.fx = this.withGradeMood(resolvePostFx(this.postFxData));
+    this.chain?.retune(this.fx, this.volumetric?.settings ?? null);
+  }
+
+  private withGradeMood(fx: ResolvedPostFx): ResolvedPostFx {
+    const m = this.gradeMood;
+    if (!m) return fx;
+    return {
+      ...fx,
+      grade: {
+        ...fx.grade,
+        saturation: fx.grade.saturation * m.saturation,
+        contrast: fx.grade.contrast * m.contrast,
+        temperature: fx.grade.temperature + m.temperature,
+      },
+    };
+  }
+
   private applyPostFxState(): void {
-    this.fx = resolvePostFx(this.postFxData);
+    this.fx = this.withGradeMood(resolvePostFx(this.postFxData));
     // pixelate is not a pass — it is the backing-store size — so it is applied
     // here and never enters the pipeline signature
     const { pixelate } = this.fx;
@@ -467,7 +576,46 @@ export class EngineRenderer {
    * See {@link precompileGroup} for the context rules this has to follow.
    */
   async precompile(scene: THREE.Scene, camera: THREE.Camera): Promise<void> {
-    await this.compileInSceneContext(scene, camera, scene);
+    // Time-sliced. The shader codegen inside compileInSceneContext is
+    // synchronous per render object, and the whole scene at once was one
+    // main-thread block of ~11 s on the MMO's proving zone — the tab froze on
+    // every scene open and every static re-batch. Compile subtree by subtree
+    // instead and give the frame loop a turn every few milliseconds; the total
+    // work is unchanged, nothing waits on it, and anything drawn before its
+    // unit comes up simply compiles on first draw as it always could.
+    await this.chainReadyFor(scene, camera);
+    const pending: Promise<void>[] = [];
+    let sliceStart = performance.now();
+    for (const unit of precompileUnits(scene)) {
+      if (!unit.parent && unit !== scene) continue; // removed while we waited
+      pending.push(this.compileInSceneContext(unit, camera, scene).catch(() => undefined));
+      if (performance.now() - sliceStart > PRECOMPILE_SLICE_MS) {
+        await nextFrame();
+        if (this.pipelineScene !== null && this.pipelineScene !== scene) break; // a newer scene took over
+        sliceStart = performance.now();
+      }
+    }
+    await Promise.all(pending);
+  }
+
+  /**
+   * The waits compileInSceneContext would otherwise do on its first call: build
+   * the post chain for this scene and let it render once (its render target is
+   * part of every compiled pipeline's key). Done up front so the slices below
+   * run their synchronous part immediately instead of all queuing behind it.
+   */
+  private async chainReadyFor(scene: THREE.Scene, camera: THREE.Camera): Promise<void> {
+    const wantsChain = !this.postUnavailable && needsPipeline(this.plan);
+    if (wantsChain && (!this.pipeline || !this.chain || this.pipelineScene !== scene)) {
+      try {
+        this.buildPipeline(scene, camera);
+      } catch {
+        // render() owns the failure path
+      }
+    }
+    if (wantsChain && this.chain && !this.chainRendered) {
+      await new Promise<void>((resolve) => this.renderWaiters.push(resolve));
+    }
   }
 
   /**
@@ -747,9 +895,25 @@ export class EngineRenderer {
       scopes?.end();
     }
     scene.matrixWorldAutoUpdate = false;
+    const boundsFrame = beginSkinnedBoundsFrame();
+    const shadowFrame = beginSkinnedShadowFrame(camera.getWorldPosition(this.shadowEye), this.skinnedShadowDistance);
+    this.shadowless.length = 0;
+    const cull = this.screenCull;
+    cull.minRadiusPx = this.minScreenRadiusPx;
+    cull.pxPerUnit = 0;
+    const perspective = camera as THREE.PerspectiveCamera;
+    if (perspective.isPerspectiveCamera && this.renderHeight > 0) {
+      cull.pxPerUnit = this.renderHeight / 2 / Math.tan((perspective.fov * Math.PI) / 360) * (perspective.zoom ?? 1);
+      camera.getWorldPosition(cull.eye);
+    }
+    const emptyBranches = hideNonRenderingBranches(scene, this.shadowless, cull);
     try {
       this.renderPreparedScene(scene, camera);
     } finally {
+      this.shadowless.length = 0;
+      restoreNonRenderingBranches(emptyBranches);
+      endSkinnedShadowFrame(shadowFrame);
+      endSkinnedBoundsFrame(boundsFrame);
       scene.matrixWorldAutoUpdate = autoUpdate;
       this.uploadProbe?.endFrame();
     }

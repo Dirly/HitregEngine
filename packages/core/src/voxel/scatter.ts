@@ -25,6 +25,8 @@ import { quatMultiply } from "../math.js";
 import { hashUnit, clamp, fbm2, smoothstep, type FbmSpec } from "./noise.js";
 import type { WorldField } from "./field.js";
 import type { ScatterDoc } from "./recipe.js";
+import type { VegetationTint } from "../components/core.js";
+import { vegetationIndex, type VegetationPlan } from "./vegetation.js";
 
 export interface VoxelScatterInstance {
   /** Rule that produced it — the scatter rule's `id`. */
@@ -38,6 +40,7 @@ export interface VoxelScatterInstance {
   scale: number;
   /** Biome the ground under it resolved to — useful for later filtering/debug. */
   biome: string;
+  vegetationTint?: VegetationTint;
 }
 
 export interface ScatterCellOptions {
@@ -48,6 +51,124 @@ export interface ScatterCellOptions {
 }
 
 const UP: Vec3 = [0, 1, 0];
+
+function colorVariant(rule: ScatterDoc, pick: number): VegetationTint | undefined {
+  const variants = rule.colorVariants;
+  if (!variants) return undefined;
+  let remaining = pick * variants.reduce((sum, v) => sum + v.weight, 0);
+  for (const v of variants) {
+    remaining -= v.weight;
+    if (remaining < 0) return v.tint;
+  }
+  return variants[variants.length - 1]!.tint;
+}
+
+function scaleMultiplier(rule: ScatterDoc, pick: number): number {
+  const variants = rule.scaleVariants;
+  if (!variants) return 1;
+  let remaining = pick * variants.reduce((sum, variant) => sum + variant.weight, 0);
+  for (const variant of variants) {
+    remaining -= variant.weight;
+    if (remaining < 0) return variant.multiplier;
+  }
+  return variants[variants.length - 1]!.multiplier;
+}
+
+function maxScale(rule: ScatterDoc): number {
+  if (!rule.scaleVariants) return rule.scale[1];
+  return Math.max(...rule.scale) * Math.max(...rule.scaleVariants.map((variant) => variant.multiplier));
+}
+
+/**
+ * Radius of the ground an instance actually STANDS on, in world units: the
+ * trunk of a tree (its cylinder/capsule collider), the narrow side of a rock's
+ * box, half the footprint disc of a collider-less bush. Smaller than the
+ * spacing footprint, which is the canopy's claim on its neighbours, not what
+ * holds it up. `scatter-float` and the footing test share it.
+ */
+export function scatterFooting(rule: ScatterDoc, scale: number): number {
+  if (rule.collider === "box") return Math.min(rule.colliderSize[0], rule.colliderSize[2]) * 0.5 * scale;
+  if (rule.collider !== "none") return rule.colliderSize[0] * 0.5 * scale;
+  return (rule.footprint > 0 ? rule.footprint : rule.colliderSize[0] * 0.5) * 0.5 * scale;
+}
+
+/** How far a footing ring may fall away below the base beyond what its slope explains, in metres. */
+export const FOOTING_OPEN = 1.0;
+/** Drop allowed per metre of footing radius for ordinary slope (a 50° bank), before OPEN applies. */
+const FOOTING_SLOPE = 1.2;
+/** Solid rock a plant must have under its base where a carve is near: a lintel over a cave mouth is not ground. */
+const FOOTING_DEPTH = 1.5;
+
+/**
+ * The ground a plant at (x, z) stands on where a 3D terrain edit is near.
+ *
+ * `height()` is a heightfield: it never sees a passage, a tunnel or a
+ * subtracting blob, and the overhang-aware `surfaceCast` only searches a few
+ * metres either side of it. So a cave mouth, a cutting or a hollowed lip
+ * leaves the heightfield standing in mid-air, and anything placed by it
+ * floats there. Here the column is cast through the carve's whole vertical
+ * span, and the footing is checked:
+ *
+ *  - `undefined`: no carve reaches the footing — the caller's own answer is
+ *    the truth, untouched (this is what keeps every unedited world identical);
+ *  - `null`: the footing was removed or opened — nothing solid in the column,
+ *    less than FOOTING_DEPTH of rock under the base (a lintel, a thin roof),
+ *    or a point of the footing ring at `radius` drops away by more than its
+ *    slope explains (the lip of a cutting, the rim of a mouth) — so DROP it;
+ *  - a number: the real top surface, which is where it stands.
+ *
+ * Shared by scatter (props, with the trunk/collider radius) and the
+ * ground-cover sampler (per 2 m probe), so both read one rule.
+ */
+export function editedGround(field: WorldField, x: number, z: number, radius: number): number | null | undefined {
+  const span = carveNear(field, x, z, radius);
+  if (!span) return undefined;
+  const y = castThrough(field, x, z, span);
+  if (y === null || !footingHolds(field, x, z, y, radius, span)) return null;
+  return y;
+}
+
+type Span = { min: number; max: number };
+
+/**
+ * The carve span reaching a footing of `radius` at (x, z), or null where no
+ * carve can touch the surface: none in plan, or one wholly buried deeper than
+ * the cast window plus the footing depth (a tunnel under a hill), or wholly
+ * in the air above it. Null means the plain answer is exact — the ordinary
+ * cast searches the same band and meets the same rock first.
+ */
+function carveNear(field: WorldField, x: number, z: number, radius: number): Span | null {
+  const reach = radius + 1;
+  const span = field.carveSpan(x - reach, z - reach, x + reach, z + reach);
+  if (!span) return null;
+  const window = field.recipe.terrain.overhang.strength * 1.5 + 2;
+  const h = field.height(x, z);
+  // the ring may stand on lower (or higher) ground than the centre: allow a
+  // steep bank's worth across the radius on top of the cast window
+  const band = window + FOOTING_DEPTH + 2 * radius + 2;
+  if (span.max < h - band || span.min > h + band) return null;
+  return span;
+}
+
+/** Topmost solid surface at (x, z), searched through the whole carve span as well as the overhang band. */
+function castThrough(field: WorldField, x: number, z: number, span: Span): number | null {
+  const window = field.recipe.terrain.overhang.strength * 1.5 + 2;
+  const h = field.height(x, z);
+  return field.surfaceCast(x, z, Math.max(h + window, span.max + 1), Math.min(h - window, span.min - 2));
+}
+
+/** Rock under the base, and no point of the footing ring falling away (see `editedGround`). */
+function footingHolds(field: WorldField, x: number, z: number, y: number, radius: number, span: Span): boolean {
+  if (field.density(x, y - FOOTING_DEPTH * 0.5, z) >= 0 || field.density(x, y - FOOTING_DEPTH, z) >= 0) return false;
+  if (radius <= 0) return true;
+  const allowed = FOOTING_OPEN + FOOTING_SLOPE * radius;
+  for (let k = 0; k < 8; k++) {
+    const a = (k / 8) * Math.PI * 2;
+    const g = castThrough(field, x + Math.cos(a) * radius, z + Math.sin(a) * radius, span);
+    if (g === null || y - g > allowed) return false;
+  }
+  return true;
+}
 
 /** Quaternion rotating `from` onto `to`, both unit vectors. */
 function quatFromTo(from: Vec3, to: Vec3): Quat {
@@ -193,7 +314,8 @@ function emitCliffColumn(
     const ox = nFlat > 1e-4 ? normal[0] / nFlat : dx;
     const oz = nFlat > 1e-4 ? normal[2] / nFlat : dz;
 
-    const scale = rule.scale[0] + (rule.scale[1] - rule.scale[0]) * h4;
+    const scale = (rule.scale[0] + (rule.scale[1] - rule.scale[0]) * h4)
+      * scaleMultiplier(rule, rule.scaleVariants ? hashUnit(gx, gz, c + 8, ruleSeed) : 0);
     // embed is a depth INTO THE MODEL, so it scales with the instance the way
     // yOffset does: resizing a rock must not leave it hanging off the face
     const embed = (cliff.embed + (h2 - 0.5) * 2 * cliff.embedJitter) * scale;
@@ -231,6 +353,7 @@ function emitCliffColumn(
       rotation,
       scale,
       biome: sample.id,
+      ...(rule.colorVariants ? { vegetationTint: colorVariant(rule, hashUnit(gx, gz, 10000 + k, ruleSeed)) } : {}),
     });
   }
 }
@@ -284,12 +407,17 @@ export function scatterCell(
     rule.footprint > 0 ? rule.footprint : rule.colliderSize[0] * 0.5;
   // largest first, stable by array index
   const order = rules
-    .map((rule, index) => ({ index, size: baseFootprint(rule) * rule.scale[1] }))
+    .map((rule, index) => ({ index, size: baseFootprint(rule) * maxScale(rule) }))
     .sort((a, b) => b.size - a.size || a.index - b.index)
     .map((o) => o.index);
   let reachMax = 0;
-  for (const rule of rules) reachMax = Math.max(reachMax, baseFootprint(rule) * rule.scale[1] + rule.spacing);
+  for (const rule of rules) reachMax = Math.max(reachMax, baseFootprint(rule) * maxScale(rule) + rule.spacing);
   const margin = Math.min(10, reachMax * 2);
+
+  // region vegetation and clearings (vegetation.ts): one flag test per
+  // candidate when the recipe has neither, so such a world is untouched
+  const veg = vegetationIndex(recipe);
+  const vegOn = !veg.empty;
 
   const out: VoxelScatterInstance[] = [];
   /** Occupancy for the spacing test, bucketed at 4m. */
@@ -356,7 +484,8 @@ export function scatterCell(
     // is skipped entirely in that case, which is the common one
     const biomeDensity = rule.biomeDensity as Record<string, number | undefined>;
     const graded = Object.keys(biomeDensity).length > 0;
-    const footprint = baseFootprint(rule);
+    // a clearing keeps a prop's whole canopy off it, not just its trunk
+    const clearPad = baseFootprint(rule) * maxScale(rule);
     // the margin ring is solved for occupancy and discarded; a prop is OWNED
     // by the cell holding its unjittered lattice point
     const gx0 = Math.ceil((x0 - margin) / spacing);
@@ -384,6 +513,28 @@ export function scatterCell(
         const wz = gz * spacing + (r2 - 0.5) * 2 * jitter;
         if (limit !== Infinity && wx * wx + wz * wz > limit * limit) continue;
 
+        // REGION VEGETATION + CLEARINGS, before anything that reads the
+        // height field: a bucket lookup and a raster read each, pure functions
+        // of position and the lattice hash, so every cell (and the server's
+        // collider worker) agrees. k > 1 fills back clump/biome thinning below.
+        let k = 1;
+        let emitIndex = ruleIndex;
+        let plan: VegetationPlan | null = null;
+        if (vegOn) {
+          const clear = veg.clearingKeep(wx, wz, 0, clearPad);
+          if (clear <= 0 || (clear < 1 && hashUnit(gx, gz, 13, ruleSeed) >= clear)) continue;
+          plan = veg.planAt(wx, wz);
+          if (plan) {
+            k = plan.ruleKeep[ruleIndex]!;
+            if (k <= 0 || (k < 1 && hashUnit(gx, gz, 12, ruleSeed) >= k)) continue;
+            if (!rule.cliff) emitIndex = plan.replace[ruleIndex]!;
+          }
+        }
+        // the rule this candidate is EMITTED as (a region's species swap):
+        // the source rule's gates decide whether it grows, the emitted rule
+        // decides what stands there
+        const emit: ScatterDoc = emitIndex === ruleIndex ? rule : rules[emitIndex]!;
+
         // CLUMPING FIRST, before `slope` — which is four height evaluations
         // and by far the most expensive thing a candidate can be asked. A
         // clumped rule authors a HIGHER peak density (the lattice is what the
@@ -395,7 +546,8 @@ export function scatterCell(
         // still always agree.
         if (clumpSpec && clump) {
           const mask = smoothstep(clump.threshold, clump.threshold + clumpBlend, fbm2(clumpSpec, wx, wz, recipe.seed));
-          const keep = clump.floor + (1 - clump.floor) * mask;
+          let keep = clump.floor + (1 - clump.floor) * mask;
+          if (k > 1) keep = Math.min(1, keep * k);
           if (keep < 1 && hashUnit(gx, gz, 6, ruleSeed) >= keep) continue;
         }
 
@@ -410,10 +562,22 @@ export function scatterCell(
           continue;
         }
 
+        // where a passage, tunnel or subtracting blob reaches this footing the
+        // heightfield is not the ground: stand on the carved surface, or drop
+        // the plant if its footing was cut away. Everywhere else (a map miss)
+        // the original answer stands, bit for bit. The radius is the largest
+        // this rule can be: the scale is not drawn until after the gates.
+        // The footing ring is tested later, just before spacing, so a candidate
+        // the cheap gates reject never pays for eight casts.
+        const carve = options.fastGround ? null : carveNear(field, wx, wz, scatterFooting(emit, maxScale(emit)));
+        const carved = carve ? castThrough(field, wx, wz, carve) : undefined;
+        if (carved === null) continue;
         const groundY =
-          options.fastGround || !overhangs
-            ? field.height(wx, wz)
-            : (field.surfaceCast(wx, wz) ?? field.height(wx, wz));
+          carved !== undefined
+            ? carved
+            : options.fastGround || !overhangs
+              ? field.height(wx, wz)
+              : (field.surfaceCast(wx, wz) ?? field.height(wx, wz));
 
         if (rule.height && (groundY < rule.height[0] || groundY > rule.height[1])) continue;
         if (rule.clearance > 0 && field.featureClearance(wx, wz) < rule.clearance) continue;
@@ -428,30 +592,43 @@ export function scatterCell(
         // per-biome thinning: one rule that is a forest in the forest and a
         // copse in the meadow, rather than two rules kept in step by hand
         if (graded) {
-          const weight = biomeDensity[sample.id];
+          let weight = biomeDensity[sample.id];
+          if (weight !== undefined && k > 1) weight = Math.min(1, weight * k);
           if (weight !== undefined && weight < 1 && hashUnit(gx, gz, 7, ruleSeed) >= weight) continue;
         }
 
-        const scale = rule.scale[0] + (rule.scale[1] - rule.scale[0]) * r3;
-        const radius = footprint * scale;
-        if (blocked(wx, wz, radius, rule.spacing)) continue;
-        occupy(wx, wz, radius, rule.spacing);
+        const scale = (emit.scale[0] + (emit.scale[1] - emit.scale[0]) * r3)
+          * scaleMultiplier(emit, emit.scaleVariants ? hashUnit(gx, gz, 9, ruleSeed) : 0);
+        const radius = baseFootprint(emit) * scale;
+        if (blocked(wx, wz, radius, emit.spacing)) continue;
+        // after `blocked` (a candidate that loses on spacing never pays for the
+        // ring) and before `occupy` (a dropped plant claims no ground)
+        if (carve && !footingHolds(field, wx, wz, groundY, scatterFooting(emit, scale), carve)) continue;
+        occupy(wx, wz, radius, emit.spacing);
         if (!owned) continue;
 
         let rotation = quatYaw(r4 * Math.PI * 2);
-        if (rule.alignToNormal > 0) {
-          const tilt = quatScaled(quatFromTo(UP, groundNormal(field, wx, wz)), rule.alignToNormal);
+        if (emit.alignToNormal > 0) {
+          const tilt = quatScaled(quatFromTo(UP, groundNormal(field, wx, wz)), emit.alignToNormal);
           rotation = quatMultiply(tilt, rotation);
+        }
+        // a region's wind-bent stand: the tops lean together (vegetation.ts)
+        const lean = plan?.lean;
+        if (lean && lean.rules[emitIndex]) {
+          const angle = lean.radians + (hashUnit(gx, gz, 14, ruleSeed) - 0.5) * 2 * lean.jitter;
+          rotation = quatMultiply(quatTilt(lean.axisAngle, angle), rotation);
         }
 
         out.push({
-          rule: rule.id,
-          ruleIndex,
+          rule: emit.id,
+          ruleIndex: emitIndex,
+          // the SOURCE rule's id keeps it unique against the target rule's own lattice
           id: `${rule.id}_${gx}_${gz}`,
-          position: [wx - x0, groundY + rule.yOffset * scale, wz - z0],
+          position: [wx - x0, groundY + emit.yOffset * scale, wz - z0],
           rotation,
           scale,
           biome: sample.id,
+          ...(emit.colorVariants ? { vegetationTint: colorVariant(emit, hashUnit(gx, gz, 10, ruleSeed)) } : {}),
         });
         // r5 is reserved for per-instance variation the prefab may read later
         void r5;

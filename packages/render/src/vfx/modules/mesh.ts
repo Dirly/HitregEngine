@@ -1,6 +1,11 @@
 import * as THREE from "three/webgpu";
+import { texture as tslTexture, uniform, uv } from "three/tsl";
 import type { VfxModuleOf } from "@hitreg/core";
-import { LiveModule, easeOut, presentationOnly, type LiveModuleHost } from "../base.js";
+import { LiveModule, easeOut, loadTexture, presentationOnly, unlitMaterial, type LiveModuleHost } from "../base.js";
+import { quantize, type N } from "../shaders.js";
+
+const camPos = new THREE.Vector3();
+const bodyPos = new THREE.Vector3();
 
 type MeshModule = VfxModuleOf<"mesh">;
 
@@ -49,6 +54,8 @@ function jitter(g: THREE.BufferGeometry, amount: number, seed: number): void {
 
 interface Body {
   node: THREE.Object3D;
+  /** the camera-facing drawing, used instead of the primitive when the module names a `sheet` */
+  card: THREE.Mesh;
   angle: number;
   radius: number;
   offset: THREE.Vector3;
@@ -60,6 +67,11 @@ interface Body {
  * nova throws up, the orbs that orbit a buffed body, the thing a summon
  * raises. A sprite says something happened HERE; a body you watch fall says
  * something is ABOUT to happen here.
+ *
+ * With `sheet` + `cells` each body is a DRAWING instead: an upright quad
+ * that yaws to face the camera (base at the bottom, like a PSX prop), cut
+ * from the school's object sheet. One shared material; each body's quad
+ * carries its cell in its own UVs, so the bodies need no per-body shader.
  */
 export class MeshLive extends LiveModule<MeshModule> {
   readonly kind = "mesh" as const;
@@ -70,27 +82,62 @@ export class MeshLive extends LiveModule<MeshModule> {
   private loaded: THREE.Object3D | null = null;
   private loadedFor = "";
   private useLoaded = false;
+  private readonly cardMaterial: THREE.MeshBasicNodeMaterial;
+  private readonly uTint = uniform(new THREE.Color(1, 1, 1));
+  private readonly uOpacity = uniform(1, "float");
+  /** texel grid across the whole sheet (cols·k, rows·k); 0 = the art's own texels */
+  private readonly uGrid = uniform(new THREE.Vector2(0, 0));
+  private cardMap: THREE.Texture | null = null;
+  private cardUrl = "";
+  private drawn = false;
+  private sheetCols = 1;
+  private sheetRows = 1;
 
   constructor(host: LiveModuleHost) {
     super(host);
     this.material = new THREE.MeshStandardMaterial({ roughness: 0.55, metalness: 0.05, transparent: true });
+    this.cardMaterial = unlitMaterial(false);
     for (let i = 0; i < MAX_BODIES; i++) {
       const mesh = new THREE.Mesh(primitive("crystal"), this.material);
       // presentation only: a shadow-casting effect body drags the whole
       // shadow pass into every spell, for a shadow nobody reads
       presentationOnly(mesh);
       this.primMeshes.push(mesh);
+      const card = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), this.cardMaterial);
+      presentationOnly(card);
+      card.visible = false;
       const node = new THREE.Group();
       node.add(mesh);
+      node.add(card);
       node.visible = false;
       this.group.add(node);
-      this.bodies.push({ node, angle: 0, radius: 0, offset: new THREE.Vector3(), spinAxis: new THREE.Vector3(0, 1, 0) });
+      this.bodies.push({ node, card, angle: 0, radius: 0, offset: new THREE.Vector3(), spinAxis: new THREE.Vector3(0, 1, 0) });
     }
     host.root.add(this.group);
   }
 
   protected naturalLife(): number {
     return this.ctx.phaseLength > 0 ? this.ctx.phaseLength : 1;
+  }
+
+  private buildCardShader(map: THREE.Texture): void {
+    const s: N = tslTexture(map, quantize(uv() as N, this.uGrid));
+    this.cardMaterial.colorNode = s.rgb.mul(this.uTint);
+    this.cardMaterial.opacityNode = s.a.mul(this.uOpacity);
+    this.cardMaterial.needsUpdate = true;
+  }
+
+  /** Point body `i`'s quad at its cell of the sheet (row 0 is the TOP of the image). */
+  private setCell(card: THREE.Mesh, cell: readonly [number, number]): void {
+    const uvs = card.geometry.attributes["uv"] as THREE.BufferAttribute;
+    const u0 = cell[0] / this.sheetCols;
+    const v0 = (this.sheetRows - 1 - cell[1]) / this.sheetRows;
+    // PlaneGeometry(1,1): vertices TL, TR, BL, BR
+    uvs.setXY(0, u0, v0 + 1 / this.sheetRows);
+    uvs.setXY(1, u0 + 1 / this.sheetCols, v0 + 1 / this.sheetRows);
+    uvs.setXY(2, u0, v0);
+    uvs.setXY(3, u0 + 1 / this.sheetCols, v0);
+    uvs.needsUpdate = true;
   }
 
   protected onBegin(): void {
@@ -101,6 +148,29 @@ export class MeshLive extends LiveModule<MeshModule> {
     this.material.opacity = 1;
     const geo = primitive(m.primitive);
     this.useLoaded = false;
+    // drawn bodies: the school's object sheet instead of a primitive
+    const sheet = m.sheet && m.cells.length > 0 ? this.host.resolvers.sheet?.(m.sheet) : undefined;
+    const cardUrl = sheet ? this.host.resolvers.texture?.(sheet.texture) : undefined;
+    this.drawn = !!cardUrl;
+    if (sheet && cardUrl) {
+      this.sheetCols = sheet.grid?.cols ?? 1;
+      this.sheetRows = sheet.grid?.rows ?? 1;
+      // the art tinted by the palette and lifted a little so it reads as lit
+      this.uTint.value.copy(this.color).lerp(new THREE.Color(1, 1, 1), m.tint ? Math.min(0.5, m.emissive * 0.15) : 1);
+      if (cardUrl !== this.cardUrl) {
+        this.cardUrl = cardUrl;
+        this.cardMap = null;
+        loadTexture(
+          cardUrl,
+          (t) => {
+            if (this.cardUrl !== cardUrl) return;
+            this.cardMap = t;
+            this.buildCardShader(t);
+          },
+          true,
+        );
+      }
+    }
     if (m.asset && this.host.resolvers.loadModel) {
       if (this.loadedFor === m.asset && this.loaded) {
         this.useLoaded = true;
@@ -123,7 +193,9 @@ export class MeshLive extends LiveModule<MeshModule> {
       if (!active) continue;
       const mesh = this.primMeshes[i]!;
       mesh.geometry = geo;
-      mesh.visible = !this.useLoaded;
+      mesh.visible = !this.useLoaded && !this.drawn;
+      b.card.visible = this.drawn;
+      if (this.drawn) this.setCell(b.card, m.cells[i % m.cells.length]!);
       b.angle = (i / n) * Math.PI * 2 + Math.random() * 0.3;
       b.radius = n > 1 ? m.spread * (0.5 + 0.5 * Math.random()) : 0;
       b.offset.set(Math.cos(b.angle) * b.radius, 0, Math.sin(b.angle) * b.radius);
@@ -167,12 +239,20 @@ export class MeshLive extends LiveModule<MeshModule> {
     }
   }
 
-  protected onUpdate(t: number, dt: number): void {
+  protected onUpdate(t: number, dt: number, camera: THREE.Camera): void {
     const m = this.module;
     const now = this.now;
     const k = Math.min(1, t);
     const o = this.opacityAt(t, now);
     this.material.opacity = o;
+    this.uOpacity.value = o;
+    const drawn = this.drawn && this.cardMap !== null;
+    if (drawn) {
+      const texel = this.texelSize();
+      const cells = texel > 0 ? (m.size * this.sizeAt(t)) / texel : 0;
+      this.uGrid.value.set(cells * this.sheetCols, cells * this.sheetRows);
+      camera.getWorldPosition(camPos);
+    }
     const s = m.size * this.sizeAt(t);
     const p = this.pose.position;
     const n = Math.min(MAX_BODIES, m.count);
@@ -221,7 +301,12 @@ export class MeshLive extends LiveModule<MeshModule> {
       }
       b.node.position.set(p.x + x, p.y + y, p.z + z);
       b.node.scale.setScalar(Math.max(0.001, scale));
-      if (m.motion !== "rise" && m.motion !== "hover") b.node.rotateOnAxis(b.spinAxis, m.spin * dt);
+      if (this.drawn) {
+        // a drawing stands upright and turns to the camera (a PSX prop), never tumbles
+        b.card.visible = drawn;
+        bodyPos.copy(b.node.position);
+        b.node.rotation.set(0, Math.atan2(camPos.x - bodyPos.x, camPos.z - bodyPos.z), 0);
+      } else if (m.motion !== "rise" && m.motion !== "hover") b.node.rotateOnAxis(b.spinAxis, m.spin * dt);
       else b.node.rotateY(m.spin * 0.3 * dt);
     }
   }
@@ -233,5 +318,7 @@ export class MeshLive extends LiveModule<MeshModule> {
   dispose(): void {
     this.group.removeFromParent();
     this.material.dispose();
+    this.cardMaterial.dispose();
+    for (const b of this.bodies) b.card.geometry.dispose();
   }
 }

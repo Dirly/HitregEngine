@@ -31,6 +31,11 @@
  *   pnpm -F playground worldgen barriers <world> [--dry]  (ridges over open zone borders, passes where paths cross; after paths)
  *   pnpm -F playground worldgen regions <world>        (audit the zones and measure every border — docs/world-editing/zones.md)
  *   pnpm -F playground worldgen scatter <world>       (audit every rule against its model + the REALIZED density per biome)
+ *   pnpm -F playground worldgen scatter-float <world> [--near x,z,r] [--list]  (fails if any plant or cover stands over air/an opening)
+ *   pnpm -F playground worldgen lips <world> [--near x,z,r] [--list] [--json] [--allow ids]  (fails on sawtooth/wall/rim the 2 m lattice draws at patch edges and road cuts)
+ *   pnpm -F playground worldgen seated <world> --slab x,z,hx,hz,yawDeg,baseY | --slabs f.json  (fails when a built slab hangs or the ground clips through it)
+ *   pnpm -F playground worldgen vegetation <world> [--region <id> --set <json|file> | --clear | --count] [--clearings <file>] [--remove-clearings <owner|id>] [--at x,z] [--dry-run]
+ *       (what grows in a zone/town/place region, and clearings — docs/voxel-worlds.md section 31)
  *   pnpm -F playground worldgen stats  <world> [--cells 9]
  *   pnpm -F playground worldgen all    <world> [--project <name>]
  */
@@ -53,6 +58,7 @@ import {
   storySchema,
   auditRegions,
   regionAt,
+  recipeSplatIndexed,
   BORDER_CLASSES,
   type RegionDoc,
   type WorldField,
@@ -76,6 +82,11 @@ import { nearestRouteCell, routeBetween, smoothRoute, solveProfile, type RouteGr
 import { auditWorld } from "./worldgen-audit.mts";
 import { modelBounds } from "./_gltf-bounds.mjs";
 import { borderClassifier, borderReport, planBarriers, snowLineOf, stripBarrierFeatures, type BorderPairReport } from "./worldgen-borders.mts";
+import { commandLandforms, landformsStageCheck } from "./worldgen-landforms.mts";
+import { commandZoneTextures, zoneTexturesStageCheck } from "./worldgen-zone-textures.mts";
+import { commandScatterFloat } from "./worldgen-scatter-float.mts";
+import { commandLips, commandSeated } from "./worldgen-lips.mts";
+import { commandVegetation } from "./worldgen-vegetation.mts";
 
 // ---------------------------------------------------------------- cli plumbing
 
@@ -186,6 +197,8 @@ const HELP = `worldgen — procedural world pipeline
                    endless-noise world; --from <world> takes an existing world's LOOK — textured
                    palette, biomes, patches, scatter with the project's models, water and bridge
                    materials — and starts only seed, landmasses, features and zones fresh)
+  scene  <world>   write the world's scene (sun, sky, ocean, voxelWorld, spawn on land) for an existing
+                   recipe, as init --scene does; refuses to replace an existing scene without --force
   continents <world> re-lay the landmasses (--count 1 --islands 2 --radius 2200 --gap 900 --lobes 2
                    --limit auto --land-floor 4 --variation 0.55 --ocean -45); lobes stop a landmass being a disc
   rivers <world>   HYDROLOGY: fill depressions, accumulate rain, trace the channel network,
@@ -243,8 +256,13 @@ const HELP = `worldgen — procedural world pipeline
   canyons <world>  cut terraced gorges (--count 6; --zone badlands to keep them in one kind of place)
   monoliths <world> raise rock spires in a zone (--biome desert --count 44 --tallest 150)
   material <world> re-emit the terrain material from the recipe surfaces (after adding textures)
+  zone-textures <world> --project <p> [--zone <id>]  give cast zones their own ground: each palette's tiles
+                   (authoring/zonegen/palettes/<palette>.json, role -> tile) become surfaces <palette>-<role>,
+                   set regions[].ground, switch to splat "indexed" and re-emit the material
   map    <world>   PNG overview: zones/surfaces, water at every level, rivers, paths, towns, the
-                   world limit; --zones colours by zone, --cx/--cz/--extent to zoom
+                   world limit; --zones colours by zone, --cx/--cz/--extent to zoom;
+                   --base writes assets/maps/<world>.base.png (terrain + water only, 2048 px) for the
+                   in-game map (M) and zonegen map, which draw zones/towns/places/spawns over it
   stats  <world>   zone & biome mix, tris/cell, ms/cell against the frame budget
   spawn  <world>   place ENEMY CAMPS in the wilderness: off the towns, off the sanctuaries, beside
                    the paths but never on them, and clear of every zone border by the camp's whole
@@ -268,6 +286,14 @@ const HELP = `worldgen — procedural world pipeline
                    surface names are real, then sample the world (--points 1500) and print, per biome, which
                    layers grow there and how thick, how many layers are drawn at once (draw calls) and
                    what share of lake/river shore and water carries water cover (exit 1 on findings)
+  scatter-float <world>  do plants float over terrain EDITS? solves real scatter cells and samples cover over every
+                   cell a passage/tunnel/blob/height patch touches (or --near x,z,r), measures each against the
+                   drawn mesh; exit 1 on a base > --tol 0.35 m over it or a footing over a drop (--list for all)
+  lips   <world>   the lip/sawtooth gate: every height patch and graded road measured on the 2 m lattice against the
+                   world without them; exit 1 on teeth (--alias 0.5 m), walls (--max-slope 1.6) or one-sample rims
+                   (--lip 0.6 m). --near x,z,r, --list, --json, --allow id,id
+  seated <world>   is a built slab sitting on the DRAWN ground? --slab x,z,halfX,halfZ,yawDeg,baseY (repeat) or
+                   --slabs file.json; exit 1 on a gap > --gap 0.25 m or ground through it > --clip 0.6 m
   river-path <world> add a DRAWN river centreline the rivers stage will solve (--id r1 --points "x,z;x,z;…"
                    --width 18, or --from-scene <scene> --entity <id> to import a path-tool entity; --remove <id>)
   audit  <world>   water & paths: every river ends somewhere, every lake has a river, beds descend,
@@ -448,7 +474,8 @@ function writeTerrainMaterial(recipe: WorldRecipe, id: string, force = false): v
     metalness: 0,
     filter: recipe.textureFilter,
     splat: {
-      source: "vertex",
+      // the mesher and this ask the same question, so geometry and material agree
+      source: recipeSplatIndexed(recipe) ? "indexed" : "vertex",
       tintByVertexColor: true,
       layers: recipe.surfaces.map((surface) => ({
         // A textured layer tints WHITE so the texture reads as painted; the
@@ -1071,7 +1098,9 @@ function commandRivers(): void {
   // this stage replaces its own features: sample the world WITHOUT them
   recipe.features.rivers = [];
   recipe.features.lakes = [];
-  recipe.features.fills = [];
+  // landform-* fills (mesas, plateaus) are not this stage's: kept, and sampled as ground
+  const keptFills = recipe.features.fills.filter((f) => f.id.startsWith("landform-"));
+  recipe.features.fills = keptFills;
   recipe.features.pois = recipe.features.pois.filter((p) => p.kind !== "falls");
   // and WITHOUT the features that come after water: towns, roads and bridges
   // are re-run once the rivers move, and sampling drainage over the old
@@ -1751,7 +1780,7 @@ function commandRivers(): void {
   }
   recipe.features.rivers = [...rivers, ...handRivers];
   recipe.features.lakes = lakes;
-  recipe.features.fills = fills;
+  recipe.features.fills = [...keptFills, ...fills];
   recipe.features.pois = [...recipe.features.pois, ...falls];
   if (handRivers.length > 0) console.log(`  ${handRivers.length} hand-written rivers kept (the field solves their beds)`);
   if (!traceRivers) console.log(`  lakes only: the traced network is not carved (--trace to carve it); rivers are authored — see docs/voxel-worlds.md`);
@@ -4465,7 +4494,9 @@ function commandTownZones(): void {
   }
   const before = recipe.regions.filter((r) => r.tags.includes("town"));
   const towns = townZones(kept, recipe.features.towns, option("town-cap", 120), before);
-  recipe.regions = [...kept, ...towns];
+  // signature-place mood regions (tag `place`) are look data cut out of a zone, not town zones: keep them
+  const places = recipe.regions.filter((r) => r.within !== undefined && r.tags.includes("place"));
+  recipe.regions = [...kept, ...towns, ...places];
   stampPoiZones(recipe);
   writeRecipe(recipe, file);
   const inherited = towns.filter((r) => !/^Town \d+$/.test(r.name)).length;
@@ -5890,10 +5921,12 @@ function pipelineStages(): PipelineStage[] {
       how: "worldgen continents <world> --count 5 --islands 3 --limit 10500",
       check: (r) => (r.bounds?.continents?.length ? null : "no landmasses: the world is endless noise"),
     },
-    { name: "canyons", after: ["continents"], by: "procedural", how: "worldgen canyons <world>", optional: true, check: (r) => has(r.features.canyons.length) },
+    // landform key (image generator draws classes, the tool computes metres) — tools/worldgen-landforms.mts
+    { name: "landforms", after: ["continents"], by: "procedural", how: "worldgen landforms apply <world> --key <png>  (after: landforms base, landforms request)", optional: true, check: (r) => landformsStageCheck(r, findRecipeFile(r.name)) },
+    { name: "canyons", after: ["continents"], by: "procedural", how: "worldgen canyons <world>", optional: true, check: (r) => has(r.features.canyons.filter((c) => c.id.startsWith("canyon-")).length) },
     {
       name: "rivers",
-      after: ["continents", "canyons"],
+      after: ["continents", "landforms", "canyons"],
       by: "procedural",
       how: "worldgen rivers <world> --trace --catchment 0.6 --lakes 14",
       check: (r) => {
@@ -5925,6 +5958,15 @@ function pipelineStages(): PipelineStage[] {
       how: "worldgen cover <world> --apply <project>/authoring/cover-rules.json",
       optional: true,
       check: (r) => (r.cover.length > 0 ? null : "no ground-cover layers: only scatter props grow"),
+    },
+    {
+      // a zone's own ground (palette tiles per role) from the cast's palettes;
+      // re-running `zones` rewrites the regions, which drops it -> STALE
+      name: "zone-textures",
+      after: ["zones"],
+      by: "procedural",
+      how: "worldgen zone-textures <world>",
+      check: (r) => zoneTexturesStageCheck(r, project, assetsRoot()),
     },
     {
       name: "paths",
@@ -7229,7 +7271,8 @@ function commandCanyons(): void {
     });
   });
 
-  recipe.features.canyons = canyons;
+  // replace only this stage's own (canyon-N): landform-* and hand-written canyons are kept
+  recipe.features.canyons = [...recipe.features.canyons.filter((c) => !c.id.startsWith("canyon-")), ...canyons];
   writeRecipe(recipe, file);
   console.log(
     `cut ${canyons.length} canyons from ${starts.length} heads (${candidates.length} plateau candidates above ${minStart.toFixed(0)}m)`,
@@ -7495,7 +7538,7 @@ const ZONE_COLOURS: Record<string, [number, number, number]> = {
 function commandMap(): void {
   const { recipe } = loadRecipe();
   const extent = extentFor(recipe);
-  const size = Math.round(option("size", 900));
+  const size = Math.round(option("size", flag("base") ? 2048 : 900));
   // Centre the window somewhere other than the origin. A world-wide map at
   // 10 m per pixel cannot show dunes or a mottled blight; --cx/--cz --extent
   // 300 is how you actually check that a zone looks like the place it claims.
@@ -7505,6 +7548,10 @@ function commandMap(): void {
   // --plain: terrain and water only, no markers — for judging the river
   // network itself, which the POI squares bury at world scale
   const plain = flag("plain");
+  // --base: the terrain picture the in-game map and `zonegen map` draw their
+  // vector layers over (zones, roads, places...): terrain, water, rivers,
+  // canyons and bridges only, at a finer default size, into assets/maps/<world>.base.png
+  const base = flag("base");
   const field = createWorldField(recipe);
   const step = (extent * 2) / size;
   const pixels = new Uint8Array(size * size * 3);
@@ -7515,7 +7562,7 @@ function commandMap(): void {
   // palette width, and a short buffer silently drops the writes past its end —
   // then reads back undefined, so every land pixel came out NaN and rendered
   // BLACK the moment the palette grew past four.
-  const splat = new Float32Array(MAX_SURFACES);
+  const splat = new Float32Array(Math.max(MAX_SURFACES, recipe.surfaces.length));
   const limit = field.worldLimit;
 
   for (let py = 0; py < size; py++) {
@@ -7616,7 +7663,7 @@ function commandMap(): void {
     }
   };
 
-  if (!plain) {
+  if (!plain && !base) {
     for (const canyon of recipe.features.canyons) {
       stroke(canyon.points, [120, 84, 58], Math.max(1, Math.round(canyon.width / (2 * step))));
     }
@@ -7630,6 +7677,14 @@ function commandMap(): void {
     }
   }
   for (const bridge of recipe.features.bridges) stroke(bridge.points, [250, 250, 250], Math.max(1, Math.round(bridge.width / step)));
+  if (base) {
+    if (cx !== 0 || cz !== 0) fail("map --base covers the whole world square; drop --cx/--cz");
+    const out = path.join(assetsRoot(), "maps", `${recipe.name}.base.png`);
+    fs.mkdirSync(path.dirname(out), { recursive: true });
+    fs.writeFileSync(out, encodePng(pixels, size, size));
+    console.log(`wrote ${path.relative(process.cwd(), out)}  (${size}x${size}, ${extent * 2} world units across, ${step.toFixed(1)} m/px, base for the in-game map + zonegen map)`);
+    return;
+  }
   if (plain) {
     const out = path.join(assetsRoot(), "..", `${recipe.name}-map-plain.png`);
     fs.writeFileSync(out, encodePng(pixels, size, size));
@@ -8360,7 +8415,11 @@ function commandScatter(): void {
       findings.push(`${rule.id}: ${rule.model} could not be read (${(error as Error).message})`);
       continue;
     }
-    const mid = (rule.scale[0] + rule.scale[1]) / 2;
+    const variants = rule.scaleVariants;
+    const meanMultiplier = variants
+      ? variants.reduce((sum, v) => sum + v.weight * v.multiplier, 0) / variants.reduce((sum, v) => sum + v.weight, 0)
+      : 1;
+    const mid = (rule.scale[0] + rule.scale[1]) / 2 * meanMultiplier;
     const size = box.size.map((v) => v * mid) as [number, number, number];
     rows.push(
       `  ${rule.id.padEnd(20)} ${rule.model.padEnd(30)} ${box.size.map((v) => v.toFixed(1)).join("x").padEnd(16)} ` +
@@ -8625,9 +8684,20 @@ function commandCover(): void {
 
 // ---------------------------------------------------------------- entry
 
+/** worldgen scene <world> [--force]: init --scene for a world that already has its recipe. */
+function commandScene(): void {
+  const { recipe } = loadRecipe();
+  const file = path.join(assetsRoot(), "scenes", `${recipe.name}.scene.json`);
+  if (fs.existsSync(file) && !flag("force")) fail(`${path.relative(process.cwd(), file)} exists — pass --force to replace it`);
+  writeScene(recipe);
+}
+
 switch (command) {
   case "init":
     commandInit();
+    break;
+  case "scene":
+    commandScene();
     break;
   case "rivers":
     commandRivers();
@@ -8668,11 +8738,17 @@ switch (command) {
   case "canyons":
     commandCanyons();
     break;
+  case "landforms":
+    commandLandforms({ argv, findRecipeFile, loadRecipe, writeRecipe, fail });
+    break;
   case "monoliths":
     commandMonoliths();
     break;
   case "material":
     commandMaterial();
+    break;
+  case "zone-textures":
+    commandZoneTextures({ argv, project, assetsRoot, loadRecipe, writeRecipe, writeTerrainMaterial, fail }, worldName);
     break;
   case "map":
     commandMap();
@@ -8713,6 +8789,18 @@ switch (command) {
     break;
   case "cover":
     commandCover();
+    break;
+  case "vegetation":
+    commandVegetation({ argv, loadRecipe: () => loadRecipe(), writeRecipe, fail });
+    break;
+  case "scatter-float":
+    commandScatterFloat({ argv, loadRecipe: () => loadRecipe(), fail });
+    break;
+  case "lips":
+    commandLips({ argv, loadRecipe: () => loadRecipe(), fail });
+    break;
+  case "seated":
+    commandSeated({ argv, loadRecipe: () => loadRecipe(), fail });
     break;
   case "stats":
     commandStats();

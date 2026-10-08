@@ -17,6 +17,8 @@ import { spellSchema } from "./vfx/spell.js";
 import { registerCharacterAssetTypes } from "./character/index.js";
 import { registerNpcAssetTypes } from "./npc/index.js";
 import { gameHudSchema, questSchema, tooltipSchema } from "./game-ui.js";
+import { performActionsSchema } from "./quest-blocks.js";
+import { dressingPlanSchema, dressingSetSchema, socketMapSchema } from "./dressing/schema.js";
 
 export const terrainHeightfieldSchema = z.object({
   version: z.literal(1).default(1),
@@ -47,8 +49,14 @@ export function registerCoreAssetTypes(assets: AssetLibrary): void {
   registerCharacterAssetTypes(assets);
   assets.defineDataType("game-hud", gameHudSchema);
   assets.defineDataType("quest", questSchema);
+  assets.defineDataType("performActions", performActionsSchema);
   registerNpcAssetTypes(assets);
   assets.defineDataType("tooltip", tooltipSchema);
+  // Prop dressing: where props may go in a space, reusable furnished groups, and a designer's plan
+  // (authoring/dressing/{sockets,sets,plans}/*.json: authoring-time, not loaded by the runtime). The prop side is the `dressing` component.
+  assets.defineDataType("socket-map", socketMapSchema);
+  assets.defineDataType("dressing-set", dressingSetSchema);
+  assets.defineDataType("dressing-plan", dressingPlanSchema);
   registerThemeAssetType(assets);
 }
 

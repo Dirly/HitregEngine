@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "id": "hitreg.poi-review",
+  "name": "POI Site Reviewer",
+  "description": "Plan a sized POI workflow with construction handoffs, plan terrain access, and review final sites against terrain triangles and player capsules. Shared CLI/API, agent-agnostic. Read-only; actual construction and visual review remain required.",
+  "category": "World/Review",
+  "surfaces": [
+    "tools"
+  ],
+  "permissions": [],
+  "entry": "./run.mjs",
+  "inputs": {
+    "mode": {
+      "kind": "select",
+      "label": "Operation",
+      "default": "review",
+      "options": [
+        {
+          "value": "plan-poi",
+          "label": "Plan POI workflow and measured brief"
+        },
+        {
+          "value": "review",
+          "label": "Review final site / terrain route"
+        },
+        {
+          "value": "plan-route",
+          "label": "Plan a terrain access route"
+        }
+      ]
+    },
+    "bundle": {
+      "kind": "file",
+      "label": "Portable review or route-search bundle",
+      "description": "plan-poi: request matching poi-request-schema.json. review: portable bundle from cli.mjs pack. plan-route: world and search matching terrain-route-schema.json. See README.md for the agent-agnostic process.",
+      "accept": [
+        "application/json"
+      ],
+      "maxBytes": 134217728
+    }
+  }
+}

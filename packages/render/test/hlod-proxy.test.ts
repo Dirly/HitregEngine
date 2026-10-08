@@ -134,4 +134,25 @@ describe("HLOD proxy merge", () => {
     expect(proxy.stats.mergedDrawCalls).toBe(1);
     expect(proxy.stats.mergedSources).toBe(2);
   });
+
+  it("keeps differently tinted trees in one merged fallback draw without changing the source", async () => {
+    const source = fakeMesh.material;
+    const previousName = source.name;
+    source.name = "Bark";
+    try {
+      const a = tree([0, 0, 0], "tinted-fallback"), b = tree([10, 0, 0], "tinted-fallback");
+      for (const [entity, bark] of [[a, [0.8, 0.9, 1]], [b, [1, 0.7, 0.6]]] as const) {
+        (entity.components["mesh"] as any).source.vegetationTint = { bark, leaves: [1, 1, 1] };
+      }
+      const proxy = await buildHlodProxy(doc({ a, b }), { resolveModel: () => "fake://tinted-fallback.glb" });
+      expect(proxy.stats.mergedDrawCalls).toBe(1);
+      const merged = proxy.group.children.find(c => (c as THREE.Mesh).isMesh) as THREE.Mesh;
+      const colors = merged.geometry.getAttribute("color");
+      expect(colors.getX(0)).toBeCloseTo(0.8);
+      expect(colors.getY(fakeMesh.geometry.getAttribute("position").count)).toBeCloseTo(0.7);
+      expect((merged.material as THREE.MeshStandardMaterial).vertexColors).toBe(true);
+      expect(fakeMesh.geometry.getAttribute("color")).toBeUndefined();
+      expect(source.vertexColors).toBe(false);
+    } finally { source.name = previousName; }
+  });
 });

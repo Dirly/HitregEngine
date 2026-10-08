@@ -104,6 +104,7 @@ describe("postfxSchema — post stack", () => {
       antialias: { mode: "fxaa" },
       motionBlur: { enabled: false, amount: 0.3, samples: 12 },
       sharpen: { enabled: false, amount: 0.4 },
+      dither: { enabled: false, levels: 32, scale: 1, amount: 1 },
       pixelate: { enabled: false, height: 240, filter: "nearest" },
       // the second block that defaults ON. It costs nothing in a scene with no
       // water: the renderer only builds the pass where there IS water, and

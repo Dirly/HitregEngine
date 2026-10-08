@@ -52,7 +52,10 @@ dungeons, party pulls, rebalancing, and zero-downtime content rollout.
 ## The flow
 
 1. **Sign in** at main (`/auth/register`, `/auth/login` → a session token;
-   scrypt passwords, no email). Make characters (`/characters`).
+   scrypt passwords, no email). Choose a world (`/worlds`), then choose or create
+   its character (`/characters`), one live character per account per world.
+   [Storage and logout](storage.md) explains world ownership, save identities,
+   migration, and the 20-second camp / 60-second reconnect distinction.
 2. **Play**: `POST /play {characterId}` → main *places* the character and
    answers `{ url, ticket, server }`. Placement (`main/registry.ts`):
    a party member's layer if it has room → the layer this character was
@@ -83,6 +86,134 @@ dungeons, party pulls, rebalancing, and zero-downtime content rollout.
    `serve.ts --kind instance --instance-of <party>`, waits for it to
    register, and pushes `transfer.begin` to every member's layer. The
    instance exits when empty for `--instance-idle` seconds.
+
+## Portals
+
+**Design (2026-10-03).** A portal is a door a player USES to be moved into
+another scene — an instanced dungeon — and back. The far side need not match
+the facade ("game black magic"): the player lands on a named anchor entity.
+One builtin script decides, the host moves, one per-character record carries
+the trip:
+
+- **`portal` builtin** (params in the spec), two modes. `interact`: on an
+  `interactable` entity; the client sends the ordinary `player.interact`.
+  `trigger` (walk-through, 2026-10-03): a box in the portal's local space
+  (`halfExtents`, `offset`); every `fixedUpdate` the authority sends a
+  `player` body that ENTERS it (outside last tick, inside now, walked — a jump
+  of more than 3 m in a tick is not walking). Either way the portal, on the
+  session authority, checks owner, range (interact), death, `transferLock` and its `condition`
+  (the dialogue condition shape — a quest state, a flag, an item…), refuses
+  with `refusal` as a `character.refused` toast, and otherwise emits
+  `portal.travel` (authority-local, never replicated). No client moves itself.
+  `npc-ui` shows a portal with a doorway glyph and its own verb (`prompt`).
+- **`portal/<bodyId>`** (core `portal.ts`, in `PERSISTED_PLAYER_NAMESPACES`, so
+  it is saved beside the sheet and restored before spawn): `arrive` = where
+  the next spawn in a scene lands (an anchor id, or a point), consumed by that
+  spawn; `return` = where a returning portal sends the player (scene, point,
+  yaw, origin layer). The host writes it with `portalDeparture` before the body
+  leaves; whoever spawns the body honours it with `resolvePortalArrival`. A
+  reconnect inside an instance still knows the way out.
+- **Three hosts, one payload.** A *layer* (`serve.ts`) turns `portal.travel`
+  into `transfer.request { kind: "instance", scene, party, portal }` (back:
+  `{ kind: "layer", layerId: <origin> }`, any layer when it is gone), then
+  commit → ticket → handoff; the instance's `GameServer.join` lands the body on
+  the anchor (`arrivalFor`) with the landing grace. The *playground* in local
+  play swaps the hosted scene under a curtain and seeds the carried state the
+  same way. The *headless harness* (`PortalHarness`) does it with two
+  `HeadlessWorld`s and a real `PlayerStore` commit/load.
+
+**Walk-through details.** A refusal is said once per entry (the edge fires
+once; walk out and in again to hear it again) and nobody moves. **No
+ping-pong**: a body a trigger portal sees for the first time — or as a new
+object under the same id, or after a gap (it left this world and came back) —
+is an arrival: ignored for `arrivalGrace` seconds (default 2) and until it
+has been outside the box, so an arrival anchor may stand in or beside the
+return portal's box; the host's landing grace is unchanged. The way back is
+the `returnAnchor`, else a metre outside the face the body walked in through,
+facing away. **Arrival**: on the anchor's yaw; an anchor with
+`portalAnchor.corridor` > 0 lines later arrivals up 1.1 m apart along its
+forward line (`portalArrivalSpot`; `arrivalFor` passes the bodies already in
+the world), else rings of 1.2/2.2 m. **Presentation** (playground): the curtain
+`ramp`s the screen toward black over the last `fade` metres before the box
+(armed only once the body has been clear of that zone, lifted again if it
+stands refused in the box), holds black across the swap, fades the
+destination in, and the play camera is turned to the arrival heading
+(`faceCameraToArrival`: the anchor's yaw in local play; in gateway mode the
+body's own spawned heading — the server spawns it on the anchor's yaw, so the
+client needs no extra message; not yet verified against a live cluster). The
+harness walks it: `walkThrough(entityId, { from? })`. Authoring: `docs/scene-authoring.md` → "Portals".
+
+**What the trip carries**: whatever a transfer carries — the sheet (bags,
+equipment, coins, level), the quest journal, NPC memory, the vault, the soul
+bind and the portal record (`CommitInput` → `PlayerSave`). Position is per
+scene as before; an arrival overrides it once.
+
+**Cluster path.** Main resolves the instance exactly as for an admin move —
+one per party key (`party` param: the party code, else the character), reused
+while it is up, started by the supervisor, exiting after `--instance-idle`
+seconds empty — and only for scenes in its instance allow-list
+(`instances.scenes`; add the dungeon scene there). Party members are pulled with
+`transfer.begin { portal }`, and each member's own layer records that member's
+arrival and way back before committing. Main's answer now carries the
+destination `scene`; the layer passes it in the client's `transfer` message,
+and the playground swaps its rendered scene when it differs (gateway mode).
+Scenes from every project folder are reachable (`loadContent` merges
+`projects/*/assets/scenes`), so a dungeon may live in its own project.
+
+**Local play** (the playground, one tab, no server): `portal.travel` →
+carry `character/` + the persisted records → curtain → `switchScene(target)` →
+play resumes → the records are seeded before the scripts start and the body is
+put on the anchor, then held until the ground there has loaded. The dev save
+(`PlayerDataService`) stays under the experience the trip started in, so the
+sheet's own restore agrees with what was carried. A published bundle
+(`play.ts`) does not host portals yet (it shows loading art across a server transfer — see "Loading art").
+
+**Harness** (`@hitreg/server` `PortalHarness`, usage in its doc comment):
+`start({ content, scene, at, sheet?, records? })`, `interact(entityId)` / `walkThrough(entityId)` →
+the trip (`{ from, to, anchor, position, yaw, rev }`) or null, `walkTo`,
+`teleport`, `step`, `sheet()`, `record(ns)`, `setRecord`, `refusals`, `hops`.
+Worlds are kept per scene for its lifetime, voxel ground streams inline.
+
+**Authoring**: an entry anchor in the dungeon (tag `instance-entry`, rotated
+to face into it), the portal on the outside door, a `back: true` portal on the
+dungeon's exit anchor, and an `npc-ui` entity in the dungeon scene (without it
+there is no prompt to use the exit). docs/scene-authoring.md → "Portals".
+
+Not yet: a portal between two layers of the same world (use a zone border),
+a cluster-level end-to-end test of the portal path (the pieces are tested:
+the script, the record, `arrivalFor` in `join`, the harness), and a "who is in
+your instance" party UI.
+
+## Loading art
+
+A scene a portal leads into may carry a painted loading screen, WoW-style: the `loadingScreen`
+component (core `portal.ts`, schema in the spec) on its settings entity (the one with `sky`) names
+`image: "loading/<scene>.png"` in the scene's project (`assets/loading/`) and the `title` shown on it.
+Made by one command (also the `loading art` stage of tools/dungeon-pipeline, MISSING until the image exists):
+
+```
+cd apps/playground
+PLAYWRIGHT_MODULE=<playwright index.mjs> npx tsx tools/loading-art.mts --project <id> --base <running dev server>
+     [--view <views.json name> | --cam x,y,z --look x,y,z] [--size 1024x576] [--title "..."] [--characters "..."]
+     [--snapshot-only] [--record-only] [--dry-run]
+```
+
+It snapshots the view (the views stage's camera at the shipped light, editor chrome hidden), lifts it to a
+readable exposure (`<scene>.snapshot.png`, kept beside the art for review, never shipped), sends it to
+`image-request.mjs gen --paint` as the COMPOSITION reference (same room and set piece, painterly, dramatic
+light, dark and foreboding, no text/logos, no characters, grey-box capsules painted out), installs the 16:9
+result at about half display resolution, and records it with one `applyOps` `set-component` (inverse in
+`reports/loading-art.json`). Default view: the views.json entry marked `"loading": true`, else the most
+readable views-stage picture. Mark the set piece; the fallback can pick a corridor.
+
+Shown by `portal-curtain.ts`: the curtain closes to black, the destination's art fades in full-screen
+(object-fit cover, smooth filtering — a half-resolution painting scaled by a non-integer factor stair-steps
+under nearest, and the house look has no pixelate pass) with the name and a 2 px progress line, held until
+the same readiness the plain curtain waits on (scene built, ground under the arrival loaded, view cells in),
+then fades. Paths: local play (`travelToScene`), the dev client's gateway transfer (same function), and the
+published bundle (`play.ts`): a server transfer there reloads the page on the destination, and the boot
+shows that scene's art until its near ground and the body are in (not over the gateway sign-in card).
+`export-game.mjs` ships `loading/` without the snapshots. A bundle only carries its own project's scenes.
 
 ## Zones
 
@@ -255,7 +386,11 @@ the character you see); friendships and blocks are per account.
 
 A whole-world layer is only affordable because the population is
 **proximity-activated**: give a place a `spawnArea` component (in the spec)
-and its packs spawn the first time a player comes within `radius`, then
+and its packs are **placed** once a player is within `showRadius` (default:
+the interest radius + 30, i.e. out of sight) — spawned, given 2 s to settle
+on the ground, then paused standing in their controller's idle clip, so a
+creature is already there when it comes into view instead of appearing and
+dropping in front of the player. They simulate once a player is within `radius`, then
 **pause in place** when nobody has been inside `sleepRadius` for
 `idleSeconds` — scripts suspended, bodies out of the physics world, the
 ground under them free to unload — and resume where they stood when
@@ -276,6 +411,33 @@ Two consequences worth knowing:
   `transferLockSeconds`, default 12 s). A chased player cannot escape into a
   dungeon, and the attacker cannot pull their party out of a fight they are
   losing; the lock extends while the fight continues and lapses on its own.
+
+### What a copy costs, and the levers (2026-10-05 scale pass)
+
+The measured story is in voxel-demo's `docs/combat-build/P-performance.md` ("Server scale pass"). What a
+layer does to stay cheap, all generic:
+
+- **NPCs sleep like packs.** `NpcManager` dormancy (`serve` `npcDormancy`; default sleep 120 m / wake
+  90 m / 10 s): authored NPCs start dormant and wake — ground first — when a player comes near. A
+  layer with nobody on it simulates nothing and holds no terrain.
+- **No generation on the tick.** `TerrainStreamer.prefetch` asks the worker threads for ground and pins
+  it; spawn-area wakes, NPC wakes/respawns and joins wait for it (a join up to 3 s).
+- **Interest.** `--interest <m>` (default 250 — creatures, giants above all, must not pop in mid-distance): each player is sent the bodies near it, the session state
+  about them and the events that name them (plus its own body and its party's); what leaves the view
+  is hidden on the client. Off-by-default delivery options: `--state-every`, `--state-hz`, `--far`.
+  **Sight scales with size** (`packages/server/src/sight.ts`): a creature taller than a person is sent from
+  `interest × height / 2.6 m`, capped at 600 m, so a giant or a dragon is seen coming; a root `netObject`
+  `{ relevancy: "proximity", radius }` overrides it. Player bodies stay at the interest radius (PvP symmetric).
+  Spawn areas place a pack beyond its biggest member's sight.
+- **Drawing-only entities are not built** on the server; static subtrees keep their matrices.
+- **A copy can load only its zones**: `serve --zones a,b [--zone-load-band 200]`; main starts dedicated
+  copies that way and never makes one the "all" heir. A party joins a mate's copy above the zone cap
+  (the process cap stays hard).
+- **Diagnostics**: `/admin/slow-ticks` (every tick over 2x budget, its phases and what it did, loop
+  stalls), `/admin/entities` (census), `/admin/status` `slow` / `terrain` / `divergence` / `timing`.
+- **Guard a world**: `pnpm -F @hitreg/server zone-budget --scene <name> [--bots N]` — per-zone budgets
+  (entities, colliders, trimesh triangles, crowd of creatures that can wake around one spot) plus a short
+  bot run, PASS/FAIL with an exit code. Run it after generating or editing a world.
 
 ## Chat
 
@@ -305,7 +467,7 @@ as before; convert big populations to spawn areas.
 ```
 pnpm -F @hitreg/server main --scene mmo --secret dev --public-host 127.0.0.1
 pnpm -F playground dev
-# open http://localhost:5173/?gateway=http://127.0.0.1:8780 → sign in → Play
+# open http://localhost:5173/?gateway=http://127.0.0.1:8780 → sign in → choose world → character → Play
 curl -s -H "Authorization: Bearer dev" http://127.0.0.1:8780/admin/status
 ```
 
@@ -372,6 +534,45 @@ scenes this cluster is the only multiplayer path — a peer host could fudge
 everything it simulates — and the playground forms no peer room for them
 (`?p2p=1` overrides for a two-tab engine experiment). Other games on the
 engine may still choose peer rooms.
+
+**Owner-only state.** Every netState key goes to every peer, except a
+namespace defined with `{ audience: "owner" }` (`NetStateStore.define`): a
+layer sends such a key only to the peer controlling the body in the value's
+`owner` field (through `owner/<bodyId>`), in joiner syncs and deltas alike,
+and moves it off the old owner's replica if the owner changes
+(`server.ts` `shipState` / `stateFor`). Loot bags (`lootbag/`) are the first
+user; anything a single player may see and nobody else should receive is the
+next. A P2P host does not filter, so the authority's request handlers still
+refuse non-owners on their own.
+
+**Loot bags are saved with their owner** (2026-10-04). The bags a character
+owns ride in the per-character record `lootbags/<bodyId>`
+(`PERSISTED_PLAYER_NAMESPACES`), so they go through the same commit as the
+sheet — no second save path. `playerSnapshot` packs the live `lootbag/` keys
+the body owns into it (sim-time lifetimes become wall-clock `expires`);
+`seedPlayerState(…, scene)` unpacks the bags of the scene the body spawns in
+and keeps the rest dormant; `clearPlayerState` removes the departed owner's
+bags from the world (body bags always; item bags only when they were saved).
+Without a save authority nothing is saved and the bags stay in the world until
+they expire or the process stops.
+
+**Corpses are saved with their DEAD character** (2026-10-07). A corpse
+(`lootbag/<id>` with `corpse`) is packed with the character it belongs to
+(core `bagKeeper`), even while a killer's claim owns it, so the claim never
+reaches the killer's save; it is saved released (no claim) and is never
+evicted by the bag cap. When a KILLER leaves a layer while holding a claim,
+`clearPlayerState` releases the corpse to its dead character at once and lifts
+the dead character's `lootlock/`. The soulbound slots and `plunderedUntil`
+live on the sheet itself, so they ride the sheet's commit.
+
+**A body being looted is held.** While `lootlock/<bodyId>` holds (a player
+killed by a player, inside the killer's window), a disconnected body is not
+torn down after the reconnect grace — it stays, sheet and all, until the lock
+ends, then leaves and commits normally; `canTransfer` refuses it; and main's
+`/play` sends a character still standing on a layer back to THAT layer (a held
+body, or one inside the reconnect grace) instead of spawning a second body
+elsewhere from an older save. A server shutting down still saves everyone as
+they are.
 
 ## What is deliberately not here yet
 

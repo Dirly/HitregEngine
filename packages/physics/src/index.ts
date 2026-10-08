@@ -4,10 +4,13 @@ export {
   type BodyState,
   type MeshGeometryData,
   type PhysicsSimOptions,
+  type PhysicsStats,
+  type StaticStreamingOptions,
 } from "./sim.js";
 export {
   Layers,
   CHARACTER_SOLID,
+  DEFAULT_QUERY_LAYERS,
   HITTABLE,
   SOLID_WORLD,
   VISION_BLOCKERS,
@@ -33,3 +36,10 @@ export {
   type ShapecastOptions,
 } from "./queries.js";
 export { gltfCollisionGeometry, type GltfGeometryOptions } from "./gltf-geometry.js";
+export {
+  RAGDOLL_POSE_STRIDE,
+  type RagdollBodySpec,
+  type RagdollJointSpec,
+  type RagdollSpec,
+  type RagdollStats,
+} from "./ragdoll.js";

@@ -9,6 +9,10 @@ The short version: **you model parts, you build a few example structures out
 of those parts, you hand over both.** Everything else — corners, the texture
 atlas, the placement rules, the prefabs — is generated from that.
 
+For a finished town, also follow [town-baking.md](town-baking.md): keep these
+editable parts and compile runtime geometry by building shell and independent
+interior units. Kit import and texture packing alone do not produce that bake.
+
 ## 1. Pick a cell size and stick to it
 
 A kit lives on a grid of identical cells. Decide the cell before the first

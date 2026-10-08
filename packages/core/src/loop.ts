@@ -31,9 +31,20 @@ export class FixedTimestepLoop {
   }
 
   tick(nowMs: number): void {
+    const frameDt = this.step(nowMs);
+    if (frameDt !== null) this.update?.(frameDt, this.accumulator / this.fixedDt);
+  }
+
+  /**
+   * Advance the simulation only — the per-frame `update` hook (the render side)
+   * is skipped. For a host that must keep the world stepping while nothing can
+   * be seen (a hidden browser tab). Returns the elapsed seconds, or null on the
+   * first call, which only primes the clock.
+   */
+  step(nowMs: number): number | null {
     if (this.lastMs === null) {
       this.lastMs = nowMs;
-      return;
+      return null;
     }
     const frameDt = Math.max(0, (nowMs - this.lastMs) / 1000);
     this.lastMs = nowMs;
@@ -49,7 +60,6 @@ export class FixedTimestepLoop {
     if (this.accumulator >= this.fixedDt) {
       this.accumulator = this.accumulator % this.fixedDt;
     }
-
-    this.update?.(frameDt, this.accumulator / this.fixedDt);
+    return frameDt;
   }
 }

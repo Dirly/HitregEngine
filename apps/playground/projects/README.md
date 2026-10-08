@@ -99,6 +99,14 @@ for a two-tab engine experiment).
 `tools` names registered tools (see `tools/README.md`); each is its own repo
 cloned into the engine's `tools/` folder. Mark a tool `optional` when the
 project still runs without it and it only regenerates content.
+`dependsOn` names the other projects whose assets this project's scenes use
+(a portal's instance scene, a borrowed model). Opening a scene loads ONLY its
+project plus `dependsOn`, transitively — in the editor
+(`/__hitreg/assets-index?scene=`) and on the server (`playgroundRoots(dir,
+scene)`) — so other folders under `projects/` cost nothing at boot. A
+reference into an unlisted project is missing at runtime: list the project
+or copy the asset in. Switching the editor to a scene outside the loaded set
+reloads the page.
 
 The dev server validates every `project.json` at boot, resolves the tool list
 against what is actually installed, and warns — by id, with the repo to get

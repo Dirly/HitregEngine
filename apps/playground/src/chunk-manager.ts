@@ -22,6 +22,12 @@ import {
   batchStaticMeshes,
   buildScene,
   buildHlodProxy,
+  cullRootIndex,
+  cullRootsOf,
+  registerCullRoots,
+  type CullingSystem,
+  type CullRoot,
+  type CullUnit,
   freezeStaticSubtree,
   refreshStaticSubtree,
   thawStaticSubtree,
@@ -47,6 +53,10 @@ interface LoadedChunk {
   batch: StaticBatchHandle | null;
   /** This cell's instances in the world prop pool (BuildOptions.instancePool), released with the cell. */
   poolOwner: object;
+  /** Culling roots (POIs, `culling` entities) of `expanded`, parents first. */
+  cullRoots: CullRoot[];
+  /** Registered culling units: the cell's own (render-only cells) first, then its roots'. */
+  cullUnits: CullUnit[];
 }
 
 /**
@@ -100,6 +110,8 @@ interface SupercellPart {
   group: THREE.Object3D;
   cellKeys: Set<string>;
   entityCount: number;
+  /** Its horizon-culling unit, once published. */
+  cullUnit?: CullUnit;
 }
 
 /**
@@ -449,6 +461,11 @@ export class ChunkManager {
    * unexplained gap in the frame graph.
    */
   profiler: ProfilerLike | undefined;
+  /**
+   * Culling (packages/render/src/culling.ts): every published cell and HLOD
+   * part stamps its terrain into the horizon and registers as a unit.
+   */
+  private culling: CullingSystem | null = null;
 
 
   constructor(
@@ -494,6 +511,109 @@ export class ChunkManager {
     for (const chunk of this.loaded.values()) {
       if (chunk.simulated) fn(chunk.expanded, chunk.objects);
     }
+  }
+
+  /**
+   * Attach the culling system. Cells already resident are registered now,
+   * so attaching late (or re-attaching after a rebuild) misses nothing.
+   */
+  setCulling(culling: CullingSystem | null): void {
+    if (this.culling === culling) return;
+    for (const chunk of this.loaded.values()) this.unregisterCulling(chunk);
+    for (const sc of this.loadedSupercells.values()) for (const part of sc.parts) this.unregisterPart(part);
+    this.culling = culling;
+    if (!culling) return;
+    for (const [key, chunk] of this.loaded) {
+      this.stampCell(key, chunk.group);
+      this.registerCulling(chunk);
+    }
+    for (const sc of this.loadedSupercells.values()) for (const part of sc.parts) this.registerPart(part);
+  }
+
+  /**
+   * A cell's drawn terrain becomes the horizon's occluder there. Replaces
+   * whatever the cell's previous representation stamped.
+   */
+  private stampCell(key: string, group: THREE.Object3D): void {
+    const culling = this.culling;
+    const s = this.streamer;
+    const coords = this.cellCoords(key);
+    if (!culling || !s || !coords) return;
+    const size = s.cellSize;
+    const rect = { minX: coords[0] * size, minZ: coords[1] * size, maxX: (coords[0] + 1) * size, maxZ: (coords[1] + 1) * size };
+    culling.occluders.clearRect(rect.minX, rect.minZ, rect.maxX, rect.maxZ);
+    group.updateWorldMatrix(true, true);
+    group.traverse((node) => {
+      const mesh = node as THREE.Mesh;
+      if (mesh.isMesh && mesh.userData["voxelSource"]) culling.occluders.stampGeometry(mesh.geometry, mesh.matrixWorld, rect);
+    });
+  }
+
+  /** The cell unit (render-only cells: simulated ones hold moving things) and its roots' units. */
+  private registerCulling(chunk: LoadedChunk): void {
+    const culling = this.culling;
+    if (!culling || chunk.cullUnits.length > 0) return;
+    const pool = this.buildOptions.instancePool;
+    const cell = chunk.simulated
+      ? undefined
+      : culling.register({
+          name: chunk.group.name,
+          objects: [chunk.group],
+          ...(pool ? { pool: { pool, owner: chunk.poolOwner, ids: null } } : {}),
+        });
+    const roots = registerCullRoots(culling, chunk.cullRoots, chunk.objects, chunk.batch, {
+      ...(cell ? { parent: cell } : {}),
+      ...(pool ? { pool: { pool, owner: chunk.poolOwner } } : {}),
+    });
+    chunk.cullUnits = cell ? [cell, ...roots] : roots;
+  }
+
+  private unregisterCulling(chunk: LoadedChunk): void {
+    // nothing registered without a culling system (and hand-built test chunks carry none)
+    if (!this.culling || !chunk.cullUnits) return;
+    for (const unit of chunk.cullUnits) this.culling.unregister(unit);
+    chunk.cullUnits = [];
+  }
+
+  /** A published HLOD part: stamp its coarse terrain for its cells, and cull it whole. */
+  private registerPart(part: SupercellPart): void {
+    const culling = this.culling;
+    const s = this.streamer;
+    if (!culling || !s || part.cullUnit) return;
+    const size = s.cellSize;
+    const cells = new Set<number>();
+    let minX = Infinity;
+    let minZ = Infinity;
+    let maxX = -Infinity;
+    let maxZ = -Infinity;
+    for (const key of part.cellKeys) {
+      const coords = this.cellCoords(key);
+      if (!coords) continue;
+      cells.add((coords[0] + 32768) * 65536 + (coords[1] + 32768));
+      culling.occluders.clearRect(coords[0] * size, coords[1] * size, (coords[0] + 1) * size, (coords[1] + 1) * size);
+      minX = Math.min(minX, coords[0] * size);
+      minZ = Math.min(minZ, coords[1] * size);
+      maxX = Math.max(maxX, (coords[0] + 1) * size);
+      maxZ = Math.max(maxZ, (coords[1] + 1) * size);
+    }
+    if (cells.size > 0) {
+      const square = culling.occluders.square;
+      const allow = (sx: number, sz: number): boolean =>
+        cells.has((Math.floor((sx * square) / size) + 32768) * 65536 + (Math.floor((sz * square) / size) + 32768));
+      part.group.updateWorldMatrix(true, true);
+      part.group.traverse((node) => {
+        const mesh = node as THREE.Mesh;
+        if (mesh.isMesh && mesh.userData["terrainProxy"]) {
+          culling.occluders.stampGeometry(mesh.geometry, mesh.matrixWorld, { minX, minZ, maxX, maxZ }, allow);
+        }
+      });
+    }
+    part.cullUnit = culling.register({ name: `hlod-part:${[...part.cellKeys][0] ?? ""}`, objects: [part.group] });
+  }
+
+  private unregisterPart(part: SupercellPart): void {
+    if (part.cullUnit) this.culling?.unregister(part.cullUnit);
+    delete part.cullUnit;
   }
 
   /** Called from rebuild(): the streamer component (or null) and the new scene. */
@@ -627,7 +747,7 @@ export class ChunkManager {
     if (!this.streamer) return;
     if (this.provider) return; // generated worlds have no file index to read
     try {
-      const index = (await fetch("/__hitreg/assets-index").then((r) => r.json())) as {
+      const index = (await fetch("/__hitreg/assets-index?kinds=chunks").then((r) => r.json())) as {
         chunks?: string[];
       };
       this.available.clear();
@@ -1182,7 +1302,14 @@ export class ChunkManager {
       // Terrain is excluded by construction: it is not flagged static, and
       // `batchStaticMeshes` refuses geometry carrying custom attributes (the
       // splat weights) anyway.
-      const batch = batchStaticMeshes(built.scene);
+      // POIs and `culling` entities batch apart from the rest of the cell, so
+      // each can be hidden on its own (see registerCulling)
+      const cullRoots = cullRootsOf(expanded);
+      const rootOf = cullRootIndex(cullRoots);
+      const batch = batchStaticMeshes(
+        built.scene,
+        rootOf.size > 0 ? { groupOf: (mesh) => rootOf.get(mesh.userData["entityId"] as string) } : {},
+      );
       const simulated = isSimulated(rep);
       // Add FIRST — the collider for streamed terrain is cooked from these
       // built objects, so anything that delays this delays the ground under
@@ -1205,8 +1332,12 @@ export class ChunkManager {
         simulated,
         batch,
         poolOwner,
+        cullRoots,
+        cullUnits: [],
       };
       this.loaded.set(key, chunk);
+      this.stampCell(key, group);
+      this.registerCulling(chunk);
       if (simulated) this.sim?.addEntities(expanded); // render-only rings never collide
       this.lifecycle.onLoaded?.(expanded, built.objects, simulated);
       this.lastFocus = null; // retire covered proxies even when standing still
@@ -1476,6 +1607,7 @@ export class ChunkManager {
         // keep the identity world matrix it was built with
         refreshStaticSubtree(existing.group);
         existing.parts.push(part);
+        this.registerPart(part);
         for (const key of part.cellKeys) existing.cellKeys.add(key);
         existing.entityCount += entityCount;
         return;
@@ -1485,8 +1617,12 @@ export class ChunkManager {
         // this supercell is missing from the scene.
         existing.group.add(part.group);
         refreshStaticSubtree(existing.group);
-        for (const stale of existing.parts) this.disposeGroup(stale.group);
+        for (const stale of existing.parts) {
+          this.unregisterPart(stale);
+          this.disposeGroup(stale.group);
+        }
         existing.parts = [part];
+        this.registerPart(part);
         existing.cellKeys = new Set(part.cellKeys);
         existing.entityCount = entityCount;
         return;
@@ -1505,6 +1641,7 @@ export class ChunkManager {
         entityCount,
         far: part.far,
       });
+      this.registerPart(part);
     }
   }
 
@@ -1515,6 +1652,7 @@ export class ChunkManager {
     this.supercellEpoch.set(scKey, (this.supercellEpoch.get(scKey) ?? 0) + 1);
     const sc = this.loadedSupercells.get(scKey);
     if (!sc) return;
+    for (const part of sc.parts) this.unregisterPart(part);
     this.disposeGroup(sc.group);
     this.loadedSupercells.delete(scKey);
   }
@@ -1538,11 +1676,15 @@ export class ChunkManager {
     }
     chunk.simulated = nowSimulated;
     chunk.rep = rep;
+    // the cell's own unit exists only while it is render-only
+    this.unregisterCulling(chunk);
+    this.registerCulling(chunk);
   }
 
   private unload(key: string, chunk: LoadedChunk): void {
     // restore the source meshes first: dispose() puts them back so disposeGroup
     // frees the real geometries rather than only the merged copies
+    this.unregisterCulling(chunk);
     chunk.batch?.dispose();
     this.buildOptions.instancePool?.release(chunk.poolOwner);
     this.disposeGroup(chunk.group);
@@ -1589,5 +1731,7 @@ export class ChunkManager {
     this.desiredSupercells.clear();
     for (const [key, chunk] of [...this.loaded]) this.unload(key, chunk);
     for (const scKey of [...this.loadedSupercells.keys()]) this.unloadSupercell(scKey);
+    // a different world (or none): its terrain must not hide anything
+    this.culling?.occluders.clear();
   }
 }

@@ -35,6 +35,25 @@ describe("FixedTimestepLoop", () => {
     expect(steps).toBe(5);
   });
 
+  it("step() advances the sim without the render hook, sharing the clock with tick()", () => {
+    let steps = 0;
+    let renders = 0;
+    const loop = new FixedTimestepLoop({
+      fixedHz: 60,
+      fixedUpdate: () => steps++,
+      update: () => renders++,
+    });
+    expect(loop.step(0)).toBeNull(); // primes the clock
+    for (let t = 50; t <= 1000; t += 50) expect(loop.step(t)).toBeCloseTo(0.05);
+    expect(steps).toBeGreaterThanOrEqual(59); // float accumulation at the boundary
+    expect(steps).toBeLessThanOrEqual(60);
+    expect(renders).toBe(0);
+    const before = steps;
+    loop.tick(1016); // rAF takes back over: one frame's worth, not a backlog
+    expect(steps - before).toBeLessThanOrEqual(2);
+    expect(renders).toBe(1);
+  });
+
   it("reports interpolation alpha in [0, 1)", () => {
     const alphas: number[] = [];
     const loop = new FixedTimestepLoop({

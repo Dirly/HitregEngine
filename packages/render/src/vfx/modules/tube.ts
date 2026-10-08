@@ -120,7 +120,7 @@ export class ColumnLive extends LiveModule<ColumnModule> {
       scroll: m.scroll,
       core: 0,
       additive: m.blend === "additive",
-      pixel: m.pixel,
+      pixel: this.cellsAcross(Math.max(2 * Math.PI * m.radius, m.height)),
       posterize: m.posterize,
     });
     this.tube.mesh.visible = false;
@@ -200,7 +200,7 @@ export class BeamLive extends LiveModule<BeamModule> {
       scroll: m.scroll,
       core: 0,
       additive: m.blend === "additive",
-      pixel: m.pixel,
+      pixel: this.cellsAcross(Math.max(m.length, Math.PI * m.width)),
       posterize: m.posterize,
     });
     this.core.set(this.glowColor, new THREE.Color(1, 1, 1), {
@@ -214,7 +214,7 @@ export class BeamLive extends LiveModule<BeamModule> {
       scroll: m.scroll * 1.6,
       core: 0.5,
       additive: true,
-      pixel: m.pixel,
+      pixel: this.cellsAcross(Math.max(m.length, Math.PI * m.width)),
       posterize: m.posterize,
     });
     this.glow.mesh.visible = false;

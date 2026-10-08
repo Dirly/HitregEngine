@@ -1,0 +1,9 @@
+{
+  "id": "ice-cave",
+  "extends": "warren-gnawed",
+  "about": "An ice cave: the warren rules with an ice substrate, a higher gentler dome, more and thinner pillars (ice columns) and more hanging clusters (icicles); gentle long noise keys (ice-wall / ice-roof).",
+  "height": 4.2,
+  "roles": { "rock": "ice", "ceiling": "ice", "floor": "smooth-stone" },
+  "natural": { "rise": 2.2, "jitter": 0.25, "pillarArea": 50, "pillarRadius": [0.5, 0.8], "clusters": 3, "stalagmites": 6,
+               "wallNoise": "ice-wall", "roofNoise": "ice-roof", "floorNoise": "earth-floor" }
+}

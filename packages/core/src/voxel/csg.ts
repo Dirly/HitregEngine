@@ -44,6 +44,43 @@ import { csgTriangleMeshSchema, compileTriangleMesh, type CompiledTriangleMesh }
 
 const vec3 = z.tuple([z.number(), z.number(), z.number()]);
 
+/** One region where a node's noise fades out: a capsule (segment a..b, or a point when b is omitted) or a box. */
+const csgNoiseProtectSchema = z.union([
+  z.object({
+    a: vec3.describe("Capsule start, node-local metres (for an imported stamp: entrance-anchor frame, Y up)."),
+    b: vec3.optional().describe("Capsule end. Omit for a sphere at `a`."),
+    radius: z.number().min(0).default(0).describe("Inside this distance of the segment the noise is zero."),
+    fade: z.number().positive().default(1).describe("Over this further distance the noise ramps (smoothstep) back to full."),
+  }).strict(),
+  z.object({
+    min: vec3.describe("Box minimum corner, node-local metres."),
+    max: vec3.describe("Box maximum corner, node-local metres."),
+    fade: z.number().positive().default(1).describe("Outside the box the noise ramps (smoothstep) back to full over this distance."),
+  }).strict(),
+  z.object({
+    floors: z.object({
+      origin: z.tuple([z.number(), z.number()]).describe("Grid corner [x, z], node-local metres."),
+      cell: z.number().positive().describe("Cell size in metres (square cells in X/Z)."),
+      columns: z.number().int().positive().max(4096),
+      rows: z.number().int().positive().max(4096),
+      spans: z.array(z.array(z.number())).describe("One entry per cell (row-major, columns along X): flat [lo, hi, lo, hi, ...] floor-height ranges in that cell; [] = no floor."),
+    }).describe("Walkable floor heights on a grid. tools/mesh-dc noise.mjs derives it from the stamp's own exposed up-facing faces, dilated past the floor edge so wall feet are covered."),
+    above: z.number().min(0).default(0.6).describe("Up to this height above a floor the noise is zero (wall feet meet the floor clean and vertical)."),
+    below: z.number().min(0).default(0.2).describe("Down to this depth below a floor the noise is zero."),
+    fade: z.number().positive().default(0.4).describe("Beyond the band the noise ramps (smoothstep, vertically) back to full over this distance."),
+  }).strict().describe("Floor band: noise fades to zero in a band around each walkable floor, so noised rock walls meet the floor crisp and leave dressable floor."),
+]);
+
+export const csgNoiseSchema = z.object({
+  amount: z.number().min(0).max(4).describe("Peak displacement in metres. The surface never moves farther than this."),
+  scale: z.number().positive().describe("Feature size in metres of the first octave (frequency = 1/scale)."),
+  seed: z.number().int().default(1),
+  octaves: z.number().int().min(1).max(5).optional().describe("Perlin octaves, each 2.7x the frequency and 1/3 the weight of the last. Omitted = 2 (the original formula)."),
+  grow: z.boolean().optional().describe("Displace OUTWARD only: the solid grows by 0..amount and never thins, so a wall thinner than 2 x amount cannot open a hole. The noise is stretched so the relief spans the full 0..amount (peak-to-peak = amount)."),
+  protect: z.array(csgNoiseProtectSchema).max(4096).optional().describe("Regions where the noise fades to zero: doorways, stair treads, the walk lane along a route. Distances are measured in the node's local frame."),
+}).describe("Geometry noise for one CSG node.");
+export type CsgNoise = z.infer<typeof csgNoiseSchema>;
+
 /** Palette indices for the three faces a surface can be, chosen per vertex by normal. */
 export const csgSurfaceSchema = z.object({
   floor: z.number().int().min(0).default(0).describe("Palette index for upward-facing surfaces."),
@@ -218,7 +255,7 @@ export const csgNodeSchema = z.object({
     .default(0)
     .describe("Smooth-min radius against everything before it. 0 is a hard boolean; raise it where cut rock should melt into a natural cave."),
   surface: csgSurfaceSchema.optional().describe("Palette indices this node paints. Omit to inherit the document default."),
-  noise: z.object({amount:z.number().min(0).max(4),scale:z.number().positive(),seed:z.number().int().default(1)}).optional().describe("Bounded two-frequency displacement of this primitive in local metres. Use on cave cuts; leave masonry cuts unperturbed. Disables distance-based block rejection."),
+  noise: csgNoiseSchema.optional().describe("Bounded displacement of this primitive in local metres (|displacement| <= amount). Use on cave cuts and on the natural-rock ROLE nodes of an imported stamp (tools/mesh-dc role noise); leave masonry, trim and treads unperturbed. On a primitive it disables distance-based block rejection; a volume made only of mesh nodes keeps block culling with a margin of 2 x the largest amount."),
   heightfield: csgHeightfieldSchema.optional().describe("Required by, and only read by, `shape: \"heightfield\"`: the sampled surface this node thickens into a slab. Its footprint and thickness come from `size`."),
   mesh: csgTriangleMeshSchema.optional().describe("Required by shape mesh: closed indexed local triangle solids, unioned and sampled by the shared CSG/DC path. Node position/rotation apply; size is ignored. Triangle palette assignments remain repaintable with volume paint."),
 }).superRefine((node, ctx) => {
@@ -305,6 +342,15 @@ interface PreparedNode {
   inv: Float64Array;
   surface: CsgSurface;
   mesh?: CompiledTriangleMesh;
+  /** Compiled `noise`: displacement at a local point given the node's base distance. */
+  noise?: (lx: number, ly: number, lz: number, ds: number) => number;
+  /**
+   * Hard-union mesh nodes only: world box around the UNPADDED triangles and the
+   * most this node's field can sit below the distance to that box (round +
+   * noise). A sample whose current union distance is already below that bound
+   * cannot be changed by this node, so skipping it is exact.
+   */
+  union?: { min: [number, number, number]; max: [number, number, number]; slack: number };
   /** World-space AABB of everything this node can affect, blend and round included. */
   min: [number, number, number];
   max: [number, number, number];
@@ -436,9 +482,113 @@ function prepare(node: CsgNode, fallback: CsgSurface): PreparedNode {
     node,
     inv,
     mesh,
+    union: mesh && node.op === "add" && node.blend === 0 ? unionBound(mesh, rot, node, center, e) : undefined,
+    noise: node.noise ? compileNoise(node.noise, mesh, mesh ? [0, 1, 2].map((a) => mesh.min[a]! - pad) : undefined, mesh ? [0, 1, 2].map((a) => mesh.max[a]! + pad) : undefined) : undefined,
     surface: node.surface ?? fallback,
     min: [worldCenter[0]! - half[0]!, worldCenter[1]! - half[1]!, worldCenter[2]! - half[2]!],
     max: [worldCenter[0]! + half[0]!, worldCenter[1]! + half[1]!, worldCenter[2]! + half[2]!],
+  };
+}
+
+/** World box of a mesh node's triangles (rotated extent, no padding) and its field slack. */
+function unionBound(mesh: CompiledTriangleMesh, rot: Float64Array, node: CsgNode, center: [number, number, number], e: number[]): PreparedNode["union"] {
+  const lo: [number, number, number] = [0, 0, 0], hi: [number, number, number] = [0, 0, 0];
+  for (let a = 0; a < 3; a++) {
+    const h = Math.abs(rot[a * 3]!) * e[0]! + Math.abs(rot[a * 3 + 1]!) * e[1]! + Math.abs(rot[a * 3 + 2]!) * e[2]!;
+    const c = node.position[a]! + rot[a * 3]! * center[0] + rot[a * 3 + 1]! * center[1] + rot[a * 3 + 2]! * center[2];
+    lo[a] = c - h; hi[a] = c + h;
+  }
+  void mesh;
+  return { min: lo, max: hi, slack: node.round + (node.noise?.amount ?? 0) };
+}
+
+/**
+ * The displacement a node's `noise` adds to its distance at a local point.
+ * Without octaves/grow/protect this is the original two-frequency formula,
+ * clamped to [-amount, amount] so the bound the mesher relies on is exact.
+ * On a MESH node (an exact distance field) samples farther than
+ * `amount + 0.5 m` from the surface skip the noise: the sign cannot change
+ * there and dual contouring never interpolates across them (a crossing edge
+ * has both ends within one voxel of the surface), so the mesh is unchanged.
+ */
+const GROW_SPAN = 0.55;
+
+function compileNoise(noise: CsgNoise, mesh: CompiledTriangleMesh | undefined, lo?: number[], hi?: number[]): (lx: number, ly: number, lz: number, ds: number) => number {
+  const { amount, scale, seed } = noise;
+  const octaves = noise.octaves ?? 2;
+  const weights: number[] = [];
+  let total = 0;
+  for (let o = 0; o < octaves; o++) { weights.push(Math.pow(1 / 3, o)); total += weights[o]!; }
+  for (let o = 0; o < octaves; o++) weights[o] = weights[o]! / total;
+  const grow = noise.grow === true;
+  // Keep only protect regions that reach the node's padded box; each carries a reach box for a six-compare reject.
+  type Zone = { cap: boolean; a: number[]; d: number[]; dd: number; min: number[]; max: number[]; radius: number; fade: number; lo: number[]; hi: number[] };
+  const zones: Zone[] = [];
+  for (const zone of noise.protect ?? []) {
+    if ("floors" in zone) continue; // floor bands are compiled below
+    const cap = "a" in zone;
+    const reach = (cap ? zone.radius : 0) + zone.fade;
+    const end = cap ? (zone.b ?? zone.a) : undefined;
+    const zmin = cap ? [0, 1, 2].map((k) => Math.min(zone.a[k]!, end![k]!)) : [...zone.min];
+    const zmax = cap ? [0, 1, 2].map((k) => Math.max(zone.a[k]!, end![k]!)) : [...zone.max];
+    const zlo = zmin.map((v) => v - reach), zhi = zmax.map((v) => v + reach);
+    if (lo && hi && [0, 1, 2].some((k) => zhi[k]! < lo[k]! || zlo[k]! > hi[k]!)) continue;
+    const d = cap ? [end![0]! - zone.a[0]!, end![1]! - zone.a[1]!, end![2]! - zone.a[2]!] : [0, 0, 0];
+    zones.push({ cap, a: cap ? [...zone.a] : [], d, dd: d[0]! * d[0]! + d[1]! * d[1]! + d[2]! * d[2]!, min: zmin, max: zmax,
+      radius: cap ? zone.radius : 0, fade: zone.fade, lo: zlo, hi: zhi });
+  }
+  type Band = { ox: number; oz: number; cell: number; cols: number; rows: number; spans: number[][]; above: number; below: number; fade: number };
+  const bands: Band[] = [];
+  for (const zone of noise.protect ?? []) {
+    if (!("floors" in zone)) continue;
+    const f = zone.floors;
+    if (f.spans.length !== f.columns * f.rows) throw new Error(`noise floor band: spans has ${f.spans.length} cells, expected ${f.columns} x ${f.rows}`);
+    bands.push({ ox: f.origin[0], oz: f.origin[1], cell: f.cell, cols: f.columns, rows: f.rows, spans: f.spans, above: zone.above, below: zone.below, fade: zone.fade });
+  }
+  const far = mesh ? amount + 0.5 : Infinity;
+  return (x, y, z, ds) => {
+    if (ds > far || ds < -far) return 0;
+    let w = 1;
+    for (let i = 0; i < bands.length; i++) {
+      const b = bands[i]!;
+      const ci = Math.floor((x - b.ox) / b.cell), cj = Math.floor((z - b.oz) / b.cell);
+      if (ci < 0 || cj < 0 || ci >= b.cols || cj >= b.rows) continue;
+      const sp = b.spans[cj * b.cols + ci]!;
+      for (let k = 0; k + 1 < sp.length; k += 2) {
+        const lo = sp[k]! - b.below, hi = sp[k + 1]! + b.above;
+        const dist = y < lo ? lo - y : y > hi ? y - hi : 0;
+        const t = Math.min(1, dist / b.fade);
+        w = Math.min(w, t * t * (3 - 2 * t));
+        if (w === 0) return 0;
+      }
+    }
+    for (let i = 0; i < zones.length; i++) {
+      const q = zones[i]!;
+      if (x < q.lo[0]! || x > q.hi[0]! || y < q.lo[1]! || y > q.hi[1]! || z < q.lo[2]! || z > q.hi[2]!) continue;
+      let dist: number;
+      if (q.cap) {
+        const px = x - q.a[0]!, py = y - q.a[1]!, pz = z - q.a[2]!;
+        const t = q.dd > 0 ? Math.max(0, Math.min(1, (px * q.d[0]! + py * q.d[1]! + pz * q.d[2]!) / q.dd)) : 0;
+        dist = Math.hypot(px - t * q.d[0]!, py - t * q.d[1]!, pz - t * q.d[2]!) - q.radius;
+      } else {
+        const ex = Math.max(q.min[0]! - x, 0, x - q.max[0]!), ey = Math.max(q.min[1]! - y, 0, y - q.max[1]!), ez = Math.max(q.min[2]! - z, 0, z - q.max[2]!);
+        dist = Math.hypot(ex, ey, ez);
+      }
+      const t = Math.max(0, Math.min(1, dist / q.fade));
+      w = Math.min(w, t * t * (3 - 2 * t));
+      if (w === 0) return 0;
+    }
+    let n = 0;
+    for (let o = 0, f = 1 / scale; o < octaves; o++, f *= 2.7) n += weights[o]! * perlin3(x * f, y * f, z * f, seed + 17 * o);
+    if (grow) {
+      // Perlin rarely leaves +-0.55; stretch that span over the whole 0..amount relief so the
+      // silhouette actually reaches `amount` (measured: unstretched, relief stayed ~0.3 x amount).
+      n = n / GROW_SPAN;
+      n = n < -1 ? -1 : n > 1 ? 1 : n;
+      return w * amount * ((n - 1) / 2);
+    }
+    n = n < -1 ? -1 : n > 1 ? 1 : n;
+    return w * amount * n;
   };
 }
 
@@ -673,6 +823,17 @@ export function createVolume(input: VolumeDoc | unknown): Volume {
       if (!p.mesh && (x < p.min[0]! - margin || x > p.max[0]! + margin || y < p.min[1]! - margin || y > p.max[1]! + margin || z < p.min[2]! - margin || z > p.max[2]! + margin)) {
         if (node.op !== "intersect") continue;
       }
+      // Exact skip: a hard-union mesh node at least `d` away (box distance minus
+      // slack is a lower bound of its field) cannot lower d, and an unchanged d
+      // keeps the previous owner. Role-split stamps lean on this: without it
+      // every role node pays a triangle query at every sample.
+      const u = p.union;
+      if (u && d < SOLID_OUTSIDE) {
+        const ex = x < u.min[0] ? u.min[0] - x : x > u.max[0] ? x - u.max[0] : 0;
+        const ey = y < u.min[1] ? u.min[1] - y : y > u.max[1] ? y - u.max[1] : 0;
+        const ez = z < u.min[2] ? u.min[2] - z : z > u.max[2] ? z - u.max[2] : 0;
+        if (ex * ex + ey * ey + ez * ez > 0 && Math.sqrt(ex * ex + ey * ey + ez * ez) - u.slack >= d) continue;
+      }
       const px = x - node.position[0]!;
       const py = y - node.position[1]!;
       const pz = z - node.position[2]!;
@@ -680,8 +841,9 @@ export function createVolume(input: VolumeDoc | unknown): Volume {
       const lx = m[0]! * px + m[1]! * py + m[2]! * pz;
       const ly = m[3]! * px + m[4]! * py + m[5]! * pz;
       const lz = m[6]! * px + m[7]! * py + m[8]! * pz;
-      let ds = shapeDistance(node, lx, ly, lz);
-      if(node.noise){const n=node.noise,s=n.scale;ds+=n.amount*(.75*perlin3(lx/s,ly/s,lz/s,n.seed)+.25*perlin3(lx/s*2.7,ly/s*2.7,lz/s*2.7,n.seed+17));}
+      // A hard-union mesh node only matters where it is nearer than the current d (plus its slack).
+      let ds = u && p.mesh && d < SOLID_OUTSIDE ? p.mesh.distance(lx, ly, lz, d + u.slack) - node.round : shapeDistance(node, lx, ly, lz);
+      if (p.noise) ds += p.noise(lx, ly, lz, ds);
       const before = d;
       if (node.op === "add") {
         d = smoothMin(d, ds, node.blend);
@@ -890,7 +1052,12 @@ export function buildVolumeMesh(volume: Volume, lodStep = 1): VoxelMesh {
   // therefore 1-Lipschitz, including ordered hard/smooth CSG, and its centre
   // distance safely proves a whole padded block homogeneous. Keep the older
   // primitive/heightfield path's conservative behavior unchanged.
-  const canCullBlocks = volume.doc.nodes.length > 0 && volume.doc.nodes.every((node) => node.shape === "mesh" && !node.noise);
+  // Noise on a MESH node is a bounded perturbation (|term| <= amount) of an
+  // exact field, and hard/smooth min/max are non-expansive, so the composed
+  // field still satisfies |f(q) - f(c)| <= |q - c| + 2 * maxAmount: cull with
+  // that margin instead of giving culling up (role-noised stamps rely on it).
+  const canCullBlocks = volume.doc.nodes.length > 0 && volume.doc.nodes.every((node) => node.shape === "mesh");
+  const cullMargin = 2 * Math.max(0, ...volume.doc.nodes.map((node) => node.noise?.amount ?? 0));
   const surfaceCount = volume.surfaceCount;
   const cells = [0, 1, 2].map((a) => Math.max(1, Math.ceil((volume.max[a]! - volume.min[a]!) / step)));
 
@@ -936,7 +1103,7 @@ export function buildVolumeMesh(volume: Volume, lodStep = 1): VoxelMesh {
         const density = volume.sampler(origin, blockMax);
         if (canCullBlocks) {
           const rx = (nx - 1) * step / 2, ry = (ny - 1) * step / 2, rz = (nz - 1) * step / 2;
-          if (Math.abs(density(origin[0] + rx, origin[1] + ry, origin[2] + rz)) > Math.hypot(rx, ry, rz)) continue;
+          if (Math.abs(density(origin[0] + rx, origin[1] + ry, origin[2] + rz)) > Math.hypot(rx, ry, rz) + cullMargin) continue;
         }
         const values = new Float32Array(nx * ny * nz);
         for (let k = 0; k < nz; k++) {

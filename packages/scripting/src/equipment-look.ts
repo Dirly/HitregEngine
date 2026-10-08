@@ -1,4 +1,4 @@
-import { composeModelLook, twoHanderOf, type EquipmentSlot, type LookPiece } from "@hitreg/core";
+import { composeModelLook, handKey, readHand, twoHanderOf, type EquipmentSlot, type LookPiece } from "@hitreg/core";
 import { Script, type ModelLook } from "./script.js";
 import { catalogOf, readSheet, sheetKey, sheetStoreOf, type SheetStoreLike } from "./character-store.js";
 
@@ -32,10 +32,17 @@ import { catalogOf, readSheet, sheetKey, sheetStoreOf, type SheetStoreLike } fro
  * `composeModelLook`, later slots win a shared part) into one look whose
  * `groups` give each item's parts its own sheet — a vanguard chest over
  * ranger legs is still one mesh, one material, one draw.
+ *
+ * The hand follows the WEAPON SET in hand (netState `hand/<actor>`, core
+ * `readHand`): while set 1 is held a `primary` look shows the `secondary`
+ * item and an `offhand` look shows nothing. `inHand: false` opts out (a
+ * sheath that always shows the primary).
  */
 export class EquipmentLook extends Script {
   static override scriptName = "equipment-look";
   static override presentation = true;
+  /** Nothing to place or swap on a dedicated server (no skeleton, no meshes, nobody looking): it never runs there. */
+  static clientOnly = true;
   static override params = {
     actor: {
       default: "",
@@ -49,6 +56,10 @@ export class EquipmentLook extends Script {
     target: {
       default: "",
       description: "entity whose model shows the item; empty = this entity's PARENT (the socketed model)",
+    },
+    inHand: {
+      default: true,
+      description: "a primary/offhand look follows the weapon set in hand: set 1 shows the secondary item in the primary hand and an empty off hand",
     },
     item: {
       default: "",
@@ -78,7 +89,7 @@ export class EquipmentLook extends Script {
     const actor = this.param<string>("actor");
     this.refresh();
     this.unsubscribe = this.store.onChange((key) => {
-      if (key === sheetKey(actor)) this.refresh();
+      if (key === sheetKey(actor) || key === handKey(actor)) this.refresh();
     });
   }
 
@@ -99,9 +110,12 @@ export class EquipmentLook extends Script {
       }));
       return;
     }
-    const slot = slots[0] ?? ("primary" as EquipmentSlot);
+    let slot = slots[0] ?? ("primary" as EquipmentSlot);
+    // the secondary set is held alone, in the main hand
+    const second = this.param<boolean>("inHand") && readHand(this.store, this.param<string>("actor")).set === 1;
+    if (second && slot === "primary") slot = "secondary";
     // an off-hand item stays worn under a two-hander, but is not drawn
-    const blocked = slot === "offhand" && sheet && twoHanderOf(sheet, { catalog: catalogOf(this.ctx) });
+    const blocked = slot === "offhand" && sheet && (second || twoHanderOf(sheet, { catalog: catalogOf(this.ctx) }));
     const uid = blocked ? undefined : sheet?.equipment[slot];
     this.show(uid ? sheet?.items[uid]?.itemId ?? null : null);
   }

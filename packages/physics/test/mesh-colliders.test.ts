@@ -228,3 +228,151 @@ describe("trimesh/convex colliders", () => {
     sim.free();
   });
 });
+
+describe("streamed static colliders (streamStatics)", () => {
+  /** A static trimesh "building" at x, its geometry a ±half quad offset in the model. */
+  function building(id: string, x: number, assetId = "model.glb"): Op {
+    return {
+      op: "add-entity",
+      id,
+      entity: {
+        name: id,
+        parent: null,
+        tags: [],
+        components: {
+          transform: { position: [x, 0, 0] },
+          mesh: { source: { kind: "asset", assetId } },
+          collider: { shape: "trimesh" },
+        },
+      },
+    };
+  }
+  const down = (sim: PhysicsSim, x: number) => sim.raycast([x, 5, 1.5], [0, -1, 0], 10);
+
+  it("defers static mesh colliders until a focus comes near, and releases them after it leaves", () => {
+    const doc = scene([building("near", 0), building("far", 500)]);
+    const sim = new PhysicsSim(doc, undefined, {
+      meshGeometry: () => quadGeometry(2),
+      streamStatics: { radius: 50, hysteresis: 10 },
+    });
+    expect(sim.stats()).toMatchObject({ statics: 2, staticsBuilt: 0 });
+    expect(down(sim, 0)).toBeNull(); // nothing built yet
+    sim.updateStatics([[0, 0, 0]]);
+    expect(sim.stats().staticsBuilt).toBe(1);
+    expect(down(sim, 0)?.entityId).toBe("near");
+    expect(down(sim, 500)).toBeNull();
+    // inside the hysteresis band: kept
+    sim.updateStatics([[55, 0, 0]]);
+    expect(down(sim, 0)?.entityId).toBe("near");
+    // well past it: released, still registered
+    sim.updateStatics([[200, 0, 0]]);
+    expect(sim.stats()).toMatchObject({ statics: 2, staticsBuilt: 0, staticsReleasedTotal: 1 });
+    expect(down(sim, 0)).toBeNull();
+    // come back: built again
+    sim.updateStatics([[0, 0, 0], [480, 0, 0]]);
+    expect(down(sim, 0)?.entityId).toBe("near");
+    expect(down(sim, 500)?.entityId).toBe("far");
+    sim.free();
+  });
+
+  it("cooks a big trimesh in pieces across updates, to the same surface", () => {
+    // a 100 x 100 quad grid over ±20 m: 20000 triangles, cooked in 40 pieces of at most 500
+    const n = 100;
+    const positions = new Float32Array((n + 1) * (n + 1) * 3);
+    for (let j = 0; j <= n; j++) {
+      for (let i = 0; i <= n; i++) positions.set([-20 + i * 0.4, 0, -20 + j * 0.4], (j * (n + 1) + i) * 3);
+    }
+    const indices: number[] = [];
+    for (let j = 0; j < n; j++) {
+      for (let i = 0; i < n; i++) {
+        const a = j * (n + 1) + i;
+        indices.push(a, a + n + 1, a + 1, a + 1, a + n + 1, a + n + 2);
+      }
+    }
+    const grid: MeshGeometryData = { positions, indices: new Uint32Array(indices) };
+    const sim = new PhysicsSim(scene([building("quay", 0)]), undefined, {
+      meshGeometry: () => grid,
+      // a small budget: each update cooks a few pieces while the focus is not close (> radius / 4)
+      streamStatics: { radius: 50, budgetMs: 0.5, pieceTriangles: 500 },
+    });
+    sim.updateStatics([[60, 0, 0]]);
+    expect(sim.stats().staticsBuilt).toBe(0); // some pieces on, the rest to come
+    expect(sim.stats().colliders).toBeGreaterThan(0);
+    expect(sim.stats().colliders).toBeLessThan(40);
+    for (let i = 0; i < 100 && sim.stats().staticsBuilt === 0; i++) sim.updateStatics([[60, 0, 0]]);
+    expect(sim.stats()).toMatchObject({ staticsBuilt: 1, staticsBuiltTotal: 1, colliders: 40 });
+    for (const [x, z] of [[-19.5, -19.5], [0.2, 0.3], [19.5, 19.5], [-19.5, 19.5], [7.7, -12.1]]) {
+      const hit = sim.raycast([x!, 5, z!], [0, -1, 0], 10);
+      expect(hit?.entityId).toBe("quay");
+      expect(hit?.distance).toBeCloseTo(5, 4);
+    }
+    // a half-cooked one is released like a built one
+    sim.updateStatics([[500, 0, 0]]);
+    sim.updateStatics([[60, 0, 0]]);
+    sim.updateStatics([[500, 0, 0]]);
+    expect(sim.stats()).toMatchObject({ staticsBuilt: 0, colliders: 0 });
+    // close enough that it must exist: all pieces at once
+    sim.updateStatics([[0, 0, 0]]);
+    expect(sim.stats()).toMatchObject({ staticsBuilt: 1, colliders: 40 });
+    sim.free();
+  });
+
+  it("uses the collider's real bounds, not the entity origin (world-space baked geometry)", () => {
+    // origin at 0 but the vertices sit around x=300 (a baked formation)
+    const shifted: MeshGeometryData = {
+      positions: new Float32Array([298, 0, -2, 302, 0, -2, 298, 0, 2, 302, 0, 2]),
+      indices: new Uint32Array([0, 2, 1, 1, 2, 3]),
+    };
+    const sim = new PhysicsSim(scene([building("rock", 0)]), undefined, {
+      meshGeometry: () => shifted,
+      streamStatics: { radius: 40 },
+    });
+    sim.updateStatics([[0, 0, 0]]);
+    expect(sim.stats().staticsBuilt).toBe(0);
+    sim.updateStatics([[290, 0, 0]]);
+    expect(down(sim, 300)?.entityId).toBe("rock");
+    sim.free();
+  });
+
+  it("ensureStaticsAround builds at once, and removed entities leave the registry", () => {
+    const sim = new PhysicsSim(scene([building("a", 0), building("b", 1000)]), undefined, {
+      meshGeometry: () => quadGeometry(2),
+      streamStatics: { radius: 30 },
+    });
+    sim.ensureStaticsAround(1000, 0);
+    expect(down(sim, 1000)?.entityId).toBe("b");
+    sim.removeEntities(["b", "a"]);
+    expect(sim.stats()).toMatchObject({ statics: 0, staticsBuilt: 0 });
+    expect(down(sim, 1000)).toBeNull();
+    sim.free();
+  });
+
+  it("a moving body added later finds the statics around it already built", () => {
+    const sim = new PhysicsSim(scene([building("a", 0), building("b", 1000)]), undefined, {
+      meshGeometry: () => quadGeometry(2),
+      streamStatics: { radius: 30 },
+    });
+    expect(sim.stats().staticsBuilt).toBe(0);
+    sim.addEntities(scene([crate]));
+    expect(sim.stats().staticsBuilt).toBe(1);
+    expect(down(sim, 0)?.entityId).toBe("a");
+    sim.free();
+  });
+
+  it("places async-geometry statics once their geometry arrives; dynamic bodies are never deferred", async () => {
+    const sim = new PhysicsSim(scene([building("near", 0), crate]), undefined, {
+      meshGeometry: () => Promise.resolve(quadGeometry(10)),
+      streamStatics: { radius: 50 },
+    });
+    expect(sim.states().has("crate")).toBe(true);
+    await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 0));
+    sim.updateStatics([[0, 0, 0]]);
+    await new Promise((r) => setTimeout(r, 0)); // the collider attaches when the provider resolves
+    simulateSeconds(sim, 2);
+    const pos = sim.states().get("crate")!.position;
+    expect(pos[1]).toBeGreaterThan(0.3);
+    expect(pos[1]).toBeLessThan(0.7);
+    sim.free();
+  });
+});

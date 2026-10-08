@@ -164,6 +164,8 @@ export interface MovementIntent {
   seq: number;
   /** Server time (ms) it arrived. */
   at: number;
+  /** The client's own clock (ms) when it sent this input, if it says — what timing drift is measured against. */
+  t?: number;
 }
 
 export interface PlayerRecord {
@@ -175,6 +177,8 @@ export interface PlayerRecord {
   input: MovementIntent | null;
   /** Last input seq the driver applied (echoed in snapshots for reconciliation). */
   appliedSeq: number;
+  /** World tick that seq was first applied: snapshots say how long it has been in force (`sa`, ms). */
+  appliedAt?: number;
   /** Server tick the player's link dropped, or null while connected (reconnect grace). */
   disconnectedAt: number | null;
   /** From the ticket; null on an open dev server (then nothing persists for this peer). */
@@ -208,6 +212,17 @@ export interface PlayerRecord {
   airTime?: number;
   /** Whether this body is in water, and how deep — the swim rules need the last state to hold a mode. */
   swim?: SwimState;
+  /**
+   * Timing drift (PlayerDriver.measureTiming): the input in force since `tick`, sent at client time `t` with
+   * velocity `v`, and the horizontal gap `drift` that a client running the SAME physics would see open up because
+   * this server applied inputs for longer or shorter than the client did. Counted, then reset, each time it passes
+   * 0.5 m (the client reconciles it away).
+   */
+  timing?: { seq: number; tick: number; t: number; v: [number, number]; drift: [number, number]; inputs: number; over05: number; maxM: number };
+  /** Client prediction vs the authority, measured on every input (GameServer.measureDivergence). */
+  divergence?: { samples: number; over05: number; nudges: number; snaps: number; maxM: number; reasons: Record<string, number>; lastAt: number | null; lastPos: [number, number, number] | null };
+  /** The [pitch, yaw] the owner last claimed, put back after every physics readback (see PlayerDriver.face). */
+  facing?: [number, number];
 }
 
 /**
@@ -631,6 +646,53 @@ export class PlayerDriver {
     return reach > 0 ? reach : null;
   }
 
+  /**
+   * The after-physics hook: a player body's sim rotation is locked, so the
+   * readback writes identity over the yaw `step` set, and every script after
+   * it (a guard's front arc, a backstab's rear) would judge a body facing +Z.
+   * No controller runs here to rewrite it each tick, so this does.
+   */
+  face = (): void => {
+    for (const player of this.players.values()) {
+      const object = player.facing ? this.world.objects.get(player.bodyId) : undefined;
+      if (object) object.rotation.set(player.facing![0], player.facing![1], 0, "YXZ");
+    }
+  };
+
+  /**
+   * A new input takes over: the one it replaces drove the body here for (ticks × dt) and on its client for
+   * (this input's send time − that one's). A client with identical physics is off by velocity × the difference;
+   * jitter cancels over time, a server that skips or drops time does not. Totals land in `timingTotals`.
+   */
+  private measureTiming(player: PlayerRecord, input: MovementIntent, v: [number, number]): void {
+    const tm = player.timing;
+    if (typeof input.t !== "number") return;
+    if (tm && input.seq > tm.seq && input.t >= tm.t) {
+      const serverMs = (this.world.tick - tm.tick) * this.world.fixedDt * 1000;
+      const clientMs = input.t - tm.t;
+      // a gap of seconds is a pause (a tab in the background), not drift
+      if (clientMs < 1000) {
+        const e = (serverMs - clientMs) / 1000;
+        tm.drift[0] += tm.v[0] * e;
+        tm.drift[1] += tm.v[1] * e;
+        tm.inputs++;
+        this.timingTotals.inputs++;
+        const size = Math.hypot(tm.drift[0], tm.drift[1]);
+        if (size > 0.5) {
+          tm.over05++;
+          this.timingTotals.over05++;
+          tm.maxM = Math.max(tm.maxM, Math.round(size * 100) / 100);
+          this.timingTotals.maxM = Math.max(this.timingTotals.maxM, Math.round(size * 100) / 100);
+          tm.drift = [0, 0]; // reconciled away on the client
+        }
+      }
+    }
+    player.timing = { seq: input.seq, tick: this.world.tick, t: input.t, v: [v[0], v[1]], drift: tm?.drift ?? [0, 0], inputs: tm?.inputs ?? 0, over05: tm?.over05 ?? 0, maxM: tm?.maxM ?? 0 };
+  }
+
+  /** Every player's timing drift since the server started (see measureTiming). */
+  readonly timingTotals = { inputs: 0, over05: 0, maxM: 0 };
+
   /** The before-step hook. */
   step = (): void => {
     const sim = this.world.sim;
@@ -671,6 +733,10 @@ export class PlayerDriver {
         if (requested > cap && requested > 0) {
           vx = (vx / requested) * cap;
           vz = (vz / requested) * cap;
+        }
+        if (player.appliedSeq !== input!.seq) {
+          player.appliedAt = this.world.tick;
+          this.measureTiming(player, input!, [vx, vz]);
         }
         player.appliedSeq = input!.seq;
       }
@@ -716,6 +782,7 @@ export class PlayerDriver {
             Math.min(this.swimMaxPitch, -Math.atan2(asked, Math.max(travel, 0.001))),
           );
           object.rotation.set(pitch, input!.yaw, 0, "YXZ");
+          player.facing = [pitch, input!.yaw];
         }
         const swimAnim = this.gaitClip(player, ud, vx, vy, vz, simNow, true, fresh ? input!.vy : 0);
         this.world.anims.set(player.bodyId, swimAnim.clip);
@@ -774,7 +841,10 @@ export class PlayerDriver {
         [vx, vz] = airSteer(vel[0], vel[2], vx, vz, fresh && Math.hypot(vx, vz) > 0, this.airControl, dt);
       }
       sim.setLinvel(player.bodyId, [vx, vy, vz]);
-      if (object && fresh) object.rotation.set(0, input!.yaw, 0);
+      if (object && fresh) {
+        object.rotation.set(0, input!.yaw, 0);
+        player.facing = [0, input!.yaw];
+      }
       const wadingDeep =
         player.swim === "wading" && water !== null && water.depth > this.wadeDeepDepth;
       const anim = this.gaitClip(player, ud, vx, vel[1], vz, simNow, false, 0, wadingDeep);

@@ -16,6 +16,7 @@ import {
   buildSceneMenu,
   newSceneMenuEntrySchema,
   describeMissingTools,
+  projectDependencyClosure,
   projectManifestSchema,
   resolveProjectTools,
   type ProjectToolReport,
@@ -174,6 +175,7 @@ function hitregBridge(): Plugin {
         "dialogues",
         "shops",
         "places",
+        "perform-actions",
         "models",
         "textures",
         "audio",
@@ -298,6 +300,33 @@ function hitregBridge(): Plugin {
         }
       };
       readProjectManifests();
+
+      /**
+       * The projects a scene loads with: its owning project plus `dependsOn`,
+       * transitively. null = unscoped (no scene given, a flat-tree scene, or an
+       * id no project owns), which keeps the old load-everything behaviour.
+       */
+      const projectScopeOf = (scene: string | null): string[] | null => {
+        if (!scene || !/^[a-z0-9][a-z0-9/_-]*$/i.test(scene) || !fs.existsSync(projectsRoot)) return null;
+        const owner = fs
+          .readdirSync(projectsRoot, { withFileTypes: true })
+          .find(
+            (entry) =>
+              entry.isDirectory() &&
+              fs.existsSync(path.join(projectsRoot, entry.name, "assets", "scenes", `${scene}.scene.json`)),
+          );
+        if (!owner) return null;
+        return projectDependencyClosure(owner.name, (name) => {
+          try {
+            const parsed = projectManifestSchema.safeParse(
+              JSON.parse(fs.readFileSync(path.join(projectsRoot, name, "project.json"), "utf8")),
+            );
+            return parsed.success ? parsed.data : null;
+          } catch {
+            return null;
+          }
+        });
+      };
 
       // The editor's scene menu: groups → projects → scenes, from each
       // project.json's `group`/`scenes` plus what is actually on disk. Read
@@ -525,8 +554,19 @@ function hitregBridge(): Plugin {
 
       // fresh-from-disk asset reads: dev NEVER trusts vite's module cache for
       // assets (the watcher ignores assets/, so cached imports go stale)
-      server.middlewares.use("/__hitreg/assets-index", (_req, res) => {
-        const index: Record<string, string[]> = Object.fromEntries(ASSET_KINDS.map((k) => [k, []]));
+      //
+      // ?scene=<id> scopes the index to the project owning that scene plus its
+      // project.json `dependsOn`, transitively — the editor boots a scene with
+      // only the content it can reach instead of parsing every project ever
+      // checked out. The x-hitreg-scope header names the projects included
+      // ("*" = unscoped). ?kinds=scenes,chunks walks only those kinds.
+      server.middlewares.use("/__hitreg/assets-index", (req, res) => {
+        const params = new URL(req.url ?? "", "http://x").searchParams;
+        const kindFilter = params.get("kinds")?.split(",").filter(Boolean);
+        const kinds = kindFilter ? ASSET_KINDS.filter((k) => kindFilter.includes(k)) : [...ASSET_KINDS];
+        const scope = projectScopeOf(params.get("scene"));
+        res.setHeader("x-hitreg-scope", scope ? scope.join(",") : "*");
+        const index: Record<string, string[]> = Object.fromEntries(kinds.map((k) => [k, []]));
         const walk = (dir: string, bucket: string[], base: string) => {
           if (!fs.existsSync(dir)) return;
           for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -535,7 +575,7 @@ function hitregBridge(): Plugin {
             else bucket.push(path.relative(base, full).split(path.sep).join("/"));
           }
         };
-        for (const kind of ASSET_KINDS) {
+        for (const kind of kinds) {
           walk(path.join(assetsRoot, kind), index[kind]!, path.join(assetsRoot, kind));
         }
         // merge in every projects/<name>/assets/<kind>/ tree — same virtual
@@ -544,8 +584,9 @@ function hitregBridge(): Plugin {
         if (fs.existsSync(projectsRoot)) {
           for (const entry of fs.readdirSync(projectsRoot, { withFileTypes: true })) {
             if (!entry.isDirectory()) continue;
+            if (scope && !scope.includes(entry.name)) continue;
             const projectAssets = path.join(projectsRoot, entry.name, "assets");
-            for (const kind of ASSET_KINDS) {
+            for (const kind of kinds) {
               const kindDir = path.join(projectAssets, kind);
               walk(kindDir, index[kind]!, kindDir);
             }
@@ -1462,7 +1503,21 @@ export default defineConfig({
   define: { "import.meta.env.HITREG_CONSOLE": JSON.stringify(devConsole ? "1" : "0") },
   server: {
     port: 5173,
-    watch: { ignored: ["**/assets/**"] },
+    // Under projects/<name>/ only scripts/ is code vite serves; authoring/,
+    // tools/, reports/ and the rest hold thousands of build outputs and
+    // .blend files. Watching them cost a handle per folder (which also blocks
+    // moving a project folder on Windows) and woke every dev server on every
+    // agent write.
+    watch: {
+      ignored: [
+        "**/assets/**",
+        (file: string) => {
+          const parts = file.split(/[\\/]/);
+          const at = parts.indexOf("projects");
+          return at !== -1 && parts.length > at + 2 && parts[at + 2] !== "scripts" && parts[at + 2] !== "project.json";
+        },
+      ],
+    },
   },
   build: gameBuild
     ? { target: "esnext", outDir: "dist-game", emptyOutDir: true, rollupOptions: { input: { play: "play.html" } } }

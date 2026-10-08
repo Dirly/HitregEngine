@@ -139,6 +139,7 @@ ctx.onmessage = (event: MessageEvent<VoxelWorkerRequest>) => {
           merged.indices.buffer as ArrayBuffer,
           merged.splat.buffer as ArrayBuffer,
           merged.tint.buffer as ArrayBuffer,
+          ...((merged.layerIndex && merged.layerWeight ? [merged.layerIndex.buffer, merged.layerWeight.buffer] : []) as ArrayBuffer[]),
         );
       }
       ctx.postMessage({ kind: "supercell", id: message.id, buckets: out } satisfies VoxelWorkerResponse, transfer);
@@ -168,6 +169,7 @@ ctx.onmessage = (event: MessageEvent<VoxelWorkerRequest>) => {
               mesh.indices.buffer,
               mesh.splat.buffer,
               mesh.tint.buffer,
+              ...(mesh.layerIndex && mesh.layerWeight ? [mesh.layerIndex.buffer, mesh.layerWeight.buffer] : []),
             ] as Transferable[]),
       );
     } catch (error) {
@@ -203,6 +205,7 @@ ctx.onmessage = (event: MessageEvent<VoxelWorkerRequest>) => {
           mesh.indices.buffer as ArrayBuffer,
           mesh.splat.buffer as ArrayBuffer,
           mesh.tint.buffer as ArrayBuffer,
+          ...((mesh.layerIndex && mesh.layerWeight ? [mesh.layerIndex.buffer, mesh.layerWeight.buffer] : []) as ArrayBuffer[]),
         );
       }
     }

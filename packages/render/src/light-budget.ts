@@ -1,4 +1,6 @@
 import * as THREE from "three/webgpu";
+import { readWorldPosition } from "./static-transforms.js";
+import { worldDaylight } from "./daylight.js";
 
 interface Entry {
   light: THREE.PointLight;
@@ -64,6 +66,14 @@ function ancestorsVisible(object: THREE.Object3D): boolean {
  * shadow-casting point light costs six cube faces and is budgeted at authoring
  * time (single digits per scene), not culled at runtime.
  */
+/** `light.when`: night lights scale by darkness, day lights by daylight. */
+function timeOfDayScale(light: THREE.Light): number {
+  const when = light.userData["lightWhen"];
+  if (when === "night") return 1 - worldDaylight.value;
+  if (when === "day") return worldDaylight.value;
+  return 1;
+}
+
 export class LightBudgetSystem {
   private readonly lights = new Set<THREE.PointLight>();
   private readonly cameraPosition = new THREE.Vector3();
@@ -126,7 +136,9 @@ export class LightBudgetSystem {
       // Authored lights are data from here on: hidden once, never toggled
       // again, so they contribute nothing to the renderer's light cache key.
       light.visible = false;
-      const distanceSq = light.getWorldPosition(_lightPosition).distanceToSquared(this.cameraPosition);
+      // a night lantern by day (or a day light at night) takes no slot at all
+      if (timeOfDayScale(light) < 0.01) continue;
+      const distanceSq = readWorldPosition(light, _lightPosition).distanceToSquared(this.cameraPosition);
       const entry = (candidates[count] ??= { light, importance: 1, distanceSq: 0 });
       entry.light = light;
       entry.importance = Math.max(0.001, Number(light.userData["lightImportance"]) || 1);
@@ -154,9 +166,9 @@ export class LightBudgetSystem {
         slot.distance = 1e-4;
         continue;
       }
-      source.getWorldPosition(slot.position);
+      readWorldPosition(source, slot.position);
       slot.color.copy(source.color);
-      slot.intensity = source.intensity;
+      slot.intensity = source.intensity * timeOfDayScale(source);
       slot.distance = source.distance;
       slot.decay = source.decay;
     }

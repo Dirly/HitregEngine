@@ -5,16 +5,39 @@ import { itemSchema } from "./items.js";
 import { progressionSchema } from "./progression.js";
 import { characterBuildSchema, characterCreationSchema, type CharacterCreation } from "./creation.js";
 import { characterSheetSchema } from "./sheet.js";
+import { GROUND_NETSTATE, groundItemSchema } from "./transfer.js";
+import {
+  LOOT_LOCK_NETSTATE,
+  LOOT_NETSTATE,
+  LOOT_ROLL_NETSTATE,
+  LOOT_SAVE_NETSTATE,
+  lootBagSchema,
+  lootLockSchema,
+  lootRollSchema,
+  savedBagsSchema,
+} from "./loot.js";
+import { HAND_NETSTATE, handStateSchema } from "./hand.js";
+import { BADGE_NETSTATE, CAST_NETSTATE, castBarSchema, plateBadgesSchema } from "./cast.js";
+import { PET_NETSTATE, TARGET_NETSTATE, petStateSchema, targetStateSchema } from "./target.js";
 import { questJournalSchema } from "../game-ui.js";
 import { registerNpcNetState } from "../npc/index.js";
+import { registerPortalNetState } from "../portal.js";
 
 export * from "./items.js";
 export * from "./progression.js";
 export * from "./sheet.js";
+export * from "./durability.js";
+export * from "./instance.js";
+export * from "./transfer.js";
+export * from "./loot.js";
+export * from "./soulbind.js";
 export * from "./events.js";
 export * from "./creation.js";
 export * from "./part-rules.js";
 export * from "./looks.js";
+export * from "./hand.js";
+export * from "./cast.js";
+export * from "./target.js";
 
 /** The replicated namespace a character sheet lives under: `character/<bodyId>`. */
 export const CHARACTER_NETSTATE = "character";
@@ -65,7 +88,18 @@ export function registerCharacterNetState(store: NetStateStore): void {
         "before the body spawns; the character-sheet authority applies it to a FRESH sheet only (a saved sheet already carries its build).",
     ),
   );
+  store.define(GROUND_NETSTATE, groundItemSchema); // ground/<dropId> — an item anyone may pick up, with its instance data
+  store.define(LOOT_NETSTATE, lootBagSchema, { audience: "owner" }); // lootbag/<bagId> — sent to its owner alone
+  store.define(LOOT_SAVE_NETSTATE, savedBagsSchema, { audience: "owner" }); // lootbags/<bodyId> — bags saved with their owner
+  store.define(LOOT_LOCK_NETSTATE, lootLockSchema); // lootlock/<bodyId> — a killed character being looted
+  store.define(LOOT_ROLL_NETSTATE, lootRollSchema); // lootroll/<rollId> — a party need/greed/pass roll
+  store.define(HAND_NETSTATE, handStateSchema); // hand/<bodyId> — the weapon set in hand and a pending swap
+  store.define(CAST_NETSTATE, castBarSchema); // cast/<bodyId> — a cast in progress, for cast bars
+  store.define(BADGE_NETSTATE, plateBadgesSchema); // badge/<bodyId> — timed statuses over a body (an interrupt lock)
+  store.define(TARGET_NETSTATE, targetStateSchema); // target/<bodyId> — the enemy it fights, the friend it supports
+  store.define(PET_NETSTATE, petStateSchema); // pet/<petId> — a creature fighting for a player
   registerNpcNetState(store);
+  registerPortalNetState(store); // portal/<bodyId> — a portal trip's arrival + way back, saved with the character
   store.define("quests", questJournalSchema.describe("Authority-owned quest journal keyed quests/<actorId>. Tracking requests validate body ownership; objective progress never accepts peer assertions."));
   store.define(
     CHARACTER_NETSTATE,

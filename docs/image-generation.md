@@ -77,6 +77,9 @@ folder. Project manifests reference request ids.
   reports `fixed` in its JSON. Keep saying "background must be pure white" anyway; this is the safety net.
 - **Alpha needs demanding.** Pass `--alpha` (or `"alpha": true`) and say "fully transparent background, real PNG
   alpha, not white, not a checkerboard" — the flag also makes the tool reject an opaque result.
+- **`--paint` repaints a screenshot.** The one `--ref` is then the COMPOSITION to keep (camera, layout, shapes), not a
+  style sample, and the downsample is smooth (it is a painting). `tools/loading-art.mts` uses it for loading screens
+  (docs/hosting.md → "Loading art").
 - **Nearest-neighbour on the downsample** is in the shared brief already; it is what keeps pixel art crisp.
 
 ## Skin: the tint contract

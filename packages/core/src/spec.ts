@@ -6,6 +6,7 @@ import type { ToolDescription, ToolRegistry } from "./tools.js";
 import { propSpecSchema, type PrefabSpec } from "./prefab.js";
 import { projectManifestSchema } from "./project.js";
 import { OP_SPECS } from "./ops.js";
+import { questBlocks, type QuestBlockRegistry, type QuestBlockSlot } from "./quest-blocks.js";
 import { z } from "zod";
 
 /**
@@ -37,6 +38,8 @@ export interface EngineSpecInputs {
   scripts?: Record<string, unknown>;
   /** Editor/asset tools contributed by the engine and installed plugins. */
   tools?: ToolRegistry;
+  /** Quest building blocks; default = the engine's own registry. */
+  questBlocks?: QuestBlockRegistry;
   /** Spec-shape version, so a consumer can detect format changes. */
   version?: string;
 }
@@ -77,6 +80,12 @@ export interface EngineSpec {
    * lets a host tell someone what they're missing before they hit it.
    */
   projectManifest: unknown;
+  /**
+   * Quest building blocks by slot (source / condition / action / consequence):
+   * name -> description, scope, optional rarity cap and the JSON Schema of its
+   * fields. Only blocks the quest runtime implements are listed.
+   */
+  questBlocks: Record<QuestBlockSlot, Record<string, unknown>>;
 }
 
 /** Current spec shape version — bump on a breaking change to EngineSpec. */
@@ -96,5 +105,6 @@ export function buildEngineSpec(inputs: EngineSpecInputs): EngineSpec {
     prefabs: inputs.assets?.prefabSpecs() ?? {},
     prefabProp: z.toJSONSchema(propSpecSchema, { io: "input" }),
     projectManifest: z.toJSONSchema(projectManifestSchema, { io: "input" }),
+    questBlocks: (inputs.questBlocks ?? questBlocks).describe(),
   };
 }

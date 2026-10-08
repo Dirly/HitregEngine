@@ -40,6 +40,7 @@ import {
   placeTokens,
   type Places,
 } from "@hitreg/core";
+import { interiorUnitFor, placeUnder, RESIDENT_CULLING } from "./town-npc-placement.mts";
 
 const here = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
 const arg = (name: string, fallback: string): string => {
@@ -47,6 +48,9 @@ const arg = (name: string, fallback: string): string => {
   return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1]! : fallback;
 };
 const checkOnly = process.argv.includes("--check");
+// --pending-quests: dialogue refs to quests/items the zone quest phase has not written yet only WARN, so a town can get
+// its bodies before its quests. Re-run without it once the quests exist; never install live with it.
+const pendingQuests = process.argv.includes("--pending-quests");
 const townName = arg("town", "");
 const projectName = arg("project", "");
 if (!townName || !projectName) {
@@ -61,7 +65,8 @@ interface Resident {
   name: string;
   title: string;
   role: string;
-  place: { at: [number, number]; face?: [number, number]; yaw?: number };
+  /** `inside`: a scene entity id — the building (or its `culling.interior` unit) the resident stands in; they go under that unit, hidden from outside. */
+  place: { at: [number, number]; face?: [number, number]; yaw?: number; inside?: string };
   anim?: string;
   appearance: Record<string, string>;
   wear: string[];
@@ -69,6 +74,9 @@ interface Resident {
   dialogue: string;
   shop?: string;
   vault?: boolean;
+  /** The HEARTH (an innkeeper): where its dialogue's `bindSoul` binds the respawn ([x, y, z] world; absent = where the resident stands) and the place name (absent = the resident's name). A soul binder offers `openSoulbind` instead. */
+  bindPoint?: [number, number, number];
+  bindName?: string;
   radius?: number;
   about?: string;
   /** Held items (weapons, a shield, a staff…), socketed like the rig prefab socket that model; `holstered` sheathes them. */
@@ -170,8 +178,8 @@ for (const r of doc.residents) {
   }
   for (const ref of refs) {
     if (ref.startsWith("item:")) {
-      if (!itemIds.has(ref.slice(5))) problems.push(`dialogue ${r.dialogue}: unknown item "${ref.slice(5)}"`);
-    } else if (!quests.has(ref)) problems.push(`dialogue ${r.dialogue}: unknown quest "${ref}"`);
+      if (!itemIds.has(ref.slice(5))) (pendingQuests ? warn : problems).push(`dialogue ${r.dialogue}: unknown item "${ref.slice(5)}"`);
+    } else if (!quests.has(ref)) (pendingQuests ? warn : problems).push(`dialogue ${r.dialogue}: unknown quest "${ref}"`);
   }
   if (r.shop) {
     if (!exists("shops", r.shop)) problems.push(`${r.id}: no shop assets/shops/${r.shop}.json`);
@@ -308,11 +316,27 @@ const placesTable: Places = { origin: [0, 0], places: {} };
     for (const id of placeTokens(text)) if (!known.has(id)) problems.push(`${where}: unknown place "${id}" (add it to the town doc's places)`);
   };
   for (const q of quests.values()) {
-    const ours = residents.has(q.giver) || residents.has(q.turnIn) || q.places === placesId;
+    // a step in another town names its own places (objective `places`): its label is that town's to lint
+    const homeSteps = q.objectives.filter((o) => !(o as { places?: string }).places);
+    const stepsHere = q.objectives.filter((o) => (o as { places?: string }).places === placesId);
+    const ours = residents.has(q.giver) || residents.has(q.turnIn) || q.places === placesId || stepsHere.length > 0;
     if (!ours) continue;
-    if (q.places !== placesId && placeTokens([q.title, q.description, ...q.objectives.map((o) => o.label), q.area?.label ?? ""].join(" ")).length > 0)
+    const homeText = [q.title, q.description, q.area?.label ?? "", ...homeSteps.map((o) => o.label)];
+    // a zone quest given by a resident carries the ZONE's places table (zonegen bind writes it): its text is linted
+    // against that table, not against this town's
+    const other = q.places && q.places !== placesId ? path.join(assets, "places", `${q.places}.json`) : "";
+    if (other && fs.existsSync(other)) {
+      const theirs = new Set(Object.keys((readJson(other) as { places?: Record<string, unknown> }).places ?? {}));
+      for (const t of homeText) {
+        for (const w of literalCompassWords(t)) problems.push(`quest ${q.id}: literal compass word "${w}" in "${t.slice(0, 80)}" — name the place instead ({dir:<place>})`);
+        for (const id of placeTokens(t)) if (!theirs.has(id)) problems.push(`quest ${q.id}: unknown place "${id}" (not in ${q.places})`);
+      }
+      continue;
+    }
+    if (q.places !== placesId && (residents.has(q.giver) || residents.has(q.turnIn) || q.places === "") && placeTokens(homeText.join(" ")).length > 0)
       problems.push(`quest ${q.id}: uses place tokens but its "places" is not "${placesId}"`);
-    for (const t of [q.title, q.description, q.area?.label ?? "", ...q.objectives.map((o) => o.label)]) lint(`quest ${q.id}`, t);
+    if (q.places === placesId || residents.has(q.giver) || residents.has(q.turnIn)) for (const t of homeText) lint(`quest ${q.id}`, t);
+    for (const o of stepsHere) lint(`quest ${q.id}/${o.id}`, o.label);
   }
   for (const r of doc.residents) {
     if (!exists("dialogues", r.dialogue)) continue;
@@ -359,8 +383,12 @@ function clearTown(scene: SceneDoc): void {
 }
 
 /** One resident: the root (collider + npc), the skinned body, and a character-look per model it shows. */
-function addResident(scene: SceneDoc, r: Resident, at: [number, number, number], yaw: number): string[] {
+function addResident(scene: SceneDoc, r: Resident, at: [number, number, number], yaw: number, inPlace = true): string[] {
   const wear = wearOf(r);
+  // indoors: under the building's interior unit, so the culler hides them with its furnishings
+  const unit = inPlace && r.place.inside ? interiorUnitFor(scene.entities, r.place.inside) : null;
+  if (inPlace && r.place.inside && !unit) throw new Error(`${r.id}: place.inside "${r.place.inside}" is not a building with a culling.interior unit (or such a unit) in the scene`);
+  const placed = placeUnder(scene.entities, unit, at, yaw);
   const worn = new Set(wear.map(itemModel));
   const look = { actor: r.id, creation: doc.creation, appearance: r.appearance, wear };
   const add = (id: string, e: Omit<Entity, "tags"> & { tags?: string[] }): void => {
@@ -368,10 +396,14 @@ function addResident(scene: SceneDoc, r: Resident, at: [number, number, number],
   };
   add(r.id, {
     name: r.name,
-    parent: null,
+    parent: unit,
     tags: ["interactable", "townsfolk", tag],
     components: {
-      transform: { position: at.map(round), rotation: [0, round(Math.sin(yaw / 2)), 0, round(Math.cos(yaw / 2))], scale: [1, 1, 1] },
+      transform: unit
+        ? { position: placed.position.map(round), rotation: placed.rotation.map(round), scale: [1, 1, 1] }
+        : { position: at.map(round), rotation: [0, round(Math.sin(yaw / 2)), 0, round(Math.cos(yaw / 2))], scale: [1, 1, 1] },
+      // screen-size culling for a small animated thing in a town (docs/culling.md)
+      culling: { ...RESIDENT_CULLING },
       rigidbody: { kind: "static" },
       collider: { shape: "capsule", size: [0.8, 1.8, 0.8], friction: 0.4 },
       script: {
@@ -379,6 +411,7 @@ function addResident(scene: SceneDoc, r: Resident, at: [number, number, number],
         params: {
           name: r.name, title: r.title, dialogue: r.dialogue, places: placesId,
           ...(r.shop ? { shop: r.shop } : {}), ...(r.vault ? { vault: true } : {}), ...(r.hold?.holstered ? { holstered: true } : {}),
+          ...(r.bindPoint ? { bindPoint: r.bindPoint } : {}), ...(r.bindName ? { bindName: r.bindName } : {}),
           radius: r.radius ?? doc.defaults.radius,
         },
       },
@@ -389,7 +422,8 @@ function addResident(scene: SceneDoc, r: Resident, at: [number, number, number],
     components: {
       transform: { position: [0, -0.9, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] },
       mesh: { source: { kind: "asset", assetId: bodyModel, textureFilter: "nearest", partMask: 511 }, castShadow: true, receiveShadow: true, renderMode: "auto", lod: true, static: false },
-      animator: { play: r.anim ?? doc.defaults.anim, fade: 0.3, speed: 1 },
+      animator: { play: r.anim ?? doc.defaults.anim, fade: 0.3, speed: 1,
+        poseLod: [{ distance: 40, fps: 20 }, { distance: 100, fps: 10 }] },
     },
   });
   add(`${r.id}-look`, { name: `${r.name} look`, parent: `${r.id}-visual`, components: { transform: identity, script: { name: "character-look", params: look } } });
@@ -490,7 +524,7 @@ if (lineup) {
     const t = n === 1 ? 0 : -Math.PI / 3 + (i / (n - 1)) * ((Math.PI * 2) / 3);
     const x = Math.sin(t) * radius;
     const z = 9 - Math.cos(t) * radius;
-    addResident(lab, r, [x, 0.9, z], Math.atan2(0 - x, 9 - z));
+    addResident(lab, r, [x, 0.9, z], Math.atan2(0 - x, 9 - z), false);
   });
   validate(lab);
   ensureUi(lab);

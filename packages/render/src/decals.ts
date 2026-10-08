@@ -2,7 +2,7 @@ import * as THREE from "three/webgpu";
 import { DecalGeometry } from "three/addons/geometries/DecalGeometry.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { attribute, float, mul } from "three/tsl";
-import { loadSharedTexture } from "./material-maps.js";
+import { loadSharedTexture, type TextureFilter } from "./material-maps.js";
 
 /**
  * Projected decals — the `decal` component (see @hitreg/core
@@ -23,10 +23,9 @@ import { loadSharedTexture } from "./material-maps.js";
  * - nearby geometry moved  -> reconcile's transform patch calls
  *                             reprojectDecalsAround
  *
- * v1 limits (deliberate): only meshes present at projection time receive
- * decals — async glTF models that pop in later, InstancedMesh batches and
- * skinned meshes are skipped; and a chunk-cell build only projects onto its
- * own cell's content.
+ * Async static glTF arrival re-fits nearby projectors. InstancedMesh batches
+ * and skinned meshes remain excluded; a chunk-cell build only projects onto
+ * its own cell's content.
  */
 
 /** Mirrors the core `decal` schema (post-validation shape). */
@@ -38,6 +37,9 @@ export interface DecalData {
   direction: [number, number, number];
   opacity: number;
   color: string;
+  emissive?: string;
+  emissiveIntensity?: number;
+  filter?: TextureFilter;
   fadeDepth?: number;
   sortOffset?: number;
 }
@@ -87,11 +89,11 @@ function registryFor(root: THREE.Object3D): Map<string, LiveDecal> {
 // url so many decals share one clamped instance.
 const decalTextureCache = new Map<string, Promise<THREE.Texture>>();
 
-function loadDecalTexture(url: string, maxAnisotropy: number): Promise<THREE.Texture> {
-  const key = `${maxAnisotropy}|${url}`;
+function loadDecalTexture(url: string, maxAnisotropy: number, filter: TextureFilter): Promise<THREE.Texture> {
+  const key = `${maxAnisotropy}|${filter}|${url}`;
   let pending = decalTextureCache.get(key);
   if (!pending) {
-    pending = loadSharedTexture(url, true, maxAnisotropy).then((shared) => {
+    pending = loadSharedTexture(url, true, maxAnisotropy, filter).then((shared) => {
       const clamped = shared.clone();
       clamped.wrapS = THREE.ClampToEdgeWrapping;
       clamped.wrapT = THREE.ClampToEdgeWrapping;
@@ -189,6 +191,8 @@ function makeDecalMaterial(
 ): THREE.Material {
   const material = new THREE.MeshStandardNodeMaterial({
     color: new THREE.Color(data.color),
+    emissive: new THREE.Color(data.emissive ?? "#000000"),
+    emissiveIntensity: data.emissiveIntensity ?? 1,
     roughness: 0.9,
     metalness: 0,
     transparent: true,
@@ -204,12 +208,15 @@ function makeDecalMaterial(
     material.opacityNode = mul(float(data.opacity), float(attribute<"float">("decalFade", "float")));
   }
   const epoch = group.userData["visualsEpoch"] as number | undefined;
-  loadDecalTexture(url, options.resolveMaxAnisotropy?.() ?? 0).then(
+  loadDecalTexture(url, options.resolveMaxAnisotropy?.() ?? 0, data.filter ?? "linear").then(
     (texture) => {
       // the entity's visuals were rebuilt while the image decoded — a newer
       // material owns the decal now
       if (group.userData["visualsEpoch"] !== epoch) return;
       material.map = texture;
+      // Reuse the same clamped sRGB texture: emission follows the painted
+      // detail, while the color map's alpha still masks the entire material.
+      material.emissiveMap = texture;
       material.needsUpdate = true;
     },
     (error) => console.warn(`[render] decal texture failed to load: ${url}`, error),

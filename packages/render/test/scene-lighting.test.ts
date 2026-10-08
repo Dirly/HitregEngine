@@ -258,6 +258,43 @@ describe("scene-builder lighting integration", () => {
     expect(request?.settings.samples).toBe(DEFAULT_VOLUMETRIC_SETTINGS.samples);
     built.lighting.dispose();
   });
+
+  it("closes the sky under overcast: full deck, no sun disc, no shafts, soft sun — and opens it again", () => {
+    const built = buildScene(
+      doc({
+        sun: sunEntity({ shadow: { enabled: false }, intensity: 2 }),
+        sky: skyEntity({
+          volumetric: { enabled: true, intensity: 1.2 },
+          environment: { mode: "none" },
+          sun: { intensity: 1.5 },
+          clouds: { coverage: 0.4, sunAmount: 0.5 },
+        }),
+      }),
+    );
+    const lighting = built.lighting;
+    lighting.frame(new THREE.PerspectiveCamera());
+    const dome = lighting.skyDomeUniforms()!;
+    const sun = findLight(built, "sun") as THREE.DirectionalLight;
+    const plan = () => passPlan(resolvePostFx(null), { volumetric: lighting.volumetricRequest() });
+
+    lighting.setSkyLive({ weather: { overcast: 1 } });
+    expect(dome.cloudCoverage.value).toBeCloseTo(1, 5);
+    expect(dome.sunIntensity.value).toBe(0);
+    expect(dome.cloudSunAmount.value).toBe(0);
+    expect(sun.intensity).toBeCloseTo(0.5, 5);
+    const closed = lighting.volumetricRequest()!;
+    expect(closed.settings.intensity).toBeLessThan(0.001);
+    // dimmed, never planned out: removing the pass would rebuild the chain as every storm arrives
+    expect(plan()).toContain("volumetrics");
+
+    lighting.setSkyLive({ weather: { overcast: 0 } });
+    expect(dome.cloudCoverage.value).toBeCloseTo(0.4, 5);
+    expect(dome.sunIntensity.value).toBeCloseTo(1.5, 5);
+    expect(dome.cloudSunAmount.value).toBeCloseTo(0.5, 5);
+    expect(sun.intensity).toBeCloseTo(2, 5);
+    expect(lighting.volumetricRequest()!.settings.intensity).toBeCloseTo(1.2, 5);
+    lighting.dispose();
+  });
 });
 
 describe("post plan with volumetrics", () => {

@@ -122,6 +122,15 @@ export type Message = ClientMessage | HostMessage;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
+/** A message already serialised to JSON, framed for the wire (it must be a valid {@link Message}). */
+export function encodeJson(json: string): Uint8Array {
+  const bytes = textEncoder.encode(json);
+  const out = new Uint8Array(1 + bytes.length);
+  out[0] = FORMAT_JSON;
+  out.set(bytes, 1);
+  return out;
+}
+
 export function encodeMessage(message: Message): Uint8Array {
   const json = textEncoder.encode(JSON.stringify(message));
   const out = new Uint8Array(1 + json.length);

@@ -19,6 +19,8 @@ export interface TicketClaims {
   sub: string;
   /** Character id — also the peer id the layer assigns. */
   chr: string;
+  /** Save identity selected by main (character id for new characters, account id for legacy saves). */
+  saveId?: string;
   /** Display name. */
   name: string;
   /** Server id this ticket admits to (a layer or an instance). */
@@ -79,6 +81,7 @@ export function verifyTicket(secret: string, ticket: string, expect: { srv: stri
   if (typeof claims.sub !== "string" || typeof claims.chr !== "string" || typeof claims.srv !== "string" || typeof claims.exp !== "number") {
     return { ok: false, reason: "malformed ticket" };
   }
+  if (claims.saveId !== undefined && (typeof claims.saveId !== "string" || !/^[A-Za-z0-9_-]{3,64}$/.test(claims.saveId))) return { ok: false, reason: "malformed save identity" };
   const now = expect.now ?? Math.floor(Date.now() / 1000);
   if (now > claims.exp) return { ok: false, reason: "ticket expired" };
   if (claims.srv !== expect.srv) return { ok: false, reason: "ticket is for another server" };

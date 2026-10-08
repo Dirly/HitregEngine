@@ -37,6 +37,7 @@ import {
 } from "@hitreg/core";
 import { applyModelAppearance, loadGltf, PortraitView, type SkinSheet } from "@hitreg/render";
 import type { CreationPreview } from "./character-creation.js";
+import { STAGE_FOG, STAGE_FRAMING, clearingStage } from "./creation-stage.js";
 
 /** The colour slot material that recolours skin texels rather than a material. */
 const SKIN = "Skin";
@@ -45,6 +46,7 @@ export function createCreationPreview(
   canvas: HTMLCanvasElement,
   creation: CharacterCreation,
   resolveModel: (assetId: string) => string | undefined,
+  resolveTexture: (assetId: string) => string | undefined = () => undefined,
 ): CreationPreview {
   let view: PortraitView | null = null;
   let bodyUrl = "";
@@ -52,7 +54,11 @@ export function createCreationPreview(
   let yaw = 0;
   let alive = true;
   let generation = 0;
+  let focus: "body" | "face" = "body";
+  let zoom = 0;
   const pieces: THREE.Object3D[] = [];
+  // the clearing the character stands in, when the screen has a painted scene behind it
+  const staged = !!creation.ui?.scene;
 
   const pixelated = (root: THREE.Object3D): void => {
     // the game draws its characters nearest-filtered (PSX look); so does the preview
@@ -67,6 +73,63 @@ export function createCreationPreview(
           map.needsUpdate = true;
         }
       }
+    });
+  };
+
+  /**
+   * The in-game hang blend (render `applyInstanceHang`, character-look's
+   * `hangDelta`) done on the CPU for the preview's one plain copy: each frame,
+   * a vertex with hang weight w (uv1.y) moves toward where the hang bone would
+   * carry it: plumb (no hang bone — the socket as the bind pose holds it on
+   * the body's root, at the socket's position now) or on a hang bone.
+   */
+  const hangOnto = (object: THREE.Object3D, socket: THREE.Object3D, hangName: string | null): void => {
+    let skinned: THREE.SkinnedMesh | null = null;
+    view!.model.traverse((o) => {
+      if (!skinned && (o as THREE.SkinnedMesh).isSkinnedMesh) skinned = o as THREE.SkinnedMesh;
+    });
+    const body = skinned as THREE.SkinnedMesh | null;
+    const sk = body?.skeleton;
+    const c = sk && hangName ? sk.bones.findIndex((b) => b.name === hangName) : -1;
+    const h = sk ? sk.bones.indexOf(socket as THREE.Bone) : -1;
+    if (!body || !sk || h < 0 || (hangName && c < 0)) {
+      console.warn(`[creation] no bone "${hangName ?? socket.name}" to hang from`);
+      return;
+    }
+    const socketAtBind = sk.boneInverses[h]!.clone().invert();
+    const frame: THREE.Object3D = hangName ? sk.bones[c]! : body;
+    const rest = (hangName ? sk.boneInverses[c]!.clone() : body.bindMatrix.clone()).multiply(socketAtBind);
+    const delta = new THREE.Matrix4();
+    const inverse = new THREE.Matrix4();
+    const p = new THREE.Vector3();
+    const q = new THREE.Vector3();
+    object.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      const uv1 = mesh.isMesh ? mesh.geometry.getAttribute("uv1") : undefined;
+      if (!uv1) return;
+      let hangs = false;
+      for (let i = 0; i < uv1.count && !hangs; i++) hangs = uv1.getY(i) > 0;
+      if (!hangs) return;
+      // this copy's own positions: the loaded model's geometry is shared
+      mesh.geometry = mesh.geometry.clone();
+      const pos = mesh.geometry.getAttribute("position") as THREE.BufferAttribute;
+      const base = Float32Array.from(pos.array as Float32Array);
+      mesh.onBeforeRender = () => {
+        // delta in the mesh's own space: inv(M) · G · inv(H) · M (character-look's followHang)
+        delta.multiplyMatrices(frame.matrixWorld, rest);
+        if (!hangName) delta.setPosition(p.setFromMatrixPosition(socket.matrixWorld));
+        delta.multiply(inverse.copy(socket.matrixWorld).invert());
+        delta.premultiply(inverse.copy(mesh.matrixWorld).invert()).multiply(mesh.matrixWorld);
+        const a = pos.array as Float32Array;
+        for (let i = 0; i < pos.count; i++) {
+          const w = uv1.getY(i);
+          if (w <= 0) continue;
+          p.fromArray(base, i * 3);
+          q.copy(p).applyMatrix4(delta);
+          p.lerp(q, w).toArray(a, i * 3);
+        }
+        pos.needsUpdate = true;
+      };
     });
   };
 
@@ -161,10 +224,17 @@ export function createCreationPreview(
       // neutral-warm light: the default cool studio fill turned dark skin tones grey-violet
       view = new PortraitView(gltf.scene, canvas, {
         clips: gltf.animations,
-        padding: 1.35,
-        lights: { sky: 0xf1ebe3, ground: 0x3a3029, rim: 0xffe9d6 },
+        ...(staged ? {} : { padding: 1.35 }),
+        // in the clearing: the painting's light — a warm low sun from the left, a cool shaded sky, a gold rim
+        lights: staged
+          ? { sky: 0xb9c4bb, ground: 0x2c2a22, key: 0xffd9a8, rim: 0xffc27a, scale: 0.62 }
+          : { sky: 0xf1ebe3, ground: 0x3a3029, rim: 0xffe9d6 },
+        // full screen behind the panels: further back, standing above the name and buttons
+        ...(staged ? { stage: clearingStage(resolveModel, resolveTexture), fog: STAGE_FOG, padding: STAGE_FRAMING.padding, aimLow: STAGE_FRAMING.aimLow } : {}),
       });
       view.setYaw(yaw);
+      view.setFocus(focus);
+      view.setZoom(zoom);
     } catch (error) {
       console.warn("[creation] body model failed to load:", error);
     }
@@ -183,6 +253,8 @@ export function createCreationPreview(
     rotationDeg?: [number, number, number];
     scale?: number;
     mirrorTo?: { socket: string; offset: [number, number, number]; rotationDeg: [number, number, number] };
+    /** The bone the model's hanging ends follow (the mount's `hang`). */
+    hang?: { socket?: string | undefined };
     texture?: string;
     parts: Set<string> | null;
     hideBones: string[];
@@ -225,6 +297,7 @@ export function createCreationPreview(
       piece.rotationDeg ??= at.rotationDeg;
       piece.scale ??= at.scale;
       piece.mirrorTo ??= at.mirrorTo;
+      piece.hang ??= at.hang;
       piece.texture ??= option.texture;
       if (option.parts) for (const part of option.parts) (piece.parts ??= new Set()).add(part);
       if (option.hideBones) piece.hideBones.push(...option.hideBones);
@@ -413,6 +486,7 @@ export function createCreationPreview(
       holder.add(object);
       bone.add(holder);
       pieces.push(holder);
+      if (piece.hang && !mirror) hangOnto(object, bone, piece.hang.socket ?? null);
     };
     for (const { piece, scene } of loaded) {
       mount(piece, scene, piece, false);
@@ -425,6 +499,15 @@ export function createCreationPreview(
     setYaw: (radians) => {
       yaw = radians;
       view?.setYaw(radians);
+    },
+    setFocus: (f) => {
+      focus = f;
+      zoom = f === "face" ? 1 : 0;
+      view?.setFocus(f);
+    },
+    setZoom: (t) => {
+      zoom = Math.max(0, Math.min(1, t));
+      view?.setZoom(zoom);
     },
     dispose: () => {
       alive = false;

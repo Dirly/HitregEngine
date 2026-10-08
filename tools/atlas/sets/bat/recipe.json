@@ -1,0 +1,163 @@
+{
+ "source": "MMO/3d/Mobs/Dragon/Bat-parts.obj",
+ "sourceScale": 1,
+ "objScale": 1,
+ "outMesh": "MMO/3d/Mobs/Dragon/Bat-unwrapped",
+ "sheet": 1254,
+ "keyStroke": 8,
+ "smooth": 48,
+ "margin": 22,
+ "gutter": 48,
+ "atlas": {
+  "size": 242,
+  "bleed": 2,
+  "bgLum": 236
+ },
+ "mirrorCopy": {
+  "axis": "z",
+  "parts": [
+   "Bat_Head",
+   "Bat_Body",
+   "Bat_Wing"
+  ]
+ },
+ "slots": {
+  "head": {
+   "color": "#ff0000",
+   "fit": "contain",
+   "labelMax": 1
+  },
+  "body": {
+   "color": "#00ff00",
+   "fit": "contain"
+  },
+  "wing": {
+   "color": "#0000ff",
+   "fit": "contain"
+  },
+  "crown": {
+   "color": "#ff00ff",
+   "fit": "contain",
+   "matchTo": "head",
+   "label": "head top"
+  },
+  "snout": {
+   "color": "#ff8000",
+   "fit": "contain",
+   "matchTo": "head",
+   "label": "face front"
+  },
+  "ear-inner": {
+   "color": "#ffff00",
+   "fit": "contain",
+   "label": "inner ear"
+  }
+ },
+ "parts": {
+  "Bat_Head": {
+   "slot": "head",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.4,
+   "split": [
+    {
+     "slot": "ear-inner",
+     "facing": "+x",
+     "above": 0.85,
+     "where": {
+      "x": [
+       0,
+       0.4
+      ],
+      "y": [
+       0.5,
+       1
+      ]
+     },
+     "u": "-z",
+     "v": "-y",
+     "flare": 0.1
+    },
+    {
+     "slot": "snout",
+     "facing": "+x",
+     "above": 0.7,
+     "where": {
+      "y": [
+       0,
+       0.5
+      ]
+     },
+     "u": "-z",
+     "v": "-y",
+     "flare": 0.15
+    },
+    {
+     "slot": "crown",
+     "facing": "+y",
+     "above": 0.7,
+     "u": "+x",
+     "v": "+z",
+     "flare": 0.15
+    }
+   ]
+  },
+  "Bat_Body": {
+   "slot": "body",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.35
+  },
+  "Bat_Wing": {
+   "slot": "wing",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  }
+ },
+ "layout": {
+  "col": [
+   {
+    "row": [
+     "wing"
+    ]
+   },
+   {
+    "row": [
+     "body",
+     "head",
+     {
+      "col": [
+       "crown",
+       "snout",
+       "ear-inner"
+      ]
+     }
+    ]
+   }
+  ]
+ },
+ "marks": [
+  {
+   "slot": "head",
+   "at": [
+    0.1881,
+    0.5554,
+    -0.0286
+   ],
+   "shape": "eye",
+   "size": 10
+  }
+ ],
+ "cutoutSlots": [],
+ "combos": [
+  [
+   "Bat_Head",
+   "Bat_Body",
+   "Bat_Wing"
+  ]
+ ]
+}

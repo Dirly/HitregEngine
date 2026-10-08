@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "id": "hitreg.statue-maker",
+  "name": "Statue Maker",
+  "description": "Freeze a character or creature into a smooth-shaded static sculpture and an anchored prefab. Accepts a portable recipe/model bundle made by the CLI.",
+  "category": "Assets/Generate",
+  "surfaces": ["tools", "assets"],
+  "permissions": ["assets.write:models", "assets.write:prefabs"],
+  "entry": "./run.mjs",
+  "inputs": {
+    "bundle": {
+      "kind": "file",
+      "label": "Statue recipe bundle",
+      "description": "Portable JSON containing recipe and embedded source GLBs. Create with statue-maker/cli.mjs pack. Material and optional pedestal must already exist in the target project.",
+      "accept": ["application/json"],
+      "maxBytes": 67108864
+    }
+  }
+}

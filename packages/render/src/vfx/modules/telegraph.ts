@@ -237,13 +237,14 @@ export class TelegraphLive extends LiveModule<TelegraphModule> {
   protected onBegin(): void {
     const m = this.module;
     this.rebuild(m);
-    // `pixel` is cells across the shape; the grid is in world metres
-    const cells = m.pixel > 0 ? Math.max(1.5, m.pixel / Math.max(0.5, m.radius * 2)) : 0;
+    // the grid is in world metres: the spell's texel, else `pixel` cells across the shape
+    const texel = this.texelSize();
+    const cells = texel > 0 ? 1 / texel : m.pixel > 0 ? Math.max(1.5, m.pixel / Math.max(0.5, m.radius * 2)) : 0;
     for (const s of [this.fillS, this.rimS, this.wallS]) {
       s.color.value.copy(this.color);
       s.cells.value = cells;
       s.steps.value = m.posterize;
-      s.dash.value = m.pixel > 0 ? m.dash : 0;
+      s.dash.value = cells > 0 ? m.dash : 0;
       s.opacity.value = 0;
     }
     const p = this.pose.position;

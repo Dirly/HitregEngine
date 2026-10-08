@@ -3,7 +3,7 @@
   "private": true,
   "packageManager": "pnpm@9.15.0",
   "scripts": {
-    "test": "pnpm -r run test && node tools/wfc-3d/self-test.mjs && node tools/wfc-3d/self-test-kit.mjs && node tools/mesh-dc/self-test.mjs",
+    "test": "pnpm -r run test && node tools/wfc-3d/self-test.mjs && node tools/wfc-3d/self-test-kit.mjs && node tools/mesh-dc/self-test.mjs && node --test tools/statue-maker/self-test.mjs && node --test tools/poi-review/self-test.mjs tools/poi-review/catalog-check.test.mjs tools/poi-review/creator/brief.test.mjs tools/dungeon-pipeline/arrival.test.mjs tools/poi-review/job.test.mjs",
     "typecheck": "pnpm -r run typecheck",
     "spec": "pnpm -F @hitreg/core spec"
   },

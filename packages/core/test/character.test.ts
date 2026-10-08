@@ -166,6 +166,39 @@ describe("grid inventory (one cell per stack)", () => {
   });
 });
 
+describe("crit stats", () => {
+  const gloves = itemSchema.parse({ name: "Keen Gloves", slots: ["gloves"], weight: 0.5, modifiers: { crit: 1, dexterity: 10 } });
+  const circlet = itemSchema.parse({ name: "Circlet", slots: ["helm"], weight: 0.2, modifiers: { spellCrit: 2.5 } });
+  const critEnv: SheetEnv = { catalog: (id) => ({ gloves, circlet })[id], progression: DEFAULT_PROGRESSION };
+
+  it("are derived stats in percent points: 5 base, a tenth per point of dexterity / intelligence", () => {
+    const d = derivedStats(createSheet(), critEnv);
+    // every attribute starts at 10
+    expect(d.stats.crit).toBeCloseTo(6);
+    expect(d.stats.spellCrit).toBeCloseTo(6);
+    expect(DEFAULT_PROGRESSION.derived.crit).toMatchObject({ base: 5, dexterity: 0.1 });
+    expect(DEFAULT_PROGRESSION.derived.spellCrit).toMatchObject({ base: 5, intelligence: 0.1 });
+  });
+
+  it("take a worn item's flat '+1 crit' and its attribute, like any other derived stat", () => {
+    let s = createSheet();
+    s = must(addItem(s, "gloves", 1, critEnv)).sheet;
+    s = must(addItem(s, "circlet", 1, critEnv)).sheet;
+    s = must(equip(s, "i1", undefined, critEnv)).sheet;
+    s = must(equip(s, "i2", undefined, critEnv)).sheet;
+    const d = derivedStats(s, critEnv);
+    expect(d.stats.crit).toBeCloseTo(5 + 0.1 * 20 + 1); // 20 dexterity, +1 flat
+    expect(d.stats.spellCrit).toBeCloseTo(6 + 2.5);
+  });
+
+  it("are tunable per game, and a progression file that leaves them out keeps the defaults", () => {
+    const p = progressionSchema.parse({ derived: { crit: { base: 2, dexterity: 0.5 } } });
+    expect(p.derived.crit).toMatchObject({ base: 2, dexterity: 0.5 });
+    expect(p.derived.spellCrit).toMatchObject({ base: 5, intelligence: 0.1 });
+    expect(derivedStats(createSheet(), { ...critEnv, progression: p }).stats.crit).toBeCloseTo(7);
+  });
+});
+
 describe("equipment", () => {
   it("wears an item, frees its cell, and derived stats pick up the modifiers", () => {
     let s = createSheet();

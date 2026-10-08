@@ -1,0 +1,25 @@
+{
+  "about": "REAL SIZE per prop kind (docs/world-standards/props.md 'Real size per kind'). Each kind matches prefab names (the last path segment, - and _ read as spaces) and bounds one dimension of the DECLARED size, in metres, for a HUMAN user (1.8 m). For another scale class the range scales by that class's height over 1.8 (dressing vocabulary). dim: h = height (Y), long = the longer horizontal side, max = the largest side. `props status` flags a prop outside its range; `dress check` refuses placing one (wrong-size) at the place's scale. A project extends, overrides or drops (null) a kind in authoring/prop-catalogs.json `realSize.kinds`; a catalogue row may set `realSizeExempt: \"<why>\"` (a toy, a model, a deliberate oversize with its own model).",
+  "userHeight": 1.8,
+  "kinds": {
+    "barrel": { "match": "(barrel|cask|keg|\\btun\\b)(?! ?(shelf|rack|stand|stack|pile|cart))", "dim": "h", "range": [0.5, 1.6], "note": "a cask to a large barrel; a vat is not a barrel" },
+    "crate": { "match": "crate", "dim": "max", "range": [0.3, 1.5] },
+    "cart": { "match": "\\bcart\\b(?! wheel)|handcart|wagon|wheel ?barrow", "dim": "long", "range": [1.2, 5.5], "note": "a wheelbarrow to a wagon" },
+    "tent": { "match": "\\btent\\b", "dim": "h", "range": [1.4, 4.5], "note": "a pup tent a body crawls into to a tall pavilion" },
+    "door": { "match": "\\bdoor\\b(?! ?(frame|step|knocker|sign))", "dim": "h", "range": [1.85, 3.2], "note": "about 2 m for its user; a grand door up to 3.2 m" },
+    "bed": { "match": "(?<!(reed|river|sea|flower|peat) )\\bbeds?\\b", "dim": "long", "range": [1.7, 2.4] },
+    "chain": { "match": "\\bchains?\\b(?! ?mail)", "dim": "h", "range": [0.05, 1.3], "note": "a barrier chain hangs about waist-high; a chain lying down is flat" },
+    "table": { "match": "\\btable\\b", "dim": "h", "range": [0.6, 1.1] },
+    "chair": { "match": "chair", "dim": "h", "range": [0.75, 1.6], "note": "a plain seat to a high-backed chair" },
+    "stool": { "match": "stool", "dim": "h", "range": [0.3, 0.85] },
+    "bench": { "match": "\\bbench\\b", "dim": "h", "range": [0.35, 1.1] },
+    "chest": { "match": "\\bchest\\b|coffer", "dim": "h", "range": [0.25, 1.0] },
+    "sack": { "match": "sack", "dim": "h", "range": [0.15, 1.1] },
+    "wardrobe": { "match": "wardrobe", "dim": "h", "range": [1.5, 2.6] },
+    "banner": { "match": "banner", "dim": "h", "range": [0.8, 3.6], "note": "cloth (+ its pole or rod): a short shop-front flag to a pole banner standing taller than a man" },
+    "wall hanging": { "match": "wall ?hanging|tapestr", "dim": "h", "range": [1.0, 3.0], "note": "a cloth hung flat on a wall from a rod" },
+    "painting": { "match": "painting|portrait", "dim": "max", "range": [0.25, 2.0], "note": "frame included: a small panel to a hall's large canvas" },
+    "mirror": { "match": "mirror", "dim": "h", "range": [0.3, 2.0], "note": "frame included: a hand-sized wall glass to a tall pier glass" },
+    "sconce": { "match": "sconce", "dim": "h", "range": [0.1, 0.6], "note": "bracket and candle/torch included" }
+  }
+}

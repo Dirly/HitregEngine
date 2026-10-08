@@ -1,0 +1,225 @@
+{
+ "source": "MMO/3d/Mobs/Dragon/Rhinoceros-parts.obj",
+ "sourceScale": 1,
+ "objScale": 1,
+ "outMesh": "MMO/3d/Mobs/Dragon/Rhinoceros-unwrapped",
+ "sheet": 1254,
+ "keyStroke": 8,
+ "smooth": 48,
+ "margin": 22,
+ "gutter": 48,
+ "atlas": {
+  "size": 1166,
+  "bleed": 2,
+  "bgLum": 236
+ },
+ "mirrorCopy": {
+  "axis": "z",
+  "parts": [
+   "Rhinoceros_Body",
+   "Rhinoceros_Head",
+   "Rhinoceros_LegFront",
+   "Rhinoceros_LegBack",
+   "Rhinoceros_Horn",
+   "Rhinoceros_Tail"
+  ]
+ },
+ "slots": {
+  "body": {
+   "color": "#ff0000",
+   "fit": "contain"
+  },
+  "chest": {
+   "color": "#00ff00",
+   "fit": "contain",
+   "matchTo": "body",
+   "label": "chest"
+  },
+  "rump": {
+   "color": "#0000ff",
+   "fit": "contain",
+   "matchTo": "body",
+   "label": "rump"
+  },
+  "back": {
+   "color": "#ffff00",
+   "fit": "contain",
+   "matchTo": "body",
+   "label": "back top"
+  },
+  "head": {
+   "color": "#ff00ff",
+   "fit": "contain",
+   "labelMax": 1
+  },
+  "crown": {
+   "color": "#ff8000",
+   "fit": "contain",
+   "matchTo": "head",
+   "label": "head top"
+  },
+  "snout": {
+   "color": "#8000ff",
+   "fit": "contain",
+   "matchTo": "head",
+   "label": "snout front"
+  },
+  "leg-front": {
+   "color": "#008c00",
+   "fit": "contain",
+   "matchTo": "body"
+  },
+  "leg-back": {
+   "color": "#00008c",
+   "fit": "contain",
+   "matchTo": "body"
+  },
+  "horn": {
+   "color": "#8c0000",
+   "fit": "contain"
+  },
+  "tail": {
+   "color": "#c0c060",
+   "fit": "contain",
+   "matchTo": "body"
+  }
+ },
+ "parts": {
+  "Rhinoceros_Body": {
+   "slot": "body",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.35,
+   "split": [
+    {
+     "slot": "chest",
+     "facing": "+x",
+     "above": 0.6,
+     "u": "-z",
+     "v": "-y",
+     "flare": 0.15
+    },
+    {
+     "slot": "rump",
+     "facing": "-x",
+     "above": 0.6,
+     "u": "+z",
+     "v": "-y",
+     "flare": 0.15
+    },
+    {
+     "slot": "back",
+     "facing": "+y",
+     "above": 0.62,
+     "u": "+x",
+     "v": "+z",
+     "flare": 0.1
+    }
+   ]
+  },
+  "Rhinoceros_Head": {
+   "slot": "head",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.4,
+   "split": [
+    {
+     "slot": "snout",
+     "facing": "+x",
+     "above": 0.7,
+     "u": "-z",
+     "v": "-y",
+     "flare": 0.15
+    },
+    {
+     "slot": "crown",
+     "facing": "+y",
+     "above": 0.7,
+     "u": "+x",
+     "v": "+z",
+     "flare": 0.15
+    }
+   ]
+  },
+  "Rhinoceros_LegFront": {
+   "slot": "leg-front",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Rhinoceros_LegBack": {
+   "slot": "leg-back",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Rhinoceros_Horn": {
+   "slot": "horn",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Rhinoceros_Tail": {
+   "slot": "tail",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  }
+ },
+ "layout": {
+  "col": [
+   {
+    "row": [
+     "body",
+     "leg-back"
+    ]
+   },
+   {
+    "row": [
+     "head",
+     "chest",
+     "rump",
+     "leg-front"
+    ]
+   },
+   {
+    "row": [
+     "back",
+     "horn",
+     "crown",
+     "snout",
+     "tail"
+    ]
+   }
+  ]
+ },
+ "marks": [
+  {
+   "slot": "head",
+   "at": [
+    1.6267,
+    0.7776,
+    -0.2721
+   ],
+   "shape": "eye",
+   "size": 10
+  }
+ ],
+ "cutoutSlots": [],
+ "combos": [
+  [
+   "Rhinoceros_Body",
+   "Rhinoceros_Head",
+   "Rhinoceros_LegFront",
+   "Rhinoceros_LegBack",
+   "Rhinoceros_Horn",
+   "Rhinoceros_Tail"
+  ]
+ ]
+}

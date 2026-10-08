@@ -205,7 +205,12 @@ function contains(solid: Solid, x: number, y: number, z: number): boolean {
 
 /** A conservative, 1-Lipschitz union of exact per-solid signed distances. */
 export interface CompiledTriangleMesh extends Bounds {
-  distance(x: number, y: number, z: number): number;
+  /**
+   * Signed distance. With `bound`, solids farther than it are not searched and the
+   * result is min(distance, bound): exact for a caller that only needs to know
+   * whether the surface is nearer than `bound` (a hard CSG union).
+   */
+  distance(x: number, y: number, z: number, bound?: number): number;
   /** Source triangle belonging to the solid that controls the union field. */
   triangleAt(x: number, y: number, z: number): number;
   /** Palette index from triangleMaterials, or undefined when materials were omitted. */
@@ -324,12 +329,18 @@ function build(mesh: CsgTriangleMesh): CompiledTriangleMesh {
   const hierarchy = tree(solids, 4);
   const boundaryBand = 64 * Number.EPSILON * Math.max(1, ...hierarchy.min.map(Math.abs), ...hierarchy.max.map(Math.abs));
   const outwardNormals = new Map<number, Vec>();
-  let lastX = NaN, lastY = NaN, lastZ = NaN, lastDistance = Infinity, lastTriangle = -1;
-  function sample(x: number, y: number, z: number): void {
-    if (x === lastX && y === lastY && z === lastZ) return;
-    lastX = x; lastY = y; lastZ = z; lastDistance = Infinity; lastTriangle = -1;
-    const hit: Nearest = { distanceSq: Infinity, triangle: -1 };
-    function visit(node: Tree<Solid>): void {
+  let lastX = NaN, lastY = NaN, lastZ = NaN, lastDistance = Infinity, lastTriangle = -1, lastBound = Infinity;
+  function sample(x: number, y: number, z: number, bound = Infinity): void {
+    // A cached answer is reusable when it was exact (found below its bound) or its bound was at least as tight.
+    if (x === lastX && y === lastY && z === lastZ && (lastTriangle >= 0 && lastDistance < lastBound || bound <= lastBound)) return;
+    lastX = x; lastY = y; lastZ = z; lastDistance = bound; lastTriangle = -1; lastBound = bound;
+    visit(hierarchy);
+  }
+  // Hoisted out of sample(): a nested function declaration is re-created at every
+  // sample (and, under tsx/esbuild keepNames, re-wrapped), measured ~10% of extraction.
+  const hit: Nearest = { distanceSq: Infinity, triangle: -1 };
+  function visit(node: Tree<Solid>): void {
+      const x = lastX, y = lastY, z = lastZ;
       const lower = boxDistanceSq(node, x, y, z);
       if (lastDistance < 0 ? lower > boundaryBand * boundaryBand : lower > (lastDistance + boundaryBand) ** 2) return;
       if (node.items) for (const solid of node.items) {
@@ -344,12 +355,10 @@ function build(mesh: CsgTriangleMesh): CompiledTriangleMesh {
         if (boxDistanceSq(a, x, y, z) > boxDistanceSq(b, x, y, z)) [a, b] = [b, a];
         visit(a); visit(b);
       }
-    }
-    visit(hierarchy);
   }
   return {
     min: hierarchy.min, max: hierarchy.max,
-    distance: (x, y, z) => { sample(x, y, z); return lastDistance; },
+    distance: (x, y, z, bound) => { sample(x, y, z, bound); return lastDistance; },
     triangleAt: (x, y, z) => { sample(x, y, z); return lastTriangle; },
     materialAt: (x, y, z) => { sample(x, y, z); return mesh.triangleMaterials?.[lastTriangle]; },
     normalAt: (x, y, z, out) => {

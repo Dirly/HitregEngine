@@ -82,6 +82,7 @@ function propEntity(rule: ScatterDoc, instance: ReturnType<typeof scatterCell>[n
       source: {
         kind: "asset",
         assetId: rule.model,
+        ...(instance.vegetationTint ? { vegetationTint: instance.vegetationTint } : {}),
         ...(rule.foliageNormals === undefined ? {} : { foliageNormals: rule.foliageNormals }),
         ...(rule.foliageUp === undefined ? {} : { foliageUp: rule.foliageUp }),
         ...(rule.brightness === undefined ? {} : { brightness: rule.brightness }),

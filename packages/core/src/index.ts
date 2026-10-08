@@ -1,4 +1,5 @@
 export { newId, type EntityId } from "./ids.js";
+export { vegetationTintSchema, type VegetationTint } from "./components/core.js";
 export {
   createScene,
   childrenOf,
@@ -18,6 +19,10 @@ export {
   registerCoreComponents,
   transformSchema,
   visibilitySchema,
+  cullingSchema,
+  cullingProfileSchema,
+  type CullingData,
+  type CullingProfileData,
   meshSchema,
   lightSchema,
   cameraSchema,
@@ -38,6 +43,14 @@ export {
   type NetObjectData,
   spawnAreaSchema,
   type SpawnAreaData,
+  spawnMixEntrySchema,
+  type SpawnMixEntry,
+  spawnRareSchema,
+  type SpawnRare,
+  SPAWN_PLACEMENTS,
+  type SpawnPlacement,
+  MOB_TEMPERAMENTS,
+  type MobTemperament,
   vec3,
   quat,
   hexColor,
@@ -193,6 +206,8 @@ export {
 export {
   EventRegistry,
   registerCoreEvents,
+  PLAYER_LOGOUT_EVENT,
+  CAMP_SECONDS,
   type EventReplication,
   type EventRegistrationOptions,
 } from "./events.js";
@@ -200,6 +215,8 @@ export {
   NetStateStore,
   type NetStateDelta,
   type NetStateChangeHandler,
+  type NetStateAudience,
+  type NetStateNamespaceOptions,
 } from "./net-state.js";
 export {
   gameManifestSchema,
@@ -296,6 +313,26 @@ export {
 } from "./water.js";
 export { decalSchema, registerDecalComponent, type DecalData } from "./components/decal.js";
 export {
+  DRESSING_MOUNTS,
+  DRESSING_VOCABULARY,
+  mergeVocabulary,
+  scaleFits,
+  cultureFits,
+  type DressingVocabulary,
+  type DressingScaleClass,
+  type DressingCulture,
+  dressingSchema,
+  dressingSocketSchema,
+  dressingOrigin,
+  isLooseClutter,
+  registerDressingComponent,
+  type DressingData,
+  type DressingInput,
+  type DressingMount,
+  type DressingSocket,
+} from "./components/dressing.js";
+export * from "./dressing/index.js";
+export {
   voxelWorldSchema,
   registerVoxelComponents,
   type VoxelWorldData,
@@ -310,7 +347,40 @@ export {
   registerTransferLockNetState,
   isTransferLocked,
 } from "./transfer-lock.js";
+export {
+  PORTAL_NETSTATE,
+  PORTAL_EVENTS,
+  PORTAL_LANDING_LIFT,
+  portalKey,
+  portalArrivalSchema,
+  portalReturnSchema,
+  portalRecordSchema,
+  portalTravelSchema,
+  portalEventDecls,
+  registerPortalNetState,
+  anchorPose,
+  yawOfQuaternion,
+  resolvePortalArrival,
+  portalDeparture,
+  portalAnchorSchema,
+  portalAnchorOf,
+  loadingScreenSchema,
+  loadingScreenOf,
+  type LoadingScreen,
+  portalArrivalSpot,
+  PORTAL_TRIGGER_DEFAULTS,
+  portalVolumeOf,
+  portalVolumeDistance,
+  portalVolumeForCorridor,
+  type PortalAnchor,
+  type PortalVolume,
+  type PortalArrival,
+  type PortalReturn,
+  type PortalRecord,
+  type PortalTravel,
+} from "./portal.js";
 export { LANDING_NETSTATE, landingKey, landingSchema, registerLandingNetState, isLanding, clearLanding } from "./landing.js";
+export { NOTICE_NETSTATE, noticeKey, noticeSchema, registerNoticeNetState, readNotice } from "./notice.js";
 export {
   MOB_EVENTS,
   MOB_STATES,
@@ -318,6 +388,7 @@ export {
   COMBAT_NETSTATE,
   combatKey,
   combatants,
+  isDowned,
   type MobEventDecl,
   type MobState,
 } from "./mob.js";
@@ -339,6 +410,7 @@ export {
   projectSceneEntrySchema,
   resolveProjectTools,
   describeMissingTools,
+  projectDependencyClosure,
   buildSceneMenu,
   sceneMenuProjectOf,
   addSceneToManifest,
@@ -355,4 +427,5 @@ export {
   type ProjectToolStatus,
 } from "./project.js";
 export * from "./game-ui.js";
+export * from "./quest-blocks.js";
 export * from "./npc/index.js";

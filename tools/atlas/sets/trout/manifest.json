@@ -1,0 +1,22 @@
+{
+  "size": 256,
+  "bleed": 2,
+  "bgLum": 236,
+  "keyColor": "#00ffff",
+  "groundFringe": 1,
+  "fitSearch": 1.6,
+  "slots": {
+    "#00ff00": {
+      "name": "body",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#ff8000": {
+      "name": "fins",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    }
+  }
+}

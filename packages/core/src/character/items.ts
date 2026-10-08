@@ -48,9 +48,15 @@ export const EQUIPMENT_SLOTS = [
   "secondary",
   "offhand",
   "bag",
+  // the belt: three potions within reach, drinkable in combat (`inventory.use`)
   "consumable",
+  "consumable2",
+  "consumable3",
 ] as const;
 export type EquipmentSlot = (typeof EQUIPMENT_SLOTS)[number];
+
+/** The belt — worn consumable slots, in key order (`inventory.use` names one). */
+export const BELT_SLOTS = EQUIPMENT_SLOTS.filter((s) => slotKind(s) === "consumable");
 
 /** The kind a slot id accepts: `trinket2` → `trinket`. */
 export function slotKind(slot: EquipmentSlot): SlotKind {
@@ -68,10 +74,22 @@ export type Attribute = (typeof ATTRIBUTES)[number];
 
 /**
  * Stats computed from attributes + worn items by the progression formulas.
- * `capacity` is carry weight; everything else is a pool or a flat defence.
+ * `capacity` is carry weight; `crit` and `spellCrit` are chances in percent
+ * points; everything else is a pool or a flat defence.
  */
-export const DERIVED_STATS = ["maxHp", "maxStamina", "maxMana", "armor", "capacity"] as const;
+export const DERIVED_STATS = ["maxHp", "maxStamina", "maxMana", "armor", "capacity", "crit", "spellCrit"] as const;
 export type DerivedStat = (typeof DERIVED_STATS)[number];
+
+/** What each derived stat means, for the schema (and so the AI-facing spec) — the units a game reads them in. */
+export const DERIVED_STAT_DESCRIPTIONS: Record<DerivedStat, string> = {
+  maxHp: "Health pool.",
+  maxStamina: "Stamina pool: pays for physical commitment (swings, blocks).",
+  maxMana: "Mana pool: pays for casts and wards.",
+  armor: "Flat armour; a game's damage rules turn it into a share of each physical hit removed.",
+  capacity: "Carry weight in kilograms before the character is overweight.",
+  crit: "Chance in PERCENT POINTS (5 = 5%) that a weapon or shot hit is critical; an item's \"+1 crit\" adds 1.",
+  spellCrit: "Chance in PERCENT POINTS (5 = 5%) that a spell or heal is critical; an item's \"+1 spellCrit\" adds 1.",
+};
 
 /** Everything an item modifier may add to (flat, additive). */
 export const MODIFIER_KEYS = [...ATTRIBUTES, ...DERIVED_STATS] as const;
@@ -263,6 +281,116 @@ export const itemGlowSchema = z
   );
 export type ItemGlow = z.infer<typeof itemGlowSchema>;
 
+/**
+ * The defence an item gives while it is in hand. Kinds are the generic guard
+ * vocabulary; what each one answers, and every default number, is the game's.
+ */
+export const itemGuardSchema = z
+  .object({
+    kind: z
+      .enum(["block", "parry", "ward", "none"])
+      .describe(
+        "block = held, absorbs (a shield); parry = timed, turns a blow (a blade); ward = held against magic (a staff); " +
+          "none = the item has no defence (a bow, an offensive staff).",
+      ),
+    parryWindow: z
+      .number()
+      .min(0)
+      .max(2)
+      .optional()
+      .describe("Seconds after the guard is raised that count as a perfect parry. Absent = the game's default."),
+    blockPower: z
+      .number()
+      .min(0)
+      .max(1)
+      .optional()
+      .describe("Share of a blocked hit absorbed, 0..1. Absent = the game's default."),
+    wardAlly: z
+      .boolean()
+      .optional()
+      .describe("The ward may be thrown onto an ally under the crosshair instead of raised on yourself."),
+    school: z
+      .string()
+      .min(1)
+      .max(32)
+      .optional()
+      .describe(
+        "The ward's school of magic, a name from the game's own list. The game judges a ward against each spell's " +
+          "school (better against some, worse against others). Absent = a plain ward, neither better nor worse.",
+      ),
+    reward: z
+      .enum(["mana", "power"])
+      .optional()
+      .describe(
+        "What a perfectly timed ward pays back when its school is the right answer to the spell: mana = the cost " +
+          "returned plus mana from the cancelled spell; power = a short damage boost. Absent = no reward.",
+      ),
+  })
+  .describe("The guard an item gives while held, with its own tuning.");
+export type ItemGuard = z.infer<typeof itemGuardSchema>;
+
+/**
+ * What an item lets its wearer DO. Ids are opaque to the engine — the game's
+ * combat layer resolves them — so the same schema serves any ability table.
+ * There are no free skill slots: a character's bar is built from these.
+ */
+export const itemSkillsSchema = z
+  .object({
+    primary: z
+      .string()
+      .min(1)
+      .optional()
+      .describe("Ability id on the primary attack (left click) while this item is the weapon in hand."),
+    secondary: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        "Right click while this item is in hand: an ability id, or an `@`-prefixed verb the game reserves — a guard " +
+          "(`@block`, `@parry`, `@ward`) or another held verb (`@steady`, a bow's steady aim). An off-hand item's " +
+          "secondary overrides the main hand's (a shield's `@block` over a sword's `@parry`).",
+      ),
+    bar: z
+      .array(z.string().min(1))
+      .max(4)
+      .default([])
+      .describe(
+        "Ability ids this item contributes to the hotbar while worn or held, in order. The allowance is by what it is: " +
+          "a ONE-handed weapon, an off-hand item and a trinket contribute ONE (the first); a TWO-handed weapon " +
+          "contributes TWO (both hands' worth). Entries past the allowance are ignored (`skillAllowance`, " +
+          "`auditItemSkills` report them). A heavy attack is just a skill the game tags heavy.",
+      ),
+    use: z
+      .string()
+      .min(1)
+      .optional()
+      .describe("What a CONSUMABLE does when used from the belt (`inventory.use`): an effect id the game resolves. Ignored on worn gear."),
+    guard: itemGuardSchema.optional(),
+  })
+  .describe("Skills an item carries: the verbs it puts on its wearer's bar while worn or held.");
+export type ItemSkills = z.infer<typeof itemSkillsSchema>;
+
+/**
+ * How many `skills.bar` entries an item may contribute: two for a two-handed
+ * weapon (it fills both hands), one for anything else worn — a one-hander, an
+ * off-hand item, a trinket. Both hands always add up to two.
+ */
+export function skillAllowance(item: Pick<Item, "twoHanded" | "slots">): number {
+  if (item.slots.length === 0) return 0;
+  return item.twoHanded ? 2 : 1;
+}
+
+/** Items declaring more bar skills than their hands allow (the extras are ignored, so the file is wrong). */
+export function auditItemSkills(items: Record<string, Item>): Array<{ id: string; declared: number; allowed: number }> {
+  const out: Array<{ id: string; declared: number; allowed: number }> = [];
+  for (const [id, item] of Object.entries(items)) {
+    const declared = item.skills?.bar.length ?? 0;
+    const allowed = skillAllowance(item);
+    if (declared > allowed) out.push({ id, declared, allowed });
+  }
+  return out;
+}
+
 export const itemSchema = z
   .object({
     name: z.string().min(1),
@@ -292,6 +420,18 @@ export const itemSchema = z
       .default(0)
       .describe("Base price of one unit in copper (100 copper = 1 silver, 100 silver = 1 gold). A shop sells at its `markup` of this and buys at its `buyRate`; 0 = worthless (vendors will not buy it)."),
     rarity: z.enum(RARITIES).default("common"),
+    durability: z
+      .number()
+      .int()
+      .min(1)
+      .max(10000)
+      .optional()
+      .describe(
+        "Maximum durability points (weapons, shields, armour). Each death costs every WORN item 10% of this (rounded up, " +
+          "at least 1); at 0 the item is BROKEN — still worn and drawn, but its modifiers stop applying until a repairer " +
+          "mends it (dialogue `openRepair`). Each owned instance keeps its current points on its stack (`durability`). " +
+          "Absent = never wears (food, materials, trade goods).",
+      ),
     icon: z
       .string()
       .optional()
@@ -301,7 +441,7 @@ export const itemSchema = z
       .partialRecord(z.enum(MODIFIER_KEYS), z.number())
       .default({})
       .describe(
-        "Flat additions applied while WORN: attributes (strength…) feed the formulas, derived stats (maxHp, armor…) add after them.",
+        "Flat additions applied while WORN: attributes (strength…) feed the formulas, derived stats (maxHp, armor, crit…) add after them. crit and spellCrit are percent points.",
       ),
     requires: z
       .object({ level: z.number().int().min(1).optional(), ...attributeRequirements })
@@ -317,6 +457,16 @@ export const itemSchema = z
         "Held in BOTH hands (a greatsword, a greataxe, a staff, a bow). While it is worn in `primary`, the `offhand` item " +
           "stays equipped but INACTIVE: no modifiers, not drawn, no stance (it still counts toward weight). The offhand " +
           "slot shows greyed out. Nothing is unequipped either way.",
+      ),
+    skills: itemSkillsSchema.optional(),
+    equipSeconds: z
+      .number()
+      .min(0)
+      .max(30)
+      .optional()
+      .describe(
+        "Seconds to put this item on or take it off (the authority's timed inventory action; the UI shows progress). " +
+          "Replacing a worn item takes the longer of the two. Absent = the progression's `inventoryDurations`.",
       ),
     stance: z
       .array(z.string().regex(/^[A-Za-z][A-Za-z0-9]*$/))
@@ -373,6 +523,26 @@ export const itemSchema = z
           "or share a sheet and differ by parts.",
       ),
     tags: z.array(z.string()).default([]),
+    entrusted: z
+      .boolean()
+      .default(false)
+      .describe(
+        "ENTRUSTED: a specific quest item put in the character's keeping (a sealed package, a ring to deliver). It cannot be " +
+          "traded, dropped, put in the vault, sold or looted, and it stays with its holder through a death (never in a " +
+          "corpse). Ordinary quest loot (\"six pelts\") is NOT entrusted. Never on an item that can be worn (`slots` must be empty).",
+      ),
+    entrustedQuest: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        "With `entrusted`: the quest id it belongs to — every carried instance is taken back when that quest is handed in " +
+          "(dialogue `turnInQuest`). Absent = it leaves only through the quest's `consume` or a dialogue `take`.",
+      ),
+  })
+  .superRefine((item, ctx) => {
+    if (item.entrusted && item.slots.length > 0) ctx.addIssue({ code: "custom", path: ["entrusted"], message: "an entrusted item cannot be equippable (slots must be empty)" });
+    if (item.entrustedQuest && !item.entrusted) ctx.addIssue({ code: "custom", path: ["entrustedQuest"], message: "entrustedQuest needs entrusted: true" });
   })
   .describe(
     "An item definition (assets/items/<id>.json). Inventories hold { itemId, qty } stacks — one cell each — that point here, so editing a file updates every copy.",

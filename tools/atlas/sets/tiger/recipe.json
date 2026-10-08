@@ -1,0 +1,225 @@
+{
+ "source": "MMO/3d/Mobs/Dragon/Tiger-parts.obj",
+ "sourceScale": 1,
+ "objScale": 1,
+ "outMesh": "MMO/3d/Mobs/Dragon/Tiger-unwrapped",
+ "sheet": 1254,
+ "keyStroke": 8,
+ "smooth": 48,
+ "margin": 22,
+ "gutter": 48,
+ "atlas": {
+  "size": 512,
+  "bleed": 2,
+  "bgLum": 236
+ },
+ "mirrorCopy": {
+  "axis": "z",
+  "parts": [
+   "Tiger_Tail",
+   "Tiger_Body",
+   "Tiger_Head",
+   "Tiger_LegBack",
+   "Tiger_LegFront",
+   "Tiger_Ear"
+  ]
+ },
+ "slots": {
+  "tail": {
+   "color": "#ff0000",
+   "fit": "contain",
+   "matchTo": "body"
+  },
+  "body": {
+   "color": "#00ff00",
+   "fit": "contain"
+  },
+  "chest": {
+   "color": "#0000ff",
+   "fit": "contain",
+   "matchTo": "body",
+   "label": "chest"
+  },
+  "rump": {
+   "color": "#ffff00",
+   "fit": "contain",
+   "matchTo": "body",
+   "label": "rump"
+  },
+  "back": {
+   "color": "#ff00ff",
+   "fit": "contain",
+   "matchTo": "body",
+   "label": "back top"
+  },
+  "head": {
+   "color": "#ff8000",
+   "fit": "contain",
+   "labelMax": 1
+  },
+  "crown": {
+   "color": "#8000ff",
+   "fit": "contain",
+   "matchTo": "head",
+   "label": "head top"
+  },
+  "snout": {
+   "color": "#008c00",
+   "fit": "contain",
+   "matchTo": "head",
+   "label": "snout front"
+  },
+  "leg-back": {
+   "color": "#00008c",
+   "fit": "contain",
+   "matchTo": "body"
+  },
+  "leg-front": {
+   "color": "#8c0000",
+   "fit": "contain",
+   "matchTo": "body"
+  },
+  "ear": {
+   "color": "#c0c060",
+   "fit": "contain"
+  }
+ },
+ "parts": {
+  "Tiger_Tail": {
+   "slot": "tail",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Tiger_Body": {
+   "slot": "body",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.35,
+   "split": [
+    {
+     "slot": "chest",
+     "facing": "+x",
+     "above": 0.6,
+     "u": "-z",
+     "v": "-y",
+     "flare": 0.15
+    },
+    {
+     "slot": "rump",
+     "facing": "-x",
+     "above": 0.6,
+     "u": "+z",
+     "v": "-y",
+     "flare": 0.15
+    },
+    {
+     "slot": "back",
+     "facing": "+y",
+     "above": 0.62,
+     "u": "+x",
+     "v": "+z",
+     "flare": 0.1
+    }
+   ]
+  },
+  "Tiger_Head": {
+   "slot": "head",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.4,
+   "split": [
+    {
+     "slot": "snout",
+     "facing": "+x",
+     "above": 0.85,
+     "u": "-z",
+     "v": "-y",
+     "flare": 0.15
+    },
+    {
+     "slot": "crown",
+     "facing": "+y",
+     "above": 0.7,
+     "u": "+x",
+     "v": "+z",
+     "flare": 0.15
+    }
+   ]
+  },
+  "Tiger_LegBack": {
+   "slot": "leg-back",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Tiger_LegFront": {
+   "slot": "leg-front",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Tiger_Ear": {
+   "slot": "ear",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  }
+ },
+ "layout": {
+  "row": [
+   {
+    "col": [
+     "body",
+     "back",
+     "snout"
+    ]
+   },
+   {
+    "col": [
+     "leg-back",
+     "head",
+     "rump",
+     "crown"
+    ]
+   },
+   {
+    "col": [
+     "leg-front",
+     "chest",
+     "tail",
+     "ear"
+    ]
+   }
+  ]
+ },
+ "marks": [
+  {
+   "slot": "head",
+   "at": [
+    1.3904,
+    1.3028,
+    -0.0925
+   ],
+   "shape": "eye",
+   "size": 10
+  }
+ ],
+ "cutoutSlots": [],
+ "combos": [
+  [
+   "Tiger_Tail",
+   "Tiger_Body",
+   "Tiger_Head",
+   "Tiger_LegBack",
+   "Tiger_LegFront",
+   "Tiger_Ear"
+  ]
+ ]
+}

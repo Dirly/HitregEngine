@@ -315,7 +315,7 @@ export const CLIP_PRESETS = {
     Combat_Exit: "Armature|PunchKick_Exit",
     Attack1: "Armature|Punch_Jab",
     Attack2: "Armature|Punch_Cross",
-    Attack3: "Armature|Kick",
+    Attack3: "Armature|Kick@yaw60",
     Sword_Idle: "Armature|Sword_Idle",
     Sword_Enter: "Armature|Sword_Enter",
     Sword_Exit: "Armature|Sword_Exit",
@@ -419,10 +419,16 @@ export const CLIP_PRESETS = {
    * half-way through the clip, because the caster fits an attack clip to its
    * windup + recovery and the hit lands at the end of the windup. Directions
    * were measured too: Mixamo's "(2)" is the LEFT turn in both packs.
+   *
+   * `@yaw60` keeps a swing's torso within 60 degrees of forward: many of these
+   * are cut out of spinning sequences and turned the body 250-600 degrees (a
+   * torso doing a 360 over walking legs). `@yaw10@arms` squares a held guard's
+   * chest and lets the shoulders hold the weapon where it was. See _yaw.mjs;
+   * `clip-yaw.mjs <glb>` reports every clip's turn.
    */
   weapons: {
     // the plain versions of the moments a stance dresses, for empty hands
-    Heavy: "Armature|Sword_Attack",
+    Heavy: "Armature|Sword_Attack@yaw60",
     Block: "Armature|Idle_Shield_Loop",
     Block_Hit: "Armature|Sword_Block@0.15-1.23",
     // holstering (weapon-stance): every stance falls back to these
@@ -431,10 +437,10 @@ export const CLIP_PRESETS = {
 
     // one-handed sword, no shield (UAL: a fast, snappy chain)
     Sword_Idle: "Armature|Sword_Idle",
-    Sword_Attack1: "Armature|Sword_Regular_A",
-    Sword_Attack2: "Armature|Sword_Regular_B",
-    Sword_Attack3: "Armature|Sword_Regular_C@0.35-0.95",
-    Sword_Heavy: "Armature|Sword_Attack@0-0.62",
+    Sword_Attack1: "Armature|Sword_Regular_A@yaw60",
+    Sword_Attack2: "Armature|Sword_Regular_B@yaw60",
+    Sword_Attack3: "Armature|Sword_Regular_C@0.35-0.95@yaw60",
+    Sword_Heavy: "Armature|Sword_Attack@0-0.62@yaw60",
     Sword_Block: "Armature|Sword_Block@0.15-1.23",
 
     // sword and board (Mixamo lite pack + UAL2's shield work)
@@ -445,9 +451,9 @@ export const CLIP_PRESETS = {
     SwordShield_Turn_L: "sword and shield turn (2)",
     SwordShield_Turn_R: "sword and shield turn",
     SwordShield_Attack1: "sword and shield attack (4)@0.12-0.8",
-    SwordShield_Attack2: "Armature|Sword_Regular_B",
-    SwordShield_Attack3: "sword and shield attack (3)@0.4-1.1",
-    SwordShield_Heavy: "sword and shield attack (2)@0.1-0.95",
+    SwordShield_Attack2: "Armature|Sword_Regular_B@yaw60",
+    SwordShield_Attack3: "sword and shield attack (3)@0.4-1.1@yaw60",
+    SwordShield_Heavy: "sword and shield attack (2)@0.1-0.95@yaw60",
     SwordShield_Bash: "Armature|Shield_OneShot",
     SwordShield_Block: "sword and shield block idle",
     SwordShield_Block_Hit: "sword and shield block (2)",
@@ -465,8 +471,8 @@ export const CLIP_PRESETS = {
     TwoHanded_Run_Right: "great sword strafe (4)",
     TwoHanded_Turn_L: "great sword turn (2)",
     TwoHanded_Turn_R: "great sword turn",
-    TwoHanded_Block: "great sword blocking (2)",
-    TwoHanded_Block_Hit: "great sword impact",
+    TwoHanded_Block: "great sword blocking (2)@yaw10@arms",
+    TwoHanded_Block_Hit: "great sword impact@yaw10@arms",
     TwoHanded_Hit_Chest: "great sword impact (2)",
     TwoHanded_Hit_Head: "great sword impact (3)",
     TwoHanded_Death: "two handed sword death",
@@ -475,26 +481,26 @@ export const CLIP_PRESETS = {
     TwoHanded_Cast_Shoot: "great sword casting@1.9-2.8",
 
     // greatsword: wide slashes, a kick in the chain, a spinning finisher
-    GreatSword_Attack1: "great sword slash@0.22-1.17",
-    GreatSword_Attack2: "great sword slash (3)@0.4-1.25",
-    GreatSword_Attack3: "great sword slash (4)@0.3-1.15",
-    GreatSword_Attack4: "great sword kick@0.6-1.5",
-    GreatSword_Heavy: "great sword high spin attack@0.2-1.6",
+    GreatSword_Attack1: "great sword slash@0.22-1.17@yaw60",
+    GreatSword_Attack2: "great sword slash (3)@0.4-1.25@yaw60",
+    GreatSword_Attack3: "great sword slash (4)@0.3-1.15@yaw60",
+    GreatSword_Attack4: "great sword kick@0.6-1.5@yaw60",
+    GreatSword_Heavy: "great sword high spin attack@0.2-1.6@yaw60",
 
     // greataxe: same body, different arm — chops first, a leaping finisher,
     // and its own idle so the two do not stand alike
     Axe2H_Idle: "great sword idle (3)",
-    Axe2H_Attack1: "great sword slash (4)@0.3-1.15",
+    Axe2H_Attack1: "great sword slash (4)@0.3-1.15@yaw60",
     Axe2H_Attack2: "great sword attack@0-0.9",
-    Axe2H_Attack3: "great sword slash (3)@0.4-1.25",
-    Axe2H_Heavy: "great sword jump attack@0.3-1.9",
+    Axe2H_Attack3: "great sword slash (3)@0.4-1.25@yaw60",
+    Axe2H_Heavy: "great sword jump attack@0.3-1.9@yaw60",
 
     // staff: Mixamo's torch swings, MIRRORED into the right hand, and a smash
-    Staff_Attack1: "Standing Torch Melee Attack 01@mirror@0.55-1.4",
-    Staff_Attack2: "Standing Torch Melee Attack 05@mirror@0.35-1.1",
+    Staff_Attack1: "Standing Torch Melee Attack 01@mirror@0.55-1.4@yaw60",
+    Staff_Attack2: "Standing Torch Melee Attack 05@mirror@0.35-1.1@yaw60",
     Staff_Attack3: "Standing Torch Melee Attack Stab@mirror@0.4-1.25",
-    Staff_Attack4: "Standing Torch Melee Attack 03@mirror@1.25-2.1",
-    Staff_Heavy: "Smash@0.3-1.6",
+    Staff_Attack4: "Standing Torch Melee Attack 03@mirror@1.25-2.1@yaw60",
+    Staff_Heavy: "Smash@0.3-1.6@yaw60",
     Staff_Cast_Shoot: "spell cast@0-0.7",
 
     // crossbow: a STOPGAP on the pistol set (two hands forward, a trigger, a

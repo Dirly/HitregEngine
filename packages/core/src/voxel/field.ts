@@ -27,11 +27,14 @@
  */
 
 import type { Vec3 } from "../math.js";
-import { clamp, fbm2, fbm3, hashUnit, smoothstep, type FbmSpec } from "./noise.js";
+import { prepareHeightPatch, type PreparedHeightPatch } from "./height-patch.js";
+import { clamp, fbm2, fbm3, hashUnit, perlin2, smoothstep, type FbmSpec } from "./noise.js";
 import { PolygonIndex, type OutlineSpec } from "./polygon-index.js";
+import { createZoneMembership, surfaceRoleIndex, zoneGroundRoles } from "./zone-ground.js";
 import {
   type BiomeDoc,
   type BlobDoc,
+  type PassageDoc,
   type CanyonDoc,
   type RidgeDoc,
   type LakeDoc,
@@ -494,8 +497,18 @@ function nearestPerOwner(
       // which side of the segment the query is on: the sign of the cross
       // product of the travel direction with the offset from the centreline.
       // Positive is "left" — the same convention the generator samples with.
-      const left = dx * pz - dz * px >= 0;
-      side = left ? s.la + (s.lb - s.la) * t : s.ra + (s.rb - s.ra) * t;
+      // Beside the segment the offset is square to it, so this is a plain
+      // left/right pick. Past an END the offset swings round the cap, and a
+      // hard pick there split the ground along the road's extended
+      // centreline — the left bank on one side, the right on the other, a
+      // knife-edge wall wherever a road stopped short of something (the
+      // rib beside a town gate). Weighting by how square the offset is keeps
+      // the pick beside the road and averages the two banks straight ahead.
+      const lateral = (dx * pz - dz * px) / (Math.sqrt(lenSq) || 1);
+      const wl = d > 1e-9 ? 0.5 + (0.5 * lateral) / d : 0.5;
+      const lv = s.la + (s.lb - s.la) * t;
+      const rv = s.ra + (s.rb - s.ra) * t;
+      side = rv + (lv - rv) * wl;
     }
     if (d < hit.distance) {
       hit.distance2 = hit.distance;
@@ -710,6 +723,13 @@ export interface WorldField {
   heightRange(x0: number, z0: number, x1: number, z1: number, samples?: number): { min: number; max: number };
   /** Topmost solid surface at (x, z) accounting for overhangs/caves, or null if none in range. */
   surfaceCast(x: number, z: number, fromY?: number, toY?: number): number | null;
+  /**
+   * Vertical span [min, max] of every 3D carve — passage, tunnel, subtracting
+   * blob — whose footprint reaches the XZ rectangle, or null when none does.
+   * Where it is null, `height()` is the real ground; where it is not, only the
+   * density is (see `editedGround` in scatter.ts).
+   */
+  carveSpan(x0: number, z0: number, x1: number, z1: number): { min: number; max: number } | null;
   /** Distance to the nearest river/road/town/lake edge — what `scatter.clearance` tests. */
   featureClearance(x: number, z: number): number;
   /**
@@ -754,6 +774,8 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
   const seed = recipe.seed;
   const t = recipe.terrain;
   const voxelSize = recipe.cellSize / recipe.resolution;
+  const heightPatchDocs = recipe.features.heightPatches ?? [];
+  const preparedPatches: (PreparedHeightPatch | undefined)[] = [];
 
   const continent = toFbm(t.continent);
   const hills = toFbm(t.hills);
@@ -1100,6 +1122,16 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
   const hasFeatures =
     riverDocs.length + canyonDocs.length + ridgeDocs.length + roadDocs.length + recipe.features.towns.length + lakeDocs.length + fillDocs.length > 0;
   const hasBlobs = recipe.features.blobs.length > 0;
+  const passageDocs = recipe.features.passages ?? [];
+  // Negative exterior samples are essential to interpolate an exact floor;
+  // retain an explicit bounded exterior margin.
+  const passages = makeBuckets<PassageDoc>(passageDocs, (p) => {
+    const pad = p.falloff + (p.footprint === "ellipse" ? p.wallNoise : 0), half = p.width / 2 + p.wallNoise + p.falloff;
+    const end = p.start[p.axis === "x" ? 0 : 2] + p.direction * p.length;
+    return p.axis === "x"
+      ? [Math.min(p.start[0], end) - pad, p.start[2] - half, Math.max(p.start[0], end) + pad, p.start[2] + half]
+      : [p.start[0] - half, Math.min(p.start[2], end) - pad, p.start[0] + half, Math.max(p.start[2], end) + pad];
+  });
   const hits: OwnerHit[] = [];
   /** While solving a hand-written river's bed: applyFeatures stops after the water stage (no towns, no roads). */
   let waterStageOnly = false;
@@ -1220,6 +1252,88 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     return recipe.surfaces.findIndex((s) => s.name.toLowerCase() === wanted);
   }
 
+  // ------------------------------------------------------------ zone ground
+  //
+  // A zone restyles ground ROLES (regions[].ground). Natural roles move the
+  // weight of the palette surfaces tagged with the role onto the zone's
+  // surface; paint roles (road, paving) re-aim what a road paints. Both are
+  // scaled by zone membership, so a border is a gradient (zone-ground.ts).
+  const zoneRoles = zoneGroundRoles(recipe);
+  const groundZones = zoneRoles.zones;
+  const hasZoneGround = groundZones.length > 0;
+  const zoneMembershipAt = hasZoneGround ? createZoneMembership(recipe, zoneRoles) : null;
+  const zoneM = new Float32Array(Math.max(1, groundZones.length));
+  let zoneMSum = 0;
+  let zoneMx = Number.NaN;
+  let zoneMz = Number.NaN;
+  /** Fill `zoneM` for (x, z); repeated calls at the same point are free. */
+  function zoneWeights(x: number, z: number): number {
+    if (!zoneMembershipAt) return 0;
+    if (x !== zoneMx || z !== zoneMz) {
+      zoneMSum = zoneMembershipAt(x, z, zoneM);
+      zoneMx = x;
+      zoneMz = z;
+    }
+    return zoneMSum;
+  }
+  /** Move each role-tagged surface's weight onto the zones' surfaces for that role. */
+  function remapNaturalRoles(x: number, z: number, out: Float32Array, offset: number): void {
+    if (zoneWeights(x, z) <= 1e-4) return;
+    const base = zoneRoles.baseRole;
+    for (let s = 0; s < surfaceCount; s++) {
+      const role = base[s]!;
+      if (role < 0) continue;
+      const w = out[offset + s]!;
+      if (w <= 0) continue;
+      for (let k = 0; k < groundZones.length; k++) {
+        const m = zoneM[k]!;
+        if (m <= 0) continue;
+        const t = groundZones[k]!.targets[role]!;
+        if (t < 0 || t === s) continue;
+        const moved = w * m;
+        out[offset + t] = out[offset + t]! + moved;
+        out[offset + s] = out[offset + s]! - moved;
+      }
+    }
+  }
+  /**
+   * Re-aim a paint GOAL vector (sums to 1) at the zones' surface for `role`:
+   * each zone that overrides the role takes its membership's share of the goal.
+   */
+  function remapPaintGoal(x: number, z: number, goal: Float32Array, role: number): void {
+    if (role < 0 || zoneWeights(x, z) <= 1e-4) return;
+    let taken = 0;
+    for (let k = 0; k < groundZones.length; k++) if (groundZones[k]!.targets[role]! >= 0) taken += zoneM[k]!;
+    if (taken <= 1e-4) return;
+    const keep = Math.max(0, 1 - taken);
+    for (let s = 0; s < surfaceCount; s++) goal[s] = goal[s]! * keep;
+    for (let k = 0; k < groundZones.length; k++) {
+      const t = groundZones[k]!.targets[role]!;
+      if (t >= 0) goal[t] = goal[t]! + zoneM[k]!;
+    }
+  }
+  /** Lerp `out` toward a one-hot `target` by `w`, re-aimed through `role` first. */
+  function paintToward(x: number, z: number, out: Float32Array, offset: number, target: number, w: number, role: number): void {
+    if (role >= 0 && hasZoneGround && zoneWeights(x, z) > 1e-4) {
+      paintGoal.fill(0);
+      paintGoal[target] = 1;
+      remapPaintGoal(x, z, paintGoal, role);
+      for (let s = 0; s < surfaceCount; s++) {
+        const cur = out[offset + s]!;
+        out[offset + s] = cur + (paintGoal[s]! - cur) * w;
+      }
+      return;
+    }
+    for (let s = 0; s < surfaceCount; s++) {
+      const cur = out[offset + s]!;
+      out[offset + s] = cur + ((s === target ? 1 : 0) - cur) * w;
+    }
+  }
+  const paintGoal = new Float32Array(surfaceCount);
+  const ROLE_ROAD = surfaceRoleIndex("road");
+  const ROLE_PAVING = surfaceRoleIndex("paving");
+  const ROLE_CLIFF = surfaceRoleIndex("cliff");
+
   // --------------------------------------------------------------- patches
   interface PatchRuntime {
     spec: FbmSpec;
@@ -1267,6 +1381,8 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     target: number;
     /** Per-biome override of `target` (index into the palette, -1 = none), or null when the road has one surface everywhere. */
     targets: Int16Array | null;
+    /** Zone ground role the tread takes (SURFACE_ROLES index), -1 = none (rivers, `role: "none"`). */
+    role: number;
   }
   const paintSegments: RoadSegment[] = [];
   for (const road of recipe.features.roads) {
@@ -1285,10 +1401,11 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
         targets[b] = index;
       }
     }
+    const role = road.role === "paving" ? ROLE_PAVING : road.role === "none" ? -1 : ROLE_ROAD;
     for (let i = 0; i + 1 < road.points.length; i++) {
       const a = road.points[i]!;
       const b = road.points[i + 1]!;
-      paintSegments.push({ ax: a[0], az: a[1], bx: b[0], bz: b[1], half: road.width / 2, verge: road.surfaceEdge, target, targets });
+      paintSegments.push({ ax: a[0], az: a[1], bx: b[0], bz: b[1], half: road.width / 2, verge: road.surfaceEdge, target, targets, role });
     }
   }
   // rivers paint their beds and banks the same way, so cover that gates on the
@@ -1302,7 +1419,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       for (let i = 0; i + 1 < river.points.length; i++) {
         const a = river.points[i]!;
         const b = river.points[i + 1]!;
-        all.push({ ax: a[0], az: a[1], bx: b[0], bz: b[1], half: river.width / 2 + river.bank * 0.45, verge: river.surfaceEdge, target, targets: null });
+        all.push({ ax: a[0], az: a[1], bx: b[0], bz: b[1], half: river.width / 2 + river.bank * 0.45, verge: river.surfaceEdge, target, targets: null, role: -1 });
       }
     }
     return makeBuckets<RoadSegment>(all, (s) => {
@@ -1975,12 +2092,18 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       // the embankment band beyond the shoulder never enters it.
       const dry = wet > 0 && hit.distance > half + road.shoulder ? 1 - wet : 1;
       if (dry <= 0) continue;
+      // A trail with maxCut / maxFill never trenches deeper (or stands higher)
+      // than that over the ground at THIS point: it rides the slope instead of
+      // cutting a wall the lattice draws as a zig-zag (height-patch.ts).
+      const value = road.maxCut === undefined && road.maxFill === undefined
+        ? hit.value
+        : Math.min(out + (road.maxFill ?? Infinity), Math.max(out - (road.maxCut ?? Infinity), hit.value));
       if (Number.isNaN(hit.side)) {
         // no embankment profile: the shoulder simply blends the road height
         // into whatever ground is there
         if (hit.distance > half + road.shoulder) continue;
         const w = (1 - smoothstep(half, half + road.shoulder, hit.distance)) * road.flatten * dry;
-        if (w > 0) out = out + (hit.value - out) * w;
+        if (w > 0) out = out + (value - out) * w;
         continue;
       }
       // The graded embankment. Between the road edge and the outer edge of
@@ -1999,8 +2122,8 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       // metres up — an S-curve to it is a wall. Clamped, the bank stops at
       // what a bench cut looks like and the cliff above stays a cliff.
       const band = outer - half;
-      const side = Math.min(hit.value + band * 1.0, Math.max(hit.value - band * 0.8, hit.side));
-      const embankment = hit.value + (side - hit.value) * smoothstep(half, outer, hit.distance);
+      const side = Math.min(value + band * 1.0, Math.max(value - band * 0.8, hit.side));
+      const embankment = value + (side - value) * smoothstep(half, outer, hit.distance);
       const w = (1 - smoothstep(half + road.shoulder + road.smooth * 0.5, outer, hit.distance)) * road.flatten * dry;
       if (w <= 0) continue;
       out = out + (embankment - out) * w;
@@ -2195,7 +2318,30 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
   }
 
   function height(x: number, z: number): number {
-    return applyFeatures(naturalHeight(x, z), x, z);
+    return heightThroughPatches(x, z, heightPatchDocs.length);
+  }
+
+  // Height patches, prepared lazily (the automatic edge feather reads the
+  // ground under each patch's boundary once). See height-patch.ts: why a
+  // patch edge narrower than the lattice draws as a sawtooth.
+  function preparedPatch(k: number): PreparedHeightPatch {
+    let p = preparedPatches[k];
+    if (!p) {
+      p = prepareHeightPatch(heightPatchDocs[k]!, voxelSize, (x, z) => heightThroughPatches(x, z, k));
+      preparedPatches[k] = p;
+    }
+    return p;
+  }
+  /** Ground with only the first `n` height patches applied. */
+  function heightThroughPatches(x: number, z: number, n: number): number {
+    let out = applyFeatures(naturalHeight(x, z), x, z);
+    for (let k = 0; k < n; k++) {
+      const doc = heightPatchDocs[k]!;
+      const dx = x - doc.origin[0], dz = z - doc.origin[1];
+      if (dx <= 0 || dz <= 0 || dx >= doc.size[0] || dz >= doc.size[1]) continue;
+      out = preparedPatch(k).apply(x, z, out);
+    }
+    return out;
   }
 
   function slopeFromHeights(hx0: number, hx1: number, hz0: number, hz1: number, e: number): number {
@@ -2446,6 +2592,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     let targets: Int16Array | null = null;
     let half = 0;
     let verge = 0;
+    let role = -1;
     for (let i = 0; i < near.length; i++) {
       const s = near[i]!;
       const dx = s.bx - s.ax;
@@ -2461,6 +2608,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
         targets = s.targets;
         half = s.half;
         verge = s.verge;
+        role = s.role;
       }
     }
     if (target < 0 || best > half + verge + 2) return;
@@ -2470,10 +2618,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     const w = (1 - smoothstep(half - verge * 0.2, half + verge, d)) * flat;
     if (w <= 0.002) return;
     if (targets === null) {
-      for (let s = 0; s < surfaceCount; s++) {
-        const cur = out[offset + s]!;
-        out[offset + s] = cur + ((s === target ? 1 : 0) - cur) * w;
-      }
+      paintToward(x, z, out, offset, target, w, role);
       return;
     }
     // the goal is the base surface, with each biome that overrides it
@@ -2488,6 +2633,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       base -= m;
     }
     roadGoal[target] = roadGoal[target]! + Math.max(0, base);
+    if (hasZoneGround) remapPaintGoal(x, z, roadGoal, role);
     for (let s = 0; s < surfaceCount; s++) {
       const cur = out[offset + s]!;
       out[offset + s] = cur + (roadGoal[s]! - cur) * w;
@@ -2549,10 +2695,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       w = Math.max(w, 1 - smoothstep(r * 0.8, r + b.falloff + 1.5, d + fbm2(vergeSpec, x, z, seed) * 1.2));
     }
     if (w <= 0.002) return;
-    for (let k = 0; k < surfaceCount; k++) {
-      const cur = out[offset + k]!;
-      out[offset + k] = cur + ((k === siteRockTarget ? 1 : 0) - cur) * w;
-    }
+    paintToward(x, z, out, offset, siteRockTarget, w, ROLE_CLIFF);
   }
 
   /** Everything that decorates the biome result, in order. Shared by every splat path. */
@@ -2565,6 +2708,10 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     offset: number,
   ): void {
     if (hasPatches) applyPatches(x, z, steep, membership, out, offset);
+    // zone ground AFTER the biome and its patches (they decide what kind of
+    // ground this is) and BEFORE feature paint (a road's dirt is a road, not
+    // the zone's open ground — paint re-aims through its own role)
+    if (hasZoneGround) remapNaturalRoles(x, z, out, offset);
     // Feature paint (lake shores, river beds and banks, road treads) is for
     // GROUND: it fades out between PAINT_STEEP_START and PAINT_STEEP_END so a
     // near-vertical face keeps the biome's cliff rock. It used to paint by
@@ -2851,6 +2998,33 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     return out;
   }
 
+  function passagesAt(x: number, y: number, z: number, d: number): number {
+    for (const p of bucketAt(passages, x, z) as readonly PassageDoc[]) {
+      const along = ((p.axis === "x" ? x - p.start[0] : z - p.start[2])) * p.direction;
+      const across = p.axis === "x" ? z - p.start[2] : x - p.start[0];
+      const up = y - p.start[1];
+      const ellipse = p.footprint === "ellipse", endPad = p.falloff + (ellipse ? p.wallNoise : 0);
+      if (along < -endPad || along > p.length + endPad || Math.abs(across) > p.width / 2 + p.wallNoise + p.falloff || up < -p.falloff || up > p.height + p.roofRise + p.roofNoise + p.falloff) continue;
+      const radial = ellipse ? Math.hypot(across / (p.width / 2), (along - p.length / 2) / (p.length / 2)) : Math.abs(across) / (p.width / 2);
+      const roofProfile = Math.max(0, 1 - radial * radial);
+      const noiseSeed = (seed + p.seed + (ellipse ? 0 : across < 0 ? 1013 : 0)) | 0;
+      const coarse = perlin2((ellipse ? x : along) / p.noiseScale, (ellipse ? z : up) / p.noiseScale, noiseSeed);
+      const detail = p.noiseDetail ? perlin2((ellipse ? x : along) * 2 / p.noiseScale, (ellipse ? z : up) * 2 / p.noiseScale, noiseSeed + 7919) : coarse;
+      const noise = clamp(((1 - p.noiseDetail) * coarse + p.noiseDetail * detail + 1) / 2, 0, 1);
+      const roof = p.height + p.roofRise * roofProfile + p.roofNoise * roofProfile * clamp((perlin2(x / p.noiseScale, z / p.noiseScale, noiseSeed + 3253) + 1) / 2, 0, 1);
+      const fade = (ellipse ? 1 : smoothstep(0, p.connectionBand, Math.min(along, p.length - along)))
+        * smoothstep(0, p.connectionBand, Math.min(up, roof - up));
+      const recess = p.wallNoise * fade * noise;
+      // Box signed field is retained OUTSIDE too: clipping to positive air
+      // would snap interpolated floors to the nearest terrain lattice layer.
+      const radialMetres = ellipse && radial > 1e-8 ? Math.hypot(across, along - p.length / 2) / radial : Math.min(p.width / 2, p.length / 2);
+      const horizontal = ellipse ? (1 - radial) * radialMetres + recess : Math.min(along, p.length - along, p.width / 2 + recess - Math.abs(across));
+      const air = Math.min(up, roof - up, horizontal);
+      d = Math.max(d, air);
+    }
+    return d;
+  }
+
   /**
    * Density given a column's already-resolved ground height and steepness.
    *
@@ -2871,6 +3045,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       if (tunnel > 0) d = Math.max(d, tunnel);
     }
     if (hasBlobs) d = blobsAt(x, y, z, d);
+    if (passageDocs.length) d = passagesAt(x, y, z, d);
     // hard floor last so nothing — not caves, not blobs — can open the world's underside
     if (y < recipe.minY + 2) d = Math.min(d, y - (recipe.minY + 2));
     return d;
@@ -3002,6 +3177,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
               if (tunnel > 0) d = Math.max(d, tunnel);
             }
             if (hasBlobs) d = blobsAt(wx, wy, wz, d);
+            if (passageDocs.length) d = passagesAt(wx, wy, wz, d);
             if (wy < recipe.minY + 2) d = Math.min(d, wy - (recipe.minY + 2));
           }
           values[i + j * nx + k * strideZ] = d;
@@ -3042,6 +3218,20 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
         if (bottom < min) min = bottom;
       }
     }
+    // A bounded authored passage may sit deeper than the ordinary below-
+    // heightfield band. Include its floor only in intersecting chunk columns.
+    for (const p of passageDocs) {
+      const end = p.start[p.axis === "x" ? 0 : 2] + p.direction * p.length;
+      const half = p.width / 2 + p.wallNoise + p.falloff;
+      const pad = p.falloff + (p.footprint === "ellipse" ? p.wallNoise : 0);
+      const bx0 = p.axis === "x" ? Math.min(p.start[0], end) - pad : p.start[0] - half;
+      const bx1 = p.axis === "x" ? Math.max(p.start[0], end) + pad : p.start[0] + half;
+      const bz0 = p.axis === "z" ? Math.min(p.start[2], end) - pad : p.start[2] - half;
+      const bz1 = p.axis === "z" ? Math.max(p.start[2], end) + pad : p.start[2] + half;
+      if (bx1 < x0 || bx0 > x1 || bz1 < z0 || bz0 > z1) continue;
+      min = Math.min(min, p.start[1] - p.falloff);
+      max = Math.max(max, p.start[1] + p.height + p.roofRise + p.roofNoise + p.falloff);
+    }
     return { min, max };
   }
 
@@ -3066,6 +3256,57 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       prev = d;
     }
     return null;
+  }
+
+  /**
+   * Vertical span of every 3D CARVE (passage, tunnel, subtracting blob) whose
+   * footprint reaches the XZ rectangle, or null when none does. `height()` and
+   * the cover lattice cannot see these — they only exist in the density — so
+   * this is how a placement asks "is the heightfield still the truth here?".
+   * Bucket lookups only: on untouched ground it is a map miss.
+   */
+  function carveSpan(x0: number, z0: number, x1: number, z1: number): { min: number; max: number } | null {
+    let min = Infinity;
+    let max = -Infinity;
+    const bx0 = Math.floor(x0 / BUCKET), bx1 = Math.floor(x1 / BUCKET);
+    const bz0 = Math.floor(z0 / BUCKET), bz1 = Math.floor(z1 / BUCKET);
+    for (let bz = bz0; bz <= bz1; bz++) {
+      for (let bx = bx0; bx <= bx1; bx++) {
+        const cx = bx * BUCKET + 1, cz = bz * BUCKET + 1;
+        if (passageDocs.length) {
+          for (const p of bucketAt(passages, cx, cz) as readonly PassageDoc[]) {
+            const pad = p.falloff + (p.footprint === "ellipse" ? p.wallNoise : 0), half = p.width / 2 + p.wallNoise + p.falloff;
+            const end = p.start[p.axis === "x" ? 0 : 2] + p.direction * p.length;
+            const ax0 = p.axis === "x" ? Math.min(p.start[0], end) - pad : p.start[0] - half;
+            const ax1 = p.axis === "x" ? Math.max(p.start[0], end) + pad : p.start[0] + half;
+            const az0 = p.axis === "z" ? Math.min(p.start[2], end) - pad : p.start[2] - half;
+            const az1 = p.axis === "z" ? Math.max(p.start[2], end) + pad : p.start[2] + half;
+            if (ax1 < x0 || ax0 > x1 || az1 < z0 || az0 > z1) continue;
+            min = Math.min(min, p.start[1] - p.falloff);
+            max = Math.max(max, p.start[1] + p.height + p.roofRise + p.roofNoise + p.falloff);
+          }
+        }
+        if (hasTunnels) {
+          for (const s of bucketAt(tunnelSegments, cx, cz) as readonly TunnelSegment[]) {
+            const r = Math.max(s.ra, s.rb) + 1;
+            if (Math.max(s.ax, s.bx) + r < x0 || Math.min(s.ax, s.bx) - r > x1 || Math.max(s.az, s.bz) + r < z0 || Math.min(s.az, s.bz) - r > z1) continue;
+            min = Math.min(min, Math.min(s.ay, s.by) - r);
+            max = Math.max(max, Math.max(s.ay, s.by) + r);
+          }
+        }
+        if (hasBlobs) {
+          for (const b of bucketAt(blobs, cx, cz) as readonly BlobDoc[]) {
+            if (b.op === "add") continue;
+            const reach = blobReach(b);
+            const rx = reach * b.scaleX + b.falloff, rz = reach * b.scaleZ + b.falloff;
+            if (b.center[0] + rx < x0 || b.center[0] - rx > x1 || b.center[2] + rz < z0 || b.center[2] - rz > z1) continue;
+            min = Math.min(min, b.center[1] - reach - b.falloff);
+            max = Math.max(max, b.center[1] + b.height + reach + b.falloff);
+          }
+        }
+      }
+    }
+    return min <= max ? { min, max } : null;
   }
 
   function featureClearance(x: number, z: number): number {
@@ -4750,6 +4991,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     sampleBlock,
     heightRange,
     surfaceCast,
+    carveSpan,
     featureClearance,
     waterY,
     waterSurface,

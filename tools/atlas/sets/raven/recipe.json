@@ -1,0 +1,127 @@
+{
+ "source": "MMO/3d/Mobs/Dragon/Raven-parts.obj",
+ "sourceScale": 1,
+ "objScale": 1,
+ "outMesh": "MMO/3d/Mobs/Dragon/Raven-unwrapped",
+ "sheet": 1254,
+ "keyStroke": 8,
+ "smooth": 48,
+ "margin": 22,
+ "gutter": 48,
+ "atlas": {
+  "size": 376,
+  "bleed": 2,
+  "bgLum": 236
+ },
+ "mirrorCopy": {
+  "axis": "z",
+  "parts": [
+   "Raven_Leg",
+   "Raven_Wing",
+   "Raven_Body",
+   "Raven_Head",
+   "Raven_Tail"
+  ]
+ },
+ "slots": {
+  "leg": {
+   "color": "#ff0000",
+   "fit": "contain",
+   "matchTo": "body"
+  },
+  "wing": {
+   "color": "#00ff00",
+   "fit": "contain"
+  },
+  "body": {
+   "color": "#0000ff",
+   "fit": "contain"
+  },
+  "head": {
+   "color": "#ffff00",
+   "fit": "contain",
+   "labelMax": 1
+  },
+  "tail": {
+   "color": "#ff00ff",
+   "fit": "contain",
+   "matchTo": "body"
+  }
+ },
+ "parts": {
+  "Raven_Leg": {
+   "slot": "leg",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Raven_Wing": {
+   "slot": "wing",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Raven_Body": {
+   "slot": "body",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.35
+  },
+  "Raven_Head": {
+   "slot": "head",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.4
+  },
+  "Raven_Tail": {
+   "slot": "tail",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  }
+ },
+ "layout": {
+  "row": [
+   {
+    "col": [
+     "wing",
+     "leg",
+     "tail"
+    ]
+   },
+   {
+    "col": [
+     "body",
+     "head"
+    ]
+   }
+  ]
+ },
+ "marks": [
+  {
+   "slot": "head",
+   "at": [
+    0.3375,
+    1.055,
+    -0.0535
+   ],
+   "shape": "eye",
+   "size": 10
+  }
+ ],
+ "cutoutSlots": [],
+ "combos": [
+  [
+   "Raven_Leg",
+   "Raven_Wing",
+   "Raven_Body",
+   "Raven_Head",
+   "Raven_Tail"
+  ]
+ ]
+}

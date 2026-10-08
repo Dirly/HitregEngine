@@ -1,0 +1,170 @@
+{
+ "source": "MMO/3d/Mobs/Dragon/Beetle-parts.obj",
+ "sourceScale": 1,
+ "objScale": 1,
+ "outMesh": "MMO/3d/Mobs/Dragon/Beetle-unwrapped",
+ "sheet": 1254,
+ "keyStroke": 8,
+ "smooth": 48,
+ "margin": 22,
+ "gutter": 48,
+ "atlas": {
+  "size": 226,
+  "bleed": 2,
+  "bgLum": 236
+ },
+ "mirrorCopy": {
+  "axis": "z",
+  "parts": [
+   "Beetle_Leg1",
+   "Beetle_Leg3",
+   "Beetle_Leg2",
+   "Beetle_Antenna",
+   "Beetle_Head",
+   "Beetle_Abdomen",
+   "Beetle_Thorax",
+   "Beetle_Mandible",
+   "Beetle_Eye"
+  ]
+ },
+ "slots": {
+  "leg1": {
+   "color": "#ff0000",
+   "fit": "contain"
+  },
+  "leg3": {
+   "color": "#00ff00",
+   "fit": "contain"
+  },
+  "leg2": {
+   "color": "#0000ff",
+   "fit": "contain"
+  },
+  "antenna": {
+   "color": "#ffff00",
+   "fit": "contain"
+  },
+  "head": {
+   "color": "#ff00ff",
+   "fit": "contain"
+  },
+  "abdomen": {
+   "color": "#ff8000",
+   "fit": "contain"
+  },
+  "thorax": {
+   "color": "#8000ff",
+   "fit": "contain"
+  },
+  "mandible": {
+   "color": "#008c00",
+   "fit": "contain"
+  },
+  "eyes": {
+   "color": "#00008c",
+   "fit": "contain",
+   "label": "compound eye"
+  }
+ },
+ "parts": {
+  "Beetle_Leg1": {
+   "slot": "leg1",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Beetle_Leg3": {
+   "slot": "leg3",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Beetle_Leg2": {
+   "slot": "leg2",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Beetle_Antenna": {
+   "slot": "antenna",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Beetle_Head": {
+   "slot": "head",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.4
+  },
+  "Beetle_Abdomen": {
+   "slot": "abdomen",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Beetle_Thorax": {
+   "slot": "thorax",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Beetle_Mandible": {
+   "slot": "mandible",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  },
+  "Beetle_Eye": {
+   "slot": "eyes",
+   "method": "plane",
+   "u": "+x",
+   "v": "-y",
+   "flare": 0.25
+  }
+ },
+ "layout": {
+  "row": [
+   {
+    "col": [
+     "abdomen",
+     "leg2",
+     "head",
+     "antenna"
+    ]
+   },
+   {
+    "col": [
+     "thorax",
+     "mandible",
+     "leg3",
+     "leg1",
+     "eyes"
+    ]
+   }
+  ]
+ },
+ "marks": [],
+ "cutoutSlots": [],
+ "combos": [
+  [
+   "Beetle_Leg1",
+   "Beetle_Leg3",
+   "Beetle_Leg2",
+   "Beetle_Antenna",
+   "Beetle_Head",
+   "Beetle_Abdomen",
+   "Beetle_Thorax",
+   "Beetle_Mandible",
+   "Beetle_Eye"
+  ]
+ ]
+}

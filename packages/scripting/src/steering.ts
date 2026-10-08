@@ -227,7 +227,8 @@ export class TerrainSteering {
       return { dir, blocked: false, stuck: false, groundY: null };
     }
 
-    const groundY = groundHeightAt(sim, x, z, y, { exclude: req.exclude });
+    // the body's own floor: it stands on it, so a short start (clear of a low roof) is enough
+    const groundY = groundHeightAt(sim, x, z, y, { up: 1.2, exclude: req.exclude });
     // Not knowing where the floor is disables the HEIGHT tests only — the
     // horizontal ray still means something, so the body keeps avoiding walls
     // while a chunk streams in instead of standing still in the open.
@@ -310,7 +311,11 @@ export class TerrainSteering {
     const az = z + dir[1] * o.probe;
 
     if (feetKnown) {
-      const ahead = groundHeightAt(sim, ax, az, feet, exclude ? { exclude } : {});
+      // Start the probe just above the highest rise this step may climb, not at a fixed 3 m: under a low ceiling (a
+      // 2.7 m warren neck) a ray from 3 m starts inside the roof, hits it, reads it as a wall-high step and refuses
+      // the way — mobs would not chase through low passages.
+      const climb = Math.max(o.maxStepUp, o.probe * Math.tan((o.maxSlope * Math.PI) / 180));
+      const ahead = groundHeightAt(sim, ax, az, feet, { up: Math.min(3, climb + 0.3), ...(exclude ? { exclude } : {}) });
       if (ahead === null) return false; // a hole in the world: do not walk into it
       const rise = ahead - feet;
       if (rise > o.maxStepUp && rise / o.probe > Math.tan((o.maxSlope * Math.PI) / 180)) return false;

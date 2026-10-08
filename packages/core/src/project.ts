@@ -154,6 +154,15 @@ export const projectManifestSchema = z
       .array(projectToolDependencySchema)
       .default([])
       .describe("Registered tools this project needs installed under the engine's tools/ folder."),
+    dependsOn: z
+      .array(projectName)
+      .default([])
+      .describe(
+        "Other projects whose assets this project's scenes use (a portal's instance scene, a borrowed model or " +
+          "material). Opening one of this project's scenes loads ONLY this project plus these, transitively — " +
+          "every other folder under projects/ costs nothing. A reference into a project not listed here is " +
+          "missing at runtime, so list it or copy the asset in.",
+      ),
   })
   .superRefine((manifest, ctx) => {
     const listed = new Set<string>();
@@ -181,6 +190,27 @@ export const projectManifestSchema = z
       seen.add(tool.id);
     }
   });
+
+/**
+ * The projects a scene of `start` needs loaded: `start` plus its `dependsOn`,
+ * transitively. Pure — the caller reads manifests (`null` when a project has
+ * none or it is invalid), so the dev bridge and the server scope the same way.
+ * A dependency with no folder is still listed; loading it finds nothing.
+ */
+export function projectDependencyClosure(
+  start: string,
+  readManifest: (name: string) => Pick<ProjectManifest, "dependsOn"> | null,
+): string[] {
+  const seen = new Set<string>();
+  const queue = [start];
+  while (queue.length > 0) {
+    const name = queue.shift()!;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    for (const dep of readManifest(name)?.dependsOn ?? []) queue.push(dep);
+  }
+  return [...seen];
+}
 
 export type ProjectToolDependency = z.infer<typeof projectToolDependencySchema>;
 export type ProjectManifest = z.infer<typeof projectManifestSchema>;

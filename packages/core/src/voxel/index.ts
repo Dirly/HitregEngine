@@ -18,6 +18,8 @@
  */
 
 export { mergeVoxelMeshes } from "./merge.js";
+export { reduceSplatTop4, SPLAT_TOP_UNUSED, type SplatTop4Options } from "./splat-top4.js";
+export { zoneGroundRoles, surfaceAliases, surfaceBaseIndex, type ZoneGroundRoles } from "./zone-ground.js";
 export {
   coverClumpKeep,
   coverEdgeClearance,
@@ -28,6 +30,19 @@ export {
   coverWaterGate,
   type CoverGateLayer,
 } from "./cover.js";
+export {
+  regionVegetationSchema,
+  clearingSchema,
+  vegetationIndex,
+  coverVegetationRejects,
+  VegetationIndex,
+  CLEARING_PAD,
+  type RegionVegetation,
+  type ClearingDoc,
+  type VegetationPlan,
+  type VegetationRecipe,
+  type CoverVegetationLayer,
+} from "./vegetation.js";
 export {
   hash3i,
   hash2i,
@@ -70,6 +85,8 @@ export {
   csgNodeSchema,
   csgSurfaceSchema,
   csgHeightfieldSchema,
+  csgNoiseSchema,
+  type CsgNoise,
   encodeHeightfieldValues,
   decodeHeightfieldValues,
   createVolume,
@@ -96,13 +113,22 @@ export {
   defaultWorldRecipe,
   continentalWorldRecipe,
   MAX_SURFACES,
+  MAX_INDEXED_SURFACES,
+  SURFACE_ROLES,
+  NATURAL_SURFACE_ROLES,
+  type SurfaceRole,
+  type NaturalSurfaceRole,
+  recipeSplatIndexed,
   riverSchema,
   canyonSchema,
   roadSchema,
   townSchema,
+  heightPatchSchema,
+  type HeightPatchDoc,
   townGateSchema,
   terraceSchema,
   blobSchema,
+  passageSchema,
   tunnelSchema,
   poiSchema,
   storySchema,
@@ -126,6 +152,7 @@ export {
   campSchema,
   type CampDoc,
   type BlobDoc,
+  type PassageDoc,
   type TunnelDoc,
   type PoiDoc,
   type StoryDoc,
@@ -145,6 +172,8 @@ export {
 } from "./recipe.js";
 export {
   regionSchema,
+  regionMoodSchema,
+  type RegionMood,
   regionAt,
   townRegionOf,
   polygonEnclosesCircle,
@@ -195,6 +224,8 @@ export {
   registerVoxelWorld,
   registerVoxelField,
   registerVoxelRecipe,
+  registerVoxelRecipeLoader,
+  getVoxelRecipe,
   getVoxelWorld,
   isVoxelWorldInUse,
   voxelWorldIds,
@@ -210,6 +241,9 @@ export {
 
 export {
   scatterCell,
+  scatterFooting,
+  editedGround,
+  FOOTING_OPEN,
   scatterVariation,
   type VoxelScatterInstance,
   type ScatterCellOptions,
@@ -240,3 +274,27 @@ export {
 export { fallSiteSchema, applyFallSites, fallSiteLedge, FALL_SITE_MIN_TIER, type FallSiteDoc, type SolvedFallSite } from "./fall-sites.js";
 export { rockFormations, rockFormationSolid, type RockFormationSolid, type RockFormationSite, type RockFormationOptions, type RockFormationResult, type RockMass } from "./rock-formations.js";
 export { fallSiteRockInstances, meshDensity, type SiteRockInstance, type MeshDensity } from "./fall-site-rocks.js";
+
+export {
+  auditVoxelMesh,
+  type VoxelMeshAuditOptions,
+  type VoxelMeshAuditResult,
+  type VoxelMeshBlade,
+} from "./mesh-audit.js";
+export {
+  prepareHeightPatch,
+  tentFilterRaster,
+  slopeLimitRaster,
+  PATCH_EDGE_SLOPE,
+  type PreparedHeightPatch,
+} from "./height-patch.js";
+export {
+  measureTerrainLips,
+  latticeHeight,
+  seatReport,
+  type TerrainLipOptions,
+  type TerrainLipFault,
+  type TerrainLipKind,
+  type TerrainLipReport,
+  type SeatReport,
+} from "./terrain-lips.js";

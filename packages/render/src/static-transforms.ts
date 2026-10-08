@@ -86,6 +86,13 @@ function recomputeFrozen(root: THREE.Object3D): void {
   THREE.Object3D.prototype.updateMatrixWorld.call(root, true);
   root.matrixWorldAutoUpdate = marker;
   rememberParent(root);
+  frozenVersions.set(root, (frozenVersions.get(root) ?? 0) + 1);
+}
+
+/** Bumped on every recompute of a frozen root: anything cached about its subtree keys on it. */
+const frozenVersions = new WeakMap<THREE.Object3D, number>();
+export function frozenSubtreeVersion(root: THREE.Object3D): number {
+  return frozenVersions.get(root) ?? 0;
 }
 
 /** Whether `freezeStaticSubtree` has pruned this root from the per-frame walk. */
@@ -114,4 +121,39 @@ export function thawStaticSubtree(root: THREE.Object3D): void {
   delete (root as unknown as { updateMatrixWorld?: unknown }).updateMatrixWorld;
   root.matrixWorldAutoUpdate = true;
   root.updateMatrixWorld(true);
+}
+
+const _scale = new THREE.Vector3();
+const _pos = new THREE.Vector3();
+
+/**
+ * Whether `object`'s world matrix is maintained by a frozen subtree (itself
+ * or an ancestor is a frozen root). Pointer hops only — no matrix math.
+ */
+function underFrozenRoot(object: THREE.Object3D): boolean {
+  for (let at: THREE.Object3D | null = object; at; at = at.parent) {
+    if (Object.prototype.hasOwnProperty.call(at, "updateMatrixWorld")) return true;
+  }
+  return false;
+}
+
+/**
+ * `getWorldPosition` without the ancestor walk when it cannot change the
+ * answer. Three's getter recomputes every ancestor's local and world matrix
+ * on each call; per-frame systems asking it of hundreds of torches and lamps
+ * in a frozen town spent ~1 ms a frame recomputing matrices that are, by the
+ * freeze contract, already current.
+ */
+export function readWorldPosition(object: THREE.Object3D, out: THREE.Vector3): THREE.Vector3 {
+  if (underFrozenRoot(object)) return out.setFromMatrixPosition(object.matrixWorld);
+  return object.getWorldPosition(out);
+}
+
+/** `getWorldQuaternion` with the same shortcut as {@link readWorldPosition}. */
+export function readWorldQuaternion(object: THREE.Object3D, out: THREE.Quaternion): THREE.Quaternion {
+  if (underFrozenRoot(object)) {
+    object.matrixWorld.decompose(_pos, out, _scale);
+    return out;
+  }
+  return object.getWorldQuaternion(out);
 }

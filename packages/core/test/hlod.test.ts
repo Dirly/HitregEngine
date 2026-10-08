@@ -104,6 +104,13 @@ describe("HLOD static-render eligibility", () => {
         withComponents({ mesh: box([1, 1, 1]), visibility: { visible: false } }),
       ),
     ).toBe(false);
+    // an interior is never seen from HLOD distance
+    expect(
+      isStaticRenderEntity(withComponents({ mesh: box([1, 1, 1]), culling: { interior: true } })),
+    ).toBe(false);
+    expect(
+      isStaticRenderEntity(withComponents({ mesh: box([1, 1, 1]), culling: { minScreenPx: 6 } })),
+    ).toBe(true);
   });
 });
 

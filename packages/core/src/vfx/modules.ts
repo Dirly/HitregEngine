@@ -49,6 +49,14 @@ export const anchorSchema = z.object({
   offset: vec3
     .default([0, 0, 0])
     .describe("metres in the anchor's own frame: x right, y up, z FORWARD along the spell direction."),
+  local: z
+    .boolean()
+    .default(false)
+    .describe(
+      "caster/target only: `offset` is in the anchor OBJECT's own axes (its rotation, not its scale) and the module " +
+        "faces with it — a point on a held weapon, such as its tip, that turns with the blade. Pair with `follow` " +
+        "(and a particle emitter's `space: local`) to ride it. false = the spell frame described under `offset`.",
+    ),
   follow: z
     .boolean()
     .default(false)
@@ -105,6 +113,16 @@ const moduleBase = {
       "PSX look: quantise the procedural shading to this many cells across the shape (0 = off, 16–32 reads as " +
         "pixel art). Rings, shells, columns and beams snap their noise and bands to the grid; masks and sprites " +
         "switch to nearest filtering.",
+    ),
+  texel: z
+    .number()
+    .min(0)
+    .max(2)
+    .default(0)
+    .describe(
+      "PSX look in WORLD units: metres per texel (0 = off; overrides `pixel`). Every module of a spell shares one, " +
+        "so a 12 m shockwave and a 1 m slash are pixelated at the same size and stay so as they grow — 0.03 matches " +
+        "the symbol sheets' own density at typical sizes (coarser turns line art to mush). Textured kinds resample their art onto the same grid.",
     ),
   posterize: z
     .number()
@@ -163,12 +181,21 @@ export const spriteModuleSchema = z.object({
   size: z.number().positive().default(1).describe("Metres — the quad's width; height follows `aspect`."),
   aspect: z.number().positive().default(1),
   orient: z
-    .enum(["billboard", "ground", "vertical", "facing", "velocity"])
+    .enum(["billboard", "ground", "vertical", "facing", "velocity", "world"])
     .default("billboard")
     .describe(
       "billboard faces the camera; ground lies flat (marks, runes); vertical stands upright and yaws toward " +
         "the camera (a slash, a wave); facing stands upright with its face along the spell direction (a portal); " +
-        "velocity aligns with the anchor's motion.",
+        "velocity is a camera-facing quad rolled onto the anchor's motion; world is fixed IN THE WORLD, never " +
+        "turning to the camera: the art's top along the motion (a projectile) or, at rest, upright and square to " +
+        "the spell direction (a stuck spear). Pair it with `crossed`.",
+    ),
+  crossed: z
+    .boolean()
+    .default(false)
+    .describe(
+      "world: a second quad crossed at 90° around the long axis, so the shape holds from every side (the PSX " +
+        "crossed-plane trick) instead of vanishing edge-on.",
     ),
   spin: z
     .number()
@@ -186,6 +213,17 @@ export const spriteModuleSchema = z.object({
       "[col, row] of ONE sheet cell shown as a static SYMBOL (a sigil, a glyph, an arrow) instead of playing the " +
         "sheet as a flipbook. `fps`/`loop` are ignored; the symbol lives for `duration` (0 = the phase, or 0.6 s).",
     ),
+  glow: z
+    .number()
+    .min(0)
+    .max(3)
+    .default(0)
+    .describe(
+      "A halo around a SYMBOL (`cell` set), built from its own shape: 0 = none, 1 = a clear glow, 2+ = blazing. " +
+        "Banded into PSX steps when the spell has a texel grid.",
+    ),
+  glowSize: z.number().min(0.02).max(0.5).default(0.06).describe("How far the halo reaches, as a fraction of the symbol's size."),
+  glowColor: z.string().default("glow").describe('Halo colour: a palette slot or #rrggbb.'),
   orbit: z.number().min(0).default(0).describe("Metres the quad circles the anchor at, around its up axis. 0 = sits on the anchor."),
   orbitSpeed: z.number().default(0).describe("Radians/sec along the orbit; negative runs the other way."),
   orbitPhase: z.number().default(0).describe("Starting angle on the orbit, radians (0 = in front of the anchor). `repeat.turn` advances it per copy."),
@@ -262,6 +300,54 @@ export const ringModuleSchema = z.object({
     .default(true)
     .describe("Ground rings follow the terrain under them (needs the host's ground probe)."),
   height: z.number().default(0).describe("Vertical/billboard: metres above the anchor the centre sits."),
+});
+
+export const decalModuleSchema = z.object({
+  kind: z.literal("decal"),
+  ...moduleBase,
+  sheet: z
+    .string()
+    .describe(
+      "Decal-sheet data-asset id (written by `fx.mjs decals`). Its texture is NOT plain art: R is WHEN each texel " +
+        "appears (0 = at the strike point, 1 = last), G is the art's own brightness, A is coverage.",
+    ),
+  cell: z.tuple([z.number().int().min(0), z.number().int().min(0)]).default([0, 0]).describe("[col, row] of the decal on its sheet."),
+  size: z.number().positive().default(3).describe("Metres across (the cell's width); depth follows `aspect`."),
+  aspect: z.number().positive().default(1).describe("Width / depth. >1 stretches the mark across the spell direction."),
+  grow: z
+    .number()
+    .min(0)
+    .default(0.5)
+    .describe(
+      "Seconds for the reveal front to run from the strike point to the rim. Cracks race along their own lines, " +
+        "vines creep, flowers open stem-first — the order is baked in the sheet. 0 = the whole mark at once.",
+    ),
+  growEase: z.enum(["out", "in", "linear"]).default("out"),
+  edge: z
+    .number()
+    .min(0)
+    .max(0.5)
+    .default(0.08)
+    .describe("Width of the glowing growth front, in reveal units (0 = no front). It fades once growth completes."),
+  edgeColor: z.string().default("glow").describe('Colour of the growth front: a palette slot or #rrggbb.'),
+  shade: z
+    .number()
+    .min(0)
+    .max(1)
+    .default(0.6)
+    .describe("How much the art's own brightness shades the colour: 0 flat, 1 the drawn detail at full contrast."),
+  fadeOut: z
+    .number()
+    .min(0)
+    .default(0.5)
+    .describe("Seconds after its life the mark takes to go — faded, or run backwards when `recede`."),
+  recede: z
+    .boolean()
+    .default(false)
+    .describe("Die by running the reveal backwards (vines withdraw, frost retreats to the centre) instead of fading."),
+  yaw: z.number().default(0).describe("Radians around up, on top of facing the spell direction."),
+  randomYaw: z.boolean().default(false).describe("Roll the yaw per play — repeated impacts stop looking stamped."),
+  drape: z.boolean().default(true).describe("Follow the terrain under the mark (needs the host's ground probe)."),
 });
 
 export const shellModuleSchema = z.object({
@@ -404,14 +490,81 @@ export const meshModuleSchema = z.object({
   spread: z.number().min(0).default(0).describe("count > 1: radius they scatter or orbit within."),
   emissive: z.number().min(0).default(1.5).describe("Glow strength of the tint."),
   tint: z.boolean().default(true).describe("Colour the body with the palette; off keeps the asset's own material."),
+  sheet: z
+    .string()
+    .optional()
+    .describe(
+      "Symbol sheet whose cells are drawn BODIES (role `object`: spikes, crystals, rocks, orbs, blades, upright, base " +
+        "at the bottom). When set, every body is a camera-facing drawing standing in the world instead of a 3D " +
+        "primitive — same motion, the spell's own art style.",
+    ),
+  cells: z
+    .array(z.tuple([z.number().int().min(0), z.number().int().min(0)]))
+    .default([])
+    .describe("[col, row] cells of `sheet`; each body takes one in turn."),
 });
 
 export const trailModuleSchema = z.object({
   kind: z.literal("trail"),
   ...moduleBase,
-  width: z.number().positive().default(0.35),
+  width: z.number().positive().default(0.35).describe("Camera-facing ribbon: metres across. Ignored with `edge` (the edge's two points set the width)."),
   length: z.number().positive().default(0.35).describe("Seconds of history the ribbon covers."),
-  taper: z.boolean().default(true),
+  taper: z
+    .boolean()
+    .default(true)
+    .describe("Narrow toward the tail. With `edge` the inner point slides toward the outer one as a sample ages, so a blade's smear thins to its tip's line."),
+  falloff: z
+    .number()
+    .min(0.25)
+    .max(8)
+    .default(1)
+    .describe(
+      "How fast the ribbon dims behind its leading edge: brightness = (1 - age/length)^falloff. 1 = a linear fade over " +
+        "the whole history (a sheet); 2.5-4 keeps only the last stretch bright, so a fast swing reads as an edge cutting " +
+        "air with a short glowing wake instead of a filled fan.",
+    ),
+  coreColor: z
+    .string()
+    .optional()
+    .describe(
+      "A third, HOT colour for the brightest band (palette slot or #rrggbb): the ribbon then ramps in hard steps " +
+        "core -> `color` -> `colorEnd` as it dims, and with `edge` the brightness also leans toward the outer point, so " +
+        "the hot core runs along the blade's leading edge near the tip. Omitted = the two-colour fade.",
+    ),
+  edge: z
+    .object({
+      from: vec3.describe("Inner point (a blade's base, a fist's knuckles): METRES in the anchor object's own axes — its rotation, not its scale."),
+      to: vec3.describe("Outer point (a blade's tip, a claw's end), same frame."),
+      bone: z
+        .string()
+        .optional()
+        .describe(
+          "A node under the anchor object whose axes the points are in (a hand bone for a creature's claw): exact name first, " +
+            "else the first node whose name contains it, ignoring case. Omitted = the anchor object itself (a held weapon's entity).",
+        ),
+      rootOpacity: unitT.default(0.25).describe("Opacity at `from` relative to `to`: low keeps the smear bright at the tip and see-through at the hilt."),
+      subdivide: z
+        .number()
+        .int()
+        .min(0)
+        .max(4)
+        .default(2)
+        .describe("Points inserted between two frames' samples along a curve through them, so a fast swing draws an arc instead of a polygon."),
+      minSpeed: z
+        .number()
+        .min(0)
+        .default(0)
+        .describe(
+          "Metres/second the OUTER point must move for a sample to show at full opacity; slower stretches fade toward nothing. " +
+            "A swing's slow raise and its pause at the top then leave no smear, its fast cut does. 0 = every sample at full opacity.",
+        ),
+    })
+    .optional()
+    .describe(
+      "SWEPT ribbon (a weapon trail): each frame samples TWO points on the anchor object and the ribbon spans them, so it " +
+        "is the surface the edge swept through, not a camera-facing strip. Anchor it on `caster` (the weapon's entity, or a " +
+        "body plus `bone`) with `follow`. Omitted = a camera-facing ribbon behind one moving point (a projectile's tail).",
+    ),
 });
 
 export const telegraphModuleSchema = z.object({
@@ -500,6 +653,7 @@ export const vfxModuleSchema = z.discriminatedUnion("kind", [
   spriteModuleSchema,
   particlesModuleSchema,
   ringModuleSchema,
+  decalModuleSchema,
   shellModuleSchema,
   columnModuleSchema,
   beamModuleSchema,
@@ -520,6 +674,7 @@ export const VFX_MODULE_KINDS = [
   "sprite",
   "particles",
   "ring",
+  "decal",
   "shell",
   "column",
   "beam",
@@ -538,6 +693,7 @@ export const VFX_MODULE_SCHEMAS: Record<VfxModuleKind, z.ZodObject<z.ZodRawShape
   sprite: spriteModuleSchema,
   particles: particlesModuleSchema,
   ring: ringModuleSchema,
+  decal: decalModuleSchema,
   shell: shellModuleSchema,
   column: columnModuleSchema,
   beam: beamModuleSchema,

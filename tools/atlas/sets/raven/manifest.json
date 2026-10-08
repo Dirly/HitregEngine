@@ -1,0 +1,42 @@
+{
+  "size": 376,
+  "bleed": 2,
+  "bgLum": 236,
+  "keyColor": "#00ffff",
+  "groundFringe": 1,
+  "fitSearch": 1.6,
+  "slots": {
+    "#ff0000": {
+      "name": "leg",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "body"
+    },
+    "#00ff00": {
+      "name": "wing",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#0000ff": {
+      "name": "body",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#ffff00": {
+      "name": "head",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#ff00ff": {
+      "name": "tail",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "body"
+    }
+  }
+}

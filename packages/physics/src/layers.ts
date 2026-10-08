@@ -68,6 +68,14 @@ export const Layers = {
   ALL: 0xffff as LayerMask,
 } as const;
 
+/**
+ * What a query hits when it names no layers: everything except DEBRIS.
+ * Cosmetic bodies (a client's own ragdolls, gibs) exist only on one tab, so a
+ * ground probe or a sword sweep that could hit them would answer differently on
+ * every client. Ask for `Layers.DEBRIS` explicitly to see them.
+ */
+export const DEFAULT_QUERY_LAYERS: LayerMask = Layers.ALL & ~Layers.DEBRIS;
+
 /** Static, immovable geometry — what a line of sight is actually blocked by. */
 export const SOLID_WORLD: LayerMask = Layers.WORLD | Layers.TERRAIN;
 

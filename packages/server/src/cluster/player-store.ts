@@ -4,7 +4,7 @@
  * Two namespaces in the player-data contract (ARCHITECTURE §3c, category 2):
  *
  *   character  { sheet, records }        the `character/<bodyId>` netState value, and the
- *                                        per-character records beside it (`quests/`, `npc/`,
+ *                                        per-character records beside it (`quests/`, `npc/`, `bind/`,
  *                                        `vault/` — core PERSISTED_PLAYER_NAMESPACES)
  *   world      { "pos:<scene>": {position, yaw} }   where the body stood, per scene
  *
@@ -23,7 +23,7 @@ export const NS_WORLD = "world";
 
 export interface PlayerSave {
   sheet: unknown | null;
-  /** Per-character netState records by namespace (`quests`, `npc`, `vault`), restored as `<ns>/<bodyId>`. */
+  /** Per-character netState records by namespace (`quests`, `npc`, `vault`, `bind`), restored as `<ns>/<bodyId>`. */
   records: Record<string, unknown>;
   position: [number, number, number] | null;
   yaw: number;

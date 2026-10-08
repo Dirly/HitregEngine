@@ -18,6 +18,7 @@ describe("EventRegistry", () => {
       "entity.spawned",
       "player.joined",
       "player.left",
+      "player.logout",
       "trigger.enter",
       "trigger.exit",
 "zone.entered",
@@ -32,6 +33,9 @@ describe("EventRegistry", () => {
     expect(registry.replicates("player.joined")).toBe(true);
     expect(registry.replicates("player.left")).toBe(true);
     expect(registry.replicates("collision")).toBe(false);
+    expect(registry.replicationOf("player.logout")).toBe("to-authority");
+    expect(registry.validate("player.logout", {})).toEqual({ ok: true, data: { cancel: false } });
+    expect(registry.validate("player.logout", { cancel: "yes" }).ok).toBe(false);
     expect(registry.replicates("entity.spawned")).toBe(false);
     expect(registry.replicates("never-registered")).toBe(false);
     registry.register("round.started", z.object({ round: z.number() }), { replicate: true });
