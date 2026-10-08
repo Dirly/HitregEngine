@@ -145,7 +145,7 @@ source, a draft declaration (kept if one exists; its measured size is refreshed)
    the supplied basket).
 5. Only then new geometry, and only of the kinds `docs/zone-pipeline.md` allows a builder to generate.
 
-**The Silkroot Grove technique** (mmo scene, `authoring/towns/brinehold-hollow/dress.mjs`, `v2-dress.mjs`): the
+**The Silkroot Grove technique** (legacy mmo scene; scripts archived to `projects-archive/restructure-2026-10-08/voxel-demo-authoring/towns/brinehold-hollow/dress.mjs`, `v2-dress.mjs`): the
 supplied bone pile's geometry with its atlas UVs replaced by a planar projection in metres and the silk material
 (`silkroot/silk-pile.glb`); egg sacs as stretched `SphereGeometry(0.5, 12, 10)` meshes in the same silk; webs as
 alpha cut-out planes with `silkroot/web` (256 x 64 px at 0.03125 m per texel). The catalogue does the same without

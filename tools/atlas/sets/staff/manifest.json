@@ -1,0 +1,133 @@
+{
+  "size": 164,
+  "bleed": 3,
+  "bgLum": 228,
+  "keyColor": "#00ffff",
+  "groundFringe": 1,
+  "fitSearch": 1.6,
+  "slots": {
+    "#6b1511": {
+      "name": "grip",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#3cff00": {
+      "name": "pommel1",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#0f3e00": {
+      "name": "pommel2",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#ff0000": {
+      "name": "guard1",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#a80000": {
+      "name": "guard2",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#ff7d00": {
+      "name": "guard3",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#1f00ff": {
+      "name": "shaft1",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#a900ff": {
+      "name": "shaft2",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#00a2ff": {
+      "name": "shaft3",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#11008a": {
+      "name": "shaft4",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#00c08b": {
+      "name": "crown1",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#007a5a": {
+      "name": "crown2",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#b35300": {
+      "name": "crown3",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "symmetric": true,
+      "mirror": true
+    },
+    "#ffb36b": {
+      "name": "crown3-top",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "mirror": true
+    },
+    "#6b3300": {
+      "name": "crown3-under",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain",
+      "matchTo": "crown3",
+      "mirror": true
+    },
+    "#7ae0c0": {
+      "name": "shape1",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#9dffa8": {
+      "name": "shape2",
+      "transparency": false,
+      "cut": false,
+      "fit": "contain"
+    },
+    "#ff8b8b": {
+      "name": "ornate",
+      "transparency": true,
+      "cut": true,
+      "openEnclosed": true,
+      "fit": "contain",
+      "anchor": "bottom",
+      "fitPadding": 0,
+      "hiddenBy": [
+        [
+          "Crown1",
+          "Crown2",
+          "Crown3"
+        ]
+      ]
+    }
+  }
+}

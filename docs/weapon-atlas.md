@@ -129,6 +129,11 @@ island and came back as two different halves. An asymmetric head (bearded, a
 spike behind) keeps its whole outline; view it from whichever side puts its
 edge the same way as the others'.
 
+**Check which axis the model's flat faces.** The swords are thin along X; the
+staff was modelled facing Z (its ornament plate lies in XY), so its `plane`s use
+`u: "+x"`, and its crook, which curls toward -Z, is the one seen from the side.
+The bounds of the ornament plate tell you.
+
 **`rim`** hangs a bar under that silhouette carrying the faces the view cannot
 see, in the same slot: as wide as the piece, as tall as the piece is thick.
 

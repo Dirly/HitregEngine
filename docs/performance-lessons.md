@@ -1642,7 +1642,7 @@ use three atlas sheets, with a draw per occupied compatible layer, not one draw
 for the entire atlas. Near imported plants/rocks still have separate material
 batches; distant foliage uses shared impostor pages.
 
-Project evidence: `authoring/towns/distant-town-solid-review/`,
+Project evidence (archived 2026-10-08 to `projects-archive/restructure-2026-10-08/voxel-demo-authoring/`): `authoring/towns/distant-town-solid-review/`,
 `authoring/towns/brinehold-lod-catalog.json`, and
 `authoring/purchased-assets/review/{clutter-draw-audit,clutter-rebalance}.json`.
 

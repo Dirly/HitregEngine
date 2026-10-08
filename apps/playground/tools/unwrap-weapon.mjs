@@ -549,6 +549,111 @@ const RECIPES = {
       ["Blade4", "CrossGuard4", "CrossFlavor2", "Pummel1", "Handle", "Ornate", "OrnateBottom"],
     ],
   },
+  // A two-handed staff. Unlike the swords it is modelled FACING Z: the
+  // ornament plate lies in the XY plane, so the flat-on view is along Z, not X.
+  // Every staff wears the Handle and ONE of each family: Pummel1-2,
+  // CrossGuard1-3 (collars at the top of the grip), TopStaff1-4 (the upper
+  // shaft: plain rod, diamond frame, crook, double helix) and Crown1-3 (the
+  // finial: octahedral gem, hex crystal, a HEAD). Optional on top: ONE floating
+  // ShapeOrnate (a gem hanging free in the middle of the upper shaft — never
+  // with TopStaff1, whose rod runs straight through it; glow-able like a blade)
+  // and the OrnateTop cut-out plate rising out of the crown. Ornates and the
+  // head are for the rarest items (Derek, 2026-10-08).
+  staff: {
+    source: "MMO/3d/Weapons/Staff.obj",
+    sourceScale: 100,
+    outMesh: "MMO/3d/Weapons/Staff-unwrapped",
+    metresPerUnit: 0.019, // the longsword's socket scale: 104 units is a 2 m staff
+    texelsPerMetre: HELD_GEAR_TEXELS_PER_M,
+    sheet: 1254,
+    gutter: 60,
+    margin: 22,
+    atlas: { size: 164, bleed: 3, bgLum: 228 },
+    slots: {
+      grip: { color: "#6b1511", fit: "contain" },
+      pommel1: { color: "#3cff00", fit: "contain" },
+      pommel2: { color: "#0f3e00", fit: "contain" },
+      guard1: { color: "#ff0000", fit: "contain" },
+      guard2: { color: "#a80000", fit: "contain" },
+      guard3: { color: "#ff7d00", fit: "contain" },
+      shaft1: { color: "#1f00ff", fit: "contain" },
+      shaft2: { color: "#a900ff", fit: "contain" },
+      shaft3: { color: "#00a2ff", fit: "contain" },
+      shaft4: { color: "#11008a", fit: "contain" },
+      crown1: { color: "#00c08b", fit: "contain" },
+      crown2: { color: "#007a5a", fit: "contain" },
+      crown3: { color: "#b35300", fit: "contain", label: "head", symmetric: true, mirror: true },
+      "crown3-top": { color: "#ffb36b", fit: "contain", label: "scalp from above", mirror: true },
+      "crown3-under": { color: "#6b3300", fit: "contain", label: "under jaw", matchTo: "crown3", mirror: true },
+      shape1: { color: "#7ae0c0", fit: "contain" },
+      shape2: { color: "#9dffa8", fit: "contain" },
+      // Rises out of the crown: its design must reach DOWN to the bottom
+      // centre, where the crown sits in front of it.
+      ornate: {
+        color: "#ff8b8b", transparency: true, cut: true, openEnclosed: true,
+        fit: "contain", anchor: "bottom", fitPadding: 0, sizeScale: 1.3,
+        hiddenBy: [["Crown1", "Crown2", "Crown3"]],
+      },
+    },
+    parts: {
+      // Six-sided rods: peeled round, seam at the back.
+      Handle: { slot: "grip", method: "unroll", axis: "y", seam: "-z", u: "arc", v: "-y" },
+      TopStaff1: { slot: "shaft1", method: "unroll", axis: "y", seam: "-z", u: "arc", v: "-y" },
+      // Rod + diamond frame and the double helix: flat-on along Z.
+      TopStaff2: { slot: "shaft2", method: "plane", u: "+x", v: "-y" },
+      TopStaff4: { slot: "shaft4", method: "plane", u: "+x", v: "-y" },
+      // The crook curls toward -Z, so it is seen from the side.
+      TopStaff3: { slot: "shaft3", method: "plane", u: "-z", v: "-y", rim: true },
+      // Collars: a box and a hexagon peeled round; the forked one flat-on.
+      CrossGuard1: { slot: "guard1", method: "unroll", axis: "y", seam: "-z", u: "arc", v: "-y" },
+      CrossGuard2: { slot: "guard2", method: "plane", u: "+x", v: "-y", rim: true },
+      CrossGuard3: { slot: "guard3", method: "unroll", axis: "y", seam: "-z", u: "arc", v: "-y" },
+      // Square bipyramids: every facet equally slanted, so a front view folds
+      // all eight onto one diamond.
+      Pummel1: { slot: "pommel1", method: "plane", u: "+x", v: "-y" },
+      Crown1: { slot: "crown1", method: "plane", u: "+x", v: "-y" },
+      ShapeOrnate2: { slot: "shape2", method: "plane", u: "+x", v: "-y" },
+      // Hexagonal crystals: peeled round.
+      Pummel2: { slot: "pommel2", method: "unroll", axis: "y", seam: "-z", u: "arc", v: "-y" },
+      Crown2: { slot: "crown2", method: "unroll", axis: "y", seam: "-z", u: "arc", v: "-y" },
+      ShapeOrnate1: { slot: "shape1", method: "unroll", axis: "y", seam: "-z", u: "arc", v: "-y" },
+      // A head, face toward +Z (the nose at z 22.5): one strip round the skull.
+      // The cap and the jaw's underside are split off: a strip crushes them.
+      Crown3: {
+        slot: "crown3", method: "sphere", front: "+z", v: "height", centered: true,
+        split: [
+          { slot: "crown3-top", facing: "+y", above: 0.6, u: "+x", v: "+z" },
+          { slot: "crown3-under", facing: "-y", above: 0.6, u: "+x", v: "-z" },
+        ],
+      },
+      OrnateTop: { slot: "ornate", method: "plane", u: "+x", v: "-y" },
+    },
+    layout: {
+      row: [
+        "grip",
+        {
+          col: [
+            { row: ["shaft1", "shaft2", "shaft3", "shaft4"] },
+            {
+              row: [
+                { col: ["crown1", "shape2", "pommel1"] },
+                { col: ["crown2", "shape1", "guard1", "guard3", "pommel2"] },
+                "guard2",
+              ],
+            },
+          ],
+        },
+        { col: ["ornate", { col: ["crown3-top", "crown3", "crown3-under"], align: "center" }] },
+      ],
+    },
+    cutoutSlots: ["ornate"],
+    combos: [
+      ["Handle", "Pummel1", "CrossGuard1", "TopStaff1", "Crown1"],
+      ["Handle", "Pummel2", "CrossGuard2", "TopStaff2", "Crown2", "ShapeOrnate1"],
+      ["Handle", "Pummel1", "CrossGuard3", "TopStaff3", "Crown2"],
+      ["Handle", "Pummel2", "CrossGuard2", "TopStaff4", "Crown3", "ShapeOrnate2", "OrnateTop"],
+    ],
+  },
   // A CREATURE, not a modular weapon — the same machinery, one difference worth
   // stating once: there are no families and no alternatives here. The ogre's ten
   // meshes are the ten shells of ONE body, so every part is always drawn and the
