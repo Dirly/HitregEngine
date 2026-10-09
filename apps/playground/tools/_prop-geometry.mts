@@ -10,6 +10,26 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { closure, PROJECTS } from "./_closure.mjs";
+
+/**
+ * `assets/<kind>/<rel>` for a project's assets dir, looking through its dependsOn closure: the
+ * project's own file first, then each dependency's (a world's props live in world-kit, their
+ * effects and palettes in foundation). Returns the own path when nothing exists, for messages.
+ */
+const closureCache = new Map<string, string[]>();
+export function locate(assets: string, kind: string, rel: string): string {
+  const own = path.join(assets, kind, rel);
+  if (fs.existsSync(own)) return own;
+  let roots = closureCache.get(assets);
+  if (!roots) {
+    const project = path.basename(path.dirname(path.resolve(assets)));
+    roots = path.resolve(path.dirname(path.dirname(path.resolve(assets)))) === path.resolve(PROJECTS) ? closure(project).map((p: string) => path.join(PROJECTS, p, "assets")) : [assets];
+    closureCache.set(assets, roots);
+  }
+  for (const r of roots) { const f = path.join(r, kind, rel); if (fs.existsSync(f)) return f; }
+  return own;
+}
 
 export type V3 = [number, number, number];
 /** The texture a triangle samples: its texel size, the material's `repeat`, and a key naming it. */
@@ -174,9 +194,9 @@ export function materialTex(assets: string, material: string | undefined): TexIn
   const k = `${assets}|${material}`;
   if (!matTexCache.has(k)) {
     let info: TexInfo | null = null;
-    const mf = path.join(assets, "materials", `${material}.json`);
+    const mf = locate(assets, "materials", `${material}.json`);
     if (fs.existsSync(mf)) {
-      const md = readJson(mf), tf = typeof md.map === "string" ? path.join(assets, "textures", md.map) : null;
+      const md = readJson(mf), tf = typeof md.map === "string" ? locate(assets, "textures", md.map) : null;
       const size = tf && fs.existsSync(tf) ? imageSize(fs.readFileSync(tf)) : null;
       if (size) info = { key: md.map, size, repeat: Array.isArray(md.repeat) ? [md.repeat[0], md.repeat[1]] : [1, 1], file: tf!, flipY: true };
     }
@@ -187,7 +207,7 @@ export function materialTex(assets: string, material: string | undefined): TexIn
 
 // -------------------------------------------------------------- prefab ----
 export function prefabFile(assets: string, id: string): string {
-  return path.join(assets, "prefabs", `${id}.json`);
+  return locate(assets, "prefabs", `${id}.json`);
 }
 export function readJson(file: string): any {
   return JSON.parse(fs.readFileSync(file, "utf8").replace(/^﻿/, ""));
@@ -221,7 +241,7 @@ export function prefabGeometry(assets: string, id: string): PropGeometry {
       if (c.vfx?.effect) geo.effects.push(c.vfx.effect);
       if (c.light) geo.lights++;
       if (c.mesh?.source?.kind === "asset") {
-        const f = path.join(assets, "models", c.mesh.source.assetId);
+        const f = locate(assets, "models", c.mesh.source.assetId);
         if (!fs.existsSync(f)) geo.warnings.push(`missing model ${c.mesh.source.assetId}`);
         else { const mat = typeof c.mesh.material === "string" ? c.mesh.material : undefined; gltfTris(f, m, mat, geo.tris, materialTex(assets, mat)); }
       } else if (c.mesh?.source?.kind === "primitive") {

@@ -16,7 +16,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { prefabGeometry, measure, readJson, prefabFile, type V3 } from "./_prop-geometry.mts";
+import { prefabGeometry, measure, readJson, locate, prefabFile, type V3 } from "./_prop-geometry.mts";
 
 export interface MakeCtx { project: string; assets: string; registryFile: string }
 
@@ -153,12 +153,12 @@ function installArt(ctx: MakeCtx, coll: string, png: string): string {
 }
 /** A material for new art: the replaced part's own settings (emissive lift, roughness) with its maps swapped. */
 function artMaterial(ctx: MakeCtx, matId: string, tex: string, baseId: string | undefined, triplanar?: number): void {
-  const bf = baseId && path.join(ctx.assets, "materials", `${baseId}.json`);
+  const bf = baseId && locate(ctx.assets, "materials", `${baseId}.json`);
   const base = bf && fs.existsSync(bf) ? readJson(bf) : { shader: "standard", color: "#ffffff", roughness: 1, metalness: 0 };
   const m: any = { ...base, map: tex, filter: "nearest" };
   for (const k of ["normalMap", "roughnessMap", "aoMap", "metalnessMap", "splat", "overlay"]) delete m[k];
   if (base.emissiveMap) m.emissiveMap = tex;
-  if (pngHasAlpha(path.join(ctx.assets, "textures", tex))) { m.alphaTest = 0.5; m.side = "double"; }
+  if (pngHasAlpha(locate(ctx.assets, "textures", tex))) { m.alphaTest = 0.5; m.side = "double"; }
   if (triplanar) { m.triplanar = true; m.triplanarScale = triplanar; m.repeat = [1, 1]; }
   writeJson(path.join(ctx.assets, "materials", `${matId}.json`), m);
 }
@@ -179,14 +179,14 @@ export function variant(ctx: MakeCtx, src: string, id: string, o: VariantOpts) {
     const tex = installArt(ctx, coll, o.art);
     matId = `${coll}/${name}`;
     artMaterial(ctx, matId, tex, oldMats[0], o.triplanar);
-    const [w] = pngSize(path.join(ctx.assets, "textures", tex));
+    const [w] = pngSize(locate(ctx.assets, "textures", tex));
     if (o.triplanar) texel = `${(w! / o.triplanar).toFixed(1)} texels/m (triplanar ${o.triplanar} m per tile)`;
   } else if (o.triplanar) {
     // a tiling material over a model whose UVs are an atlas layout: project it in metres instead
     matId = `${coll}/${name}`;
-    const base = readJson(path.join(ctx.assets, "materials", `${o.material}.json`));
+    const base = readJson(locate(ctx.assets, "materials", `${o.material}.json`));
     writeJson(path.join(ctx.assets, "materials", `${matId}.json`), { ...base, triplanar: true, triplanarScale: o.triplanar, repeat: [1, 1] });
-    const t = base.map && path.join(ctx.assets, "textures", base.map);
+    const t = base.map && locate(ctx.assets, "textures", base.map);
     if (t && fs.existsSync(t)) texel = `${(pngSize(t)[0]! / o.triplanar).toFixed(1)} texels/m (triplanar ${o.triplanar} m per tile)`;
   } else matId = o.material!;
   for (const [, e] of hits) e.components.mesh.material = matId;
@@ -229,7 +229,7 @@ export function compose(ctx: MakeCtx, recipeFile: string, o: { force?: boolean }
       comps = { transform: { position: at, rotation: q, scale: sc }, prefab: { prefabId: p.prefab, props: {}, overrides: [] } };
       from.push(`prefab ${p.prefab}`);
     } else if (p.model) {
-      if (!fs.existsSync(path.join(ctx.assets, "models", p.model))) throw Error(`part ${k}: no model ${p.model}`);
+      if (!fs.existsSync(locate(ctx.assets, "models", p.model))) throw Error(`part ${k}: no model ${p.model}`);
       comps = { transform: { position: at, rotation: q, scale: sc }, mesh: { source: { kind: "asset", assetId: p.model }, ...(p.material ? { material: p.material } : {}), castShadow: true, receiveShadow: true } };
       if ((p.collider ?? "trimesh") !== "none") comps.collider = { shape: p.collider ?? "trimesh" };
       from.push(`model ${p.model}${p.material ? ` + ${p.material}` : ""}`);
@@ -247,7 +247,7 @@ export function compose(ctx: MakeCtx, recipeFile: string, o: { force?: boolean }
         if (/\.png$/i.test(p.card)) {
           const tex = installArt(ctx, coll, p.card);
           mat = tex.replace(/\.png$/i, "");
-          if (!fs.existsSync(path.join(ctx.assets, "materials", `${mat}.json`))) writeJson(path.join(ctx.assets, "materials", `${mat}.json`), { shader: "standard", color: "#ffffff", map: tex, filter: "nearest", roughness: 1, metalness: 0, side: "double", alphaTest: 0.5 });
+          if (!fs.existsSync(locate(ctx.assets, "materials", `${mat}.json`))) writeJson(path.join(ctx.assets, "materials", `${mat}.json`), { shader: "standard", color: "#ffffff", map: tex, filter: "nearest", roughness: 1, metalness: 0, side: "double", alphaTest: 0.5 });
         } else mat = p.card;
       }
       // a plane is laid flat by the renderer; +90 about X stands it up facing +Z with the art's top up. `at` = bottom centre.

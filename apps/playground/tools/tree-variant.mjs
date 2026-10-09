@@ -6,12 +6,12 @@
  * GLB's UV accessors are remapped into those cells; the source GLB is untouched.
  *
  * Example:
- * node tools/tree-variant.mjs --model projects/proving/assets/models/purchased/nature/pine_tree_n_3.glb \
+ * node tools/tree-variant.mjs --model projects/world-kit/assets/models/purchased/nature/pine_tree_n_3.glb \
  *   --bark projects/foundation/assets/textures/purchased/nature/pine_bark_1_winter.png \
  *   --foliage projects/foundation/assets/textures/purchased/nature/pine_branch_2_snowy.png \
- *   --name pine_tree_snow --out projects/proving/assets/models/purchased/nature/pine_tree_snow.glb \
+ *   --name pine_tree_snow --out projects/world-kit/assets/models/purchased/nature/pine_tree_snow.glb \
  *   --atlas projects/foundation/assets/textures/purchased/nature/pine_tree_snow_atlas.png \
- *   --manifest projects/proving/authoring/purchased-assets/pine-tree-snow.json
+ *   --manifest projects/world-kit/authoring/purchased-assets/pine-tree-snow.json
  */
 import fs from 'node:fs';
 import path from 'node:path';

@@ -81,6 +81,12 @@ import {
 
 import { controllerLimits } from "./dress-steps.mts";
 import { measure, prefabGeometry } from "./_prop-geometry.mts";
+import { closure, findAsset, PROJECTS } from "./_closure.mjs";
+
+/** A prefab file through the project's dependsOn closure (a world's props live in world-kit); own path when none. */
+const prefabAt = (proj: string, id: string): string => findAsset(proj, `prefabs/${id}.json`) ?? path.join(proj, "assets", "prefabs", `${id}.json`);
+/** The first existing `rel` across the project and its dependsOn closure, else the project's own path. */
+const inClosure = (proj: string, rel: string): string => { for (const p of closure(proj) as string[]) { const f = path.join(PROJECTS, p, rel); if (fs.existsSync(f)) return f; } return path.join(proj, rel); };
 
 const PLAYGROUND = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 /** Comfort added on each side of the player capsule for a furnishing lane (steering slack, the controller's skin). */
@@ -117,7 +123,7 @@ function projectDir(): string {
   if (!fs.existsSync(dir)) fail(`no project ${dir}`);
   return dir;
 }
-const dressDir = (proj: string, kind: "sockets" | "sets" | "plans"): string => path.join(proj, "authoring", "dressing", kind);
+const dressDir = (proj: string, kind: "sockets" | "sets" | "plans"): string => kind === "sets" ? inClosure(proj, "authoring/dressing/sets") : path.join(proj, "authoring", "dressing", kind);
 
 function loadMap(proj: string, id: string): { map: SocketMap; file: string; raw: string } {
   const file = path.join(dressDir(proj, "sockets"), `${id}.json`);
@@ -152,7 +158,7 @@ function sources(proj: string) {
   const prop = (id: string): DressingData | undefined => {
     if (props.has(id)) return props.get(id);
     let decl: DressingData | undefined;
-    const files = [...(overlay ? [path.resolve(overlay, `${id}.json`)] : []), path.join(proj, "assets", "prefabs", `${id}.json`)];
+    const files = [...(overlay ? [path.resolve(overlay, `${id}.json`)] : []), prefabAt(proj, id)];
     for (const file of files) {
       if (!fs.existsSync(file)) continue;
       const doc = readJson(file) as { root?: string; entities?: Record<string, { components?: Record<string, unknown> }> } & Record<string, unknown>;
@@ -339,7 +345,7 @@ const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
 /** The dressing vocabulary: core's DRESSING_VOCABULARY + authoring/dressing/vocabulary.json of the props' project and this project. */
 function vocabulary(proj: string): DressingVocabulary {
-  const files = [opt("props") ? path.resolve(opt("props")!, "../../authoring/dressing/vocabulary.json") : "", path.join(proj, "authoring/dressing/vocabulary.json")];
+  const files = [opt("props") ? path.resolve(opt("props")!, "../../authoring/dressing/vocabulary.json") : "", inClosure(proj, "authoring/dressing/vocabulary.json")];
   let v = mergeVocabulary();
   for (const f of files) if (f && fs.existsSync(f)) { const x = readJson(f) as Partial<DressingVocabulary>; v = mergeVocabulary({ scales: [...v.scales, ...(x.scales ?? [])], cultures: [...v.cultures, ...(x.cultures ?? [])] }); }
   return v;
@@ -429,7 +435,7 @@ function resolvePlan(proj: string, file: string) {
         result.violations.push({ item: item.id, code: "unknown-prop", message: `${item.prop} declares no prop "${k}" (it has: ${declared.join(", ") || "none"})` });
   }
   // real size per kind at the place's scale (room scale, else the plan's space scale, else the scale it was made for)
-  const catalogs = path.join(proj, "authoring/prop-catalogs.json");
+  const catalogs = inClosure(proj, "authoring/prop-catalogs.json");
   const sizes = kindSizes(fs.existsSync(catalogs) ? (readJson(catalogs) as { realSize?: Parameters<typeof kindSizes>[0] }).realSize : undefined);
   const scales = vocabulary(proj).scales;
   for (const p of result.placements) {
@@ -448,7 +454,7 @@ function resolvePlan(proj: string, file: string) {
 
 /** Names of the props a prefab declares (its tunable knobs), [] when it has none or does not exist. */
 function prefabProps(proj: string, prefabId: string): string[] {
-  const file = path.join(proj, "assets", "prefabs", `${prefabId}.json`);
+  const file = prefabAt(proj, prefabId);
   if (!fs.existsSync(file)) return [];
   return Object.keys((readJson(file) as { props?: Record<string, unknown> }).props ?? {});
 }
@@ -556,7 +562,7 @@ const LIVE = ["prefab", "script", "scripts", "animator", "clothSway", "rigidBody
  */
 function staticOverrides(proj: string, prefabId: string, fire: boolean): { path: string; value: boolean }[] {
   if (fire) return [];
-  const file = path.join(proj, "assets", "prefabs", `${prefabId}.json`);
+  const file = prefabAt(proj, prefabId);
   if (!fs.existsSync(file)) return [];
   const prefab = JSON.parse(fs.readFileSync(file, "utf8").replace(/^\uFEFF/, "")) as {
     entities: Record<string, { components: Record<string, { moving?: boolean; source?: { kind?: string; wind?: unknown } } | undefined> }>;
@@ -835,7 +841,7 @@ function fixtures(): void {
     const def = FIXTURE_DEFAULTS[a.kind];
     if (used.has(a.id)) { skipped.push(`${a.id} (already placed)`); continue; }
     if (!def) { skipped.push(`${a.id} (${a.kind}: no default fixture)`); continue; }
-    if (!fs.existsSync(path.join(proj, "assets", "prefabs", `${def.prop}.json`))) { skipped.push(`${a.id} (${def.prop} missing)`); continue; }
+    if (!fs.existsSync(prefabAt(proj, def.prop))) { skipped.push(`${a.id} (${def.prop} missing)`); continue; }
     let id = `fx-${a.id}`;
     for (let k = 2; ids.has(id); k++) id = `fx-${a.id}-${k}`;
     ids.add(id);

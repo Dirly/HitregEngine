@@ -47,7 +47,8 @@ import { fileURLToPath } from "node:url";
 import { applyOps, ComponentRegistry, registerCoreComponents, dressingSchema, dressingSetSchema, dressingOrigin, isLooseClutter, type DressingData } from "@hitreg/core";
 import { mergeVocabulary, scaleFits, cultureFits, dressingPlanSchema, type DressingVocabulary } from "@hitreg/core";
 import { socketMapSchema, placeableFloor, roomBudget, standStretches, describeSetShape, HEAD_STEP } from "@hitreg/core";
-import { prefabGeometry, measure, findSurfaces, supportBelow, readJson, prefabFile, type PropGeometry, type Measure, type V3 } from "./_prop-geometry.mts";
+import { locate, prefabGeometry, measure, findSurfaces, supportBelow, readJson, prefabFile, type PropGeometry, type Measure, type V3 } from "./_prop-geometry.mts";
+import { closure, PROJECTS } from "./_closure.mjs";
 import { kindSizes, realSizeIssue, type KindSize } from "./_prop-real-size.mts";
 import { addRequest, compositeFaults, readRequests, requestsFile } from "./_prop-composite-guard.mts";
 import { texelDensity, clearGeometryCaches, type Density, type TexInfo, type PixelPage } from "./_prop-geometry.mts";
@@ -73,13 +74,20 @@ for (let i = 1; i < argv.length; i++) {
 const flag = (k: string) => (typeof flags[k] === "string" ? (flags[k] as string) : undefined);
 /** Scale classes + cultures: core's DRESSING_VOCABULARY merged with this project's authoring/dressing/vocabulary.json (data, not code). */
 function vocabulary(): DressingVocabulary {
-  const f = path.join(PROJECT, "authoring/dressing/vocabulary.json");
+  const f = proj("authoring/dressing/vocabulary.json");
   return fs.existsSync(f) ? mergeVocabulary(readJson(f)) : mergeVocabulary();
 }
 const projectName = flag("project") ?? "proving";
 const PROJECT = path.resolve(HERE, "..", "projects", projectName);
 const ASSETS = path.join(PROJECT, "assets");
 const INDEX = "authoring/prop-catalogs.json";
+/**
+ * The project and its dependsOn closure (a world, then world-kit, then foundation): READS look through
+ * all of them — catalogs, sidecars, sets, plans, prefabs — the way the running game resolves assets;
+ * WRITES (index, report, new props) go to --project.
+ */
+const ROOTS: string[] = closure(projectName).map((p: string) => path.join(PROJECTS, p));
+const proj = (rel: string): string => { for (const r of ROOTS) { const f = path.join(r, rel); if (fs.existsSync(f)) return f; } return path.join(PROJECT, rel); };
 
 // -------------------------------------------------------------- catalogs ----
 /** `shared`: a reusable collection (kits, supplied props, wrappers/variants/composites); otherwise a site's own. */
@@ -92,12 +100,27 @@ interface Exempt { kind: "exempt"; reason: string; sidecar: string }
 
 /** The project's texel-density standard: props are drawn at `target` texels/m; below `min` (median) is LOW. */
 interface DensityStandard { target: number; min: number; note?: string }
-const registry = readJson(path.join(PROJECT, INDEX)) as { version: number; catalogs: CatalogEntry[]; texelDensity?: DensityStandard; exemptFolders?: ExemptFolder[]; realSize?: { userHeight?: number; kinds?: Record<string, Partial<KindSize> | null> } };
+type Registry = { version: number; catalogs: CatalogEntry[]; texelDensity?: DensityStandard; exemptFolders?: ExemptFolder[]; realSize?: { userHeight?: number; kinds?: Record<string, Partial<KindSize> | null> } };
+/** Every closure project's prop-catalogs.json merged, own first; standards from the first that sets them. */
+function mergedRegistry(): Registry {
+  const out: Registry = { version: 1, catalogs: [], exemptFolders: [] };
+  for (const r of ROOTS) {
+    const file = path.join(r, INDEX);
+    if (!fs.existsSync(file)) continue;
+    const one = readJson(file) as Registry;
+    for (const c of one.catalogs ?? []) if (!out.catalogs.some((o) => o.path === c.path && o.entries === c.entries)) out.catalogs.push(c);
+    for (const e of one.exemptFolders ?? []) if (!out.exemptFolders!.some((o) => o.folder === e.folder)) out.exemptFolders!.push(e);
+    out.texelDensity ??= one.texelDensity;
+    out.realSize ??= one.realSize;
+  }
+  return out;
+}
+const registry = mergedRegistry();
 /** Real size per kind: tools/prop-kind-sizes.json with the project's `realSize` over it. */
 const KIND_SIZES = kindSizes(registry.realSize);
 const STANDARD: DensityStandard | null = registry.texelDensity ?? null;
 const docCache = new Map<string, any>();
-const doc = (rel: string) => { if (!docCache.has(rel)) docCache.set(rel, readJson(path.join(PROJECT, rel))); return docCache.get(rel); };
+const doc = (rel: string) => { if (!docCache.has(rel)) docCache.set(rel, readJson(proj(rel))); return docCache.get(rel); };
 
 /** prefab id -> owning catalog rows, in registry order. */
 function catalogued(only?: string): Map<string, Owner[]> {
@@ -121,7 +144,7 @@ function catalogued(only?: string): Map<string, Owner[]> {
   return out;
 }
 function sidecar(rel: string): { version: number; props: Record<string, any> } {
-  const file = path.join(PROJECT, rel);
+  const file = proj(rel);
   if (!fs.existsSync(file)) return { version: 1, props: {} };
   return doc(rel);
 }
@@ -159,7 +182,7 @@ function density(id: string): Density {
     // a triplanar material ignores the mesh's UVs (a variant laying tiling art over an atlas layout): its density is
     // the texture's width over the metres one tile spans
     const mats = new Set(geometry(id).geo.tris.map((t) => t.material).filter(Boolean) as string[]);
-    const tri = [...mats].map((m) => { const f = path.join(ASSETS, "materials", `${m}.json`); const j = fs.existsSync(f) ? readJson(f) : null; return j?.triplanar && j.map ? { j, f: path.join(ASSETS, "textures", j.map) } : null; });
+    const tri = [...mats].map((m) => { const f = locate(ASSETS, "materials", `${m}.json`); const j = fs.existsSync(f) ? readJson(f) : null; return j?.triplanar && j.map ? { j, f: locate(ASSETS, "textures", j.map) } : null; });
     if (mats.size && tri.every(Boolean) && tri.every((t) => fs.existsSync(t!.f))) {
       const px = fs.readFileSync(tri[0]!.f).readUInt32BE(16), v = px / tri[0]!.j.triplanarScale;
       hit = { ...hit, median: v, p10: v, texturedArea: hit.area, flatArea: 0 };
@@ -342,7 +365,7 @@ function sync(): { changed: string[]; rehashed: string[]; staleHash: string[] } 
     for (const { entry, row } of owners) {
       if (typeof row.sha256 !== "string" || !entry.prefabIds) continue;
       if (row.sha256 !== oldHash) { staleHash.push(`${id} (${entry.path})`); continue; }
-      const catFile = path.join(PROJECT, entry.path), catText = fs.readFileSync(catFile, "utf8");
+      const catFile = proj(entry.path), catText = fs.readFileSync(catFile, "utf8");
       const needle = `"sha256": "${oldHash}"`;
       if (catText.split(needle).length !== 2) { staleHash.push(`${id} (${entry.path}: hash not unique)`); continue; }
       fs.writeFileSync(catFile, catText.replace(needle, `"sha256": "${newHash}"`));
@@ -435,7 +458,7 @@ function buildIndex() {
     ok: rows.find((r) => r.id === id)?.state === "ok",
     ...(provenance(owners.get(id) ?? []) ? { from: provenance(owners.get(id) ?? []) } : {}),
   }));
-  const setsDir = path.join(PROJECT, "authoring/dressing/sets"), sets: any[] = [];
+  const setsDir = proj("authoring/dressing/sets"), sets: any[] = [];
   if (fs.existsSync(setsDir))
     for (const f of fs.readdirSync(setsDir).filter((f) => f.endsWith(".json"))) {
       const parsed = dressingSetSchema.safeParse(readJson(path.join(setsDir, f)));
@@ -551,7 +574,7 @@ function placeFilter(roomId?: string): { scale?: string; cultures: string[]; kee
   let scale = flag("scale"), cultures = flag("culture") ? flag("culture")!.split(",") : [], keepCentre = false;
   const planRef = flag("plan");
   if (planRef) {
-    const file = fs.existsSync(planRef) ? planRef : path.join(PROJECT, "authoring/dressing/plans", `${planRef}.json`);
+    const file = fs.existsSync(planRef) ? planRef : proj(`authoring/dressing/plans/${planRef}.json`);
     const plan = dressingPlanSchema.parse(readJson(file)), room = roomId ? plan.rooms[roomId] : undefined;
     scale ??= room?.scale ?? plan.space?.scale;
     if (!cultures.length) cultures = room?.cultures ?? plan.space?.cultures ?? [];
@@ -574,7 +597,7 @@ const wallWords = (p: any): string =>
 function roomMenu() {
   const mapId = flag("map")!, roomId = flag("room");
   // a map of another project (a dungeon dressed from this catalogue) is given by its path
-  const file = mapId.endsWith(".json") && fs.existsSync(mapId) ? mapId : path.join(PROJECT, "authoring/dressing/sockets", `${mapId}.json`);
+  const file = mapId.endsWith(".json") && fs.existsSync(mapId) ? mapId : proj(`authoring/dressing/sockets/${mapId}.json`);
   if (!fs.existsSync(file)) { console.log(`no socket map ${mapId} (authoring/dressing/sockets/${mapId}.json)`); process.exitCode = 1; return; }
   const map = socketMapSchema.parse(readJson(file));
   const lv = map.levels.find((l) => l.rooms.some((r) => r.id === roomId));
@@ -796,9 +819,9 @@ async function reskinProp(id: string) {
   if (!kitOwner) throw Error(`${id}: not in an atlas kit collection (rows with tile [u, v, scale]); reskin its own texture instead`);
   const { reskin, BAK } = await import("./_prop-reskin.mts");
   const { decodePng, encodePng } = await import("./_png.mjs" as string);
-  const kitFile = path.join(PROJECT, kitOwner.entry.path), kit = readJson(kitFile), row = kit[kitOwner.entry.entries].find((r: any) => r.id === id);
+  const kitFile = proj(kitOwner.entry.path), kit = readJson(kitFile), row = kit[kitOwner.entry.entries].find((r: any) => r.id === id);
   if (kit.atlas?.standard) throw Error(`${kitOwner.entry.path} is sized and routed by its generator (${kit.generatedBy}): add "${id.split("/").pop()}" to its ROUTES and re-run it; a reskin here would be wiped`);
-  const pageFile = path.join(PROJECT, kit.atlas.path);
+  const pageFile = proj(kit.atlas.path);
   const before = density(id), tex = before.textures[0];
   const tilePx = (row.tile[2] * kit.atlas.size[0]) / (before.effective[tex.key] ?? 1);
   const need = Math.ceil((tilePx * STANDARD.target) / before.median);
@@ -816,11 +839,11 @@ async function reskinProp(id: string) {
   if (route === "b" && !roleDecl) throw Error(`route b needs --role <${Object.keys((STANDARD as any).detailRoles ?? {}).filter((k) => k !== "note").join("|")}> (texelDensity.detailRoles in ${INDEX})`);
   const art = flag("art");
   if (route === "c" && (!art || !fs.existsSync(art))) throw Error("route c needs --art <png> (generated for the prop: docs/image-generation.md)");
-  const modelFile = path.join(PROJECT, row.modelPath);
+  const modelFile = proj(row.modelPath);
   const res = reskin({
     route, pageFile, atlas: kit.atlas, tile: row.tile, modelFile, tris: geometry(id).geo.tris, need, target: STANDARD.target,
-    source: route !== "c" ? img(path.join(PROJECT, row.source.textureImage)) : undefined,
-    role: roleDecl ? { page: img(path.join(ASSETS, "textures", roleDecl.texture)), rect: roleDecl.rect, metres: roleDecl.metres } : undefined,
+    source: route !== "c" ? img(proj(row.source.textureImage)) : undefined,
+    role: roleDecl ? { page: img(locate(ASSETS, "textures", roleDecl.texture)), rect: roleDecl.rect, metres: roleDecl.metres } : undefined,
     art: art ? img(art) : undefined,
     encode: encodePng, decode: (b: Buffer) => img2(decodePng(b)),
   });
@@ -863,7 +886,7 @@ async function proofSheet(ids: string[]) {
     const { geo } = geometry(id);
     const mat = geo.tris.find((t) => t.material)?.material;
     if (mat && !pages.has(mat)) {
-      const mf = path.join(ASSETS, "materials", `${mat}.json`), map = fs.existsSync(mf) ? readJson(mf).map : null, tf = map && path.join(ASSETS, "textures", map);
+      const mf = locate(ASSETS, "materials", `${mat}.json`), map = fs.existsSync(mf) ? readJson(mf).map : null, tf = map && locate(ASSETS, "textures", map);
       pages.set(mat, tf && fs.existsSync(tf) ? (() => { const png = decodePng(fs.readFileSync(tf)); return { width: png.width, height: png.height, rgba: png.data }; })() : null);
     }
     const tris = geo.tris.map((t) => ({ p: [t.a, t.b, t.c].map((p) => new THREE.Vector3(p[0], p[1], p[2])), uv: t.uv?.map(([u, v]) => [u, 1 - v]) }));
@@ -894,9 +917,9 @@ async function proof(id: string) {
   let texture: any = null;
   const mat = geo.tris.find((t) => t.material)?.material;
   if (mat) {
-    const mf = path.join(ASSETS, "materials", `${mat}.json`);
+    const mf = locate(ASSETS, "materials", `${mat}.json`);
     if (fs.existsSync(mf)) {
-      const map = readJson(mf).map, tf = map && path.join(ASSETS, "textures", map);
+      const map = readJson(mf).map, tf = map && locate(ASSETS, "textures", map);
       if (tf && fs.existsSync(tf)) { const png = decodePng(fs.readFileSync(tf)); texture = { width: png.width, height: png.height, rgba: png.data }; }
     }
   }
@@ -1001,7 +1024,7 @@ async function main() {
       }
     }
     if (fs.existsSync(INDEX_OUT)) {
-      const t = fs.statSync(INDEX_OUT).mtimeMs, newer = registry.catalogs.some((c) => c.dressing && fs.existsSync(path.join(PROJECT, c.dressing)) && fs.statSync(path.join(PROJECT, c.dressing)).mtimeMs > t);
+      const t = fs.statSync(INDEX_OUT).mtimeMs, newer = registry.catalogs.some((c) => c.dressing && fs.existsSync(proj(c.dressing)) && fs.statSync(path.join(PROJECT, c.dressing)).mtimeMs > t);
       if (newer) { console.log("STALE   prop-index.json is older than a sidecar (run index)"); process.exitCode = 1; }
     } else { console.log("MISSING prop-index.json (run index)"); process.exitCode = 1; }
     if (bad.length) process.exitCode = 1;
@@ -1055,7 +1078,7 @@ async function main() {
     console.log(JSON.stringify(out));
     // the new prefab and its collection are now catalogued: compile its declaration onto the root like any other
     docCache.clear();
-    Object.assign(registry, readJson(path.join(PROJECT, INDEX)));
+    Object.assign(registry, mergedRegistry());
     const r = sync();
     console.log(`sync: ${r.changed.length} prefab(s) updated. next: props status --catalog authoring/${(flag("id") ?? (out as any).id).replace(/\/[^/]+$/, "")}/catalog.json, props proof <id>, then props index`);
     return;
