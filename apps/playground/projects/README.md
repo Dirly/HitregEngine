@@ -18,6 +18,23 @@ in either direction. Cloning a project into `projects/<name>/` of any engine
 working copy is the whole install step. Keep the project's branch on `main`
 to match the engine's.
 
+## The projects in this checkout (2026-10-08)
+
+A project is not always a whole game: shared layers are projects too, and a world lists them in
+`project.json` `dependsOn` (the editor, server and authoring tools load a project's closure).
+
+| project | repo (private) | what it is |
+| --- | --- | --- |
+| `foundation` | Dirly/hitreg-foundation | the shared game: characters, combat scripts, items, spells, creatures, UI, audio, their workbenches and the `field` server test fixture. Depends on no world. |
+| `world-kit` | Dirly/hitreg-world-kit | shared world-building content: catalogued props, purchased packs (resized textures), dressing sets, town role tiles, kit Blockbench sources. Depends on `foundation`. |
+| `proving` | Dirly/hitreg-proving | the sample world: zones, towns, POIs, NPCs, quests, site props. Depends on both + its dungeons. |
+| `fieldfast-hall`, `fieldfast-barrow`, `gnawspur-deeps`, `rime-hall` | Dirly/hitreg-<name> | proving's instanced dungeons |
+| `dc-carved-library`, `dc-pattern-workshop` | Dirly/hitreg-<name> | workbenches of the DC carving/construction tools |
+
+`npx tsx tools/assets-reach.mts <project> --check-deps` (from `apps/playground`) lists references
+that resolve only outside a project's closure — missing at runtime. Retired projects and pruned assets
+are in `HitRegStudios/projects-archive/restructure-2026-10-08/` with undo lists.
+
 ## Layout
 
 ```

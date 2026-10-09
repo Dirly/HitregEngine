@@ -8,6 +8,10 @@ reading route (tool-neutral despite its filename). Follow that route rather
 than loading every subsystem manual. Read references once per relevant task;
 revisit them when the task or implementation changes.
 
+For content work (dungeons, zones, POIs, towns, characters, gear, art, audio) read
+`docs/workflows.md` first: it routes every content workflow and names the project each
+tool runs on (`foundation`, `world-kit`, or the world).
+
 For dungeon work, start with the installed `hitreg-dungeon-authoring` skill,
 its quickstart, the existing kit README, and the current project's plan/notes.
 Reference images, measured layouts, applicable stamp/carving tools, and the
