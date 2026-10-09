@@ -1,5 +1,6 @@
 import * as THREE from "three/webgpu";
 import { loadGltf } from "@hitreg/render";
+import type { CreationStage } from "@hitreg/core";
 
 /**
  * The clearing the character stands in on the creation and character-select
@@ -10,10 +11,11 @@ import { loadGltf } from "@hitreg/render";
  *
  * The painting is CSS behind the transparent canvas and shows only in the
  * DISTANCE: everything from the character's feet to the horizon is this 3D
- * layer, built from the game's own art —
+ * layer, built from the game's own art, which the game names in its creation
+ * asset's `stage` (core `creationStageSchema`); this module owns only the layout —
  *
- *   - the ground: the world's grass surface (`mmo/Grass.png`), with a worn
- *     dirt patch under the feet (`mmo/Dirt.png`), lit like the world, running
+ *   - the ground: the stage's ground texture, with a worn patch under the
+ *     feet (its groundPatch texture), lit like the world, running
  *     out to the fog where it meets the painting's misty treeline;
  *   - ground cover: the world's cover sprites (ferns, heather, moss, clover),
  *     thick at the edges, sparse in the middle, none in front of the character;
@@ -40,18 +42,16 @@ interface Placement {
   yaw: number;
 }
 
-/** The world's own trees and rocks, framing the clearing (the character stands at the origin, facing +Z). */
-const PLANTS: Placement[] = forest();
-
 /**
- * A dense forest round the clearing: rings of the world's pines (a maple and a
- * dead tree here and there) on both sides and behind, a corridor kept open
- * down the middle so the painting's ruin and light show through, and nothing
- * between the camera and the character. Deterministic: the same clearing
- * every time.
+ * A dense forest round the clearing: rings of the stage's tree models (picked by
+ * weight) on both sides and behind, a corridor kept open down the middle so the
+ * painting's ruin and light show through, and nothing between the camera and the
+ * character. Deterministic: the same clearing every time.
  */
-function forest(): Placement[] {
+function forest(trees: CreationStage["trees"]): Placement[] {
   const out: Placement[] = [];
+  const total = trees.reduce((sum, t) => sum + t.weight, 0);
+  if (!(total > 0)) return out;
   const h = (i: number, k: number): number => {
     const v = Math.sin(i * 91.7 + k * 47.3) * 43758.5453;
     return v - Math.floor(v);
@@ -66,23 +66,12 @@ function forest(): Placement[] {
     if (z > -7 && Math.abs(x) < 5.5) continue;
     // not too close to another
     if (out.some((p) => Math.hypot(p.at[0] - x, p.at[2] - z) < 2.6)) continue;
-    const pick = h(i, 3);
-    const model = pick < 0.08 ? "mmo/nature/MapleTree.gltf" : pick < 0.13 ? "mmo/nature/DeadDriedTree.gltf" : "mmo/nature/PineTree.gltf";
+    let pick = h(i, 3) * total;
+    const model = trees.find((t) => (pick -= t.weight) < 0)?.model ?? trees[trees.length - 1]!.model;
     out.push({ model, at: [x, 0, z], scale: 1.0 + h(i, 4) * 0.7, yaw: h(i, 5) * Math.PI * 2 });
   }
-  out.push(
-    { model: "mmo/nature/GranitRockMedium.gltf", at: [4.6, 0, -3.6], scale: 0.7, yaw: 0.8 },
-    { model: "mmo/nature/GranitRockSmall.gltf", at: [-3.8, 0, -4.8], scale: 0.8, yaw: 2.6 },
-    { model: "mmo/nature/Stump.gltf", at: [-5.6, 0, -2.2], scale: 0.85, yaw: 2.2 },
-    { model: "mmo/nature/GranitRockBig.gltf", at: [-9, 0, -9], scale: 0.6, yaw: 1.1 },
-  );
   return out;
 }
-
-/** Cover sprites from the world's sheet (textures/cover/cover-tufts.png, 4 x 8 tiles), by tile index. */
-const COVER_SHEET = { texture: "cover/cover-tufts.png", columns: 4, rows: 8 };
-/** fern, moss, heather, clover, bluebells, cottongrass */
-const COVER_TILES = [5, 8, 9, 4, 6, 10];
 
 /** A canvas texture: (u, v) in 0..1 → rgba 0..255. */
 function painted(size: number, paint: (u: number, v: number) => [number, number, number, number]): THREE.CanvasTexture {
@@ -124,7 +113,13 @@ function pixelTexture(url: string | undefined, repeat: number): THREE.Texture | 
   return tex;
 }
 
-export function clearingStage(resolveModel: (assetId: string) => string | undefined, resolveTexture: (assetId: string) => string | undefined) {
+export function clearingStage(
+  resolveModel: (assetId: string) => string | undefined,
+  resolveTexture: (assetId: string) => string | undefined,
+  art: CreationStage | undefined,
+) {
+  const plants: Placement[] = [...forest(art?.trees ?? []), ...(art?.props ?? []).map((p) => ({ model: p.model, at: p.at, scale: p.scale ?? 1, yaw: p.yaw ?? 0 }))];
+  const cover = art?.cover;
   return (scene: THREE.Scene): { update(dt: number): void; dispose(): void } => {
     const group = new THREE.Group();
     group.name = "creation-stage";
@@ -134,7 +129,7 @@ export function clearingStage(resolveModel: (assetId: string) => string | undefi
 
     // -- the ground: the world's grass to the horizon, a worn dirt patch under the feet
     const GROUND = 90;
-    const grassTex = pixelTexture(resolveTexture("mmo/Grass.png"), GROUND / 3.5);
+    const grassTex = art?.ground ? pixelTexture(resolveTexture(art.ground), GROUND / 3.5) : null;
     const groundGeo = new THREE.CircleGeometry(GROUND, 64);
     const groundMat = new THREE.MeshLambertMaterial({ color: grassTex ? 0x6f7d66 : 0x3f4a32, ...(grassTex ? { map: grassTex } : {}) });
     const ground = new THREE.Mesh(groundGeo, groundMat);
@@ -143,7 +138,7 @@ export function clearingStage(resolveModel: (assetId: string) => string | undefi
     disposables.push(groundGeo, groundMat);
     if (grassTex) disposables.push(grassTex);
     // the worn patch: dirt, its edge broken up so it is never a circle
-    const dirtTex = pixelTexture(resolveTexture("mmo/Dirt.png"), 2.2);
+    const dirtTex = art?.groundPatch ? pixelTexture(resolveTexture(art.groundPatch), 2.2) : null;
     const patchMask = painted(64, (u, v) => {
       const dx = u - 0.5;
       const dz = v - 0.5;
@@ -192,8 +187,8 @@ export function clearingStage(resolveModel: (assetId: string) => string | undefi
     disposables.push(bandTex, bandGeo, bandMat);
 
     // -- ground cover: the world's tufts, thick at the edges, sparse in the middle, none in front
-    const coverUrl = resolveTexture(COVER_SHEET.texture);
-    if (coverUrl) {
+    const coverUrl = cover ? resolveTexture(cover.texture) : undefined;
+    if (cover && coverUrl) {
       const coverTex = loader.load(coverUrl);
       coverTex.colorSpace = THREE.SRGBColorSpace;
       coverTex.magFilter = THREE.NearestFilter;
@@ -202,8 +197,8 @@ export function clearingStage(resolveModel: (assetId: string) => string | undefi
       // unlit, tinted to the clearing's light: a lit double-sided sprite turns black from behind (its normal flips)
       const coverMat = new THREE.MeshBasicMaterial({ map: coverTex, alphaTest: 0.5, side: THREE.DoubleSide, color: 0x76806a });
       disposables.push(coverTex, coverMat);
-      const tw = 1 / COVER_SHEET.columns;
-      const th = 1 / COVER_SHEET.rows;
+      const tw = 1 / cover.columns;
+      const th = 1 / cover.rows;
       const positions: number[] = [];
       const uvs: number[] = [];
       let n = 0;
@@ -216,10 +211,10 @@ export function clearingStage(resolveModel: (assetId: string) => string | undefi
         if (z > -0.5) continue;
         // denser toward the sides and the back
         if (hash(i, 3) > 0.25 + Math.min(1, (Math.abs(x) + Math.max(0, -z)) / 9)) continue;
-        const tile = COVER_TILES[Math.floor(hash(i, 4) * COVER_TILES.length)]!;
+        const tile = cover.tiles[Math.floor(hash(i, 4) * cover.tiles.length)]!;
         const s = 0.3 + hash(i, 5) * 0.4;
-        const col = tile % COVER_SHEET.columns;
-        const row = Math.floor(tile / COVER_SHEET.columns);
+        const col = tile % cover.columns;
+        const row = Math.floor(tile / cover.columns);
         const u0 = col * tw;
         const v1 = 1 - row * th;
         const v0 = v1 - th;
@@ -250,7 +245,7 @@ export function clearingStage(resolveModel: (assetId: string) => string | undefi
     }
 
     // -- the world's trees and rocks, standing on the ground, darkened into the evening
-    for (const p of PLANTS) {
+    for (const p of plants) {
       const url = resolveModel(p.model);
       if (!url) continue;
       void loadGltf(url)

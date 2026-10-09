@@ -230,7 +230,7 @@ export function createCreationPreview(
           ? { sky: 0xb9c4bb, ground: 0x2c2a22, key: 0xffd9a8, rim: 0xffc27a, scale: 0.62 }
           : { sky: 0xf1ebe3, ground: 0x3a3029, rim: 0xffe9d6 },
         // full screen behind the panels: further back, standing above the name and buttons
-        ...(staged ? { stage: clearingStage(resolveModel, resolveTexture), fog: STAGE_FOG, padding: STAGE_FRAMING.padding, aimLow: STAGE_FRAMING.aimLow } : {}),
+        ...(staged ? { stage: clearingStage(resolveModel, resolveTexture, creation.stage), fog: STAGE_FOG, padding: STAGE_FRAMING.padding, aimLow: STAGE_FRAMING.aimLow } : {}),
       });
       view.setYaw(yaw);
       view.setFocus(focus);

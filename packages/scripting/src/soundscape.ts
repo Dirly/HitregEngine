@@ -73,116 +73,6 @@ interface SoundZoneState {
 }
 const soundZones = new Set<SoundZoneState>();
 
-/**
- * Default spot-emitter lists: biome → band → comma list of sound ids. An id
- * without an extension is a variant family (`spot/owl-hoot` = owl-hoot.mp3,
- * owl-hoot-2.mp3 …). `*` is any biome; `town` is used inside town zones.
- */
-const DEFAULT_SPOTS: Record<string, Partial<Record<Band | "*", string>>> = {
-  "*": {
-    dawn: "spot/songbird-chirp,spot/blackbird-song",
-    day: "spot/songbird-chirp,spot/crow-caw,spot/leaves-gust",
-    dusk: "spot/blackbird-song,spot/crow-caw",
-    night: "spot/owl-hoot,spot/cricket-burst,spot/twig-snap",
-  },
-  forest: {
-    dawn: "spot/songbird-chirp,spot/blackbird-song,spot/woodpecker",
-    day: "spot/songbird-chirp,spot/woodpecker,spot/crow-caw,spot/tree-creak,spot/twig-snap,spot/bee-buzz-pass",
-    dusk: "spot/blackbird-song,spot/crow-caw,spot/tree-creak,spot/fox-bark",
-    night: "spot/owl-hoot,spot/wolf-howl-distant,spot/cricket-burst,spot/twig-snap,spot/nightjar,spot/tree-creak",
-  },
-  taiga: {
-    dawn: "spot/songbird-chirp,spot/woodpecker,spot/raven-croak",
-    day: "spot/woodpecker,spot/raven-croak,spot/tree-creak,spot/branch-fall,spot/elk-bugle-distant",
-    dusk: "spot/raven-croak,spot/elk-bugle-distant,spot/tree-creak",
-    night: "spot/wolf-howl-distant,spot/wolf-pack-distant,spot/owl-hoot,spot/tree-creak,spot/snow-slump",
-  },
-  grassland: {
-    dawn: "spot/songbird-chirp,spot/blackbird-song,spot/rooster",
-    day: "spot/songbird-chirp,spot/bee-buzz-pass,spot/leaves-gust,spot/fly-buzz",
-    dusk: "spot/blackbird-song,spot/cricket-burst,spot/fox-bark",
-    night: "spot/cricket-burst,spot/owl-hoot,spot/wolf-howl-distant",
-  },
-  foothills: {
-    day: "spot/songbird-chirp,spot/rock-fall-small",
-    night: "spot/wolf-howl-distant,spot/owl-hoot,spot/cricket-burst",
-  },
-  moor: {
-    day: "spot/crow-caw,spot/raven-croak,spot/leaves-gust",
-    dusk: "spot/raven-croak,spot/heron-call",
-    night: "spot/owl-hoot,spot/nightjar,spot/wolf-howl-distant",
-  },
-  fen: {
-    dawn: "spot/heron-call,spot/frog-croak,spot/songbird-chirp",
-    day: "spot/frog-croak,spot/heron-call,spot/fly-buzz,spot/bubble-pop-swamp",
-    dusk: "spot/toad-chorus-burst,spot/heron-call,spot/frog-croak",
-    night: "spot/toad-chorus-burst,spot/frog-croak,spot/loon-call,spot/owl-hoot",
-  },
-  swamp: {
-    day: "spot/frog-croak,spot/fly-buzz,spot/bubble-pop-swamp,spot/heron-call",
-    dusk: "spot/toad-chorus-burst,spot/bubble-pop-swamp,spot/crow-caw",
-    night: "spot/toad-chorus-burst,spot/frog-croak,spot/bubble-pop-swamp,spot/owl-hoot",
-  },
-  jungle: {
-    dawn: "spot/jungle-bird-exotic,spot/monkey-call-distant,spot/parrot-squawk",
-    day: "spot/jungle-bird-exotic,spot/parrot-squawk,spot/monkey-call-distant,spot/cicada-swell,spot/fly-buzz",
-    dusk: "spot/monkey-call-distant,spot/cicada-swell,spot/jungle-bird-exotic",
-    night: "spot/cicada-swell,spot/frog-croak,spot/jungle-bird-exotic,spot/twig-snap",
-  },
-  savanna: {
-    day: "spot/cicada-swell,spot/fly-buzz,spot/leaves-gust",
-    dusk: "spot/cicada-swell,spot/cricket-burst",
-    night: "spot/cricket-burst,spot/wolf-howl-distant,spot/owl-hoot",
-  },
-  desert: {
-    day: "spot/sand-hiss-gust",
-    dusk: "spot/sand-hiss-gust",
-    night: "spot/sand-hiss-gust,spot/cricket-burst",
-  },
-  badlands: {
-    day: "spot/sand-hiss-gust,spot/rock-fall-small,spot/raven-croak",
-    night: "spot/wolf-howl-distant,spot/rock-fall-small,spot/sand-hiss-gust",
-  },
-  blight: {
-    day: "spot/raven-croak,spot/eerie-whisper-wind,spot/bone-rattle,spot/crow-caw",
-    dusk: "spot/eerie-whisper-wind,spot/distant-groan,spot/raven-croak",
-    night: "spot/distant-groan,spot/eerie-whisper-wind,spot/bone-rattle,spot/owl-hoot",
-    dawn: "spot/raven-croak,spot/eerie-whisper-wind",
-  },
-  beach: {
-    "*": "spot/seagull,spot/gull-flock",
-    night: "spot/loon-call,spot/cricket-burst",
-  },
-  tundra: {
-    "*": "spot/ice-crack,spot/snow-slump,spot/raven-croak",
-    night: "spot/wolf-howl-distant,spot/wolf-pack-distant,spot/ice-crack",
-  },
-  highland: {
-    day: "spot/sheep-bleat,spot/raven-croak,spot/leaves-gust",
-    night: "spot/wolf-howl-distant,spot/owl-hoot",
-  },
-  montane: {
-    day: "spot/eagle-cry,spot/rock-fall-small,spot/tree-creak",
-    night: "spot/wolf-howl-distant,spot/rock-fall-small,spot/owl-hoot",
-  },
-  alpine: {
-    "*": "spot/eagle-cry,spot/rock-fall-small,spot/snow-slump,spot/ice-crack",
-    night: "spot/rock-slide-distant,spot/snow-slump,spot/ice-crack",
-  },
-  crag: {
-    "*": "spot/eagle-cry,spot/rock-fall-small,spot/rock-slide-distant,spot/raven-croak",
-  },
-  // Towns: a dog barks now and then far off; the bell is the CLOCK (clockBell,
-  // on the hour), never a random spot. Nothing that MOVES near the player
-  // (hooves, carts, footsteps, doors) — in a town that reads as somebody
-  // being there who is not. (Derek, 2026-09-27)
-  town: {
-    dawn: "spot/dog-bark",
-    day: "spot/dog-bark",
-    dusk: "spot/dog-bark",
-    night: "spot/owl-hoot",
-  },
-};
 
 const DEFAULT_BIOME_ALIAS: Record<string, string> = { seabed: "beach", mountains: "montane" };
 const COASTAL = ["beach", "seabed"];
@@ -264,7 +154,7 @@ export class Soundscape extends Script {
     combatFadeOut: { default: 5, min: 0.1, max: 30, description: "Seconds combat music takes to leave once the fight is over." },
     musicGapMin: { default: 40, min: 0, max: 1800, description: "Least silence (s) after an exploration track before the next." },
     musicGapMax: { default: 150, min: 0, max: 1800, description: "Most silence (s) after an exploration track before the next." },
-    spots: { default: DEFAULT_SPOTS, description: "Biome (or * or town) → band (or *) → comma list of spot sound ids; an id without extension is a variant family." },
+    spots: { default: {}, description: "Biome (or * or town) → band (or *) → comma list of spot sound ids; an id without extension is a variant family. The engine ships no sounds: a game supplies its table (the foundation project's is authoring/audio/soundscape-spots.json). Empty = no spot emitters." },
     spotEveryMin: { default: 3, min: 0.2, max: 120, description: "Least seconds between spot emitters." },
     spotEveryMax: { default: 9, min: 0.2, max: 300, description: "Most seconds between spot emitters." },
     spotNear: { default: 10, min: 0, max: 200, description: "Nearest a spot sound is placed (m)." },

@@ -348,9 +348,41 @@ export const creationSkinSchema = z
   .describe("Optional look for the creation screen — the game's own UI pieces. Absent = the engine's plain dark look.");
 export type CreationSkin = z.infer<typeof creationSkinSchema>;
 
+const stagePlacementSchema = z.object({
+  model: z.string().min(1).describe("Model asset id."),
+  at: z.tuple([z.number(), z.number(), z.number()]).describe("Position; the character stands at the origin facing +Z."),
+  scale: z.number().positive().default(1),
+  yaw: z.number().default(0).describe("Radians."),
+});
+
+export const creationStageSchema = z
+  .object({
+    ground: z.string().min(1).optional().describe("Texture asset id of the ground surface running out to the fog. Absent = flat colour."),
+    groundPatch: z.string().min(1).optional().describe("Texture asset id of the worn patch under the character's feet."),
+    trees: z
+      .array(z.object({ model: z.string().min(1), weight: z.number().positive().default(1) }))
+      .default([])
+      .describe("Models for the forest rings round the clearing, picked by weight. Empty = no forest."),
+    props: z.array(stagePlacementSchema).default([]).describe("Fixed pieces placed as given (rocks, stumps)."),
+    cover: z
+      .object({
+        texture: z.string().min(1).describe("Sprite-sheet texture asset id."),
+        columns: z.number().int().positive(),
+        rows: z.number().int().positive(),
+        tiles: z.array(z.number().int().min(0)).min(1).describe("Tile indices (row-major from the top left) scattered as ground cover."),
+      })
+      .optional()
+      .describe("Ground-cover sprites round the clearing. Absent = none."),
+  })
+  .describe(
+    "The 3D clearing behind the creation and character-select screens, built from the game's own art. The engine owns the layout (forest rings, open corridor, cover density); this names the art. Absent = a bare clearing.",
+  );
+export type CreationStage = z.infer<typeof creationStageSchema>;
+
 export const characterCreationSchema = z
   .object({
     ui: creationSkinSchema.optional(),
+    stage: creationStageSchema.optional(),
     model: z
       .string()
       .default("")

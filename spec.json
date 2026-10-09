@@ -20975,23 +20975,26 @@
         "ui": {
           "$ref": "#/$defs/__schema0"
         },
-        "model": {
+        "stage": {
           "$ref": "#/$defs/__schema28"
         },
+        "model": {
+          "$ref": "#/$defs/__schema44"
+        },
         "archetypes": {
-          "$ref": "#/$defs/__schema30"
+          "$ref": "#/$defs/__schema46"
         },
         "traits": {
-          "$ref": "#/$defs/__schema52"
+          "$ref": "#/$defs/__schema68"
         },
         "traitPicks": {
-          "$ref": "#/$defs/__schema60"
+          "$ref": "#/$defs/__schema76"
         },
         "appearance": {
-          "$ref": "#/$defs/__schema62"
+          "$ref": "#/$defs/__schema78"
         },
         "mounts": {
-          "$ref": "#/$defs/__schema109"
+          "$ref": "#/$defs/__schema125"
         }
       },
       "required": [
@@ -21190,46 +21193,210 @@
           }
         },
         "__schema28": {
-          "default": "",
-          "description": "Model asset id of the base body shown in the preview (and worn when no body slot overrides it).",
-          "$ref": "#/$defs/__schema29"
+          "type": "object",
+          "properties": {
+            "ground": {
+              "$ref": "#/$defs/__schema29"
+            },
+            "groundPatch": {
+              "$ref": "#/$defs/__schema31"
+            },
+            "trees": {
+              "$ref": "#/$defs/__schema33"
+            },
+            "props": {
+              "$ref": "#/$defs/__schema35"
+            },
+            "cover": {
+              "$ref": "#/$defs/__schema41"
+            }
+          },
+          "description": "The 3D clearing behind the creation and character-select screens, built from the game's own art. The engine owns the layout (forest rings, open corridor, cover density); this names the art. Absent = a bare clearing."
         },
         "__schema29": {
-          "type": "string"
+          "description": "Texture asset id of the ground surface running out to the fog. Absent = flat colour.",
+          "$ref": "#/$defs/__schema30"
         },
         "__schema30": {
+          "type": "string",
+          "minLength": 1
+        },
+        "__schema31": {
+          "description": "Texture asset id of the worn patch under the character's feet.",
+          "$ref": "#/$defs/__schema32"
+        },
+        "__schema32": {
+          "type": "string",
+          "minLength": 1
+        },
+        "__schema33": {
+          "default": [],
+          "description": "Models for the forest rings round the clearing, picked by weight. Empty = no forest.",
+          "$ref": "#/$defs/__schema34"
+        },
+        "__schema34": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "model": {
+                "type": "string",
+                "minLength": 1
+              },
+              "weight": {
+                "default": 1,
+                "type": "number",
+                "exclusiveMinimum": 0
+              }
+            },
+            "required": [
+              "model"
+            ]
+          }
+        },
+        "__schema35": {
+          "default": [],
+          "description": "Fixed pieces placed as given (rocks, stumps).",
+          "$ref": "#/$defs/__schema36"
+        },
+        "__schema36": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "model": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Model asset id."
+              },
+              "at": {
+                "type": "array",
+                "prefixItems": [
+                  {
+                    "$ref": "#/$defs/__schema37"
+                  },
+                  {
+                    "$ref": "#/$defs/__schema38"
+                  },
+                  {
+                    "$ref": "#/$defs/__schema39"
+                  }
+                ],
+                "description": "Position; the character stands at the origin facing +Z."
+              },
+              "scale": {
+                "default": 1,
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "yaw": {
+                "default": 0,
+                "description": "Radians.",
+                "$ref": "#/$defs/__schema40"
+              }
+            },
+            "required": [
+              "model",
+              "at"
+            ]
+          }
+        },
+        "__schema37": {
+          "type": "number"
+        },
+        "__schema38": {
+          "type": "number"
+        },
+        "__schema39": {
+          "type": "number"
+        },
+        "__schema40": {
+          "type": "number"
+        },
+        "__schema41": {
+          "description": "Ground-cover sprites round the clearing. Absent = none.",
+          "$ref": "#/$defs/__schema42"
+        },
+        "__schema42": {
+          "type": "object",
+          "properties": {
+            "texture": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Sprite-sheet texture asset id."
+            },
+            "columns": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "rows": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "tiles": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/__schema43"
+              },
+              "description": "Tile indices (row-major from the top left) scattered as ground cover."
+            }
+          },
+          "required": [
+            "texture",
+            "columns",
+            "rows",
+            "tiles"
+          ]
+        },
+        "__schema43": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "__schema44": {
+          "default": "",
+          "description": "Model asset id of the base body shown in the preview (and worn when no body slot overrides it).",
+          "$ref": "#/$defs/__schema45"
+        },
+        "__schema45": {
+          "type": "string"
+        },
+        "__schema46": {
           "minItems": 1,
           "type": "array",
           "items": {
-            "$ref": "#/$defs/__schema31"
+            "$ref": "#/$defs/__schema47"
           }
         },
-        "__schema31": {
+        "__schema47": {
           "type": "object",
           "properties": {
             "id": {
-              "$ref": "#/$defs/__schema32"
+              "$ref": "#/$defs/__schema48"
             },
             "name": {
-              "$ref": "#/$defs/__schema33"
+              "$ref": "#/$defs/__schema49"
             },
             "blurb": {
-              "$ref": "#/$defs/__schema34"
+              "$ref": "#/$defs/__schema50"
             },
             "icon": {
-              "$ref": "#/$defs/__schema36"
+              "$ref": "#/$defs/__schema52"
             },
             "attributes": {
-              "$ref": "#/$defs/__schema38"
+              "$ref": "#/$defs/__schema54"
             },
             "branches": {
-              "$ref": "#/$defs/__schema40"
+              "$ref": "#/$defs/__schema56"
             },
             "startingItems": {
-              "$ref": "#/$defs/__schema43"
+              "$ref": "#/$defs/__schema59"
             },
             "startingCoins": {
-              "$ref": "#/$defs/__schema50"
+              "$ref": "#/$defs/__schema66"
             }
           },
           "required": [
@@ -21238,38 +21405,38 @@
           ],
           "description": "A starting lean — Brawn, Cunning, Wise. Adds a few attribute points; locks nothing out."
         },
-        "__schema32": {
+        "__schema48": {
           "type": "string",
           "pattern": "^[a-z0-9][a-z0-9_-]{0,31}$",
           "description": "Stable id — what a saved build stores. Renaming an id orphans every character that picked it."
         },
-        "__schema33": {
+        "__schema49": {
           "type": "string",
           "minLength": 1,
           "maxLength": 32
         },
-        "__schema34": {
+        "__schema50": {
           "default": "",
           "description": "One or two sentences on the creation screen.",
-          "$ref": "#/$defs/__schema35"
+          "$ref": "#/$defs/__schema51"
         },
-        "__schema35": {
+        "__schema51": {
           "type": "string",
           "maxLength": 240
         },
-        "__schema36": {
+        "__schema52": {
           "description": "Texture asset id for the archetype's emblem (optional).",
-          "$ref": "#/$defs/__schema37"
+          "$ref": "#/$defs/__schema53"
         },
-        "__schema37": {
+        "__schema53": {
           "type": "string"
         },
-        "__schema38": {
+        "__schema54": {
           "description": "Points added to the progression's base attributes. Keep them small: an archetype is a lean, not a class.",
           "default": {},
-          "$ref": "#/$defs/__schema39"
+          "$ref": "#/$defs/__schema55"
         },
-        "__schema39": {
+        "__schema55": {
           "type": "object",
           "propertyNames": {
             "type": "string",
@@ -21287,46 +21454,46 @@
             "maximum": 5
           }
         },
-        "__schema40": {
+        "__schema56": {
           "default": [],
           "description": "Names of the paths this archetype can grow into later (shown as a hint; not enforced yet).",
-          "$ref": "#/$defs/__schema41"
+          "$ref": "#/$defs/__schema57"
         },
-        "__schema41": {
+        "__schema57": {
           "maxItems": 8,
           "type": "array",
           "items": {
-            "$ref": "#/$defs/__schema42"
+            "$ref": "#/$defs/__schema58"
           }
         },
-        "__schema42": {
+        "__schema58": {
           "type": "string",
           "minLength": 1,
           "maxLength": 32
         },
-        "__schema43": {
+        "__schema59": {
           "default": [],
           "description": "Items a FRESH character of this archetype is given — a starting armour set, equipped — BEFORE the character-sheet script's own startingItems, which never take a worn kit piece off. A restored sheet never gets them again.",
-          "$ref": "#/$defs/__schema44"
+          "$ref": "#/$defs/__schema60"
         },
-        "__schema44": {
+        "__schema60": {
           "maxItems": 32,
           "type": "array",
           "items": {
-            "$ref": "#/$defs/__schema45"
+            "$ref": "#/$defs/__schema61"
           }
         },
-        "__schema45": {
+        "__schema61": {
           "type": "object",
           "properties": {
             "itemId": {
-              "$ref": "#/$defs/__schema46"
+              "$ref": "#/$defs/__schema62"
             },
             "qty": {
-              "$ref": "#/$defs/__schema47"
+              "$ref": "#/$defs/__schema63"
             },
             "equip": {
-              "$ref": "#/$defs/__schema48"
+              "$ref": "#/$defs/__schema64"
             }
           },
           "required": [
@@ -21334,57 +21501,57 @@
           ],
           "description": "An item given to a fresh character."
         },
-        "__schema46": {
+        "__schema62": {
           "type": "string",
           "minLength": 1,
           "description": "Item asset id (assets/items/<id>.json)."
         },
-        "__schema47": {
+        "__schema63": {
           "default": 1,
           "type": "integer",
           "minimum": 1,
           "maximum": 9007199254740991
         },
-        "__schema48": {
+        "__schema64": {
           "default": false,
           "description": "Wear it at once (the first slot that accepts it).",
-          "$ref": "#/$defs/__schema49"
+          "$ref": "#/$defs/__schema65"
         },
-        "__schema49": {
+        "__schema65": {
           "type": "boolean"
         },
-        "__schema50": {
+        "__schema66": {
           "description": "Copper a FRESH character of this archetype starts with (100 = 1 silver). Absent = the character-sheet script's startingCoins.",
-          "$ref": "#/$defs/__schema51"
+          "$ref": "#/$defs/__schema67"
         },
-        "__schema51": {
+        "__schema67": {
           "type": "integer",
           "minimum": 0,
           "maximum": 100000000
         },
-        "__schema52": {
+        "__schema68": {
           "default": [],
           "type": "array",
           "items": {
             "type": "object",
             "properties": {
               "id": {
-                "$ref": "#/$defs/__schema32"
+                "$ref": "#/$defs/__schema48"
               },
               "name": {
-                "$ref": "#/$defs/__schema53"
+                "$ref": "#/$defs/__schema69"
               },
               "blurb": {
-                "$ref": "#/$defs/__schema54"
+                "$ref": "#/$defs/__schema70"
               },
               "ability": {
-                "$ref": "#/$defs/__schema55"
+                "$ref": "#/$defs/__schema71"
               },
               "icon": {
-                "$ref": "#/$defs/__schema56"
+                "$ref": "#/$defs/__schema72"
               },
               "archetypes": {
-                "$ref": "#/$defs/__schema58"
+                "$ref": "#/$defs/__schema74"
               }
             },
             "required": [
@@ -21395,75 +21562,75 @@
             "description": "An innate ability picked at creation."
           }
         },
-        "__schema53": {
+        "__schema69": {
           "type": "string",
           "minLength": 1,
           "maxLength": 32
         },
-        "__schema54": {
+        "__schema70": {
           "default": "",
           "type": "string",
           "maxLength": 240
         },
-        "__schema55": {
+        "__schema71": {
           "type": "string",
           "minLength": 1,
           "description": "Ability id the character is born with. The game's combat layer resolves it; the engine only carries it."
         },
-        "__schema56": {
+        "__schema72": {
           "description": "Texture asset id for the trait's icon (optional).",
-          "$ref": "#/$defs/__schema57"
+          "$ref": "#/$defs/__schema73"
         },
-        "__schema57": {
+        "__schema73": {
           "type": "string"
         },
-        "__schema58": {
+        "__schema74": {
           "description": "Archetype ids that offer this trait (a Brawn trait, a Wise trait). Absent = every archetype.",
-          "$ref": "#/$defs/__schema59"
+          "$ref": "#/$defs/__schema75"
         },
-        "__schema59": {
+        "__schema75": {
           "type": "array",
           "items": {
             "type": "string",
             "minLength": 1
           }
         },
-        "__schema60": {
+        "__schema76": {
           "default": 1,
           "description": "How many birth traits a character takes.",
-          "$ref": "#/$defs/__schema61"
+          "$ref": "#/$defs/__schema77"
         },
-        "__schema61": {
+        "__schema77": {
           "type": "integer",
           "minimum": 0,
           "maximum": 4
         },
-        "__schema62": {
+        "__schema78": {
           "default": [],
           "type": "array",
           "items": {
             "type": "object",
             "properties": {
               "id": {
-                "$ref": "#/$defs/__schema32"
+                "$ref": "#/$defs/__schema48"
               },
               "label": {
-                "$ref": "#/$defs/__schema63"
+                "$ref": "#/$defs/__schema79"
               },
               "body": {
-                "$ref": "#/$defs/__schema64"
+                "$ref": "#/$defs/__schema80"
               },
               "material": {
-                "$ref": "#/$defs/__schema66"
+                "$ref": "#/$defs/__schema82"
               },
               "preview": {
-                "$ref": "#/$defs/__schema68"
+                "$ref": "#/$defs/__schema84"
               },
               "tintModels": {
-                "$ref": "#/$defs/__schema70"
+                "$ref": "#/$defs/__schema86"
               },
               "options": {
-                "$ref": "#/$defs/__schema72"
+                "$ref": "#/$defs/__schema88"
               }
             },
             "required": [
@@ -21474,99 +21641,99 @@
             "description": "A row on the creation screen: sex, face, hair, beard…"
           }
         },
-        "__schema63": {
+        "__schema79": {
           "type": "string",
           "minLength": 1,
           "maxLength": 32
         },
-        "__schema64": {
+        "__schema80": {
           "default": false,
           "description": "This slot swaps the whole body model (sex). Its option's `model` replaces the base model rather than riding a bone.",
-          "$ref": "#/$defs/__schema65"
+          "$ref": "#/$defs/__schema81"
         },
-        "__schema65": {
+        "__schema81": {
           "type": "boolean"
         },
-        "__schema66": {
+        "__schema82": {
           "description": "Material NAME on the body that a colour option tints. \"Skin\" is special: the colour recolours the SKIN TEXELS of every sheet an option opts in with `skin` (the skin-tint contract: every sheet paints skin in one palette, docs/image-generation.md), keeping the painted shading. A body without that material shows no tint — the choice is still kept.",
-          "$ref": "#/$defs/__schema67"
+          "$ref": "#/$defs/__schema83"
         },
-        "__schema67": {
+        "__schema83": {
           "type": "string"
         },
-        "__schema68": {
+        "__schema84": {
           "default": false,
           "description": "A DEV PREVIEW row (outfits, armour, headgear — for looking at art on the creator's model): shown on the creation screen, never saved into a build and never drawn in game, where equipment dresses the character.",
-          "$ref": "#/$defs/__schema69"
+          "$ref": "#/$defs/__schema85"
         },
-        "__schema69": {
+        "__schema85": {
           "type": "boolean"
         },
-        "__schema70": {
+        "__schema86": {
           "description": "A colour slot that recolours the WHOLE sheet of these models (hair colour → the hair ubermesh, whose every texel is hair: styles, beards and moustache alike, so one choice colours them all). The painted strand shading is kept. No `material` needed.",
-          "$ref": "#/$defs/__schema71"
+          "$ref": "#/$defs/__schema87"
         },
-        "__schema71": {
+        "__schema87": {
           "type": "array",
           "items": {
             "type": "string",
             "minLength": 1
           }
         },
-        "__schema72": {
+        "__schema88": {
           "minItems": 1,
           "type": "array",
           "items": {
-            "$ref": "#/$defs/__schema73"
+            "$ref": "#/$defs/__schema89"
           }
         },
-        "__schema73": {
+        "__schema89": {
           "type": "object",
           "properties": {
             "id": {
-              "$ref": "#/$defs/__schema32"
+              "$ref": "#/$defs/__schema48"
             },
             "label": {
-              "$ref": "#/$defs/__schema74"
+              "$ref": "#/$defs/__schema90"
             },
             "model": {
-              "$ref": "#/$defs/__schema75"
-            },
-            "socket": {
-              "$ref": "#/$defs/__schema77"
-            },
-            "offset": {
-              "$ref": "#/$defs/__schema79"
-            },
-            "rotationDeg": {
-              "$ref": "#/$defs/__schema81"
-            },
-            "scale": {
-              "$ref": "#/$defs/__schema83"
-            },
-            "mirrorTo": {
-              "$ref": "#/$defs/__schema85"
-            },
-            "texture": {
-              "$ref": "#/$defs/__schema87"
-            },
-            "parts": {
-              "$ref": "#/$defs/__schema89"
-            },
-            "hideBones": {
               "$ref": "#/$defs/__schema91"
             },
-            "skin": {
+            "socket": {
               "$ref": "#/$defs/__schema93"
             },
+            "offset": {
+              "$ref": "#/$defs/__schema95"
+            },
+            "rotationDeg": {
+              "$ref": "#/$defs/__schema97"
+            },
+            "scale": {
+              "$ref": "#/$defs/__schema99"
+            },
+            "mirrorTo": {
+              "$ref": "#/$defs/__schema101"
+            },
+            "texture": {
+              "$ref": "#/$defs/__schema103"
+            },
+            "parts": {
+              "$ref": "#/$defs/__schema105"
+            },
+            "hideBones": {
+              "$ref": "#/$defs/__schema107"
+            },
+            "skin": {
+              "$ref": "#/$defs/__schema109"
+            },
             "remap": {
-              "$ref": "#/$defs/__schema96"
+              "$ref": "#/$defs/__schema112"
             },
             "color": {
-              "$ref": "#/$defs/__schema104"
+              "$ref": "#/$defs/__schema120"
             },
             "requires": {
-              "$ref": "#/$defs/__schema106"
+              "$ref": "#/$defs/__schema122"
             }
           },
           "required": [
@@ -21575,30 +21742,30 @@
           ],
           "description": "One choice inside an appearance slot."
         },
-        "__schema74": {
+        "__schema90": {
           "type": "string",
           "minLength": 1,
           "maxLength": 32
         },
-        "__schema75": {
+        "__schema91": {
           "description": "Model asset id drawn for this choice. Absent = nothing to draw yet (placeholder art pending).",
-          "$ref": "#/$defs/__schema76"
+          "$ref": "#/$defs/__schema92"
         },
-        "__schema76": {
+        "__schema92": {
           "type": "string"
         },
-        "__schema77": {
+        "__schema93": {
           "description": "Bone the model rides on (a face or hair piece → the head bone), with offset/rotationDeg/scale/mirrorTo beside it. Usually absent: the creation's `mounts` entry for the model places it, one place for every option and item. Absent with no mount = the option dresses the body model itself (an outfit).",
-          "$ref": "#/$defs/__schema78"
+          "$ref": "#/$defs/__schema94"
         },
-        "__schema78": {
+        "__schema94": {
           "type": "string"
         },
-        "__schema79": {
+        "__schema95": {
           "description": "Position of the model in the socket bone's space (the `bone-socket` offset).",
-          "$ref": "#/$defs/__schema80"
+          "$ref": "#/$defs/__schema96"
         },
-        "__schema80": {
+        "__schema96": {
           "type": "array",
           "prefixItems": [
             {
@@ -21612,11 +21779,11 @@
             }
           ]
         },
-        "__schema81": {
+        "__schema97": {
           "description": "Rotation of the model in the socket bone's space, XYZ Euler degrees (the `bone-socket` rotationDeg).",
-          "$ref": "#/$defs/__schema82"
+          "$ref": "#/$defs/__schema98"
         },
-        "__schema82": {
+        "__schema98": {
           "type": "array",
           "prefixItems": [
             {
@@ -21630,19 +21797,19 @@
             }
           ]
         },
-        "__schema83": {
+        "__schema99": {
           "description": "Uniform scale of the model in the socket bone's space. On a BODY-slot option (sex), the scale of the whole character: the female body is the male skeleton at 0.96, so her head and shoulders come down with it.",
-          "$ref": "#/$defs/__schema84"
+          "$ref": "#/$defs/__schema100"
         },
-        "__schema84": {
+        "__schema100": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema85": {
+        "__schema101": {
           "description": "A second copy of the model, MIRRORED across its own Z (left/right), on another bone: a shoulder pad modelled for the left arm also sits on the right. Same parts, texture and scale; its own placement in that bone's space.",
-          "$ref": "#/$defs/__schema86"
+          "$ref": "#/$defs/__schema102"
         },
-        "__schema86": {
+        "__schema102": {
           "type": "object",
           "properties": {
             "socket": {
@@ -21684,40 +21851,40 @@
             "rotationDeg"
           ]
         },
-        "__schema87": {
+        "__schema103": {
           "description": "Sheet id of the look on the model's packed page (its `tiles` table, as an item's appearance.texture): a face is one tile of the head's page. On a BODY-slot option (sex), with `parts`: the body's UNEQUIPPED look — what every empty equipment slot shows.",
-          "$ref": "#/$defs/__schema88"
+          "$ref": "#/$defs/__schema104"
         },
-        "__schema88": {
+        "__schema104": {
           "type": "string"
         },
-        "__schema89": {
+        "__schema105": {
           "description": "Ubermesh parts of the model this choice shows (a hair style, a beard). Options in different slots that name the SAME model share one piece: their parts are shown together and the texture comes from whichever names one.",
-          "$ref": "#/$defs/__schema90"
+          "$ref": "#/$defs/__schema106"
         },
-        "__schema90": {
+        "__schema106": {
           "type": "array",
           "items": {
             "type": "string",
             "minLength": 1
           }
         },
-        "__schema91": {
+        "__schema107": {
           "description": "Body triangles weighted to these bones (and every bone under them) are hidden while this piece is worn — a head module replacing the body's own head or hood.",
-          "$ref": "#/$defs/__schema92"
+          "$ref": "#/$defs/__schema108"
         },
-        "__schema92": {
+        "__schema108": {
           "type": "array",
           "items": {
             "type": "string",
             "minLength": 1
           }
         },
-        "__schema93": {
+        "__schema109": {
           "description": "This option's sheet paints BARE SKIN, so the skin tone recolours it (opt-in: a sheet never opted in is never tinted, whatever its colours — leather and linen sit on skin's hue). true = anywhere on the sheet (the unequipped body); \"face\" = the whole sheet of a HEAD, with its mouth found and kept as painted (lips never take the tone); a list of part names = only on those parts' islands (the bare fingers of a gloved set).",
-          "$ref": "#/$defs/__schema94"
+          "$ref": "#/$defs/__schema110"
         },
-        "__schema94": {
+        "__schema110": {
           "anyOf": [
             {
               "type": "boolean"
@@ -21730,40 +21897,40 @@
               "minItems": 1,
               "type": "array",
               "items": {
-                "$ref": "#/$defs/__schema95"
+                "$ref": "#/$defs/__schema111"
               }
             }
           ]
         },
-        "__schema95": {
+        "__schema111": {
           "type": "string",
           "minLength": 1
         },
-        "__schema96": {
+        "__schema112": {
           "description": "BODY-slot options only: how items written for another body (their part names and sheets) map onto this one — the female body wearing an item that names the man's parts.",
-          "$ref": "#/$defs/__schema97"
+          "$ref": "#/$defs/__schema113"
         },
-        "__schema97": {
+        "__schema113": {
           "type": "object",
           "properties": {
             "parts": {
-              "$ref": "#/$defs/__schema98"
+              "$ref": "#/$defs/__schema114"
             },
             "prefixes": {
-              "$ref": "#/$defs/__schema100"
+              "$ref": "#/$defs/__schema116"
             },
             "sheetSuffix": {
-              "$ref": "#/$defs/__schema102"
+              "$ref": "#/$defs/__schema118"
             }
           },
           "description": "Maps looks written for one body onto this one (the female body wearing an item written for the male)."
         },
-        "__schema98": {
+        "__schema114": {
           "default": {},
           "description": "Exact part name → this body's part (\"Belt\" → \"F_Belt\"). Tried before `prefixes`.",
-          "$ref": "#/$defs/__schema99"
+          "$ref": "#/$defs/__schema115"
         },
-        "__schema99": {
+        "__schema115": {
           "type": "object",
           "propertyNames": {
             "type": "string",
@@ -21774,12 +21941,12 @@
             "minLength": 1
           }
         },
-        "__schema100": {
+        "__schema116": {
           "default": {},
           "description": "Part-name prefix → replacement (\"HumanMale_\" → \"HumanFemale_\"); the longest matching prefix wins.",
-          "$ref": "#/$defs/__schema101"
+          "$ref": "#/$defs/__schema117"
         },
-        "__schema101": {
+        "__schema117": {
           "type": "object",
           "propertyNames": {
             "type": "string",
@@ -21789,26 +21956,26 @@
             "type": "string"
           }
         },
-        "__schema102": {
+        "__schema118": {
           "description": "Inserted before the extension of an item's sheet (\"-f\": mmo/human-body-vanguard.png → mmo/human-body-vanguard-f.png) when the model's page HAS that sheet; otherwise the item's own sheet is kept.",
-          "$ref": "#/$defs/__schema103"
+          "$ref": "#/$defs/__schema119"
         },
-        "__schema103": {
+        "__schema119": {
           "type": "string"
         },
-        "__schema104": {
+        "__schema120": {
           "description": "A colour choice (skin tone, lip colour): drawn as a swatch, and tints the slot's `material` on the body.",
-          "$ref": "#/$defs/__schema105"
+          "$ref": "#/$defs/__schema121"
         },
-        "__schema105": {
+        "__schema121": {
           "type": "string",
           "pattern": "^#[0-9a-fA-F]{6}$"
         },
-        "__schema106": {
+        "__schema122": {
           "description": "Only offered while other slots hold one of these options — { \"sex\": [\"male\"] }.",
-          "$ref": "#/$defs/__schema107"
+          "$ref": "#/$defs/__schema123"
         },
-        "__schema107": {
+        "__schema123": {
           "type": "object",
           "propertyNames": {
             "type": "string"
@@ -21817,46 +21984,46 @@
             "minItems": 1,
             "type": "array",
             "items": {
-              "$ref": "#/$defs/__schema108"
+              "$ref": "#/$defs/__schema124"
             }
           }
         },
-        "__schema108": {
+        "__schema124": {
           "type": "string"
         },
-        "__schema109": {
+        "__schema125": {
           "default": [],
           "description": "Where each socketed model (head, hair, helm, shoulder pad) sits on the body — see the mount schema.",
-          "$ref": "#/$defs/__schema110"
+          "$ref": "#/$defs/__schema126"
         },
-        "__schema110": {
+        "__schema126": {
           "type": "array",
           "items": {
             "type": "object",
             "properties": {
               "model": {
-                "$ref": "#/$defs/__schema111"
+                "$ref": "#/$defs/__schema127"
               },
               "socket": {
-                "$ref": "#/$defs/__schema112"
+                "$ref": "#/$defs/__schema128"
               },
               "offset": {
-                "$ref": "#/$defs/__schema113"
+                "$ref": "#/$defs/__schema129"
               },
               "rotationDeg": {
-                "$ref": "#/$defs/__schema115"
+                "$ref": "#/$defs/__schema131"
               },
               "scale": {
-                "$ref": "#/$defs/__schema116"
+                "$ref": "#/$defs/__schema132"
               },
               "mirrorTo": {
-                "$ref": "#/$defs/__schema118"
+                "$ref": "#/$defs/__schema134"
               },
               "requires": {
-                "$ref": "#/$defs/__schema120"
+                "$ref": "#/$defs/__schema136"
               },
               "hang": {
-                "$ref": "#/$defs/__schema123"
+                "$ref": "#/$defs/__schema139"
               }
             },
             "required": [
@@ -21866,26 +22033,26 @@
             "description": "Where a socketed model sits on the body — ONE place for every option and item drawing it: the creator's face, hair and headgear rows and the in-game helm and shoulder items all read it. The first mount whose `requires` the wearer satisfies wins, so a per-sex placement is two entries."
           }
         },
-        "__schema111": {
+        "__schema127": {
           "type": "string",
           "minLength": 1,
           "description": "Model asset id this placement is for (mmo/human-head.glb)."
         },
-        "__schema112": {
+        "__schema128": {
           "type": "string",
           "minLength": 1,
           "description": "Bone the model rides on (the head bone for a face, hair or helm)."
         },
-        "__schema113": {
+        "__schema129": {
           "default": [
             0,
             0,
             0
           ],
           "description": "Position of the model in the socket bone's OWN space (it inherits the bone's scale).",
-          "$ref": "#/$defs/__schema114"
+          "$ref": "#/$defs/__schema130"
         },
-        "__schema114": {
+        "__schema130": {
           "type": "array",
           "prefixItems": [
             {
@@ -21899,29 +22066,29 @@
             }
           ]
         },
-        "__schema115": {
+        "__schema131": {
           "default": [
             0,
             0,
             0
           ],
           "description": "Rotation of the model in the socket bone's space, XYZ Euler degrees.",
-          "$ref": "#/$defs/__schema114"
+          "$ref": "#/$defs/__schema130"
         },
-        "__schema116": {
+        "__schema132": {
           "default": 1,
           "description": "Uniform scale of the model in the socket bone's space.",
-          "$ref": "#/$defs/__schema117"
+          "$ref": "#/$defs/__schema133"
         },
-        "__schema117": {
+        "__schema133": {
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "__schema118": {
+        "__schema134": {
           "description": "A second copy of the model, MIRRORED across its own Z (left/right), on another bone: a shoulder pad modelled for the left arm also sits on the right. Same parts, texture and scale; its own placement in that bone's space.",
-          "$ref": "#/$defs/__schema119"
+          "$ref": "#/$defs/__schema135"
         },
-        "__schema119": {
+        "__schema135": {
           "type": "object",
           "properties": {
             "socket": {
@@ -21929,10 +22096,10 @@
               "minLength": 1
             },
             "offset": {
-              "$ref": "#/$defs/__schema114"
+              "$ref": "#/$defs/__schema130"
             },
             "rotationDeg": {
-              "$ref": "#/$defs/__schema114"
+              "$ref": "#/$defs/__schema130"
             }
           },
           "required": [
@@ -21941,11 +22108,11 @@
             "rotationDeg"
           ]
         },
-        "__schema120": {
+        "__schema136": {
           "description": "Only for wearers whose appearance holds one of these options — { \"sex\": [\"male\"] } for a man's placement.",
-          "$ref": "#/$defs/__schema121"
+          "$ref": "#/$defs/__schema137"
         },
-        "__schema121": {
+        "__schema137": {
           "type": "object",
           "propertyNames": {
             "type": "string"
@@ -21954,27 +22121,27 @@
             "minItems": 1,
             "type": "array",
             "items": {
-              "$ref": "#/$defs/__schema122"
+              "$ref": "#/$defs/__schema138"
             }
           }
         },
-        "__schema122": {
+        "__schema138": {
           "type": "string"
         },
-        "__schema123": {
+        "__schema139": {
           "description": "Ends that hang — braids, long hair down the back — blended per vertex by the model's baked hang weight (TEXCOORD_1.y: 0 = rides `socket`, 1 = hangs). With no `socket` here they hang PLUMB: as modelled on the body's root, wherever the head is now, so a nod or a tilt bends the hair instead of swinging it. Still one instanced draw; a model without weights rides `socket` whole.",
-          "$ref": "#/$defs/__schema124"
+          "$ref": "#/$defs/__schema140"
         },
-        "__schema124": {
+        "__schema140": {
           "type": "object",
           "properties": {
             "socket": {
               "description": "Bone the hanging ends ride instead, as it sat against `socket` at the bind pose. Omit it (recommended): a bone that moves against the head in the idles (the chest breathing, hunching, arms folded) drags the ends with it.",
-              "$ref": "#/$defs/__schema125"
+              "$ref": "#/$defs/__schema141"
             }
           }
         },
-        "__schema125": {
+        "__schema141": {
           "type": "string",
           "minLength": 1
         }
