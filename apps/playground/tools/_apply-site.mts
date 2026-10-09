@@ -2,7 +2,7 @@
 import fs from "node:fs";
 import { worldRecipeSchema } from "@hitreg/core";
 const [sitePath, blobsPath] = process.argv.slice(2) as [string, string];
-const file = "projects/voxel-demo/assets/worlds/mmo.json";
+const file = "projects/proving/assets/worlds/mmo.json";
 const raw = JSON.parse(fs.readFileSync(file, "utf8"));
 const site = JSON.parse(fs.readFileSync(sitePath, "utf8"));
 const blobs = JSON.parse(fs.readFileSync(blobsPath, "utf8")) as { id: string; center: number[]; radius: number }[];

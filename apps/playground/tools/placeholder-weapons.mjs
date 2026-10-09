@@ -2,8 +2,8 @@
  * placeholder-weapons — chunky stand-in models for every held-weapon kind, so
  * sockets can be placed and stances played before the real art exists.
  *
- *   node tools/placeholder-weapons.mjs --project voxel-demo
- *   node tools/placeholder-weapons.mjs --project voxel-demo --only bow,staff
+ *   node tools/placeholder-weapons.mjs --project foundation
+ *   node tools/placeholder-weapons.mjs --project foundation --only bow,staff
  *
  * Writes assets/models/weapons/placeholders/<kind>.glb. Each one is shaped for
  * the SAME path real gear takes — a part table (glTF extras `parts` + a `uv1`

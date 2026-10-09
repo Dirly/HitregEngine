@@ -18,7 +18,7 @@ The procedural river pipeline mostly works:
 - Steep faces are painted cliff.
 - Falls get mist, splash and foam.
 
-The mmo world was rebuilt with `worldgen all mmo --project voxel-demo --trace
+The mmo world was rebuilt with `worldgen all mmo --project proving --trace
 --catchment 0.6 --lakes 20 --terrace-share 0.75`. `worldgen status` is green
 except zone names.
 

@@ -182,14 +182,14 @@ this before regenerating a world, before changing a river rule in
 The order is `worldgen all` (continents → canyons → rivers → towns → terrace →
 zones → paths → barriers → pois → trails → barriers → caves → map), then
 `worldgen spawn <world> --scene <scene>` and
-`projects/voxel-demo/tools/place-spawn.mts --world <w> --scene <s>`. The mmo
+`projects/proving/tools/place-spawn.mts --world <w> --scene <s>`. The mmo
 world is built with:
 
 ```
 cd apps/playground
-npx tsx tools/worldgen.mts all mmo --project voxel-demo --trace --catchment 0.6 --lakes 20 --terrace-share 0.75
-npx tsx tools/worldgen.mts spawn mmo --project voxel-demo --scene mmo
-npx tsx projects/voxel-demo/tools/place-spawn.mts --world mmo --scene mmo
+npx tsx tools/worldgen.mts all mmo --project proving --trace --catchment 0.6 --lakes 20 --terrace-share 0.75
+npx tsx tools/worldgen.mts spawn mmo --project proving --scene mmo
+npx tsx projects/proving/tools/place-spawn.mts --world mmo --scene mmo
 ```
 
 **Any change to a water rule in field.ts makes towns, paths and trails

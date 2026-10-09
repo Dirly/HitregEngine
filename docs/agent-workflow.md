@@ -177,7 +177,7 @@ The primary AI channel is **direct file editing** — no MCP required:
   the pivot must sit INSIDE the body's collider — `pivotHeight` is from the
   entity origin, which on a capsule is the waist; `height` is a PITCH, not a
   translation): **docs/camera.md**. Feel bugs are green in unit tests — check a
-  camera change with `projects/voxel-demo/tools/camera-probe.mjs`, which walks
+  camera change with `projects/proving/tools/camera-probe.mjs`, which walks
   the real player through a real door and reads back the pose.
 - **Placement toolbox** (settle props instead of eyeballing coordinates): give
   props a `placement` component (spec has the fields) and run

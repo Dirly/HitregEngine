@@ -1,7 +1,7 @@
 /* scratch: the fixed review views of one fall site (river-15 cascade by default) */
 import fs from "node:fs";
 import { createWorldField, worldRecipeSchema } from "@hitreg/core";
-const recipe = worldRecipeSchema.parse(JSON.parse(fs.readFileSync("projects/voxel-demo/assets/worlds/mmo.json", "utf8")));
+const recipe = worldRecipeSchema.parse(JSON.parse(fs.readFileSync("projects/proving/assets/worlds/mmo.json", "utf8")));
 const field = createWorldField(recipe);
 const river = process.argv[2] ?? "river-15";
 const c = field.falls.filter((f) => f.river === river).sort((a, b) => b.top - a.top);

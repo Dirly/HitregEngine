@@ -2,7 +2,7 @@
  * site-sockets — measure an OUTDOOR site (a POI's camp, yard, cave mouth, shore, ruin) into socket maps of named pitches,
  * so a dresser places its props by NAME (`props menu --map`, `dress check`, `dress apply`), never by a transform.
  *
- *   npx tsx tools/site-sockets.mts --project voxel-demo --job <poi job dir> [--scene proving] [--prefix hrimgard] [--area <id>]
+ *   npx tsx tools/site-sockets.mts --project proving --job <poi job dir> [--scene proving] [--prefix hrimgard] [--area <id>]
  *
  * Reads the job's handoff.json files (the job dir and every v<N>/ under it, newest last) and boots the scene headless as
  * the dedicated server does (terrain, installed props' colliders, water). It never writes a scene or the world. Writes ONE
@@ -32,7 +32,7 @@ import {
 type P2 = [number, number];
 const argv = process.argv.slice(2);
 const opt = (n: string, d = ""): string => { const i = argv.indexOf(`--${n}`); return i >= 0 ? argv[i + 1]! : d; };
-const project = opt("project", "voxel-demo"), jobArg = opt("job");
+const project = opt("project", "proving"), jobArg = opt("job");
 if (!jobArg) { console.error("usage: site-sockets --project <p> --job <poi job dir> [--scene <scene>] [--prefix <feature id prefix>] [--area <id>]"); process.exit(2); }
 const proj = path.join("projects", project);
 const job = path.isAbsolute(jobArg) || fs.existsSync(jobArg) ? jobArg : path.join(proj, jobArg);

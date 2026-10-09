@@ -8,7 +8,7 @@ import { buildVoxelMesh, createWorldField, scatterCell, voxelChunkDoc, worldReci
 
 const river = process.argv[2] ?? "river-15";
 const siteId = process.argv[3] ?? "site-river-15-21";
-const file = process.argv[4] ?? "projects/voxel-demo/assets/worlds/mmo.json";
+const file = process.argv[4] ?? "projects/proving/assets/worlds/mmo.json";
 const recipe = worldRecipeSchema.parse(JSON.parse(fs.readFileSync(file, "utf8")));
 const t0 = performance.now();
 const field = createWorldField(recipe);

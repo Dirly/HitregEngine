@@ -5,29 +5,29 @@
  * grades, lot sizes, door paths) is computed here, deterministically. Per-town working files live in
  * `projects/<p>/authoring/towns/<town>-ground/` (config `ground.json`, written with defaults on first use).
  *
- *   npx tsx tools/town-ground.mts export  --project voxel-demo --town tidewell [--world proving] [--force-map]
+ *   npx tsx tools/town-ground.mts export  --project proving --town tidewell [--world proving] [--force-map]
  *       the BARE site (town shaping lifted off, reroutes applied): site.f32 (1 m heights), site-map.png
  *       (1024 px, hillshade + contours + roads + gates + four black registration squares; kept if present), mapping.json
- *   npx tsx tools/town-ground.mts request --project voxel-demo --town tidewell [--prev key-2.png] [--dry-run]
+ *   npx tsx tools/town-ground.mts request --project proving --town tidewell [--prev key-2.png] [--dry-run]
  *       compose prompt-key-<k>.txt from the PLAN's building program and the REAL envelopes (pad sizes in px that
  *       the models fit, door steps included) + the site + ground.json `keyBrief`, then image-request gen (--dry-run passes through)
- *   npx tsx tools/town-ground.mts key     --project voxel-demo --town tidewell --key key-2.png
+ *   npx tsx tools/town-ground.mts key     --project proving --town tidewell --key key-2.png
  *       register (marks -> affine, residual), classify, clean (majority/open/close/specks) -> key-labels.bin, key-parse.json, overlay
- *   npx tsx tools/town-ground.mts build   --project voxel-demo --town tidewell [--dry]
+ *   npx tsx tools/town-ground.mts build   --project proving --town tidewell [--dry]
  *       key -> ground: graded streets, level square, a pad per lot from the real envelope, structure sites reserved and
  *       levelled only, harmonic banks; ONE heightPatch + town street roads. Writes ground-edits.json + ground-inverse.json
  *       (and the plan's lots); --dry writes ground-*-dry files only.
- *   npx tsx tools/town-ground.mts doors   --project voxel-demo --town tidewell [--dry]
+ *   npx tsx tools/town-ground.mts doors   --project proving --town tidewell [--dry]
  *       AFTER the buildings are placed: a footpath (road `<townId>-door-<lot>`, narrow, the town's lane surface) from
  *       the foot of every door's steps to the nearest town street, routed over the ground at a walkable grade and
  *       clear of every other lot. Re-runnable: it replaces only its own `-door-` roads. Writes doors-edits.json,
  *       doors-inverse.json and the evidence `<town>-paths.json` beside the layout.
- *   npx tsx tools/town-ground.mts paving  --project voxel-demo --town tidewell [--off]
+ *   npx tsx tools/town-ground.mts paving  --project proving --town tidewell [--off]
  *       mark the town's own streets, lanes and square (`<townId>-street-*` roads) `role: "paving"`, so they are
  *       painted with the zone's paving tile (recipe `regions[].ground.paving`, `worldgen zone-textures`) instead of
  *       their gravel. Paint only: heights, widths and points are untouched. `build` writes the role itself; this is
  *       for towns built before it. --off restores `road`. Writes paving-inverse.json.
- *   npx tsx tools/town-ground.mts undo    --project voxel-demo --town tidewell --step build|doors
+ *   npx tsx tools/town-ground.mts undo    --project proving --town tidewell --step build|doors
  *       apply the saved inverse (build also restores the plan saved before it).
  */
 import fs from "node:fs";
@@ -51,7 +51,7 @@ if (!COMMANDS.includes(cmd) || !opt("town")) {
   console.error(`usage: town-ground <${COMMANDS.join("|")}> --project <p> --town <town> [--world <w>]  (see the header)`);
   process.exit(2);
 }
-const c = context(opt("project", "voxel-demo"), opt("town"), opt("world") || undefined);
+const c = context(opt("project", "proving"), opt("town"), opt("world") || undefined);
 const rel = (f: string): string => path.relative(process.cwd(), f).replaceAll("\\", "/");
 const writeRecipe = (recipe: unknown): void => fs.writeFileSync(c.worldFile, `${JSON.stringify(recipe, null, 2)}\n`);
 

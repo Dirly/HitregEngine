@@ -23,7 +23,7 @@ import { bodyLootOffer } from "../../../apps/playground/projects/foundation/scri
 const here = path.dirname(fileURLToPath(import.meta.url));
 const playground = path.resolve(here, "../../../apps/playground");
 // items live in the foundation project, the world's dialogues and shops in the proving world (voxel-demo)
-const PROJECTS = ["projects/voxel-demo/assets", "projects/foundation/assets"].map((p) => path.join(playground, p));
+const PROJECTS = ["projects/proving/assets", "projects/foundation/assets"].map((p) => path.join(playground, p));
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function until(cond: () => boolean, timeoutMs = 10_000, what = ""): Promise<void> {
   const start = Date.now();

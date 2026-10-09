@@ -2,7 +2,7 @@
 import fs from "node:fs";
 import { createWorldField, voxelChunkDoc, worldRecipeSchema } from "@hitreg/core";
 
-const file = process.argv[2] ?? "projects/voxel-demo/assets/worlds/mmo.json";
+const file = process.argv[2] ?? "projects/proving/assets/worlds/mmo.json";
 const limit = Number(process.argv[3] ?? 400);
 const t0 = performance.now();
 const recipe = worldRecipeSchema.parse(JSON.parse(fs.readFileSync(file, "utf8")));

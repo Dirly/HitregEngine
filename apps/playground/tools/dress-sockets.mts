@@ -35,7 +35,7 @@
  *   ignores the layout's corners and door, to test path 1's detection on real geometry.
  *
  * Writes projects/<p>/authoring/dressing/sockets/<id>.json and prints a summary plus an ASCII plan per level.
- * Ported from projects/voxel-demo/authoring/towns/interior-grid.mts (+ interior-walls.mjs, brinehold-props
+ * Ported from projects/proving/authoring/towns/interior-grid.mts (+ interior-walls.mjs, brinehold-props
  * findDoor): wall slices at hip/waist/chest, roof ray for headroom, 0.75 m erosion to split rooms at
  * doorways, stair treads by up-facing normals 0.45-0.86 (51 and 35 degree flights), wells where an upper floor has no slab.
  */
@@ -774,7 +774,7 @@ export async function run(argv: string[]): Promise<void> {
       source: { model: rel(glb), sha256: sha256(glb) } };
     console.log(`${b.id}: cut from ${rel(glb)} (district ${b.district}, ${tris.roof.length} tris near the lot), yaw ${b.yaw}${b.preRot ? ` preRot ${b.preRot}` : ""} removed${auto ? "; --auto: layout corners and door ignored" : ""}`);
     if (argv.includes("--terrain")) { // the built town: sample the voxel terrain under the lot (read-only)
-      const tv = opt("--terrain"), worldFile = resolve(tv && !tv.startsWith("--") ? tv : "assets/worlds/mmo.json");
+      const tv = opt("--terrain"), worldFile = resolve(tv && !tv.startsWith("--") ? tv : "assets/worlds/proving.json");
       const core = await import("@hitreg/core"), recipe = core.worldRecipeSchema.parse(JSON.parse(fs.readFileSync(worldFile, "utf8"))), wid = "dress-steps";
       core.registerVoxelWorld(wid, recipe); const cs = recipe.cellSize, meshes = new Map<string, any>(), cb = Math.cos(-a), sb = Math.sin(-a);
       ground = (lx, lz) => { const x = lx * cb + lz * sb + b.centre[0], z = -lx * sb + lz * cb + b.centre[1], ci = Math.floor(x / cs), cj = Math.floor(z / cs), key = ci + "," + cj;

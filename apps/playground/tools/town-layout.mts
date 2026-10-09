@@ -1,7 +1,7 @@
 /**
  * town-layout — stage 3 of the town pipeline: the plan's lots become world placements, checked against the ground.
  *
- *   npx tsx tools/town-layout.mts --project voxel-demo --town brinehold [--no-map]
+ *   npx tsx tools/town-layout.mts --project proving --town brinehold [--no-map]
  *
  * Reads authoring/towns/<town>-plan.json. Each building sits on a terrace (or the town pad) at `u` metres
  * along the terrace's centreline, on the `east` (+v, the terrace's left) or `west` side of the street that

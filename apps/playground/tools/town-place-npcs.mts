@@ -4,7 +4,7 @@
  * e.g. a DC gate tower or the quay) take their spot from `spots`. Writes the town doc's `place` for each resident; run
  * tools/town-npcs.mts afterwards to regenerate the scene NPCs.
  *
- *   npx tsx tools/town-place-npcs.mts --project voxel-demo --town brinehold --spots "gate-tower=4110.8,-2178.4,4105,-2172;quay=4064,-2153,4040,-2160"
+ *   npx tsx tools/town-place-npcs.mts --project proving --town brinehold --spots "gate-tower=4110.8,-2178.4,4105,-2172;quay=4064,-2153,4040,-2160"
  * A spot is "id=x,z,faceX,faceZ".
  */
 import fs from "node:fs";

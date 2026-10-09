@@ -1,7 +1,7 @@
 /* scratch: rivers whose channels cross another river somewhere other than a chain join or a mouth */
 import fs from "node:fs";
 import { createWorldField, worldRecipeSchema } from "@hitreg/core";
-const file = process.argv[2] ?? "projects/voxel-demo/assets/worlds/mmo.json";
+const file = process.argv[2] ?? "projects/proving/assets/worlds/mmo.json";
 const recipe = worldRecipeSchema.parse(JSON.parse(fs.readFileSync(file, "utf8")));
 const field = createWorldField(recipe);
 const rivers = field.rivers;

@@ -5,8 +5,8 @@ lives there, a roster of residents placed on the real ground, what each of them
 says, sells or keeps, and the quests they hand out. Everything is data; one tool
 lints it and writes the scene. The engine side is generic (any game with the
 modular human and the character sheet); the worked example is the MMO project's
-starting capital, Brinehold (`projects/voxel-demo/authoring/towns/brinehold.json`,
-readable version `projects/voxel-demo/docs/towns/brinehold.md`).
+starting capital, Brinehold (`projects/proving/authoring/towns/brinehold.json`,
+readable version `projects/proving/docs/towns/brinehold.md`).
 
 Related: `docs/armor-sets.md` (outfits: a town's look is armor-set work),
 `docs/character-progression.md` (the sheet, items), `docs/voxel-worlds.md`

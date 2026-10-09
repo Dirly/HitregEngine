@@ -1,7 +1,7 @@
 /**
  * town-install — put a town's exported buildings into its scene, as an ops batch.
  *
- *   npx tsx tools/town-install.mts --project voxel-demo --town brinehold [--models towns/brinehold] [--dry]
+ *   npx tsx tools/town-install.mts --project proving --town brinehold [--models towns/brinehold] [--dry]
  *
  * Reads assets/models/<models>/manifest.json (MMO/WFC/wfc/export_town.py: one merged model per district, its anchor
  * in world space) and replaces the town's building entities (tag `town-building:<town>`) with one entity per district:

@@ -2,7 +2,7 @@
   "version": 1,
   "id": "ironcut-gorge",
   "name": "Ironcut Gorge",
-  "project": "voxel-demo",
+  "project": "proving",
   "adventureSize": "large",
   "hostility": "mixed",
   "description": "A substantial iron-mining adventure built around the gorge. A safe loading yard leads into branching underground workings, larger excavations and routes between elevations. The lower gorge contains another meaningful part of the adventure.",

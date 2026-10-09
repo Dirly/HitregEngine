@@ -14,7 +14,7 @@ not to skip.
 1. **Data only.** A crafting pass edits the site doc in the world recipe and
    runs the bake. It never changes engine code. If audit check a, d or f
    fails for an engine reason, stop and report it.
-2. **Back up the world file first** (`projects/voxel-demo/assets/worlds/mmo.json`,
+2. **Back up the world file first** (`projects/proving/assets/worlds/mmo.json`,
    copied to your scratchpad).
 3. **No hand blobs, no hand rocks.** The template runs with `--rocks 0`, and
    no `features.blobs` go into the site.
@@ -28,7 +28,7 @@ not to skip.
 7. **The safety net is 8 look rounds, or 2 rounds with no gate change.** When
    it trips, record the fall as blocked, with the reasons.
 8. **Always append the result line** to
-   `projects/voxel-demo/authoring/falls-log.jsonl`, and report your token use.
+   `projects/proving/authoring/falls-log.jsonl`, and report your token use.
 
 ## Order
 

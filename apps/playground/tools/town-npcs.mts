@@ -18,7 +18,7 @@
  * Process: docs/town-npcs.md.
  *
  *   cd apps/playground
- *   npx tsx tools/town-npcs.mts --project voxel-demo --town brinehold [--check]
+ *   npx tsx tools/town-npcs.mts --project proving --town brinehold [--check]
  *     [--lineup brinehold-lineup --with hud,character-ui]   also write a review/test scene
  */
 import fs from "node:fs";

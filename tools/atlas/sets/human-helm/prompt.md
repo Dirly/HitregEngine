@@ -17,7 +17,7 @@ Generate with **`key-labelled.png`** attached; replace only `{subject}`. Save
 each sheet as `tools/atlas/art/human-helm/<theme>.png`, then:
 
     node tools/atlas/import-atlas.mjs --set human-helm --theme <theme> --slices
-    pnpm -F playground weapon-page --recipe human-helm --project voxel-demo --model mmo/human-helm.glb --themes <theme> …
+    pnpm -F playground weapon-page --recipe human-helm --project foundation --model mmo/human-helm.glb --themes <theme> …
 
 The sheet ships at 132 texels (109/m, the body's density), shrunk nearest.
 

@@ -44,7 +44,7 @@ All three are at the body's density (109 texels/m, nearest-filtered). One model
      `node tools/body-page.mjs --glb projects/foundation/assets/models/mmo/human-body.glb --theme <id>=<atlas> …`
      (reads the sheets already on the page back out of it; geometry, skin and clips are kept byte for byte).
      Copy each new atlas to `assets/textures/mmo/human-body-<t>[-f].png` too: item-icon reads the sheets from there.
-   - helm/shoulders: `weapon-page --recipe human-helm|human-shoulder --project voxel-demo --model mmo/<model>.glb --themes <every set>`
+   - helm/shoulders: `weapon-page --recipe human-helm|human-shoulder --project foundation --model mmo/<model>.glb --themes <every set>`
 5. **Look at it** on both sexes, front and back, in the creator (`/?creator`,
    the Outfit / Headgear / Shoulders preview rows).
 

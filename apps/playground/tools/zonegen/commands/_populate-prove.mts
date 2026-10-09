@@ -1,6 +1,6 @@
 /**
  * Proof for `zonegen populate` on a scratch scene the batch was installed into (never the live scene):
- *   npx tsx tools/zonegen/commands/_populate-prove.mts --project voxel-demo --scene zt-populate-proof --zone zone-5 [--pack <regex>] [--min 2] [--out <json>]
+ *   npx tsx tools/zonegen/commands/_populate-prove.mts --project proving --scene zt-populate-proof --zone zone-5 [--pack <regex>] [--min 2] [--out <json>]
  *
  * --pack picks the pack by its templates' ids (default the timber wolves, ^pop-wolf-timber); a dressed-human pack is
  * e.g. --pack ^pop-wrecker (populate's body "human" templates). --min is the smallest pack size accepted (default 2).
@@ -29,7 +29,7 @@ const opt = (k: string, d: string): string => (argv.includes(`--${k}`) ? argv[ar
 const sceneName = opt("scene", "");
 const zone = opt("zone", "");
 if (!sceneName.startsWith("zt-populate")) throw new Error("--scene must be a zt-populate-* scratch copy");
-const projectDir = path.resolve("projects", opt("project", "voxel-demo"));
+const projectDir = path.resolve("projects", opt("project", "proving"));
 const t0 = Date.now();
 
 // ---- boot (quest-play's) -----------------------------------------------------------------------------------------

@@ -7,13 +7,13 @@
 // sound, a variant count. Changing the template or a prompt makes the affected files STALE, so a restyle is
 // one edit + one `gen`.
 //
-//   node tools/sfx-request.mjs status  --project voxel-demo [--category melee] [--next]
-//   node tools/sfx-request.mjs gen     --project voxel-demo [--category melee] [--only 'combat/melee/sword*']
+//   node tools/sfx-request.mjs status  --project foundation [--category melee] [--next]
+//   node tools/sfx-request.mjs gen     --project foundation [--category melee] [--only 'combat/melee/sword*']
 //                                      [--force] [--dry] [--concurrency 3] [--stale]
-//   node tools/sfx-request.mjs one     --project voxel-demo --id ui/click --prompt "…" --category ui [--variants 2]
-//   node tools/sfx-request.mjs refit   --project voxel-demo [--category ambience] [--only …]   # re-level installed files, no API
-//   node tools/sfx-request.mjs board   --project voxel-demo            # audition page: authoring/audio/board.html
-//   node tools/sfx-request.mjs reject  --project voxel-demo --file combat/melee/sword-swing-2.ogg [--note "…"]
+//   node tools/sfx-request.mjs one     --project foundation --id ui/click --prompt "…" --category ui [--variants 2]
+//   node tools/sfx-request.mjs refit   --project foundation [--category ambience] [--only …]   # re-level installed files, no API
+//   node tools/sfx-request.mjs board   --project foundation            # audition page: authoring/audio/board.html
+//   node tools/sfx-request.mjs reject  --project foundation --file combat/melee/sword-swing-2.ogg [--note "…"]
 //
 // Output: assets/audio/<id>.<ext>; variants 2..n are <id>-2.<ext> …, so a script's comma list names them all.
 // Ext: the entry's `ext`, else the category's, else "ogg" for loops/music and "mp3" for one-shots.

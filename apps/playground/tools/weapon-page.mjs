@@ -3,7 +3,7 @@
  * Bake a weapon type's HELD-weapon model: the ubermesh with ONE packed page of
  * every theme inside it, plus the tables that let an item name its look.
  *
- *   pnpm -F playground weapon-page --recipe longsword --project voxel-demo \
+ *   pnpm -F playground weapon-page --recipe longsword --project foundation \
  *     --themes iron-common iron-rusted steel [--model weapons/longsword-uber.glb]
  *
  * Why a page: every held weapon of one type is ONE draw call (a `mesh.moving`

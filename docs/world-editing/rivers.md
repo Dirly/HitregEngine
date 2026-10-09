@@ -99,7 +99,7 @@ the lake band.
 ## Steps
 
 All commands: `pnpm -F playground worldgen <cmd> <world> --project <project>`.
-Below, `W="voxel-demo --project voxel-demo"`.
+Below, `W="voxel-demo --project proving"`.
 
 1. **Know the lakes.** Read `features.lakes` from the recipe: id, `center`,
    `waterY`, `radius`, `polygon`. Look at the map:

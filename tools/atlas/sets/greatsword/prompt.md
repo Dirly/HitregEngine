@@ -22,7 +22,7 @@ then register it:
 
 and put it on the held-weapon page (every theme at once):
 
-    pnpm -F playground weapon-page --recipe greatsword --project voxel-demo --themes <a>,<b>,…
+    pnpm -F playground weapon-page --recipe greatsword --project foundation --themes <a>,<b>,…
 
 **Only the TWO ORNAMENTS cut.** Every other region is filled edge to edge.
 

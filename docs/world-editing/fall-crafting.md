@@ -33,15 +33,15 @@ Derek's judgement, in the order he raised it:
 
 Run everything from `apps/playground`. `<river>` is the fall's river id and
 `<site>` is the site id the template writes (`site-<river>-<fallIndex>`).
-The world file is `projects/voxel-demo/assets/worlds/mmo.json`. **Copy it to
+The world file is `projects/proving/assets/worlds/mmo.json`. **Copy it to
 your scratchpad before the first edit.**
 
 1. **Pick and read the fall.** Fall INDICES shift: crafting a site splits
    its fall into tiers, and every later index moves up. Name a fall by its river
    and foot position, and re-run `--list` before using an index.
-   - `npx tsx tools/worldgen.mts fall-site mmo --project voxel-demo --list`
+   - `npx tsx tools/worldgen.mts fall-site mmo --project proving --list`
      lists every fall by index.
-   - `... fall-site mmo --project voxel-demo --fall <i> --snapshot` gives the
+   - `... fall-site mmo --project proving --fall <i> --snapshot` gives the
      compact context: the fall's levels, flow direction and channel width, plus
      a 32×32 ground grid.
 2. **Write the site.**
@@ -130,7 +130,7 @@ failing.
 ### Result record
 
 When done or blocked, append one JSON line to
-`projects/voxel-demo/authoring/falls-log.jsonl` (create it if it does not exist):
+`projects/proving/authoring/falls-log.jsonl` (create it if it does not exist):
 
 ```json
 {"site": "...", "river": "...", "fall": 18, "status": "done | blocked", "rounds": 3,

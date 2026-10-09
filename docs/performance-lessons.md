@@ -1246,7 +1246,7 @@ cover group hidden in alternate 2.5 s windows) measured the same median frame
 at every spot, jungle 20.8 ms both ways, for +4-5 draw calls. The cost is
 CPU PLACEMENT on each recenter, amortised at 2 ms a frame, so it shows up as
 cover arriving late while running, never as fps. Three findings, measured with
-`projects/voxel-demo/tools/cover-bench.mts` (median of nine recenters):
+`projects/proving/tools/cover-bench.mts` (median of nine recenters):
 
 - **`field.waterY` costs a whole height evaluation (6 us).** It answers the
   sea question by computing the ground, which the gate had already done. The

@@ -2,7 +2,7 @@
  * town-exterior — measure a town's OUTDOORS into a socket map of named pitches, so its streets, square and quay are
  * dressed by NAME (`dress check` / `dress apply`), never by a hand-written transform.
  *
- *   npx tsx tools/town-exterior.mts sockets --project voxel-demo --town tidewell [--scene proving]
+ *   npx tsx tools/town-exterior.mts sockets --project proving --town tidewell [--scene proving]
  *
  * Boots the scene headless as the dedicated server does (HeadlessWorld + TerrainStreamer: terrain, every installed
  * building and quay mesh, scatter colliders) and proposes outdoor floor anchors from the town's own data:
@@ -27,7 +27,7 @@ type P2 = [number, number];
 const argv = process.argv.slice(2);
 const opt = (n: string, d = ""): string => { const i = argv.indexOf(`--${n}`); return i >= 0 ? argv[i + 1]! : d; };
 if (argv[0] !== "sockets") { console.error("usage: town-exterior sockets --project <p> --town <name> [--scene <scene>]"); process.exit(2); }
-const project = opt("project", "voxel-demo"), town = opt("town");
+const project = opt("project", "proving"), town = opt("town");
 if (!town) { console.error("--town is required"); process.exit(2); }
 const proj = path.join("projects", project);
 const towns = path.join(proj, "authoring", "towns");

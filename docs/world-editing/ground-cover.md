@@ -110,7 +110,7 @@ off (A/B in one page session, +4-5 draws); what a layer really costs is CPU
 PLACEMENT on each recenter, amortised at 2 ms a frame — cover that arrives
 late while running, not lower fps. All 25 layers place in ~52-69 ms per
 recenter at the heaviest spots. Check a new layer with
-`projects/voxel-demo/tools/cover-bench.mts spots.json` (`DETAIL=1` per layer):
+`projects/proving/tools/cover-bench.mts spots.json` (`DETAIL=1` per layer):
 a layer with many calls and few hits is walking ground it cannot grow on —
 tighten its region (biomes, a `floor: 0` clump) rather than its density.
 
@@ -137,7 +137,7 @@ tighten its region (biomes, a `floor: 0` clump) rather than its density.
    lake/river shore and shallows carries the water layers. Exit 1 on
    findings (unknown biome/surface, missing page, an empty atlas slot, a
    layer that grows nowhere, a biome with no cover at all).
-5. **Look at it**: `tsx projects/voxel-demo/tools/cover-spots.mts <world> --out spots.json`
+5. **Look at it**: `tsx projects/proving/tools/cover-spots.mts <world> --out spots.json`
    finds where each layer is thickest; `cover-probe.mjs` screenshots each
    spot headless with draw counts (header of the file has the commands).
 

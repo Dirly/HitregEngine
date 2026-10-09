@@ -1,7 +1,7 @@
 /* scratch: the river profiles as runs and falls */
 import fs from "node:fs";
 import { createWorldField, worldRecipeSchema } from "@hitreg/core";
-const recipe = worldRecipeSchema.parse(JSON.parse(fs.readFileSync(process.argv[2] ?? "projects/voxel-demo/assets/worlds/mmo.json", "utf8")));
+const recipe = worldRecipeSchema.parse(JSON.parse(fs.readFileSync(process.argv[2] ?? "projects/proving/assets/worlds/mmo.json", "utf8")));
 const t0 = performance.now();
 const field = createWorldField(recipe);
 console.log(`field ${(performance.now() - t0).toFixed(0)} ms`);

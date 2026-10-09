@@ -90,7 +90,7 @@ Held gear is drawn from ONE model that carries ONE packed page of every theme.
 Adding a theme means re-baking; it never means adding a material:
 
 ```
-pnpm -F playground weapon-page --recipe longsword --project voxel-demo --themes iron-common iron-rusted steel
+pnpm -F playground weapon-page --recipe longsword --project foundation --themes iron-common iron-rusted steel
 ```
 
 It seam-blends each theme on its own, packs a page, bakes it into the

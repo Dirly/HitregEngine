@@ -2,7 +2,7 @@
  * road-regrade — re-sample the embankment side heights (`leftY` / `rightY`) of every road over one area,
  * against the ground as it is NOW.
  *
- *   npx tsx tools/road-regrade.mts --project voxel-demo --world mmo --at 4105,-2170 --radius 22 [--dry]
+ *   npx tsx tools/road-regrade.mts --project proving --world mmo --at 4105,-2170 --radius 22 [--dry]
  *
  * `worldgen paths` samples each road's side heights once, from the ground it saw then, and the field
  * applies roads AFTER towns and terraces. So a terrace (or any town-pipeline fix) laid over a road later is
@@ -20,7 +20,7 @@ const opt = (name: string, fallback: string): string => {
   const i = argv.indexOf(`--${name}`);
   return i >= 0 && argv[i + 1] ? argv[i + 1]! : fallback;
 };
-const file = path.resolve("projects", opt("project", "voxel-demo"), "assets/worlds", `${opt("world", "mmo")}.json`);
+const file = path.resolve("projects", opt("project", "proving"), "assets/worlds", `${opt("world", "proving")}.json`);
 const [ax, az] = opt("at", "").split(",").map(Number) as [number, number];
 const radius = Number(opt("radius", "20"));
 if (!Number.isFinite(ax) || !Number.isFinite(az)) {

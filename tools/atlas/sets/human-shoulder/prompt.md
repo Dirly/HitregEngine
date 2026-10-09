@@ -18,7 +18,7 @@ attached (plus the matching body sheet); replace only `{subject}`. Save each
 sheet as `tools/atlas/art/human-shoulder/<theme>.png`, then:
 
     node tools/atlas/import-atlas.mjs --set human-shoulder --theme <theme> --slices
-    pnpm -F playground weapon-page --recipe human-shoulder --project voxel-demo --model mmo/human-shoulder.glb --themes <theme> …
+    pnpm -F playground weapon-page --recipe human-shoulder --project foundation --model mmo/human-shoulder.glb --themes <theme> …
 
 The sheet ships at 112 texels (109/m, the body's density), shrunk nearest.
 

@@ -1,7 +1,7 @@
 /* scratch: where a river has no drawn water on its own centreline, and whether tributaries' water reaches their trunk */
 import fs from "node:fs";
 import { createWorldField, worldRecipeSchema } from "@hitreg/core";
-const recipe = worldRecipeSchema.parse(JSON.parse(fs.readFileSync("projects/voxel-demo/assets/worlds/mmo.json", "utf8")));
+const recipe = worldRecipeSchema.parse(JSON.parse(fs.readFileSync("projects/proving/assets/worlds/mmo.json", "utf8")));
 const field = createWorldField(recipe);
 const ws = { y: 0, flowX: 0, flowZ: 0, kind: "lake" as "lake" | "river", floor: 0 };
 const drawnAt = (x: number, z: number): string => {

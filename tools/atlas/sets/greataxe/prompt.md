@@ -21,7 +21,7 @@ then register it and bake it into the mesh:
 
     node tools/atlas/import-atlas.mjs --set greataxe --theme <theme> --slices
 
-    pnpm -F playground weapon-page --recipe greataxe --project voxel-demo --themes <theme> …
+    pnpm -F playground weapon-page --recipe greataxe --project foundation --themes <theme> …
 
 **Only the THREE ORNAMENTS cut.** Every other region is filled edge to edge.
 

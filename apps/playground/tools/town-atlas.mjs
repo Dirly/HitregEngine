@@ -3,8 +3,8 @@
  * Town texture atlas: one atlas page per town, one shared material per town.
  *
  *   node tools/town-atlas.mjs <town-model-dir> --out <staging-dir> [--page 1024] [--pad 8]
- *   e.g. node tools/town-atlas.mjs projects/voxel-demo/assets/models/towns/tidewell \
- *          --out projects/voxel-demo/authoring/town-atlas/tidewell
+ *   e.g. node tools/town-atlas.mjs projects/proving/assets/models/towns/tidewell \
+ *          --out projects/proving/authoring/town-atlas/tidewell
  *
  * The town building GLBs exported from Blender each carry ~13 kit materials and
  * embed their own copies of the kit's textures (55 files, 658 images, 37

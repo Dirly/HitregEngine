@@ -2,7 +2,7 @@
  * town-survey — stage 1 of the town planner: read the ground a town stands on
  * and PROVE a player can walk in.
  *
- *   npx tsx tools/town-survey.mts --project voxel-demo --town brinehold [--margin 90] [--out <dir>]
+ *   npx tsx tools/town-survey.mts --project proving --town brinehold [--margin 90] [--out <dir>]
  *
  * Reads the town doc (`authoring/towns/<town>.json`: its world and town id)
  * and the world recipe, samples the field's ground on a 1 m grid round the

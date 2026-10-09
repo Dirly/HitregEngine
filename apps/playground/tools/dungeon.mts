@@ -554,7 +554,7 @@ const doc = {
   nodes,
 };
 
-const target = process.argv[2] ?? "voxel-demo";
+const target = process.argv[2] ?? "proving";
 const out = path.join(ROOT, "projects", target, "assets", "volumes");
 fs.mkdirSync(out, { recursive: true });
 const file = path.join(out, "dwarven-hold.json");

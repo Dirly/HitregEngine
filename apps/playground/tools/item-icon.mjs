@@ -2,10 +2,10 @@
 /**
  * Inventory icons for items, made from the item itself.
  *
- *   node tools/item-icon.mjs --project voxel-demo --all            # every item with an `appearance`
- *   node tools/item-icon.mjs --project voxel-demo --item steel-heater iron-heater
- *   node tools/item-icon.mjs --project voxel-demo --model weapons/shield-uber.glb   # every item on one model
- *   node tools/item-icon.mjs --project voxel-demo --item rat-tail --from-image art/rat-tail.png
+ *   node tools/item-icon.mjs --project foundation --all            # every item with an `appearance`
+ *   node tools/item-icon.mjs --project foundation --item steel-heater iron-heater
+ *   node tools/item-icon.mjs --project foundation --model weapons/shield-uber.glb   # every item on one model
+ *   node tools/item-icon.mjs --project foundation --item rat-tail --from-image art/rat-tail.png
  *   ... [--size 40] [--no-backdrop] [--tint #hex] [--outline] [--sheet out.png] [--dry]
  *
  * BACKDROP (default): every icon sits on an opaque ground of fractal noise

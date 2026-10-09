@@ -4,10 +4,10 @@
  * monster eyes and parts, ore, gems, jewellery, herbs, vendor junk), made as
  * SPRITE SHEETS rather than one generator call per item.
  *
- *   node tools/loot-sheet.mjs request --project voxel-demo [--sheets potions gems …] [--timeout 3000]
- *   node tools/loot-sheet.mjs slice   --project voxel-demo [--sheets …] [--contact <png>]
- *   node tools/loot-sheet.mjs list    --project voxel-demo [--tag potion]
- *   node tools/loot-sheet.mjs audit   --project voxel-demo
+ *   node tools/loot-sheet.mjs request --project foundation [--sheets potions gems …] [--timeout 3000]
+ *   node tools/loot-sheet.mjs slice   --project foundation [--sheets …] [--contact <png>]
+ *   node tools/loot-sheet.mjs list    --project foundation [--tag potion]
+ *   node tools/loot-sheet.mjs audit   --project foundation
  *
  * Why sheets: an icon ends up ~40 px, and a generator call makes a 1024 image.
  * One call per item throws almost all of it away; a 4x4 sheet gets sixteen

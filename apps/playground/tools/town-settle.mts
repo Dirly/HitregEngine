@@ -5,8 +5,8 @@
  * ever pokes through a floor. Run after the pads, lanes and road-regrade are written; export with --lift 0 afterwards
  * (the height is in the layout).
  *
- *   npx tsx tools/town-settle.mts --project voxel-demo --town brinehold [--clear 0.15]   settle, then check
- *   npx tsx tools/town-settle.mts --project voxel-demo --town brinehold --check [--out f]  check only (writes nothing but the report; --out puts it elsewhere)
+ *   npx tsx tools/town-settle.mts --project proving --town brinehold [--clear 0.15]   settle, then check
+ *   npx tsx tools/town-settle.mts --project proving --town brinehold --check [--out f]  check only (writes nothing but the report; --out puts it elsewhere)
  *
  * The CHECK (`terrain-through-floor`, docs/world-standards/towns.md "No terrain pokes through a floor"): after any
  * ground change, the ground under each model's full footprint must stay below its floor. It writes

@@ -1511,7 +1511,7 @@ Two things learned building it:
 - **Which anchor a zone draws is a draw.** The first demo world drew no desert
   and no badlands at all. `zones.seed` re-rolls the layout without moving a
   hill, and the demo's generator sweeps it until every anchor covers land and
-  none swallows it (`projects/voxel-demo/tools/gen-world.mts`).
+  none swallows it (`projects/proving/tools/gen-world.mts`).
 - **Every consumer must read the zone through the same warp.** The landform,
   the biome rules and the public `zone()` all go through the climate edge
   warp; the first version read the landform unwarped and a tool asked for

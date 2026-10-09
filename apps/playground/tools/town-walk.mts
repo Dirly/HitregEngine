@@ -1,7 +1,7 @@
 /**
  * town-walk — the town pipeline's traversal gate, run against the REAL ground.
  *
- *   npx tsx tools/town-walk.mts --project voxel-demo --town brinehold [--scene mmo] [--out <dir>]
+ *   npx tsx tools/town-walk.mts --project proving --town brinehold [--scene mmo] [--out <dir>]
  *   [--line "x,z[,y];x,z;...|..."]   also walk straight polylines; a first point with a y starts the body there (a wall-walk, a deck)
  *
  * The survey (town-survey.mts) reads the field; this reads what a player

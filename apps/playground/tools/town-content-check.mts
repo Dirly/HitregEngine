@@ -2,7 +2,7 @@
  * town-content-check — lint a batch of town content (dialogues, quests, shops) BEFORE it is installed, against the
  * project's live assets and the town doc. The gate `codex-task.mjs --check` runs on a staging folder.
  *
- *   npx tsx tools/town-content-check.mts --project voxel-demo --town brinehold --stage <dir>
+ *   npx tsx tools/town-content-check.mts --project proving --town brinehold --stage <dir>
  *
  * Staged files are named by kind: `dialogue.<id>.json` (id without the town prefix; installed as
  * dialogues/<town>/<id>.json), `quest.<id>.json`, `shop.<id>.json` (installed as shops/<town>/<id>.json).

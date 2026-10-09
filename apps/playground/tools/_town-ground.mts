@@ -1,6 +1,6 @@
 /**
  * Helper for tools/town-ground.mts: the per-town config, the shared grid routines and the KEY -> GROUND build.
- * Ported from projects/voxel-demo/authoring/towns/tidewell-ground/{_common,key,ground}.mts (the Tidewell scripts
+ * Ported from projects/proving/authoring/towns/tidewell-ground/{_common,key,ground}.mts (the Tidewell scripts
  * stay there as the reference); the measurement logic is unchanged, the Tidewell constants became config.
  */
 import fs from "node:fs";

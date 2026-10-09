@@ -141,7 +141,7 @@ API (terraform), and the edit is the save. Nothing else persists yet
 (player state dies with the body); nothing is authenticated; one scene per
 process; ~50 players per process at 60 Hz with headroom.
 
-**Content changes** — all in `projects/voxel-demo`, which is its own git repo
+**Content changes** — all in `projects/proving`, which is its own git repo
 (the `combat-demo` and `mmo` projects were folded into it on 2026-09-04, so
 the paths below moved with them):
 - `scripts/combat-caster.ts`: ownership check on `combat.cast.request`, dash

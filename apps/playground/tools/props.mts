@@ -76,7 +76,7 @@ function vocabulary(): DressingVocabulary {
   const f = path.join(PROJECT, "authoring/dressing/vocabulary.json");
   return fs.existsSync(f) ? mergeVocabulary(readJson(f)) : mergeVocabulary();
 }
-const projectName = flag("project") ?? "voxel-demo";
+const projectName = flag("project") ?? "proving";
 const PROJECT = path.resolve(HERE, "..", "projects", projectName);
 const ASSETS = path.join(PROJECT, "assets");
 const INDEX = "authoring/prop-catalogs.json";
