@@ -2,7 +2,7 @@
  * pose-sheet — LOOK at a character's clips with its held items in its hands,
  * with no browser: one row per clip (per view), one column per sampled frame.
  *
- *   node tools/pose-sheet.mjs --project voxel-demo --scene mmo --actor player-visual \
+ *   node tools/pose-sheet.mjs --project foundation --prefab characters/player --actor player-visual \
  *     --equip primary=iron-arming-sword,offhand=iron-heater \
  *     --clips Idle,SwordShield_Idle,SwordShield_Attack1 --frames 6 --out sheet.png
  *

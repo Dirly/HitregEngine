@@ -3,7 +3,7 @@
  * IN the hand the way a hand actually holds it, from the anatomy of the
  * character and the shape of the item, instead of nudging numbers by eye.
  *
- *   node tools/fit-grip.mjs --project voxel-demo --scene mmo --actor player-visual \
+ *   node tools/fit-grip.mjs --project foundation --prefab characters/player --actor player-visual \
  *     --socket player-weapon --grip handle --handle Handle --blade Blade1
  *   node tools/fit-grip.mjs ... --socket player-shield --grip shield --face Shield2 --bone CC_Base_L_Forearm
  *
