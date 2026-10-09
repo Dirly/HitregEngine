@@ -194,8 +194,14 @@ describe.skipIf(!layer)("targets, support and pets", { timeout: 120_000 }, () =>
     bus().emit("combat.cast.request", { casterId: ana, abilityId: "summonWolf", aim: [1, 0] });
     await until(() => petsOf(net(), ana).some((id) => !!world().objects.get(id)), 10_000, "a second wolf");
     const second = petsOf(net(), ana).find((id) => !!world().objects.get(id))!;
-    net().set(`transferLock/${ana}`, 0);
-    bus().emit("inventory.unequip", { actorId: ana, slot: "trinket" });
+    // gear never changes in combat, and the wolf (assist stance, a foe nearby) can land a blow that
+    // re-arms the owner's combat lock between clearing it and the request: ask again until it is off
+    for (let i = 0; i < 20 && sheet(ana)?.equipment.trinket; i++) {
+      net().set(`transferLock/${ana}`, 0);
+      bus().emit("inventory.unequip", { actorId: ana, slot: "trinket" });
+      await wait(250);
+    }
+    expect(sheet(ana)?.equipment.trinket, "the trinket came off").toBeUndefined();
     await until(() => !world().objects.get(second) && petsOf(net(), ana).length === 0, 10_000, "dismissed with its trinket");
   });
 });

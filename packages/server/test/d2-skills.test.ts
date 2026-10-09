@@ -52,6 +52,8 @@ type Side = "front" | "rear";
 describe.skipIf(!layer)("D2: stealth, the opener, bows, birth traits", { timeout: 120_000 }, () => {
   const transports: WebSocketClientTransport[] = [];
   const clients: RoomClient[] = [];
+  /** body id -> the RoomClient that owns it (to send that player's input) */
+  const clientOf = new Map<string, RoomClient>();
   afterAll(async () => {
     for (const c of clients) c.leave();
     for (const t of transports) t.close();
@@ -82,7 +84,10 @@ describe.skipIf(!layer)("D2: stealth, the opener, bows, birth traits", { timeout
     });
     transports.push(transport);
     clients.push(client);
-    return until(() => spawned.length === 1, 10_000, `${peerId} spawn`).then(() => spawned[0]!);
+    return until(() => spawned.length === 1, 10_000, `${peerId} spawn`).then(() => {
+      clientOf.set(spawned[0]!, client);
+      return spawned[0]!;
+    });
   }
 
   const xz = (id: string): [number, number] => {
@@ -304,10 +309,20 @@ describe.skipIf(!layer)("D2: stealth, the opener, bows, birth traits", { timeout
     await ready(ana);
     await ready(foe);
     await placeLevel(foe, ana, 5);
-    // ana faces the shooter, so the guard's front arc is the side the arrow comes in on
-    const [fx, fz] = xz(foe);
-    const [ax, az] = xz(ana);
-    world().objects.get(ana)!.rotation.y = Math.atan2(fx - ax, fz - az);
+    // ana turns to face the shooter the way a player does — an input with that heading (standing
+    // still) — so the guard's front arc is the side the arrow comes in on. Setting the body's rotation
+    // here does not hold: the server restores a player's facing from its last input every tick
+    // (players.ts `face`).
+    {
+      const [fx, fz] = xz(foe);
+      const [ax, az] = xz(ana);
+      const p = world().objects.get(ana)!.position;
+      const yaw = Math.atan2(fx - ax, fz - az);
+      for (let i = 0; i < 5; i++) {
+        clientOf.get(ana)!.sendCommand({ t: "input", seq: 100_000 + i, v: [0, 0], jump: false, yaw, p: [p.x, p.y, p.z] });
+        await wait(60);
+      }
+    }
     await settle();
     const guarded = (kind: string) =>
       net().set(`combat/${ana}.loadout`, JSON.stringify({ set: 0, lmb: "", rmb: "", weapon1: "", weapon2: "", trinket1: "", trinket2: "", trait: "", consumables: [], guard: { kind } }));

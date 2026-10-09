@@ -245,7 +245,7 @@ describe("twists: the audit on composed skills", () => {
         if (!twistFits(t, base)) continue;
         const v = auditTwisted(composeSkill(base, [t]), base);
         if (v.length === 0) passed++;
-        else for (const x of v) expect(["twist-sum", "twist-mult", "control", "bounded", "interrupt", "chain", "self", "stealth", "opener", "dot"]).toContain(x.rule);
+        else for (const x of v) expect(["twist-sum", "twist-mult", "control", "bounded", "interrupt", "chain", "self", "stealth", "opener", "dot", "summon"]).toContain(x.rule);
       }
     }
     expect(passed).toBeGreaterThan(1000);

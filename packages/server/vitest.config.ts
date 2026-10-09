@@ -7,6 +7,11 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     testTimeout: 20_000,
+    // one file at a time: each boots its own world and socket server, and run side by side their
+    // waits (combat windows, spawns, persistence) time out under the combined load — the same
+    // tests pass alone every time (2026-10-09: defence, x2-corpse, l2-persist, spawn-areas)
+    fileParallelism: false,
+    pool: "forks",
     hookTimeout: 30_000,
   },
 });
