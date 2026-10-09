@@ -8,7 +8,7 @@ import { WORLD_MODULE, type WorldModuleMessage } from "../src/index.js";
 import { eventLog } from "./event-log.js";
 
 /**
- * The defensive layer of voxel-demo's combat model (docs/combat-plan.md), over
+ * The defensive layer of the foundation's combat model (docs/combat-plan.md), over
  * real sockets, with the game's scripts on the `field` scene.
  *
  * This is the half of combat that cannot be checked by reading the code: guard,
@@ -38,7 +38,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const playground = path.resolve(here, "../../../apps/playground");
 /** A real item's guard, as deriveLoadout copies it into the loadout. */
 const itemGuard = (id: string): Record<string, unknown> =>
-  (JSON.parse(readFileSync(path.join(playground, "projects/voxel-demo/assets/items", `${id}.json`), "utf8")) as { skills: { guard: Record<string, unknown> } }).skills.guard;
+  (JSON.parse(readFileSync(path.join(playground, "projects/foundation/assets/items", `${id}.json`), "utf8")) as { skills: { guard: Record<string, unknown> } }).skills.guard;
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function until(cond: () => boolean, timeoutMs = 10_000, what = ""): Promise<void> {
   const start = Date.now();

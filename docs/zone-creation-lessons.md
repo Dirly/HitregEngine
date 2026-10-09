@@ -468,7 +468,7 @@ Proved on `projects/gnawspur-rough` (2026-10-06): `tools/mesh-dc/noise.mjs` `flo
   room outline) and fail loudly when a pack id prefix matches no NPC.
 - **Melee missed every tall body (engine, voxel-demo combat).** A swing's volume is a band 2.2 m either side of the
   ground, judged on the target's CENTRE: a 4-5 m giant's centre sits above it. `volumeContains` now takes the body's
-  half-height from its collider (overlap, not point). Test: `projects/voxel-demo/tools/combat-volume.test.ts`.
+  half-height from its collider (overlap, not point). Test: `projects/foundation/tools/combat-volume.test.ts`.
 - **groundY anchored swings on the loft.** It probes down from 40 m and took the first TERRAIN hit: in a timber hall
   that is a tie-beam top split-floor calls floor, so every strike in the door and hearth halls was 10 m up. It now steps
   through hits more than 4 m over the probe's height. Indoor dungeons with storeys above the fight need both fixes.

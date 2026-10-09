@@ -21,12 +21,12 @@ import {
 } from "@hitreg/core";
 import { serve, type ServeHandle } from "../src/serve.js";
 import { PortalHarness, WORLD_MODULE, type LoadedContent, type WorldModuleMessage } from "../src/index.js";
-import { serializeLoadout } from "../../../apps/playground/projects/voxel-demo/scripts/lib/combat-rules.js";
-import { deriveLoadout } from "../../../apps/playground/projects/voxel-demo/scripts/lib/loadout.js";
+import { serializeLoadout } from "../../../apps/playground/projects/foundation/scripts/lib/combat-rules.js";
+import { deriveLoadout } from "../../../apps/playground/projects/foundation/scripts/lib/loadout.js";
 import { eventLog } from "./event-log.js";
 
 /**
- * Package T (voxel-demo docs/combat-build/T-instance-transfer.md): an item
+ * Package T (foundation docs/combat-build/T-instance-transfer.md): an item
  * instance — a pyre staff worn to 31 of 60 with two rolled twists — survives
  * every way it changes hands or place, over real sockets on the `field` scene
  * with the engine's character-sheet and npc builtins on the authority: dropped
@@ -40,7 +40,7 @@ import { eventLog } from "./event-log.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const playground = path.resolve(here, "../../../apps/playground");
-const ITEMS = path.join(playground, "projects/voxel-demo/assets/items");
+const ITEMS = path.join(playground, "projects/foundation/assets/items");
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function until(cond: () => boolean, timeoutMs = 10_000, what = ""): Promise<void> {
   const start = Date.now();

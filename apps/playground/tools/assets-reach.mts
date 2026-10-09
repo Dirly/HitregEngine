@@ -3,6 +3,9 @@
 //   npx tsx tools/assets-reach.mts <project> [--keep a,b,c | --keep-file f.txt] [--json out.json]
 //                                  [--archive <dir>] [--dry]
 //                                  [--kinds models,worlds,…]  only report/archive these kinds
+//                                  [--wholesale items,spells,…] [--no-catalogs]  narrow the implicit roots
+//                                  [--stop-kinds worlds,quests,…]  never reach these kinds except as roots
+//                                  [--check-deps]  list references that resolve only in projects outside dependsOn
 //
 // Roots: the kept scenes (default: every scene project.json lists), every script of the
 // project closure (project + dependsOn), the engine/playground source, and the data kinds the
@@ -28,7 +31,7 @@ const PROJECTS = path.join(PLAYGROUND, "projects");
 
 const args = process.argv.slice(2);
 const opt = (n: string) => { const i = args.indexOf(`--${n}`); return i >= 0 ? args[i + 1] : undefined; };
-const project = args.find((a, i) => !a.startsWith("--") && !(i > 0 && args[i - 1].startsWith("--") && ["keep", "keep-file", "json", "archive", "kinds", "also"].includes(args[i - 1].slice(2))));
+const project = args.find((a, i) => !a.startsWith("--") && !(i > 0 && args[i - 1].startsWith("--") && ["keep", "keep-file", "json", "archive", "kinds", "also", "wholesale", "stop-kinds"].includes(args[i - 1].slice(2))));
 if (!project) { console.error("usage: assets-reach.mts <project> [--keep a,b] [--keep-file f] [--json out] [--archive dir] [--dry]"); process.exit(1); }
 
 /** Data kinds loaded wholesale (every file is live without a reference). */
@@ -67,6 +70,22 @@ const add = (k: string, a: Asset) => { const l = byKey.get(k); if (l) l.push(a);
 for (const a of assets) { add(a.rel, a); add(a.rel.replace(/\.[^./]+$/, ""), a); }
 const relSorted = [...new Set(assets.map((a) => a.rel))].sort();
 
+// --check-deps: the same index over every project OUTSIDE the closure. A reference that resolves only
+// there is a missing dependsOn (or a file that has to be copied in) — at runtime it is simply missing.
+const checkDeps = args.includes("--check-deps");
+const outside = new Map<string, string[]>();
+if (checkDeps) {
+  for (const p of fs.readdirSync(PROJECTS)) {
+    if (closure.includes(p) || !fs.existsSync(path.join(PROJECTS, p, "assets"))) continue;
+    const root = path.join(PROJECTS, p, "assets");
+    for (const file of walk(root)) {
+      const rel = path.relative(root, file).split(path.sep).join("/").split("/").slice(1).join("/");
+      for (const k of [rel, rel.replace(/.[^./]+$/, "")]) { const l = outside.get(k); if (l) { if (!l.includes(p)) l.push(p); } else outside.set(k, [p]); }
+    }
+  }
+}
+const crossRefs = new Map<string, Set<string>>(); // "project: key" -> referring files
+
 // ---- string extraction -----------------------------------------------------------------------
 const reached = new Set<Asset>();
 const queue: string[] = [];
@@ -104,11 +123,26 @@ function mention(s: string, fromFile: string | null, whole = true) {
       if (abs.startsWith(root)) cands.push(path.relative(root, abs).split(path.sep).join("/").replace(/^[^/]+\//, ""));
     }
   }
-  for (const c of cands) for (const k of [c, c.replace(/\.[^./]+$/, "")]) for (const a of byKey.get(k) ?? []) hit(a);
+  let found = false;
+  for (const c of cands) for (const k of [c, c.replace(/\.[^./]+$/, "")]) for (const a of byKey.get(k) ?? []) { hit(a); found = true; }
+  if (checkDeps && !found && fromFile && fromFile.startsWith(PROJECTS) && s.includes("/")) {
+    for (const c of cands) {
+      const ps = outside.get(c) ?? outside.get(c.replace(/\.[^./]+$/, ""));
+      if (!ps) continue;
+      const key = `${ps.join("|")}: ${c}`;
+      const set = crossRefs.get(key) ?? new Set<string>();
+      set.add(path.relative(PROJECTS, fromFile).split(path.sep).join("/"));
+      crossRefs.set(key, set);
+      break;
+    }
+  }
 }
 
+const stopKinds = new Set(opt("stop-kinds")?.split(",") ?? []);
+const roots = new Set<Asset>();
 function hit(a: Asset) {
   if (reached.has(a)) return;
+  if (stopKinds.has(a.kind) && !roots.has(a)) return;
   reached.add(a);
   // a world recipe keeps its map picture and layers (loaded by world name, never referenced)
   if (a.kind === "worlds") { const w = a.rel.replace(/.json$/, ""); for (const m of assets) if (m.kind === "maps" && m.rel.startsWith(w + ".")) hit(m); }
@@ -147,14 +181,15 @@ const sceneAssets = assets.filter((a) => a.kind === "scenes");
 for (const id of keep) {
   const hits = sceneAssets.filter((a) => a.rel === `${id}.scene.json`);
   if (!hits.length) console.warn(`keep: no scene "${id}" in ${closure.join(", ")}`);
-  hits.forEach(hit);
+  hits.forEach((a) => { roots.add(a); hit(a); });
 }
 // every project in the closure's project.json lists its own scenes; portals name instance scenes
 // by id, which `mention` resolves through the scenes kind like any other asset
-for (const a of assets) if (WHOLESALE.has(a.kind)) hit(a);
+const wholesale = opt("wholesale") ? new Set(opt("wholesale")!.split(",")) : WHOLESALE;
+for (const a of assets) if (wholesale.has(a.kind)) { roots.add(a); hit(a); }
 for (const p of closure) for (const f of walk(path.join(PROJECTS, p, "scripts"))) if (TEXT.test(f)) queue.push(f);
 // catalogued props are live for dressing even when no scene places them yet (docs/prop-cataloging.md)
-for (const p of closure) {
+for (const p of args.includes("--no-catalogs") ? [] : closure) {
   const idx = path.join(PROJECTS, p, "authoring", "prop-catalogs.json");
   if (!fs.existsSync(idx)) continue;
   queue.push(idx);
@@ -171,7 +206,7 @@ while (grew) {
   grew = false;
   for (const pre of prefixes) {
     let i = lowerBound(relSorted, pre);
-    for (; i < relSorted.length && relSorted[i].startsWith(pre); i++) for (const a of byKey.get(relSorted[i]) ?? []) if (!reached.has(a)) { hit(a); grew = true; }
+    for (; i < relSorted.length && relSorted[i].startsWith(pre); i++) for (const a of byKey.get(relSorted[i]) ?? []) if (!reached.has(a)) { const before = reached.size; hit(a); if (reached.size > before) grew = true; }
   }
   while (queue.length) scan(queue.pop()!);
 }
@@ -190,7 +225,11 @@ const groups = new Map<string, Asset[]>();
 for (const a of unused) { const g = `${a.kind}/${a.rel.split("/").slice(0, a.rel.includes("/") ? 1 : 0).join("/")}`; groups.set(g, [...(groups.get(g) ?? []), a]); }
 for (const [g, l] of [...groups].sort((x, y) => sum(y[1]) - sum(x[1])).slice(0, 40)) console.log(`   ${mb(sum(l)).padStart(7)} MB ${String(l.length).padStart(5)}  ${g}`);
 
-if (opt("json")) fs.writeFileSync(opt("json")!, JSON.stringify({ project, closure, keep, unused: unused.map((a) => `${a.kind}/${a.rel}`) }, null, 1));
+if (checkDeps) {
+  console.log(`  references into projects outside the closure: ${crossRefs.size}`);
+  for (const [k, from] of [...crossRefs].slice(0, 60)) console.log(`   ${k}  <- ${[...from].slice(0, 2).join(", ")}${from.size > 2 ? ` (+${from.size - 2})` : ""}`);
+}
+if (opt("json")) fs.writeFileSync(opt("json")!, JSON.stringify({ project, closure, keep, unused: unused.map((a) => `${a.kind}/${a.rel}`), used: mine.filter((a) => reached.has(a)).map((a) => `${a.kind}/${a.rel}`) }, null, 1));
 
 const dest = opt("archive");
 if (dest) {

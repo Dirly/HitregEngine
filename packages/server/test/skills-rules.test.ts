@@ -11,11 +11,11 @@ import {
   type Condition,
   type HitFacts,
   type Payoff,
-} from "../../../apps/playground/projects/voxel-demo/scripts/lib/skills.js";
-import { ABILITIES, INTERRUPT_MAX_DAMAGE, auditAbilities, type Ability } from "../../../apps/playground/projects/voxel-demo/scripts/lib/abilities.js";
+} from "../../../apps/playground/projects/foundation/scripts/lib/skills.js";
+import { ABILITIES, INTERRUPT_MAX_DAMAGE, auditAbilities, type Ability } from "../../../apps/playground/projects/foundation/scripts/lib/abilities.js";
 
 /**
- * voxel-demo's skill grammar (lib/skills.ts, package D1), pure: every
+ * the foundation's skill grammar (lib/skills.ts, package D1), pure: every
  * condition, every payoff, the riposte, and the audit's bounds on the grammar.
  * combat-actor applies what `evaluateSkill` returns; skills.test.ts proves that
  * over sockets. Imports the game by path, like defence-rules.test.ts.
@@ -161,7 +161,7 @@ describe("auditAbilities: the grammar's bounds", () => {
 });
 
 describe("the D1 items", () => {
-  const items = path.resolve(__dirname, "../../../apps/playground/projects/voxel-demo/assets/items");
+  const items = path.resolve(__dirname, "../../../apps/playground/projects/foundation/assets/items");
   const read = (id: string) => JSON.parse(readFileSync(path.join(items, `${id}.json`), "utf8")) as { skills?: { secondary?: string; bar?: string[] }; icon?: string; tags?: string[] };
   it("every shield carries one skill; the iron heater and tower keep the shield bash (package D3a spread the rest)", () => {
     const shields = readdirSync(items).filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5)).filter((id) => read(id).tags?.includes("shield"));

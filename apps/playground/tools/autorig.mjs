@@ -165,7 +165,7 @@ autorig — skin an unrigged mesh to a donor rig's skeleton and clips
 
 Example:
   node tools/autorig.mjs --mesh Wolf.obj --rig Dog.glb --forward +x \\
-    --texture Wolf.png --out projects/voxel-demo/assets/models/mmo/wolf.glb
+    --texture Wolf.png --out projects/foundation/assets/models/mmo/wolf.glb
 `);
   process.exit(args.help ? 0 : 1);
 }

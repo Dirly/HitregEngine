@@ -9,8 +9,8 @@ import { WORLD_MODULE, type WorldModuleMessage } from "../src/index.js";
 import { eventLog } from "./event-log.js";
 
 /**
- * Package L2 (voxel-demo docs/combat-build/L-loot.md, "second pass"), over real
- * sockets on the `field` scene with voxel-demo's combat scripts and the
+ * Package L2 (foundation docs/combat-build/L-loot.md, "second pass"), over real
+ * sockets on the `field` scene with the foundation's combat scripts and the
  * engine's character-sheet: a three-player PARTY kill (need beats greed, the
  * winner's bag sent to the winner alone; all pass = the killer's; round-robin
  * below the rarity threshold; the copper split; a member out of range left
@@ -21,7 +21,7 @@ import { eventLog } from "./event-log.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const playground = path.resolve(here, "../../../apps/playground");
-const ITEMS = path.join(playground, "projects/voxel-demo/assets/items");
+const ITEMS = path.join(playground, "projects/foundation/assets/items");
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function until(cond: () => boolean, timeoutMs = 10_000, what = ""): Promise<void> {
   const start = Date.now();

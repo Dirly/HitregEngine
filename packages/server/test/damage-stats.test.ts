@@ -4,11 +4,11 @@ import { afterAll, describe, expect, it } from "vitest";
 import { RoomClient, WebSocketClientTransport, WS_HOST_ID } from "@hitreg/net";
 import { serve, type ServeHandle } from "../src/serve.js";
 import { WORLD_MODULE, type WorldModuleMessage } from "../src/index.js";
-import { armorReduction } from "../../../apps/playground/projects/voxel-demo/scripts/lib/damage-math.js";
+import { armorReduction } from "../../../apps/playground/projects/foundation/scripts/lib/damage-math.js";
 import { eventLog } from "./event-log.js";
 
 /**
- * Package S of voxel-demo's combat model (docs/combat-plan.md "Damage maths"):
+ * Package S of the foundation's combat model (docs/combat-plan.md "Damage maths"):
  * World of Warcraft's crit and armour, wired into the one damage path
  * (scripts/combat-actor.ts), over real sockets on the `field` scene.
  *

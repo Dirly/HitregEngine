@@ -5,11 +5,11 @@ import { RoomClient, WebSocketClientTransport, WS_HOST_ID } from "@hitreg/net";
 import type { EntityDoc } from "@hitreg/core";
 import { serve, type ServeHandle } from "../src/serve.js";
 import { WORLD_MODULE, type WorldModuleMessage } from "../src/index.js";
-import { arcOf } from "../../../apps/playground/projects/voxel-demo/scripts/lib/combat-rules.js";
+import { arcOf } from "../../../apps/playground/projects/foundation/scripts/lib/combat-rules.js";
 import { eventLog } from "./event-log.js";
 
 /**
- * Package D3a of voxel-demo's combat model (docs/combat-build/D3a-skill-library.md):
+ * Package D3a of the foundation's combat model (docs/combat-build/D3a-skill-library.md):
  * the wider grammar applied where a hit lands (combat-actor) and the new ways
  * to land (combat-caster), over real sockets on the `field` scene with the
  * game's scripts. A representative dozen-and-a-bit of the roster, every new

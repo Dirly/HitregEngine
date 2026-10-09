@@ -41,6 +41,7 @@ import {
   type Places,
 } from "@hitreg/core";
 import { interiorUnitFor, placeUnder, RESIDENT_CULLING } from "./town-npc-placement.mts";
+import { assetIds, assetPath, findAsset } from "./_closure.mjs";
 
 const here = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
 const arg = (name: string, fallback: string): string => {
@@ -59,6 +60,8 @@ if (!townName || !projectName) {
 }
 const project = path.resolve(here, "..", "projects", projectName);
 const assets = path.join(project, "assets");
+/** Shared game data (items, creation, rigs) resolves through the project's dependsOn closure; world data stays local. */
+const shared = (rel: string): string => assetPath(projectName, rel);
 
 interface Resident {
   id: string;
@@ -109,14 +112,14 @@ const doc = JSON.parse(fs.readFileSync(path.join(project, "authoring", "towns", 
 const problems: string[] = [];
 const warn: string[] = [];
 const readJson = (file: string): unknown => JSON.parse(fs.readFileSync(file, "utf8"));
-const exists = (kind: string, id: string): boolean => fs.existsSync(path.join(assets, kind, `${id}.json`));
+const exists = (kind: string, id: string): boolean => findAsset(projectName, `${kind}/${id}.json`) !== null;
 
 // -- lint ----------------------------------------------------------------------------
 const residents = new Map(doc.residents.map((r) => [r.id, r]));
 if (residents.size !== doc.residents.length) problems.push("duplicate resident id");
-const itemIds = new Set(fs.readdirSync(path.join(assets, "items")).filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5)));
+const itemIds = assetIds(projectName, "items");
 for (const id of itemIds) {
-  const parsed = itemSchema.safeParse(readJson(path.join(assets, "items", `${id}.json`)));
+  const parsed = itemSchema.safeParse(readJson(shared(`items/${id}.json`)));
   if (!parsed.success) problems.push(`item ${id}: ${parsed.error.issues[0]?.message}`);
 }
 const quests = new Map<string, Quest>();
@@ -206,7 +209,7 @@ interface CreationLike {
   appearance: Array<{ id: string; preview?: boolean; body?: boolean; options: Array<{ id: string; model?: string }> }>;
   mounts: Array<{ model: string; mirrorTo?: unknown }>;
 }
-const creation = readJson(path.join(assets, "creation", `${doc.creation}.json`)) as CreationLike;
+const creation = readJson(shared(`creation/${doc.creation}.json`)) as CreationLike;
 const bodyModel = creation.appearance.find((s) => s.body)?.options.find((o) => o.model)?.model ?? "";
 if (!bodyModel) problems.push(`creation ${doc.creation}: no body slot option names a model`);
 // socketed models in mount order: the ones every build shows (face, hair) and the ones only items draw on
@@ -217,12 +220,12 @@ const buildModels = new Set(
 );
 // held items: the rig prefab's socket for (slot, the item's model)
 type RigEntity = { name: string; parent: string | null; tags?: string[]; components: Record<string, unknown> };
-const rig = doc.weaponRig && exists("prefabs", doc.weaponRig) ? (readJson(path.join(assets, "prefabs", `${doc.weaponRig}.json`)) as { entities: Record<string, RigEntity> }) : null;
+const rig = doc.weaponRig && exists("prefabs", doc.weaponRig) ? (readJson(shared(`prefabs/${doc.weaponRig}.json`)) as { entities: Record<string, RigEntity> }) : null;
 if (doc.weaponRig && !rig) problems.push(`weaponRig: no prefab assets/prefabs/${doc.weaponRig}.json`);
 const heldOf = (r: Resident): Array<["primary" | "offhand", string]> =>
   (["primary", "offhand"] as const).filter((s) => r.hold?.[s]).map((s) => [s, r.hold![s]!]);
 function socketFor(slot: string, itemId: string): RigEntity | null {
-  const model = (readJson(path.join(assets, "items", `${itemId}.json`)) as { appearance?: { model?: string } }).appearance?.model;
+  const model = (readJson(shared(`items/${itemId}.json`)) as { appearance?: { model?: string } }).appearance?.model;
   if (!rig || !model) return null;
   for (const [id, e] of Object.entries(rig.entities)) {
     const mesh = e.components["mesh"] as { source?: { assetId?: string } } | undefined;
@@ -368,7 +371,7 @@ const socketed = (model: string) => ({
   castShadow: true, receiveShadow: true, renderMode: "instanced", lod: true, moving: true, static: false,
 });
 const itemModel = (id: string): string =>
-  (readJson(path.join(assets, "items", `${id}.json`)) as { appearance?: { model?: string } }).appearance?.model ?? "";
+  (readJson(shared(`items/${id}.json`)) as { appearance?: { model?: string } }).appearance?.model ?? "";
 // "mmo/human-shoulder.glb" -> "shoulder": the child entity's suffix
 const shortName = (model: string): string => path.basename(model).replace(/\.[a-z]+$/i, "").replace(/^.*-/, "");
 

@@ -8,7 +8,7 @@ import { WORLD_MODULE, type WorldModuleMessage } from "../src/index.js";
 import { eventLog } from "./event-log.js";
 
 /**
- * voxel-demo's targets, support and pets (2026-10-07), over real sockets on
+ * the foundation's targets, support and pets (2026-10-07), over real sockets on
  * the melee-brawl scene with the game's scripts:
  *
  *   - target/<me>: a primary must be a foe and a secondary a friend

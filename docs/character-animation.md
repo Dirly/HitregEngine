@@ -370,11 +370,11 @@ the rig GLB is edited surgically: the primitive's accessors are replaced, the
 clips and every extra stay byte for byte.
 
 ```
-node tools/reskin.mjs --rig projects/voxel-demo/assets/models/mmo/human.glb \
+node tools/reskin.mjs --rig projects/foundation/assets/models/mmo/human.glb \
   --in <HumanBase.obj> --parts <body pieces> --mirror <one-sided pieces> \
   --bind TassetFront=CC_Base_Pelvis --bind TassetBack=CC_Base_Pelvis \
   --bind ChestHalo=CC_Base_Spine02 --texture <atlas.png> \
-  --out projects/voxel-demo/assets/models/mmo/human-body.glb
+  --out projects/foundation/assets/models/mmo/human-body.glb
 ```
 
 - The output is a skinned UBERMESH: part index in TEXCOORD_1, `parts` in the
@@ -1176,7 +1176,7 @@ blade crossed the target wherever its contact fell in the clip, often
 100-250 ms before the authority's hit. The window is the caller's, so the caller
 fixes it: play the clip at the one rate that puts its contact on the resolve,
 `window = clipLength × windup / contact`. voxel-demo measures each strike
-clip's contact with `projects/voxel-demo/tools/clip-contacts.mjs` (the
+clip's contact with `projects/foundation/tools/clip-contacts.mjs` (the
 weapon tip, from the player prefab's own sockets, crossing the target line
 fastest and furthest out; a clip with two blows lists both and the one nearest
 the clip's own pace is used) and sets `actionUntil` from it in combat-caster.

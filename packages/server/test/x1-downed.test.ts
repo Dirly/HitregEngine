@@ -7,7 +7,7 @@ import { WORLD_MODULE, type WorldModuleMessage } from "../src/index.js";
 import { eventLog } from "./event-log.js";
 
 /**
- * voxel-demo package X1 (docs/combat-build/X1-downed-revive.md), over real
+ * foundation package X1 (docs/combat-build/X1-downed-revive.md), over real
  * sockets on the `field` scene: a PLAYER at 0 health goes DOWN, not dead (no
  * blow lands on it, no heal either); it dies when it bleeds out (credited to
  * the player who downed it, even past the 10 s last-hit window), when it

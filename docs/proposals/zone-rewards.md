@@ -16,10 +16,10 @@ blocking a drop. No number here depends on combat.
 | Icons | rendered from the model, or a cell of a 16-object category sprite sheet | `docs/item-icons.md` |
 | Quest rewards | `rewardXp`, `rewardCoins`, `rewardItems` | `packages/core/src/game-ui.ts` (`questSchema`); planned as `rewards {xp, coins, items}` in `tools/zonegen/schemas.mts`, written by `zonegen bind` (`commands/bind.mts:291`) |
 | Shops | stock list, markup, buyRate, restock; live stock in netState `shop/<id>` | `packages/core/src/npc/index.ts` (`shopSchema`); `assets/shops/brinehold`, `tidewell` |
-| Kill hook | `combat.killed {victimId, killerId, xp}`, emitted by a project script | `projects/voxel-demo/scripts/combat-actor.ts:587` |
+| Kill hook | `combat.killed {victimId, killerId, xp}`, emitted by a project script | `projects/foundation/scripts/combat-actor.ts:587` |
 | Abilities | spells as element x archetype (13 kinds) x phases; creation traits name an ability id | `packages/core/src/vfx/spell.ts`, `assets/spells/`, `character/creation.ts` |
 
-Content today: 114 items in `voxel-demo/assets/items/` (104 equipment; 82 common, 22 uncommon, 9 rare, 1 legendary).
+Content today: 114 items in `foundation/assets/items/` (104 equipment; 82 common, 22 uncommon, 9 rare, 1 legendary).
 The planned zone `proving/zones/zone-5` has 19 quests that all reward xp + coins and **no items**; its 9 planned
 items are keys and evidence; its 7 rares and its boss `hob-yarrow` drop nothing.
 

@@ -3,13 +3,13 @@
  * reskin — put a NEW body on an already-rigged character GLB, keeping its
  * skeleton, every clip and every extra, and write it as a skinned UBERMESH.
  *
- *   node tools/reskin.mjs --rig projects/voxel-demo/assets/models/mmo/human.glb \
+ *   node tools/reskin.mjs --rig projects/foundation/assets/models/mmo/human.glb \
  *     --in MMO/3d/HumanRig/HumanBase.obj \
  *     --parts HumanMale_ChestFront,HumanMale_ChestBack,...,TassetFront,TassetBack \
  *     --mirror HumanMale_ArmOutside,HumanMale_ArmInside,HumanMale_HandPalm,HumanMale_HandFront,HumanMale_Foot \
  *     --bind TassetFront=CC_Base_Pelvis --bind TassetBack=CC_Base_Pelvis --bind ChestHalo=CC_Base_Spine02 \
  *     --texture MMO/3d/HumanRig/atlas.png \
- *     --out projects/voxel-demo/assets/models/mmo/human-body.glb
+ *     --out projects/foundation/assets/models/mmo/human-body.glb
  *
  * WHY NOT RE-RIG. The character's rig is an auto-rigger's (AccuRig), and a
  * fresh auto-rig of a remodelled body means a new skeleton: its bone rolls and

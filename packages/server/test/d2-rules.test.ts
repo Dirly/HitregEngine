@@ -14,19 +14,19 @@ import {
   type Condition,
   type HitFacts,
   type Payoff,
-} from "../../../apps/playground/projects/voxel-demo/scripts/lib/skills.js";
-import { ABILITIES, auditAbilities, loadoutBindings, type Ability } from "../../../apps/playground/projects/voxel-demo/scripts/lib/abilities.js";
-import { EMPTY_LOADOUT, HELD_VERBS, STEADY, STEALTH, TELL_LEAD, guardAnswers, hitClassOf } from "../../../apps/playground/projects/voxel-demo/scripts/lib/combat-rules.js";
-import { deriveLoadout } from "../../../apps/playground/projects/voxel-demo/scripts/lib/loadout.js";
+} from "../../../apps/playground/projects/foundation/scripts/lib/skills.js";
+import { ABILITIES, auditAbilities, loadoutBindings, type Ability } from "../../../apps/playground/projects/foundation/scripts/lib/abilities.js";
+import { EMPTY_LOADOUT, HELD_VERBS, STEADY, STEALTH, TELL_LEAD, guardAnswers, hitClassOf } from "../../../apps/playground/projects/foundation/scripts/lib/combat-rules.js";
+import { deriveLoadout } from "../../../apps/playground/projects/foundation/scripts/lib/loadout.js";
 
 /**
- * voxel-demo package D2 (docs/combat-build/D2-stealth-bows-traits.md), pure:
+ * foundation package D2 (docs/combat-build/D2-stealth-bows-traits.md), pure:
  * the new payoffs (dot, stealth, vanish, brace, envenom), the opener, the
  * bow and crossbow verbs, the birth-trait abilities, the audit's new rules,
  * and the item and creation data. The socket half is d2-skills.test.ts.
  */
 
-const game = path.resolve(__dirname, "../../../apps/playground/projects/voxel-demo");
+const game = path.resolve(__dirname, "../../../apps/playground/projects/foundation");
 const facts = (on: Partial<HitFacts> = {}): HitFacts => ({ ...NO_FACTS, ...on });
 const a = (id: string): Ability => ABILITIES[id]!;
 const readItem = (id: string): Item => itemSchema.parse(JSON.parse(readFileSync(path.join(game, "assets/items", `${id}.json`), "utf8")));

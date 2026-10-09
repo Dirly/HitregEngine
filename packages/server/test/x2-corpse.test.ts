@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
@@ -7,11 +7,11 @@ import { createSheet, equip, itemSchema, lootClock, placeStack, type CharacterSh
 import { serve, type ServeHandle } from "../src/serve.js";
 import { WORLD_MODULE, type WorldModuleMessage } from "../src/index.js";
 import { eventLog } from "./event-log.js";
-import { bodyLootOffer } from "../../../apps/playground/projects/voxel-demo/scripts/lib/loot-rules.js";
+import { bodyLootOffer } from "../../../apps/playground/projects/foundation/scripts/lib/loot-rules.js";
 
 /**
- * Package X2 (voxel-demo docs/combat-build/X2-corpse-soulbind.md), over real
- * sockets on the `field` scene with voxel-demo's combat scripts, the engine's
+ * Package X2 (foundation docs/combat-build/X2-corpse-soulbind.md), over real
+ * sockets on the `field` scene with the foundation's combat scripts, the engine's
  * character-sheet and npc builtins and the real Tidewell dialogues: every
  * player death leaves a CORPSE (the bags' contents and the money; worn gear and
  * entrusted items stay on the character); a killing player holds it alone for a
@@ -22,7 +22,8 @@ import { bodyLootOffer } from "../../../apps/playground/projects/voxel-demo/scri
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const playground = path.resolve(here, "../../../apps/playground");
-const PROJECT = path.join(playground, "projects/voxel-demo/assets");
+// items live in the foundation project, the world's dialogues and shops in the proving world (voxel-demo)
+const PROJECTS = ["projects/voxel-demo/assets", "projects/foundation/assets"].map((p) => path.join(playground, p));
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function until(cond: () => boolean, timeoutMs = 10_000, what = ""): Promise<void> {
   const start = Date.now();
@@ -31,7 +32,8 @@ async function until(cond: () => boolean, timeoutMs = 10_000, what = ""): Promis
     await wait(15);
   }
 }
-const json = (rel: string): unknown => JSON.parse(readFileSync(path.join(PROJECT, rel), "utf8"));
+const json = (rel: string): unknown =>
+  JSON.parse(readFileSync(PROJECTS.map((p) => path.join(p, rel)).find((f) => existsSync(f)) ?? path.join(PROJECTS[0]!, rel), "utf8"));
 
 const PARCEL = { name: "Sealed Parcel", kind: "quest", entrusted: true, entrustedQuest: "x2-deliver", value: 50 };
 const items: Record<string, Item> = { "x2-parcel": itemSchema.parse(PARCEL) };

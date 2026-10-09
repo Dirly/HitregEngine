@@ -7,10 +7,10 @@
  *
  * Example:
  * node tools/tree-variant.mjs --model projects/voxel-demo/assets/models/purchased/nature/pine_tree_n_3.glb \
- *   --bark projects/voxel-demo/assets/textures/purchased/nature/pine_bark_1_winter.png \
- *   --foliage projects/voxel-demo/assets/textures/purchased/nature/pine_branch_2_snowy.png \
+ *   --bark projects/foundation/assets/textures/purchased/nature/pine_bark_1_winter.png \
+ *   --foliage projects/foundation/assets/textures/purchased/nature/pine_branch_2_snowy.png \
  *   --name pine_tree_snow --out projects/voxel-demo/assets/models/purchased/nature/pine_tree_snow.glb \
- *   --atlas projects/voxel-demo/assets/textures/purchased/nature/pine_tree_snow_atlas.png \
+ *   --atlas projects/foundation/assets/textures/purchased/nature/pine_tree_snow_atlas.png \
  *   --manifest projects/voxel-demo/authoring/purchased-assets/pine-tree-snow.json
  */
 import fs from 'node:fs';

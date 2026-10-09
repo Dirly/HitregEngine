@@ -20,6 +20,7 @@
  * state, reasons, files and an inputs hash; `zonegen status` reads it. --dry prints the table and writes nothing.
  */
 import fs from "node:fs";
+import { assetIds } from "../../_closure.mjs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import {
@@ -91,7 +92,7 @@ function makeEnv(ctx: Ctx, plan: ZonePlan): Env {
     if (rt) towns.set(t.id, { id: t.id, name: t.name, doc: names.get(t.id) ?? "", center: rt.center, radius: rt.radius + (rt.falloff ?? 0) });
   }
   const scene = sceneIndex(ctx);
-  return { ctx, plan, scene, instances: scene.found ? instanceScenes(ctx, scene) : [], residents: residents(ctx), planned: plannedResidents(ctx), items: listIds(path.join(assets, "items")), prefabs, towns };
+  return { ctx, plan, scene, instances: scene.found ? instanceScenes(ctx, scene) : [], residents: residents(ctx), planned: plannedResidents(ctx), items: assetIds(ctx.paths.projectDir, "items"), prefabs, towns };
 }
 
 /** Town id of a town location, or "". */

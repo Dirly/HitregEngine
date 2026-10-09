@@ -10,7 +10,7 @@ import { MemoryAccountStore } from "../src/persistence/accounts.js";
 import { WORLD_MODULE, type WorldModuleMessage } from "../src/index.js";
 
 /**
- * Package L2 (voxel-demo docs/combat-build/L-loot.md, "second pass"): loot bags
+ * Package L2 (foundation docs/combat-build/L-loot.md, "second pass"): loot bags
  * are saved with their owner by the save authority (main), survive a layer
  * restart with their contents and instance data, and expire on time in REAL
  * time (an injected wall clock steps days ahead); a dropped-item bag lives
@@ -21,7 +21,7 @@ import { WORLD_MODULE, type WorldModuleMessage } from "../src/index.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const playground = path.resolve(here, "../../../apps/playground");
-const ITEMS = path.join(playground, "projects/voxel-demo/assets/items");
+const ITEMS = path.join(playground, "projects/foundation/assets/items");
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function until(cond: () => boolean | Promise<boolean>, timeoutMs = 10_000, what = ""): Promise<void> {
   const start = Date.now();

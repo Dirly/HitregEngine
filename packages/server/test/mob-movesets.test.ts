@@ -3,12 +3,12 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { MobBrain } from "@hitreg/scripting";
-import { ABILITIES, auditAbilities } from "../../../apps/playground/projects/voxel-demo/scripts/lib/abilities.js";
-import { MOB_ABILITIES } from "../../../apps/playground/projects/voxel-demo/scripts/lib/mob-abilities.js";
-import { TELL_LEAD } from "../../../apps/playground/projects/voxel-demo/scripts/lib/combat-rules.js";
+import { ABILITIES, auditAbilities } from "../../../apps/playground/projects/foundation/scripts/lib/abilities.js";
+import { MOB_ABILITIES } from "../../../apps/playground/projects/foundation/scripts/lib/mob-abilities.js";
+import { TELL_LEAD } from "../../../apps/playground/projects/foundation/scripts/lib/combat-rules.js";
 
 /**
- * voxel-demo's creature movesets (package C of docs/combat-plan.md), pinned
+ * the foundation's creature movesets (package C of docs/combat-plan.md), pinned
  * without a server: every mob ability is tagged and tells long enough, and
  * every prefab's `moves` parses, names a real ability, and repeats that
  * ability's wind-up — the brain stands committed for the move's `windup`, the
@@ -19,7 +19,7 @@ import { TELL_LEAD } from "../../../apps/playground/projects/voxel-demo/scripts/
  * defence-rules.test.ts (projects/ is gitignored).
  */
 
-const PREFABS = join(__dirname, "../../../apps/playground/projects/voxel-demo/assets/prefabs/mobs");
+const PREFABS = join(__dirname, "../../../apps/playground/projects/foundation/assets/prefabs/mobs");
 
 interface Entity {
   components: { script?: { name: string; params: Record<string, unknown> } };

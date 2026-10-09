@@ -2,7 +2,7 @@ import { readFileSync, readdirSync, existsSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { addItem, auditItemSkills, createSheet, equip, itemSchema, parseSpell, vaultDeposit, vaultSchema, vaultWithdraw, wearEquipped, characterSheetSchema, type CharacterSheet, type Item } from "@hitreg/core";
-import { NO_FACTS, evaluateSkill, type HitFacts } from "../../../apps/playground/projects/voxel-demo/scripts/lib/skills.js";
+import { NO_FACTS, evaluateSkill, type HitFacts } from "../../../apps/playground/projects/foundation/scripts/lib/skills.js";
 import {
   ABILITIES,
   D3B_SPELLS,
@@ -11,10 +11,10 @@ import {
   auditTwisted,
   spellDrift,
   type Ability,
-} from "../../../apps/playground/projects/voxel-demo/scripts/lib/abilities.js";
-import { schoolOf } from "../../../apps/playground/projects/voxel-demo/scripts/lib/combat-rules.js";
-import { describeSkill } from "../../../apps/playground/projects/voxel-demo/scripts/lib/describe-skill.js";
-import { deriveLoadout } from "../../../apps/playground/projects/voxel-demo/scripts/lib/loadout.js";
+} from "../../../apps/playground/projects/foundation/scripts/lib/abilities.js";
+import { schoolOf } from "../../../apps/playground/projects/foundation/scripts/lib/combat-rules.js";
+import { describeSkill } from "../../../apps/playground/projects/foundation/scripts/lib/describe-skill.js";
+import { deriveLoadout } from "../../../apps/playground/projects/foundation/scripts/lib/loadout.js";
 import {
   RARITY_TWISTS,
   TWISTS,
@@ -23,13 +23,13 @@ import {
   skillTags,
   twistFits,
   twistedId,
-} from "../../../apps/playground/projects/voxel-demo/scripts/lib/twists.js";
-import { rollTwists, seededRandom, twistableSkills } from "../../../apps/playground/projects/voxel-demo/scripts/lib/loot-twists.js";
+} from "../../../apps/playground/projects/foundation/scripts/lib/twists.js";
+import { rollTwists, seededRandom, twistableSkills } from "../../../apps/playground/projects/foundation/scripts/lib/loot-twists.js";
 // @ts-expect-error a plain .mjs tool, no types
-import { STARTER_REQUIREMENT, check as checkRequires } from "../../../apps/playground/projects/voxel-demo/tools/item-requires.mjs";
+import { STARTER_REQUIREMENT, check as checkRequires } from "../../../apps/playground/projects/foundation/tools/item-requires.mjs";
 
 /**
- * voxel-demo package D3b (docs/combat-build/D3b-spells-twists.md), pure: the
+ * foundation package D3b (docs/combat-build/D3b-spells-twists.md), pure: the
  * 32 spells (audit, schools, generated effects, describeSkill), the items that
  * carry them, rolled twists (composition, the audit on composed skills, the
  * seeded rarity roll, describeSkill with twists, the loadout's twisted ids),
@@ -37,7 +37,7 @@ import { STARTER_REQUIREMENT, check as checkRequires } from "../../../apps/playg
  * starter kit's requirement. The socket half is d3b-spells.test.ts.
  */
 
-const game = path.resolve(__dirname, "../../../apps/playground/projects/voxel-demo");
+const game = path.resolve(__dirname, "../../../apps/playground/projects/foundation");
 const ITEMS = path.join(game, "assets/items");
 const items: Record<string, Item> = Object.fromEntries(
   readdirSync(ITEMS)

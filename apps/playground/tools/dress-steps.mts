@@ -32,6 +32,7 @@
  * The lane sweep FAILs anything in the capsule standing more than stepHeight above the floor, WARNs an unproven lip.
  */
 import fs from "node:fs";
+import { assetPath } from "./_closure.mjs";
 import path from "node:path";
 
 export interface ControllerLimits {
@@ -49,7 +50,8 @@ export function controllerLimits(engineRoot: string, projDir: string): Controlle
   let stepHeight = num(builtin, /stepHeight:\s*\{\s*default:\s*([\d.]+)/) ?? 0.35, runSpeed = num(builtin, /\n\s*speed:\s*\{\s*default:\s*([\d.]+)/) ?? 6.5, sprintSpeed = num(builtin, /sprintSpeed:\s*\{\s*default:\s*([\d.]+)/) ?? 9.5;
   const stepLook = num(loco, /const STEP_LOOK\s*=\s*([\d.]+)/) ?? 0.2, stepMin = num(loco, /const STEP_MIN\s*=\s*([\d.]+)/) ?? 0.04, stepRateMax = num(loco, /STEP_RATE_MAX\s*=\s*([\d.]+)/) ?? 5, uphillRatio = num(loco, /UPHILL_RATIO\s*=\s*([\d.]+)/) ?? 1.5;
   let radius = 0.4, height = 1.8;
-  const prefab = path.join(projDir, "assets/prefabs/characters/player.json");
+  // the player prefab is shared game data (foundation): resolve it through the dependsOn closure
+  const prefab = assetPath(projDir, "prefabs/characters/player.json");
   const pt = read(prefab);
   if (pt) {
     try {

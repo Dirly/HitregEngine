@@ -6,10 +6,10 @@ import {
   critChance,
   critFromStat,
   damageBeforeGuard,
-} from "../../../apps/playground/projects/voxel-demo/scripts/lib/damage-math.js";
+} from "../../../apps/playground/projects/foundation/scripts/lib/damage-math.js";
 
 /**
- * voxel-demo's crit and armour maths, pinned against the World of Warcraft
+ * the foundation's crit and armour maths, pinned against the World of Warcraft
  * numbers they are taken from. Pure: no server, no sockets.
  */
 describe("damage maths (WoW formulas)", () => {

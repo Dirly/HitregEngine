@@ -8,6 +8,7 @@
  * The description stays empty: quest text is written after placement, by the bind task of the quest that uses the item.
  */
 import fs from "node:fs";
+import { assetDirs, findAsset } from "../../_closure.mjs";
 import path from "node:path";
 import { exists, readJson, writeJson, type Ctx } from "../lib.mts";
 import { requireZone } from "./_shared.mts";
@@ -40,12 +41,13 @@ export async function run(ctx: Ctx): Promise<number> {
   if (!exists(p.quests(ctx.zone))) { console.error("items: the zone has no quests.json"); return 1; }
   const plan = readJson(p.quests(ctx.zone)) as { items?: PlanItem[] };
   const dir = path.join(p.projectDir, "assets", "items");
-  const iconDir = path.join(p.projectDir, "assets", "textures", "icons", "loot");
-  const icons = exists(iconDir) ? fs.readdirSync(iconDir).filter((f) => f.endsWith(".png")).map((f) => f.replace(/\.png$/, "")) : [];
+  // loot icons are shared game art (foundation): list them across the dependsOn closure
+  const icons = [...new Set(assetDirs(p.projectDir, "textures/icons/loot").flatMap((d) => fs.readdirSync(d).filter((f) => f.endsWith(".png")).map((f) => f.replace(/\.png$/, ""))))];
   let wrote = 0;
   for (const item of plan.items ?? []) {
     const file = path.join(dir, `${item.id}.json`);
-    if (exists(file)) continue;
+    // a zone quest item is world content and is written here; skip ids any project in the closure already has
+    if (exists(file) || findAsset(p.projectDir, `items/${item.id}.json`)) continue;
     const [stack, weight] = STACK[item.kind] ?? [10, 1];
     const name = item.name.replace(/^(a|an)\s+/i, "");
     const icon = pickIcon(item, icons);

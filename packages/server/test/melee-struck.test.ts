@@ -7,7 +7,7 @@ import { WORLD_MODULE, type WorldModuleMessage } from "../src/index.js";
 import { eventLog } from "./event-log.js";
 
 /**
- * Package V of voxel-demo's combat (docs/combat-build/V-melee-visuals.md): the
+ * Package V of the foundation's combat (docs/combat-build/V-melee-visuals.md): the
  * one replicated signal melee visuals needed. A PHYSICAL blow that lands is
  * announced as `combat.struck` — who, by whom, its class and ability, what the
  * guard made of it, crit, rear — so every client draws the same impact,

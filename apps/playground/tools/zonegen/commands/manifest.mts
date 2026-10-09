@@ -12,6 +12,7 @@
  * = assets/items/<id>.json, its icon = the item's `icon` under assets/textures/.
  */
 import fs from "node:fs";
+import { assetDirs, findAsset } from "../../_closure.mjs";
 import path from "node:path";
 import { exists, finish, load, readJson, writeJson, type Ctx, type Finding } from "../lib.mts";
 import { assetManifestSchema, bestiarySchema, castSchema, questGraphSchema, zoneBestiarySchema, zoneBriefSchema, type AssetManifest } from "../schemas.mts";
@@ -81,7 +82,7 @@ export function manifestRows(ctx: Ctx, zone: string, f: Finding[]): { rows: Row[
   const rows: Row[] = [];
   if (!cat || !cast || !brief || !zb || !g) return { rows, inputs };
   const assets = path.join(p.projectDir, "assets");
-  const asset = (rel: string): boolean => !!rel && exists(path.join(assets, rel));
+  const asset = (rel: string): boolean => !!rel && findAsset(p.projectDir, rel) !== null;
   const add = (r: Omit<Row, "how" | "note"> & { how?: string; note?: string }): void => {
     if (!rows.some((x) => x.id === r.id && x.kind === r.kind)) rows.push({ how: "", note: "", ...r });
   };
@@ -214,14 +215,13 @@ export function manifestRows(ctx: Ctx, zone: string, f: Finding[]): { rows: Row[
   for (const e of g.entities) add({ id: e.id, kind: "entity", for: e.location, status: live.ids.has(e.id) ? "have" : "request", by: "opus", how: `POI owner places a ${e.kind} entity (npc builtin${e.kind === "readable" ? ", readable: true" : e.kind === "presence" ? " + presence" : ", face: false"})`, note: e.what });
 
   // audio: a zone bed, and one per dungeon (docs/audio.md: template + catalog entry, never a one-off prompt)
-  const audioDir = path.join(assets, "audio");
-  const audioHas = (key: string): boolean => filesUnder(audioDir, (n) => n.includes(key)).length > 0;
+  const audioHas = (key: string): boolean => assetDirs(p.projectDir, "audio").some((d) => filesUnder(d, (n) => n.includes(key)).length > 0);
   add({ id: `${ctx.world}-${zone}-ambience`, kind: "audio", for: zone, status: audioHas(`${ctx.world}-${zone}`) ? "have" : "request", by: "elevenlabs", how: "docs/audio.md: catalog entry, then tools/sfx-request.mjs", note: `an ambience bed named for ${ctx.world}-${zone}` });
   for (const d of g.dungeons) add({ id: `${d.id}-ambience`, kind: "audio", for: d.id, status: audioHas(d.id) ? "have" : "request", by: "elevenlabs", how: "docs/audio.md: catalog entry, then tools/sfx-request.mjs", note: `dungeon bed named for ${d.id}` });
 
   // quest items and their icons
   for (const it of g.items) {
-    const file = path.join(assets, "items", `${it.id}.json`);
+    const file = findAsset(p.projectDir, `items/${it.id}.json`) ?? path.join(assets, "items", `${it.id}.json`);
     const item = exists(file) ? (readJson(file) as { icon?: string }) : null;
     add({ id: it.id, kind: "item", for: `quest item (${it.kind})`, status: item ? "have" : "request", by: "sonnet", how: "item asset (docs/character-progression.md)", note: `assets/items/${it.id}.json` });
     const iconHave = !!item?.icon && asset(path.join("textures", item.icon));

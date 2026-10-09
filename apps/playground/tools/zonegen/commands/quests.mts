@@ -17,6 +17,7 @@
  * ceiling on plain NPC kill/collect errands; and each block's registered rarity cap.
  */
 import path from "node:path";
+import { findAsset } from "../../_closure.mjs";
 import { conditionBlockNames, DEFAULT_PERFORM_ACTIONS, dialogueConditionSchema, literalCompassWords, questBlocks, questConsequenceSchema, type QuestBlockSlot } from "@hitreg/core";
 import { exists, finish, load, readJson, type Ctx, type Finding } from "../lib.mts";
 import { bestiarySchema, castSchema, HABITATS, questGraphSchema, zoneBestiarySchema, zoneBriefSchema, type PlannedQuest } from "../schemas.mts";
@@ -175,7 +176,7 @@ export async function run(ctx: Ctx): Promise<number> {
     const items = new Map(g.items.map((i) => [i.id, i]));
     const quests = new Map(g.quests.map((q) => [q.id, q]));
     const used = new Set<string>();
-    const itemAsset = (id: string): boolean => exists(path.join(p.projectDir, "assets", "items", `${id}.json`));
+    const itemAsset = (id: string): boolean => findAsset(p.projectDir, `items/${id}.json`) !== null;
 
     for (const it of g.items) if (it.unique) err(f, "unique-item", `item ${it.id} is unique: one copy in a shared world strands every other player`, it.id);
 

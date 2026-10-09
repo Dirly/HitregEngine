@@ -7,7 +7,7 @@
  *     --parts HairBase1,HairBase3,FemaleBase1,HairStyle1,HairStyle2,FemaleStyle1,Bangs,PonyTail1,Braids,BeardBase1,BeardBase2,Mustache,Chops \
  *     --hang HairBase1,HairBase3,FemaleBase1,FemaleStyle1,Braids \
  *     --texture MMO/3d/HumanRig/Head/pasted.png --size 40 \
- *     --out projects/voxel-demo/assets/models/mmo/human-hair.glb
+ *     --out projects/foundation/assets/models/mmo/human-hair.glb
  *
  * Why its own mesh, not parts of the head: carried inside the head's 72px sheet
  * the swatch shrank to 17 texels (~50/m, half the body's density), a head page

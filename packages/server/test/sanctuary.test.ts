@@ -10,7 +10,7 @@ import { WORLD_MODULE, type WorldModuleMessage } from "../src/index.js";
  * Sanctuaries and zone crossings on one layer, over real sockets
  * (docs/world-editing/barriers.md → "Runtime"): the flat `field` scene is
  * given two zones split east of the spawn and one waystation sanctuary ON
- * the spawn. The layer publishes `sanctuaries/list`; voxel-demo's
+ * the spawn. The layer publishes `sanctuaries/list`; the foundation's
  * combat-actor refuses a player-on-player hit while either body stands in
  * the circle, still takes an NPC's hit there, and damages normally outside;
  * a body that walks into the other zone gets a `zone.entered` event and a

@@ -129,7 +129,7 @@ across its width even at arm's length, so it blurs.
 For the CC human rig: `CC_Base_R_Hand`, scale `0.019`, `rotationDeg [90, 0,
 0]`, `offset [-0.03, 0.085, -0.093]`. The hand is a mitten (fingers +Y, thumb
 +Z, palm −X), so the blade leaves the thumb side of the fist. The MMO's
-`projects/voxel-demo/authoring/player-sword.mts` writes it.
+`projects/foundation/authoring/player-sword.mts` writes it.
 
 ## Glow: an overlay on named parts
 
@@ -225,7 +225,7 @@ need ~0.3 m to show a flame at all; at 0.11 m it was invisible.
 ## Seeing it
 
 - **The lab:** voxel-demo **Item FX lab**
-  (`projects/voxel-demo/authoring/item-fx-lab.mts`). The swords standing large
+  (`projects/foundation/authoring/item-fx-lab.mts`). The swords standing large
   and held by idle mannequins, at night, driven exactly as in play.
 - **One part at a time:** before trusting a new glow or mask change, line up
   swords that each glow ONE part (grip, blade, guard, pommel). Every glow bug

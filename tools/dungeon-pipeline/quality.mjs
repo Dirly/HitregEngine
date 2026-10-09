@@ -209,7 +209,7 @@ export function worldPositions(entities) {
 /** Does a prefab emit light? (its JSON holds a light component, directly or in a nested prefab) */
 function prefabEmits(c, prefabId, seen = new Set()) {
   if (seen.has(prefabId)) return false; seen.add(prefabId);
-  const cands = [path.join(c.root, "assets/prefabs", prefabId + ".json"), path.join(c.projects, "voxel-demo/assets/prefabs", prefabId + ".json"), path.join(c.projects, "..", "assets/prefabs", prefabId + ".json")];
+  const cands = [path.join(c.root, "assets/prefabs", prefabId + ".json"), path.join(c.projects, "voxel-demo/assets/prefabs", prefabId + ".json"), path.join(c.projects, "foundation/assets/prefabs", prefabId + ".json"), path.join(c.projects, "..", "assets/prefabs", prefabId + ".json")];
   const file = cands.find(exists);
   if (!file) return false;
   const text = fs.readFileSync(file, "utf8");
@@ -376,7 +376,7 @@ async function gateAtlas(c) {
   const folders = new Set(layers.filter((l) => l.map).map((l) => l.map.split("/")[0]));
   metrics.folders = [...folders];
   if (folders.size > 1) failures.push({ check: "pages", what: `palette maps come from ${folders.size} texture folders (${[...folders].join(", ")}); one page = one folder` });
-  const texFile = (map) => [c.f(`assets/textures/${map}`), path.join(c.projects, "voxel-demo/assets/textures", map)].find(exists);
+  const texFile = (map) => [c.f(`assets/textures/${map}`), path.join(c.projects, "voxel-demo/assets/textures", map), path.join(c.projects, "foundation/assets/textures", map)].find(exists);
   const roles = mat?.roles ?? [];
   const rows = [];
   const seen = new Map();
@@ -489,7 +489,7 @@ async function gateRecipe(c) {
   if (decalTex.size < R.dungeon.decalTexturesMin) failures.push({ check: "decalTextures", what: `${decalTex.size} decal texture(s) in the dungeon (min ${R.dungeon.decalTexturesMin})` });
   if (decalTex.size) {
     let mid = false;
-    for (const t of decalTex.keys()) { const f = [c.f(`assets/textures/${t}`), path.join(c.projects, "voxel-demo/assets/textures", t)].find(exists); if (f && luma(await meanColour(f)) >= R.dungeon.decalMidLuma) mid = true; }
+    for (const t of decalTex.keys()) { const f = [c.f(`assets/textures/${t}`), path.join(c.projects, "voxel-demo/assets/textures", t), path.join(c.projects, "foundation/assets/textures", t)].find(exists); if (f && luma(await meanColour(f)) >= R.dungeon.decalMidLuma) mid = true; }
     if (!mid) failures.push({ check: "decalMid", what: `every decal tile is dark (none with mean luma >= ${R.dungeon.decalMidLuma}): add a light or mid-value one (frost, salt, soot halo, water stain)` });
   }
   // built detail from source-audit objects named <space>.<kind>.n

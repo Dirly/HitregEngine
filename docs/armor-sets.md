@@ -41,7 +41,7 @@ All three are at the body's density (109 texels/m, nearest-filtered). One model
    opaque texels on their free edges (measure it). Then:
    - body: `reskin ... --theme mmo/human-body-<t>.png=<atlas> --theme mmo/human-body-<t>-f.png=<atlas-f>` for EVERY set on the page,
      or, to add or replace sets without re-running the weight transfer,
-     `node tools/body-page.mjs --glb projects/voxel-demo/assets/models/mmo/human-body.glb --theme <id>=<atlas> …`
+     `node tools/body-page.mjs --glb projects/foundation/assets/models/mmo/human-body.glb --theme <id>=<atlas> …`
      (reads the sheets already on the page back out of it; geometry, skin and clips are kept byte for byte).
      Copy each new atlas to `assets/textures/mmo/human-body-<t>[-f].png` too: item-icon reads the sheets from there.
    - helm/shoulders: `weapon-page --recipe human-helm|human-shoulder --project voxel-demo --model mmo/<model>.glb --themes <every set>`
@@ -164,7 +164,7 @@ legs is still one draw. How (render `appearance.ts`):
 ## Icons
 
 Every armor item gets an icon RENDERED from its own model, parts and sheet,
-like weapons: `node tools/item-icon.mjs --project voxel-demo --model mmo/human-body.glb`
+like weapons: `node tools/item-icon.mjs --project foundation --model mmo/human-body.glb`
 (and the helm and shoulder models). Framing is per model and per item in
 `projects/<p>/authoring/item-icons.json`: a chest seen from the front, boots
 from the side, gloves palm-out. Re-run after every bake: `weapon-page` does it

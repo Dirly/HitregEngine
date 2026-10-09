@@ -9,7 +9,7 @@ small set of reusable, schema-registered mechanics, with sameness caught by the 
 |---|---|---|
 | Clock | `world.hour` in netState, authority-owned, `/time` | `packages/scripting/src/builtin.ts` (`DayNight`, `NET_HOUR_KEY`) |
 | Weather | `world.weather` {precipitation, storm, wind, windAngle}, ONE per layer; rain/sand/snow is chosen by the client's biome | `builtin.ts` (`Weather`, `NET_WEATHER_KEY`) |
-| Death and killer | `combat.killed {victimId, killerId, xp}` — emitted by a PROJECT script, no cause | `projects/voxel-demo/scripts/combat-actor.ts` |
+| Death and killer | `combat.killed {victimId, killerId, xp}` — emitted by a PROJECT script, no cause | `projects/foundation/scripts/combat-actor.ts` |
 | Buffs/status | Only a VFX look vocabulary (`STATUS_EFFECTS`); no authority status state on the sheet | `packages/core/src/vfx/spell.ts` |
 | Item use | `consumable` item kind exists; no "use" event | `packages/core/src/character/items.ts` |
 | Interactable objects | The `npc` builtin runs on any entity tagged `interactable` (nothing requires a body); its dialogue is the only server-checked interaction | `packages/scripting/src/npc.ts` |

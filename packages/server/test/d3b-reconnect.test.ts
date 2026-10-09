@@ -8,7 +8,7 @@ import { serve, type ServeHandle } from "../src/serve.js";
 import { startMain, type MainHandle } from "../src/main/main.js";
 import { MemoryAccountStore } from "../src/persistence/accounts.js";
 import { WORLD_MODULE, type WorldModuleMessage } from "../src/index.js";
-import { deriveLoadout } from "../../../apps/playground/projects/voxel-demo/scripts/lib/loadout.js";
+import { deriveLoadout } from "../../../apps/playground/projects/foundation/scripts/lib/loadout.js";
 
 /**
  * Package D3b (docs/combat-build/D3b-spells-twists.md): an item instance's
@@ -20,7 +20,7 @@ import { deriveLoadout } from "../../../apps/playground/projects/voxel-demo/scri
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const playground = path.resolve(here, "../../../apps/playground");
-const ITEMS = path.join(playground, "projects/voxel-demo/assets/items");
+const ITEMS = path.join(playground, "projects/foundation/assets/items");
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function until(cond: () => boolean, timeoutMs = 8000): Promise<void> {
   const start = Date.now();

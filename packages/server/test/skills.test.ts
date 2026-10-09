@@ -9,7 +9,7 @@ import { WORLD_MODULE, type WorldModuleMessage } from "../src/index.js";
 import { eventLog } from "./event-log.js";
 
 /**
- * Package D1 of voxel-demo's combat model (docs/combat-build/D1-skills.md):
+ * Package D1 of the foundation's combat model (docs/combat-build/D1-skills.md):
  * the skill grammar's payoffs, applied by combat-actor where the hit lands,
  * over real sockets on the `field` scene with the game's scripts.
  *

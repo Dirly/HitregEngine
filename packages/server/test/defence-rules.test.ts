@@ -5,7 +5,7 @@ import {
   resolveDefence,
   type DefencePools,
   type GuardState,
-} from "../../../apps/playground/projects/voxel-demo/scripts/lib/defence.js";
+} from "../../../apps/playground/projects/foundation/scripts/lib/defence.js";
 import {
   BEATS,
   SCHOOLS,
@@ -20,15 +20,15 @@ import {
   type DamageKind,
   type GuardKind,
   type School,
-} from "../../../apps/playground/projects/voxel-demo/scripts/lib/combat-rules.js";
+} from "../../../apps/playground/projects/foundation/scripts/lib/combat-rules.js";
 
 /**
- * voxel-demo's `resolveDefence` (lib/defence.ts), pure: the whole
+ * the foundation's `resolveDefence` (lib/defence.ts), pure: the whole
  * attack class x guard x arc matrix of docs/combat-plan.md, pinned without a
  * server. The socket test (defence.test.ts) proves the actor wires it up; this
  * proves what it decides. The game has no test runner of its own, so it lives
  * here and imports the game lib by path (projects/ is gitignored: on a clone
- * without voxel-demo this file fails to import, as defence.test.ts skips).
+ * without the foundation project this file fails to import, as defence.test.ts skips).
  */
 
 const NOW = 100;

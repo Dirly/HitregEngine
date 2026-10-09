@@ -3,7 +3,7 @@
  * body-page — add or replace outfit sheets on the skinned body's page without
  * re-running `reskin` (docs/armor-sets.md).
  *
- *   node tools/body-page.mjs --glb projects/voxel-demo/assets/models/mmo/human-body.glb \
+ *   node tools/body-page.mjs --glb projects/foundation/assets/models/mmo/human-body.glb \
  *     --theme mmo/human-body-leather.png=../../tools/atlas/out/human-body/leather/atlas.png \
  *     --theme mmo/human-body-leather-f.png=../../tools/atlas/out/human-body/leather-f/atlas.png
  *

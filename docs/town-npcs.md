@@ -204,7 +204,7 @@ the purse covers the whole bill). Wear survives the vault.
 { "text": "Mend my gear.", "do": [{ "do": "openRepair" }] }
 ```
 
-The MMO project rates its items with `projects/voxel-demo/tools/item-durability.mjs`
+The MMO project rates its items with `projects/foundation/tools/item-durability.mjs`
 (weapons/shields 60–100, armour 40–80, by rarity; heavy armour +10).
 
 ## Making a town, in order

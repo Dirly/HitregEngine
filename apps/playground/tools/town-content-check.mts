@@ -12,6 +12,7 @@
  * Exit 1 with every problem listed.
  */
 import fs from "node:fs";
+import { assetIds } from "./_closure.mjs";
 import path from "node:path";
 import { dialogueSchema, literalCompassWords, placeTokens, questSchema, shopSchema } from "@hitreg/core";
 
@@ -33,7 +34,8 @@ if (fs.existsSync(placesFile)) {
   for (const k of Object.keys(table.places ?? table)) places.add(k);
 }
 for (const r of residents) places.add(r);
-const items = new Set(fs.readdirSync(path.join(assets, "items")).filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5)));
+// items are shared game data: resolve them through the project's dependsOn closure
+const items = assetIds(project, "items");
 const quests = new Set(fs.readdirSync(path.join(assets, "quests")).filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5)));
 const staged = fs.readdirSync(stage).filter((f) => f.endsWith(".json"));
 for (const f of staged) if (f.startsWith("quest.")) quests.add(f.slice(6, -5));

@@ -2,20 +2,20 @@ import { describe, expect, it } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { auditItemSkills, createSheet, addItem, equip, itemSchema, type CharacterSheet, type Item } from "@hitreg/core";
-import { deriveLoadout, DRINKS } from "../../../apps/playground/projects/voxel-demo/scripts/lib/loadout.js";
-import { ABILITIES } from "../../../apps/playground/projects/voxel-demo/scripts/lib/abilities.js";
-import { GUARD_VERBS, HELD_VERBS, parseLoadout, serializeLoadout } from "../../../apps/playground/projects/voxel-demo/scripts/lib/combat-rules.js";
+import { deriveLoadout, DRINKS } from "../../../apps/playground/projects/foundation/scripts/lib/loadout.js";
+import { ABILITIES } from "../../../apps/playground/projects/foundation/scripts/lib/abilities.js";
+import { GUARD_VERBS, HELD_VERBS, parseLoadout, serializeLoadout } from "../../../apps/playground/projects/foundation/scripts/lib/combat-rules.js";
 
 /**
- * voxel-demo's `deriveLoadout` (lib/loadout.ts), pure: the bar is built from
+ * the foundation's `deriveLoadout` (lib/loadout.ts), pure: the bar is built from
  * what the character wears (docs/combat-plan.md "The bar"), plus a check that
  * every item file's skills parse, fit their hands and name abilities that
  * exist. The game has no test runner of its own, so it lives here and imports
- * the game lib by path (projects/ is gitignored: on a clone without voxel-demo
+ * the game lib by path (projects/ is gitignored: on a clone without the foundation project
  * this file fails to import).
  */
 
-const ITEMS_DIR = fileURLToPath(new URL("../../../apps/playground/projects/voxel-demo/assets/items/", import.meta.url));
+const ITEMS_DIR = fileURLToPath(new URL("../../../apps/playground/projects/foundation/assets/items/", import.meta.url));
 const items: Record<string, Item> = Object.fromEntries(
   readdirSync(ITEMS_DIR)
     .filter((f) => f.endsWith(".json"))

@@ -9,8 +9,8 @@ import { WORLD_MODULE, type WorldModuleMessage } from "../src/index.js";
 import { eventLog } from "./event-log.js";
 
 /**
- * Package L (voxel-demo docs/combat-build/L-loot.md): loot bags, over real
- * sockets on the `field` scene with voxel-demo's combat scripts and the
+ * Package L (foundation docs/combat-build/L-loot.md): loot bags, over real
+ * sockets on the `field` scene with the foundation's combat scripts and the
  * engine's character-sheet on the authority. A creature's drops lie in a bag
  * at the corpse that only the killer is SENT (the other client's replica never
  * holds the key) and only the killer may take from; an item that does not fit
@@ -22,7 +22,7 @@ import { eventLog } from "./event-log.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const playground = path.resolve(here, "../../../apps/playground");
-const ITEMS = path.join(playground, "projects/voxel-demo/assets/items");
+const ITEMS = path.join(playground, "projects/foundation/assets/items");
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function until(cond: () => boolean, timeoutMs = 10_000, what = ""): Promise<void> {
   const start = Date.now();

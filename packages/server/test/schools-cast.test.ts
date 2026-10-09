@@ -6,12 +6,12 @@ import { MOB_EVENTS, castBarProgress, readBadges, readCastBar } from "@hitreg/co
 import type { ScriptContext } from "@hitreg/scripting";
 import { serve, type ServeHandle } from "../src/serve.js";
 import { WORLD_MODULE, type WorldModuleMessage } from "../src/index.js";
-import { SCHOOL_COLOR } from "../../../apps/playground/projects/voxel-demo/scripts/lib/combat-rules.js";
-import MobCombatBridge from "../../../apps/playground/projects/voxel-demo/scripts/mob-combat-bridge.js";
+import { SCHOOL_COLOR } from "../../../apps/playground/projects/foundation/scripts/lib/combat-rules.js";
+import MobCombatBridge from "../../../apps/playground/projects/foundation/scripts/mob-combat-bridge.js";
 import { eventLog } from "./event-log.js";
 
 /**
- * Package W of voxel-demo's combat model (docs/combat-build/W-schools.md):
+ * Package W of the foundation's combat model (docs/combat-build/W-schools.md):
  * what a cast bar is fed, and interrupts, over real sockets on the `field`
  * scene with the game's scripts. The ward wheel's outcomes are pinned in
  * defence.test.ts (socket) and defence-rules.test.ts (pure).

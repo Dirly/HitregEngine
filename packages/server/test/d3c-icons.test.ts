@@ -2,26 +2,26 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { ABILITIES } from "../../../apps/playground/projects/voxel-demo/scripts/lib/abilities.js";
-import { MOB_ABILITIES } from "../../../apps/playground/projects/voxel-demo/scripts/lib/mob-abilities.js";
-import { SCHOOL_COLOR } from "../../../apps/playground/projects/voxel-demo/scripts/lib/combat-rules.js";
-import { SKILL_ICON_TYPE } from "../../../apps/playground/projects/voxel-demo/scripts/lib/skill-icon-table.js";
+import { ABILITIES } from "../../../apps/playground/projects/foundation/scripts/lib/abilities.js";
+import { MOB_ABILITIES } from "../../../apps/playground/projects/foundation/scripts/lib/mob-abilities.js";
+import { SCHOOL_COLOR } from "../../../apps/playground/projects/foundation/scripts/lib/combat-rules.js";
+import { SKILL_ICON_TYPE } from "../../../apps/playground/projects/foundation/scripts/lib/skill-icon-table.js";
 import {
   TYPE_COLOR,
   VERB_ICON_IDS,
   VERB_SKIN,
   skillIcon,
   skillType,
-} from "../../../apps/playground/projects/voxel-demo/scripts/lib/skill-icons.js";
+} from "../../../apps/playground/projects/foundation/scripts/lib/skill-icons.js";
 
 /**
- * voxel-demo package D3c (docs/combat-build/D3c-icons-hud.md): every player
+ * foundation package D3c (docs/combat-build/D3c-icons-hud.md): every player
  * skill and every right-click verb has its own icon file, drawn on a sheet of
  * its own type, and the type colours are the school colours plus a distinct
  * physical one. The same checks as `npx tsx tools/skill-icons.mts audit`.
  */
 
-const textures = path.resolve(__dirname, "../../../apps/playground/projects/voxel-demo/assets/textures");
+const textures = path.resolve(__dirname, "../../../apps/playground/projects/foundation/assets/textures");
 const player = Object.values(ABILITIES).filter((a) => !(a.id in MOB_ABILITIES));
 
 describe("skill icons (D3c)", () => {

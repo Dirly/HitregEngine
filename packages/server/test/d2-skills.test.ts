@@ -8,7 +8,7 @@ import { WORLD_MODULE, type WorldModuleMessage } from "../src/index.js";
 import { eventLog } from "./event-log.js";
 
 /**
- * Package D2 of voxel-demo's combat model (docs/combat-build/D2-stealth-bows-traits.md)
+ * Package D2 of the foundation's combat model (docs/combat-build/D2-stealth-bows-traits.md)
  * over real sockets on the `field` scene with the game's scripts:
  *
  *   - a sneaking body is not noticed by a creature at a range where a walking

@@ -6,12 +6,12 @@ import { RoomClient, WebSocketClientTransport, WS_HOST_ID } from "@hitreg/net";
 import { addItem, createSheet, equip, itemSchema, type CharacterSheet, type EntityDoc, type Item } from "@hitreg/core";
 import { serve, type ServeHandle } from "../src/serve.js";
 import { WORLD_MODULE, type WorldModuleMessage } from "../src/index.js";
-import { serializeLoadout } from "../../../apps/playground/projects/voxel-demo/scripts/lib/combat-rules.js";
-import { deriveLoadout } from "../../../apps/playground/projects/voxel-demo/scripts/lib/loadout.js";
+import { serializeLoadout } from "../../../apps/playground/projects/foundation/scripts/lib/combat-rules.js";
+import { deriveLoadout } from "../../../apps/playground/projects/foundation/scripts/lib/loadout.js";
 import { eventLog } from "./event-log.js";
 
 /**
- * Package D3b of voxel-demo's combat model (docs/combat-build/D3b-spells-twists.md),
+ * Package D3b of the foundation's combat model (docs/combat-build/D3b-spells-twists.md),
  * over real sockets on the `field` scene with the game's scripts: one spell of
  * each school doing what it says, cast for real (frost slows, roots hold, a
  * curse ticks, a heal lands on the friend under the crosshair) plus a smite
@@ -24,7 +24,7 @@ import { eventLog } from "./event-log.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const playground = path.resolve(here, "../../../apps/playground");
-const ITEMS = path.join(playground, "projects/voxel-demo/assets/items");
+const ITEMS = path.join(playground, "projects/foundation/assets/items");
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function until(cond: () => boolean, timeoutMs = 10_000, what = ""): Promise<void> {
   const start = Date.now();

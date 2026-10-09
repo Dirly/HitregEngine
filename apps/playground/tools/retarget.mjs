@@ -135,8 +135,8 @@ Examples:
   node tools/retarget.mjs --anim UAL1.fbx --list
   node tools/retarget.mjs --anim UAL1.fbx --anim UAL2.fbx --list
   node tools/retarget.mjs --mesh HumanRigged.fbx --anim UAL1.fbx \\
-    --out projects/voxel-demo/assets/models/mmo/human.glb
-  node tools/retarget.mjs --measure projects/voxel-demo/assets/models/mmo/human.glb
+    --out projects/foundation/assets/models/mmo/human.glb
+  node tools/retarget.mjs --measure projects/foundation/assets/models/mmo/human.glb
 `);
   process.exit(0);
 }

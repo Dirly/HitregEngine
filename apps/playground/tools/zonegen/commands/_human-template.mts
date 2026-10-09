@@ -17,6 +17,7 @@
  * string param equal to a pattern id (`actor`, ...) is rewritten to the template's.
  */
 import fs from "node:fs";
+import { assetIds, assetPath } from "../../_closure.mjs";
 import path from "node:path";
 import type { Op } from "@hitreg/core";
 import type { Finding } from "../lib.mts";
@@ -113,12 +114,12 @@ export function loadHumanKit(projectDir: string, f: Finding[]): HumanKit | null 
   const scripts = new Set(pattern.map(([, e]) => scriptOf(e)?.name));
   const lacks = ["mob-brain", "combat-caster", "combat-actor", "character-look", "character-sheet", "bone-socket", "equipment-look"].filter((n) => !scripts.has(n));
   if (lacks.length) return bad(`pattern ${rootId} has no ${lacks.join(", ")} script`);
-  const creationFile = path.join(assets, "creation", `${cfg.creation}.json`);
+  const creationFile = assetPath(projectDir, `creation/${cfg.creation}.json`);
   if (!fs.existsSync(creationFile)) return bad(`creation ${cfg.creation} not found`);
-  const rigFile = path.join(assets, "prefabs", `${cfg.weaponRig}.json`);
+  const rigFile = assetPath(projectDir, `prefabs/${cfg.weaponRig}.json`);
   if (!fs.existsSync(rigFile)) return bad(`weaponRig prefab ${cfg.weaponRig} not found`);
   const items = new Map<string, ItemDoc>();
-  for (const name of fs.readdirSync(path.join(assets, "items"))) if (name.endsWith(".json")) items.set(name.slice(0, -5), read(path.join(assets, "items", name)) as ItemDoc);
+  for (const id of assetIds(projectDir, "items")) items.set(id, read(assetPath(projectDir, `items/${id}.json`)) as ItemDoc);
   for (const [set, o] of Object.entries(cfg.outfits)) for (const id of o.wear) if (!items.has(id)) return bad(`outfit ${set} wears unknown item ${id}`);
   for (const [w, o] of Object.entries(cfg.weapons)) if (!items.has(o.item)) return bad(`weapon ${w} names unknown item ${o.item}`);
   return {

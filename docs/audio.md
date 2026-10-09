@@ -34,12 +34,12 @@ so a restyle is one edit and one `gen`.
 ## Commands (run from `apps/playground`)
 
 ```
-node tools/sfx-request.mjs status --project voxel-demo [--category ui] [--next]   # ok / STALE / MISSING / REJECTED
-node tools/sfx-request.mjs gen    --project voxel-demo [--category ui] [--only 'ui/equip-*'] [--dry] [--force] [--concurrency 2]
-node tools/sfx-request.mjs one    --project voxel-demo --id ui/click --category ui --prompt "…" [--variants 2]
-node tools/sfx-request.mjs refit  --project voxel-demo [--category ambience]  # re-level installed files, no API
-node tools/sfx-request.mjs board  --project voxel-demo     # authoring/audio/board.html: listen, tick rejects, copy commands
-node tools/sfx-request.mjs reject --project voxel-demo --file ui/click.mp3 --note "too shrill"
+node tools/sfx-request.mjs status --project foundation [--category ui] [--next]   # ok / STALE / MISSING / REJECTED
+node tools/sfx-request.mjs gen    --project foundation [--category ui] [--only 'ui/equip-*'] [--dry] [--force] [--concurrency 2]
+node tools/sfx-request.mjs one    --project foundation --id ui/click --category ui --prompt "…" [--variants 2]
+node tools/sfx-request.mjs refit  --project foundation [--category ambience]  # re-level installed files, no API
+node tools/sfx-request.mjs board  --project foundation     # authoring/audio/board.html: listen, tick rejects, copy commands
+node tools/sfx-request.mjs reject --project foundation --file ui/click.mp3 --note "too shrill"
 ```
 
 `gen` only makes what is not ok, so it is safe to re-run. Output goes to

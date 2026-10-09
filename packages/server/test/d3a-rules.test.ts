@@ -20,7 +20,7 @@ import {
   type Condition,
   type HitFacts,
   type Payoff,
-} from "../../../apps/playground/projects/voxel-demo/scripts/lib/skills.js";
+} from "../../../apps/playground/projects/foundation/scripts/lib/skills.js";
 import {
   ABILITIES,
   CONTROL_MAX_SECONDS,
@@ -28,19 +28,19 @@ import {
   auditAbilities,
   moveDistance,
   type Ability,
-} from "../../../apps/playground/projects/voxel-demo/scripts/lib/abilities.js";
-import { CONDITION_PHRASE, describeSkill, payoffPhrase } from "../../../apps/playground/projects/voxel-demo/scripts/lib/describe-skill.js";
+} from "../../../apps/playground/projects/foundation/scripts/lib/abilities.js";
+import { CONDITION_PHRASE, describeSkill, payoffPhrase } from "../../../apps/playground/projects/foundation/scripts/lib/describe-skill.js";
 // @ts-expect-error a plain .mjs tool, no types
-import { check as checkRequires, creationProblems } from "../../../apps/playground/projects/voxel-demo/tools/item-requires.mjs";
+import { check as checkRequires, creationProblems } from "../../../apps/playground/projects/foundation/tools/item-requires.mjs";
 
 /**
- * voxel-demo package D3a (docs/combat-build/D3a-skill-library.md), pure: the
+ * foundation package D3a (docs/combat-build/D3a-skill-library.md), pure: the
  * eight new conditions and twelve new payoffs, describeSkill, the new audit
  * rules, the roster, the items that carry it, and the stat requirements. The
  * socket half is d3a-skills.test.ts.
  */
 
-const game = path.resolve(__dirname, "../../../apps/playground/projects/voxel-demo");
+const game = path.resolve(__dirname, "../../../apps/playground/projects/foundation");
 const facts = (on: Partial<HitFacts> = {}): HitFacts => ({ ...NO_FACTS, ...on });
 const a = (id: string): Ability => ABILITIES[id]!;
 const ITEMS = path.join(game, "assets/items");
