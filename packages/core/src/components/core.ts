@@ -683,6 +683,26 @@ export const lightSchema = z.object({
         "windows), fading through dusk with the day-night script. Off-hours lights also stop taking a slot in the " +
         "point-light budget, so a town full of lanterns costs nothing by day.",
     ),
+  glow: z
+    .number()
+    .min(0)
+    .max(4)
+    .default(1)
+    .describe(
+      "point lights only: strength of the soft halo drawn around the light (1 = the default, 0 = none). One shared " +
+        "instanced draw for every halo in view, no light slot and no texture, so lights beyond the dynamic-light " +
+        "budget still read as lit from afar. Size follows `range`, colour follows `color`, it fades with `when` and " +
+        "flickers with the intensity. Turn it off for hidden fill lights that have no visible source.",
+    ),
+  flicker: z
+    .enum(["none", "candle", "torch", "brazier"])
+    .default("none")
+    .describe(
+      "point lights only: a living flame's unsteadiness, applied to the light, its halo, its pool and its fog glow — " +
+        "candle = a slow shiver, torch = a lively gutter, brazier = deep slow surges. Costs nothing per frame beyond " +
+        "a sine or two per light. Standing-fire VFX lights already flicker on their own; use this for plain lights " +
+        "placed in a lantern, sconce or hearth.",
+    ),
   /**
    * directional + castShadow only: half-width of the shadow camera's square
    * ortho frustum, world units (so the frustum spans `-shadowSize` to

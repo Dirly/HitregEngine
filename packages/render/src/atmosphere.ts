@@ -1,5 +1,5 @@
 import * as THREE from "three/webgpu";
-import { cameraPosition, clamp, dot, floor, fog, float, fract, Fn, hash, If, Loop, max, mix, normalize, positionWorld, pow, screenCoordinate, screenUV, select, smoothstep, time, uniform, vec2, vec3, vec4 } from "three/tsl";
+import { atan, cameraPosition, clamp, dot, floor, fog, float, fract, Fn, hash, If, Loop, max, mix, normalize, positionWorld, pow, screenCoordinate, screenUV, select, smoothstep, time, uniform, vec2, vec3, vec4 } from "three/tsl";
 import { godrays } from "three/addons/tsl/display/GodraysNode.js";
 import { bilateralBlur } from "three/addons/tsl/display/BilateralBlurNode.js";
 import { depthAwareBlend } from "three/addons/tsl/display/depthAwareBlend.js";
@@ -141,6 +141,20 @@ const fogSun = {
   scatter: uniform(0),
   power: uniform(6),
 };
+/**
+ * The nearest few point lights, for the glow they throw into the fog — fed
+ * each frame by LightBudgetSystem (budgeted or not). xyz = position, w =
+ * range; colour pre-multiplied by intensity, on-ness and glow. Zero colour =
+ * an empty slot, which costs its arithmetic and adds nothing.
+ */
+export const FOG_LAMP_COUNT = 4;
+export const fogLamps = {
+  position: Array.from({ length: FOG_LAMP_COUNT }, () => uniform(new THREE.Vector4(0, -1e5, 0, 1))),
+  color: Array.from({ length: FOG_LAMP_COUNT }, () => uniform(new THREE.Color(0, 0, 0))),
+  /** Overall strength of lamp glow in fog, per unit of fog density. */
+  gain: uniform(0.25),
+};
+
 const fogMist = {
   amount: uniform(0),
   /** Zone mood multiplier on top of the authored amount. */
@@ -320,6 +334,28 @@ function buildHeightFogNode(features: FogFeatures = { scatter: false, mist: fals
     const view: any = normalize(positionWorld.sub(cameraPosition));
     const toward: any = pow(max(dot(view, fogSun.direction), 0), fogSun.power);
     fogColor = mix(color, fogSun.color, clamp(toward.mul(fogSun.scatter), 0, 1));
+  }
+  // Lamps glowing in the haze: single-scattered light from the nearest point
+  // lights along this sight line — the closed form of the inverse-square
+  // integral (two atans per lamp), weighted by how thick the air is. It is
+  // ADDED to whatever the fog leaves of the surface; written into the fog
+  // colour divided by the fog factor so `mix(surface, fogColor, factor)`
+  // comes out as exactly that sum.
+  {
+    const view: any = normalize(positionWorld.sub(cameraPosition));
+    let glow: any = vec3(0, 0, 0);
+    for (let i = 0; i < FOG_LAMP_COUNT; i++) {
+      const lamp: any = fogLamps.position[i]!;
+      const rel: any = lamp.xyz.sub(cameraPosition);
+      const t0: any = dot(rel, view);
+      const h: any = max(dot(rel, rel).sub(t0.mul(t0)), 0.09).sqrt();
+      const along: any = atan(distance.sub(t0).div(h)).add(atan(t0.div(h)));
+      const reach: any = clamp(float(1).sub(h.div(lamp.w.mul(0.5))), 0, 1);
+      glow = glow.add(fogLamps.color[i]!.mul(along.div(h)).mul(reach.mul(reach)));
+    }
+    const air: any = features.mist ? density.add(fogMist.amount.mul(fogMist.scale).mul(0.02)) : density;
+    const scatter: any = glow.mul(air).mul(fogLamps.gain);
+    fogColor = fogColor.add(scatter.div(max(factor, 0.02)));
   }
   /* eslint-enable @typescript-eslint/no-explicit-any */
 

@@ -113,8 +113,11 @@ import { flushDecals, reprojectDecalsAround, syncEntityDecals, type DecalData, t
 import { DEFAULT_SHADOW_SETTINGS, applyShadowSettings, type ShadowSettings } from "./csm.js";
 import { DEFAULT_VOLUMETRIC_SETTINGS, type FogSettings, type VolumetricSettings } from "./atmosphere.js";
 import type { EnvironmentSettings } from "./environment.js";
-import { nightLevel } from "./daylight.js";
+import { findWindows, seedWindowGlass, windowCardGeometry, windowCardMaterial, windowInterior, windowLight, windowOutside, windowSeed, NO_SHADOW_FLAG } from "./window-lights.js";
 import { rimmedCopy } from "./rim-light.js";
+import { setCloudShadowImage } from "./cloud-shadow.js";
+import { CHIMNEYS_KEY, chimneySmoke, findChimneys } from "./chimney-smoke.js";
+import { WINDOWS_KEY, distantWindows } from "./distant-windows.js";
 import { SceneLighting, SKY_DOME_UNIFORMS, type SkyData, type SkyDomeUniforms } from "./scene-lighting.js";
 import {
   applyMaterialCommon,
@@ -164,7 +167,13 @@ export function loadGltf(url: string): Promise<GLTF> {
         shareNamedTextures(gltf.scene);
         applyWindowGlass(gltf.scene);
         // atlased kits (tools/town-atlas.mjs): one shared tile-sampling material per page
-        applyAtlasMaterials(gltf.scene);
+        const atlased = applyAtlasMaterials(gltf.scene);
+        // buildings (kit glass or a town atlas) get their chimneys found once,
+        // for the smoke every placed copy registers (chimney-smoke.ts)
+        if (atlased > 0 || hasWindowGlass(gltf.scene)) {
+          const tops = findChimneys(gltf.scene, (m) => WINDOW_GLASS.test(m.name) || m.userData?.[NO_SHADOW_FLAG] === true);
+          if (tops.length > 0) gltf.scene.userData[CHIMNEYS_KEY] = tops.map((t) => [t.x, t.y, t.z]);
+        }
         shareModelMaterials(gltf.scene, scope);
         // creatures and characters: a rim keeps them readable in the dark (sky.rim; 0 = off)
         gltf.scene.traverse((node) => {
@@ -180,9 +189,23 @@ export function loadGltf(url: string): Promise<GLTF> {
   return pending;
 }
 
+function hasWindowGlass(root: THREE.Object3D): boolean {
+  let found = false;
+  root.traverse((node) => {
+    const m = (node as THREE.Mesh).material;
+    if (!found && m && !Array.isArray(m) && WINDOW_GLASS.test(m.name)) found = true;
+  });
+  return found;
+}
+
+/** Light-only geometry (window light cards): never in a shadow pass, whatever the entity says. */
+function casterExempt(mesh: THREE.Mesh): boolean {
+  const m = mesh.material;
+  return !Array.isArray(m) && m?.userData?.[NO_SHADOW_FLAG] === true;
+}
+
 /** The window kit's pane material (docs/world-standards/building-styles.md → Windows). */
 const WINDOW_GLASS = /windowglass/i;
-const WINDOW_GLOW = new THREE.Color("#ffb060");
 
 /**
  * Lit windows at night, by CONVENTION: the window kit puts every pane on one
@@ -192,12 +215,18 @@ const WINDOW_GLOW = new THREE.Color("#ffb060");
  * `nightLevel` uniform; bloom catches it). Converted once on the cached
  * scene, so every building sharing the kit shares ONE material. No extra
  * draw, no light: a town reads as lived in after dark for a multiply.
+ *
+ * Each window also gets its own character and a light card (shaft into the
+ * street + halo on the wall) — see window-lights.ts. The cards are one more
+ * mesh per model on one shared material, so they batch to a single draw.
  */
 const windowGlassMaterials = new WeakMap<THREE.Material, THREE.Material>();
 function applyWindowGlass(root: THREE.Object3D): void {
+  const glassMeshes: THREE.Mesh[] = [];
   root.traverse((node) => {
     const mesh = node as THREE.Mesh;
     if (!mesh.isMesh) return;
+    const before = mesh.material;
     const swap = (m: THREE.Material): THREE.Material => {
       if (!WINDOW_GLASS.test(m.name)) return m;
       const cached = windowGlassMaterials.get(m);
@@ -212,13 +241,63 @@ function applyWindowGlass(root: THREE.Object3D): void {
         side: src.side,
         alphaTest: src.alphaTest,
       });
+      // the pane texture repeats, so the per-window seed added to its UVs
+      // (window-lights.ts) leaves the picture unchanged
+      if (src.map) src.map.wrapS = THREE.RepeatWrapping;
       const pane = src.map ? (tslTexture(src.map) as unknown as THREE.Node<"vec4">).rgb : vec3(1, 1, 1);
-      glass.emissiveNode = pane.mul(uniform(WINDOW_GLOW)).mul(float(1.6)).mul(nightLevel) as THREE.Node<"vec3">;
+      // each window its own: lit or dark tonight, its dusk hour, warm or pale, a slow flicker
+      const seed = windowSeed(uv().x);
+      const light = windowLight(seed);
+      glass.emissiveNode = pane.mul(light).mul(float(1.6)) as THREE.Node<"vec3">;
+      // by day the street side shows a dim room behind the leading, brighter
+      // at grazing angles where the glass reflects the sky (window-lights.ts)
+      if (src.map) {
+        const viewDir = normalize(cameraPosition.sub(positionWorld));
+        const grazing = pow(float(1).sub(saturate(abs(dot(viewDir, normalWorld)))), float(2));
+        const behind = mix(windowInterior(seed).mul(2.2), vec3(1, 1, 1), grazing.mul(0.7));
+        const shaded = mix(vec3(1, 1, 1), behind, windowOutside(uv().y));
+        glass.colorNode = (tslTexture(src.map) as unknown as THREE.Node<"vec4">).rgb.mul(uniform(glass.color)).mul(shaded) as THREE.Node<"vec3">;
+      }
       windowGlassMaterials.set(m, glass);
       return glass;
     };
     mesh.material = Array.isArray(mesh.material) ? mesh.material.map(swap) : swap(mesh.material);
+    if (!Array.isArray(before) && mesh.material !== before) glassMeshes.push(mesh);
   });
+  if (glassMeshes.length === 0) return;
+  // light cards: one sibling mesh per glass mesh, drawn with the shared card
+  // material so every building's cards batch into one draw
+  root.updateMatrixWorld(true);
+  const bounds = new THREE.Box3().setFromObject(root);
+  const modelCentre = bounds.getCenter(new THREE.Vector3());
+  const toRoot = new THREE.Matrix4().copy(root.matrixWorld).invert();
+  // every window, root space, for the far-away specks (distant-windows.ts)
+  const far: number[] = [];
+  for (const glass of glassMeshes) {
+    const parent = glass.parent;
+    if (!parent) continue;
+    const glassToRoot = new THREE.Matrix4().multiplyMatrices(toRoot, glass.matrixWorld);
+    const local = glassToRoot.clone().invert();
+    const windows = findWindows(glass.geometry, modelCentre.clone().applyMatrix4(local));
+    if (windows.length === 0) continue;
+    for (const w of windows) {
+      const c = w.centre.clone().applyMatrix4(glassToRoot);
+      const n = w.normal.clone().transformDirection(glassToRoot);
+      far.push(c.x, c.y, c.z, w.seed, n.x, n.z);
+    }
+    seedWindowGlass(glass.geometry, windows);
+    const geometry = windowCardGeometry(windows);
+    if (!geometry) continue;
+    const cards = new THREE.Mesh(geometry, windowCardMaterial());
+    cards.name = `${glass.name || "WindowGlass"}-light`;
+    cards.position.copy(glass.position);
+    cards.quaternion.copy(glass.quaternion);
+    cards.scale.copy(glass.scale);
+    cards.castShadow = false;
+    cards.receiveShadow = false;
+    parent.add(cards);
+  }
+  if (far.length > 0) root.userData[WINDOWS_KEY] = far;
 }
 
 /** Prefix the kit-import tools give a glTF texture whose bytes are shared by many files. */
@@ -598,6 +677,10 @@ interface LightData {
   importance?: number;
   /** Time of day the light is on (see the schema). */
   when?: "always" | "night" | "day";
+  /** point only: halo strength (see the schema). */
+  glow?: number;
+  /** point only: flame unsteadiness (see the schema). */
+  flicker?: "none" | "candle" | "torch" | "brazier";
   /** directional + castShadow only — shadow camera ortho frustum half-width. */
   shadowSize?: number;
   /** `light.shadow`; every field optional here because old docs predate it. */
@@ -714,6 +797,9 @@ const defaultMaterial = new THREE.MeshStandardMaterial({
  * no textures needed. `sun` direction is fixed, not tied to any actual light
  * in the scene — see the `sky.sun` schema doc for that tradeoff.
  */
+/** How far the day cloud deck leans toward the sky colour behind it (0 = the art as painted). */
+const DAY_CLOUD_SKY_BLEND = 0.35;
+
 function buildSkyDome(
   top: string,
   bottom: string,
@@ -783,6 +869,7 @@ function buildSkyDome(
     cloudSun: uniform(new THREE.Color(clouds?.sun ?? "#ffb27a")),
     cloudSunAmount: uniform(clouds?.sunAmount ?? 0),
     cloudLight: uniform(1),
+    cloudNight: uniform(0),
     cloudTexOn: uniform(0),
     horizonOpacity: uniform(0),
   };
@@ -791,7 +878,11 @@ function buildSkyDome(
   // uniform until its image is actually there.
   const cloudMap = new THREE.Texture();
   const horizonMap = new THREE.Texture();
-  loadSkyLayer(cloudMap, clouds?.texture, resolveTexture, THREE.RepeatWrapping, () => (uniforms.cloudTexOn.value = 1));
+  loadSkyLayer(cloudMap, clouds?.texture, resolveTexture, THREE.RepeatWrapping, () => {
+    uniforms.cloudTexOn.value = 1;
+    // the same clouds, cast onto the land (cloud-shadow.ts)
+    setCloudShadowImage(cloudMap.image);
+  });
   loadSkyLayer(horizonMap, horizon?.texture, resolveTexture, THREE.ClampToEdgeWrapping, () => (uniforms.horizonOpacity.value = horizon?.opacity ?? 1));
   // TSL's generics cannot follow uniform-typed colours through mix/pow/add;
   // the graph is the same one the constant version built, just with uniforms
@@ -804,6 +895,7 @@ function buildSkyDome(
   // horizon haze: lighten toward the bottom color near dir.y == 0
   const hazeAmount: any = sub(float(1), smoothstep(float(0), float(0.22), abs(dir.y)));
   colorNode = mix(colorNode, u.bottom, mul(hazeAmount, float(0.6)));
+  const skyGradient: any = colorNode;
   // soft sun glow: a wide falloff shaped by `size` (closer to 1 = tighter)
   const sunFacing: any = clamp(dot(dir, normalize(u.sunDirection)), 0, 1);
   const sunGlow: any = mul(pow(sunFacing, float(1).div(float(1).sub(u.sunSize))), u.sunIntensity);
@@ -913,7 +1005,15 @@ function buildSkyDome(
     cloudAlpha = mul(smoothstep(threshold, add(threshold, u.cloudSoftness), density), horizonFade);
     thickness = smoothstep(threshold, float(1), density);
   }
-  let cloudColor: any = mix(u.cloudColor, u.cloudShadow, mul(thickness, float(0.75)));
+  // By day the painted art's white rims against its dark bodies read as cut
+  // paper: compress the thickness range a little (rim and body closer), and
+  // lean the whole deck toward the sky it sits in — lit parts a touch lighter
+  // than the gradient, in its hue — the same idea that makes the night deck
+  // look soft (see `moonlit` below), at about a third of the strength.
+  const dayThick: any = mix(add(mul(thickness, float(0.7)), float(0.12)), thickness, u.cloudNight);
+  let cloudColor: any = mix(u.cloudColor, u.cloudShadow, mul(dayThick, float(0.7)));
+  const skyTone: any = mul(skyGradient, mix(float(1.55), float(1.0), dayThick));
+  cloudColor = mix(cloudColor, skyTone, mul(float(DAY_CLOUD_SKY_BLEND), sub(float(1), u.cloudNight)));
   // Dawn and dusk are DIRECTIONAL: a low sun lights the deck from the side,
   // so the cloud near its azimuth burns and the far side of the sky stays
   // cold blue. A single day/night `color` tints the whole dome at once and
@@ -928,6 +1028,13 @@ function buildSkyDome(
     add(float(0.45), mul(thickness, float(0.55))),
   );
   cloudColor = mul(mix(cloudColor, u.cloudSun, clamp(cloudWarm, 0, 1)), u.cloudLight);
+  // Night cloud is moonlit: a little LIGHTER than the sky it crosses, in the
+  // sky's own hue, silvered near the moon — never darker than the gaps, which
+  // is what made a night deck read as black holes punched in a blue sky. The
+  // painted shading survives as a gentle step down with thickness.
+  const silver: any = mul(mul(u.moonColor, pow(moonFacing, float(24))), mul(u.moonIntensity, float(0.35)));
+  const moonlit: any = mul(add(mul(skyGradient, float(1.3)), silver), sub(float(1), mul(thickness, float(0.25))));
+  cloudColor = mix(cloudColor, max(cloudColor, moonlit), u.cloudNight);
   colorNode = mix(colorNode, cloudColor, mul(cloudAlpha, float(0.96)));
   /* eslint-enable @typescript-eslint/no-explicit-any */
   material.colorNode = colorNode;
@@ -2474,8 +2581,8 @@ function populateEntityGroup(
             instance.userData["modelRoot"] = true;
             instance.traverse((node) => {
               if ((node as THREE.Mesh).isMesh) {
-                node.castShadow = meshData.castShadow;
-                node.receiveShadow = meshData.receiveShadow;
+                node.castShadow = meshData.castShadow && !casterExempt(node as THREE.Mesh);
+                node.receiveShadow = meshData.receiveShadow && !casterExempt(node as THREE.Mesh);
                 // Updated lazily from the current bone pose, including teleports.
                 if ((node as THREE.SkinnedMesh).isSkinnedMesh) {
                   enableSkinnedBounds(node as THREE.SkinnedMesh);
@@ -2516,6 +2623,11 @@ function populateEntityGroup(
               mergeModelSubmeshes(instance);
             }
             group.add(instance);
+            // a building's chimneys smoke (the whole model only: a detached node has no roof)
+            if (!nodeName) {
+              chimneySmoke.register(instance);
+              distantWindows.register(instance);
+            }
             // The initial decal flush can precede async model arrival. Fit
             // nearby projectors now that their static receiver exists.
             if (scene) reprojectDecalsAround(scene, id, group, options);
@@ -2588,6 +2700,8 @@ function populateEntityGroup(
         light.userData["runtimeEnabled"] = true;
         light.userData["lightImportance"] = lightData.importance ?? 1;
         if (lightData.when && lightData.when !== "always") light.userData["lightWhen"] = lightData.when;
+        if (lightData.glow !== undefined) light.userData["lightGlow"] = lightData.glow;
+        if (lightData.flicker && lightData.flicker !== "none") light.userData["lightFlicker"] = lightData.flicker;
         group.add(light);
         options.onLight?.(id, light, lightData.importance ?? 1);
       }
@@ -3418,7 +3532,7 @@ function instanceGltfInto(
       ),
       entries.length,
     );
-    instanced.castShadow = first.castShadow;
+    instanced.castShadow = first.castShadow && !casterExempt(instanced);
     instanced.receiveShadow = first.receiveShadow;
     instanced.userData["instancedEntityIds"] = entries.map((e) => e.id);
     for (let i = 0; i < entries.length; i++) {

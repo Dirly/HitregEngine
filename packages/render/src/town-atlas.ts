@@ -1,5 +1,6 @@
 import * as THREE from "three/webgpu";
-import { attribute, dFdx, dFdy, fract, texture, uv, vec4 } from "three/tsl";
+import { attribute, dFdx, dFdy, float, fract, texture, uv, vec4 } from "three/tsl";
+import { wetColor, wetRoughness, wetSpecular } from "./wetness.js";
 
 /**
  * Runtime half of `apps/playground/tools/town-atlas.mjs`.
@@ -40,7 +41,11 @@ function atlasMaterialFor(source: THREE.MeshStandardMaterial): THREE.Material {
   const tiled = uv();
   const inTile = rect.xy.add(fract(tiled).mul(rect.zw));
   const gradUv = tiled.mul(rect.zw);
-  material.colorNode = texture(map, inTile).grad(dFdx(gradUv), dFdy(gradUv));
+  // rain darkens the walls and gives the matte kit a sheen (wetness.ts)
+  const page = texture(map, inTile).grad(dFdx(gradUv), dFdy(gradUv));
+  material.colorNode = vec4(wetColor(page.rgb), page.a);
+  material.roughnessNode = wetRoughness(float(1));
+  material.specularIntensityNode = wetSpecular(float(material.specularIntensity));
   material.userData["hitregAtlas"] = source.userData["hitregAtlas"];
   atlasMaterials.set(map, material);
   return material;

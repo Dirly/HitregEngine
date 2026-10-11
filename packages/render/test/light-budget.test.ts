@@ -173,3 +173,35 @@ describe("LightBudgetSystem", () => {
     expect(litPointLights(scene)).toHaveLength(0);
   });
 });
+
+describe("LightBudgetSystem glow, pools and fog lamps", () => {
+  it("halos every live light, pools only the ones past the budget, and feeds the nearest to the fog", async () => {
+    const { fogLamps } = await import("../src/atmosphere.js");
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera();
+    const budget = new LightBudgetSystem(2);
+    const lights = [2, 4, 6, 8, 10].map((x) => {
+      const light = new THREE.PointLight(0xffaa66, 8, 10);
+      light.position.x = x;
+      scene.add(light);
+      budget.register(light, 1);
+      return light;
+    });
+    lights[4]!.userData["lightGlow"] = 0;
+    budget.update(scene, camera);
+    const stats = budget.stats();
+    expect(stats.active).toBe(2);
+    expect(stats.glows).toBe(4); // the glow-0 light has none
+    expect(stats.pools).toBe(3); // 5 live - 2 budgeted
+    expect(fogLamps.position[0]!.value.x).toBeCloseTo(2);
+    expect(fogLamps.color[0]!.value.r).toBeGreaterThan(0);
+    expect(fogLamps.color[4 - 1]!.value.r).toBeGreaterThan(0);
+
+    // night lights by day: no halo, no pool, no fog glow
+    for (const light of lights) light.userData["lightWhen"] = "night";
+    budget.update(scene, camera);
+    expect(budget.stats()).toMatchObject({ glows: 0, pools: 0 });
+    expect(fogLamps.color[0]!.value.r).toBe(0);
+    budget.dispose();
+  });
+});

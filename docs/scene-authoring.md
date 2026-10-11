@@ -781,6 +781,10 @@ Six things make the difference between "there are particles" and weather:
   point, on `splashChance` of landings. Never drive a splash emitter's *rate*
   instead: every splash then spawns at the emitter's own origin, which is a
   puff of particles at the player's feet and nothing where the rain is.
+- **Rain wets the world**: the weather builtin publishes `weather.wet` (soaks in
+  over ~20 s of rain, dries over ~2 min; snow leaves it alone), which darkens
+  the splat ground and town atlas walls and drops their roughness so lamps
+  streak across them (`wetness.ts`). One uniform; no recompile.
 - **The sky answers the weather**, and it takes three separate things:
   `gloom` dims the lights, `cloudDark` darkens the deck itself, and the dome's
   own gradient darkens with it (`SceneLighting`, from `cloudDark`) — the sky is

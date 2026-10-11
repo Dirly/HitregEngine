@@ -25,6 +25,15 @@ import { setEnvironment as setMaterialEnvironment, setEnvironmentScale } from ".
 import { refillSkyEnvironmentTexture } from "./environment.js";
 import { setFoliageWindScale } from "./foliage-wind.js";
 import { publishDaylight } from "./daylight.js";
+import { setSnowLine, setWetness } from "./wetness.js";
+import { setSmokeWindAngle } from "./chimney-smoke.js";
+import { birds } from "./birds.js";
+import { cloudShadow } from "./cloud-shadow.js";
+import { updateSunGlare } from "./sun-glare.js";
+const WHITE = new THREE.Color(1, 1, 1);
+
+/** How much direct sun a full cloud takes away (cloud-shadow.ts). */
+const CLOUD_SHADOW_STRENGTH = 0.55;
 import { setRimLight, type RimSettings } from "./rim-light.js";
 
 /**
@@ -102,6 +111,8 @@ export interface SkyDomeUniforms {
   cloudSun: { value: THREE.Color };
   cloudSunAmount: { value: number };
   cloudLight: { value: number };
+  /** 0 by day .. 1 at night: how far the cloud is held to the sky's own tone (moonlit, never a black hole). */
+  cloudNight: { value: number };
   /** 1 once the painted cloud texture has loaded (until then the layer is the procedural deck alone). */
   cloudTexOn: { value: number };
   /** Horizon backdrop opacity, held at 0 until its texture has loaded. */
@@ -171,7 +182,7 @@ export interface LiveSkyOptions {
    * turns god rays off and softens the sun (no hard shadows under a full
    * deck). Rain drives it to 1; a dry grey day is anywhere in between.
    */
-  weather?: { gloom?: number; tint?: string; tintAmount?: number; wind?: number; cloudDark?: number; flash?: number; overcast?: number };
+  weather?: { gloom?: number; tint?: string; tintAmount?: number; wind?: number; cloudDark?: number; flash?: number; overcast?: number; wet?: number; snowLine?: number; windAngle?: number };
   /**
    * A zone's MOOD, layered over the day/night values and under the weather
    * (see `regionMoodSchema` in @hitreg/core): `sky`/`haze` pull the zenith and
@@ -349,6 +360,14 @@ export class SceneLighting {
   }
 
   /**
+   * What lies on the ground (`weather.wet` / `weather.snow`), held per scene
+   * and pushed to the shared surface uniforms in frame() — by the scene being
+   * DRAWN, never at construction: portraits build their own small scenes every
+   * few frames, and a reset there dried the world (and shed its snow) mid-storm.
+   */
+  private ground = { wet: 0, snowLine: 1e6 };
+
+  /**
    * Turn a light's `shadow` block into three state. The one place that knows
    * `cascades`/`cascadeSplit` are directional-only — the schema cannot express
    * a conditional field, so the condition lives here.
@@ -517,6 +536,9 @@ export class SceneLighting {
       if (w.cloudDark !== undefined) this.weather.cloudDark = Math.min(1, Math.max(0, w.cloudDark));
       if (w.flash !== undefined) this.weather.flash = Math.min(1, Math.max(0, w.flash));
       if (w.overcast !== undefined) this.weather.overcast = Math.min(1, Math.max(0, w.overcast));
+      if (w.wet !== undefined) this.ground.wet = Math.min(1, Math.max(0, w.wet));
+      if (w.windAngle !== undefined) setSmokeWindAngle(w.windAngle);
+      if (w.snowLine !== undefined) this.ground.snowLine = w.snowLine;
       // Weather modulates the sun and the fill, so it needs their unmodulated
       // values even in a scene no day/night script drives (else they never move).
       const sun = this.directionalLights.values().next().value as THREE.DirectionalLight | undefined;
@@ -566,6 +588,18 @@ export class SceneLighting {
       const sky = this.baseSky;
       const coverage = req.cloudCoverage ?? sky?.clouds?.coverage ?? 0;
       dome.cloudCoverage.value = coverage + (1 - coverage) * overcast;
+      // the clouds' shadows on the land: strongest in full day under broken
+      // cloud; an overcast sky is one even shade (the sun dims instead), and
+      // night has no sun to block
+      // Only a sky WITH painted cloud writes these shared uniforms: portraits
+      // and face shots build small cloudless scenes every few frames, and
+      // letting them write switched the world's cloud shadows off.
+      if (sky?.clouds?.texture) {
+        cloudShadow.coverage.value = coverage;
+        cloudShadow.scale.value = dome.cloudScale.value;
+        cloudShadow.speed.value.copy(dome.cloudSpeed.value);
+        cloudShadow.strength.value = CLOUD_SHADOW_STRENGTH * open * Math.min(1, req.daylight * 1.5);
+      }
       dome.cloudSunAmount.value = (req.cloudSunAmount ?? sky?.clouds?.sunAmount ?? 0) * open;
       dome.sunIntensity.value = (req.sunDisc ?? sky?.sun?.intensity ?? 0) * open * open;
     }
@@ -578,6 +612,7 @@ export class SceneLighting {
     if (req.ambientColor) for (const ambient of this.findAmbientLights()) ambient.color.copy(req.ambientColor).multiply(mood.shade);
     if (req.top && this.hemisphere) this.hemisphere.color.copy(req.top).multiply(mood.shade);
     if (req.cloudLight !== null && dome) dome.cloudLight.value = req.cloudLight * dim;
+    if (dome) dome.cloudNight.value = 1 - req.daylight;
     // The deck itself: storm grey, and lit from inside by a strike. Derived
     // from what the day/night script asked for, so the two stay independent.
     if (dome) {
@@ -744,6 +779,16 @@ export class SceneLighting {
     this.claimMaterialEnvironment();
     this.syncSun();
     publishDaylight(this.req.daylight);
+    // the drawn scene's ground: a scene with no weather is dry and snowless
+    setWetness(this.ground.wet);
+    setSnowLine(this.ground.snowLine);
+    birds.setWeather(this.ground.wet);
+    // only the world's own lighting drives the glare (portraits build scenes too)
+    if (this.baseSky?.clouds?.texture || this.hemisphere) {
+      const sun = this.directionalLights.values().next().value as THREE.DirectionalLight | undefined;
+      const up = THREE.MathUtils.smoothstep(this.sunDirection.y, -0.02, 0.12);
+      updateSunGlare(camera, this.sunDirection, sun?.color ?? WHITE, sun && sun.visible ? up * (1 - this.weather.overcast) * this.req.daylight : 0);
+    }
 
     if (!this.volumetric.enabled) {
       if (this.shaftLights.length > 0) {

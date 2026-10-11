@@ -1,6 +1,9 @@
 import * as THREE from "three/webgpu";
 import { readWorldPosition } from "./static-transforms.js";
 import { worldDaylight } from "./daylight.js";
+import { DEFAULT_LIGHT_GLOW, LightGlows } from "./light-glow.js";
+import { LightPools } from "./light-pools.js";
+import { FOG_LAMP_COUNT, fogLamps } from "./atmosphere.js";
 
 interface Entry {
   light: THREE.PointLight;
@@ -69,9 +72,33 @@ function ancestorsVisible(object: THREE.Object3D): boolean {
 /** `light.when`: night lights scale by darkness, day lights by daylight. */
 function timeOfDayScale(light: THREE.Light): number {
   const when = light.userData["lightWhen"];
-  if (when === "night") return 1 - worldDaylight.value;
-  if (when === "day") return worldDaylight.value;
-  return 1;
+  const flicker = light.userData["lightFlicker"];
+  const scale = flicker ? flickerScale(light, flicker) : 1;
+  if (when === "night") return (1 - worldDaylight.value) * scale;
+  if (when === "day") return worldDaylight.value * scale;
+  return scale;
+}
+
+/** `light.flicker`: (rate Hz, depth) for two incommensurate sines per kind. */
+const FLICKER: Record<string, [number, number, number, number]> = {
+  candle: [1.7, 0.06, 4.3, 0.04],
+  torch: [3.1, 0.12, 7.9, 0.08],
+  brazier: [0.9, 0.16, 2.3, 0.07],
+};
+
+/** A flame's unsteadiness right now: two sines per light, phased by its id so no two lamps beat together. */
+function flickerScale(light: THREE.Light, kind: string): number {
+  const f = FLICKER[kind];
+  if (!f) return 1;
+  const t = performance.now() / 1000;
+  const phase = light.id * 1.618;
+  return 1 + Math.sin(t * f[0] * Math.PI * 2 + phase) * f[1] + Math.sin(t * f[2] * Math.PI * 2 + phase * 2.3) * f[3];
+}
+
+/** `light.glow` (userData `lightGlow`); unset = the default halo, 0 = none. */
+function glowOf(light: THREE.Light): number {
+  const glow = light.userData["lightGlow"];
+  return typeof glow === "number" ? glow : DEFAULT_LIGHT_GLOW;
 }
 
 export class LightBudgetSystem {
@@ -85,6 +112,10 @@ export class LightBudgetSystem {
   private readonly live: Entry[] = [];
   private slotHost: THREE.Scene | null = null;
   private active = 0;
+  /** Halos for every live point light, budgeted or not (`light.glow`). */
+  private readonly glows = new LightGlows();
+  /** Screen-space pools for the lights the budget left out. */
+  private readonly pools = new LightPools();
 
   constructor(private maxPointLights = 8) {}
 
@@ -115,6 +146,7 @@ export class LightBudgetSystem {
     // it is what the old `[...this.lights]` copy was really guarding against.
     const candidates = this.scratch;
     let count = 0;
+    this.glows.begin();
     this.pruned.length = 0;
     for (const light of this.lights) {
       if (!belongsToScene(light, scene)) {
@@ -131,14 +163,19 @@ export class LightBudgetSystem {
       // comment. It is not a pool candidate and does not spend pool budget.
       if (light.castShadow) {
         light.visible = true;
+        const onness = timeOfDayScale(light);
+        readWorldPosition(light, _lightPosition);
+        this.glows.add(light, _lightPosition, _lightPosition.distanceTo(this.cameraPosition), glowOf(light), onness);
         continue;
       }
       // Authored lights are data from here on: hidden once, never toggled
       // again, so they contribute nothing to the renderer's light cache key.
       light.visible = false;
       // a night lantern by day (or a day light at night) takes no slot at all
-      if (timeOfDayScale(light) < 0.01) continue;
+      const onness = timeOfDayScale(light);
+      if (onness < 0.01) continue;
       const distanceSq = readWorldPosition(light, _lightPosition).distanceToSquared(this.cameraPosition);
+      this.glows.add(light, _lightPosition, Math.sqrt(distanceSq), glowOf(light), onness);
       const entry = (candidates[count] ??= { light, importance: 1, distanceSq: 0 });
       entry.light = light;
       entry.importance = Math.max(0.001, Number(light.userData["lightImportance"]) || 1);
@@ -173,6 +210,29 @@ export class LightBudgetSystem {
       slot.decay = source.decay;
     }
     this.active = allowed;
+    this.glows.end(scene, camera);
+
+    // the lights past the budget: a screen-space pool each, nearest first
+    this.pools.begin();
+    for (let i = allowed; i < live.length; i++) {
+      const entry = live[i]!;
+      readWorldPosition(entry.light, _lightPosition);
+      if (!this.pools.add(entry.light, _lightPosition, Math.sqrt(entry.distanceSq), timeOfDayScale(entry.light))) break;
+    }
+    this.pools.end(scene);
+
+    // the nearest few glow in the fog
+    for (let i = 0; i < FOG_LAMP_COUNT; i++) {
+      const entry = i < live.length ? live[i]! : null;
+      const color = fogLamps.color[i]!.value;
+      if (!entry) {
+        color.setRGB(0, 0, 0);
+        continue;
+      }
+      readWorldPosition(entry.light, _lightPosition);
+      fogLamps.position[i]!.value.set(_lightPosition.x, _lightPosition.y, _lightPosition.z, Math.max(0.1, entry.light.distance || 10));
+      color.copy(entry.light.color).multiplyScalar(entry.light.intensity * timeOfDayScale(entry.light) * glowOf(entry.light));
+    }
   }
 
   /**
@@ -204,12 +264,15 @@ export class LightBudgetSystem {
   /** Release the pool (scene teardown). Authored lights are left as they are. */
   dispose(): void {
     this.disposeSlots();
+    this.glows.dispose();
+    this.pools.dispose();
+    for (const color of fogLamps.color) color.value.setRGB(0, 0, 0);
     this.lights.clear();
     this.active = 0;
   }
 
-  stats(): { registered: number; active: number; budget: number } {
-    return { registered: this.lights.size, active: this.active, budget: this.maxPointLights };
+  stats(): { registered: number; active: number; budget: number; glows: number; pools: number } {
+    return { registered: this.lights.size, active: this.active, budget: this.maxPointLights, glows: this.glows.stats(), pools: this.pools.stats() };
   }
 }
 

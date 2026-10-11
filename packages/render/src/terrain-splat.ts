@@ -34,6 +34,7 @@ import {
   type TriplanarBasis,
 } from "./material-maps.js";
 import type { MaterialData } from "./scene-builder.js";
+import { wetColor, wetRoughness } from "./wetness.js";
 
 /**
  * The `terrain-splat` shader: a palette of surfaces blended into one material.
@@ -334,8 +335,8 @@ export function buildTerrainSplatMaterial(
   const splat = data.splat as SplatData | undefined;
   const layers = splat?.layers ?? [];
   if (!splat || layers.length === 0) {
-    material.colorNode = tslColor(data.color);
-    material.roughnessNode = float(data.roughness);
+    material.colorNode = wetColor(tslColor(data.color));
+    material.roughnessNode = wetRoughness(float(data.roughness));
     return material;
   }
 
@@ -459,8 +460,8 @@ function wireSplat(
     colorNode = mul(colorNode, attribute("color", "vec3"));
   }
 
-  material.colorNode = colorNode;
-  material.roughnessNode = roughnessNode;
+  material.colorNode = wetColor(colorNode);
+  material.roughnessNode = wetRoughness(roughnessNode);
 
   // normals only if at least one layer supplied one; blending a normal map
   // across layers that mostly lack one just flattens the ones that have it

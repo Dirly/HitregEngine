@@ -236,13 +236,13 @@ describe("weather fronts", () => {
     }
   });
 
-  it("closes the whole sky once it is properly raining, and leaves coverage authored", () => {
+  it("closes the whole sky once it is properly raining, over the dry-spell share of the authored deck", () => {
     const { sky } = run(150, { force: "storm", changeMinutes: 4, fadeSeconds: 2 });
     const last = sky[sky.length - 1]!;
     // rain under a blue gap is what overcast exists to rule out
     expect(last.weather!.overcast!).toBeGreaterThan(0.99);
-    // the deck's shapes are its shading now, so coverage itself is not driven
-    expect(last.clouds!.coverage).toBeUndefined();
+    // coverage is only ever a share of the authored deck (0.3); overcast closes the rest
+    expect(last.clouds!.coverage!).toBeLessThanOrEqual(0.3 + 1e-9);
     // and harder-edged, not softer: soft cloud is haze, which fog already does
     expect(last.clouds!.softness!).toBeLessThan(0.35);
   });
@@ -251,6 +251,17 @@ describe("weather fronts", () => {
     const { sky } = run(240, { force: "storm", changeMinutes: 4, fadeSeconds: 2 });
     // the drizzle phase (see the envelope test): mostly closed already
     expect(sky[Math.round(30 * 30)]!.weather!.overcast!).toBeGreaterThan(0.7);
+  });
+
+  it("lays snow above a snowline: snowAbove + 120 at rest, a number pins it, off lays none", () => {
+    expect(run(5, { force: "clear", snowAbove: 220, fadeSeconds: 2 }).last().weather!.snowLine).toBe(340);
+    expect(run(5, { force: "clear", snowLine: "300", fadeSeconds: 2 }).last().weather!.snowLine).toBe(300);
+    expect(run(5, { force: "clear", snowLine: "off", fadeSeconds: 2 }).last().weather!.snowLine!).toBeGreaterThan(1e5);
+  });
+
+  it("pins the dry cloud cover from the param: 0 is a clear sky, 1 the authored deck", () => {
+    expect(run(20, { force: "clear", overcast: "0", cloudCover: "0", fadeSeconds: 2 }).last().clouds!.coverage!).toBeCloseTo(0, 3);
+    expect(run(20, { force: "clear", overcast: "0", cloudCover: "1", fadeSeconds: 2 }).last().clouds!.coverage!).toBeCloseTo(0.3, 3);
   });
 
   it("pins a dry overcast from the param, and clears it with nothing falling", () => {

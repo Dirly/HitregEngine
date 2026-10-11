@@ -1,5 +1,6 @@
 import * as THREE from "three/webgpu";
 import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
+import { cloudShadowFactor } from "./cloud-shadow.js";
 import { CSMFrustum } from "three/addons/csm/CSMFrustum.js";
 import { SHADOW_CAMERA_LAYERS } from "./horizon.js";
 
@@ -347,6 +348,17 @@ class EngineCascadeShadowNode extends CSMShadowNode {
   baseNormalBias = DEFAULT_SHADOW_SETTINGS.normalBias;
   /** Filled by `updateFrustums()`; read by `stats()` and by tests. */
   readonly cascadeExtents: number[] = [];
+
+  /**
+   * Three's cascade term, times the drifting cloud shadow (cloud-shadow.ts):
+   * the sun's shadow is the one place that dims ONLY direct sunlight on every
+   * receiving material, so clouds shade the land, towns and trees here.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  override setup(builder: any): any {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (super.setup(builder) as any).mul(cloudShadowFactor());
+  }
 
   override updateFrustums(): void {
     if (this.mainFrustum === null) return; // pre-`_init()`; nothing to fit yet

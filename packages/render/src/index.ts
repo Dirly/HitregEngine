@@ -160,6 +160,10 @@ export {
   type ImpostorInstanceData,
 } from "./impostor.js";
 export { LightBudgetSystem } from "./light-budget.js";
+export { chimneySmoke, ChimneySmoke } from "./chimney-smoke.js";
+export { updateWorldAmbience, setWorldExtrasEnabled } from "./ambience.js";
+export { cloudShadow } from "./cloud-shadow.js";
+export { updateCharacterGrounding } from "./contact-shadows.js";
 export { pathGeometry, type PathMeshSource } from "./path-mesh.js";
 export { surfaceGeometry, type SurfaceMeshSource } from "./surface-mesh.js";
 export { WaterWake, waterWakeUniforms, type WaterWakeOptions } from "./water-wake.js";

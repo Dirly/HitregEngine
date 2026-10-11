@@ -47,7 +47,7 @@ import {
   type ChunkStreamerData,
   type SpritesheetDoc,
 } from "@hitreg/core";
-import { MovingInstanceSystem, EngineRenderer, buildScene, gltfLoadingCount, type PostFxData, makeMeshGeometryProvider, AnimationSystem, CROWD_POSE_LOD, ParticleSystem, BillboardSystem, LightBudgetSystem, FoliageLodSystem, ClusterLodSystem, GrassSystem, PortraitView, ThirdPersonCameraRig, fitRigToBody, type RigBodyCollider, type BuildOptions, type RigVec3 } from "@hitreg/render";
+import { MovingInstanceSystem, EngineRenderer, buildScene, gltfLoadingCount, type PostFxData, makeMeshGeometryProvider, AnimationSystem, CROWD_POSE_LOD, ParticleSystem, BillboardSystem, LightBudgetSystem, updateWorldAmbience, updateCharacterGrounding, FoliageLodSystem, ClusterLodSystem, GrassSystem, PortraitView, ThirdPersonCameraRig, fitRigToBody, type RigBodyCollider, type BuildOptions, type RigVec3 } from "@hitreg/render";
 import { createAmbientVfx, createVfx, makeVfxHost, warmVfx } from "./vfx-host.js";
 
 /** The `camera` component, straight off the schema. */
@@ -1076,6 +1076,7 @@ async function main(): Promise<void> {
       modelLooks.update(); // item effects placed once their model has loaded
       ambientVfx.update(renderCam, built.scene); // before the plays step and the light budget re-aims
       vfx.update(dt, renderCam, built.scene);
+      updateCharacterGrounding(animations.roots(), built.scene, renderCam);
       grass.update(renderCam, ground.sampleGround, ground.sampleCover);
       // the near->mid foliage LOD switch is judged in screen pixels, so the
       // system needs the projection actually in use (idempotent when unchanged)
@@ -1085,6 +1086,7 @@ async function main(): Promise<void> {
       foliageLod.update(renderCam.getWorldPosition(camWorldPos));
       clusterLod.update(renderCam, canvas.clientHeight || window.innerHeight);
       lightBudget.update(built.scene, renderCam);
+      updateWorldAmbience(built.scene, renderCam, dt);
       if (skyDomeMesh) (skyDomeMesh as THREE.Object3D).position.copy(renderCam.getWorldPosition(camWorldPos));
       profiler.begin("draw");
       vfx.applyShake(renderCam); // the rig owns the camera; the offset lives only inside the draw

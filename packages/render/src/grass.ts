@@ -1,5 +1,7 @@
 import * as THREE from "three/webgpu";
 import { foliageWindScale } from "./foliage-wind.js";
+import { grassPushOffset } from "./grass-push.js";
+import { snowAt } from "./wetness.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type N = any;
@@ -25,6 +27,8 @@ import { sqrt,
   uniform,
   vec2,
   step,
+  modelWorldMatrix,
+  vec4,
 } from "three/tsl";
 
 /** Validated `grass` component data (schema lives in @hitreg/core). */
@@ -614,9 +618,15 @@ class GrassPatch {
     const sway = mul(sin(add(mul(time, rate), phase)), mul(float(data.windStrength), foliageWindScale));
     // a flat card has no height to bend over; it rides the water still
     if (!flat) {
+      // …and parts around whoever walks through it (grass-push.ts)
+      const world: N = modelWorldMatrix.mul(vec4(positionLocal, 1)).xyz;
+      // under lying snow the whole tuft sinks out of sight (wetness.ts snowAt —
+      // the same drift pattern the ground whitens with, so they never disagree)
+      const buried: N = snowAt(world.x, world.y, world.z);
+      const sink: N = vec3(0, buried.mul(float(data.bladeHeight * 1.6 + 0.1)).negate(), 0);
       this.material.positionNode = add(
-        positionLocal,
-        vec3(mul(sway, bendEased), 0, mul(mul(sway, bendEased), float(0.3))),
+        add(add(positionLocal, vec3(mul(sway, bendEased), 0, mul(mul(sway, bendEased), float(0.3)))), sink),
+        grassPushOffset(world, bendEased),
       );
     }
     // fake "mostly up" normal (no real geometry normal — a thin blade's true

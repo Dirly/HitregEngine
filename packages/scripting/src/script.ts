@@ -32,8 +32,8 @@ export interface LiveSkyOptions {
     softness?: number;
   };
   ambient?: { color?: string; intensity?: number };
-  /** Applied on top of the day/night values: gloom 0..1 dims sun/fill/ambient/IBL, tint blends fog + horizon, wind scales foliage wind, cloudDark drives the deck itself toward storm grey, flash is lightning (a momentary wash over sky, fog and fill — no light is added), overcast 0..1 closes the sky over the authored coverage (1 = full deck, no sun disc, no god rays, soft sun). */
-  weather?: { gloom?: number; tint?: string; tintAmount?: number; wind?: number; cloudDark?: number; flash?: number; overcast?: number };
+  /** Applied on top of the day/night values: gloom 0..1 dims sun/fill/ambient/IBL, tint blends fog + horizon, wind scales foliage wind, cloudDark drives the deck itself toward storm grey, flash is lightning (a momentary wash over sky, fog and fill — no light is added), overcast 0..1 closes the sky over the authored coverage (1 = full deck, no sun disc, no god rays, soft sun), wet 0..1 darkens the ground and town walls with matte puddles (rain), snowLine (world Y) is where snow lies: above it what faces up is white. */
+  weather?: { gloom?: number; tint?: string; tintAmount?: number; wind?: number; cloudDark?: number; flash?: number; overcast?: number; wet?: number; snowLine?: number; windAngle?: number };
   /**
    * A zone's MOOD, layered over the day/night values and under the weather
    * (see `regionMoodSchema` in @hitreg/core): `sky`/`haze` pull the zenith and

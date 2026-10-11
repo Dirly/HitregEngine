@@ -363,6 +363,47 @@ currently win. The light set the renderer sees is then constant forever and the
 per-frame update writes uniforms only. Shadow casters are excluded (a shadow
 map belongs to its light) and left permanently visible.
 
+The same loop feeds three light-free stand-ins, so a small budget does not
+read as dark: a halo per live light (`light-glow.ts`, `light.glow`), a
+screen-space pool per light PAST the budget (`light-pools.ts`: a back-face
+box that rebuilds the surface from the depth texture and adds a Lambert term
+with three's own range falloff), and the nearest four as lamp glow in the
+height fog (`fogLamps` in `atmosphere.ts`, two atans per lamp per lit
+fragment). Each is one instanced draw or a uniform write; none touches the
+renderer's light set. Measured look on Greyharbour at night: budget 3 vs 32
+is hard to tell apart.
+
+### The cheap world extras, and how they were proven cheap
+
+Each is a uniform, a term in an existing shader, or ONE instanced draw for
+the whole world — never a per-object draw or a light slot:
+
+- cloud shadows: the dome's painted clouds multiplied into the cascaded sun
+  shadow term (`cloud-shadow.ts`, `EngineCascadeShadowNode.setup`) — one
+  texture read per sun-lit fragment, direct sun only;
+- chimney smoke: tops found in building geometry at load
+  (`findChimneys`), puffs animated wholly on the GPU (`chimney-smoke.ts`);
+- birds (`birds.ts`), contact shadows under characters
+  (`contact-shadows.ts`, the light-pool depth trick, multiply blend), grass
+  parting (`grass-push.ts`, 8 uniform pushers);
+- window interiors by day (interior mapping on street-side glass only),
+  sun glare (5 depth taps in the post chain, `sun-glare.ts`), light
+  `flicker` (CPU sines in the budget loop), footstep puffs (one VFX burst
+  per step, presentation only).
+
+Shared uniforms must only be written by the WORLD's lighting: portraits and
+face shots build small scenes with their own `SceneLighting` every few
+frames, and a constructor that reset cloud shadows (or a cloudless sky that
+wrote them) switched them off for good. Gate such writes on the scene
+actually having the feature (a painted cloud layer).
+
+Measured with `tools/light-shots.mts --ab` (all extras off vs on, interleaved
+in one session, vsync off; `setWorldExtrasEnabled` on the dev handle):
+Greyharbour night 29.5 → 27.9 ms median, day 30.1 → 30.3 ms — inside the
+noise — for +8..10 draw calls. The A/B cannot switch off terms compiled into
+shaders (fog lamps at zero gain, the cloud read, wetness, grass push, window
+interiors); those are a few ALU each.
+
 Diagnosis note: the engine profiler bills this to `render` with a large pile of
 **off-loop** time, which is what shader compilation looks like from outside the
 JS timeline. The `update/light-budget` scope itself reads as ~0.3 ms — the

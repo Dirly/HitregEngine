@@ -94,6 +94,11 @@ import {
   GrassSystem,
   type GrassData,
   LightBudgetSystem,
+  updateWorldAmbience,
+  setWorldExtrasEnabled,
+  cloudShadow,
+  chimneySmoke,
+  updateCharacterGrounding,
   makeMeshGeometryProvider,
   ParticleSystem,
   patchMaterial,
@@ -4395,6 +4400,8 @@ async function main(): Promise<void> {
       culling,
       terrainHeight: (x: number, z: number) => sampleTerrainHeight(x, z),
       waterWakeUniforms,
+      // world ambience (cloud shadows, chimney smoke): a probe can read their live state
+      ambience: { cloudShadow, chimneySmoke, setWorldExtrasEnabled },
       // the wake height field: a probe can pin its centre or read its size
       get waterWake() {
         return waterWake;
@@ -4918,6 +4925,7 @@ async function main(): Promise<void> {
         // the world carries its own cover: re-register it from the new recipe
         syncWorldCover(grass, worldCoverRoot, field, worldCoverIds, (assetId) => assets.getTexture(assetId)?.url);
       }
+      updateCharacterGrounding(animations.roots(), built.scene, renderCamera);
       grass.update(renderCamera, sampleTerrainHeight, sampleFoliageGround);
       profiler.end();
       profiler.begin("foliage-lod");
@@ -4944,6 +4952,7 @@ async function main(): Promise<void> {
       profiler.end();
       profiler.begin("light-budget");
       lightBudget.update(built.scene, renderCamera);
+      updateWorldAmbience(built.scene, renderCamera, dt);
       profiler.end();
       // recenter the sky dome on whichever camera is actually rendering — a
       // fixed-radius BackSide sphere only reads as an infinite background

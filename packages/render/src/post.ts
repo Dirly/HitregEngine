@@ -42,6 +42,7 @@ import { sharpen as sharpenNode } from "three/addons/tsl/display/SharpenNode.js"
 import { chromaticAberration as caNode } from "three/addons/tsl/display/ChromaticAberrationNode.js";
 import { lut3D as lut3DNode } from "three/addons/tsl/display/Lut3DNode.js";
 import { lut3DTextureFrom } from "./post-lut.js";
+import { applySunGlare } from "./sun-glare.js";
 import { ScreenShafts, VolumetricShafts, type VolumetricRequest, type VolumetricSettings } from "./atmosphere.js";
 
 /* -------------------------------------------------------------------------- */
@@ -1258,6 +1259,9 @@ export class PostChain {
       // additive bloom in working space
       color = color.add(bloomPass);
     }
+
+    // glare toward the sun, hidden by anything in front of it (sun-glare.ts)
+    color = applySunGlare(color, scenePass.getTextureNode("depth"), sceneColor);
 
     if (has("dof")) {
       this.dofFocus = uniform(fx.dof.focusDistance);

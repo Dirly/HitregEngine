@@ -2456,6 +2456,23 @@ class ThirdPersonController extends Script {
     // ±12% on the level (about 0.88, so footstepVolume stays the ceiling it
     // says it is): identical steps are the loop the ear catches first
     this.contactSound(1, 0.88 * (1 + (Math.random() * 2 - 1) * 0.12), pitch);
+    this.footPuff();
+  }
+
+  /**
+   * A small kick of the ground at the foot: dust off dirt and sand, powder off
+   * snow, a splash in water — nothing off stone, wood or metal. One tiny
+   * particle burst through the VFX system (presentation only: absent on a
+   * dedicated server). The footstep's own surface decides which.
+   */
+  private footPuff(): void {
+    const vfx = this.ctx.vfx;
+    if (!vfx) return;
+    const p = this.object.position;
+    const key = this.surfaceKey(this.ctx.surfaceAt?.(p.x, p.y, p.z) ?? "dirt");
+    const look = FOOT_PUFFS[key];
+    if (!look) return;
+    vfx.play(look, { origin: [p.x, p.y, p.z] });
   }
 
   private contactSound(priority: number, gain: number, pitch = 1): void {
@@ -3436,7 +3453,48 @@ interface WeatherState {
   until: number;
   /** How closed the sky is with nothing falling, 0..1 — a dry grey day. Rain closes it the rest of the way locally. Absent from older states. */
   overcast?: number;
+  /** Share of the scene's authored cloud coverage showing on a dry spell, 0..1 — clear nights happen. Absent = 1 (older states). */
+  cover?: number;
 }
+
+/** Footstep kick per surface (see footPuff): colour, count, how high it flies. */
+function footPuffDoc(color: string, count: number, speed: [number, number], size: number, gravity: number): unknown {
+  return {
+    modules: [
+      {
+        kind: "particles",
+        anchor: { at: "ground", offset: [0, 0.05, 0] },
+        color,
+        colorEnd: color,
+        burst: count,
+        emitter: {
+          emitting: false,
+          max: count,
+          lifetime: [0.35, 0.7],
+          shape: "sphere",
+          shapeSize: [0.12, 0.02, 0.12],
+          direction: [0, 1, 0],
+          spread: 70,
+          speed,
+          gravity,
+          drag: 3,
+          sizeStart: size,
+          sizeEnd: size * 2.2,
+          opacityStart: 0.45,
+          opacityEnd: 0,
+          blending: "normal",
+        },
+      },
+    ],
+  };
+}
+const FOOT_PUFFS: Record<string, unknown> = {
+  dirt: footPuffDoc("#7a6a55", 5, [0.4, 0.9], 0.14, -0.1),
+  sand: footPuffDoc("#b8a27a", 6, [0.5, 1.1], 0.14, -0.05),
+  rubble: footPuffDoc("#8a8278", 4, [0.4, 0.8], 0.12, 0),
+  snow: footPuffDoc("#e8eef5", 7, [0.6, 1.3], 0.12, 1.5),
+  water: footPuffDoc("#c8d8e8", 8, [1.2, 2.2], 0.08, 6),
+};
 
 type WeatherKind = "rain" | "sand" | "snow";
 const KINDS: WeatherKind[] = ["rain", "sand", "snow"];
@@ -3568,6 +3626,13 @@ class Weather extends Script {
         "fringe of badlands puts a sandstorm over a forest.",
     },
     snowAbove: { default: 220, min: -1000, max: 5000, description: "World Y above which precipitation is snow in any biome." },
+    snowLine: {
+      default: "auto",
+      description:
+        "World Y above which snow LIES on the ground at rest (peaks stay white, valleys and towns stay clear). auto = " +
+        "snowAbove + 120; a number pins it; 'off' = nothing ever lies. Seasons later move this per continent.",
+    },
+    snowDrop: { default: 150, min: 0, max: 2000, description: "Metres a full snowfall pushes the snowline down the mountain; it melts back up afterwards." },
     fadeSeconds: { default: 8, min: 0.5, max: 120, description: "How long a change takes to fade in or out, locally. The front's own envelope is the slow shape; this only smooths the steps between published states." },
     drizzle: { default: 0.22, min: 0, max: 1, description: "Where a front OPENS, as a fraction of its peak. Rain that starts at full strength reads as a switch; this is the spitting few minutes before it means it." },
     rainRate: { default: 2600, min: 0, max: 8000, description: "Rain emitter spawn rate per second at full precipitation. A pour is DENSE: too few drops and each one reads as a scratch on the lens rather than as weather." },
@@ -3630,6 +3695,13 @@ class Weather extends Script {
         "softens shadows. Rain and snow close the sky fully whatever this says. Console: /overcast.",
     },
     overcastMax: { default: 0.7, min: 0, max: 1, description: "auto only: the greyest a dry roll can be." },
+    cloudCover: {
+      default: "auto",
+      description:
+        "How much of the scene's authored cloud coverage shows on a dry spell: auto rolls it with each front (about " +
+        "a third clear, a third broken, a third as authored), or a number 0..1 pins it. Rain, snow and overcast close " +
+        "the sky over whatever this says. Console: /clouds.",
+    },
     gloomMax: { default: 0.6, min: 0, max: 1, description: "How much a full storm dims sun, fill, ambient and IBL." },
     cloudDarkMax: { default: 0.85, min: 0, max: 1, description: "How far a full storm drives the cloud deck itself toward slate. Gloom dims what the cloud lights; this darkens the cloud you are looking AT, and a storm needs both or the world goes dim under a bright white sky." },
     windMax: { default: 3, min: 0, max: 10, description: "Foliage wind multiplier at full storm (1 = authored)." },
@@ -3663,12 +3735,35 @@ class Weather extends Script {
       description: "Set or report how closed the sky is on a dry day (1 = full grey deck, no sun, no god rays). Rain closes it fully anyway.",
       authority: true,
     },
+    {
+      name: "ground",
+      args: "wet|snow [0-1 | auto] · snowline [y | auto]",
+      description: "Pin or release how wet the ground is, how much snow has fallen, or the snowline height (this client only; for testing the look).",
+    },
+    {
+      name: "clouds",
+      args: "[0-1 | auto]",
+      description: "Set or report how much of the authored cloud shows on a dry spell (0 = clear sky, 1 = as authored).",
+      authority: true,
+    },
   ];
-  private state: WeatherState = { precipitation: 0, storm: 0, wind: 0, windAngle: 0, strike: 0, until: 0, overcast: 0 };
+  private state: WeatherState = { precipitation: 0, storm: 0, wind: 0, windAngle: 0, strike: 0, until: 0, overcast: 0, cover: 1 };
   /** Console: pins the dry-day overcast without editing the scene (null = the param decides). */
   private forcedOvercast: number | null = null;
   /** The overcast showing here, eased like everything else. */
   private localOvercast = 0;
+  /** The dry-spell cloud cover showing here, eased like everything else. */
+  private localCover = 1;
+  /** Console: pins the dry cloud cover (null = the param decides). */
+  private forcedCover: number | null = null;
+  /** How wet the ground is here, 0..1: soaks in over a shower, dries slowly after it (sky `weather.wet`). */
+  private wetness = 0;
+  /** How much snow lies here, 0..1: settles over a few minutes of snowfall, melts slower (sky `weather.snow`). */
+  private snowCover = 0;
+  /** Console pins for the ground (null = the weather decides). */
+  private forcedWet: number | null = null;
+  private forcedSnow: number | null = null;
+  private forcedSnowLine: number | null = null;
   /** Console: overrides the `force` param without editing the scene. */
   private forcedMode: string | null = null;
   /**
@@ -3760,6 +3855,7 @@ class Weather extends Script {
     }
     this.localAngle = this.state.windAngle;
     this.localOvercast = this.state.overcast ?? 0;
+    this.localCover = this.state.cover ?? 1;
     this.lastStrike = this.state.strike;
     this.sample();
   }
@@ -3811,6 +3907,18 @@ class Weather extends Script {
     this.localStorm += (this.state.storm * this.state.precipitation - this.localStorm) * k;
     this.localDust += (this.dustShare - this.localDust) * k;
     this.localOvercast += ((this.state.overcast ?? 0) - this.localOvercast) * k;
+    this.localCover += ((this.state.cover ?? 1) - this.localCover) * k;
+    // Ground soaks in over ~20 s of rain and dries over ~2 min after it; snow
+    // is its own look and leaves the ground as it was, as does going under water.
+    if (!submerged) {
+      const soak = Math.min(1, this.local.rain / 0.4);
+      const rate = soak > this.wetness ? 1 / 20 : 1 / 120;
+      this.wetness += Math.sign(soak - this.wetness) * Math.min(Math.abs(soak - this.wetness), rate * dt);
+      // snow settles over ~2 min of steady snowfall and melts over ~6 min
+      const settle = Math.min(1, this.local.snow / 0.5);
+      const snowRate = settle > this.snowCover ? 1 / 120 : 1 / 360;
+      this.snowCover += Math.sign(settle - this.snowCover) * Math.min(Math.abs(settle - this.snowCover), snowRate * dt);
+    }
     // Gusts are the FAST layer and must not be smoothed into the slow one:
     // eased at `fadeSeconds` a gust arrives as a gentle swell, which is the
     // opposite of what a gust is.
@@ -3924,6 +4032,27 @@ class Weather extends Script {
    */
   private rollOvercast(): void {
     this.state.overcast = this.pinnedOvercast() ?? (Math.random() < 0.5 ? 0 : this.param<number>("overcastMax") * Math.random());
+    const r = Math.random();
+    this.state.cover = this.pinnedCover() ?? (r < 0.33 ? 0.12 * Math.random() : r < 0.66 ? 0.4 + 0.35 * Math.random() : 1);
+  }
+
+  /** Where snow lies right now: the resting line, pushed down the mountain by how much has fallen. */
+  private snowLineNow(): number {
+    if (this.forcedSnowLine !== null) return this.forcedSnowLine;
+    const raw = String(this.param<string | number>("snowLine") ?? "auto").trim().toLowerCase();
+    if (raw === "off") return 1e6;
+    const rest = raw === "auto" || raw === "" ? this.param<number>("snowAbove") + 120 : Number(raw);
+    if (!Number.isFinite(rest)) return 1e6;
+    return rest - this.param<number>("snowDrop") * (this.forcedSnow ?? this.snowCover);
+  }
+
+  /** The pinned dry cloud cover: the console's, else a numeric `cloudCover` param; null = auto. */
+  private pinnedCover(): number | null {
+    if (this.forcedCover !== null) return this.forcedCover;
+    const raw = this.param<string | number>("cloudCover");
+    if (raw === undefined || raw === null || String(raw).trim().toLowerCase() === "auto" || String(raw).trim() === "") return null;
+    const value = Number(raw);
+    return Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : null;
   }
 
   /**
@@ -4117,6 +4246,36 @@ class Weather extends Script {
       this.ctx.netState?.set(NET_WEATHER_KEY, { ...this.state });
       return this.windLine();
     }
+    if (name === "ground") {
+      // /ground wet <0-1|auto> · /ground snow <0-1|auto> · /ground snowline <y|auto>: pin what lies on the ground
+      const which = (args[0] ?? "").toLowerCase();
+      const raw = (args[1] ?? "").toLowerCase();
+      if (which === "snowline") {
+        this.forcedSnowLine = raw === "auto" || raw === "" ? null : Number(raw);
+        if (this.forcedSnowLine !== null && !Number.isFinite(this.forcedSnowLine)) throw new Error("usage: /ground snowline <y | auto>");
+        return `snowline ${this.snowLineNow().toFixed(0)} m${this.forcedSnowLine !== null ? " (pinned)" : ""}`;
+      }
+      if (which !== "wet" && which !== "snow") throw new Error("usage: /ground wet|snow <0-1 | auto> · /ground snowline <y | auto>");
+      const value = raw === "auto" || raw === "" ? null : Math.min(1, Math.max(0, Number(raw)));
+      if (value !== null && !Number.isFinite(value)) throw new Error("usage: /ground wet|snow <0-1 | auto>");
+      if (which === "wet") this.forcedWet = value;
+      else this.forcedSnow = value;
+      return `ground: wet ${(this.forcedWet ?? this.wetness).toFixed(2)}${this.forcedWet !== null ? " (pinned)" : ""} · snowfall ${(this.forcedSnow ?? this.snowCover).toFixed(2)}${this.forcedSnow !== null ? " (pinned)" : ""} · snowline ${this.snowLineNow().toFixed(0)} m`;
+    }
+    if (name === "clouds") {
+      const arg = (args[0] ?? "").toLowerCase();
+      if (arg === "auto") {
+        this.forcedCover = null;
+        this.rollOvercast();
+      } else if (arg) {
+        const value = Number(arg);
+        if (!Number.isFinite(value)) throw new Error("usage: /clouds [0-1 | auto]");
+        this.forcedCover = Math.min(1, Math.max(0, value));
+        this.state.cover = this.forcedCover;
+      }
+      if (arg) this.ctx.netState?.set(NET_WEATHER_KEY, { ...this.state });
+      return `clouds ${(this.state.cover ?? 1).toFixed(2)} of authored (${this.pinnedCover() !== null ? "pinned" : "auto"})`;
+    }
     if (name === "overcast") {
       const arg = (args[0] ?? "").toLowerCase();
       if (arg === "auto") {
@@ -4301,6 +4460,9 @@ class Weather extends Script {
       // shadow colour, which `cloudDark` drives to a bruise) rather than as
       // gaps, so a full sky still reads as weather moving overhead.
       clouds: {
+        // the dry spell's share of the authored deck; overcast and rain close
+        // the rest of the sky over it (SceneLighting)
+        ...(base?.clouds ? { coverage: (base.clouds.coverage ?? 0) * this.localCover } : {}),
         // HARDER edges, not softer: soft cloud is haze, and haze is what fog
         // is already doing.
         softness: baseSoftness + (0.28 - baseSoftness) * Math.min(1, cloudDrive + sandDrive * 0.5),
@@ -4325,6 +4487,9 @@ class Weather extends Script {
         ),
         flash: this.flashAt >= 0 ? strikeFlash(this.flashAt) : 0,
         overcast: this.overcastHere(),
+        wet: this.forcedWet ?? this.wetness,
+        snowLine: this.snowLineNow(),
+        windAngle: this.localAngle,
       },
     });
   }

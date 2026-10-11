@@ -1076,6 +1076,11 @@ export class AnimationSystem {
   private readonly lodCameraPosition = new THREE.Vector3();
   private readonly lodRootPosition = new THREE.Vector3();
 
+  /** Every animated character's root (players, NPCs, mobs) — e.g. for grass to part around. */
+  *roots(): IterableIterator<THREE.Object3D> {
+    for (const entry of this.entries.values()) yield entry.root;
+  }
+
   update(dt: number, camera?: THREE.Camera, fullRateEntityId?: string | null): void {
     if (!this.running) return;
     if (camera) camera.getWorldPosition(this.lodCameraPosition);
