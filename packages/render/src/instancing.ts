@@ -7,6 +7,7 @@ import {
   attribute,
   context,
   cross,
+  dot,
   float,
   mat4,
   mix,
@@ -21,6 +22,7 @@ import {
   positionGeometry,
   positionLocal,
   rotateUV,
+  select,
   time,
   mx_fractal_noise_float,
   transformNormal,
@@ -121,6 +123,46 @@ export function instancedPositionLocal(): ReturnType<typeof vec4>["xyz"] {
 }
 
 /**
+ * TSL: -1 for an instance whose matrix MIRRORS (negative determinant: the
+ * right-hand copy of a left-hand shoulder pad, mounted with scale z = -1),
+ * else +1.
+ *
+ * Why the normal is multiplied by it: a mirroring matrix reverses every
+ * triangle's winding, so the GPU reports the faces the viewer sees as BACK
+ * faces. For a plain Mesh three fixes that per object (it flips the
+ * pipeline's front face when `matrixWorld.determinantAffine() < 0`), but a
+ * batch is one draw with one front face for every instance. A mirrored
+ * instance of a double-sided material therefore had its (correctly
+ * transformed) normal negated by `faceDirection` and shaded inside out:
+ * unlit, and the character rim `1 - dot(N, V)` at full strength over the
+ * whole surface (2026-10-09: the pale right shoulder pad). Pre-negating the
+ * normal of a mirrored instance makes the back-face negation land it on the
+ * true normal, on both sides of the surface, with no extra draw and no extra
+ * vertex attribute (the determinant comes from the matrix columns the
+ * shader already reads; worn looks are at WebGPU's 16-location limit).
+ *
+ * Limit: culling is still per draw, so a FrontSide material on a mirrored
+ * instance culls the faces that should show. Mirror only double-sided
+ * models in a batch (every worn/held glTF here is).
+ */
+export function instanceMirrorSign() {
+  const [a, b, c] = INSTANCE_MATRIX_ATTRIBUTES;
+  const det = dot(cross(attribute<"vec4">(a, "vec4").xyz, attribute<"vec4">(b, "vec4").xyz), attribute<"vec4">(c, "vec4").xyz);
+  return select(det.lessThan(0), float(-1), float(1));
+}
+
+/** CPU twin of {@link instanceMirrorSign}: -1 when `matrix` mirrors, else 1. */
+export function mirrorSignOf(matrix: THREE.Matrix4): -1 | 1 {
+  const e = matrix.elements;
+  // (column0 x column1) . column2, as the shader computes it
+  const det =
+    (e[1]! * e[6]! - e[2]! * e[5]!) * e[8]! +
+    (e[2]! * e[4]! - e[0]! * e[6]!) * e[9]! +
+    (e[0]! * e[5]! - e[1]! * e[4]!) * e[10]!;
+  return det < 0 ? -1 : 1;
+}
+
+/**
  * Make a node material draw {@link InstancedProps} batches. Idempotent.
  *
  * Runs the instance transform FIRST and then any position node the material
@@ -141,7 +183,8 @@ export function applyInstancedProps(material: THREE.Material): void {
   node.positionNode = (Fn as any)((_: unknown, builder: { hasGeometryAttribute(name: string): boolean }) => {
     const m = instanceMatrixNode();
     positionLocal.assign(m.mul(vec4(positionLocal, 1)).xyz);
-    if (builder.hasGeometryAttribute("normal")) normalLocal.assign(transformNormal(normalLocal, m));
+    // pre-negated on a mirrored instance (see instanceMirrorSign)
+    if (builder.hasGeometryAttribute("normal")) normalLocal.assign(transformNormal(normalLocal, m).mul(instanceMirrorSign()));
     return inner ?? positionLocal;
   })();
   node.userData[INSTANCED_FLAG] = true;

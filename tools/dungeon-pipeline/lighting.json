@@ -3,10 +3,10 @@
   "about": "The dungeon/interior LIGHTING MODEL as data (owner, zone-3 review 2026-10-06: 'pools of light on black look wrong', 'lighting must feel similar across zones; the difference is colour tone, not brightness'). Two layers: (1) a READABILITY FLOOR, one hemisphere fill per dungeon (light.groundColor: a sky tone from above, a darker ground tone from below) so every surface reads dimly and floors / walls / ceilings read apart; fog that fades distance to the fill-lit tone, never to black; neutral exposure; a mild vignette; (2) the fixtures of the light buckets (tools/light-buckets.json, a project's authoring/light-buckets.json) add the warm or cold pools. Mood comes from TONE (the fill's hue, the fixtures' colour), never from darkness. tools/dungeon-pipeline/lighting.mts applies it as one applyOps batch; the readability gate measures the result. A dungeon that must differ writes authoring/lighting.json with only the keys it changes (and why).",
   "fill": {
     "about": "brightness of the floor: the same for every dungeon (owner: similar feel everywhere); only the tone differs. Calibrated 2026-10-06 on rime-hall-light (giant rock + ice halls, dark soot ceilings) against the readability gate; fieldfast-hall's approved flat fill is ambient 3.2 #8a93a8, gnawspur-deeps' 'very bright' one ambient 3.0 #a2ab9c (too pale a colour: flat). A hemisphere at intensity I lights a wall with the mean of the two tones.",
-    "intensity": 5
+    "intensity": 4.5
   },
   "tones": {
-    "about": "the fill's colour by the dungeon's dominant light bucket temperature. plan.lights maps warm / cold to a bucket; the bucket most spaces use decides. Equal luminance on purpose (the tone changes, the brightness does not).",
+    "about": "the fill's colour by the dungeon's dominant light bucket temperature. plan.lights { warm, cold } maps a temperature to a bucket per plan space; without that map, the buckets the dressing plans name (authoring/dressing/plans/*.json \"lights\") decide through byBucket. The bucket most spaces / plans use wins. Equal luminance on purpose (the tone changes, the brightness does not).",
     "neutral": {
       "sky": "#a9aebb",
       "ground": "#6a6662"
@@ -18,6 +18,15 @@
     "cold": {
       "sky": "#9fb0c8",
       "ground": "#5e6674"
+    },
+    "byBucket": {
+      "about": "the temperature of each light bucket (tools/light-buckets.json): fire-lit buckets are warm, the rime bucket's blue-white glows cold",
+      "tomb": "warm",
+      "manor": "warm",
+      "delve": "warm",
+      "camp": "warm",
+      "street": "warm",
+      "rime": "cold"
     }
   },
   "fog": {
@@ -28,9 +37,56 @@
     "background": true
   },
   "post": {
-    "about": "neutral exposure; vignette capped (a strong vignette turns a dim frame's corners into the black voids the owner flagged)",
+    "about": "ONE post preset for every dungeon (2026-10-09 consistency pass: fieldfast-hall had grade/vignette/bloom/rim off and a 480-line pixelate, the others the old outdoor grade with vignette 0.4). lighting.mts writes `preset` over each scene's postfx key by key (only the keys named here; underwater etc. stay the scene's own), then caps vignette at vignetteMax. The grade is the outdoor house grade (proving, 2026-10-09: contrast 1.05, saturation 0.9) so a character reads the same in and out of a dungeon. No screen pixelate (owner, 2026-10-04). A dungeon that must differ records it in its authoring/lighting.json with a why.",
     "exposure": 1,
-    "vignetteMax": 0.25
+    "vignetteMax": 0.25,
+    "preset": {
+      "grade": {
+        "enabled": true,
+        "contrast": 1.05,
+        "saturation": 0.9,
+        "temperature": -0.06,
+        "tint": 0,
+        "lift": "#808286",
+        "gamma": "#7e7e80",
+        "gain": "#84817b"
+      },
+      "vignette": {
+        "enabled": true,
+        "amount": 0.25,
+        "radius": 0.7,
+        "smoothness": 0.5
+      },
+      "bloom": {
+        "enabled": true,
+        "strength": 0.3,
+        "radius": 0.4,
+        "threshold": 0.82
+      },
+      "grain": {
+        "enabled": true,
+        "amount": 0.02,
+        "size": 1
+      },
+      "sharpen": {
+        "enabled": true,
+        "amount": 0.3
+      },
+      "dither": {
+        "enabled": true,
+        "levels": 32,
+        "scale": 1,
+        "amount": 1
+      },
+      "antialias": {
+        "mode": "fxaa"
+      },
+      "pixelate": {
+        "enabled": false,
+        "height": 480,
+        "filter": "nearest"
+      }
+    }
   },
   "cullingProfile": {
     "about": "an instanced dungeon is all interior (docs/culling.md 'Interior scenes'): reveal from the room's door, nothing hides by size, no terrain horizon. interiorReveal 'auto' = the culling gate's farthest room-entry-to-dressing distance rounded up to 5 m, at least minReveal.",
@@ -38,5 +94,21 @@
     "minReveal": 30,
     "maxMinScreenPx": 0,
     "occlusion": false
+  },
+  "rim": {
+    "about": "the character rim every dungeon shares (the outdoor sky's rim; it lights silhouettes only, so a dark-gear character never reads as a cut-out against a dim wall). 2026-10-09: lowered from strength 0.8 / power 3 to 0.6 / 4 (owner: 'is that the rim lighting? we may have to reduce it'). At 0.8/3 the edge glow read as a pale blue band down every arm and leg; part of the complaint was a mirrored-instance shading bug (the right shoulder pad shaded inside out, the rim at full strength over it), fixed in packages/render instancing.ts. Light-shots dark-gear probe after the fix, 0.8/3 -> 0.6/4: fieldfast-barrow (night, min 10) 13.0/14.3/12.8 -> 11.8/12.9/11.5; gnawspur-deeps (lit, min 20) nest-hall 19.7, gate-den 26.9, rot-cistern 10.7 (already 13.8 at 0.8: a dark corner, not the rim). 0.5/4.5 read the same (nest-hall 19.6); going lower costs dark-gear readability. Outdoors runs 0.25 + night 0.3, power 4.5.",
+    "color": "#8fa6d8",
+    "strength": 0.6,
+    "night": 0,
+    "power": 4
+  },
+  "levels": {
+    "about": "the fill per light level (thresholds.json readability.levels). A dungeon picks `level` in its authoring/lighting.json; an explicit `fill.intensity` there still wins (a fixture-heavy dungeon trimming its fill, e.g. gnawspur-deeps). The probe reads roughly in proportion to the fill: lit 4.5 -> grey ~73; night 2.2 -> ~36.",
+    "lit": {
+      "fill": 4.5
+    },
+    "night": {
+      "fill": 2.2
+    }
   }
 }

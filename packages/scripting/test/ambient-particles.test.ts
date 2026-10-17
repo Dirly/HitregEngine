@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { layerStrength, normalizeLayer, timeWeight, type AmbientSample } from "../src/ambient-particles.js";
+import { layerStrength, normalizeLayer, timeWeight, zoneLayer, type AmbientSample } from "../src/ambient-particles.js";
 
 const sample = (over: Partial<AmbientSample>): AmbientSample => ({
   biomes: {},
@@ -55,5 +55,70 @@ describe("ambient-particles layer rules", () => {
     expect(layerStrength(leaves, sample({ biomes: { forest: 1 }, storm: 1 }))).toBe(3);
     const calm = normalizeLayer({ id: "f", storm: -1 });
     expect(layerStrength(calm, sample({ storm: 1 }))).toBe(0);
+  });
+});
+
+describe("ambient-particles: zone layers from the recipe", () => {
+  const spores = { id: "spores", biomes: "", when: "always" as const, town: "never" as const, needWater: false, waterBoost: 0.5, rate: 4, storm: -0.7, wind: 0.4, rise: 0.12, glow: 0.5 };
+
+  it("a zone layer lives wherever its zone is, whatever the biome", () => {
+    const layer = zoneLayer(spores);
+    const inZone = sample({ biomes: { grassland: 1 }, region: { id: "zone-4", name: "Downs", tags: [], ambient: [spores] } });
+    expect(layerStrength(layer, inZone)).toBeGreaterThan(0.9);
+  });
+
+  it("its biomes narrow it inside the zone, and town: never keeps it out of town", () => {
+    const narrowed = zoneLayer({ ...spores, biomes: "swamp" });
+    expect(layerStrength(narrowed, sample({ biomes: { grassland: 1 } }))).toBe(0);
+    expect(layerStrength(narrowed, sample({ biomes: { swamp: 1 } }))).toBeGreaterThan(0.9);
+    expect(layerStrength(zoneLayer(spores), sample({ region: { id: "t", name: "Town", tags: ["town"] } }))).toBe(0);
+  });
+
+  it("the script drives a zone layer's emitter while in the zone, and fades it outside", async () => {
+    const THREE = await import("three");
+    const { applyOps, ComponentRegistry, createScene, registerCoreComponents } = await import("@hitreg/core");
+    const { registerBuiltinScripts, ScriptRegistry, ScriptRuntime } = await import("../src/index.js");
+    const reg = new ComponentRegistry();
+    registerCoreComponents(reg);
+    const doc = applyOps(
+      createScene("t"),
+      [
+        { op: "add-entity", id: "amb", entity: { name: "amb", parent: null, tags: [], components: { script: { name: "ambient-particles", params: { layers: [] } } } } },
+        { op: "add-entity", id: "player", entity: { name: "player", parent: null, tags: ["player"], components: { transform: {} } } },
+        { op: "add-entity", id: "emit", entity: { name: "emit", parent: null, tags: ["ambient-spores"], components: { transform: {} } } },
+      ],
+      reg,
+    ).doc;
+    const objects = new Map<string, InstanceType<typeof THREE.Object3D>>();
+    for (const id of Object.keys(doc.entities)) objects.set(id, new THREE.Object3D());
+    let inZone = true;
+    const rates: number[] = [];
+    const registry = new ScriptRegistry();
+    registerBuiltinScripts(registry);
+    const runtime = new ScriptRuntime({
+      doc,
+      objects,
+      registry,
+      sim: { getLinvel: () => [0, 0, 0], setLinvel: () => {}, applyImpulse: () => {} },
+      input: { isDown: () => false },
+      biomeAt: () => ({ id: "grassland", zone: "t", weights: { grassland: 1 }, ground: 0, temperature: 0.5, moisture: 0.5, slope: 0 }),
+      regionAt: () => (inZone ? { id: "zone-4", name: "Downs", tags: [], ambient: [spores] } : { id: "zone-1", name: "Reach", tags: [] }),
+      setParticles: (entity, o) => {
+        if (entity === "emit") rates.push(o.rate ?? 0);
+      },
+    });
+    runtime.start();
+    const step = (s: number) => {
+      for (let t = 0; t < s * 30; t++) {
+        runtime.fixedUpdate(1 / 30);
+        runtime.lateUpdate(1 / 30);
+      }
+    };
+    step(20);
+    expect(rates.at(-1)).toBeGreaterThan(3);
+    inZone = false;
+    step(30);
+    expect(rates.at(-1)).toBe(0);
+    runtime.dispose();
   });
 });

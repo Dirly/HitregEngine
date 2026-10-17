@@ -71,14 +71,32 @@ def structural_kinds():
         return set(json.load(fh)["recipe"]["structuralKinds"])
 
 
+def bake_voxels(plan):
+    """(default voxel, {group: voxel}) the rooms will be baked at: the rooms file's own "voxel" / "groupVoxel", else the
+    dungeon plan beside it (authoring/plan.json voxelSize / groupVoxel), else the kit default. The kit's shell rules
+    (rules.MIN_SHELL_VOXELS, JOINT_VOXELS) are counted in these voxels."""
+    voxel, groups = plan.get("voxel"), dict(plan.get("groupVoxel") or {})
+    side = os.path.join(plan.get("_base", ""), "plan.json") if plan.get("_base") else None
+    if side and os.path.exists(side):
+        try:
+            with open(side, encoding="utf-8") as fh:
+                dp = json.load(fh)
+            voxel = voxel or dp.get("voxelSize") or dp.get("voxel")
+            groups = {**(dp.get("groupVoxel") or {}), **groups}
+        except (OSError, ValueError):
+            pass
+    return voxel or rules.DEFAULT_VOXEL, groups
+
+
 def plan_rooms(plan):
     """Pure geometry (no bpy): [(room spec, Room)]. Usable for tests in any Python."""
     out = []
+    voxel, group_voxel = bake_voxels(plan)
     for spec in plan["rooms"]:
         st = load_style(spec["style"], (plan.get("styles") or {}).get(spec["style"]))
         if spec.get("rules"):
             st = _merge(st, spec["rules"])
-        out.append((spec, rules.build_room(spec, st)))
+        out.append((spec, rules.build_room(spec, st, group_voxel.get(spec.get("group"), voxel))))
     return out
 
 

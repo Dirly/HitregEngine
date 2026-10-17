@@ -23,6 +23,7 @@ its manual (`apps/playground/tools/portal-*.mts`). Run from `apps/playground`.
 3. **Cover**: `npx tsx tools/portal-cover.mts --scene <id> [--portal <ids>]`; on failure `--fit`, which sizes trigger
    and veil from the rock, writes `authoring/portal-veils.json` (kept through rebuilds) and one ops batch with its
    inverse (`--undo <inverse>`).
+   Check 4 FINISH: the veil must read as the way in, never sky — its material resolves in the scene project's closure (the shared `hollow-bastion/zone-boundary` lives in `proving`: outside it the veil is a flat grey card) and is the swirl or dark. A world door into a dungeon: state `material` (a painted dark card) for the portal in `authoring/portal-veils.json`.
 4. **Headless trip**: `npx tsx tools/portal-trip.mts --scene <world> --portal <id> --exit <exit anchor>` (runs cover
    on both doors first).
 5. **Real client, last**: `npx tsx tools/portal-play.mts --dungeon <instance>` (Playwright + system Chrome, W held):

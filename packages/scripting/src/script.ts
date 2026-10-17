@@ -1,4 +1,4 @@
-import type { ItemEffect, ItemGlow } from "@hitreg/core";
+import type { ItemEffect, ItemGlow, RegionAmbientLayer, RegionSound } from "@hitreg/core";
 import type * as THREE from "three";
 import type { z } from "zod";
 import type { EntityDoc, EventRegistrationOptions, PlayerDataService } from "@hitreg/core";
@@ -41,7 +41,22 @@ export interface LiveSkyOptions {
    * the sun's and the fill lights' colours; `lightScale` and `fogDensity`
    * multiply intensities. Omitted fields are neutral. Pass null to clear.
    */
-  mood?: { sky?: string; haze?: string; amount?: number; light?: string; lightScale?: number; shade?: string; fogDensity?: number; mist?: number } | null;
+  mood?: {
+    sky?: string;
+    haze?: string;
+    amount?: number;
+    light?: string;
+    lightScale?: number;
+    shade?: string;
+    fogDensity?: number;
+    mist?: number;
+    /** Ground-relative mist: the WORLD Y the mist reaches here (local low ground + the zone's `mistTop`). */
+    mistTop?: number;
+    /** Metres that mist fades over below `mistTop`. */
+    mistThickness?: number;
+    /** 0..1 how far `mistTop`/`mistThickness` replace the scene's absolute mist top (eased across a border). */
+    mistLocal?: number;
+  } | null;
   /** How much DAYLIGHT there is, 0..1 — a day/night script publishes it so the weather tint (a LIT colour) can be dimmed to the hour instead of lighting up midnight fog. Defaults to 1. */
   daylight?: number;
   environmentIntensity?: number;
@@ -129,7 +144,14 @@ export interface RegionAt {
     saturation: number;
     contrast: number;
     temperature: number;
+    /** Ground-relative mist: metres above the local low ground (see regionMoodSchema). */
+    mistTop?: number;
+    mistThickness?: number;
   }>;
+  /** The zone's sound (recipe `regions[].sound`), resolved over place -> zone -> parent. */
+  sound?: Readonly<RegionSound>;
+  /** Ambient particle layers living here (recipe `regions[].ambient`), resolved over the same chain. */
+  ambient?: readonly RegionAmbientLayer[];
 }
 
 /**
@@ -150,6 +172,11 @@ export interface WaterAt {
   swim: boolean;
   /** Drift in m/s [x, z] — a river's current, a canal's flow. */
   current: readonly [number, number];
+  /**
+   * A procedural world's kind of water here: "sea", "river", "lake" or another
+   * still-water kind the world reports (a marsh pool). Absent for authored water.
+   */
+  kind?: string;
 }
 
 /** Mirrors `LiveSkyBase` in @hitreg/render. */
@@ -1154,6 +1181,12 @@ export interface ScriptCommandDecl {
    * itself two seconds later.
    */
   authority?: boolean;
+  /**
+   * True when the authority honours this command from a STAFF peer (a gm/dev account, core `staffRole`): its
+   * request travels to the server, which applies it. The console then does not warn a staff tab that the change
+   * will be undone. Only commands whose handler checks staff may say so (`/give`, `/soulbind`).
+   */
+  staff?: boolean;
 }
 
 export type ScriptClass = (new () => Script) & {

@@ -13,6 +13,7 @@ of `apps/playground/tools/site-sockets.mts` and `tools/dress.mts`. Rooms and dun
   It never writes a prop transform in a build script.
 - One fresh Sonnet per AREA places every loose prop (`zonegen brief-for dress-site --poi <id> --area <area>`).
 - The coordinator applies. Gate: row `site-dress <poi>` in `zonegen status`.
+- Owner overrides are fixed; read `dress overrides <project>` before dressing an area (`<plan>.owner.json`: never move, re-add or replace those props; `dress manifest` lists them).
 
 ## Commands (from apps/playground)
 ```
@@ -38,6 +39,8 @@ Named pitches: `hearth-seat`, `spit-side`, `firewood-side`, `door-left/right`, `
     on first, props keep off them.
   - refused points -> retry loop (refused -> auto open -> drop), never hand-nudge.
 - `LIGHTS:` line -> every fixture from the plan's one bucket (`tools/light-buckets.json`, `"lights": "camp"`).
+- `seat: N with NO support` (dress apply) or `worldgen float` FAIL -> the plan put a prop where nothing holds it (an edge, a
+  cut, over water): move it in the plan. `apply` re-seats the rest on the real ground itself; never hand-set a y.
 - Site props invisible until you stand in them -> they were culled as an interior: re-apply with the current dress
   (site maps cull as clutter, minScreenPx 6).
 

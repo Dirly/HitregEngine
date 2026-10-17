@@ -31,6 +31,12 @@ await ctx.addInitScript(() => {
     localStorage.setItem(k, JSON.stringify({ ...cur, showStats: false, showGizmos: false, grid: false, showPhysics: false, showLights: false, showSkeletons: false }));
   } catch {}
 });
+// review pictures never write: every dev-server write (scene autosave, player data) is answered here, never reaches disk
+await ctx.route(/\/__hitreg\//, (route) => {
+  const r = route.request();
+  if (r.method() !== "GET" && !/\/__hitreg\/log\b/.test(r.url())) return route.fulfill({ status: 200, contentType: "application/json", body: "{\"ok\":true}" });
+  return route.continue();
+});
 // freeze the page at the code it booted with (other sessions edit the tree; HMR would reload mid-run)
 await ctx.route(/\/@vite\/client(\?.*)?$/, (route) =>
   route.fulfill({

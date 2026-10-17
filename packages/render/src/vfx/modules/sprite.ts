@@ -1,8 +1,8 @@
 import * as THREE from "three/webgpu";
-import { clamp, float, step, texture as tslTexture, uniform, uv, vec2 } from "three/tsl";
+import { clamp, float, step, texture as tslTexture, uv, vec2 } from "three/tsl";
 import type { VfxModuleOf } from "@hitreg/core";
 import { LiveModule, loadTexture, moduleColor, presentationOnly, unlitMaterial, type LiveModuleHost } from "../base.js";
-import { posterize, quantize, type N } from "../shaders.js";
+import { bindValues, objectUniform, posterize, quantize, type N } from "../shaders.js";
 
 type SpriteModule = VfxModuleOf<"sprite">;
 
@@ -24,6 +24,83 @@ const basis = new THREE.Matrix4();
 const basisQ = new THREE.Quaternion();
 const crossRoll = new THREE.Quaternion();
 let quad: THREE.PlaneGeometry | null = null;
+
+/** A sprite's per-mesh values; the variant's shared graph reads them (shaders.ts sharedUniforms). */
+function spriteValues() {
+  return {
+    uOffset: { value: new THREE.Vector2(0, 0) },
+    uScale: { value: new THREE.Vector2(1, 1) },
+    uTint: { value: new THREE.Color(1, 1, 1) },
+    uOpacity: { value: 1 },
+    /** texel grid: cells across the quad (x, y) and the mip level matching them */
+    uCells: { value: new THREE.Vector2(0, 0) },
+    uLod: { value: 0 },
+    /** halo: strength, reach (symbol units), quad enlargement, colour */
+    uGlow: { value: 0 },
+    uReach: { value: 0.14 },
+    uPad: { value: 1 },
+    uGlowColor: { value: new THREE.Color(1, 1, 1) },
+  };
+}
+type SpriteValues = ReturnType<typeof spriteValues>;
+
+/**
+ * One material per (sheet texture, texel grid, halo, blend): every sprite of
+ * that look shares its shader, so a spell's tenth sigil compiles nothing.
+ */
+const variants = new Map<string, THREE.MeshBasicNodeMaterial>();
+
+function variant(map: THREE.Texture | null, grid: boolean, halo: boolean, additive: boolean): THREE.MeshBasicNodeMaterial {
+  const key = `${map?.uuid ?? "-"}:${grid ? "grid" : ""}:${halo ? "halo" : ""}:${additive ? "add" : "norm"}`;
+  let material = variants.get(key);
+  if (material) return material;
+  material = unlitMaterial(additive);
+  const init = spriteValues();
+  const u = Object.fromEntries(Object.entries(init).map(([name, v]) => [name, objectUniform("s", name, v.value)])) as Record<keyof SpriteValues, N>;
+  if (map) {
+    // symbol-local coordinates; with a halo the quad is larger than the symbol
+    const l: N = uv() as N;
+    const c: N = halo ? l.sub(0.5).mul(u.uPad).add(0.5) : l;
+    const cq: N = grid ? quantize(c, u.uCells) : c;
+    const inside = (p: N): N => step(float(0), p.x).mul(step(p.x, float(1))).mul(step(float(0), p.y)).mul(step(p.y, float(1)));
+    const at = (p: N): N => {
+      const t = tslTexture(map, (clamp(p, 0, 1) as N).mul(u.uScale).add(u.uOffset)) as N;
+      return grid ? (t.level(u.uLod) as N) : t;
+    };
+    const s: N = at(cq);
+    const coreA: N = halo ? s.a.mul(inside(cq)) : s.a;
+    let color: N = s.rgb.mul(u.uTint);
+    let alpha: N = coreA;
+    if (halo) {
+      // a neon band: the STRONGEST line within reach, full near, half at the
+      // outer ring. (An average reads nothing on thin line art; a boosted
+      // average fills a sigil's interior into one white disc.)
+      // three rings of taps, each ring weighted by its distance and rotated
+      // off the last, so no single offset copy of the art stands out as a
+      // ghost outline
+      let halo: N = float(0);
+      for (const [k, w, phase] of [[0.34, 1, 0], [0.67, 0.6, 0.33], [1, 0.3, 0.66]] as const) {
+        for (let i = 0; i < 8; i++) {
+          const a = ((i + phase) / 8) * Math.PI * 2;
+          const p: N = cq.add(vec2(Math.cos(a), Math.sin(a)).mul(u.uReach.mul(k)));
+          halo = halo.max(at(p).a.mul(inside(p)).mul(w));
+        }
+      }
+      if (grid) halo = posterize(halo, float(3));
+      const h: N = halo.mul(u.uGlow).mul(0.6).min(0.85).mul(float(1).sub(coreA));
+      alpha = coreA.add(h);
+      color = color.mul(coreA).add(u.uGlowColor.mul(h)).div(alpha.max(1e-3));
+    }
+    material.colorNode = color;
+    material.opacityNode = alpha.mul(u.uOpacity);
+  } else {
+    material.colorNode = u.uTint;
+    material.opacityNode = u.uOpacity;
+  }
+  material.name = `vfx-sprite:${key}`;
+  variants.set(key, material);
+  return material;
+}
 
 /**
  * A flipbook quad — or, with `cell`, one static SYMBOL from the sheet. The
@@ -48,19 +125,18 @@ export class SpriteLive extends LiveModule<SpriteModule> {
   private readonly mesh: THREE.Mesh;
   /** `world` + `crossed`: the second quad, at 90° around the long axis (same material, same quad). */
   private readonly cross: THREE.Mesh;
-  private readonly material: THREE.MeshBasicNodeMaterial;
-  private readonly uOffset = uniform(new THREE.Vector2(0, 0));
-  private readonly uScale = uniform(new THREE.Vector2(1, 1));
-  private readonly uTint = uniform(new THREE.Color(1, 1, 1));
-  private readonly uOpacity = uniform(1, "float");
-  /** texel grid: cells across the quad (x, y) and the mip level matching them */
-  private readonly uCells = uniform(new THREE.Vector2(0, 0));
-  private readonly uLod = uniform(0, "float");
-  /** halo: strength, reach (symbol units), quad enlargement, colour */
-  private readonly uGlow = uniform(0, "float");
-  private readonly uReach = uniform(0.14, "float");
-  private readonly uPad = uniform(1, "float");
-  private readonly uGlowColor = uniform(new THREE.Color(1, 1, 1));
+  private readonly values = spriteValues();
+  private readonly uOffset = this.values.uOffset;
+  private readonly uScale = this.values.uScale;
+  private readonly uTint = this.values.uTint;
+  private readonly uOpacity = this.values.uOpacity;
+  private readonly uCells = this.values.uCells;
+  private readonly uLod = this.values.uLod;
+  private readonly uGlow = this.values.uGlow;
+  private readonly uReach = this.values.uReach;
+  private readonly uPad = this.values.uPad;
+  private readonly uGlowColor = this.values.uGlowColor;
+  private additive = true;
   /** which shader variant is built: grid (texel) and/or halo */
   private grid = false;
   private halo = false;
@@ -75,62 +151,24 @@ export class SpriteLive extends LiveModule<SpriteModule> {
   constructor(host: LiveModuleHost) {
     super(host);
     quad ??= new THREE.PlaneGeometry(1, 1);
-    this.material = unlitMaterial(true);
-    this.mesh = new THREE.Mesh(quad, this.material);
+    const material = variant(null, false, false, true);
+    this.mesh = new THREE.Mesh(quad, material);
+    bindValues(this.mesh, "s", this.values);
     presentationOnly(this.mesh);
     this.mesh.visible = false;
     host.root.add(this.mesh);
-    this.cross = new THREE.Mesh(quad, this.material);
+    this.cross = new THREE.Mesh(quad, material);
+    bindValues(this.cross, "s", this.values);
     presentationOnly(this.cross);
     this.cross.visible = false;
     host.root.add(this.cross);
-    this.buildShader();
   }
 
+  /** Put both quads on the shared material for the current look. */
   private buildShader(): void {
-    const map = this.map;
-    if (map) {
-      const grid = this.grid;
-      // symbol-local coordinates; with a halo the quad is larger than the symbol
-      const l: N = uv() as N;
-      const c: N = this.halo ? l.sub(0.5).mul(this.uPad).add(0.5) : l;
-      const cq: N = grid ? quantize(c, this.uCells) : c;
-      const inside = (p: N): N => step(float(0), p.x).mul(step(p.x, float(1))).mul(step(float(0), p.y)).mul(step(p.y, float(1)));
-      const at = (p: N): N => {
-        const t = tslTexture(map, (clamp(p, 0, 1) as N).mul(this.uScale).add(this.uOffset)) as N;
-        return grid ? (t.level(this.uLod) as N) : t;
-      };
-      const s: N = at(cq);
-      const coreA: N = this.halo ? s.a.mul(inside(cq)) : s.a;
-      let color: N = s.rgb.mul(this.uTint);
-      let alpha: N = coreA;
-      if (this.halo) {
-        // a neon band: the STRONGEST line within reach, full near, half at the
-        // outer ring. (An average reads nothing on thin line art; a boosted
-        // average fills a sigil's interior into one white disc.)
-        // three rings of taps, each ring weighted by its distance and rotated
-        // off the last, so no single offset copy of the art stands out as a
-        // ghost outline
-        let halo: N = float(0);
-        for (const [k, w, phase] of [[0.34, 1, 0], [0.67, 0.6, 0.33], [1, 0.3, 0.66]] as const) {
-          for (let i = 0; i < 8; i++) {
-            const a = ((i + phase) / 8) * Math.PI * 2;
-            const p: N = cq.add(vec2(Math.cos(a), Math.sin(a)).mul(this.uReach.mul(k)));
-            halo = halo.max(at(p).a.mul(inside(p)).mul(w));
-          }
-        }
-        if (grid) halo = posterize(halo, float(3));
-        const h: N = halo.mul(this.uGlow).mul(0.6).min(0.85).mul(float(1).sub(coreA));
-        alpha = coreA.add(h);
-        color = color.mul(coreA).add(this.uGlowColor.mul(h)).div(alpha.max(1e-3));
-      }
-      this.material.colorNode = color;
-      this.material.opacityNode = alpha.mul(this.uOpacity);
-    } else {
-      this.material.colorNode = this.uTint;
-      this.material.opacityNode = this.uOpacity;
-    }
-    this.material.needsUpdate = true;
+    const material = variant(this.map, this.grid, this.halo, this.additive);
+    this.mesh.material = material;
+    this.cross.material = material;
   }
 
   /** Resolve the sheet before the base class asks for the natural life. */
@@ -146,7 +184,9 @@ export class SpriteLive extends LiveModule<SpriteModule> {
     const halo = !!module.cell && module.glow > 0;
     const nearest = !onGrid && module.pixel > 0;
     const key = url ? `${url}#${nearest ? "nearest" : "linear"}` : "";
-    const variantChanged = onGrid !== this.grid || halo !== this.halo;
+    const additive = module.blend === "additive";
+    const variantChanged = onGrid !== this.grid || halo !== this.halo || additive !== this.additive;
+    this.additive = additive;
     this.grid = onGrid;
     this.halo = halo;
     this.ready = false;
@@ -180,7 +220,6 @@ export class SpriteLive extends LiveModule<SpriteModule> {
 
   protected onBegin(): void {
     const m = this.module;
-    this.material.blending = m.blend === "additive" ? THREE.AdditiveBlending : THREE.NormalBlending;
     this.uTint.value.copy(this.color);
     this.uScale.value.set(1 / this.cols, 1 / this.rows);
     this.yaw = m.randomYaw ? Math.random() * Math.PI * 2 : m.yaw;
@@ -316,6 +355,6 @@ export class SpriteLive extends LiveModule<SpriteModule> {
   dispose(): void {
     this.cross.removeFromParent();
     this.mesh.removeFromParent();
-    this.material.dispose();
+    // variant materials are shared and outlive this sprite
   }
 }

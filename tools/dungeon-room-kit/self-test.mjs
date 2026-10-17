@@ -8,6 +8,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { thinWallsGate, worldOf } from "../mesh-dc/thin-walls.mjs";
 
 const KIT = path.dirname(fileURLToPath(import.meta.url));
 const BLENDER = process.env.BLENDER || "P:\\Program Files\\Blender Foundation\\Blender 5.2\\blender.exe";
@@ -27,6 +28,16 @@ test("sample rooms build into closed, grouped, counted solids", { skip: !fs.exis
   for (const k of ["pilaster", "voussoir", "rib", "niche", "plinth", "stile", "beam", "rafter", "post-pad", "pillar", "stalactite"]) assert.ok(kinds.has(k), `no ${k}`);
   const stamp = JSON.parse(fs.readFileSync(path.join(out, "sample-rooms.mesh-stamp.json"), "utf8"));
   assert.ok(stamp.noise && stamp.noise.roles["rock-wall"]);
+  // shell rules (docs/see-through.md): no shell under 3 voxels, so the bake can not perforate one
+  const gate = thinWallsGate(stamp, { voxel: 0.12 });
+  assert.equal(gate.passed, true, JSON.stringify(gate.failures));
+  // the barrel crypt's lunettes are closed: from the nave just over the springing, looking up at either end wall
+  // (the crypt runs along plan y; engine z = -y), nothing looks out of the map
+  const world = worldOf(stamp.meshes);
+  for (const dz of [-1, 1]) for (const dx of [-0.6, 0, 0.6]) {
+    const d = [dx, 0.25, dz], l = Math.hypot(...d);
+    assert.equal(world.escapes([0, 3.6, -6.4], d.map((v) => v / l)), false, `crypt lunette open toward ${JSON.stringify(d)}`);
+  }
   fs.rmSync(out, { recursive: true, force: true });
 });
 

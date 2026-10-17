@@ -160,7 +160,11 @@ export interface VegetationRecipe {
   regions?: readonly RegionDoc[];
   scatter: readonly { id: string; collider?: string }[];
   cover?: readonly { id: string }[];
-  features: { clearings?: readonly ClearingDoc[] };
+  features: {
+    clearings?: readonly ClearingDoc[];
+    ribbons?: readonly { clearing?: [number, number][] }[];
+    kitWalls?: readonly { cuts: readonly { origin: readonly number[]; dir: readonly number[]; s: readonly number[]; n: readonly number[] }[] }[];
+  };
 }
 
 /** One region's resolved effect, compiled to rule/layer indices. */
@@ -290,7 +294,24 @@ export class VegetationIndex {
     });
 
     // ---- clearings
-    this.clearings = recipe.features.clearings ?? [];
+    // a path ribbon keeps its own outline clear (scatter and cover), feathered a little past the verge
+    const ribbonClearings = (recipe.features.ribbons ?? []).flatMap((r, i) =>
+      r.clearing && r.clearing.length >= 3 ? [clearingSchema.parse({ id: `ribbon-${i}`, polygon: r.clearing, feather: 1.5 })] : [],
+    );
+    // an operator's kit wall run keeps its face clear: the strip behind the wall top and the carved ground in front
+    const wallClearings = (recipe.features.kitWalls ?? []).flatMap((w, i) => {
+      if (!w.cuts.length) return [];
+      const back: [number, number][] = [], front: [number, number][] = [];
+      const push = (x: number, z: number, d: readonly number[], reach: number) => {
+        back.push([x + d[1]! * 1.5, z - d[0]! * 1.5]);
+        front.push([x - d[1]! * reach, z + d[0]! * reach]);
+      };
+      for (const c of w.cuts) push(c.origin[0]!, c.origin[1]!, c.dir, c.n[1]!);
+      const last = w.cuts[w.cuts.length - 1]!;
+      push(last.origin[0]! + last.dir[0]! * last.s[1]!, last.origin[1]! + last.dir[1]! * last.s[1]!, last.dir, last.n[1]!);
+      return [clearingSchema.parse({ id: `kit-wall-${i}`, polygon: [...back, ...front.reverse()], feather: 1 })];
+    });
+    this.clearings = [...(recipe.features.clearings ?? []), ...ribbonClearings, ...wallClearings];
     this.hasClearings = this.clearings.length > 0;
     this.clearingIndex = this.hasClearings
       ? new PolygonIndex(

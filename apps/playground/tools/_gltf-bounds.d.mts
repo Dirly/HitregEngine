@@ -18,4 +18,4 @@ export function boundsOf(
   roots?: number[],
 ): ModelBounds;
 
-export function modelBounds(file: string): ModelBounds & { textures: string[] };
+export function modelBounds(file: string): ModelBounds & { textures: string[]; materials: string[] };

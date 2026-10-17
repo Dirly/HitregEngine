@@ -1,8 +1,8 @@
 import * as THREE from "three/webgpu";
-import { float, mix, saturate, step, texture as tslTexture, uniform, uv } from "three/tsl";
+import { float, mix, saturate, step, texture as tslTexture, uv } from "three/tsl";
 import type { VfxModuleOf } from "@hitreg/core";
 import { LiveModule, easeIn, easeOut, loadTexture, moduleColor, presentationOnly, unlitMaterial, type LiveModuleHost } from "../base.js";
-import { posterize, quantize, type N } from "../shaders.js";
+import { bindValues, objectUniform, posterize, quantize, type N } from "../shaders.js";
 
 type DecalModule = VfxModuleOf<"decal">;
 
@@ -12,6 +12,53 @@ const yawQ = new THREE.Quaternion();
 const tiltQ = new THREE.Quaternion();
 const X = new THREE.Vector3(1, 0, 0);
 const Y = new THREE.Vector3(0, 1, 0);
+
+/** A decal's per-mesh values; the page's shared graph reads them (shaders.ts sharedUniforms). */
+function decalValues() {
+  return {
+    uOffset: { value: new THREE.Vector2(0, 0) },
+    uScale: { value: new THREE.Vector2(1, 1) },
+    uColor: { value: new THREE.Color(1, 1, 1) },
+    uEdgeColor: { value: new THREE.Color(1, 1, 1) },
+    uOpacity: { value: 1 },
+    /** The reveal front, 0 (nothing) .. 1 + edge (everything, front gone). */
+    uFront: { value: 0 },
+    uEdge: { value: 0.08 },
+    uShade: { value: 0.6 },
+    uSteps: { value: 0 },
+    /** texel grid: cells across the mark (x, y); 0 = the page's own texels */
+    uCells: { value: new THREE.Vector2(0, 0) },
+  };
+}
+type DecalValues = ReturnType<typeof decalValues>;
+
+/** One material per (decal page, blend), shared by every mark drawn from it. */
+const variants = new Map<string, THREE.MeshBasicNodeMaterial>();
+
+function variant(map: THREE.Texture | null, additive: boolean): THREE.MeshBasicNodeMaterial {
+  const key = `${map?.uuid ?? "-"}:${additive ? "add" : "norm"}`;
+  let material = variants.get(key);
+  if (material) return material;
+  material = unlitMaterial(additive);
+  const u = Object.fromEntries(Object.entries(decalValues()).map(([name, v]) => [name, objectUniform("d", name, v.value)])) as Record<keyof DecalValues, N>;
+  if (map) {
+    const s: N = tslTexture(map, quantize(uv() as N, u.uCells).mul(u.uScale).add(u.uOffset));
+    const reveal: N = s.r;
+    const shown: N = step(reveal, u.uFront);
+    // texels the front crossed less than `edge` ago burn in the edge colour
+    const since: N = u.uFront.sub(reveal).div(u.uEdge.max(1e-4));
+    const front: N = shown.mul(float(1).sub(saturate(since))).mul(step(float(1e-4), u.uEdge));
+    const body: N = u.uColor.mul(mix(float(1), s.g, u.uShade));
+    material.colorNode = mix(body, u.uEdgeColor, front);
+    material.opacityNode = posterize(s.a.mul(shown), u.uSteps).mul(u.uOpacity);
+  } else {
+    material.colorNode = u.uColor;
+    material.opacityNode = u.uOpacity.mul(0);
+  }
+  material.name = `vfx-decal:${key}`;
+  variants.set(key, material);
+  return material;
+}
 
 /**
  * A ground mark that GROWS: cracks racing out from a strike, frost feathering
@@ -29,19 +76,17 @@ export class DecalLive extends LiveModule<DecalModule> {
   readonly kind = "decal" as const;
   private readonly mesh: THREE.Mesh;
   private readonly geometry: THREE.PlaneGeometry;
-  private readonly material: THREE.MeshBasicNodeMaterial;
-  private readonly uOffset = uniform(new THREE.Vector2(0, 0));
-  private readonly uScale = uniform(new THREE.Vector2(1, 1));
-  private readonly uColor = uniform(new THREE.Color(1, 1, 1));
-  private readonly uEdgeColor = uniform(new THREE.Color(1, 1, 1));
-  private readonly uOpacity = uniform(1, "float");
-  /** The reveal front, 0 (nothing) .. 1 + edge (everything, front gone). */
-  private readonly uFront = uniform(0, "float");
-  private readonly uEdge = uniform(0.08, "float");
-  private readonly uShade = uniform(0.6, "float");
-  private readonly uSteps = uniform(0, "float");
-  /** texel grid: cells across the mark (x, y); 0 = the page's own texels */
-  private readonly uCells = uniform(new THREE.Vector2(0, 0));
+  private readonly values = decalValues();
+  private readonly uOffset = this.values.uOffset;
+  private readonly uScale = this.values.uScale;
+  private readonly uColor = this.values.uColor;
+  private readonly uEdgeColor = this.values.uEdgeColor;
+  private readonly uOpacity = this.values.uOpacity;
+  private readonly uFront = this.values.uFront;
+  private readonly uEdge = this.values.uEdge;
+  private readonly uShade = this.values.uShade;
+  private readonly uSteps = this.values.uSteps;
+  private readonly uCells = this.values.uCells;
   private map: THREE.Texture | null = null;
   private mapKey = "";
   private ready = false;
@@ -53,24 +98,11 @@ export class DecalLive extends LiveModule<DecalModule> {
   constructor(host: LiveModuleHost) {
     super(host);
     this.geometry = new THREE.PlaneGeometry(1, 1, SEGMENTS, SEGMENTS);
-    this.material = unlitMaterial(true);
-    this.mesh = new THREE.Mesh(this.geometry, this.material);
+    this.mesh = new THREE.Mesh(this.geometry, variant(null, true));
+    bindValues(this.mesh, "d", this.values);
     presentationOnly(this.mesh);
     this.mesh.visible = false;
     host.root.add(this.mesh);
-  }
-
-  private buildShader(map: THREE.Texture): void {
-    const s: N = tslTexture(map, quantize(uv() as N, this.uCells).mul(this.uScale).add(this.uOffset));
-    const reveal: N = s.r;
-    const shown: N = step(reveal, this.uFront);
-    // texels the front crossed less than `edge` ago burn in the edge colour
-    const since: N = this.uFront.sub(reveal).div(this.uEdge.max(1e-4));
-    const front: N = shown.mul(float(1).sub(saturate(since))).mul(step(float(1e-4), this.uEdge));
-    const body: N = this.uColor.mul(mix(float(1), s.g, this.uShade));
-    this.material.colorNode = mix(body, this.uEdgeColor, front);
-    this.material.opacityNode = posterize(s.a.mul(shown), this.uSteps).mul(this.uOpacity);
-    this.material.needsUpdate = true;
   }
 
   /** Resolve the sheet before the base class asks for the natural life. */
@@ -88,7 +120,7 @@ export class DecalLive extends LiveModule<DecalModule> {
         (t) => {
           if (this.mapKey !== url) return;
           this.map = t;
-          this.buildShader(t);
+          this.mesh.material = variant(t, module.blend === "additive");
           this.ready = true;
         },
         true,
@@ -112,7 +144,7 @@ export class DecalLive extends LiveModule<DecalModule> {
 
   protected onBegin(): void {
     const m = this.module;
-    this.material.blending = m.blend === "additive" ? THREE.AdditiveBlending : THREE.NormalBlending;
+    if (this.map) this.mesh.material = variant(this.map, m.blend === "additive");
     this.uColor.value.copy(this.color);
     moduleColor(m.edgeColor, this.ctx.frame.palette, this.uEdgeColor.value);
     this.uEdge.value = m.edge;
@@ -194,6 +226,6 @@ export class DecalLive extends LiveModule<DecalModule> {
   dispose(): void {
     this.mesh.removeFromParent();
     this.geometry.dispose();
-    this.material.dispose();
+    // variant materials are shared and outlive this decal
   }
 }

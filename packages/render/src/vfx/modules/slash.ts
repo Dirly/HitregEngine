@@ -2,7 +2,7 @@ import * as THREE from "three/webgpu";
 import { abs, float, mix, smoothstep, sub, uv, vec2 } from "three/tsl";
 import type { VfxModuleOf } from "@hitreg/core";
 import { LiveModule, presentationOnly, unlitMaterial, type LiveModuleHost } from "../base.js";
-import { makeUniforms, posterize, quantize, ringBand, type N } from "../shaders.js";
+import { bindValues, makeValues, posterize, quantize, ringBand, sharedUniforms, type N } from "../shaders.js";
 
 type SlashModule = VfxModuleOf<"slash">;
 
@@ -13,40 +13,18 @@ const tiltX = new THREE.Quaternion().setFromAxisAngle(X, -Math.PI / 2);
 const rollQ = new THREE.Quaternion();
 let disc: THREE.CircleGeometry | null = null;
 
-/**
- * A melee cut: an annular sector whose LEADING EDGE sweeps across the arc
- * over `sweepTime` of the life, with a fading tail behind it — the anime
- * slash, drawn from one disc. The cutting plane rolls around the spell
- * direction (`tilt`): flat is a cleave, upright an overhead chop, ±45 a
- * diagonal; two copies with `repeat.alternate` are an X.
- *
- * Everything is in the shader: the band, the sector, the sweep and the tail
- * are uniforms on a unit disc, so a hundred different cuts share one
- * geometry and one program.
- */
-export class SlashLive extends LiveModule<SlashModule> {
-  readonly kind = "slash" as const;
-  private readonly mesh: THREE.Mesh;
-  private readonly material: THREE.MeshBasicNodeMaterial;
-  /** color/glow/opacity; a = inner, b = soft, c = half-sweep (rad), d = head 0..1, e = tail */
-  private readonly u = makeUniforms();
-  /** a = core, b = pixel cells, c = posterize steps, d = reverse (0/1) */
-  private readonly x = makeUniforms();
+/** One material per blend, shared by every slash (values per mesh: shaders.ts sharedUniforms). */
+const variants = new Map<string, THREE.MeshBasicNodeMaterial>();
 
-  constructor(host: LiveModuleHost) {
-    super(host);
-    disc ??= new THREE.CircleGeometry(1, SEGMENTS);
-    this.material = unlitMaterial(true);
-    this.buildShader();
-    this.mesh = new THREE.Mesh(disc, this.material);
-    presentationOnly(this.mesh);
-    this.mesh.visible = false;
-    host.root.add(this.mesh);
-  }
-
-  private buildShader(): void {
-    const u = this.u;
-    const x = this.x;
+function variant(additive: boolean): THREE.MeshBasicNodeMaterial {
+  const key = additive ? "add" : "norm";
+  let material = variants.get(key);
+  if (material) return material;
+  material = unlitMaterial(additive);
+  // color/glow/opacity; a = inner, b = soft, c = half-sweep (rad), d = head 0..1, e = tail
+  const u = sharedUniforms("u");
+  // a = core, b = pixel cells, c = posterize steps, d = reverse (0/1)
+  const x = sharedUniforms("x");
     const quv: N = quantize(uv() as N, x.b);
     const p: N = quv.sub(vec2(0.5, 0.5)).mul(2);
     const r: N = p.length();
@@ -65,9 +43,41 @@ export class SlashLive extends LiveModule<SlashModule> {
     const lit: N = smoothstep(float(0), float(0.02), behind).mul(sub(float(1), smoothstep(float(0), u.e.max(0.01), behind)));
     const edge: N = sub(float(1), smoothstep(float(0), float(0.12), behind));
     const alpha: N = band.mul(inArc).mul(lit);
-    this.material.colorNode = mix(u.color, u.glow, edge.mul(x.a));
-    this.material.opacityNode = posterize(alpha, x.c).mul(u.opacity);
-    this.material.needsUpdate = true;
+    material.colorNode = mix(u.color, u.glow, edge.mul(x.a));
+    material.opacityNode = posterize(alpha, x.c).mul(u.opacity);
+  material.name = `vfx-slash:${key}`;
+  variants.set(key, material);
+  return material;
+}
+
+/**
+ * A melee cut: an annular sector whose LEADING EDGE sweeps across the arc
+ * over `sweepTime` of the life, with a fading tail behind it — the anime
+ * slash, drawn from one disc. The cutting plane rolls around the spell
+ * direction (`tilt`): flat is a cleave, upright an overhead chop, ±45 a
+ * diagonal; two copies with `repeat.alternate` are an X.
+ *
+ * Everything is in the shader: the band, the sector, the sweep and the tail
+ * are uniforms on a unit disc, so a hundred different cuts share one
+ * geometry and one program.
+ */
+export class SlashLive extends LiveModule<SlashModule> {
+  readonly kind = "slash" as const;
+  private readonly mesh: THREE.Mesh;
+  /** color/glow/opacity; a = inner, b = soft, c = half-sweep (rad), d = head 0..1, e = tail */
+  private readonly u = makeValues();
+  /** a = core, b = pixel cells, c = posterize steps, d = reverse (0/1) */
+  private readonly x = makeValues();
+
+  constructor(host: LiveModuleHost) {
+    super(host);
+    disc ??= new THREE.CircleGeometry(1, SEGMENTS);
+    this.mesh = new THREE.Mesh(disc, variant(true));
+    bindValues(this.mesh, "u", this.u);
+    bindValues(this.mesh, "x", this.x);
+    presentationOnly(this.mesh);
+    this.mesh.visible = false;
+    host.root.add(this.mesh);
   }
 
   protected naturalLife(): number {
@@ -76,7 +86,7 @@ export class SlashLive extends LiveModule<SlashModule> {
 
   protected onBegin(): void {
     const m = this.module;
-    this.material.blending = m.blend === "additive" ? THREE.AdditiveBlending : THREE.NormalBlending;
+    this.mesh.material = variant(m.blend === "additive");
     this.u.color.value.copy(this.color);
     this.u.glow.value.copy(this.color).lerp(new THREE.Color(1, 1, 1), 0.75);
     this.u.a.value = m.inner;
@@ -114,7 +124,7 @@ export class SlashLive extends LiveModule<SlashModule> {
   }
 
   dispose(): void {
+    // the variant material is shared and outlives this one
     this.mesh.removeFromParent();
-    this.material.dispose();
   }
 }

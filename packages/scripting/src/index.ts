@@ -158,4 +158,4 @@ export {
 } from "./advance.js";
 export { carryPhaseOffset, stanceCarryFor, type StanceCarry } from "./stance-carry.js";
 export { inHours, SettleLatch, SoundEmitter, Soundscape, SoundZone, worldClock } from "./soundscape.js";
-export { AmbientParticles, layerStrength, normalizeLayer, timeWeight, type AmbientLayer, type AmbientSample } from "./ambient-particles.js";
+export { AmbientParticles, layerStrength, normalizeLayer, timeWeight, zoneLayer, type AmbientLayer, type AmbientSample } from "./ambient-particles.js";

@@ -19,6 +19,18 @@ describe("tickets", () => {
     expect(verifyTicket("other", t, { srv: "layer-1", now: 1030 })).toEqual({ ok: false, reason: "bad ticket signature" });
   });
 
+  it("carries a staff role, and a client cannot add one", () => {
+    const t = signTicket(secret, { sub: "acct-1", chr: "chr-1", name: "Ann", srv: "layer-1", role: "gm", now: 1000 });
+    const v = verifyTicket(secret, t, { srv: "layer-1", now: 1001 });
+    expect(v.ok && v.claims.role).toBe("gm");
+    const plain = signTicket(secret, { sub: "acct-2", chr: "chr-2", name: "Bo", srv: "layer-1", now: 1000 });
+    const ok = verifyTicket(secret, plain, { srv: "layer-1", now: 1001 });
+    expect(ok.ok && ok.claims.role).toBeUndefined();
+    const [body, sig] = plain.split(".") as [string, string];
+    const forged = Buffer.from(JSON.stringify({ ...JSON.parse(Buffer.from(body, "base64url").toString()), role: "dev" })).toString("base64url");
+    expect(verifyTicket(secret, `${forged}.${sig}`, { srv: "layer-1", now: 1001 })).toEqual({ ok: false, reason: "bad ticket signature" });
+  });
+
   it("rejects tampering and garbage", () => {
     const t = signTicket(secret, { sub: "acct-1", chr: "chr-1", name: "Ann", srv: "layer-1", now: 1000 });
     const [body, sig] = t.split(".") as [string, string];

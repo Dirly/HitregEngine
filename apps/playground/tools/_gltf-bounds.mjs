@@ -139,6 +139,8 @@ export function modelBounds(file) {
     return bytes;
   };
   const result = boundsOf(json, bufferBytes);
-  result.textures = (json.textures ?? []).map((t) => t.name ?? "");
+  // three's GLTFLoader names a texture after the texture, else its image; wind also matches material names
+  result.textures = (json.textures ?? []).map((t) => t.name || (t.source != null ? json.images?.[t.source]?.name : "") || "");
+  result.materials = (json.materials ?? []).map((m) => m.name ?? "");
   return result;
 }

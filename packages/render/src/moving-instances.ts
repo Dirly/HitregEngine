@@ -383,6 +383,8 @@ export class MovingInstanceSystem {
       // when it fills (see grow); the count drawn is set every frame
       mesh.instanceCount = 0;
       mesh.name = `moving:${batch.assetId}#${index}`;
+      // worn/held pieces of characters (heads, helms, weapons): never the map (see-through's notMapObjects)
+      mesh.userData["movingBatch"] = true;
       mesh.castShadow = batch.castShadow;
       mesh.receiveShadow = batch.receiveShadow;
       // Held items can move every frame; a fixed culling volume would be stale
@@ -523,8 +525,36 @@ export class MovingInstanceSystem {
   gripOf(entityId: string): THREE.Vector3 | null {
     const found = this.slotOf.get(entityId);
     if (!found?.batch.submeshes) return null;
-    const grip = Object.keys(found.batch.partIndex ?? {}).find((name) => /handle|haft|grip|shaft/i.test(name));
+    const grip = this.gripPart(entityId);
     return this.anchorOf(entityId, grip ? { part: grip, at: "center" } : { at: "center" });
+  }
+
+  /** The grip-named part an item is held by — a SHOWN one first (an ubermesh carries every haft length). */
+  private gripPart(entityId: string): string | undefined {
+    const found = this.slotOf.get(entityId);
+    const index = found?.batch.partIndex ?? {};
+    const grips = Object.keys(index).filter((name) => /handle|haft|grip|shaft/i.test(name));
+    return grips.find((name) => found!.slot.mask & (1 << index[name]!)) ?? grips[0];
+  }
+
+  /**
+   * The grip part's two ends along its long axis, in the entity GROUP's local
+   * space — the line a second hand has to be on for a two-handed hold — the
+   * POMMEL end first (the one farther from the centre of the item as shown,
+   * i.e. away from the blade or head). Prefers
+   * a grip part that is shown (an ubermesh carries every haft length); null
+   * when the model has no grip-named part or has not loaded.
+   */
+  handleOf(entityId: string): [THREE.Vector3, THREE.Vector3] | null {
+    const found = this.slotOf.get(entityId);
+    if (!found?.batch.submeshes) return null;
+    const grip = this.gripPart(entityId);
+    if (!grip) return null;
+    const base = this.anchorOf(entityId, { part: grip, at: "base" });
+    const tip = this.anchorOf(entityId, { part: grip, at: "tip" });
+    if (!base || !tip) return null;
+    const middle = this.anchorOf(entityId, { at: "center" });
+    return middle && base.distanceToSquared(middle) < tip.distanceToSquared(middle) ? [tip, base] : [base, tip];
   }
 
   /** A part's box size in the entity GROUP's local units (every shown part when omitted); null until loaded. */

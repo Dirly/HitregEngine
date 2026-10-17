@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import * as THREE from "three/webgpu";
 import Attributes from "three/src/renderers/common/Attributes.js";
 import { GrassSystem, type GrassData } from "../src/index.js";
+import { LEAD_MAX_FRACTION, RECENTER_FRACTION } from "../src/grass.js";
 
 /**
  * The cost side of ground cover: how OFTEN a field re-places itself, how much
@@ -40,10 +41,10 @@ const DATA: GrassData = {
 };
 
 /** LEAD_MAX_FRACTION in grass.ts — the cap on how far ahead a recenter may place. */
-const LEAD_MAX = 0.12;
+const LEAD_MAX = LEAD_MAX_FRACTION;
 
 /** cell = radius * RECENTER_FRACTION, the grid the patch centre snaps to. */
-const CELL = DATA.radius * 0.6;
+const CELL = DATA.radius * RECENTER_FRACTION;
 
 interface Rig {
   system: GrassSystem;
@@ -402,5 +403,21 @@ describe("cover reaches past its own fade in every direction", () => {
     // FADE_BAND in grass.ts: nothing fades at all before 0.7 of the radius,
     // so a field that ends inside that is a visible edge
     expect(worst).toBeGreaterThan(DATA.radius * 0.7);
+  });
+
+  it("keeps the whole authored radius covered walking DIAGONALLY", () => {
+    // The deadband is per axis, so a diagonal walk drifts furthest from the
+    // disc. Coverage short of the radius pulls the fade edge in, and an edge
+    // that breathes in and out between recenters is grass flickering at the
+    // tufts it sweeps over (Derek, 2026-10-09: 40 m -> 26 m -> 40 m at 0.6).
+    const r = rig(() => 0, 50);
+    let p = 0;
+    let worst = Infinity;
+    for (let i = 0; i < 3000; i++) {
+      p += (CELL * 10) / 3000;
+      r.pump(p, p);
+      if (i % 30 === 0 && i > 300) worst = Math.min(worst, worstReach(r, p, p));
+    }
+    expect(worst).toBeGreaterThan(DATA.radius * 0.95);
   });
 });

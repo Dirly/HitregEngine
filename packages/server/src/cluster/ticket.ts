@@ -12,7 +12,7 @@
  */
 
 import { createHmac, timingSafeEqual } from "node:crypto";
-import type { CharacterBuild } from "@hitreg/core";
+import type { CharacterBuild, StaffRole } from "@hitreg/core";
 
 export interface TicketClaims {
   /** Account id. */
@@ -34,6 +34,12 @@ export interface TicketClaims {
    * character that already has a save.
    */
   build?: CharacterBuild;
+  /**
+   * Staff role of the account (`gm` / `dev`), signed so a client cannot claim
+   * one: the layer publishes it as netState `staff/<peer>`, and authority
+   * handlers (`/give`, `/soulbind`) accept that peer's requests.
+   */
+  role?: StaffRole;
   /** Why the holder is arriving (join, transfer, instance) — informational. */
   reason?: string;
   /** Issued-at / expiry, unix seconds. */

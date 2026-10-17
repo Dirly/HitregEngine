@@ -37,9 +37,8 @@ import {
   type Op,
   type VoxelMesh,
 } from "@hitreg/core";
-// @ts-expect-error plain JS tool module
-import { GltfBuilder } from "../../../tools/wfc-3d/gltf.mjs";
 import { checkFormationMesh, terrainSolid, type FormationCheck } from "./rock-formations-check.mts";
+import { writeVolumeGlb as writeGlb } from "./_volume-glb.mts";
 
 const MIN_TRIANGLES = 60;
 const MIN_SIZE = 2;
@@ -113,43 +112,6 @@ function keepComponents(mesh: VoxelMesh, check: FormationCheck, keep: (index: nu
 const summary = (c: FormationCheck) => `open edges ${c.openEdges} (exposed ${c.exposedOpenEdges}), components ${c.components.length}, unsupported ${c.unsupported}`;
 
 /** GLB (binary glTF): the loader gets the bytes directly, no base64 string parse on the main thread. */
-function writeGlb(mesh: VoxelMesh, file: string): number {
-  const b = new GltfBuilder("HitReg rock formations (baked DC volume)");
-  const count = mesh.vertexCount;
-  const attributes: Record<string, number> = {
-    POSITION: b.pushAccessor(mesh.positions, "VEC3", { minMax: true }),
-    NORMAL: b.pushAccessor(mesh.normals, "VEC3"),
-    COLOR_0: b.pushAccessor(mesh.tint.length === count * 3 ? mesh.tint : new Float32Array(count * 3).fill(1), "VEC3"),
-  };
-  const S = mesh.surfaceCount;
-  for (let k = 0; k * 4 < S; k++) {
-    const a = new Float32Array(count * 4);
-    for (let i = 0; i < count; i++) for (let j = 0; j < 4; j++) a[i * 4 + j] = k * 4 + j < S ? mesh.splat[i * S + k * 4 + j]! : 0;
-    attributes["_SPLATWEIGHT" + (k ? String(k + 1) : "")] = b.pushAccessor(a, "VEC4");
-  }
-  b.pushNode({ mesh: b.pushMesh({ primitives: [{ attributes, indices: b.pushAccessor(mesh.indices, "SCALAR") }] }) }, true);
-  const doc = b.finish();
-  const uri: string = doc.buffers[0].uri;
-  const bin = Buffer.from(uri.slice(uri.indexOf(",") + 1), "base64");
-  const json = Buffer.from(JSON.stringify({ ...doc, buffers: [{ byteLength: bin.byteLength }] }), "utf8");
-  const jsonPad = (4 - (json.byteLength % 4)) % 4, binPad = (4 - (bin.byteLength % 4)) % 4;
-  const total = 12 + 8 + json.byteLength + jsonPad + 8 + bin.byteLength + binPad;
-  const out = Buffer.alloc(total);
-  let o = 0;
-  out.writeUInt32LE(0x46546c67, o); o += 4;
-  out.writeUInt32LE(2, o); o += 4;
-  out.writeUInt32LE(total, o); o += 4;
-  out.writeUInt32LE(json.byteLength + jsonPad, o); o += 4;
-  out.writeUInt32LE(0x4e4f534a, o); o += 4;
-  json.copy(out, o); o += json.byteLength;
-  out.fill(0x20, o, o + jsonPad); o += jsonPad;
-  out.writeUInt32LE(bin.byteLength + binPad, o); o += 4;
-  out.writeUInt32LE(0x004e4942, o); o += 4;
-  bin.copy(out, o); o += bin.byteLength;
-  out.fill(0, o, o + binPad);
-  writeFileSync(file, out);
-  return total;
-}
 
 const ids = result.docs.map((_, i) => `rock-${siteId}${result.docs.length > 1 ? `-${i + 1}` : ""}`);
 const bake = !has("no-bake");

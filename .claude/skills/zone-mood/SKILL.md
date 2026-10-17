@@ -30,5 +30,7 @@ mood equals `before` (apply) or `after` (revert), so it is its own inverse. Neve
 - Neighbouring zones' moods differ visibly; borders blend over `blendSeconds`.
 - A place whose brief mood breaks its zone's gets a NESTED region (`within` the zone, the place id) with its own mood;
   a nested region without a mood wears its zone's. Nested places are the likeliest to fail the band: lint them too.
+- Mist that should sit in a zone's pools and hollows at ANY altitude (swamp, bog) is `mistTop`/`mistThickness`
+  (metres above the local low ground), not a bigger `mist`: the scene's absolute mist top misses high ground.
 - A place mood also sets its vegetation and role tiles (`terrain-edits`); a read that depends on dark or pale ground
   needs that tile in the palette.

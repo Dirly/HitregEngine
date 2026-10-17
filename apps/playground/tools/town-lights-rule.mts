@@ -29,12 +29,15 @@ export const streetLightingSchema = z
         spacing: z.number().positive().default(18).describe("Metres between lanterns along one street; sides alternate, so one side sees one every 2x this."),
         cover: z.number().positive().default(13).describe("GATE: every metre of every street and lane has a lantern within this distance."),
         edgeOffset: z.number().default(0.5).describe("Preferred distance of a lantern beyond the street's paved edge (negative = on the edge band)."),
+        lit: z.enum(["spaced", "none"]).default("spaced").describe("Streets: lanterns every `spacing` (gate: `cover`), or none (a poor village keeps its street dark)."),
+        lanes: z.enum(["spaced", "junctions", "none"]).default("spaced").describe("Lanes: spaced like streets, one lantern where each lane leaves a street (`junctions`; gate: within `cover` of that end), or none."),
       })
       .prefault({}),
     plazas: z
       .object({
         prefab: prefabId.default("town-lights/lamp-post-lit"),
         cover: z.number().positive().default(3).describe("GATE: a lantern within the plaza (half its width + this) of its centre."),
+        lit: z.boolean().default(true).describe("false: plazas get no lantern of their own (and no gate)."),
       })
       .prefault({}),
     gates: z
@@ -61,8 +64,32 @@ export const streetLightingSchema = z
         shoulderOffset: z.number().positive().default(1.1).describe("Lanterns stand on the shoulder this far beyond the carriageway edge, never on it."),
         junctionReach: z.number().positive().default(200).describe("Road junctions and bridge ends within this distance of a mouth get a lantern."),
         exclude: z.array(z.string()).default(["^trail-"]).describe("Road ids (regex) that are not roads for lighting: mountain trails."),
+        lit: z.boolean().default(true).describe("false: no lanterns on the roads out, their junctions or bridge ends (and no gate for them)."),
       })
       .prefault({}),
+    doors: z
+      .object({
+        prefab: prefabId.default("town-lights/lamp-post-lit").describe("Lantern beside the door of a building whose plan `use` matches `uses`."),
+        uses: z.array(z.string()).default([]).describe("Regexes (case-insensitive) on the town plan's building `use`: those buildings get a lantern by the door (the alehouse, the inn)."),
+        cover: z.number().positive().default(6).describe("GATE: a lantern within this distance of each such door."),
+      })
+      .prefault({}),
+    profiles: z
+      .array(
+        z.object({
+          name: z.string().min(1),
+          about: z.string().default(""),
+          when: z
+            .object({
+              tier: z.array(z.string()).optional().describe("Town plan `tier` values this profile applies to (hamlet, village, town, city, capital)."),
+              wealth: z.array(z.string()).optional().describe("Town wealth values (plan `wealth`, else the residents' median on `wealthTiers`)."),
+            })
+            .prefault({}),
+          set: z.record(z.string(), z.unknown()).describe("Partial rule merged over the base (same keys as the rule)."),
+        }),
+      )
+      .default([])
+      .describe("Wealth/size factor: the FIRST profile whose `when` matches the town is merged over the base rule."),
     clearance: z
       .object({
         building: z.number().min(0).default(0.6).describe("Minimum distance from a building footprint (layout `full`)."),
@@ -85,8 +112,30 @@ export function streetLightingFile(projectDir: string): string {
   const own = path.join(projectDir, "authoring", "street-lights.json");
   return fs.existsSync(own) ? own : path.join(HERE, "street-lights.json");
 }
-export function loadStreetLighting(projectDir: string): StreetLighting {
-  return streetLightingSchema.parse(JSON.parse(fs.readFileSync(streetLightingFile(projectDir), "utf8")));
+/** What a profile is chosen by: the town plan's tier and the town's wealth. */
+export interface TownStanding { tier?: string; wealth?: string }
+/** The town's wealth: plan `wealth` if set, else the median resident `wealth` on the plan's `wealthTiers` scale. */
+export function townWealth(plan: { wealth?: string; wealthTiers?: string[]; residents?: { wealth?: string }[] }): string | undefined {
+  if (plan.wealth) return plan.wealth;
+  const scale = plan.wealthTiers ?? ["destitute", "poor", "comfortable", "wealthy", "noble"];
+  const ranks = (plan.residents ?? []).map((r) => scale.indexOf(r.wealth ?? "")).filter((i) => i >= 0).sort((a, b) => a - b);
+  return ranks.length ? scale[ranks[Math.floor((ranks.length - 1) / 2)]!] : undefined;
+}
+const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+function merge(a: Record<string, unknown>, b: Record<string, unknown>): Record<string, unknown> {
+  const out = { ...a };
+  for (const [k, v] of Object.entries(b)) out[k] = isObj(v) && isObj(out[k]) ? merge(out[k] as Record<string, unknown>, v) : v;
+  return out;
+}
+/** The rule for one town: the base with the first matching profile merged over it. Pure. */
+export function resolveStreetLighting(raw: unknown, town: TownStanding = {}): { rule: StreetLighting; profile: string | null } {
+  const base = streetLightingSchema.parse(raw);
+  const hit = base.profiles.find((p) => (!p.when.tier || (town.tier !== undefined && p.when.tier.includes(town.tier))) && (!p.when.wealth || (town.wealth !== undefined && p.when.wealth.includes(town.wealth))));
+  if (!hit) return { rule: base, profile: null };
+  return { rule: streetLightingSchema.parse(merge(raw as Record<string, unknown>, hit.set)), profile: hit.name };
+}
+export function loadStreetLighting(projectDir: string, town: TownStanding = {}): { rule: StreetLighting; profile: string | null } {
+  return resolveStreetLighting(JSON.parse(fs.readFileSync(streetLightingFile(projectDir), "utf8")), town);
 }
 
 // ------------------------------------------------------------------ inputs
@@ -108,12 +157,13 @@ export interface TownLightInput {
   town: { id: string; name: string; center: XZ; radius: number; gates: LightGate[] };
   roads: LightRoad[]; // the whole recipe's roads
   bridges: { id: string; points: [XZ, XZ]; width: number; deckY: number }[];
-  buildings: { id: string; poly: XZ[]; door?: XZ }[];
+  /** `use` is the town plan's building use (matched by `doors.uses`); `facing` the outward front normal. */
+  buildings: { id: string; poly: XZ[]; door?: XZ; use?: string; facing?: XZ }[];
   docks: LightDock[];
   obstacles: LightObstacle[];
   ground: LightGround;
 }
-export type LightKind = "street" | "lane" | "plaza" | "gate" | "quay" | "road" | "junction" | "bridge";
+export type LightKind = "street" | "lane" | "plaza" | "gate" | "quay" | "road" | "junction" | "bridge" | "door";
 export interface Lantern { id: string; prefab: string; kind: LightKind; ref: string; at: [number, number, number]; yaw: number; deck?: boolean }
 
 // ------------------------------------------------------------------ geometry
@@ -278,6 +328,31 @@ function put(c: Ctx, l: Omit<Lantern, "id">, n: number): Lantern {
 }
 const covered = (c: Ctx, p: XZ, r: number): boolean => c.placed.some((l) => dist(p, [l.at[0], l.at[2]]) <= r);
 
+/** Buildings the rule's `doors.uses` names (by their plan use) that have a door. */
+function litDoors(inp: TownLightInput, rule: StreetLighting): TownLightInput["buildings"] {
+  const res = rule.doors.uses.map((x) => new RegExp(x, "i"));
+  return inp.buildings.filter((b) => b.door && b.use && res.some((r) => r.test(b.use!)));
+}
+/** Outward front normal of a building: its own `facing`, else from the footprint centre to the door. */
+function doorFacing(b: TownLightInput["buildings"][number]): XZ {
+  if (b.facing) return norm(b.facing);
+  const c: XZ = [b.poly.reduce((s, p) => s + p[0], 0) / b.poly.length, b.poly.reduce((s, p) => s + p[1], 0) / b.poly.length];
+  return norm(sub(b.door!, c));
+}
+/** The town street a door faces (nearest to the door): a door lantern may stand on its edge band like a street lantern. */
+function doorStreet(net: TownNet, b: TownLightInput["buildings"][number]): LightRoad | undefined {
+  return net.streets.filter((r) => r.kind !== "plaza").sort((x, y) => polyDist(b.door!, x.points) - polyDist(b.door!, y.points))[0];
+}
+/** Which ends of a lane (0 = start, 1 = end) meet another street, lane or plaza of the town. A lane that meets
+ *  nothing is lit at its start. */
+function laneJunctions(net: TownNet, lane: TownNet["streets"][number]): (0 | 1)[] {
+  const ends = ([0, 1] as const).filter((k) => {
+    const e = k === 0 ? lane.points[0]! : lane.points[lane.points.length - 1]!;
+    return net.streets.some((o) => o.id !== lane.id && polyDist(e, o.points) < o.width / 2 + 3);
+  });
+  return ends.length ? [...ends] : [0];
+}
+
 export interface TownLightPlan { lanterns: Lantern[]; unplaced: { kind: LightKind; ref: string; at: XZ; why: string }[] }
 
 export function planTownLights(inp: TownLightInput, rule: StreetLighting): TownLightPlan {
@@ -316,11 +391,23 @@ export function planTownLights(inp: TownLightInput, rule: StreetLighting): TownL
   // 2. gates: a pair flanking each mouth, just outside it
   for (const g of inp.town.gates) {
     const f = norm(g.facing), n: XZ = [-f[1], f[0]];
-    for (const sg of rule.gates.pair ? [1, -1] : [1])
-      tryAll("gate", g.id, rule.gates.prefab, g.at, [1.5, 3, 0.5, 4.5, 6].flatMap((s) => [1.2, 2].map((o) => ({ p: add(add(g.at, f, s), n, sg * (g.width / 2 + o)), u: [-n[0] * sg, -n[1] * sg] as XZ })), ), sg > 0 ? 0 : 1);
+    // a single lantern (pair false) may stand on either side of the mouth: whichever is lawful nearest the mouth
+    const cand = (sg: number): { p: XZ; u: XZ }[] => [1.5, 3, 0.5, 4.5, 6].flatMap((s) => [1.2, 2].map((o) => ({ p: add(add(g.at, f, s), n, sg * (g.width / 2 + o)), u: [-n[0] * sg, -n[1] * sg] as XZ })));
+    if (rule.gates.pair) for (const sg of [1, -1]) tryAll("gate", g.id, rule.gates.prefab, g.at, cand(sg), sg > 0 ? 0 : 1);
+    else tryAll("gate", g.id, rule.gates.prefab, g.at, [...cand(1), ...cand(-1)].sort((x, y) => dist(x.p, g.at) - dist(y.p, g.at)), 0);
+  }
+  // 2b. doors: a lantern beside the door of each building whose use the rule names (the alehouse), off the door path
+  for (const b of litDoors(inp, rule)) {
+    const f = doorFacing(b), t: XZ = [-f[1], f[0]];
+    const cands = [2.4, 3.2, 4, 5].flatMap((s) => [1, -1].flatMap((sg) => [1.0, 1.6, 2.4, 0.4].map((o) => {
+      const p = add(add(b.door!, f, o), t, sg * s);
+      const st = doorStreet(net, b);
+      return { p, u: norm(sub(b.door!, p)), ...(st ? { self: st.id, selfMin: st.width / 2 - 0.35 } : {}) };
+    })));
+    tryAll("door", b.id, rule.doors.prefab, b.door!, cands, 0);
   }
   // 3. plazas: one in the square (centre if clear, else round its edge)
-  for (const pz of net.streets.filter((s) => s.kind === "plaza")) {
+  for (const pz of net.streets.filter((s) => s.kind === "plaza" && rule.plazas.lit)) {
     const L = lengthOf(pz.points), mid = along(pz.points, L / 2);
     const ring = [0, 1, 2, 3, 4, 5, 6, 7].flatMap((k) => [0.35, 0.7].map((f) => {
       const a = (k / 8) * Math.PI * 2;
@@ -329,7 +416,7 @@ export function planTownLights(inp: TownLightInput, rule: StreetLighting): TownL
     if (!covered(c, mid.p, pz.width / 2)) tryAll("plaza", pz.id, rule.plazas.prefab, mid.p, [{ p: mid.p, u: mid.t, self: pz.id, selfMin: 0 }, ...ring], 0);
   }
   // 4. streets then lanes, widest first: stations at most `spacing` apart, sides alternating, at the paved edge
-  const order = net.streets.filter((s) => s.kind !== "plaza").sort((a, b) => (a.kind === b.kind ? b.width - a.width || a.id.localeCompare(b.id) : a.kind === "street" ? -1 : 1));
+  const order = net.streets.filter((s) => (s.kind === "street" && rule.streets.lit === "spaced") || (s.kind === "lane" && rule.streets.lanes === "spaced")).sort((a, b) => (a.kind === b.kind ? b.width - a.width || a.id.localeCompare(b.id) : a.kind === "street" ? -1 : 1));
   for (const s of order) {
     const L = lengthOf(s.points);
     const n = Math.max(1, Math.ceil(L / rule.streets.spacing));
@@ -351,8 +438,20 @@ export function planTownLights(inp: TownLightInput, rule: StreetLighting): TownL
       tryAll(s.kind, s.id, prefab, at, cands, i);
     }
   }
+  // 4b. lanes lit only where they leave a street: one lantern a few metres in from each such end
+  if (rule.streets.lanes === "junctions") for (const s of net.streets.filter((x) => x.kind === "lane")) {
+    const L = lengthOf(s.points), prefab = rule.streets.lanePrefab, slim = prefab.includes("hanging");
+    laneJunctions(net, s).forEach((end, n) => {
+      const offs = slim ? [s.width / 2 + 0.9, s.width / 2 + 1.4, s.width / 2 + 1.1] : [s.width / 2 + rule.streets.edgeOffset, s.width / 2 + 1.2];
+      const cands = [3, 4.5, 6, 2, 8, 10].flatMap((d) => [1, -1].flatMap((sg) => offs.map((o) => {
+        const a = along(s.points, Math.max(0, Math.min(L, end === 0 ? d : L - d))), nrm: XZ = [-a.t[1], a.t[0]];
+        return { p: add(a.p, nrm, sg * o), u: [-nrm[0] * sg, -nrm[1] * sg] as XZ, self: s.id, selfMin: slim ? s.width / 2 + 0.4 : s.width / 2 - 0.35 };
+      })));
+      tryAll("lane", s.id, prefab, end === 0 ? s.points[0]! : s.points[s.points.length - 1]!, cands, n);
+    });
+  }
   // 5. roads out of every mouth: on the shoulder, from `start` to `reach`, sides alternating
-  for (const r of net.out) {
+  for (const r of rule.roads.lit ? net.out : []) {
     const L = Math.min(rule.roads.reach, lengthOf(r.points));
     // even stations from `start` to the end of the lit stretch, at most `spacing` apart, the last one AT the end
     const n = Math.max(1, Math.ceil((L - rule.roads.start) / rule.roads.spacing)), step = (L - rule.roads.start) / n;
@@ -383,7 +482,7 @@ export function planTownLights(inp: TownLightInput, rule: StreetLighting): TownL
     }
   }
   junctions.sort((x, y) => x.at[0] - y.at[0] || x.at[1] - y.at[1]);
-  junctions.forEach((j, n) => {
+  if (rule.roads.lit) junctions.forEach((j, n) => {
     if (covered(c, j.at, 8)) return;
     const r0 = Math.max(j.a.width, j.b.width) / 2;
     const cands = [0, 1, 2, 3, 4, 5, 6, 7].flatMap((k) => [r0 + 1.5, r0 + 2.5].map((o) => {
@@ -393,7 +492,7 @@ export function planTownLights(inp: TownLightInput, rule: StreetLighting): TownL
     tryAll("junction", `${j.a.id}+${j.b.id}`, rule.roads.prefab, j.at, cands, n);
   });
   // 7. both ends of every bridge near the town, on the bank beside the abutment
-  for (const b of inp.bridges) {
+  for (const b of rule.roads.lit ? inp.bridges : []) {
     if (!b.points.some((p) => near(p))) continue;
     b.points.forEach((p, n) => {
       const away = norm(sub(p, b.points[1 - n]!)), side: XZ = [-away[1], away[0]];
@@ -430,10 +529,16 @@ export function checkTownLights(inp: TownLightInput, rule: StreetLighting, insta
   for (const s of net.streets) {
     if (s.kind === "plaza") {
       const mid = along(s.points, lengthOf(s.points) / 2).p;
-      if (nearest(mid) > s.width / 2 + rule.plazas.cover) failures.push(`plaza ${s.id}: no lantern in the square`);
-    } else gapsAlong(`${s.kind} ${s.id}`, s.points, rule.streets.cover, (p) => inp.docks.some((d) => inPoly(p, d.corners)));
+      if (rule.plazas.lit && nearest(mid) > s.width / 2 + rule.plazas.cover) failures.push(`plaza ${s.id}: no lantern in the square`);
+    } else if (s.kind === "lane" && rule.streets.lanes === "junctions") {
+      for (const k of laneJunctions(net, s)) {
+        const e = k === 0 ? s.points[0]! : s.points[s.points.length - 1]!;
+        if (nearest(e) > rule.streets.cover) failures.push(`lane ${s.id}: no lantern where it leaves the street (${e[0].toFixed(0)}, ${e[1].toFixed(0)}); the standard is ${rule.streets.cover} m`);
+      }
+    } else if ((s.kind === "street" && rule.streets.lit === "spaced") || (s.kind === "lane" && rule.streets.lanes === "spaced")) gapsAlong(`${s.kind} ${s.id}`, s.points, rule.streets.cover, (p) => inp.docks.some((d) => inPoly(p, d.corners)));
   }
   for (const g of inp.town.gates) if (nearest(g.at) > rule.gates.cover) failures.push(`gate ${g.id}: no lantern at the mouth`);
+  for (const b of litDoors(inp, rule)) if (nearest(b.door!) > rule.doors.cover) failures.push(`door of ${b.id} (${b.use}): no lantern within ${rule.doors.cover} m`);
   for (const d of inp.docks) {
     if (d.head && nearest(d.head.at) > rule.quays.cover) failures.push(`quay ${d.id}: no lantern at the quay head`);
     if (d.jetty && nearest(d.jetty.end) > rule.quays.cover) failures.push(`quay ${d.id}: no lantern at the jetty end`);
@@ -442,15 +547,16 @@ export function checkTownLights(inp: TownLightInput, rule: StreetLighting, insta
     const w = inp.ground.waterY(p[0], p[1]);
     return (w !== null && w > inp.ground.height(p[0], p[1]) - 0.05) || inp.bridges.some((b) => segDist(p, b.points[0], b.points[1]) < b.width);
   };
-  for (const r of net.out) gapsAlong(`road ${r.id} out of ${r.gate || "the town"}`, cut(r.points, rule.roads.reach), rule.roads.cover, wet);
-  for (const b of inp.bridges) if (b.points.some((p) => net.out.some((o) => dist(p, o.mouth) <= rule.roads.junctionReach)))
+  if (rule.roads.lit) for (const r of net.out) gapsAlong(`road ${r.id} out of ${r.gate || "the town"}`, cut(r.points, rule.roads.reach), rule.roads.cover, wet);
+  if (rule.roads.lit) for (const b of inp.bridges) if (b.points.some((p) => net.out.some((o) => dist(p, o.mouth) <= rule.roads.junctionReach)))
     for (const p of b.points) if (nearest(p) > 8) failures.push(`bridge ${b.id}: no lantern at the end (${p[0].toFixed(0)}, ${p[1].toFixed(0)})`);
   // lawful spots
   const c: Ctx = { inp, rule, net, placed: [] };
   for (const l of installed) {
     const p: XZ = [l.at[0], l.at[2]];
     const u: XZ = [Math.cos(l.yaw), -Math.sin(l.yaw)];
-    const selfRoad = [...net.streets, ...net.out].filter((r) => r.id === l.ref)[0];
+    const doorB = l.kind === "door" ? inp.buildings.find((b) => b.id === l.ref && b.door) : undefined;
+    const selfRoad = doorB ? doorStreet(net, doorB) : [...net.streets, ...net.out].filter((r) => r.id === l.ref)[0];
     const why = refuse(c, p, footOf(l.prefab, p, u), {
       kind: l.kind, deck: !!l.deck, self: selfRoad?.id,
       selfMin: selfRoad ? (l.kind === "road" ? selfRoad.width / 2 + 0.4 : l.kind === "plaza" ? 0 : l.prefab.includes("hanging") ? selfRoad.width / 2 + 0.4 : selfRoad.width / 2 - 0.35) : undefined,

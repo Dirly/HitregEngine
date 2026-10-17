@@ -778,7 +778,7 @@ export async function run(argv: string[]): Promise<void> {
       const core = await import("@hitreg/core"), recipe = core.worldRecipeSchema.parse(JSON.parse(fs.readFileSync(worldFile, "utf8"))), wid = "dress-steps";
       core.registerVoxelWorld(wid, recipe); const cs = recipe.cellSize, meshes = new Map<string, any>(), cb = Math.cos(-a), sb = Math.sin(-a);
       ground = (lx, lz) => { const x = lx * cb + lz * sb + b.centre[0], z = -lx * sb + lz * cb + b.centre[1], ci = Math.floor(x / cs), cj = Math.floor(z / cs), key = ci + "," + cj;
-        let m = meshes.get(key); if (!m) { m = core.voxelMesh({ kind: "voxel", world: wid, cell: [ci, cj] } as any); meshes.set(key, m); }
+        let m = meshes.get(key); if (!m) { m = core.voxelMesh({ kind: "voxel", world: wid, cell: [ci, cj], mesher: "auto" } as any); meshes.set(key, m); }
         const px = x - ci * cs, pz = z - cj * cs, P = m.positions as ArrayLike<number>, I = m.indices as ArrayLike<number>; let h = -Infinity;
         for (let i = 0; i < I.length; i += 3) { const A = I[i]! * 3, B = I[i + 1]! * 3, C = I[i + 2]! * 3, den = (P[B + 2]! - P[C + 2]!) * (P[A]! - P[C]!) + (P[C]! - P[B]!) * (P[A + 2]! - P[C + 2]!); if (Math.abs(den) < 1e-8) continue; const u = ((P[B + 2]! - P[C + 2]!) * (px - P[C]!) + (P[C]! - P[B]!) * (pz - P[C + 2]!)) / den, v = ((P[C + 2]! - P[A + 2]!) * (px - P[C]!) + (P[A]! - P[C]!) * (pz - P[C + 2]!)) / den; if (u >= -1e-6 && v >= -1e-6 && u + v <= 1 + 1e-6) h = Math.max(h, u * P[A + 1]! + v * P[B + 1]! + (1 - u - v) * P[C + 1]!); }
         return Number.isFinite(h) ? h - b.groundY : null; };

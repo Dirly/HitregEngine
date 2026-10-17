@@ -276,7 +276,18 @@ export function advanceGrassReach(current: number, target: number, elapsedMs: nu
 // old 0.35 fraction — under a second of flight at typical speed. Widened so
 // it fires roughly half as often; still frequent enough that the field
 // visibly follows the camera.
-const RECENTER_FRACTION = 0.6;
+//
+// Back to 0.35 (2026-10-09). The relayout spike that widened it is gone
+// (placement is amortised under PLACEMENT_BUDGET_MS and ground samples are
+// cached per world cell, so a recenter mostly re-reads the cache), and the
+// wide cell had a visible cost of its own: the deadband is per AXIS, so on a
+// diagonal the camera drifted up to ~0.59 of the radius from its disc, the
+// fade reach pulled in to ~0.7 of the radius to stay on placed ground, and
+// grew back out after each recenter. Walking, the cover edge breathed 40 m ->
+// 26 m -> 40 m and tufts along it cut in and out — read as grass flickering
+// while moving. At 0.35 the worst diagonal drift is ~0.35 of the radius, which
+// PLACEMENT_PAD covers, so the edge stays at the authored radius.
+export const RECENTER_FRACTION = 0.35;
 
 /**
  * Deadband on that grid, as a fraction of a cell PAST the boundary.
@@ -340,12 +351,12 @@ const LEAD_GAIN = 0.5;
  * whole disc each way. So `L <= 0.2 * cell`, and `cell` is
  * `RECENTER_FRACTION` of the radius:
  *
- *   0.2 * 0.6 = 0.12
+ *   0.2 * 0.35 = 0.07
  *
- * On the 42 m field this project authors that is 5 m of lead, which buys most
- * of a second at running speed — comfortably more than a placement now takes.
+ * On a 40 m field that is 2.8 m of lead, about half a second at running speed —
+ * more than a placement takes now that the cached cells answer most of it.
  */
-const LEAD_MAX_FRACTION = 0.12;
+export const LEAD_MAX_FRACTION = 0.2 * RECENTER_FRACTION;
 
 /**
  * How much re-placement work one frame may do — a MILLISECOND budget, checked

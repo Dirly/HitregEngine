@@ -27,6 +27,8 @@ export interface DevConsoleBoot {
   runtime(): ScriptRuntime | null;
   /** True when this tab owns world state (alone, or host/server). */
   isAuthority?(): boolean;
+  /** True when this tab's player is a GM/dev on the server (its authority commands are honoured there). */
+  isStaff?(): boolean;
   /** Extra commands this host owns — "/fps", "/scene". */
   extras?(register: (command: import("@hitreg/scripting/console").ConsoleCommand) => void): void;
 }
@@ -41,6 +43,7 @@ export async function startDevConsole(boot: DevConsoleBoot): Promise<DevConsoleH
   const dev = new DevConsole({
     runtime: boot.runtime,
     ...(boot.isAuthority ? { isAuthority: boot.isAuthority } : {}),
+    ...(boot.isStaff ? { isStaff: boot.isStaff } : {}),
   });
   boot.extras?.((command) => dev.register(command));
   const ui = mountDevConsole({ console: dev });

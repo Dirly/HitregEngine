@@ -8,20 +8,22 @@
  */
 import path from "node:path";
 import { exists, finish, load, type Ctx, type Finding } from "../lib.mts";
+import { findAsset } from "../../_closure.mjs";
 import { bestiarySchema, castSchema, factionMembers, zoneBestiarySchema, zoneBriefSchema, type Bestiary, type Cast, type Creature, type ZoneBestiary } from "../schemas.mts";
 import { err, levelFit, MELEE_ROLES, jaccard, neighboursOf, readAdjacency, warn } from "./_shared.mts";
 
 /** An asset path in the catalogue is relative to the project's assets/ folder. */
-export const assetExists = (ctx: Ctx, rel: string): boolean => !!rel && exists(path.join(ctx.paths.projectDir, "assets", rel));
+/** Bodies and atlases resolve across the project's dependsOn closure (a world's mobs live in foundation), as the game loads them. */
+export const assetExists = (ctx: Ctx, rel: string): boolean => !!rel && findAsset(path.basename(ctx.paths.projectDir), rel) !== null;
 
 function lintCatalogue(ctx: Ctx, cat: Bestiary, f: Finding[]): void {
   if (cat.creatures.length === 0 || cat.factions.length === 0) err(f, "empty", "the catalogue has no creatures or no factions: nothing for a zone to select");
   for (const c of cat.creatures) {
     if (c.body.status === "needs-body") warn(f, "needs-body", `${c.id}: no body yet — a HUMAN must model it; the longest lead in the pipeline`, c.id);
-    if (c.body.status === "ready" && !assetExists(ctx, c.body.model)) err(f, "body-missing", `${c.id}: body says ready but the model "${c.body.model}" is not under assets/`, c.id);
+    if (c.body.status === "ready" && !assetExists(ctx, c.body.model)) err(f, "body-missing", `${c.id}: body says ready but the model "${c.body.model}" is not under assets/ in the project or its dependsOn closure`, c.id);
     if (c.body.status === "needs-install" && !c.body.source) warn(f, "install-source", `${c.id}: body needs-install but names no source`, c.id);
     for (const t of c.themes) if (t.status === "needs-install" && !t.source) warn(f, "install-source", `${c.id}/${t.id}: needs-install but names no source`, c.id);
-    for (const t of c.themes) if (t.status === "ready" && !assetExists(ctx, t.atlas)) err(f, "atlas-missing", `${c.id}/${t.id}: theme says ready but the atlas "${t.atlas}" is not under assets/`, c.id);
+    for (const t of c.themes) if (t.status === "ready" && !assetExists(ctx, t.atlas)) err(f, "atlas-missing", `${c.id}/${t.id}: theme says ready but the atlas "${t.atlas}" is not under assets/ in the project or its dependsOn closure`, c.id);
   }
   const byId = new Map(cat.creatures.map((c) => [c.id, c]));
   for (const fa of cat.factions) {

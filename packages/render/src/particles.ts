@@ -1,4 +1,5 @@
 import * as THREE from "three/webgpu";
+import { PRECOMPILE_SAFE } from "./precompile-safe.js";
 import { InstancedProps, applyInstancedProps } from "./instancing.js";
 import { worldDaylight } from "./daylight.js";
 import {
@@ -1011,6 +1012,9 @@ class ParticleBatch {
       blending: data.blending === "additive" ? THREE.AdditiveBlending : THREE.NormalBlending,
     });
     this.material.forceSinglePass = true;
+    this.material.name = `particles:${batchKey(data)}`;
+    // a soft-faded batch reads the viewport depth; any other is safe to compile before first use
+    if (!(data.softFade > 0)) this.material.userData[PRECOMPILE_SAFE] = true;
     const sprite = data.sprite && data.sprite !== "soft" ? variantSpriteTexture(data.sprite) : softSpriteTexture();
     if (sprite) this.material.map = sprite;
     const textureUrl = data.texture ? resolveTexture?.(data.texture) : undefined;

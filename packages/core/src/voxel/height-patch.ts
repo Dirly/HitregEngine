@@ -36,7 +36,7 @@ export interface PreparedHeightPatch {
   apply(x: number, z: number, under: number): number;
   /** The (filtered) raster height at (x, z), clamped to the footprint. */
   raster(x: number, z: number): number;
-  /** Blend weight in [0, 1]; 0 outside and on the boundary. */
+  /** Blend weight in [0, 1] (edge feather times the `weights` opacity); 0 outside and on the boundary. */
   weight(x: number, z: number): number;
 }
 
@@ -122,17 +122,21 @@ export function prepareHeightPatch(doc: HeightPatchDoc, voxelSize: number, under
   const filter = doc.filter ?? voxelSize;
   const limited = doc.maxSlope !== undefined ? slopeLimitRaster(doc.heights, cols, rows, cellX, cellZ, doc.maxSlope) : doc.heights;
   const h = filter > 0 ? tentFilterRaster(limited, cols, rows, filter / cellX, filter / cellZ) : Float64Array.from(limited);
+  // MASKED patch: a per-sample opacity, filtered like the heights, so an untouched sample lets the ground under it show
+  const m = doc.weights ? (filter > 0 ? tentFilterRaster(doc.weights, cols, rows, filter / cellX, filter / cellZ) : Float64Array.from(doc.weights)) : null;
 
-  const raster = (x: number, z: number): number => {
+  const sample = (g: Float64Array, x: number, z: number): number => {
     const dx = Math.min(sx, Math.max(0, x - doc.origin[0]));
     const dz = Math.min(sz, Math.max(0, z - doc.origin[1]));
     const u = (dx / sx) * (cols - 1), v = (dz / sz) * (rows - 1);
     const col = Math.min(cols - 2, Math.floor(u)), row = Math.min(rows - 2, Math.floor(v));
     const fx = u - col, fz = v - row, i = row * cols + col;
-    const a = h[i]! + (h[i + 1]! - h[i]!) * fx;
-    const b = h[i + cols]! + (h[i + cols + 1]! - h[i + cols]!) * fx;
+    const a = g[i]! + (g[i + 1]! - g[i]!) * fx;
+    const b = g[i + cols]! + (g[i + cols + 1]! - g[i + cols]!) * fx;
     return a + (b - a) * fz;
   };
+  const raster = (x: number, z: number): number => sample(h, x, z);
+  const opacity = m ? (x: number, z: number): number => Math.max(0, Math.min(1, sample(m, x, z))) : () => 1;
 
   // Feather per edge. Explicit `feather` wins; otherwise the widest of the
   // authored blend, two lattice steps, and what keeps the blend no steeper
@@ -149,7 +153,7 @@ export function prepareHeightPatch(doc: HeightPatchDoc, voxelSize: number, under
       const t = (s / (n - 1)) * len;
       const x = alongX ? doc.origin[0] + t : edge === 0 ? doc.origin[0] : doc.origin[0] + sx;
       const z = alongX ? (edge === 2 ? doc.origin[1] : doc.origin[1] + sz) : doc.origin[1] + t;
-      const d = Math.abs(raster(x, z) - under(x, z));
+      const d = Math.abs(raster(x, z) - under(x, z)) * opacity(x, z);
       if (d > worst) worst = d;
     }
     return worst;
@@ -165,12 +169,13 @@ export function prepareHeightPatch(doc: HeightPatchDoc, voxelSize: number, under
   const weight = (x: number, z: number): number => {
     const dx = x - doc.origin[0], dz = z - doc.origin[1];
     if (dx <= 0 || dz <= 0 || dx >= sx || dz >= sz) return 0;
-    return Math.min(
+    const edge = Math.min(
       smoothstep(0, feather[0], dx),
       smoothstep(0, feather[1], sx - dx),
       smoothstep(0, feather[2], dz),
       smoothstep(0, feather[3], sz - dz),
     );
+    return edge > 0 ? edge * opacity(x, z) : 0;
   };
 
   return {

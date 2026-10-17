@@ -2,7 +2,7 @@ import * as THREE from "three/webgpu";
 import { float, mix, positionLocal, sub, uv, vec3 } from "three/tsl";
 import type { VfxModuleOf } from "@hitreg/core";
 import { LiveModule, presentationOnly, unlitMaterial, type LiveModuleHost } from "../base.js";
-import { capFade, fresnel, makeUniforms, noise01, posterize, quantize, type N } from "../shaders.js";
+import { bindValues, capFade, fresnel, makeValues, noise01, posterize, quantize, sharedUniforms, type N } from "../shaders.js";
 
 type ColumnModule = VfxModuleOf<"column">;
 type BeamModule = VfxModuleOf<"beam">;
@@ -13,6 +13,42 @@ const tmpEnd = new THREE.Vector3();
 const flip = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI);
 const spinQ = new THREE.Quaternion();
 let cylinder: THREE.CylinderGeometry | null = null;
+
+/** One material per blend, shared by every tube (values per mesh: shaders.ts sharedUniforms). */
+const variants = new Map<string, THREE.MeshBasicNodeMaterial>();
+
+function variant(additive: boolean): THREE.MeshBasicNodeMaterial {
+  const key = additive ? "add" : "norm";
+  let material = variants.get(key);
+  if (material) return material;
+  material = unlitMaterial(additive);
+  const u = sharedUniforms("u"); // color, glow, opacity, time, a=noise amount, b=scroll, c=pulse phase(unused), d=core mix
+  const x = sharedUniforms("x"); // a=top ratio, b=cap lo, c=cap hi, d=edge fade, e=noise scale ; x.opacity=axial stretch
+  const q = sharedUniforms("q"); // a=PSX cells, b=alpha steps
+  const quv: N = quantize(uv() as N, q.a);
+  const v: N = quv.y; // 1 at the top (+Y), 0 at the base
+  // cone: scale x/z by the far-end ratio along the axis
+  const s: N = mix(float(1), x.a, v);
+  const p: N = positionLocal as N;
+  material.positionNode = vec3(p.x.mul(s), p.y, p.z.mul(s));
+  const caps: N = capFade(v, x.b, x.c);
+  // Silhouette fade with a wide falloff (power 1.1): a tube with a hard
+  // vertical edge reads as a painted cylinder, not as light.
+  const edge: N = mix(float(1), sub(float(1), fresnel(float(1.1))), x.d);
+  const qp: N = quantize(p.mul(0.5).add(0.5), q.a).sub(0.5).mul(2);
+  // One octave: a column is a lot of screen, and the second octave was the
+  // single most expensive thing in a big spell (a 3D perlin per pixel per
+  // surface, several surfaces deep). Posterised it was invisible anyway.
+  const n: N = noise01(vec3(qp.x.mul(x.e).mul(2), v.mul(x.e).mul(x.opacity).sub(u.time.mul(u.b)), qp.z.mul(x.e).mul(2)), 1);
+  const broken: N = mix(float(1), n.mul(1.7), u.a);
+  // 0.3 toward glow, not 0.5: the old mix made every cone and pillar a
+  // white wedge as soon as two of them overlapped
+  material.colorNode = mix(u.color, u.glow, caps.mul(edge).mul(0.3).add(u.d));
+  material.opacityNode = posterize(caps.mul(edge).mul(broken), q.b).mul(u.opacity);
+  material.name = `vfx-tube:${key}`;
+  variants.set(key, material);
+  return material;
+}
 
 /**
  * One open cylinder with a soft-edged, cap-faded, noise-scrolled shader. A
@@ -25,47 +61,21 @@ let cylinder: THREE.CylinderGeometry | null = null;
  */
 class TubeMesh {
   readonly mesh: THREE.Mesh;
-  readonly material: THREE.MeshBasicNodeMaterial;
-  readonly u = makeUniforms();
+  readonly u = makeValues();
   /** Far-end radius ratio, cap fades, edge fade, noise scale, axial stretch. */
-  readonly x = makeUniforms();
+  readonly x = makeValues();
   /** PSX cells and alpha steps. */
-  readonly q = makeUniforms();
+  readonly q = makeValues();
 
   constructor(root: THREE.Object3D) {
     cylinder ??= new THREE.CylinderGeometry(1, 1, 1, 48, 8, true);
-    this.material = unlitMaterial(true);
-    this.mesh = new THREE.Mesh(cylinder, this.material);
+    this.mesh = new THREE.Mesh(cylinder, variant(true));
+    bindValues(this.mesh, "u", this.u);
+    bindValues(this.mesh, "x", this.x);
+    bindValues(this.mesh, "q", this.q);
     presentationOnly(this.mesh);
     this.mesh.visible = false;
     root.add(this.mesh);
-    this.build();
-  }
-
-  private build(): void {
-    const u = this.u; // color, glow, opacity, time, a=noise amount, b=scroll, c=pulse phase(unused), d=core mix
-    const x = this.x; // a=top ratio, b=cap lo, c=cap hi, d=edge fade, e=noise scale ; x.opacity=axial stretch
-    const quv: N = quantize(uv() as N, this.q.a);
-    const v: N = quv.y; // 1 at the top (+Y), 0 at the base
-    // cone: scale x/z by the far-end ratio along the axis
-    const s: N = mix(float(1), x.a, v);
-    const p: N = positionLocal as N;
-    this.material.positionNode = vec3(p.x.mul(s), p.y, p.z.mul(s));
-    const caps: N = capFade(v, x.b, x.c);
-    // Silhouette fade with a wide falloff (power 1.1): a tube with a hard
-    // vertical edge reads as a painted cylinder, not as light.
-    const edge: N = mix(float(1), sub(float(1), fresnel(float(1.1))), x.d);
-    const qp: N = quantize(p.mul(0.5).add(0.5), this.q.a).sub(0.5).mul(2);
-    // One octave: a column is a lot of screen, and the second octave was the
-    // single most expensive thing in a big spell (a 3D perlin per pixel per
-    // surface, several surfaces deep). Posterised it was invisible anyway.
-    const n: N = noise01(vec3(qp.x.mul(x.e).mul(2), v.mul(x.e).mul(x.opacity).sub(u.time.mul(u.b)), qp.z.mul(x.e).mul(2)), 1);
-    const broken: N = mix(float(1), n.mul(1.7), u.a);
-    // 0.3 toward glow, not 0.5: the old mix made every cone and pillar a
-    // white wedge as soon as two of them overlapped
-    this.material.colorNode = mix(u.color, u.glow, caps.mul(edge).mul(0.3).add(u.d));
-    this.material.opacityNode = posterize(caps.mul(edge).mul(broken), this.q.b).mul(u.opacity);
-    this.material.needsUpdate = true;
   }
 
   set(color: THREE.Color, glow: THREE.Color, opts: { top: number; capLo: number; capHi: number; edge: number; noise: number; scale: number; stretch: number; scroll: number; core: number; additive: boolean; pixel?: number; posterize?: number }): void {
@@ -82,12 +92,12 @@ class TubeMesh {
     this.x.d.value = opts.edge;
     this.x.e.value = opts.scale;
     this.x.opacity.value = opts.stretch;
-    this.material.blending = opts.additive ? THREE.AdditiveBlending : THREE.NormalBlending;
+    this.mesh.material = variant(opts.additive);
   }
 
   dispose(): void {
+    // the variant material is shared and outlives this tube
     this.mesh.removeFromParent();
-    this.material.dispose();
   }
 }
 

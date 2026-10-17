@@ -19,6 +19,7 @@ import type {
   MeshEditActions,
   MeshEditState,
   ModelBones,
+  PoseScrub,
   MultiSelection,
   Observable,
   NewSceneRequest,
@@ -68,6 +69,8 @@ export interface MountOptions {
   assetsVersion: Observable<number>;
   /** Entity id -> bone names of its loaded skinned model (bone dropdowns). */
   modelBones?: ModelBones;
+  /** The pose scrubber (prefab editing) — see PoseScrubState. */
+  poseScrub?: PoseScrub;
   /** World-anchored notes; the host owns persistence (dev bridge pin store). */
   pins?: Pins;
   camera?: THREE.PerspectiveCamera;
@@ -144,6 +147,7 @@ export function mountEditor(options: MountOptions): { unmount(): void } {
       dockSizes={options.dockSizes}
       assetsVersion={options.assetsVersion}
       modelBones={options.modelBones}
+      poseScrub={options.poseScrub}
       pins={options.pins}
       camera={options.camera}
       canvas={options.canvas}

@@ -48,6 +48,8 @@ merge them by *what they look like* (atlas tiles):
    one flower beside drifts of another instead of confetti. Leave it 0 for a
    mix that should read mixed (a forest floor of fern AND moss).
 4. **Water layers name `water`, and nothing else ever grows in water.**
+   `kinds: ["lake"]` means ANY still inland water: lakes and every still-water
+   kind a world adds (marsh pools) — `coverKindAllowed` in core.
    - `shore`: ground within `level` [min, max] of the nearest lake/river line
      within `reach` metres. A negative `min` lets cattails stand in the
      shallows. Lake banks are steep: give shore layers `slopeMax` ~0.62.
@@ -83,6 +85,37 @@ merge them by *what they look like* (atlas tiles):
 9. **Sizes are world metres of the CARD** (`bladeWidth` x `bladeHeight`);
    the pack tool fits each plant to its tile, so a low plant (moss, clover)
    occupies the bottom of a square card — size the card, not the plant.
+10. **Plain grass is the carpet; everything coloured is a sprinkle**
+    (Derek, 2026-10-09). The `grass-carpet*` layers draw light, low-contrast
+    grass tiles TINTED to the ground: `bladeColor` = ground texture average /
+    card average, in linear light, times the biome tint (the terrain material's
+    splat layers are white, so the ground IS the texture). A biome changes the
+    grass's height and tuft (tall soft grass in the open lands, short in the
+    woods, wiry on the moor), not its colour. Flowers, white tufts (cotton
+    grass, daisies) and other colour stay at a few hundredths per m².
+    A zone that restyles its grass gets its own carpet tinted to THAT texture
+    (a world's own rules file, applied after the shared one:
+    `--apply shared.json,world.json`), and the zone denies the shared carpets
+    (`regions[].vegetation.cover.deny`).
+
+11. **Dense carpets: fewer, bigger tufts, further out.** What a layer costs
+    is the tufts it places (density x area). Half the density on ~1.3x the
+    card buys a 55 m radius for the tufts a 40 m one cost, and a fade edge far
+    out is one nobody watches. The grass carpets run 0.7-1.0/m² at r55.
+
+A cover edge that FLICKERS while walking is the fade reach breathing: the
+disc trails the camera, the fade pulls in to stay on placed ground, and tufts
+along the moving edge cut in and out of the alpha test. `RECENTER_FRACTION`
+(render grass.ts) bounds the drift — 0.6 let a diagonal walk pull a 40 m edge
+in to 26 m; 0.35 holds it at the radius (test: "walking DIAGONALLY").
+
+## Towns
+
+A town pad grows no cover unless the town says `cover: true`. Before
+turning it on, every building plot needs a clearing (`cover: true`), or grass
+stands inside the floors; streets need nothing (road clearance + paving). For
+proving: `npx tsx projects/proving/authoring/towns/town-cover.mts <town>`
+writes the plot clearings from `<town>-layout.json` and sets the flag.
 
 ## Verges
 

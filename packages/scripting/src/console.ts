@@ -56,6 +56,12 @@ export interface DevConsoleOptions {
   runtime(): ScriptRuntime | null;
   /** True when this tab owns world state (single player, or the host/server). */
   isAuthority?(): boolean;
+  /**
+   * True when this tab's player is STAFF on a server (core `staffRole`: the server marked the account gm/dev from
+   * its signed ticket). The authority then honours this tab's commands declared `staff` (`/give`, `/soulbind`), so
+   * the console does not warn that those will be undone.
+   */
+  isStaff?(): boolean;
   /** Longest input remembered for the up-arrow (default 50). */
   historyLimit?: number;
 }
@@ -170,6 +176,7 @@ export class DevConsole {
     if (!decl.authority) return null;
     const authority = this.opts.isAuthority?.();
     if (authority === undefined || authority) return null;
+    if (decl.staff && this.opts.isStaff?.()) return null;
     return `/${decl.name} changes world state the host owns — this tab will be corrected on the next sync`;
   }
 

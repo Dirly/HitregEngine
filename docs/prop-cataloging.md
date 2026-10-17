@@ -102,6 +102,11 @@ gets its twin's `dressing` declaration plus `fire: true` in `authoring/fixtures/
 hearth, sconce or lantern takes a mesh-less fixture placed by `dress fixtures` on the anchors
 its `.markers.json` produced.
 
+Every placed prop is seated by its **contact** (`dressing.contact`: base, legs, embed, hang, wall; docs/voxel-worlds.md
+"Seat"). Leave it out when the derived default is right (wall mount -> wall, ceiling -> hang, rocks -> embed,
+tables/chairs/benches -> legs, else base); declare it when it is not — a lantern that hangs from a beam, a sconce
+that stands on a sill, a boulder that should sit on its base.
+
 ## Reuse first: wrap, variant, compose
 
 A builder who needs a prop the menu lacks makes it from what exists, in this order, with `props.mts`

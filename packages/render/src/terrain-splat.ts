@@ -354,9 +354,11 @@ type LayerTextures = Record<number, { map?: THREE.Texture; normalMap?: THREE.Tex
  * slice each layer index sits in. See `sampleTriplanarLayer` for why: past
  * twelve or so separate maps the WebGPU binding limits fail the pipeline.
  */
-interface LayerArray {
+export interface LayerArray {
   texture: THREE.DataArrayTexture;
   slice: Map<number, number>;
+  /** Mean colour of each packed layer (by layer index), linear. */
+  averages?: Map<number, THREE.Color>;
 }
 
 /**
@@ -564,11 +566,33 @@ async function loadLayerTextures(
  * stored top-down as drawn (`flipY` is false on array textures); the ground
  * is triplanar-tiled, so which way up a tile sits is invisible.
  */
-function packLayerArray(
+/**
+ * Packed arrays by what they hold (each slice's texture object, the filter, the depth). The textures
+ * come from `loadSharedTexture`, cached by URL, so any material that packs the same palette the same
+ * way gets the SAME array object: the rock-cap material samples the terrain's own palette array
+ * instead of uploading a second copy of every ground texture.
+ */
+const packedLayerCache = new Map<string, LayerArray>();
+
+export function packLayerArray(
   layers: { index: number; texture: THREE.Texture }[],
   filter: TextureFilter,
   maxAnisotropy: number,
   /** Indexed palettes: one slice PER PALETTE ENTRY, slice = layer index, untextured ones white. */
+  paletteDepth?: number,
+): LayerArray {
+  const cacheKey = JSON.stringify([layers.map((l) => [l.index, l.texture.uuid]), filter, maxAnisotropy, paletteDepth ?? null]);
+  const cached = packedLayerCache.get(cacheKey);
+  if (cached) return cached;
+  const packed = packLayerArrayUncached(layers, filter, maxAnisotropy, paletteDepth);
+  packedLayerCache.set(cacheKey, packed);
+  return packed;
+}
+
+function packLayerArrayUncached(
+  layers: { index: number; texture: THREE.Texture }[],
+  filter: TextureFilter,
+  maxAnisotropy: number,
   paletteDepth?: number,
 ): LayerArray {
   const images = layers.map((l) => l.texture.image as { width?: number; height?: number } | undefined);
@@ -595,6 +619,7 @@ function packLayerArray(
   // white under every slice no texture fills, so an untextured layer is its tint
   if (paletteDepth !== undefined) data.fill(255);
   const slice = new Map<number, number>();
+  const averages = new Map<number, THREE.Color>();
   layers.forEach((layer, k) => {
     const at = paletteDepth !== undefined ? layer.index : k;
     if (at >= depth) return;
@@ -603,6 +628,11 @@ function packLayerArray(
     const pixels = ctx.getImageData(0, 0, size, size).data;
     data.set(pixels, at * size * size * 4);
     slice.set(layer.index, at);
+    // mean colour (linear), for consumers that draw a slice as one colour at distance (rock impostors)
+    let r = 0, g = 0, b = 0;
+    for (let i = 0; i < pixels.length; i += 16) { r += pixels[i]!; g += pixels[i + 1]!; b += pixels[i + 2]!; }
+    const n = Math.max(1, pixels.length / 16);
+    averages.set(layer.index, new THREE.Color().setRGB(r / n / 255, g / n / 255, b / n / 255, THREE.SRGBColorSpace));
   });
   const texture = new THREE.DataArrayTexture(data, size, size, depth);
   texture.format = THREE.RGBAFormat;
@@ -620,5 +650,5 @@ function packLayerArray(
     if (maxAnisotropy > 1) texture.anisotropy = maxAnisotropy;
   }
   texture.needsUpdate = true;
-  return { texture, slice };
+  return { texture, slice, averages };
 }

@@ -980,6 +980,8 @@ export class PostChain {
   private sandAmount: Tsl = null;
   private sandAngle: Tsl = null;
   private sandColor: Tsl = null;
+  /** The grain colour a script last set (setSandstorm), which a retune must keep — see retune. */
+  private liveSandColor: string | null = null;
   private sandOpacity: Tsl = null;
   private sandHaze: Tsl = null;
   private sandScale: Tsl = null;
@@ -1489,7 +1491,12 @@ export class PostChain {
       // `amount`, `angle` and `toward` are this frame's storm (setSandstorm);
       // an inspector edit must not blow the sand away or turn it round.
       const sand = fx.sandstorm;
-      this.sandColor.value.set(sand.color);
+      // The colour is live state too: the weather script dims it with the
+      // daylight every tick, and retune runs whenever the zone mood eases the
+      // grade or the overcast moves the shafts — so resetting it here put the
+      // full-day tan back on a night storm (a sandstorm at 22:00 measured
+      // brighter than noon).
+      this.sandColor.value.set(this.liveSandColor ?? sand.color);
       this.sandOpacity.value = sand.opacity;
       this.sandHaze.value = sand.haze;
       this.sandScale.value = sand.scale;
@@ -1546,7 +1553,10 @@ export class PostChain {
     if (!this.sandAmount) return;
     this.sandAmount.value = Math.max(0, Math.min(1, amount));
     this.sandAngle.value = angle;
-    if (color) this.sandColor.value.set(color);
+    if (color) {
+      this.liveSandColor = color;
+      this.sandColor.value.set(color);
+    }
   }
 
   /** Per-frame uniform housekeeping. Cheap; call before every render. */

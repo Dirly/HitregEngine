@@ -36,16 +36,24 @@ export function decimateRough(mesh, { error = 0.02, splatWeight = 0.5, normalWei
   // A collapse can pinch two nearby sheets onto one edge (4 uses: non-manifold). Lock the vertices of every
   // pinched edge and their 1-ring in the SOURCE mesh and simplify again; a few rounds clear it.
   const lock = new Uint8Array(n);
+  // meshAudit welds by exact position, so two indices at one point are one vertex: find pinches on canonical ids
+  // (the first index at each exact position) and lock every index sharing a pinched point
+  const canon = new Uint32Array(n), firstAt = new Map(), members = new Map();
+  for (let i = 0; i < n; i++) {
+    const key = pos[i * 3] + "," + pos[i * 3 + 1] + "," + pos[i * 3 + 2];
+    const c = firstAt.get(key);
+    if (c === undefined) { firstAt.set(key, i); canon[i] = i; } else { canon[i] = c; (members.get(c) ?? members.set(c, [c]).get(c)).push(i); }
+  }
   let ring = null, out, achieved, rounds = 0, locked = 0;
   for (;;) {
     [out, achieved] = MeshoptSimplifier.simplifyWithAttributes(indices, pos, 3, attrs, stride, weights, locked ? lock : null, 0, error, ["ErrorAbsolute"]);
     const uses = new Map();
     for (let t = 0; t < out.length; t += 3) for (let e = 0; e < 3; e++) {
-      const p = out[t + e], q = out[t + (e + 1) % 3], k = p < q ? p * n + q : q * n + p;
+      const p = canon[out[t + e]], q = canon[out[t + (e + 1) % 3]], k = p < q ? p * n + q : q * n + p;
       uses.set(k, (uses.get(k) ?? 0) + 1);
     }
     const pinched = [];
-    for (const [k, c] of uses) if (c > 2) pinched.push(Math.floor(k / n), k % n);
+    for (const [k, c] of uses) if (c > 2) for (const v of [Math.floor(k / n), k % n]) pinched.push(...(members.get(v) ?? [v]));
     if (!pinched.length || rounds >= 6) break;
     if (!ring) {
       ring = Array.from({ length: n }, () => []);

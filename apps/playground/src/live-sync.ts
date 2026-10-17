@@ -118,7 +118,7 @@ export function installLiveSync(deps: LiveSyncDeps): LiveSync {
           if (ops.length > 0) {
             try {
               // one undo-able batch: non-overlapping concurrent edits merge
-              store.apply(ops);
+              store.apply(ops, "file");
             } catch (error) {
               console.warn("[live-sync] merge failed, falling back to replace:", error);
               store.replace(doc);

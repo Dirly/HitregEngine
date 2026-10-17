@@ -36,6 +36,13 @@ mesh, skeleton and clips in *one* file. Two facts decide the whole pipeline:
 
 `pnpm -F playground retarget` does the conversion:
 
+The tool also accepts a GLB character and GLB library, including the installed
+human body's named clips. Use `--height none` when the target already has its
+intended stature. A CC_Base source is detected through the identity rig map;
+its motion still goes through measured rest reconciliation. For repaired mitten
+hands and reusable Blender grip controls, see
+`apps/playground/tools/humanoid-hands/README.md`.
+
 ```
 pnpm -F playground retarget --anim Library.fbx --list      # what's in there
 pnpm -F playground retarget \
@@ -316,8 +323,8 @@ stands every character in the first frame of its idle
 (apps/playground/src/socket-preview.ts, the math in @hitreg/render
 `socket-pose`), showing the item the character starts with equipped — or, while
 a slot is selected, the first starting item that fits it. So: open the
-character's prefab (in voxel-demo, the **Player rig** scene → select `player` →
-Edit prefab), select a weapon slot, and move it:
+character's prefab (in foundation, the **Player rig** scene → select `player` →
+edit definition), select a weapon slot, and move it:
 
 - The gizmo on a held item writes the SOCKET (`offset`/`rotationDeg` in the
   bone's axes, or the alt pose if that is what is showing), never a transform
@@ -331,6 +338,30 @@ Edit prefab), select a weapon slot, and move it:
 - Inspector edits during play or pause are patched into the running script
   (`ScriptRuntime.updateParams` / `Script.onParamsChanged`) without restarting
   the session; the socket re-poses at once, paused or not.
+
+**The pose scrubber.** While a prefab is open, selecting a held item (or its
+look child, or the character carrying it) shows a **pose** row in the
+inspector. Pick any of the character's clips (the filter box narrows 140-odd
+names), then drag the time slider, step ±1 frame (1/30 s), or play it looping
+at 0.1–1×. The character stands at that frame, so a grip can be placed with the
+gizmo at the top of a swing instead of only at idle. "stance idle (default)"
+puts it back to the old behaviour.
+
+For an item with a grip-named part, the row also checks the **off hand**:
+the palm centre (midway from wrist to index knuckle) of the hand the item is NOT
+socketed to, measured against the handle line (`MovingInstanceSystem.handleOf`),
+with how far it sits from the pommel end. The gripping hand's own reading is
+shown as the baseline; the off hand counts as on the handle within 4 cm of
+it. The strip under the slider samples the clip at 48 times: a solid bar means
+the hand is on the handle, a hollow bar means it is off. Click the strip to
+jump to that time. A two-hander being placed hides the character's other held
+items, and a slot no starting item uses shows any item made from its model.
+Presentation only: nothing here writes to the document except the gizmo.
+
+Trap fixed with this (2026-10-09): `poseStill` used to `stop()` its action, and
+three.js hands a bone back to its saved original state when the last action
+using it stops. So edit mode had been showing the BIND pose, not idle's first
+frame, the whole time; the still action now stays active and paused.
 
 Sockets re-seat after each frame's animation (`Script.onLateUpdate`), not only on the fixed tick, so an item never trails a moving arm by a frame. Edits save (the editor autosaves; a prefab edit saves to the prefab file and
 every scene using it picks it up). Editing a character that is NOT a prefab

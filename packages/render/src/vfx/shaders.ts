@@ -120,3 +120,65 @@ export function posterize(a: N, steps: N): N {
   const banded: N = floor(a.mul(s).add(0.001)).div(s);
   return mix(a, banded, saturate(steps));
 }
+
+/**
+ * One instance's values for a SHARED variant material: the same shape as
+ * `FxUniforms` (so module code writes `u.color.value…` either way), but
+ * plain holders — the node graph is built once per variant and reads these
+ * from the object being drawn.
+ *
+ * Why: three keys a shader by its node graph and a node's key is its id, so a
+ * graph built per instance is a shader built per instance. Measured on the
+ * first cast of a spell (2026-10-09): 30-50 builds of ~10 ms each, one per
+ * pooled module the spell needed, and a second caster of the same spell paid
+ * it again. With the graph shared and the values per object, a look compiles
+ * once per session however many copies of it are drawn.
+ */
+export type FxValues = {
+  [K in keyof FxUniforms]: { value: FxUniforms[K]["value"] };
+};
+
+export function makeValues(): FxValues {
+  return {
+    color: { value: new THREE.Color(1, 1, 1) },
+    glow: { value: new THREE.Color(1, 1, 1) },
+    opacity: { value: 1 },
+    time: { value: 0 },
+    a: { value: 0 },
+    b: { value: 0 },
+    c: { value: 0 },
+    d: { value: 0 },
+    e: { value: 0 },
+  };
+}
+
+/** Where a drawn object keeps its value sets: `object.userData.fx[slot]`. */
+export function bindValues(object: THREE.Object3D, slot: string, values: Record<string, { value: unknown }>): void {
+  const fx = (object.userData["fx"] ??= {}) as Record<string, unknown>;
+  fx[slot] = values;
+}
+
+/** A shared uniform that takes the drawn object's `fx[slot][name]` right before it draws. */
+export function objectUniform<T extends THREE.Color | THREE.Vector2 | number>(slot: string, name: string, init: T): N {
+  const type = typeof init === "number" ? "float" : undefined;
+  const node: N = type ? uniform(init as number, type) : uniform(init as THREE.Color);
+  return node.onObjectUpdate(({ object }: { object: THREE.Object3D }) => {
+    const set = (object.userData["fx"] as Record<string, Record<string, { value: T }>> | undefined)?.[slot];
+    return set?.[name]?.value;
+  });
+}
+
+/** The shared counterpart of `makeUniforms()`: every slot reads `fx[slot]` of the drawn object. */
+export function sharedUniforms(slot: string): FxUniforms {
+  return {
+    color: objectUniform(slot, "color", new THREE.Color(1, 1, 1)),
+    glow: objectUniform(slot, "glow", new THREE.Color(1, 1, 1)),
+    opacity: objectUniform(slot, "opacity", 1),
+    time: objectUniform(slot, "time", 0),
+    a: objectUniform(slot, "a", 0),
+    b: objectUniform(slot, "b", 0),
+    c: objectUniform(slot, "c", 0),
+    d: objectUniform(slot, "d", 0),
+    e: objectUniform(slot, "e", 0),
+  };
+}

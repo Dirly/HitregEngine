@@ -4,9 +4,12 @@ import {
   coverEdgeClearance,
   coverScratch,
   coverWaterGate,
+  coverWantsInland,
   coverVegetationRejects,
   coverWaterLevel,
   editedGround,
+  cachedVoxelMesh,
+  type VoxelMesh,
   surfaceAliases,
   type CoverLayerDoc,
   type WorldField,
@@ -129,7 +132,46 @@ export function foliageSink(data: GrassData, steep: number): number {
  * rebuilding the samplers; the probe cache notices the new field object and
  * drops itself.
  */
-export function voxelGroundProbes(field: () => WorldField | null): VoxelGroundProbes {
+/** Per-mesh 2 m column buckets of triangle ids (planar-cliff cells' cover reads the drawn mesh). */
+const meshColumns = new WeakMap<VoxelMesh, { n: number; size: number; buckets: number[][] }>();
+/** Highest surface of a cell mesh over cell-local (lx, lz), or null. Skirts (vertical) never hit. */
+function meshTop(mesh: VoxelMesh, cellSize: number, lx: number, lz: number): number | null {
+  let idx = meshColumns.get(mesh);
+  const P = mesh.positions, I = mesh.indices;
+  if (!idx) {
+    const size = 2, n = Math.ceil(cellSize / size);
+    const buckets: number[][] = Array.from({ length: n * n }, () => []);
+    for (let t = 0; t < mesh.triangleCount; t++) {
+      const a = I[t * 3]! * 3, b = I[t * 3 + 1]! * 3, c = I[t * 3 + 2]! * 3;
+      const x0 = Math.max(0, Math.floor(Math.min(P[a]!, P[b]!, P[c]!) / size)), x1 = Math.min(n - 1, Math.floor(Math.max(P[a]!, P[b]!, P[c]!) / size));
+      const z0 = Math.max(0, Math.floor(Math.min(P[a + 2]!, P[b + 2]!, P[c + 2]!) / size)), z1 = Math.min(n - 1, Math.floor(Math.max(P[a + 2]!, P[b + 2]!, P[c + 2]!) / size));
+      for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) buckets[x + z * n]!.push(t);
+    }
+    meshColumns.set(mesh, (idx = { n, size, buckets }));
+  }
+  const bx = Math.floor(lx / idx.size), bz = Math.floor(lz / idx.size);
+  if (bx < 0 || bz < 0 || bx >= idx.n || bz >= idx.n) return null;
+  let best: number | null = null;
+  for (const t of idx.buckets[bx + bz * idx.n]!) {
+    const a = I[t * 3]! * 3, b = I[t * 3 + 1]! * 3, c = I[t * 3 + 2]! * 3;
+    const d = (P[b + 2]! - P[c + 2]!) * (P[a]! - P[c]!) + (P[c]! - P[b]!) * (P[a + 2]! - P[c + 2]!);
+    if (Math.abs(d) < 1e-9) continue;
+    const u = ((P[b + 2]! - P[c + 2]!) * (lx - P[c]!) + (P[c]! - P[b]!) * (lz - P[c + 2]!)) / d;
+    const v = ((P[c + 2]! - P[a + 2]!) * (lx - P[c]!) + (P[a]! - P[c]!) * (lz - P[c + 2]!)) / d;
+    const w = 1 - u - v;
+    if (u < -1e-6 || v < -1e-6 || w < -1e-6) continue;
+    const y = u * P[a + 1]! + v * P[b + 1]! + w * P[c + 1]!;
+    if (best === null || y > best) best = y;
+  }
+  return best;
+}
+
+/**
+ * @param worldId the registered world id, when the host streams one: on planar-cliff ground the probes then read
+ *   the real surface off the streamed cell's own mesh (what is drawn and collided with) instead of casting the
+ *   field on the main thread. Omitted (tools), or a cell not meshed yet: the field cast.
+ */
+export function voxelGroundProbes(field: () => WorldField | null, worldId?: () => string | null): VoxelGroundProbes {
   const probeSlot = new Map<number, number>();
   const probeKey = new Float64Array(FOLIAGE_PROBE_LIMIT).fill(NaN);
   const probeSlope = new Float32Array(FOLIAGE_PROBE_LIMIT);
@@ -145,6 +187,8 @@ export function voxelGroundProbes(field: () => WorldField | null): VoxelGroundPr
    * no carve reaches, which is what keeps unedited cover identical.
    */
   const probeCarved = new Uint8Array(FOLIAGE_PROBE_LIMIT);
+  /** 1 when planar cliffs rebuild the ground at this probe (its bed is the real tread/wall surface). */
+  const probePlanar = new Uint8Array(FOLIAGE_PROBE_LIMIT);
   /** index into recipe.biomes, or BIOME_UNKNOWN */
   const probeBiome = new Int16Array(FOLIAGE_PROBE_LIMIT).fill(BIOME_UNKNOWN);
   let probeSplat = new Float32Array(0);
@@ -176,6 +220,29 @@ export function voxelGroundProbes(field: () => WorldField | null): VoxelGroundPr
   }
 
   /**
+   * The real ground per lattice point where planar cliffs rebuild it (field.ground: one surface cast), shared by
+   * neighbouring probes like `latticeHeights`. A probe's slope there is a central difference of these, so each
+   * lattice point pays ONE cast — this runs on the main thread, and a per-probe cast plus a density-gradient
+   * normal was ~1 ms a frame riding through cliff country.
+   */
+  const latticeGrounds = new Map<number, number>();
+  function latticeGround(f: WorldField, gx: number, gz: number): number {
+    const key = gx * 4294967296 + (gz >>> 0);
+    let y = latticeGrounds.get(key);
+    if (y === undefined) {
+      if (latticeGrounds.size >= 65536) latticeGrounds.clear();
+      const x = gx * FOLIAGE_PROBE, z = gz * FOLIAGE_PROBE;
+      if (f.planarNear(x, z)) {
+        const id = worldId?.(), C = f.recipe.cellSize, cx = Math.floor(x / C), cz = Math.floor(z / C);
+        const mesh = id ? cachedVoxelMesh({ kind: "voxel", world: id, cell: [cx, cz], mesher: "dc" }) ?? cachedVoxelMesh({ kind: "voxel", world: id, cell: [cx, cz] }) : null;
+        y = (mesh && mesh.triangleCount > 0 ? meshTop(mesh, C, x - cx * C, z - cz * C) : null) ?? f.ground(x, z);
+      } else y = latticeHeight(f, gx, gz);
+      latticeGrounds.set(key, y);
+    }
+    return y;
+  }
+
+  /**
    * Shore water line per probe slot, per (reach, kinds) — NaN = not asked
    * yet, -Infinity = no water in reach. A shore layer's gate samples a ring
    * of 13 water queries; per BLADE that was 3 us and, beside a lake the
@@ -202,6 +269,7 @@ export function voxelGroundProbes(field: () => WorldField | null): VoxelGroundPr
     regionWeights.clear();
     for (const levels of shoreLevels.values()) levels.fill(NaN);
     latticeHeights.clear();
+    latticeGrounds.clear();
     probeSlot.clear();
     probeKey.fill(NaN);
     probeBiome.fill(BIOME_UNKNOWN);
@@ -234,6 +302,17 @@ export function voxelGroundProbes(field: () => WorldField | null): VoxelGroundPr
     } else {
       steep = f.slope(x, z);
       y = f.height(x, z);
+    }
+    // planar cliffs: treads and walls are not the heightfield — the bed and its slope come from the real surface
+    // (a tread is flat, a wall is vertical, wherever the heightfield under them says otherwise)
+    probePlanar[slot] = 0;
+    if (f.planarNear(x, z)) {
+      y = latticeGround(f, gx, gz);
+      const dx = (latticeGround(f, gx + 1, gz) - latticeGround(f, gx - 1, gz)) / (2 * FOLIAGE_PROBE);
+      const dz = (latticeGround(f, gx, gz + 1) - latticeGround(f, gx, gz - 1)) / (2 * FOLIAGE_PROBE);
+      const g = Math.sqrt(dx * dx + dz * dz);
+      steep = g / Math.sqrt(1 + g * g);
+      probePlanar[slot] = 1;
     }
     probeSlope[slot] = steep;
     probeHeight[slot] = y;
@@ -356,7 +435,7 @@ export function voxelGroundProbes(field: () => WorldField | null): VoxelGroundPr
     if (water) {
       const reach = water.mode === "shore" ? water.reach : 0;
       const inland =
-        (water.kinds.includes("lake") || water.kinds.includes("river")) &&
+        coverWantsInland(water.kinds) &&
         f.waterNear(x0 - reach, z0 - reach, x1 + reach, z1 + reach);
       const half = Math.hypot(x1 - x0, z1 - z0) / 2 + reach;
       const sea = water.kinds.includes("sea") && f.shoreDistance((x0 + x1) / 2, (z0 + z1) / 2) < half;
@@ -407,6 +486,12 @@ export function voxelGroundProbes(field: () => WorldField | null): VoxelGroundPr
     // a carve opened or moved the ground in this lattice square: the bed below
     // would be the heightfield's, standing in the air over it
     if (probeCarved[s00]! | probeCarved[s10]! | probeCarved[s01]! | probeCarved[s11]!) return null;
+    // planar cliffs: four flat beds a riser apart (tread above, tread below) would interpolate a blade into the air
+    // in front of the wall — a square whose beds disagree by more than a metre holds a riser edge, so no blade
+    if (probePlanar[s00]! | probePlanar[s10]! | probePlanar[s01]! | probePlanar[s11]!) {
+      const a = probeHeight[s00]!, b = probeHeight[s10]!, c = probeHeight[s01]!, d = probeHeight[s11]!;
+      if (Math.max(a, b, c, d) - Math.min(a, b, c, d) > 1) return null;
+    }
     if (data.biomes && data.biomes.length > 0) {
       const mask = maskFor(f, data);
       const nx = fx < 0.5 ? 0 : 1;
@@ -440,7 +525,7 @@ export function voxelGroundProbes(field: () => WorldField | null): VoxelGroundPr
     // following the road's offset curve like a stencil. Water layers skip it:
     // a lake edge IS a feature edge, and they live there.
     if (!water) {
-      const clear = f.featureClearance(x, z);
+      const clear = f.featureClearance(x, z, true);
       const base = Math.max(0.5, data.bladeWidth * 0.65);
       // far from any feature (the common case) the noise is never evaluated
       if (clear < base + 1.8 && clear < coverEdgeClearance(f.recipe.seed, x, z, base)) return null;

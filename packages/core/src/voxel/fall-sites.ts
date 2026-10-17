@@ -134,6 +134,10 @@ export const fallSiteSchema = z
         spacing: z.number().positive().optional().describe("Mean spacing (m) of wall buttresses along each side; default 8."),
         scale: z.number().positive().optional().describe("Scales every mass; default 1."),
         margin: z.number().min(0).optional().describe("Clearance (m) past the measured water edge no rock may enter; default 1.5."),
+        clear: z
+          .array(z.object({ at: z.tuple([z.number(), z.number()]).describe("[x, z] centre."), radius: z.number().positive().describe("Disc radius (m).") }))
+          .optional()
+          .describe("Keep-clear discs: a mass whose centre falls inside one is left out (a stair, ledge line, fight space or sight line); every other mass is unchanged."),
         voxelSize: z.number().positive().optional().describe("Volume lattice spacing (m); default 1 (dual contouring keeps the facets crisp)."),
         wallSurface: z.string().optional().describe("World surface name for the faces; default 'rock'."),
         accentSurface: z.string().optional().describe("Surface brushed faintly on some fronts; default 'cliff' ('' for none)."),

@@ -46,6 +46,23 @@ export const regionMoodSchema = z
     saturation: z.number().min(0).max(3).default(1).describe("Multiplies postfx.grade saturation (needs the scene's grade enabled). 0.7 = drained; 1.2 = lush."),
     contrast: z.number().min(0).max(3).default(1).describe("Multiplies postfx.grade contrast (needs the scene's grade enabled)."),
     temperature: z.number().min(-1).max(1).default(0).describe("Added to postfx.grade temperature: + warm, - cold (needs the scene's grade enabled)."),
+    mistTop: z
+      .number()
+      .min(0)
+      .max(60)
+      .optional()
+      .describe(
+        "Ground-relative mist: metres above the LOCAL LOW GROUND (the lowest ground or still-water surface the " +
+          "`zone-mood` builtin finds around the player) the scene's mist reaches while in this zone, instead of the " +
+          "scene's absolute `sky.fog.mist.top`. A swamp at any height then keeps its mist hugging its pools " +
+          "(2-4 m). Omit = the scene's absolute top. Needs the scene's mist enabled (amount > 0).",
+      ),
+    mistThickness: z
+      .number()
+      .positive()
+      .max(60)
+      .optional()
+      .describe("With `mistTop`: metres over which that mist fades out below its top (small = a hard sheet, large = soft). Omit = the scene's `thickness`."),
   })
   .describe(
     "Optional look of this zone: tinted sky/haze, sun colour and strength, shadow colour, fog and colour grade. " +
@@ -54,6 +71,84 @@ export const regionMoodSchema = z
   );
 
 export type RegionMood = z.infer<typeof regionMoodSchema>;
+
+/** One sound id (or a comma list of them) per time-of-day band; `*` stands in for any band left out. */
+export const regionSoundBandsSchema = z
+  .object({
+    "*": z.string().optional().describe("Any band not listed."),
+    dawn: z.string().optional().describe("05:00-07:30."),
+    day: z.string().optional().describe("07:30-16:30."),
+    dusk: z.string().optional().describe("16:30-19:30."),
+    night: z.string().optional().describe("19:30-05:00."),
+  })
+  .describe("Per day/night band (the same edges as the day-night script, crossfaded by the soundscape): a sound id, or a comma list. `*` = every band not listed.");
+
+export type RegionSoundBands = z.infer<typeof regionSoundBandsSchema>;
+
+/**
+ * A zone's own SOUND: what the `soundscape` builtin plays here instead of the
+ * biome patterns. Resolved over the region chain (a `place` over its zone, a
+ * nested town zone over its parent) field by field; anything left out falls
+ * back to the biome beds, spots and music as before.
+ */
+export const regionSoundSchema = z
+  .object({
+    bed: regionSoundBandsSchema
+      .optional()
+      .describe("Ambient bed LOOP per band (one sound id each, e.g. `ambience/biome/swamp-{band}.ogg` — `{band}` is filled in). Replaces the biome beds here (see `biomeMix`)."),
+    bedMix: z.number().min(0).max(2).default(1).describe("Gain of `bed` relative to a biome bed (1 = as loud as one)."),
+    biomeMix: z
+      .number()
+      .min(0)
+      .max(1)
+      .default(0)
+      .describe("How much of the biome beds is still heard under `bed`: 0 = the zone's bed replaces them, 0.3 = a little of the land shows through."),
+    spots: regionSoundBandsSchema
+      .optional()
+      .describe("Spot one-shots per band: comma list of ids (an id without extension is a variant family, e.g. `spot/frog-croak`). Replaces the biome spot table here."),
+    music: regionSoundBandsSchema
+      .optional()
+      .describe(
+        "Exploration tracks per band, comma list (`{daynight}` = day|night is filled in). Beats biome music; a town zone's town music " +
+          "beats an INHERITED one (a town zone inherits its parent's bed and still water, never its music or spots).",
+      ),
+    stillWater: z
+      .string()
+      .optional()
+      .describe("Bed near still inland water here (marsh pools: `ambience/water/swamp-water.ogg`). Replaces the soundscape's lake bed; rivers and the sea keep theirs."),
+  })
+  .describe(
+    "Optional sound of this zone: its own ambient bed, spot sounds, music and still-water bed per day/night band. Read by the " +
+      "`soundscape` builtin BEFORE the biome patterns; a place inherits its zone's, a nested town zone its parent's bed and still water.",
+  );
+
+export type RegionSound = z.infer<typeof regionSoundSchema>;
+
+/**
+ * One ambient particle layer a zone carries (fireflies, spores, ash): the
+ * `ambient-particles` builtin drives the player's `ambient-<id>` emitter by it
+ * while the player stands in the zone. The look is the emitter's own data.
+ */
+export const regionAmbientLayerSchema = z
+  .object({
+    id: z
+      .string()
+      .regex(/^[a-z][a-z0-9-]*$/, "lowercase slug")
+      .describe("Layer id: drives the local player's child entity tagged `ambient-<id>` (the scene must carry that emitter)."),
+    biomes: z.string().default("").describe("Comma list of biome ids it is limited to INSIDE the zone. Empty = the whole zone."),
+    when: z.enum(["day", "night", "always"]).default("always").describe("Time of day it lives, eased across dusk and dawn."),
+    town: z.enum(["any", "only", "never"]).default("any").describe("Town zones (region tag `town`): `never` keeps it out of the zone's towns."),
+    needWater: z.boolean().default(false).describe("Only near water."),
+    waterBoost: z.number().min(0).default(0).describe("Extra rate x closeness to water (1.5 = two and a half times as many at the edge)."),
+    rate: z.number().min(0).default(4).describe("Particles per second at full strength (live count ~ rate x lifetime, capped by the emitter's `max`)."),
+    storm: z.number().default(0).describe("Extra rate per unit of storm; negative thins it out in a storm."),
+    wind: z.number().min(0).default(0).describe("Metres/second the wind carries it at full gust; 0 = the emitter's own aim."),
+    rise: z.number().default(0).describe("Vertical drift m/s added to the wind aim: negative falls (ash), positive rises (spores)."),
+    glow: z.number().min(0).max(1).default(0.25).describe("Night brightness floor: 1 = self-lit (fireflies), 0.2 = moonlit only."),
+  })
+  .describe("An ambient particle layer that lives in this zone (same fields as an `ambient-particles` layer, minus `zones`: the zone IS where).");
+
+export type RegionAmbientLayer = z.infer<typeof regionAmbientLayerSchema>;
 
 export const regionSchema = z.object({
   id: z
@@ -114,7 +209,27 @@ export const regionSchema = z.object({
         "parent's unless it declares its own.",
     ),
   mood: regionMoodSchema.optional(),
+  sound: regionSoundSchema.optional(),
+  ambient: z
+    .array(regionAmbientLayerSchema)
+    .optional()
+    .describe(
+      "Ambient particle layers that live in this zone (spores in a bog, ash in burned country). A place inherits its zone's and a " +
+        "nested town zone its parent's (a layer with the same id nearer the point wins). Read by `ambient-particles` on top of its " +
+        "scene `layers` param, so older scenes keep working.",
+    ),
   vegetation: regionVegetationSchema.optional(),
+  rockCap: z
+    .object({
+      layer: z.string().min(1).describe("Palette surface NAME the rocks of this zone wear on top (`snow`, a grass for moss, `sand`, the zone's own ground...)."),
+      amount: z.number().min(0).max(1).default(0.6).describe("How far it reaches: 0 = bare, 0.4 = flat tops, 0.7 = tops and ledges, 1 = all but the steep sides."),
+    })
+    .optional()
+    .describe(
+      "This zone's rock cap: every scatter rule that opts in with `cap` wears it here, overriding the rule's own `cap` " +
+        "(auto ground sampling or a fixed layer). The nearest region on the chain place -> zone -> parent that declares " +
+        "one wins. Cosmetic and seed-stable: the same mesh and material everywhere, only the per-rock cap changes.",
+    ),
   tags: z
     .array(z.string())
     .default([])
@@ -138,6 +253,70 @@ export function regionAt(regions: readonly RegionDoc[], x: number, z: number, op
   for (const region of regions) if (region.within !== undefined && (places || !region.tags.includes("place")) && pointInPolygon(x, z, region.polygon)) return region;
   for (const region of regions) if (region.within === undefined && pointInPolygon(x, z, region.polygon)) return region;
   return null;
+}
+
+/** What a point's region chain says about its look and sound — see `regionLookAt`. */
+export interface RegionLook {
+  /** The ZONE (hosting/chat/sanctuary sense): a nested town zone first, else the top-level zone. */
+  region: RegionDoc;
+  /** A signature place (tagged `place`) the point lies in, when one differs from `region`. */
+  place: RegionDoc | null;
+  /** Nearest mood on the chain place -> zone -> parent. */
+  mood?: RegionMood;
+  /** Sound resolved field by field along the chain (a town zone does not inherit `music` or `spots`). */
+  sound?: RegionSound;
+  /** Ambient layers along the chain, unique by id, the nearest region's winning. */
+  ambient?: RegionAmbientLayer[];
+}
+
+/**
+ * The region chain at (x, z) — place, zone, the zone's parent — resolved into
+ * one look: mood, sound and ambient layers, each from the nearest region that
+ * declares it. Null outside every zone. What the client's `ctx.regionAt`
+ * hands to the zone-mood, soundscape and ambient-particles builtins.
+ */
+export function regionLookAt(regions: readonly RegionDoc[], x: number, z: number): RegionLook | null {
+  const region = regionAt(regions, x, z);
+  if (!region) return null;
+  const hit = regionAt(regions, x, z, { places: true });
+  const place = hit && hit !== region && hit.tags.includes("place") ? hit : null;
+  const chain: RegionDoc[] = [];
+  const push = (r: RegionDoc | undefined | null): void => {
+    if (r && !chain.includes(r)) chain.push(r);
+  };
+  const parentOf = (r: RegionDoc): RegionDoc | undefined => (r.within !== undefined ? regions.find((p) => p.id === r.within) : undefined);
+  if (place) push(place);
+  push(region);
+  push(parentOf(region));
+  if (place) push(parentOf(place));
+  const out: RegionLook = { region, place };
+  for (const r of chain) {
+    if (r.mood) {
+      out.mood = r.mood;
+      break;
+    }
+  }
+  let sound: RegionSound | undefined;
+  for (const r of chain) {
+    if (!r.sound) continue;
+    // a town zone has its own music and spot logic (town tracks, the town spot table); its parent's are the wilderness's
+    const inherited = r !== chain[0] && chain.slice(0, chain.indexOf(r)).some((c) => c.tags.includes("town"));
+    const s = r.sound;
+    sound ??= { bedMix: s.bedMix, biomeMix: s.biomeMix };
+    if (!sound.bed && s.bed) {
+      sound.bed = s.bed;
+      sound.bedMix = s.bedMix;
+      sound.biomeMix = s.biomeMix;
+    }
+    if (!sound.spots && s.spots && !inherited) sound.spots = s.spots;
+    if (!sound.music && s.music && !inherited) sound.music = s.music;
+    if (sound.stillWater === undefined && s.stillWater !== undefined) sound.stillWater = s.stillWater;
+  }
+  if (sound) out.sound = sound;
+  const ambient: RegionAmbientLayer[] = [];
+  for (const r of chain) for (const layer of r.ambient ?? []) if (!ambient.some((a) => a.id === layer.id)) ambient.push(layer);
+  if (ambient.length) out.ambient = ambient;
+  return out;
 }
 
 /** The region tagged `town` that is `townId`'s own (its first landmark), or null. */

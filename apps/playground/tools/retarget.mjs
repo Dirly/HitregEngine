@@ -28,18 +28,16 @@
  * to one character.
  */
 import "./node-dom-shim.mjs";
-import { addTextureSearchRoot } from "./node-dom-shim.mjs";
 import * as THREE from "three";
-import { FBXLoader } from "three/examples/jsm/loaders/FBXLoader.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
 import fs from "node:fs";
 import path from "node:path";
 import { RIG_MAPS, CLIP_PRESETS, detectRigMap } from "./rig-map.mjs";
 import { yawBones, conditionYaw } from "./_yaw.mjs";
-import { sanitizeFbx } from "./_fbx.mjs";
 import { normalizeLoop } from "./_clips.mjs";
 import { reportLocomotion } from "./_locomotion.mjs";
+import { loadCharacter } from "./_load-character.mjs";
 
 // ---------------------------------------------------------------- args
 
@@ -103,9 +101,9 @@ if (args.help || (!args.mesh && !args.list)) {
   console.log(`
 retarget — bake an FBX animation library onto a differently-rigged character
 
-  --mesh <file.fbx>     rigged character (skin + skeleton). Required.
+  --mesh <file.fbx|glb> rigged character (skin + skeleton). Required.
   --anim <file|folder>  animation library, or a folder of one-clip downloads
-                        (every .fbx directly inside). Repeat it (or comma-join)
+                        (every .fbx or .glb directly inside). Repeat it (or comma-join)
                         to merge packs — on one rig or on several: each file's
                         rig is detected from its bone names and baked through
                         its own map. Later files win a name collision. A file
@@ -142,26 +140,6 @@ Examples:
 }
 
 // ---------------------------------------------------------------- loading
-
-function loadFbx(file) {
-  const abs = path.resolve(file);
-  if (!fs.existsSync(abs)) {
-    console.error(`retarget: no such file: ${abs}`);
-    process.exit(1);
-  }
-  addTextureSearchRoot(path.dirname(abs));
-  const buf = fs.readFileSync(abs);
-  const ab = sanitizeFbx(buf); // see _fbx.mjs — a no-op unless three would refuse the file
-  // Silence the loader's per-curve chatter; a 68MB library emits thousands of
-  // lines about unused curves and 5-influence vertices, none actionable here.
-  const warn = console.warn;
-  console.warn = () => {};
-  try {
-    return new FBXLoader().parse(ab, path.dirname(abs) + path.sep);
-  } finally {
-    console.warn = warn;
-  }
-}
 
 function collectBones(root) {
   const bones = new Map();
@@ -534,7 +512,7 @@ function animFiles(spec) {
       fs.existsSync(f) && fs.statSync(f).isDirectory()
         ? fs
             .readdirSync(f)
-            .filter((n) => /\.fbx$/i.test(n))
+            .filter((n) => /\.(fbx|glb)$/i.test(n))
             .sort()
             .map((n) => path.join(f, n))
         : [f],
@@ -553,7 +531,7 @@ if (args.anim) {
   for (const file of files) {
     if (!quiet) process.stdout.write(`reading ${path.basename(file)} … `);
     const t1 = Date.now();
-    const group = loadFbx(file);
+    const group = await loadCharacter(file);
     const names = new Set();
     let skinned = false;
     let duplicated = false;
@@ -601,7 +579,7 @@ if (args.list) {
 }
 
 process.stdout.write(`reading ${path.basename(args.mesh)} … `);
-const meshGroup = loadFbx(args.mesh);
+const meshGroup = await loadCharacter(args.mesh);
 const tgtBones = collectBones(meshGroup);
 console.log(`${tgtBones.size} bones`);
 
@@ -617,6 +595,7 @@ if (!skinned) {
 const tgtBind = snapshotLocals(tgtBones);
 
 // ---- material: FBX gives us Phong, glTF speaks Standard.
+if (/\.fbx$/i.test(args.mesh)) {
 const materials = Array.isArray(skinned.material) ? skinned.material : [skinned.material];
 const converted = materials.map((m) => {
   const std = new THREE.MeshStandardMaterial({
@@ -640,6 +619,7 @@ const uv = skinned.geometry.attributes.uv;
 if (uv) {
   for (let i = 0; i < uv.count; i++) uv.setY(i, 1 - uv.getY(i));
   uv.needsUpdate = true;
+}
 }
 
 // ---- scale to a real-world stature

@@ -214,8 +214,9 @@ export class FogSystem {
     const mist = settings.mist;
     fogMist.amount.value = mist?.amount ?? 0;
     if (mist) {
-      fogMist.top.value = mist.top;
-      fogMist.thickness.value = Math.max(0.1, mist.thickness);
+      this.mistTop = mist.top;
+      this.mistThickness = Math.max(0.1, mist.thickness);
+      this.writeMistHeight();
       fogMist.frequency.value = mist.scale;
       fogMist.speed.value.set(mist.speed[0], mist.speed[1]);
     }
@@ -271,6 +272,27 @@ export class FogSystem {
   /** Zone-mood multiplier on the authored mist amount (1 = as authored). */
   setMistScale(scale: number): void {
     fogMist.scale.value = Math.max(0, scale);
+  }
+
+  /**
+   * Ground-relative mist from a zone mood: `top` is a WORLD Y (the local low
+   * ground plus the zone's own height), blended over the scene's absolute top
+   * by `weight` 0..1. Uniform writes only. `thickness` <= 0 keeps the scene's.
+   */
+  setMistLocal(top: number, thickness: number, weight: number): void {
+    this.mistLocal = { top, thickness, weight: Math.min(1, Math.max(0, weight)) };
+    this.writeMistHeight();
+  }
+
+  /** The scene's authored mist height (`sky.fog.mist`) and a zone's local one, mixed. */
+  private mistTop = 12;
+  private mistThickness = 10;
+  private mistLocal = { top: 0, thickness: 0, weight: 0 };
+  private writeMistHeight(): void {
+    const { top, thickness, weight: w } = this.mistLocal;
+    fogMist.top.value = w > 0 ? this.mistTop + (top - this.mistTop) * w : this.mistTop;
+    const thick = thickness > 0 ? thickness : this.mistThickness;
+    fogMist.thickness.value = Math.max(0.1, w > 0 ? this.mistThickness + (thick - this.mistThickness) * w : this.mistThickness);
   }
 
   dispose(scene?: THREE.Scene): void {

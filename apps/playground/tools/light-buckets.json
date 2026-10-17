@@ -38,7 +38,8 @@
         "fixtures/lantern-glow",
         "poi-props/hanging-lantern",
         "poi-props/campfire",
-        "poi-props/cold-campfire"
+        "poi-props/cold-campfire",
+        "posed-props/campfire-indoor"
       ],
       "note": "what someone carried in: torches, lanterns, a fire where they camp."
     },
@@ -47,11 +48,13 @@
       "use": [
         "poi-props/campfire",
         "camp-props/bonfire",
+        "giant-camp/landmark-pyre",
         "poi-props/cold-campfire",
         "poi-props/standing-torch",
         "poi-props/hanging-lantern",
         "fixtures/lantern-glow",
-        "poi-props/brazier"
+        "poi-props/brazier",
+        "posed-props/campfire-indoor"
       ],
       "note": "one fire at the heart (camp-props/bonfire for giants, ogres or any big camp), torches or lanterns at the edge."
     },
@@ -75,6 +78,7 @@
         "fixtures/lantern-glow",
         "poi-props/hanging-lantern",
         "camp-props/bonfire",
+        "giant-camp/landmark-pyre",
         "poi-props/brazier"
       ],
       "note": "cold blue-white glow carries it: lanterns and glows tinted ice-blue (#b8d0ff) in niches and along the galleries; ONE fire, the bonfire in a hearth hall where the living gather. Detail pass: cold-tinted variants of lantern-glow / hanging-lantern."

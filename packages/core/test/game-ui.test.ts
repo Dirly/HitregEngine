@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { advanceQuest, bearing, bearingDelta, nearbyTowns, questSchema, questJournalSchema, itemSchema, createSheet, addItem, equip, unequip, gridOf, gameHudSchema } from "../src/index.js";
+import { advanceQuest, bearing, bearingDelta, nearbyTowns, questSchema, questJournalSchema, itemSchema, createSheet, addItem, equip, unequip, gridOf, gameHudSchema, chatLayoutSchema } from "../src/index.js";
 
 describe("MMO navigation and quest contracts", () => {
+  it("accepts local combat/loot feeds and rejects ambiguous saved window and tab ids", () => {
+    const tabs = [{ id: "all", name: "All", channels: ["combat", "loot"] }];
+    expect(chatLayoutSchema.safeParse({ tabs }).success).toBe(true);
+    expect(chatLayoutSchema.safeParse({ tabs: [...tabs, ...tabs] }).success).toBe(false);
+    expect(chatLayoutSchema.safeParse({ tabs, windows: [{ id: "main", name: "Chat" }, { id: "main", name: "Duplicate" }] }).success).toBe(false);
+    expect(chatLayoutSchema.safeParse({ tabs, windows: [{ id: "main", name: "Chat", idleOpacity: 1.1 }] }).success).toBe(false);
+  });
   it("wraps bearings across north and excludes distant towns", () => {
     expect(bearing(0, -20)).toBe(0); expect(bearing(20, 0)).toBe(90);
     expect(bearingDelta(5, 355)).toBe(10); expect(bearingDelta(355, 5)).toBe(-10);

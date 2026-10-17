@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "about": "The dungeon quality bar as DATA (docs/world-standards/dungeons.md 'Quality recipe'; numbers from projects/voxel-demo/authoring/reports/dungeon-quality-recipe.md section 3.4, owner ruling 2026-10-05, palette per the owner's texture correction: ONE ATLAS, one stone colouring, one wood grain/tone, one metal tone). quality.mjs reads only this file for numbers; a dungeon that must differ records a justified exception in its own authoring/quality-exceptions.json, never an edit here.",
+  "about": "The dungeon quality bar as DATA (docs/world-standards/dungeons.md 'Quality recipe'; numbers from projects/proving/authoring/reports/dungeon-quality-recipe.md section 3.4, owner ruling 2026-10-05, palette per the owner's texture correction: ONE ATLAS, one stone colouring, one wood grain/tone, one metal tone). quality.mjs reads only this file for numbers; a dungeon that must differ records a justified exception in its own authoring/quality-exceptions.json, never an edit here.",
   "references": {
     "about": "the owner-approved bar: their shipped-light sheets go beside every dungeon's sheet (compare gate)",
     "fieldfast-barrow": "reports/views/sheet.png",
@@ -102,7 +102,8 @@
       "boneShareMax": 0.35,
       "lightsMin": 2,
       "lightsMax": 5,
-      "decalsMin": 6,
+      "decalsMin": 0,
+      "decalsMinNote": "2026-10-13 owner ruling: decals are optional (was 6). A dungeon that has decals makes its own set from its concept frames; the decals gate holds them to it.",
       "decalsMax": 12,
       "setPiece": true
     },
@@ -198,6 +199,12 @@
     ],
     "ruling": "Coordinator ruling 2026-10-05 (owner delegated: \"you need to ultimately decide\"): per-room floors are set near the MEDIAN room of the owner-approved references (Barrow detail 17 / props 3; Hall detail 23 / props 6), raised where the owner explicitly asked for more (props, decals, visible light sources). Decals stay required although neither reference has any (owner: \"you also need decals and more props\"). Tombs/ossuaries may exceed bonesMax through a reasoned authoring/quality-exceptions.json entry (dungeons.md: more bones in a tomb)."
   },
+  "decals": {
+    "about": "Owner ruling 2026-10-13: decals are optional; a dungeon that has them makes its OWN set from its concept frames (tools/image-request.mjs gen, ids prefixed with the project: <project>-decal-*), and no decal image is reused across dungeons. Fails: a decal texture that is the same file, a byte copy or a perceptual near copy (64-bit difference hash, Hamming distance <= phashMaxDistance) of a decal another dungeon uses; one texture making up more than maxShareOfOne of a dungeon's decals (judged from minForShare decals).",
+    "phashMaxDistance": 6,
+    "maxShareOfOne": 0.4,
+    "minForShare": 5
+  },
   "originality": {
     "about": "no set-piece builder or build script shared with another dungeon. Builders are the Python files of authoring/ (outside lib/, the shared primitive library) and crafted*/setpieces* recipe files. A function shared with another dungeon fails unless it is a shared primitive named here; a whole file mostly copied (line Jaccard) fails.",
     "builderFiles": [
@@ -276,6 +283,20 @@
   },
   "readability": {
     "about": "the readability floor (owner, zone-3 review 2026-10-06: 'pools of light on black look wrong'; dungeons.md 'near black is a fault'). Measured on the shipped-light views (reports/views/*.png): luma = Rec.709 weights on the sRGB bytes, every sampleStep-th pixel. A view is BLACK when more than view.darkShareMax of it is under nearBlack. The dungeon is judged on its MEDIAN view: near-black share (lights on black), mean luminance band (too dark / too bright) and the 10th percentile (flat: even the darkest tenth is lit, no pools of light).",
+    "standard": {
+      "about": "THE interior readability table, one source for every interior target (2026-10-09 dungeon consistency pass; reconciles the light schema's old 'an interior shot averages 70-100', which no shipped dungeon ever met, with this gate's 14-40). Cited by the light component's `intensity` description (packages/core) and tools/dungeon-pipeline/lighting.json. Two scales of the same light: PROBE = what a mid-grey matte sphere and two reference characters read at chest height in a room's lit floor area, camera 4 m (apps/playground/tools/light-shots.mts --spots); VIEW = what a whole player-height picture reads (the gate below, on reports/views). Luma = Rec.709 on 0-255 sRGB. Mood is tone (the fill's hue, the fixtures' colour), never brightness.",
+      "probe": {
+        "grey": [
+          60,
+          80
+        ],
+        "lightGearMin": 55,
+        "darkGearMin": 20,
+        "acrossDungeonsMax": 0.1,
+        "poolNote": "above 80 only inside a fixture's pool; the dungeons' per-dungeon median probe within acrossDungeonsMax of each other in comparable rooms"
+      },
+      "view": "readability.dungeon below (the gate on reports/views): median view mean in [meanMin, meanMax], darkest tenth <= p10Max (pools, not a flat wash), near-black share <= darkShareMedianMax (not lights on black)"
+    },
     "lumaWeights": [
       0.2126,
       0.7152,
@@ -290,10 +311,34 @@
     "dungeon": {
       "darkShareMedianMax": 0.5,
       "meanMin": 14,
-      "meanMax": 40,
+      "meanMax": 45,
       "p10Max": 10
     },
-    "calibration": "2026-10-06 on the shipped views as they stood. fieldfast-hall (owner-approved bar): median near-black 0.48, mean 21, p10 3, worst view 0.86 -> passes. gnawspur-deeps (owner: 'very bright'): median near-black 0.10, mean 32, p10 14 -> FAILS flat. rime-hall (owner: 'lights on black, horrendous'): median near-black 0.80, mean 9, three views >= 0.95 -> FAILS. fieldfast-barrow's checked-in views: median near-black 0.93, mean 6.6 -> FAILS (the views predate the barrow's current light or the owner judged it in play; re-shoot before acting)."
+    "calibration": "2026-10-06 on the shipped views as they stood. fieldfast-hall (owner-approved bar): median near-black 0.48, mean 21, p10 3, worst view 0.86 -> passes. gnawspur-deeps (owner: 'very bright'): median near-black 0.10, mean 32, p10 14 -> FAILS flat. rime-hall (owner: 'lights on black, horrendous'): median near-black 0.80, mean 9, three views >= 0.95 -> FAILS. fieldfast-barrow's checked-in views: median near-black 0.93, mean 6.6 -> FAILS (the views predate the barrow's current light or the owner judged it in play; re-shoot before acting). RECALIBRATED 2026-10-09 (dungeon consistency pass, readability.standard): all four now run the shared lighting stage (hemisphere fill 4.5, Gnawspur 4.0; one post preset). The probe standard (grey sphere 60-80) is ~35% brighter than the old fieldfast-hall flat fill (sphere 54), so meanMax 40 -> 45; meanMin, p10Max and the near-black limits stay. Measured on fresh views: fieldfast-hall mean 27.4 / near-black 0.36 / p10 4; fieldfast-barrow 40.8 / 0.14 / 9; rime-hall 32.0 / 0.23 / 8; gnawspur-deeps 41.5 / 0.05 / 17 -> FAILS flat (its 26 scene torches at intensity 10, range 12-18 m blanket every floor; a fixture fix, not a fill fix).",
+    "levels": {
+      "about": "A dungeon's LIGHT LEVEL (owner, 2026-10-09: 'I did like barrows darker; I'm ok with dungeons mimicking night lighting, it all depends'). A dungeon picks one in its authoring/lighting.json (`level`, default lit); lighting.json `levels` sets the fill each level gets, and the gate judges the median view against that level's band. `lit` is the interior standard above (readability.dungeon, readability.standard.probe). `night` is outdoor-night dark (proving at 22:00 reads a grey probe ~35): moody and dim, still never pitch black, so a character can be read and a room's shape seen.",
+      "lit": {
+        "dungeon": "readability.dungeon",
+        "probe": "readability.standard.probe"
+      },
+      "night": {
+        "probe": {
+          "grey": [
+            30,
+            45
+          ],
+          "lightGearMin": 30,
+          "darkGearMin": 10
+        },
+        "dungeon": {
+          "darkShareMedianMax": 0.75,
+          "meanMin": 7,
+          "meanMax": 25,
+          "p10Max": 10
+        },
+        "calibration": "2026-10-09: set beside outdoor night (proving 22:00 after the consistency pass: grey 32-42, light gear 38-41, dark 11-23). The barrow before the dungeon pass (sphere 5, views mean 6.6, near-black 0.93) is darker than this and fails it: night is dark, not black."
+      }
+    }
   },
   "matte": {
     "about": "matte unless intended (owner, zone-3 review 2026-10-06: 'materials gained a SHEEN'). Judged: every painted atlas role (the dc-palette layer's roughness), the palette's own base, every other material asset of the project (schema defaults when left out: roughness 1, metalness 0 since 2026-10-06; 0.85 / 0.05 before) and the project's own GLB materials (glTF: a factor left out is 1). A role or material whose name carries a metalRoles word may be metal and a little smoother. An intended shine (ice, water, polished black ice) is a quality exception with a why.",
@@ -351,5 +396,59 @@
     "about": "dungeon arrival safe zone (real-client portal test 2026-10-06: a ghost 15 m from fieldfast-hall's arrival pinned the player under the fight lock, 'cannot leave in the middle of a fight'). No pack (its spread included), patrol point, named creature, miniboss or boss within safeM of any arrival or exit anchor (plan anchors named entry-* / exit-* / arrival*). Straight-line 3D distance in plan metres: never longer than the walk, so it errs on the safe side.",
     "safeM": 25,
     "anchorPattern": "^(entry|exit|arrival)"
+  },
+  "loot": {
+    "about": "instance loot coverage (owner ruling 2026-10-08): every instance has a reason to go for every class. authoring/loot.json lists the instance's drops; every armor weight drops, every armor slot drops in at least minWeightsPerSlot weights, every weapon role drops, trash has its own table, every named and the boss drop something, rarity stays within the level band, ornament parts only on rare+, and every listed drop is wired (item file exists, the source's loot string names it).",
+    "weights": [
+      "cloth",
+      "leather",
+      "mail",
+      "plate"
+    ],
+    "slots": [
+      "helm",
+      "shoulders",
+      "chest",
+      "legs",
+      "gloves",
+      "boots"
+    ],
+    "minWeightsPerSlot": 2,
+    "roles": [
+      "caster",
+      "melee-1h",
+      "melee-2h",
+      "tank"
+    ],
+    "minTrashItems": 4,
+    "rarityOrder": [
+      "common",
+      "uncommon",
+      "rare",
+      "epic",
+      "legendary"
+    ],
+    "levelBands": [
+      {
+        "maxLevel": 10,
+        "cap": "uncommon",
+        "bossCap": "rare"
+      },
+      {
+        "maxLevel": 20,
+        "cap": "rare",
+        "bossCap": "rare"
+      },
+      {
+        "maxLevel": 999,
+        "cap": "epic",
+        "bossCap": "legendary"
+      }
+    ],
+    "ornamentParts": "^(Ornate|ChestHalo|OrnateTop|OrnateSide|OrnateBottom|OrnateAxeHead)",
+    "ornamentMinRarity": "rare",
+    "itemDirs": [
+      "../foundation/assets/items"
+    ]
   }
 }

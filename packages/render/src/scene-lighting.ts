@@ -23,6 +23,7 @@ import {
 } from "./environment.js";
 import { setEnvironment as setMaterialEnvironment, setEnvironmentScale } from "./material-maps.js";
 import { refillSkyEnvironmentTexture } from "./environment.js";
+import { isFrozenStaticSubtree, refreshStaticSubtree } from "./static-transforms.js";
 import { setFoliageWindScale } from "./foliage-wind.js";
 import { publishDaylight } from "./daylight.js";
 import { setSnowLine, setWetness } from "./wetness.js";
@@ -190,7 +191,22 @@ export interface LiveSkyOptions {
    * the sun's and the fill lights' colours; `lightScale` and `fogDensity`
    * multiply intensities. Omitted fields are neutral. Pass null to clear.
    */
-  mood?: { sky?: string; haze?: string; amount?: number; light?: string; lightScale?: number; shade?: string; fogDensity?: number; mist?: number } | null;
+  mood?: {
+    sky?: string;
+    haze?: string;
+    amount?: number;
+    light?: string;
+    lightScale?: number;
+    shade?: string;
+    fogDensity?: number;
+    mist?: number;
+    /** Ground-relative mist: the WORLD Y the mist reaches here (local low ground + the zone's `mistTop`). */
+    mistTop?: number;
+    /** Metres that mist fades over below `mistTop`. */
+    mistThickness?: number;
+    /** 0..1 how far `mistTop`/`mistThickness` replace the scene's absolute mist top (eased across a border). */
+    mistLocal?: number;
+  } | null;
   /**
    * How much DAYLIGHT there is here, 0..1 — what a day/night script already
    * computes from the sun elevation, published so the weather layer can be
@@ -480,7 +496,14 @@ export class SceneLighting {
           const holder = sun.parent ?? sun;
           this.aimVector.set(live.sun.direction[0], live.sun.direction[1], live.sun.direction[2]).normalize();
           holder.quaternion.setFromUnitVectors(UP, this.aimVector);
-          holder.updateMatrixWorld(true);
+          // Play mode freezes every still entity subtree (static-transforms.ts),
+          // and a sun entity is transform + light: still. A frozen root's own
+          // `updateMatrixWorld` returns early while its parent has not moved,
+          // so the re-aimed sun kept its AUTHORED direction at every hour (one
+          // fixed angle all day; faces toward the camera stayed in shadow).
+          // A frozen root is refreshed in place and stays frozen.
+          if (isFrozenStaticSubtree(holder)) refreshStaticSubtree(holder);
+          else holder.updateMatrixWorld(true);
         }
       }
       if (live.sun.color !== undefined) (req.sunColor ??= new THREE.Color()).set(live.sun.color);
@@ -672,7 +695,9 @@ export class SceneLighting {
     if (req.fogColor) {
       this.tintScratch.copy(req.fogColor);
       if (mood.haze) this.tintScratch.lerp(mood.haze, mood.amount);
-      this.tintScratch.lerp(this.litTint, amount);
+      // the same darkening the horizon gets, or distant ground fogs to a grey
+      // card brighter than the storm sky behind it
+      this.tintScratch.multiplyScalar(skyDim).lerp(this.litTint, amount);
       // Fog IS the air, so a strike has to light it too — without this the
       // flash reads as the sky blinking behind a scene that never noticed.
       if (flash > 0) this.tintScratch.lerp(this.flashColor, 0.6 * flash);
@@ -698,6 +723,7 @@ export class SceneLighting {
     m.fogDensity = Math.max(0, next?.fogDensity ?? 1);
     m.mist = Math.max(0, next?.mist ?? 1);
     this.fog.setMistScale(m.mist);
+    this.fog.setMistLocal(next?.mistTop ?? 0, next?.mistThickness ?? 0, next?.mistLocal ?? 0);
     const sky = this.baseSky;
     if (sky) {
       req.top ??= new THREE.Color(sky.top);

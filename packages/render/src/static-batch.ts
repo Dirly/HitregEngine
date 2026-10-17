@@ -28,6 +28,9 @@ import { ATLAS_RECT_ATTRIBUTE } from "./town-atlas.js";
 
 /** Marks a mesh as eligible. Set by the scene builder from `mesh.static`. */
 export const STATIC_BATCH_FLAG = "staticBatch";
+/** On an entity group driving an effect drawn elsewhere (a standing `vfx`, `particles`): empty, yet never "drawn by the
+ *  batch" — pruning it or an ancestor would stop the effect, which plays only while its group is visible. */
+export const EFFECT_GROUP = "drivesEffect";
 /** Present on a merged mesh; carries the face→entity table. */
 export const BATCH_OWNERS = "batchOwners";
 
@@ -118,23 +121,53 @@ export function ownerOfFace(object: THREE.Object3D, faceIndex: number | undefine
  */
 const MERGED_ATTRIBUTES = new Set(["position", "normal", "uv", ATLAS_RECT_ATTRIBUTE]);
 
-function prepForMerge(geometry: THREE.BufferGeometry): THREE.BufferGeometry {
+function prepForMerge(geometry: THREE.BufferGeometry, keepColor: false | 3 | 4 = false): THREE.BufferGeometry {
   const g = (geometry.index ? geometry.toNonIndexed() : geometry.clone()) as THREE.BufferGeometry;
+  // Vertex colours (baked AO on kit pieces) ride through a merge exactly like uv: a world-space bake does not change
+  // them. Only kept when the bucket's material reads them; normalised to 3 floats so every member matches (4 under an
+  // `alphaHash` material: the alpha is its dithered fade, e.g. a path ribbon's verge).
+  const color = g.getAttribute("color");
+  if (keepColor) {
+    const size = keepColor;
+    const count = g.getAttribute("position").count;
+    const rgb = new Float32Array(count * size).fill(1);
+    if (color) for (let i = 0; i < count; i++) {
+      rgb[i * size] = color.getX(i); rgb[i * size + 1] = color.getY(i); rgb[i * size + 2] = color.getZ(i);
+      if (size === 4 && color.itemSize >= 4) rgb[i * size + 3] = color.getW(i);
+    }
+    g.setAttribute("color", new THREE.BufferAttribute(rgb, size));
+  }
   if (!g.getAttribute("normal")) g.computeVertexNormals();
   if (!g.getAttribute("uv")) {
     const count = g.getAttribute("position").count;
     g.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(count * 2), 2));
   }
   for (const name of Object.keys(g.attributes)) {
-    if (!MERGED_ATTRIBUTES.has(name)) g.deleteAttribute(name);
+    if (!MERGED_ATTRIBUTES.has(name) && !(keepColor && name === "color")) g.deleteAttribute(name);
   }
   return g;
 }
 
-/** Does this geometry carry vertex data a merge would have to throw away? */
-function hasCustomAttributes(geometry: THREE.BufferGeometry): boolean {
+/** Does the material draw the geometry's vertex colours (so a merge must carry them)? */
+function readsVertexColors(material: THREE.Material | THREE.Material[]): boolean {
+  return !Array.isArray(material) && (material as THREE.Material & { vertexColors?: boolean }).vertexColors === true;
+}
+
+/** Colour stream width a merge keeps under this material: none, 3, or 4 when it dithers by vertex alpha. */
+function mergedColorSize(material: THREE.Material | THREE.Material[]): false | 3 | 4 {
+  if (!readsVertexColors(material)) return false;
+  return (material as THREE.Material & { alphaHash?: boolean }).alphaHash === true ? 4 : 3;
+}
+
+/**
+ * Does this geometry carry vertex data a merge would have to throw away? Vertex colours ride through ONLY under a
+ * material that declares `vertexColors` (baked AO on kit pieces): a shader that reads the colour stream through its
+ * own node (voxel terrain's biome tint) does not declare it, and its mesh stays unbatched as before.
+ */
+function hasCustomAttributes(geometry: THREE.BufferGeometry, material?: THREE.Material | THREE.Material[]): boolean {
+  const colorOk = material !== undefined && readsVertexColors(material);
   for (const name of Object.keys(geometry.attributes)) {
-    if (!MERGED_ATTRIBUTES.has(name)) return true;
+    if (!MERGED_ATTRIBUTES.has(name) && !(colorOk && name === "color")) return true;
   }
   return false;
 }
@@ -199,7 +232,7 @@ export function batchStaticMeshes(
     // mismatched sets), so batching such a mesh would silently delete the data
     // its shader depends on and render it as a single flat layer. Skip it: the
     // draw call saved is never worth losing what the mesh looks like.
-    if (hasCustomAttributes(mesh.geometry)) return void skipped++;
+    if (hasCustomAttributes(mesh.geometry, mesh.material)) return void skipped++;
     // World-baking changes the local coordinates read by wind/displacement.
     const material = mesh.material as THREE.Material & { positionNode?: unknown; displacementMap?: unknown };
     if (material.positionNode || material.displacementMap ||
@@ -232,7 +265,7 @@ export function batchStaticMeshes(
     let triangles = 0;
 
     for (const c of list) {
-      const g = prepForMerge(c.mesh.geometry);
+      const g = prepForMerge(c.mesh.geometry, mergedColorSize(c.material));
       // Bake the world transform in: the merged mesh sits at the origin, so
       // every source's placement has to live in its vertices.
       g.applyMatrix4(c.mesh.matrixWorld);
@@ -339,6 +372,7 @@ export function batchStaticMeshes(
       // (a culled interior, an authored-invisible part) can be shown again later
       if (hidden.has(node as THREE.Mesh) || hiddenRoots.has(node)) result = true;
       else if (!node.visible) result = false;
+      else if (node.userData[EFFECT_GROUP]) result = false;
       else if (node.type !== "Group" && node.type !== "Object3D") result = false;
       else result = node.children.every(covered);
       drawnByBatch.set(node, result);
@@ -434,7 +468,7 @@ export function mergeModelSubmeshes(root: THREE.Object3D): number {
     if ((mesh as unknown as { isInstancedProps?: boolean }).isInstancedProps) return;
     if (Array.isArray(mesh.material)) return;
     if (!mesh.geometry?.getAttribute("position")) return;
-    if (hasCustomAttributes(mesh.geometry)) return;
+    if (hasCustomAttributes(mesh.geometry, mesh.material)) return;
     const key = bucketKey(mesh, mesh.material);
     const list = buckets.get(key);
     if (list) list.push(mesh);
@@ -446,7 +480,7 @@ export function mergeModelSubmeshes(root: THREE.Object3D): number {
     if (list.length < 2) continue;
     const geoms: THREE.BufferGeometry[] = [];
     for (const mesh of list) {
-      const g = prepForMerge(mesh.geometry);
+      const g = prepForMerge(mesh.geometry, mergedColorSize(mesh.material as THREE.Material));
       // into the model root's local space, so the merged mesh can sit on the
       // root with an identity transform and still land where the parts did
       g.applyMatrix4(toRootLocal.clone().multiply(mesh.matrixWorld));

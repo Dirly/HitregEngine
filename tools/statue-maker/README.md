@@ -38,7 +38,9 @@ A minimal recipe:
 ```
 
 `inspect` gives actual part names, bones and clip durations. Omit `body.parts`
-for the whole mesh. `pose.kind: "rest"` freezes the source pose; `clip` samples
+for the whole mesh. Optional `contact` (a seat contact kind, docs/voxel-worlds.md "Seat") is written
+onto the prefab root as `dressing.contact`: a sitting figure takes `"seated"` (it rests
+where its own underside touches, legs may overhang its seat). `pose.kind: "rest"` freezes the source pose; `clip` samples
 one existing source clip at a time in its duration. Optional `pose.rotations`
 maps actual bone names to local XYZ Euler offsets in degrees, applied after the
 pose. All skinned and morph vertices are evaluated before export. The output

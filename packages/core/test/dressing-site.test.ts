@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildSiteSocketMap, dressingSchema, resolveDressing, socketMapSchema, type DressingData } from "../src/index.js";
+import { buildSiteSocketMap, keepWithoutRooms, dressingSchema, resolveDressing, socketMapSchema, type DressingData } from "../src/index.js";
 
 // a flat yard at y 10 with a gentle rise to the east, a tent (built), a hearth, a path and a pack clearing
 const sample = { ground: (x: number) => 10 + Math.max(0, x - 6) * 0.05, water: (x: number) => (x < -9 ? 11 : null) };
@@ -49,5 +49,24 @@ describe("site socket maps", () => {
     expect(p, JSON.stringify(res.violations)).toBeTruthy();
     expect(Math.hypot(p!.position[0], p!.position[2])).toBeLessThan(5);
     expect(p!.position[1]).toBeCloseTo(10 + Math.max(0, p!.position[0] - 6) * 0.05, 1);
+  });
+
+  it("skips anchors and kept-clear entries that have no coordinates instead of crashing", () => {
+    const { map } = buildSiteSocketMap(
+      { id: "t2", areas: [{ id: "yard", role: "yard", centre: [0, 0], radius: 6 }], anchors: [{ id: "bare" } as never], keep: [{ id: "bare-keep", why: "x", points: [] }, { id: "lane", why: "x", points: [[0, -6], [0, 6]], width: 2 }], blockers: [] },
+      sample,
+    );
+    const lv = map.levels[0]!;
+    const ch = (x: number, z: number) => lv.cells[Math.floor((z - lv.origin[1]) / lv.step)]![Math.floor((x - lv.origin[0]) / lv.step)];
+    expect(ch(0, 0)).toBe("x");
+    expect(ch(4, 0)).toBe("o");
+    expect(map.anchors.some((a) => a.id.endsWith("/bare"))).toBe(false);
+  });
+
+  it("room takes one passage id or a comma-separated list", () => {
+    const keep = ["a", "b", "c"].map((id) => ({ id, why: "p", points: [[0, 0]] as [number, number][], radius: 1 }));
+    expect(keepWithoutRooms(keep, "b").map((k) => k.id)).toEqual(["a", "c"]);
+    expect(keepWithoutRooms(keep, "a, c").map((k) => k.id)).toEqual(["b"]);
+    expect(keepWithoutRooms(keep).length).toBe(3);
   });
 });

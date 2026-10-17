@@ -38,6 +38,9 @@ The design bar for outdoor places. Measured rules live in the task skills: `site
 - Camps: catalogue tents at 1.5x, stands 1.25x; the tent door faces the fire.
 - Small pieces that work (a broken house, a hut) are registered for reuse.
 - A route a place depends on is its own plan row with an owner and a gate (cut + real-body walk).
+- Monument approach: a butte, mesa or monument is climbed by a path carved AROUND it (a cut ledge with a kerb,
+  spiralling or switching up the face), never a freestanding stair (poi-review gate 10, `tools/monument-approach.mts`).
+- Flat art (door reliefs, plaques, panels) reads upright and unmirrored (gate 9, `tools/flat-art.mts`).
 
 ## Entrances and life
 - Each landmark has its OWN dungeon with ONE door, a walk-through portal deep in a real passage (`portals`).

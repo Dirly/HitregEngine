@@ -1,7 +1,8 @@
 /**
  * Apply the dungeon lighting model (tools/dungeon-pipeline/lighting.json, merged with a project's own
  * authoring/lighting.json) to a dungeon scene as ONE applyOps batch: the readability-floor hemisphere fill, fog that
- * fades to the fill-lit tone, neutral exposure with a capped vignette, and the interior cullingProfile.
+ * fades to the fill-lit tone, the shared post preset (grade, bloom, vignette <= the cap, no pixelate) and character
+ * rim, neutral exposure, and the interior cullingProfile.
  *
  *   npx tsx ../../tools/dungeon-pipeline/lighting.mts --project projects/<id> [--scene <id>] [--dry]   (from apps/playground)
  *
@@ -12,7 +13,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyOps, type Op, type SceneDoc } from "../../packages/core/src/index.ts";
 import { defaultRegistry } from "../../packages/server/src/index.ts";
-import { ctxOf, measurePopin } from "./quality.mjs";
+import { ctxOf, lightLevel, measurePopin } from "./quality.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 type Json = Record<string, any>;
@@ -25,14 +26,35 @@ const merge = (a: Json, b: Json | null): Json => {
 };
 const scaleHex = (hex: string, k: number): string => "#" + [1, 3, 5].map((i) => Math.round(Math.min(255, parseInt(hex.slice(i, i + 2), 16) * k)).toString(16).padStart(2, "0")).join("");
 
-/** warm / cold / neutral: the temperature of the bucket most plan spaces use (plan.lights maps warm|cold -> bucket). */
-export function dominantTone(plan: Json | null): "warm" | "cold" | "neutral" {
-  const map = plan?.lights ?? {};
-  const toneOf = (bucket: string) => (map.warm === bucket ? "warm" : map.cold === bucket ? "cold" : "neutral");
+/** warm / cold / neutral: the temperature of the bucket most plan spaces use (plan.lights maps warm|cold -> bucket); with
+ *  no such map, the buckets the dressing plans name ("lights"), each toned by lighting.json tones.byBucket. */
+export function dominantTone(plan: Json | null, dressingBuckets: string[] = [], byBucket: Json = {}): "warm" | "cold" | "neutral" {
+  const map = plan?.lights && typeof plan.lights === "object" ? plan.lights : null;
   const count = new Map<string, number>();
-  for (const sp of plan?.spaces ?? []) if (sp.lights) count.set(toneOf(sp.lights), (count.get(toneOf(sp.lights)) ?? 0) + 1);
+  const add = (t: string) => count.set(t, (count.get(t) ?? 0) + 1);
+  if (map) {
+    // a map that names no temperature for a bucket (plan.lights { bucket: "tomb" }) falls back to tones.byBucket
+    const toneOf = (bucket: string) => (map.warm === bucket ? "warm" : map.cold === bucket ? "cold" : typeof byBucket[bucket] === "string" ? byBucket[bucket] : "neutral");
+    for (const sp of plan?.spaces ?? []) if (sp.lights) add(toneOf(sp.lights));
+  } else for (const b of dressingBuckets) add(typeof byBucket[b] === "string" ? byBucket[b] : "neutral");
   const best = [...count.entries()].sort((a, b) => b[1] - a[1])[0];
   return (best?.[0] as "warm" | "cold" | "neutral") ?? "neutral";
+}
+
+/** The fill tone: a project's authoring/lighting.json `tone` (warm | cold | neutral, with its why) wins over the counted
+ *  dominant tone - for a dungeon whose read and climax sit in the minority of its spaces (a cold sea cave beside warm
+ *  galleries). One hemisphere fill per scene, so the tone is a choice, not a per-space mix. */
+export function chooseTone(own: Json | null, counted: () => "warm" | "cold" | "neutral"): string {
+  const t = own?.tone;
+  return t === "warm" || t === "cold" || t === "neutral" ? t : counted();
+}
+
+/** The light bucket each dressing plan names (authoring/dressing/plans/*.json, reports and inverses left out). */
+export function dressingBuckets(root: string): string[] {
+  const dir = path.join(root, "authoring/dressing/plans");
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir).filter((n) => n.endsWith(".json") && !/.(inverse|report).json$/.test(n))
+    .map((n) => readJson(path.join(dir, n))?.lights).filter((b): b is string => typeof b === "string");
 }
 
 /** The ops that put the lighting model on `doc` (pure; `popinAtEntryM` sizes an `auto` reveal). */
@@ -52,13 +74,18 @@ export function lightingOps(doc: SceneDoc, model: Json, tone: string, popinAtEnt
       const fog = sky.fog ? { ...sky.fog, color: scaleHex(t.sky, model.fog.colourScale), near: model.fog.near, far: model.fog.far } : sky.fog;
       const fogTone = scaleHex(t.sky, model.fog.colourScale);
       const dome = model.fog.background ? { top: fogTone, bottom: fogTone } : {};
-      ops.push({ op: "set-component", id, component: "sky", data: { ...sky, ...dome, fog } });
+      const rim = model.rim ? { rim: Object.fromEntries(Object.entries(model.rim).filter(([k]) => k !== "about")) } : {};
+      ops.push({ op: "set-component", id, component: "sky", data: { ...sky, ...dome, ...rim, fog } });
     }
     const post = e.components["postfx"] as Json | undefined;
     if (post) {
-      const tonemap = { ...(post.tonemap ?? {}), exposure: model.post.exposure };
-      const vignette = post.vignette ? { ...post.vignette, amount: Math.min(post.vignette.amount ?? 0, model.post.vignetteMax) } : post.vignette;
-      ops.push({ op: "set-component", id, component: "postfx", data: { ...post, tonemap, vignette } });
+      // the shared post preset, key by key (keys it does not name stay the scene's own), then the exposure and the vignette cap
+      const preset: Json = model.post.preset ?? {};
+      const merged: Json = { ...post };
+      for (const [k, v] of Object.entries(preset)) merged[k] = v && typeof v === "object" && !Array.isArray(v) ? { ...(post[k] ?? {}), ...v } : v;
+      const tonemap = { ...(merged.tonemap ?? {}), exposure: model.post.exposure };
+      const vignette = merged.vignette ? { ...merged.vignette, amount: Math.min(merged.vignette.amount ?? 0, model.post.vignetteMax) } : merged.vignette;
+      ops.push({ op: "set-component", id, component: "postfx", data: { ...merged, tonemap, vignette } });
     }
   }
   const cp = model.cullingProfile;
@@ -78,14 +105,25 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const scenePath = path.join(root, `assets/scenes/${sceneId}.scene.json`);
   const doc = readJson(scenePath) as SceneDoc | null;
   if (!doc) throw new Error(`no scene ${scenePath}`);
-  const model = merge(readJson(path.join(HERE, "lighting.json"))!, readJson(path.join(root, "authoring/lighting.json")));
+  const own = readJson(path.join(root, "authoring/lighting.json"));
+  const model = merge(readJson(path.join(HERE, "lighting.json"))!, own);
+  // the dungeon's light level (lit | night; thresholds.json readability.levels) sets the fill, unless it names its own
+  const level = lightLevel(own);
+  if ((own as Json | null)?.fill?.intensity === undefined) {
+    const fill = model.levels?.[level]?.fill;
+    if (typeof fill !== "number") throw new Error(`lighting: no fill for light level "${level}" in tools/dungeon-pipeline/lighting.json levels`);
+    model.fill.intensity = fill;
+  }
   const pop = measurePopin(c);
   const atEntry = Math.max(0, ...(pop?.rows ?? []).filter((r: Json) => r.routed).map((r: Json) => r.atEntryM));
-  const { ops, summary } = lightingOps(doc, model, dominantTone(c.plan), atEntry);
+  const { ops, summary } = lightingOps(doc, model, chooseTone(own, () => dominantTone(c.plan, dressingBuckets(root), model.tones.byBucket)), atEntry);
   if (args.includes("--dry")) { console.log(JSON.stringify({ summary, ops: ops.map((o) => ({ op: o.op, id: (o as Json).id, component: (o as Json).component })) }, null, 1)); process.exit(0); }
   const result = applyOps(doc, ops, defaultRegistry());
-  fs.writeFileSync(scenePath, JSON.stringify(result.doc, null, 1) + "\n");
+  // keep the file's own layout (indent, trailing newline) so the diff is the lighting, not a reformat
+  const raw = fs.readFileSync(scenePath, "utf8");
+  const indent = /\n( +)"/.exec(raw)?.[1]?.length ?? 2;
+  fs.writeFileSync(scenePath, JSON.stringify(result.doc, null, indent) + (raw.endsWith("\n") ? "\n" : ""));
   fs.mkdirSync(path.join(root, "reports"), { recursive: true });
   fs.writeFileSync(path.join(root, "reports/lighting.json"), JSON.stringify({ at: new Date().toISOString(), scene: path.relative(root, scenePath), summary, inverse: result.inverse }, null, 1) + "\n");
-  console.log(`lighting: ${ops.length} ops on ${path.relative(root, scenePath)} (tone ${summary.tone}, fill ${summary.fill.intensity}, reveal ${summary.cullingProfile.interiorReveal} m); inverse in reports/lighting.json`);
+  console.log(`lighting: ${ops.length} ops on ${path.relative(root, scenePath)} (level ${level}, tone ${summary.tone}, fill ${summary.fill.intensity}, reveal ${summary.cullingProfile.interiorReveal} m); inverse in reports/lighting.json`);
 }

@@ -1,5 +1,5 @@
 {
-  "about": "The street-lighting standard (docs/world-standards/towns.md): every town street and every road near a town carries lanterns. Read by tools/town-lights.mts (plan/check/apply) and by `zonegen status` (row `town <name>: lights`). Schema with every field described: streetLightingSchema in tools/town-lights-rule.mts. A project may replace this file with authoring/street-lights.json.",
+  "about": "The street-lighting standard (docs/world-standards/towns.md): every town street and every road near a town carries lanterns. Read by tools/town-lights.mts (plan/check/apply) and by `zonegen status` (row `town <name>: lights`). Schema with every field described: streetLightingSchema in tools/town-lights-rule.mts. A project may replace this file with authoring/street-lights.json. `profiles` is the wealth/size factor: the first whose `when` matches the town (plan tier; plan wealth, else the residents' median) is merged over the base.",
   "streets": {
     "prefab": "town-lights/lamp-post-lit",
     "lanePrefab": "town-lights/hanging-lantern-lit",
@@ -7,9 +7,20 @@
     "cover": 13,
     "edgeOffset": 0.5
   },
-  "plazas": { "prefab": "town-lights/lamp-post-lit", "cover": 3 },
-  "gates": { "prefab": "town-lights/lamp-post-lit", "pair": true, "cover": 7 },
-  "quays": { "prefab": "town-lights/lamp-post-lit", "jettyPrefab": "town-lights/hanging-lantern-lit", "cover": 6 },
+  "plazas": {
+    "prefab": "town-lights/lamp-post-lit",
+    "cover": 3
+  },
+  "gates": {
+    "prefab": "town-lights/lamp-post-lit",
+    "pair": true,
+    "cover": 7
+  },
+  "quays": {
+    "prefab": "town-lights/lamp-post-lit",
+    "jettyPrefab": "town-lights/hanging-lantern-lit",
+    "cover": 6
+  },
   "roads": {
     "prefab": "town-lights/lamp-post-lit",
     "reach": 160,
@@ -18,16 +29,84 @@
     "cover": 24,
     "shoulderOffset": 1.1,
     "junctionReach": 200,
-    "exclude": ["^trail-"]
+    "exclude": [
+      "^trail-"
+    ]
   },
   "clearance": {
     "building": 0.6,
-    "door": 1.0,
+    "door": 1,
     "stair": 1.5,
     "npc": 1.5,
     "landmark": 4,
     "minApart": 8,
     "maxTilt": 0.35,
     "groundTolerance": 0.3
-  }
+  },
+  "doors": {
+    "prefab": "town-lights/lamp-post-lit",
+    "uses": [],
+    "cover": 6
+  },
+  "profiles": [
+    {
+      "name": "poor-village",
+      "about": "Hamlets and villages whose folk are poor burn little oil: one lantern at each gate, one where each lane leaves the street, one at the alehouse/inn door; the street, the green and the roads out stay dark.",
+      "when": {
+        "tier": [
+          "hamlet",
+          "village"
+        ],
+        "wealth": [
+          "destitute",
+          "poor"
+        ]
+      },
+      "set": {
+        "streets": {
+          "lit": "none",
+          "lanes": "junctions"
+        },
+        "plazas": {
+          "lit": false
+        },
+        "gates": {
+          "pair": false
+        },
+        "roads": {
+          "lit": false
+        },
+        "doors": {
+          "uses": [
+            "\\b(ale ?house|inn|tavern)\\b"
+          ]
+        }
+      }
+    },
+    {
+      "name": "village",
+      "about": "Comfortable villages: street lanterns twice as far apart, lanes lit where they leave the street, a lantern at the alehouse/inn, no lanterns on the roads out.",
+      "when": {
+        "tier": [
+          "hamlet",
+          "village"
+        ]
+      },
+      "set": {
+        "streets": {
+          "spacing": 36,
+          "cover": 26,
+          "lanes": "junctions"
+        },
+        "roads": {
+          "lit": false
+        },
+        "doors": {
+          "uses": [
+            "\\b(ale ?house|inn|tavern)\\b"
+          ]
+        }
+      }
+    }
+  ]
 }

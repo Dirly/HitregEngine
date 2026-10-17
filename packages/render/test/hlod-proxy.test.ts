@@ -117,6 +117,22 @@ describe("HLOD proxy merge", () => {
     expect(merged.geometry.index!.count).toBe(72);
   });
 
+  it("draws a glTF placed with its own material asset (kit pieces) in that material, merged across models", async () => {
+    const kit = (position: [number, number, number], assetId: string): SceneDoc["entities"][string] => {
+      const e = tree(position, assetId);
+      (e.components["mesh"] as Record<string, unknown>)["material"] = "red";
+      (e.components["mesh"] as Record<string, unknown>)["lod"] = false;
+      return e;
+    };
+    const proxy = await buildHlodProxy(doc({ a: kit([0, 0, 0], "bay"), b: kit([10, 0, 0], "pier"), c: tree([20, 0, 0], "plain") }), { ...materials, resolveModel: (id) => `fake://${id}.glb` });
+    const meshes = proxy.group.children.filter((c) => (c as THREE.Mesh).isMesh) as THREE.Mesh[];
+    const colors = meshes.map((m) => ((m.material as THREE.MeshStandardMaterial).color.getHexString())).sort();
+    // the two kit pieces (different models, one material asset) share the red draw; the plain glTF keeps its own green
+    expect(colors).toEqual(["00ff00", "ff0000"]);
+    const red = meshes.find((m) => (m.material as THREE.MeshStandardMaterial).color.getHex() === 0xff0000)!;
+    expect(red.geometry.index!.count).toBe(72);
+  });
+
   it("merges primitives with and without uvs (wedge next to box) without crashing", async () => {
     const mixed = doc({
       b: box([0, 0, 0], "red"),

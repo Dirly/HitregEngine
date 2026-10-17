@@ -54,8 +54,8 @@ export function standingContent(ctx: Ctx, recipe: J): Content[] {
 
 // the overlay drawn on the review map (runs in the page: plain JS, no imports)
 const DRAW = String.raw`
-const COLORS = { "cliff-water": "#4fc3f7", "canyon-end": "#ff8a65", plateau: "#ffd54f", peak: "#e0e0e0", saddle: "#ba68c8", "wall-gap": "#ef5350", cove: "#4dd0e1", waterfall: "#81d4fa", "path-end": "#aed581", switchback: "#9ccc65", "empty-land": "#ffffff", island: "#26a69a", access: "#ff4081" };
-const SHAPE = { "cliff-water": "tri", "canyon-end": "chev", plateau: "square", peak: "tri", saddle: "diamond", "wall-gap": "bar", cove: "circle", waterfall: "drop", "path-end": "circle", switchback: "z", "empty-land": "ring", island: "circle", access: "bar" };
+const COLORS = { "cliff-water": "#4fc3f7", "canyon-end": "#ff8a65", plateau: "#ffd54f", peak: "#e0e0e0", saddle: "#ba68c8", "wall-gap": "#ef5350", cove: "#4dd0e1", waterfall: "#81d4fa", "path-end": "#aed581", switchback: "#9ccc65", "empty-land": "#ffffff", island: "#26a69a", access: "#ff4081", "fall-lip": "#b3e5fc", "plunge-pool": "#0288d1", "sea-stack": "#bcaaa4", "stack-cluster": "#ffab40", headland: "#90caf9", "butte-top": "#ffb300", "canyon-bend": "#d84315" };
+const SHAPE = { "cliff-water": "tri", "canyon-end": "chev", plateau: "square", peak: "tri", saddle: "diamond", "wall-gap": "bar", cove: "circle", waterfall: "drop", "path-end": "circle", switchback: "z", "empty-land": "ring", island: "circle", access: "bar", "fall-lip": "drop", "plunge-pool": "drop", "sea-stack": "circle", "stack-cluster": "diamond", headland: "tri", "butte-top": "square", "canyon-bend": "chev" };
 ctx.save();
 ctx.font = "bold 12px system-ui, sans-serif";
 ctx.textBaseline = "middle";
@@ -166,6 +166,8 @@ export async function run(ctx: Ctx): Promise<number> {
     content,
     canyons: ((recipe.features?.canyons ?? []) as J[]).map((c) => ({ id: c.id, points: (c.points as number[][]).map(xz) })),
     step: Number(ctx.opt("step", "8")),
+    // DC terrain (docs/voxel-worlds.md §30/§30a): sample the drawn ground, so stacks, lips and walls are seen
+    planar: !!(recipe.terrain?.planarCliffs || recipe.terrain?.seaCliffs || recipe.terrain?.buttes),
   });
   console.log(`sites ${zone}: ${report.candidates.length} candidates, ${report.paths.length} path findings (${((performance.now() - t0) / 1000).toFixed(1)} s)`);
 

@@ -81,6 +81,16 @@ Tools read a project's `dependsOn` closure, so a world sees foundation and world
   `docs/world-editing/rivers-and-falls.md` — the rules (lowland rivers, one
   waterfall per river, banks, the network) and the rebuild order. Crafting one
   fall into a place: `docs/world-editing/fall-crafting.md` (the `fall-crafting` skill).
+- **A bridge or aqueduct across a gap** (gorge, valley, river, cliff to sea stack): `worldgen bridge-place
+  <world> --project <p> --id x --a "x,z" --b "x,z" [--kind arch|rope] [--style gnawspur|coastal] [--channel]`
+  (fields: `features.bridgeSpans` in the spec; kits: world-kit `authoring/bridges/`, its build.mts header).
+  Arch where piers can be founded (<= 14 m of water, <= 70 m tall); rope for sea stacks and chasms. Never
+  hand-place bridge pieces: `--refit --all` after any terrain rebuild, `--check` lists STALE spans. On sea stacks and
+  DC cliff tops seat the ends `--seat rock` (the end slides to the rim, the deck eases level over it). Straight spans
+  between natural tops; slope instead of structures: rope spans run STRAIGHT between NATURAL TOPS and take the
+  height as SLOPE (<= 30 deg end to end, deck <= 35 deg with the sag); no stairs, stages, towers or plinths to meet
+  a deck (Derek's standing rule): too steep means a different anchor pair.
+  `--seat stage` is only for docks / sea-level landings. Prove a chain with `world-kit authoring/bridges/walk-chain.mts`.
 
 ## Characters, gear and art
 

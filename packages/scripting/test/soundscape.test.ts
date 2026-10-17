@@ -12,6 +12,10 @@ const SOUNDS = new Set([
   "ambience/biome/forest-dusk.ogg",
   "ambience/biome/forest-night.ogg",
   "ambience/biome/grassland-day.ogg",
+  "ambience/biome/swamp-day.ogg",
+  "ambience/water/lake-shore-lapping.ogg",
+  "ambience/water/swamp-water.ogg",
+  "music/zone/bog-day.ogg",
   "ambience/town/day.ogg",
   "ambience/interior/tavern-busy.ogg",
   "music/biome/forest-day.ogg",
@@ -36,6 +40,7 @@ interface World {
   emitter?: Record<string, unknown>;
   params?: Record<string, unknown>;
   trackSeconds?: number;
+  water?: { surfaceY: number; depth: number; floorY: number; swim: boolean; current: readonly [number, number]; kind?: string } | null;
 }
 
 const live: ScriptRuntime[] = [];
@@ -69,6 +74,7 @@ function world(opts: World) {
       return { id, zone: "t", weights: { [id]: 1 }, ground: 0, temperature: 0.5, moisture: 0.5, slope: 0 };
     },
     regionAt: () => opts.region ?? null,
+    ...(opts.water !== undefined ? { waterAt: (_x: number, y: number) => (opts.water ? { ...opts.water, depth: opts.water.surfaceY - y } : null) } : {}),
     hasSound: (id) => SOUNDS.has(id),
     worldLoading: () => loading,
     soundDuration: (id) => (id.startsWith("music/") ? opts.trackSeconds ?? 600 : 5),
@@ -260,5 +266,56 @@ describe("soundscape", () => {
     expect(inHours(12, "22-6")).toBe(false);
     expect(inHours(12, "7-19")).toBe(true);
     expect(inHours(12, "")).toBe(false);
+  });
+});
+
+describe("soundscape: a zone's own sound", () => {
+  const bog: RegionAt = {
+    id: "bog",
+    name: "The Bog",
+    tags: [],
+    sound: { bed: { "*": "ambience/biome/swamp-{band}.ogg" }, bedMix: 1, biomeMix: 0, music: { day: "music/zone/bog-day.ogg" }, stillWater: "ambience/water/swamp-water.ogg" },
+  };
+
+  it("a zone bed replaces the biome beds, and zone music beats biome music", () => {
+    worldClock.hour = 12;
+    const w = world({ region: bog });
+    w.step(10);
+    const a = w.audible();
+    expect(a["ambience/biome/swamp-day.ogg"]).toBeGreaterThan(0.2);
+    expect(a["ambience/biome/forest-day.ogg"]).toBeUndefined();
+    expect(a["music/zone/bog-day.ogg"]).toBeGreaterThan(0.2);
+    expect(a["music/biome/forest-day.ogg"]).toBeUndefined();
+  });
+
+  it("biomeMix lets some of the land's bed through", () => {
+    worldClock.hour = 12;
+    const w = world({ region: { ...bog, sound: { ...bog.sound!, biomeMix: 0.5 } } });
+    w.step(10);
+    const a = w.audible();
+    expect(a["ambience/biome/forest-day.ogg"]).toBeGreaterThan(0.05);
+    expect(a["ambience/biome/forest-day.ogg"]!).toBeLessThan(a["ambience/biome/swamp-day.ogg"]!);
+  });
+
+  it("still water plays the zone's still-water bed, else the kind's, else the lake bed", () => {
+    worldClock.hour = 12;
+    const still = { surfaceY: -0.5, depth: 0, floorY: -1, swim: true, current: [0, 0] as const };
+    const zoned = world({ region: bog, water: { ...still, kind: "lake" } });
+    zoned.step(10);
+    expect(zoned.audible()["ambience/water/swamp-water.ogg"]).toBeGreaterThan(0.1);
+    const marsh = world({ water: { ...still, kind: "marsh" } });
+    marsh.step(10);
+    expect(marsh.audible()["ambience/water/swamp-water.ogg"]).toBeGreaterThan(0.1);
+    const lake = world({ water: { ...still, kind: "lake" } });
+    lake.step(10);
+    expect(lake.audible()["ambience/water/lake-shore-lapping.ogg"]).toBeGreaterThan(0.1);
+    expect(lake.audible()["ambience/water/swamp-water.ogg"]).toBeUndefined();
+  });
+
+  it("without a zone sound the biome patterns play as before", () => {
+    worldClock.hour = 12;
+    const w = world({ region: { id: "plain", name: "Plain", tags: [] } });
+    w.step(8);
+    expect(w.audible()["ambience/biome/forest-day.ogg"]).toBeGreaterThan(0.2);
   });
 });

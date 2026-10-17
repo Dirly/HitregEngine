@@ -1,3 +1,4 @@
+import { assetFileUrl, setAssetScopeOwner } from "./asset-url.js";
 import { type AssetLibrary } from "@hitreg/core";
 import { loadVolumes, loadWorldRecipes } from "./voxel-world.js";
 
@@ -29,10 +30,11 @@ export async function loadAssets(
   );
   const scopeHeader = response.headers.get("x-hitreg-scope");
   projectScope = scopeHeader && scopeHeader !== "*" ? new Set(scopeHeader.split(",")) : null;
+  // the header lists the owning project first; every later read resolves in its closure
+  setAssetScopeOwner(projectScope ? scopeHeader!.split(",")[0]! : null);
   if (projectScope) console.info(`[assets] loading projects: ${[...projectScope].join(", ")}`);
   const index = (await response.json()) as Record<string, string[]>;
-  const fileUrl = (kind: string, file: string) =>
-    `/__hitreg/asset-file?file=${encodeURIComponent(`${kind}/${file}`)}`;
+  const fileUrl = (kind: string, file: string) => assetFileUrl(`${kind}/${file}`);
   // A merged project library can contain thousands of prefabs. Starting all
   // fetches together exhausts browser request resources and silently drops
   // later kinds (including materials). Share one bounded queue across kinds.

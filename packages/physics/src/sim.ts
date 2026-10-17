@@ -977,6 +977,12 @@ export class PhysicsSim {
       );
     }
 
+    if (source?.kind === "surface") {
+      // generator-written triangles (a voxel world's path ribbons and stair treads): the collider IS the drawn mesh
+      const surf = source as { kind: "surface"; positions: number[]; indices: number[] };
+      if (surf.indices.length < 3) return boxFallback();
+      return this.cookShape(id, kind, scaleVertices(Float32Array.from(surf.positions), scale), Uint32Array.from(surf.indices)) ?? boxFallback();
+    }
     if (source?.kind === "poly") {
       // editable meshes cook from the SAME faces the renderer triangulates
       const geom = polyMeshCollision(source as PolyMeshSource);

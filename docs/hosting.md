@@ -439,6 +439,31 @@ layer does to stay cheap, all generic:
   (entities, colliders, trimesh triangles, crowd of creatures that can wake around one spot) plus a short
   bot run, PASS/FAIL with an exit code. Run it after generating or editing a world.
 
+### The terrain-collision cache (baked once per recipe hash)
+
+A layer does not cook its ground. Main bakes every in-world cell (inside `bounds.limit + limitFalloff`) once,
+in the background at boot, on a worker pool, into `<playground>/.hitreg/terrain-cache/<world>/<hash>/`
+(`cells.bin` deflated records, `index.json`, `meta.json` written last = complete). A record is the cell doc
+(scatter, POI prefabs; expanded on the layer as before, so prop primitive colliders are unchanged) plus the
+terrain trimesh's positions and indices. The hash covers the parsed recipe, the world id, the cook options
+(mesher, collider LOD, scatter), which scatter/POI assets exist, a format constant and core's voxel sources —
+any of those changing rebakes; the two most recent caches per world are kept, older and half-baked ones
+deleted. One bake per hash: the first process to take `<hash>.lock` bakes (main, before it starts a layer);
+layers cook on demand until `meta.json` appears (polled every 5 s), then read cells with positioned async
+reads, holding only the index. A terraform stops the cache serving the cells it touched (`replaceRecipe`
+drops it); the next boot rebakes. Code: `packages/server/src/terrain-cache.ts`.
+
+Flags (main and serve): `--terrain-bake auto|read|force|off` (default auto; `off` on main is passed to its
+layers), `--bake-workers n` (default min(8, cpus-1)), `--terrain-cache <dir>`. The `serve()` library default
+is `off` (tests).
+
+Measured 2026-10-11 on saltreach (DC, mesher auto, 18,624 in-world cells at 48 m, 16-thread box): cold bake
+**120 s on 8 threads**, cache **123 MB** (248 MB raw), main peaks at **~5.3 GB** while baking (≈0.6 GB per
+bake thread — use `--bake-workers` on a small box) and falls back to ~240 MB after. Warm boot: main gateway
+2.0 s, first layer serving 4.7 s. A zone copy with one player: **~260 MB RSS reading the cache vs 700-820 MB
+cooking** (the cooking pool's threads each hold the field); spawn-time inline cooks (0.6-0.8 s per join on
+the cook path) go to zero; tick p50 0.35 ms / p95 0.65 ms either way (no spawn areas in that world yet).
+
 ## Chat
 
 Text chat routes on the host, and on a layer the host is the layer: each one
@@ -467,7 +492,9 @@ as before; convert big populations to spawn areas.
 ```
 pnpm -F @hitreg/server main --scene mmo --secret dev --public-host 127.0.0.1
 pnpm -F playground dev
-# open http://localhost:5173/?gateway=http://127.0.0.1:8780 → sign in → choose world → character → Play
+# open http://localhost:5173/?scene=<world scene>&gateway=http://127.0.0.1:8780 → sign in → choose world → character → Play
+# (scene= is required today: the dev app plays the scene it opened, not the grant's — net-client.ts honours the
+#  grant's scene only on transfers; without it the client shows no terrain and the body falls)
 curl -s -H "Authorization: Bearer dev" http://127.0.0.1:8780/admin/status
 ```
 
@@ -506,6 +533,28 @@ destination and moves the character, `GET /admin/players` (peer, body,
 position — read it to check a crossing landed in place) and
 `POST /admin/teleport { peerId, position }` (a probe walking a pass; ground
 is made under the body first).
+
+## Staff accounts (GM / dev)
+
+A staff account runs the console's authority commands on a live server
+(`/give`, `/soulbind`, `/stats <value> [attribute]` to meet any gear's requirement): what a single-player tab can always do, granted to a
+named account on a server. It is set ON THE SERVER MACHINE, against the store
+`hitreg-main` uses, and nowhere else:
+
+    pnpm -F @hitreg/server account-role <account name> gm      # or dev; player revokes; no role argument shows it
+    ... [--data <dir>] [--database <url>]                      # the same store as hitreg-main
+
+The role rides in the signed play ticket (`TicketClaims.role`, read off the
+account record when main mints it), so it applies at the account's NEXT join
+or zone change and a client cannot add one (the signature fails). A layer
+publishes it as netState `staff/<peerId>` (core `STAFF_NETSTATE`,
+`staffRole`); the character sheet honours `inventory.give`,
+`inventory.soulbind` and `character.setstats` from a staff peer, still only for a body that peer owns,
+and refuses them from everyone else. A console command honoured this way is
+declared `staff: true` (`ScriptCommandDecl`); the console stops warning a staff
+tab about those, and still warns about the rest (`/time`, `/weather` are not
+yet honoured from staff). Character names that pose as staff are already
+refused (docs/moderation.md).
 
 ## The agent's weekly edit and running servers
 

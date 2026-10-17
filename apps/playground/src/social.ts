@@ -127,9 +127,12 @@ export function mountSocialPanel(opts: SocialPanelOptions): SocialPanel {
   const root = el("div", { className: "hg-social" });
   root.hidden = true;
   root.setAttribute("aria-label", "Friends and party");
-  const title = el("h1", {}, "Friends, party & guild", el("span", { text: "O to close" }));
+  root.setAttribute("role", "dialog");
+  const closeBtn = el("button", { text: "×", title: "Close social window" }); closeBtn.type = "button"; closeBtn.setAttribute("aria-label", "Close social window");
+  const title = el("h1", {}, "Social", el("span", { text: "Friends · Party · Guild" }), closeBtn);
   const body = el("div");
   const nameInput = el("input", { placeholder: "character name" });
+  nameInput.setAttribute("aria-label", "Character name");
   const addBtn = el("button", { text: "Add friend" });
   const inviteBtn = el("button", { text: "Invite" });
   const err = el("div", { className: "err" });
@@ -486,6 +489,7 @@ export function mountSocialPanel(opts: SocialPanelOptions): SocialPanel {
   };
 
   const open = (): void => {
+    if (document.pointerLockElement) document.exitPointerLock?.();
     root.hidden = false;
     void refresh();
     timer ??= setInterval(() => void refresh(), 15_000);
@@ -496,6 +500,9 @@ export function mountSocialPanel(opts: SocialPanelOptions): SocialPanel {
     if (timer) clearInterval(timer);
     timer = null;
   };
+  closeBtn.onclick = close;
+  root.addEventListener("keydown", e => { if (e.key === "Escape") { e.preventDefault(); close(); } e.stopPropagation(); });
+  root.addEventListener("keyup", e => e.stopPropagation());
   addBtn.onclick = () => {
     const name = nameInput.value.trim();
     if (name) void calls.friend(name).then(() => (nameInput.value = ""));

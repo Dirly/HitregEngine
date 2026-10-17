@@ -618,13 +618,20 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
     let server = attempt();
     if (server) return server;
     const layers = registry.layersFor(world.scene).length + [...booting.keys()].filter((id) => id.startsWith("layer-")).length;
-    if (layers < world.max && supervisor) {
+    // a copy that would take them is already booting (a crossing layer re-asks every 2 s while it boots): wait for it,
+    // never start another — one crossing started three copies of a zone before this
+    const bootingFor = [...booting.keys()].find((id) => {
+      if (!id.startsWith("layer-")) return false;
+      const hosted = pendingHosted.get(id);
+      return hosted === undefined || hosted === "all" || (zoned && zone !== null && hosted.includes(zone));
+    });
+    if (layers < world.max && supervisor && !bootingFor) {
       await spawnLayer(zoned && zone ? [zone] : "all").catch((error: unknown) => log(`[main] layer boot failed: ${error instanceof Error ? error.message : String(error)}`));
       server = attempt();
       if (server) return server;
     }
     // a layer may already be booting: wait for it
-    const pending = [...booting.entries()].find(([id]) => id.startsWith("layer-"));
+    const pending = [...booting.entries()].find(([id]) => id === bootingFor) ?? [...booting.entries()].find(([id]) => id.startsWith("layer-"));
     if (pending) {
       await new Promise<void>((resolve) => {
         const original = pending[1];
@@ -689,7 +696,7 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
         if (!character || worldOf(character, worldId) !== worldId) throw new Error("character does not belong to this world");
         registry.reserve(dest.id, call.characterId, call.playerId, call.name);
         return {
-          ticket: signTicket(opts.secret, { sub: call.playerId, chr: call.characterId, saveId: character.saveId ?? call.playerId, name: call.name, srv: call.srv, rev: call.rev, reason: call.reason, ttlSeconds: ticketTtl }),
+          ticket: signTicket(opts.secret, { sub: call.playerId, chr: call.characterId, saveId: character.saveId ?? call.playerId, name: call.name, srv: call.srv, rev: call.rev, reason: call.reason, ...(account?.role ? { role: account.role } : {}), ttlSeconds: ticketTtl }),
         };
       }
       case "transfer.request": {
@@ -1068,7 +1075,7 @@ export async function startMain(opts: MainOptions): Promise<MainHandle> {
       const heldOn = held ? registry.servers.get(held) : undefined;
       const server = heldOn && heldOn.accepting ? heldOn : await placeOrGrow(character.id, zone);
       registry.reserve(server.id, character.id, account.id, character.name, Date.now(), zone);
-      const ticket = signTicket(opts.secret, { sub: account.id, chr: character.id, saveId: character.saveId ?? account.id, name: character.name, srv: server.id, reason: "join", ...(character.build ? { build: character.build } : {}), ttlSeconds: ticketTtl });
+      const ticket = signTicket(opts.secret, { sub: account.id, chr: character.id, saveId: character.saveId ?? account.id, name: character.name, srv: server.id, reason: "join", ...(character.build ? { build: character.build } : {}), ...(account.role ? { role: account.role } : {}), ttlSeconds: ticketTtl });
       return send(res, 200, { url: server.url, ticket, server: server.id, scene: server.scene });
     }
     // a player reports another (docs/moderation.md §2): evidence gathered now, stored with the report

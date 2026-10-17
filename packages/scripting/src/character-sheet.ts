@@ -64,6 +64,10 @@ import {
   corpseClaimed,
   corpseContents,
   isEntrusted,
+  staffRole,
+  setAttributes,
+  MAX_SET_ATTRIBUTE,
+  ATTRIBUTES,
   isPlundered,
   releaseCorpse,
   soulProtected,
@@ -299,6 +303,7 @@ export class CharacterSheetScript extends Script {
         "Put an item (an items/ asset id) into your own inventory — for trying gear without a drop. Twists (the game's opaque " +
         "ids, comma-separated) go on each new instance.",
       authority: true,
+      staff: true,
     },
     {
       name: "soulbind",
@@ -308,6 +313,16 @@ export class CharacterSheetScript extends Script {
         "there) — or free it with 'off'. A testing override of the soul binder: no slot limit, no price. Names a slot " +
         "(chest, primary, …) or a WORN item by uid or item id.",
       authority: true,
+      staff: true,
+    },
+    {
+      name: "stats",
+      args: "<value> [attribute]",
+      description:
+        "Set your attributes outright — all of them, or the one named (strength, dexterity, constitution, intelligence, " +
+        `wisdom) — to 1-${MAX_SET_ATTRIBUTE}, so any gear's requirement is met. A testing override: no points spent.`,
+      authority: true,
+      staff: true,
     },
   ];
 
@@ -353,6 +368,10 @@ export class CharacterSheetScript extends Script {
     on<{ actorId: string; attribute: Attribute }>(CHARACTER_EVENTS.allocate, (p, meta) =>
       this.handle("allocate", p, meta, (s) => allocate(s, p.attribute, this.env)),
     );
+    on<{ actorId: string; value: number; attribute?: Attribute }>(CHARACTER_EVENTS.setStats, (p, meta) => {
+      if (!this.trusted(meta)) return; // the console's /stats: local, or a staff peer; never a player
+      this.handle("setstats", p, meta, (s) => setAttributes(s, p.value, p.attribute));
+    });
     on<{ actorId: string; amount: number }>(CHARACTER_EVENTS.xp, (p, meta) => {
       if (meta?.from !== undefined) return; // grants are authority-internal
       const r = this.handle("xp", p, meta, (s) => grantXp(s, p.amount, this.env));
@@ -365,7 +384,7 @@ export class CharacterSheetScript extends Script {
       }
     });
     on<{ actorId: string; itemId: string; qty: number; twists?: string[] }>(CHARACTER_EVENTS.give, (p, meta) => {
-      if (meta?.from !== undefined) return;
+      if (!this.trusted(meta)) return; // the console's grant: local, or a staff peer (staff/<peer>, from its signed ticket)
       const r = this.handle("give", p, meta, (s) => {
         const added = addItem(s, p.itemId, p.qty ?? 1, this.env);
         // rolled twists belong to an instance: only an item that does not stack can carry them
@@ -411,7 +430,7 @@ export class CharacterSheetScript extends Script {
     on<LootRequest>(CHARACTER_EVENTS.loot, (p, meta) => this.loot(p, meta));
     on<{ actorId: string; rollId: string; choice: RollChoice }>(CHARACTER_EVENTS.roll, (p, meta) => this.answerRoll(p, meta));
     on<{ actorId: string; slot: EquipmentSlot; bound?: boolean }>(CHARACTER_EVENTS.soulbind, (p, meta) => {
-      if (meta?.from !== undefined) return; // authority-internal: an admin or the console, never a peer
+      if (!this.trusted(meta)) return; // authority-internal: an admin, the console, or a staff peer; never a player
       this.handle("soulbind", p, meta, (s): SheetResult => {
         const next = structuredClone(s);
         const slots = { ...(next.soulslots ?? {}) };
@@ -518,6 +537,14 @@ export class CharacterSheetScript extends Script {
    * sender OWNS; a local emission has no sender and is trusted (single-player,
    * or an authoritative script asking on the host).
    */
+  /**
+   * An authority-only request (the console's `/give`, `/soulbind`): emitted on this tab, or sent by a STAFF peer —
+   * one whose account the server marked gm/dev in netState from its signed play ticket (core `staffRole`).
+   */
+  private trusted(meta?: { from?: string }): boolean {
+    return meta?.from === undefined || staffRole(this.store, meta.from) !== null;
+  }
+
   private mayAct(meta?: { from?: string }): boolean {
     if (meta?.from === undefined) return true;
     return this.store.get(`owner/${this.actorId}`) === meta.from;
@@ -538,6 +565,15 @@ export class CharacterSheetScript extends Script {
       const bound = args[1] !== "off";
       this.ctx.events?.emit(CHARACTER_EVENTS.soulbind, { actorId, slot, bound });
       return `${bound ? "soulbinding" : "freeing"} the ${slot} slot of ${actorId}`;
+    }
+    if (name === "stats") {
+      const value = Number(args[0]);
+      if (!Number.isInteger(value) || value < 1 || value > MAX_SET_ATTRIBUTE) throw new Error(`usage: /stats <1-${MAX_SET_ATTRIBUTE}> [attribute]`);
+      const attribute = args[1]?.toLowerCase();
+      if (attribute !== undefined && !(ATTRIBUTES as readonly string[]).includes(attribute)) throw new Error(`/stats: "${args[1]}" is not one of ${ATTRIBUTES.join(", ")}`);
+      const actorId = this.ctx.localPlayer?.() ?? this.actorId;
+      this.ctx.events?.emit(CHARACTER_EVENTS.setStats, { actorId, value, ...(attribute ? { attribute } : {}) });
+      return `setting ${attribute ?? "every attribute"} of ${actorId} to ${value}`;
     }
     if (name !== "give") return null;
     const itemId = args[0];

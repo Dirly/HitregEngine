@@ -1,5 +1,21 @@
 import type { WorldField } from "./field.js";
 import { createVolume, encodeHeightfieldValues, type VolumeDoc } from "./csg.js";
+import { fieldSolidProbe, seatSamples } from "./seat.js";
+import { surfaceRoleIndex, zoneGroundRoles } from "./zone-ground.js";
+
+/**
+ * The zone cliff surface (a palette surface some zone uses as its `ground.cliff`) that dominates the sampled wall
+ * weights, or null when the wall is base-palette stone (no zone restyles it there). Used as the formations' face.
+ */
+export function zoneWallStone(field: WorldField, wall: readonly number[], samples: number): string | null {
+  if (!samples) return null;
+  const roles = zoneGroundRoles(field.recipe as never);
+  const CLIFF = surfaceRoleIndex("cliff");
+  let best = -1, bw = 1e-3;
+  const stone = (i: number) => roles.overrideRole[i] === CLIFF || roles.baseRole[i] === CLIFF || field.recipe.surfaces[i]!.name === "rock" || field.recipe.surfaces[i]!.name === "cliff";
+  for (let i = 0; i < field.surfaceCount; i++) if (stone(i) && wall[i]! > bw) { bw = wall[i]!; best = i; }
+  return best >= 0 && roles.overrideRole[best] === CLIFF ? field.recipe.surfaces[best]!.name : null;
+}
 
 /**
  * ROCK FORMATIONS — faceted bedrock masses for a waterfall site, generated.
@@ -61,6 +77,11 @@ export interface RockFormationOptions {
   spacing?: number;
   /** Scales every mass. */
   scale?: number;
+  /**
+   * Keep-clear discs: a mass whose centre (x, z) falls inside one is left out (a stair, a ledge line, a fight space or a
+   * sight line the formations must not fill). The rest of the set is unchanged: the generator still draws every mass in order.
+   */
+  clear?: readonly { at: readonly [number, number]; radius: number }[];
   /** How far (m) a mass may stand above the ground behind it. */
   rimAllowance?: number;
   /** Split into several documents when one would exceed this many lattice samples. */
@@ -314,7 +335,19 @@ export function rockFormations(field: WorldField, site: RockFormationSite, opts:
     const mid = (uFront + uBack) / 2;
     return { x: ax + fx * mid, z: az + fz * mid, depth: uFront - uBack };
   };
+  const keepClear = opts.clear ?? [];
+  // SEAT (seat.ts): a mass with no solid under most of its footprint (it would hang off a lip, over a cut or a
+  // drop the gorge opened) is not placed. Solid within its own height above the base counts: its back is buried.
+  const solid = fieldSolidProbe(field);
+  const supported = (x: number, z: number, bottom: number, top: number, L: number, D: number, fx: number, fz: number): boolean => {
+    const pts = seatSamples({ x, z, y: bottom, halfX: L / 2, halfZ: D / 2, yaw: Math.atan2(fx, fz), height: top - bottom });
+    let hit = 0;
+    for (const [px, pz] of pts) if (solid.floor(px, pz, top, bottom - 4) !== null) hit++;
+    return hit / pts.length >= 0.6;
+  };
   const push = (kind: RockMass["kind"], tier: number, side: -1 | 1, x: number, z: number, bottom: number, top: number, L: number, D: number, fx: number, fz: number) =>
+    keepClear.some((c) => Math.hypot(x - c.at[0], z - c.at[1]) < c.radius) ||
+    !supported(x, z, bottom, top, L, D, fx, fz) ||
     masses.push({ kind, tier, side, center: [x, (top + bottom) / 2, z], size: [L, top - bottom, D], front: [fx, fz] });
 
   // shoulders: either side of every curtain, facing downstream off the headwall
@@ -428,8 +461,12 @@ export function rockFormations(field: WorldField, site: RockFormationSite, opts:
   // faces: the terrain's own slope rock, so a mass reads as part of the wall
   // it is fused with (a contrasting cliff texture made every ledge read as a
   // separate box stuck on the wall); a faint accent brushes some fronts
-  const wallName = opts.wallSurface ?? "rock";
-  const accentName = opts.accentSurface ?? (names.includes("cliff") ? "cliff" : "");
+  // the stone follows the place: where a zone restyles the cliff (regions[].ground.cliff), the masses wear the
+  // zone's own cliff surface sampled on the wall, with no foreign accent (a tan "cliff" brushed on a blue slate
+  // wall read as a pasted block); elsewhere the base palette's slope rock, as before
+  const zoneStone = zoneWallStone(field, wallAvg, acc.wallN);
+  const wallName = opts.wallSurface ?? zoneStone ?? "rock";
+  const accentName = opts.accentSurface ?? (zoneStone ? "" : names.includes("cliff") ? "cliff" : "");
   const accentIndex = accentName ? names.indexOf(accentName) : -1;
   const wallIndex = names.indexOf(wallName) >= 0 ? names.indexOf(wallName) : acc.wallN ? ranked(wallAvg)[0]![0] : rockIndex;
   const rimRank = ranked(rimAvg).filter(([i]) => i !== rockIndex && i !== names.indexOf("cliff"));
@@ -448,107 +485,21 @@ export function rockFormations(field: WorldField, site: RockFormationSite, opts:
   const strataBase = rand() * strataStep;
 
   type Node = Record<string, unknown>;
+  const shapeContext: RockShapeContext = {
+    rand,
+    bedUp,
+    dip,
+    dipAz,
+    strataStep,
+    strataBase,
+    ground: opts.groundAt ?? ((x: number, z: number) => field.height(x, z)),
+  };
   const massNodes = (m: RockMass, index: number): { nodes: Node[]; paint: Record<string, unknown>[] } => {
-    const nodes: Node[] = [];
+    const id = `m${index}`;
+    const { nodes, at, front: f } = rockMassNodes(m, id, shapeContext);
     const [L, H, D] = m.size;
     const C = m.center;
-    const f: V3 = norm([m.front[0], 0, m.front[1]]);
-    const up: V3 = [0, 1, 0];
-    const ax: V3 = norm(cross(up, f)); // along the wall
-    const yaw = Math.atan2(f[0], f[2]);
-    const minDim = Math.min(L, H, D);
-    const at = (lx: number, ly: number, lz: number): V3 => [C[0] + ax[0] * lx + f[0] * lz, C[1] + ly, C[2] + ax[2] * lx + f[2] * lz];
-    const id = `m${index}`;
-    const noise = { amount: r3(Math.min(0.8, 0.09 * minDim + 0.15)), scale: r3(Math.max(1.8, 0.4 * minDim)), seed: Math.floor(rand() * 1e6) };
-    // Blocks, not orbs, underneath: the core and the satellite columns have VERTICAL sides and run
-    // down into the ground under their own footprint (the trim then clips them 1.5 m under it), so
-    // nothing has an underside hanging over the gorge. Measured: rounded (ellipsoid) bottoms were
-    // every overhang the support check found, up to 3 m out over a pool. The lumpy ellipsoid rides
-    // on top and within the core's plan.
-    const ground = opts.groundAt ?? ((x: number, z: number) => field.height(x, z));
-    const footGround = (lx: number, lz: number, w: number, d: number, spin: number) => {
-      let g = Infinity;
-      const cs = Math.cos(spin), sn = Math.sin(spin);
-      for (const [u, v] of [[0, 0], [-0.5, -0.5], [0.5, -0.5], [-0.5, 0.5], [0.5, 0.5], [0, -0.5], [0, 0.5], [-0.5, 0], [0.5, 0]] as const) {
-        const ox = u * w * cs + v * d * sn, oz = -u * w * sn + v * d * cs;
-        const q = at(lx + ox, 0, lz + oz);
-        g = Math.min(g, ground(q[0], q[2]));
-      }
-      return g - 1.5;
-    };
-    nodes.push({ id: `${id}-orb`, op: "add", shape: "ellipsoid", position: at(0, H * 0.05, -D * 0.03).map(r3), rotation: [r3(between(-0.06, 0.06)), r3(yaw), r3(between(-0.06, 0.06))], size: [r3(L * 0.9), r3(H), r3(D * 0.9)], blend: r3(minDim * 0.2), noise });
-    {
-      const w = L * between(0.82, 0.95), d = D * 0.95, spin = between(-0.2, 0.2);
-      const lx = between(-0.06, 0.06) * L, lz = between(-0.04, 0.02) * D;
-      const top = C[1] + H * 0.475, bottom = Math.min(C[1] - H / 2, footGround(lx, lz, w, d, spin));
-      const q = at(lx, 0, lz);
-      nodes.push({ id: `${id}-core`, op: "add", shape: "box", position: [r3(q[0]), r3((top + bottom) / 2), r3(q[2])], rotation: [0, r3(yaw + spin), 0], size: [r3(w), r3(top - bottom), r3(d)], round: r3(minDim * 0.12), blend: r3(minDim * 0.2) });
-    }
-    const sats = 1 + Math.floor(rand() * 3);
-    for (let i = 0; i < sats; i++) {
-      // a jointed column beside the core, from the ground to a varied height
-      const w = L * between(0.3, 0.5), d = D * between(0.5, 0.85), spin = between(-0.4, 0.4);
-      const lx = (rand() < 0.5 ? -1 : 1) * between(0.28, 0.45) * L, lz = between(-0.2, 0.05) * D;
-      const top = C[1] + (H / 2) * between(-0.1, 0.75), bottom = Math.min(C[1] - H / 2, footGround(lx, lz, w, d, spin));
-      if (top - bottom < 1.5) continue;
-      const q = at(lx, 0, lz);
-      nodes.push({ id: `${id}-sat${i}`, op: "add", shape: "box", position: [r3(q[0]), r3((top + bottom) / 2), r3(q[2])], rotation: [0, r3(yaw + spin), 0], size: [r3(w), r3(top - bottom), r3(d)], round: r3(Math.min(w, d) * 0.18), blend: r3(minDim * 0.25) });
-    }
-    // a planar cut: everything past the plane (normal n through point p) goes, within the mass's reach
-    const reach = Math.max(L, H, D) * 1.15;
-    /**
-     * A planar cut: everything of THIS mass past the plane (normal n through
-     * p) goes. The box is sized to the mass's own extent in the plane's frame
-     * — just past its far side along n, just past its width across — because
-     * a sub node carves everything before it, and an oversized box would
-     * erase the neighbours this mass is fused with.
-     */
-    const cut = (name: string, n: V3, p: V3) => {
-      const ay = norm(n);
-      const ref: V3 = Math.abs(ay[1]) > 0.9 ? [1, 0, 0] : [0, 1, 0];
-      const bx = norm(cross(ref, ay));
-      const bz = cross(bx, ay);
-      const off = (p[0] - C[0]) * ay[0] + (p[1] - C[1]) * ay[1] + (p[2] - C[2]) * ay[2];
-      const T = Math.max(0.5, support(ay) - off + minDim * 0.25);
-      // the box's lateral centre is the mass centre projected onto the plane
-      const q: V3 = [C[0] + ay[0] * off, C[1] + ay[1] * off, C[2] + ay[2] * off];
-      const wx = 2 * support(bx) * 1.15 + 1, wz = 2 * support(bz) * 1.15 + 1;
-      nodes.push({ id: `${id}-${name}`, op: "sub", shape: "box", position: [r3(q[0] + ay[0] * T / 2), r3(q[1] + ay[1] * T / 2), r3(q[2] + ay[2] * T / 2)], rotation: eulerFromBasis(bx, ay, bz).map(r3), size: [r3(wx), r3(T), r3(wz)] });
-    };
-    const local = (lx: number, ly: number, lz: number): V3 => norm([ax[0] * lx + f[0] * lz, ly, ax[2] * lx + f[2] * lz]);
-    const support = (n: V3) => {
-      // half-extent of the ellipsoid along a world direction
-      const lx = n[0] * ax[0] + n[2] * ax[2], lz = n[0] * f[0] + n[2] * f[2];
-      return Math.hypot((L / 2) * lx, (H / 2) * n[1], (D / 2) * lz);
-    };
-    // leaning front face (top set back), bedding top, two oblique corners
-    const front = local(between(-0.3, 0.3), between(0, 0.25), 1);
-    cut("front", front, at(0, 0, D * 0.5 * between(0.8, 0.92)));
-    const topN = norm([bedUp[0] + between(-0.08, 0.08), bedUp[1], bedUp[2] + between(-0.08, 0.08)]);
-    cut("top", topN, [C[0], C[1] + H * 0.5 * between(0.7, 0.88), C[2]]);
-    for (const sx of [-1, 1]) {
-      const n = local(sx, between(-0.15, 0.5), between(0.3, 1));
-      const e = support(n);
-      const k = between(0.62, 0.82);
-      cut(`side${sx > 0 ? "R" : "L"}`, n, [C[0] + n[0] * e * k, C[1] + n[1] * e * k, C[2] + n[2] * e * k]);
-    }
-    // strata: above each world-height level the front steps back a little more
-    const bottom = C[1] - H / 2, top = C[1] + H / 2;
-    // the front starts about where the front facet is and retreats at most ~0.3 of the depth in all,
-    // skipping some levels so the steps are irregular (a staircase of equal treads reads as masonry)
-    let setback = D * 0.5 * 0.85;
-    let retreat = D * 0.3;
-    for (let y = Math.ceil((bottom + 1.2 - strataBase) / strataStep) * strataStep + strataBase; y < top - 1 && retreat > 0.3; y += strataStep) {
-      if (rand() < 0.35) continue;
-      const delta = Math.min(retreat, between(0.5, 1.3));
-      retreat -= delta;
-      setback -= delta;
-      const hTop = top + 2 - y;
-      // box: from level y up past the top, and from the set-back plane outward
-      const depthOut = D / 2 - setback + 1;
-      const bx0 = at(0, 0, setback + depthOut / 2);
-      nodes.push({ id: `${id}-bed${Math.round(y)}`, op: "sub", shape: "box", position: [r3(bx0[0]), r3(y + hTop / 2), r3(bx0[2])], rotation: [r3(dip * Math.cos(dipAz)), r3(yaw + between(-0.12, 0.12)), r3(dip * Math.sin(dipAz))], size: [r3(L * 1.2), r3(hTop), r3(depthOut)] });
-    }
+    const top = C[1] + H / 2;
     // cover on the upward faces: dirt, then grass in from its edge
     const R = Math.max(L, D) * 0.65 + 1;
     const paint: Record<string, unknown>[] = [];
@@ -770,6 +721,137 @@ export function rockFormations(field: WorldField, site: RockFormationSite, opts:
     }
   }
   return { river: riverId, tiers: tiers.length, masses, docs };
+}
+
+/** What the shaping of one mass reads besides the mass itself: the seeded stream and the site-wide bedding. */
+export interface RockShapeContext {
+  /** The seeded stream; `rockMassNodes` draws from it in a fixed order, so a caller sharing it stays reproducible. */
+  rand: () => number;
+  /** Bedding-plane normal (the gentle dip shared by every mass of a site). */
+  bedUp: V3;
+  dip: number;
+  dipAz: number;
+  /** World-height spacing and phase of the strata step-backs, so ledges line up from mass to mass. */
+  strataStep: number;
+  strataBase: number;
+  /** Ground height under (x, z): the core and satellite columns run down to 1.5 m under it. */
+  ground: (x: number, z: number) => number;
+}
+
+/**
+ * The CSG nodes of ONE faceted rock mass (see SHAPE in the module comment): a lumpy ellipsoid over a
+ * vertical-sided core and 1-3 jointed satellite columns, then planar cuts (a leaning front face, a
+ * bedding-tilted top, two oblique corners) and strata step-backs. Shared by the fall-site formations
+ * and the world-kit rock kit (`tools/rock-kit.mts`), so both read as the same rock. `front` is the
+ * face that gets the leaning cut and the step-backs. Returns the nodes plus the mass's local frame.
+ */
+export function rockMassNodes(
+  m: Pick<RockMass, "center" | "size" | "front">,
+  id: string,
+  ctx: RockShapeContext,
+): { nodes: Record<string, unknown>[]; at: (lx: number, ly: number, lz: number) => V3; front: V3 } {
+  type Node = Record<string, unknown>;
+  const { rand, bedUp, dip, dipAz, strataStep, strataBase, ground } = ctx;
+  const between = (a: number, b: number) => a + (b - a) * rand();
+  const nodes: Node[] = [];
+  const [L, H, D] = m.size;
+  const C = m.center;
+  const f: V3 = norm([m.front[0], 0, m.front[1]]);
+  const up: V3 = [0, 1, 0];
+  const ax: V3 = norm(cross(up, f)); // along the wall
+  const yaw = Math.atan2(f[0], f[2]);
+  const minDim = Math.min(L, H, D);
+  const at = (lx: number, ly: number, lz: number): V3 => [C[0] + ax[0] * lx + f[0] * lz, C[1] + ly, C[2] + ax[2] * lx + f[2] * lz];
+  const noise = { amount: r3(Math.min(0.8, 0.09 * minDim + 0.15)), scale: r3(Math.max(1.8, 0.4 * minDim)), seed: Math.floor(rand() * 1e6) };
+  // Blocks, not orbs, underneath: the core and the satellite columns have VERTICAL sides and run
+  // down into the ground under their own footprint (the trim then clips them 1.5 m under it), so
+  // nothing has an underside hanging over the gorge. Measured: rounded (ellipsoid) bottoms were
+  // every overhang the support check found, up to 3 m out over a pool. The lumpy ellipsoid rides
+  // on top and within the core's plan.
+  const footGround = (lx: number, lz: number, w: number, d: number, spin: number) => {
+    let g = Infinity;
+    const cs = Math.cos(spin), sn = Math.sin(spin);
+    for (const [u, v] of [[0, 0], [-0.5, -0.5], [0.5, -0.5], [-0.5, 0.5], [0.5, 0.5], [0, -0.5], [0, 0.5], [-0.5, 0], [0.5, 0]] as const) {
+      const ox = u * w * cs + v * d * sn, oz = -u * w * sn + v * d * cs;
+      const q = at(lx + ox, 0, lz + oz);
+      g = Math.min(g, ground(q[0], q[2]));
+    }
+    return g - 1.5;
+  };
+  nodes.push({ id: `${id}-orb`, op: "add", shape: "ellipsoid", position: at(0, H * 0.05, -D * 0.03).map(r3), rotation: [r3(between(-0.06, 0.06)), r3(yaw), r3(between(-0.06, 0.06))], size: [r3(L * 0.9), r3(H), r3(D * 0.9)], blend: r3(minDim * 0.2), noise });
+  {
+    const w = L * between(0.82, 0.95), d = D * 0.95, spin = between(-0.2, 0.2);
+    const lx = between(-0.06, 0.06) * L, lz = between(-0.04, 0.02) * D;
+    const top = C[1] + H * 0.475, bottom = Math.min(C[1] - H / 2, footGround(lx, lz, w, d, spin));
+    const q = at(lx, 0, lz);
+    nodes.push({ id: `${id}-core`, op: "add", shape: "box", position: [r3(q[0]), r3((top + bottom) / 2), r3(q[2])], rotation: [0, r3(yaw + spin), 0], size: [r3(w), r3(top - bottom), r3(d)], round: r3(minDim * 0.12), blend: r3(minDim * 0.2) });
+  }
+  const sats = 1 + Math.floor(rand() * 3);
+  for (let i = 0; i < sats; i++) {
+    // a jointed column beside the core, from the ground to a varied height
+    const w = L * between(0.3, 0.5), d = D * between(0.5, 0.85), spin = between(-0.4, 0.4);
+    const lx = (rand() < 0.5 ? -1 : 1) * between(0.28, 0.45) * L, lz = between(-0.2, 0.05) * D;
+    const top = C[1] + (H / 2) * between(-0.1, 0.75), bottom = Math.min(C[1] - H / 2, footGround(lx, lz, w, d, spin));
+    if (top - bottom < 1.5) continue;
+    const q = at(lx, 0, lz);
+    nodes.push({ id: `${id}-sat${i}`, op: "add", shape: "box", position: [r3(q[0]), r3((top + bottom) / 2), r3(q[2])], rotation: [0, r3(yaw + spin), 0], size: [r3(w), r3(top - bottom), r3(d)], round: r3(Math.min(w, d) * 0.18), blend: r3(minDim * 0.25) });
+  }
+  // a planar cut: everything past the plane (normal n through point p) goes, within the mass's reach
+  const reach = Math.max(L, H, D) * 1.15;
+  /**
+   * A planar cut: everything of THIS mass past the plane (normal n through
+   * p) goes. The box is sized to the mass's own extent in the plane's frame
+   * — just past its far side along n, just past its width across — because
+   * a sub node carves everything before it, and an oversized box would
+   * erase the neighbours this mass is fused with.
+   */
+  const cut = (name: string, n: V3, p: V3) => {
+    const ay = norm(n);
+    const ref: V3 = Math.abs(ay[1]) > 0.9 ? [1, 0, 0] : [0, 1, 0];
+    const bx = norm(cross(ref, ay));
+    const bz = cross(bx, ay);
+    const off = (p[0] - C[0]) * ay[0] + (p[1] - C[1]) * ay[1] + (p[2] - C[2]) * ay[2];
+    const T = Math.max(0.5, support(ay) - off + minDim * 0.25);
+    // the box's lateral centre is the mass centre projected onto the plane
+    const q: V3 = [C[0] + ay[0] * off, C[1] + ay[1] * off, C[2] + ay[2] * off];
+    const wx = 2 * support(bx) * 1.15 + 1, wz = 2 * support(bz) * 1.15 + 1;
+    nodes.push({ id: `${id}-${name}`, op: "sub", shape: "box", position: [r3(q[0] + ay[0] * T / 2), r3(q[1] + ay[1] * T / 2), r3(q[2] + ay[2] * T / 2)], rotation: eulerFromBasis(bx, ay, bz).map(r3), size: [r3(wx), r3(T), r3(wz)] });
+  };
+  const local = (lx: number, ly: number, lz: number): V3 => norm([ax[0] * lx + f[0] * lz, ly, ax[2] * lx + f[2] * lz]);
+  const support = (n: V3) => {
+    // half-extent of the ellipsoid along a world direction
+    const lx = n[0] * ax[0] + n[2] * ax[2], lz = n[0] * f[0] + n[2] * f[2];
+    return Math.hypot((L / 2) * lx, (H / 2) * n[1], (D / 2) * lz);
+  };
+  // leaning front face (top set back), bedding top, two oblique corners
+  const front = local(between(-0.3, 0.3), between(0, 0.25), 1);
+  cut("front", front, at(0, 0, D * 0.5 * between(0.8, 0.92)));
+  const topN = norm([bedUp[0] + between(-0.08, 0.08), bedUp[1], bedUp[2] + between(-0.08, 0.08)]);
+  cut("top", topN, [C[0], C[1] + H * 0.5 * between(0.7, 0.88), C[2]]);
+  for (const sx of [-1, 1]) {
+    const n = local(sx, between(-0.15, 0.5), between(0.3, 1));
+    const e = support(n);
+    const k = between(0.62, 0.82);
+    cut(`side${sx > 0 ? "R" : "L"}`, n, [C[0] + n[0] * e * k, C[1] + n[1] * e * k, C[2] + n[2] * e * k]);
+  }
+  // strata: above each world-height level the front steps back a little more
+  const bottom = C[1] - H / 2, top = C[1] + H / 2;
+  // the front starts about where the front facet is and retreats at most ~0.3 of the depth in all,
+  // skipping some levels so the steps are irregular (a staircase of equal treads reads as masonry)
+  let setback = D * 0.5 * 0.85;
+  let retreat = D * 0.3;
+  for (let y = Math.ceil((bottom + 1.2 - strataBase) / strataStep) * strataStep + strataBase; y < top - 1 && retreat > 0.3; y += strataStep) {
+    if (rand() < 0.35) continue;
+    const delta = Math.min(retreat, between(0.5, 1.3));
+    retreat -= delta;
+    setback -= delta;
+    const hTop = top + 2 - y;
+    // box: from level y up past the top, and from the set-back plane outward
+    const depthOut = D / 2 - setback + 1;
+    const bx0 = at(0, 0, setback + depthOut / 2);
+    nodes.push({ id: `${id}-bed${Math.round(y)}`, op: "sub", shape: "box", position: [r3(bx0[0]), r3(y + hTop / 2), r3(bx0[2])], rotation: [r3(dip * Math.cos(dipAz)), r3(yaw + between(-0.12, 0.12)), r3(dip * Math.sin(dipAz))], size: [r3(L * 1.2), r3(hTop), r3(depthOut)] });
+  }
+  return { nodes, at, front: f };
 }
 
 /**

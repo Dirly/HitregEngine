@@ -195,18 +195,20 @@ export interface SeatReport {
  * the perimeter of its footprint (a rotated rectangle, centre + half extents
  * + yaw) and compares it with the slab's base height `baseY`. `gap`: ground
  * below the base (it hangs); `clip`: ground above the base (terrain shows
- * through, or the slab is sunk).
+ * through, or the slab is sunk). `ground(x, z, y)`, when given, is the REAL solid surface under a point near
+ * height y (seat.ts fieldSolidProbe: cuts, carves and planar treads count); without it the drawn lattice height is used.
  */
 export function seatReport(
   field: Pick<WorldField, "height" | "voxelSize">,
   slab: { x: number; z: number; halfX: number; halfZ: number; yaw?: number; baseY: number },
   spacing = 1,
+  ground?: (x: number, z: number, y: number) => number,
 ): SeatReport {
   const c = Math.cos(slab.yaw ?? 0), sn = Math.sin(slab.yaw ?? 0);
   let gap = 0, clip = 0, samples = 0;
   const visit = (lx: number, lz: number): void => {
     const x = slab.x + lx * c + lz * sn, z = slab.z - lx * sn + lz * c;
-    const g = latticeHeight(field, x, z);
+    const g = ground ? ground(x, z, slab.baseY) : latticeHeight(field, x, z);
     samples++;
     gap = Math.max(gap, slab.baseY - g);
     clip = Math.max(clip, g - slab.baseY);

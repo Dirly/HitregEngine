@@ -22,9 +22,11 @@ import {
   vec2,
   vec3,
   vec4,
+  vertexStage,
 } from "three/tsl";
 import { instanceMatrixNode, instancedPositionLocal } from "./instancing.js";
-import { vegetationMaskTintNode } from "./vegetation-tint.js";
+import { VEGETATION_TINT_ATTRIBUTES, vegetationMaskTintNode } from "./vegetation-tint.js";
+import { rockImpostorColor, type RockImpostorLook } from "./rock-cap.js";
 
 /**
  * Octahedral impostors for the instanced-prop far tier — the second piece of
@@ -332,11 +334,11 @@ function rotateByQuat(v: any, qxyz: any, qw: any): any {
  * per-instance sort, and cut-outs compose correctly where blending would
  * show the draw order.
  */
-export function impostorMaterial(atlas: ImpostorAtlas, bounds: THREE.Box3): THREE.MeshLambertNodeMaterial {
+export function impostorMaterial(atlas: ImpostorAtlas, bounds: THREE.Box3, rock?: RockImpostorLook | null): THREE.MeshLambertNodeMaterial {
   const radius = bounds.getSize(new THREE.Vector3()).length() / 2;
   const instanceScale = float(attribute<"float">("impostorScale", "float"));
   const region = atlas.region ? vec3(atlas.region.u, atlas.region.v, atlas.region.scale) : null;
-  return buildImpostorMaterial(atlas, region, float(radius).mul(instanceScale), instancedPositionLocal());
+  return buildImpostorMaterial(atlas, region, float(radius).mul(instanceScale), instancedPositionLocal(), rock ?? null);
 }
 
 /**
@@ -345,13 +347,13 @@ export function impostorMaterial(atlas: ImpostorAtlas, bounds: THREE.Box3): THRE
  * so a supercell's every species draws as one batch. Cached by the caller
  * per page (the page's textures are what the shader binds).
  */
-export function impostorPageMaterial(page: ImpostorAtlas): THREE.MeshLambertNodeMaterial {
+export function impostorPageMaterial(page: ImpostorAtlas, rock?: RockImpostorLook | null): THREE.MeshLambertNodeMaterial {
   const instanceScale = float(attribute<"float">("impostorScale", "float"));
   const region = vec3(attribute<"vec3">("impostorRegion", "vec3"));
   const radius = float(attribute<"float">("impostorRadius", "float"));
   const center = vec3(attribute<"vec3">("impostorCenter", "vec3"));
   const anchor = instanceMatrixNode().mul(vec4(center, 1)).xyz;
-  return buildImpostorMaterial(page, region, radius.mul(instanceScale), anchor);
+  return buildImpostorMaterial(page, region, radius.mul(instanceScale), anchor, rock ?? null, true);
 }
 
 /**
@@ -369,6 +371,10 @@ function buildImpostorMaterial(
   region: any,
   half: any,
   anchor: any,
+  /** A rock-cap rock: body base ratio and cap per instance (rock-cap.ts). */
+  rock: RockImpostorLook | null = null,
+  /** A shared page: trees and rocks in one draw, so the rock look applies per instance only. */
+  mixed = false,
 ): THREE.MeshLambertNodeMaterial {
   const grid = atlas.grid;
   const rotation = vec4(attribute<"vec4">("impostorRotation", "vec4"));
@@ -384,6 +390,12 @@ function buildImpostorMaterial(
   const corner = sub(uv(), vec2(0.5, 0.5)).mul(2); // [-1, 1]²
   const quadPosition = anchor.add(right.mul(corner.x.mul(half))).add(up.mul(corner.y.mul(half)));
 
+  // INTER-STAGE BUDGET (WebGPU guarantees 16 locations; the lit material spends two on view/world
+  // position). The frame choice depends only on the instance and the camera, so it is made ONCE per
+  // vertex here and handed to the fragment stage packed: left to TSL, every per-instance attribute the
+  // fragment graph touched became its own varying (the four instance-matrix columns, centre, region,
+  // rotation, uv, and each tint slot once per call site), 18 locations on a rock page: the pipeline
+  // failed to build and every draw of the page was dropped.
   // view direction in MODEL space (undo the instance rotation) → atlas cell
   const dirModel = rotateByQuat(toCamera, qxyzInv, qw);
   const dirHemi = vec3(dirModel.x, max(dirModel.y, 0), dirModel.z); // clamp below-horizon views to the horizon
@@ -400,28 +412,48 @@ function buildImpostorMaterial(
   const frame2 = base.add(vec2(0, 1));
   const w0 = mix(f.x.add(f.y).sub(1), float(1).sub(f.x).sub(f.y), lower);
   const w1 = mix(float(1).sub(f.y), f.x, lower);
-  const w2 = mix(float(1).sub(f.x), f.y, lower);
-  const inner = atlas.flipFrames ? vec2(uv().x, sub(float(1), uv().y)) : uv();
+  // frame k's texel = (frame_k + inner) / grid, then into the region: offset_k + inner * scale
   const invGrid = float(1 / grid);
-  const frameUv = (frame: any) => {
-    const local = frame.add(inner).mul(invGrid);
-    return region ? local.mul(region.z).add(region.xy) : local;
-  };
-  const uv0 = frameUv(frame0);
-  const uv1 = frameUv(frame1);
-  const uv2 = frameUv(frame2);
+  const span = region ? invGrid.mul(region.z) : invGrid;
+  const offset = (frame: any) => (region ? frame.mul(span).add(region.xy) : frame.mul(span));
+  const inner = atlas.flipFrames ? vec2(uv().x, sub(float(1), uv().y)) : uv();
+  const offsets01 = vertexStage(vec4(offset(frame0), offset(frame1)));
+  const offset2Weights = vertexStage(vec4(offset(frame2), w0, w1));
+  const rotationF = vertexStage(rotation);
+  // the two per-instance tint slots (vegetation tint, or a rock cap's slot), read only when the
+  // shader uses them: a batch that never enabled them has no such attributes
+  const tinted = !!atlas.vegetationMask || !!rock;
+  let innerF: any;
+  let barkF: any = null;
+  let leavesF: any = null;
+  if (tinted) {
+    const tintBark = vec3(attribute<"vec3">(VEGETATION_TINT_ATTRIBUTES[0], "vec3"));
+    const tintLeaves = vec3(attribute<"vec3">(VEGETATION_TINT_ATTRIBUTES[1], "vec3"));
+    // the inner uv (already scaled into the region) rides in the second tint's spare lanes
+    const tintA = vertexStage(vec4(tintBark, tintLeaves.x));
+    const scaledInner: any = inner.mul(span);
+    const tintB = vertexStage(vec4(tintLeaves.yz as any, scaledInner));
+    innerF = tintB.zw;
+    barkF = tintA.xyz;
+    leavesF = vec3(tintA.w, tintB.x, tintB.y);
+  } else {
+    innerF = vertexStage(inner.mul(span));
+  }
+  const fw0 = offset2Weights.z;
+  const fw1 = offset2Weights.w;
+  const fw2 = float(1).sub(fw0).sub(fw1);
+  const uv0 = offsets01.xy.add(innerF);
+  const uv1 = offsets01.zw.add(innerF);
+  const uv2 = offset2Weights.xy.add(innerF);
   const a0 = tslTexture(atlas.albedo, uv0);
   const a1 = tslTexture(atlas.albedo, uv1);
   const a2 = tslTexture(atlas.albedo, uv2);
-  const albedo = a0.mul(w0).add(a1.mul(w1)).add(a2.mul(w2));
+  const albedo = a0.mul(fw0).add(a1.mul(fw1)).add(a2.mul(fw2));
   const normal0 = tslTexture(atlas.normal, uv0);
   const normal1 = tslTexture(atlas.normal, uv1);
   const normal2 = tslTexture(atlas.normal, uv2);
-  const n0 = normal0.xyz;
-  const n1 = normal1.xyz;
-  const n2 = normal2.xyz;
-  const normalModel = n0.mul(w0).add(n1.mul(w1)).add(n2.mul(w2)).mul(2).sub(1);
-  const normalLocal = normalize(rotateByQuat(normalModel, qxyz, qw));
+  const normalModel = normal0.xyz.mul(fw0).add(normal1.xyz.mul(fw1)).add(normal2.xyz.mul(fw2)).mul(2).sub(1);
+  const normalLocal = normalize(rotateByQuat(normalModel, rotationF.xyz, rotationF.w));
 
   const material = new THREE.MeshLambertNodeMaterial({
     side: THREE.DoubleSide,
@@ -432,10 +464,12 @@ function buildImpostorMaterial(
   material.positionNode = quadPosition;
   material.colorNode = albedo.rgb;
   if (atlas.vegetationMask) {
-    material.colorNode = a0.rgb.mul(vegetationMaskTintNode(normal0.a)).mul(w0)
-      .add(a1.rgb.mul(vegetationMaskTintNode(normal1.a)).mul(w1))
-      .add(a2.rgb.mul(vegetationMaskTintNode(normal2.a)).mul(w2));
+    const tints = { bark: barkF, leaves: leavesF };
+    material.colorNode = a0.rgb.mul(vegetationMaskTintNode(normal0.a, tints)).mul(fw0)
+      .add(a1.rgb.mul(vegetationMaskTintNode(normal1.a, tints)).mul(fw1))
+      .add(a2.rgb.mul(vegetationMaskTintNode(normal2.a, tints)).mul(fw2));
   }
+  if (rock) material.colorNode = rockImpostorColor(rock, mixed ? material.colorNode : albedo.rgb, normalLocal.y, mixed, [barkF, leavesF]);
   material.opacityNode = albedo.a;
   material.normalNode = transformNormalToView(normalLocal);
   return material;

@@ -38,6 +38,7 @@
  * Project HUD skins supply the --map-* CSS tokens; canvas marker colours and
  * label fonts inherit the same skin as the panels.
  */
+import { assetFileUrl } from "./asset-url.js";
 import {
   collectMapData,
   drawMapLayers,
@@ -117,7 +118,7 @@ const BUTTON_CSS =
 
 export function createWorldMapOverlay(options: WorldMapOverlayOptions): { toggle(): void; visible(): boolean } {
   const dev = options.devLayers === true;
-  const fileUrl = options.fileUrl ?? ((f: string): string => `/__hitreg/asset-file?file=${encodeURIComponent(f)}`);
+  const fileUrl = options.fileUrl ?? ((f: string): string => assetFileUrl(f));
   /** Layers this host may draw at all. */
   const allowed: ReadonlySet<LayerId> = dev ? new Set(LAYERS.map((l) => l.id)) : PLAYER_LAYERS;
   /** Layers in the "dev" group of the panel: everything a player does not get. */

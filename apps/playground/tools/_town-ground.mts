@@ -572,7 +572,8 @@ export function buildGround(c: Ctx, opts: { dry: boolean }): BuildResult {
     const [w0, d0] = b.request.size as [number, number];
     const [w, d] = door === "+x" || door === "-x" ? [d0, w0] : [w0, d0];
     const Wm = w * CELL, Dm = d * CELL;
-    const setback = round(g.front * CELL + 1.8);
+    // 2.4 m past the steps: the lot check keeps the GROWN (+0.6 m) envelope width/2 + 1.5 m off the street line, which 1.8 m never cleared on a straight street (docs/zone-creation-lessons.md, "Lots with deep front steps")
+    const setback = round(g.front * CELL + 2.4);
     const setbackUsed = Math.max(setback, g.front * CELL + 0.5);
     let hsh = 0; for (const ch of b.id as string) hsh = (hsh * 31 + ch.charCodeAt(0)) >>> 0;
     const jit = (((hsh % 1000) / 1000) * 2 - 1) * ((6 * Math.PI) / 180);

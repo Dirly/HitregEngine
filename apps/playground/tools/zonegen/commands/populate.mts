@@ -30,6 +30,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import zlib from "node:zlib";
+import { assetPath, findAsset } from "../../_closure.mjs";
 import {
   applyOps,
   ComponentRegistry,
@@ -507,7 +508,8 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
   // an item the plan sources from a creature drops from every template of that creature (60% a kill)
   const lootOf = new Map<string, string>();
   for (const it of plan.graph.items) if (it.source?.type === "creature") lootOf.set(it.source.ref, [lootOf.get(it.source.ref), it.id + ":1:0.6"].filter(Boolean).join(","));
-  const prefabExists = (id: string): boolean => exists(path.join(p.projectDir, "assets", "prefabs", `${id}.json`));
+  // prefabs resolve through the project's dependsOn closure (a world's mob bodies live in foundation)
+  const prefabExists = (id: string): boolean => findAsset(p.projectDir, `prefabs/${id}.json`) !== null;
   const readyPrefab = (c: Creature, theme: string): string | null => {
     for (const id of [`mobs/${c.id}-${theme}`, `mobs/${c.family}-${theme}`, ...(theme === "base" || theme === "" ? [`mobs/${c.family}`] : [])]) if (prefabExists(id)) return id;
     return null;
@@ -1091,7 +1093,7 @@ export function populate(ctx: Ctx, zone: string, plan: ZonePlan, f: Finding[]): 
   // a mob body needs all three: mob-brain asks to attack, combat-caster resolves the request, combat-actor takes the hit.
   // A prefab missing one spawns, walks up and can never hurt anyone (found on the first proving zone).
   for (const body of new Set(used.filter((t) => t.body !== "capsule" && t.body !== "human").map((t) => t.body))) {
-    const doc = readJson(path.join(p.projectDir, "assets", "prefabs", `${body}.json`)) as { entities?: Record<string, { components?: { script?: { name?: string } } }> };
+    const doc = readJson(assetPath(p.projectDir, `prefabs/${body}.json`)) as { entities?: Record<string, { components?: { script?: { name?: string } } }> };
     const have = new Set(Object.values(doc.entities ?? {}).map((e) => e.components?.script?.name));
     const lacks = ["mob-brain", "combat-caster", "combat-actor"].filter((n) => !have.has(n));
     if (lacks.length) f.push({ level: "error", code: "mob-unarmed", message: `prefab ${body} has no ${lacks.join(", ")} script: its creatures could not fight` });
@@ -1298,7 +1300,7 @@ function buildOps(ctx: Ctx, zone: string, areas: Area[], templates: Template[], 
   // a body prefab that declares a `level` prop gets the template's (combat-actor level: armour and crit maths)
   const hasLevelProp = (id: string): boolean => {
     try {
-      return Boolean((JSON.parse(fs.readFileSync(path.join(ctx.paths.projectDir, "assets", "prefabs", `${id}.json`), "utf8")) as { props?: Record<string, unknown> }).props?.["level"]);
+      return Boolean((JSON.parse(fs.readFileSync(assetPath(ctx.paths.projectDir, `prefabs/${id}.json`), "utf8")) as { props?: Record<string, unknown> }).props?.["level"]);
     } catch {
       return false;
     }
@@ -1316,7 +1318,7 @@ function buildOps(ctx: Ctx, zone: string, areas: Area[], templates: Template[], 
           const r = m["range"] as number[] | undefined;
           return Array.isArray(r) && r[0] === 0 ? { ...m, range: [0, Math.round(r[1]! * k * 100) / 100] } : m;
         });
-    } else if (script === "combat-caster") out["reach"] = k;
+    } else if (script === "combat-caster") out["reach"] = Math.round((typeof params["reach"] === "number" ? (params["reach"] as number) : 1) * k * 100) / 100; // on top of a big body prefab's own reach
     else if (script === "third-person-controller" && params["clipSpeeds"] && typeof params["clipSpeeds"] === "object")
       out["clipSpeeds"] = Object.fromEntries(Object.entries(params["clipSpeeds"] as Record<string, number>).map(([c, v]) => [c, Math.round(v * k * 100) / 100]));
     return Object.keys(out).length ? out : null;
@@ -1325,7 +1327,7 @@ function buildOps(ctx: Ctx, zone: string, areas: Area[], templates: Template[], 
   const sizeOverrides = (prefabId: string, k: number): Array<{ path: string; value: unknown }> => {
     let prefab: { entities?: Record<string, { components?: { script?: { name: string; params?: Record<string, unknown> } } }> };
     try {
-      prefab = JSON.parse(fs.readFileSync(path.join(ctx.paths.projectDir, "assets", "prefabs", `${prefabId}.json`), "utf8"));
+      prefab = JSON.parse(fs.readFileSync(assetPath(ctx.paths.projectDir, `prefabs/${prefabId}.json`), "utf8"));
     } catch {
       return [];
     }
@@ -1534,6 +1536,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { applyOps, ComponentRegistry, registerCoreComponents, registerChunkComponents } from "@hitreg/core";
+import { findAsset } from "${path.relative(populateDir(ctx, zone), path.resolve("tools", "_closure.mjs")).replaceAll("\\", "/")}";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT = path.resolve(HERE, "${path.relative(populateDir(ctx, zone), ctx.paths.projectDir).replaceAll("\\", "/")}");
@@ -1572,7 +1575,7 @@ for (const o of ops) {
   if (o.op === "add-entity" && live.entities[o.id]) fail("the scene already has " + o.id);
   if (o.op !== "add-entity" && !live.entities[o.id] && !ops.some((x) => x.op === "add-entity" && x.id === o.id)) fail("the scene has no " + o.id + " to change");
   const pf = o.entity?.components?.prefab?.prefabId;
-  if (pf && !fs.existsSync(path.join(PROJECT, "assets", "prefabs", pf + ".json"))) fail("prefab " + pf + " missing");
+  if (pf && !findAsset(PROJECT, "prefabs/" + pf + ".json")) fail("prefab " + pf + " missing (not in the dependsOn closure)");
 }
 const before = sha(SCENE);
 const res = applyOps(live, ops as never, reg);

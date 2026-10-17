@@ -11,7 +11,7 @@
  *
  * Inputs, all optional, the owner's declaration winning (handoff.json `siteDressing`):
  *   siteDressing.areas:     [{ id, role: camp|yard|cave-mouth|path|shore|ruin, centre: [x,z], radius, floorY?, room? }]
- *                           floorY: a chamber under the ground (cave floor height); room: that chamber's passage id
+ *                           floorY: a chamber under the ground (cave floor height); room: that chamber's passage id (or a comma-separated list of ids)
  *                           default: a 14 m `camp` round every hearth/bonfire of the POI
  *   siteDressing.anchors:   [{ id, kind: hearth|door|cave-mouth|water-edge|<any>, at: [x,z], facing?: [dx,dz] (OUT of a door
  *                           or cave), radius? }]   added to the derived ones: hearths (fire prefabs), tent doors (toward
@@ -24,7 +24,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { buildSiteSocketMap, dressingSchema, type SiteAnchorIn, type SiteArea, type SiteBlocker, type SiteKeep } from "@hitreg/core";
+import { buildSiteSocketMap, keepWithoutRooms, dressingSchema, type SiteAnchorIn, type SiteArea, type SiteBlocker, type SiteKeep } from "@hitreg/core";
 import {
   HeadlessWorld, TerrainStreamer, defaultEvents, defaultRegistry, defaultScripts, loadContent, loadProjectScripts, playgroundRoots, resolveServerVoxelWorld,
 } from "../../../packages/server/src/index.ts";
@@ -98,6 +98,7 @@ for (const t of blockers.filter((b) => TENT.test(b.prefab))) {
   anchors.push({ id: `${t.id}-door`, kind: "door", at: [t.centre[0] + f[0] * (ext + 0.5), t.centre[1] + f[1] * (ext + 0.5)], facing: f });
 }
 const keep: SiteKeep[] = [];
+const ownerKeep = new Set<SiteKeep>(); // the owner's own keepClear: declared for this site, so it applies at an area's floorY too
 const passages = (recipe.features.passages ?? []).filter((p) => p.id.startsWith(`${prefix}-`));
 for (const p of passages) {
   const a = xz(p.start), u: P2 = p.axis === "x" ? [p.direction, 0] : [0, p.direction];
@@ -109,8 +110,8 @@ for (const h of handoffs) {
   for (const n of h.sitePacks?.namedSpots ?? []) if (n.at) keep.push({ id: n.creature, why: "quest/named spot", points: [xz(n.at)], radius: n.radius ?? 6 });
 }
 for (const o of own) {
-  anchors.push(...(o.anchors ?? []));
-  for (const k of o.keepClear ?? []) keep.push({ id: k.id, why: k.why ?? "kept clear by the owner", points: k.points ?? [k.at!], ...(k.points ? { width: k.width ?? 2 } : { radius: k.radius ?? 2 }) });
+  for (const a of o.anchors ?? []) { if (!a.at) { console.warn(`site-sockets: anchor ${a.id} has no coordinates; skipped`); continue; } anchors.push(a); }
+  for (const k of o.keepClear ?? []) { if (!k.points?.length && !k.at) { console.warn(`site-sockets: keepClear ${k.id} has no coordinates; skipped`); continue; } const q: SiteKeep = { id: k.id, why: k.why ?? "kept clear by the owner", points: k.points ?? [k.at!], ...(k.points ? { width: k.width ?? 2 } : { radius: k.radius ?? 2 }) }; keep.push(q); ownerKeep.add(q); }
 }
 let areas: SiteArea[] = own.flatMap((o) => o.areas ?? []);
 if (!areas.length) areas = hearths.map((h) => ({ id: h.id, role: "camp", centre: h.centre, radius: 14 }));
@@ -154,8 +155,8 @@ const caveSampler = (fy: number) => ({ ...sampler,
 for (const area of areas) {
   const id = `${poi}-${area.id}`;
   const { floorY: fy, room } = area as SiteArea & { floorY?: number; room?: string };
-  // under ground only the cave's own passages, quest spots and pack clearings apply (surface routes run over its roof)
-  const areaKeep = keep.filter((q) => q.id !== room && (fy == null || ["portal/cave passage", "quest/named spot", "creature-pack clearing"].includes(q.why)));
+  // under ground only the cave's own passages, quest spots, pack clearings and the owner's keepClear apply (surface routes run over its roof)
+  const areaKeep = keepWithoutRooms(keep, room).filter((q) => (fy == null || ownerKeep.has(q) || ["portal/cave passage", "quest/named spot", "creature-pack clearing"].includes(q.why)));
   const { map, report } = buildSiteSocketMap({ id, source: `${path.relative(proj, job).replaceAll("\\", "/")} handoff (site ${area.role}, measured on scene ${scene})`, areas: [area], anchors, keep: areaKeep, blockers }, fy != null ? caveSampler(fy) : sampler);
   fs.writeFileSync(path.join(outDir, `${id}.json`), JSON.stringify(map) + "\n");
   const r = report[0]!, lv = map.levels[0]!;

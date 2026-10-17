@@ -19,9 +19,17 @@ import type { ChunkDoc } from "../chunks.js";
 import type { EntityDoc } from "../scene.js";
 import type { VoxelWorldData } from "../components/voxel.js";
 import type { RiverFall, SurfaceSample, WorldField } from "./field.js";
-import { scatterCell, type ScatterCellOptions } from "./scatter.js";
+import { modelVariantIndex, scatterCell, scatterVariation, type ScatterCellOptions } from "./scatter.js";
+import { rockCapResolver } from "./rock-cap.js";
 import { fallSiteRockInstances } from "./fall-site-rocks.js";
-import type { VoxelMesher } from "./mesh.js";
+import { terraceWallEntities } from "./terrace-walls.js";
+import { kitWallEntities } from "./kit-walls.js";
+import { landmarkEntities } from "./ledge-landmark.js";
+import { bridgeSpanEntities } from "./bridge-spans.js";
+import { ribbonEntities, type RibbonDoc, type RibbonSurfaceResolver } from "./ribbon.js";
+import { regionAt } from "./regions.js";
+import { FALL_FACE_CLEAR, fallColumn, fallProbeDepth, fitFall, groundAtProfile, profileFace, type FallFitField } from "./fall-fit.js";
+import { resolveCellMesher, type VoxelMesherChoice } from "./mesh.js";
 import type { BridgeDoc, LakeDoc, RiverDoc, ScatterDoc, WorldRecipe } from "./recipe.js";
 
 export interface VoxelChunkOptions extends ScatterCellOptions {
@@ -51,7 +59,7 @@ export interface VoxelChunkOptions extends ScatterCellOptions {
   /** Mesh at a coarser lattice (HLOD/preview). 1 = full detail. */
   lodStep?: number;
   /** Which mesher the terrain cell asks for. Omit for marching cubes. */
-  mesher?: VoxelMesher;
+  mesher?: VoxelMesherChoice;
   /** Emit river ribbons and lake sheets (needs `recipe.waterMaterial`). Default on. */
   water?: boolean;
 }
@@ -67,7 +75,38 @@ function scatterUsable(rule: ScatterDoc, exists: VoxelChunkOptions["assetExists"
   return exists(rule.model!, "model");
 }
 
-function propEntity(rule: ScatterDoc, instance: ReturnType<typeof scatterCell>[number]): EntityDoc {
+/**
+ * Every asset `voxelChunkDoc` may ask `assetExists` about for this recipe: scatter rules (their prefab or
+ * model, model variants, formation member variants), POI prefabs and terrace-wall pieces. A host that cannot
+ * pass the closure (the voxel worker) sends the answers for exactly this list; an asset missing from it reads
+ * as absent, which silently drops POIs and wall pieces and collapses rock variants to the rule's model in
+ * every worker-generated cell (2026-10-10: town-4's terrace walls missing when walked up to).
+ */
+export function voxelRecipeAssetRefs(recipe: WorldRecipe): Array<{ id: string; kind: "prefab" | "model" }> {
+  const out = new Map<string, "prefab" | "model">();
+  const add = (id: string | undefined, kind: "prefab" | "model") => { if (id) out.set(`${kind}:${id}`, kind); };
+  for (const rule of recipe.scatter) {
+    if (rule.prefab) add(rule.prefab, "prefab");
+    else add(rule.model, "model");
+    for (const v of rule.modelVariants ?? []) add(v.model, "model");
+    for (const v of rule.formation?.memberVariants ?? []) add(v.model, "model");
+  }
+  for (const poi of recipe.features.pois) add(poi.prefab, "prefab");
+  for (const t of recipe.features.terraceWalls ?? []) for (const p of t.solved?.pieces ?? []) add(p.prefab, "prefab");
+  for (const b of recipe.features.bridgeSpans ?? []) for (const p of b.solved?.pieces ?? []) add(p.prefab, "prefab");
+  for (const w of recipe.features.kitWalls ?? []) for (const p of w.pieces) add(p.prefab, "prefab");
+  for (const l of recipe.features.landmarks ?? []) add(l.prefab, "prefab");
+  return [...out].map(([key, kind]) => ({ id: key.slice(kind.length + 1), kind }));
+}
+
+function propEntity(rule: ScatterDoc, instance: ReturnType<typeof scatterCell>[number], exists?: VoxelChunkOptions["assetExists"]): EntityDoc {
+  // a model variant (a second or third rock of the kind) is the instance's own pick; one the host
+  // lacks falls back to the rule's reference model rather than dropping the prop
+  const variant = instance.variant !== undefined ? rule.modelVariants?.[instance.variant] : undefined;
+  const useVariant = !!variant && (!exists || exists(variant.model, "model"));
+  const own = instance.model && (!exists || exists(instance.model, "model")) ? instance.model : undefined;
+  const model = own ?? (useVariant ? variant!.model : rule.model);
+  const colliderSize = (own ? instance.colliderSize : undefined) || (!own && useVariant && variant!.colliderSize) || rule.colliderSize;
   const components: Record<string, unknown> = {
     transform: {
       position: instance.position,
@@ -77,12 +116,13 @@ function propEntity(rule: ScatterDoc, instance: ReturnType<typeof scatterCell>[n
   };
   if (rule.prefab) {
     components["prefab"] = { prefabId: rule.prefab, props: {}, overrides: [] };
-  } else if (rule.model) {
+  } else if (model) {
     components["mesh"] = {
       source: {
         kind: "asset",
-        assetId: rule.model,
+        assetId: model,
         ...(instance.vegetationTint ? { vegetationTint: instance.vegetationTint } : {}),
+        ...(instance.rockCap ? { rockCap: instance.rockCap } : {}),
         ...(rule.foliageNormals === undefined ? {} : { foliageNormals: rule.foliageNormals }),
         ...(rule.foliageUp === undefined ? {} : { foliageUp: rule.foliageUp }),
         ...(rule.brightness === undefined ? {} : { brightness: rule.brightness }),
@@ -97,9 +137,11 @@ function propEntity(rule: ScatterDoc, instance: ReturnType<typeof scatterCell>[n
       static: rule.static,
       castShadow: rule.castShadow,
       receiveShadow: true,
+      ...(rule.hlod === false || instance.filler ? { hlod: false } : {}),
     };
   }
-  if (rule.collider !== "none") {
+  // a formation's small filler members carry no collider (the anchor and big members do)
+  if (rule.collider !== "none" && !instance.filler) {
     // Size and offset are the MODEL-space numbers, NOT pre-multiplied by
     // `instance.scale`. The transform above already carries that scale and
     // the physics sim applies a body's world scale to its collider itself
@@ -113,8 +155,8 @@ function propEntity(rule: ScatterDoc, instance: ReturnType<typeof scatterCell>[n
     // rule to the model on the same assumption this line now honours.
     components["collider"] = {
       shape: rule.collider,
-      size: [rule.colliderSize[0], rule.colliderSize[1], rule.colliderSize[2]],
-      offset: [0, rule.colliderSize[1] / 2, 0],
+      size: [colliderSize[0], colliderSize[1], colliderSize[2]],
+      offset: [0, colliderSize[1] / 2, 0],
     };
   }
   return { name: instance.id, parent: null, tags: ["scatter", rule.id], components };
@@ -188,7 +230,8 @@ function waterEntities(
   const fz = new Float32Array(count);
   const mat: (string | null)[] = new Array(count).fill(null);
   const riverMaterial = recipe.riverMaterial ?? material;
-  const nearFalls = field.falls.filter((f) => f.x > x0 - 60 && f.x < x0 + size + 60 && f.z > z0 - 60 && f.z < z0 + size + 60);
+  // each fall on its MEASURED lip (fall-fit.ts): the upper water is cut, and the curtain hung, where the ground really drops
+  const nearFalls = fittedFalls(field).filter((f) => f.x > x0 - 60 && f.x < x0 + size + 60 && f.z > z0 - 60 && f.z < z0 + size + 60);
   /** Each fall's curtain span (curtainSpan): the upper water cut at its lip line ends where the curtain does. */
   const spans = new Map<RiverFall, [number, number]>();
   const spanOf = (fall: RiverFall): [number, number] => {
@@ -300,11 +343,12 @@ function waterEntities(
       f[k] = -1;
       const x = x0 + i * cellStep;
       const z = z0 + j * cellStep;
-      if (groundAt) groundAt[k] = field.height(x, z);
+      // field.ground: the real top surface (planar-cliff treads and walls are not the heightfield); height() elsewhere
+      if (groundAt) groundAt[k] = field.ground(x, z);
       if (!field.waterSurface(x, z, sample)) continue;
       // at or under the sea the ocean plane is the water
       if (sample.y <= recipe.seaLevel + 0.05) continue;
-      const ground = groundAt ? groundAt[k]! : field.height(x, z);
+      const ground = groundAt ? groundAt[k]! : field.ground(x, z);
       if (sample.kind === "river" && ground < sample.floor - WATER_FLOOR_SLACK) continue;
       f[k] = sample.y + WATER_OVERLAP - ground;
       wy[k] = sample.y;
@@ -559,12 +603,12 @@ function mistEntities(field: WorldField, cx: number, cz: number, entities: Chunk
   const x0 = cx * size;
   const z0 = cz * size;
   const material = field.recipe.riverMaterial ?? field.recipe.waterMaterial;
-  field.falls.forEach((fall, index) => {
+  fittedFalls(field).forEach((fall, index) => {
     if (fall.x < x0 || fall.x >= x0 + size || fall.z < z0 || fall.z >= z0 + size) return;
     const height = fall.top - fall.bottom;
     // the water lattice's square at full detail (waterEntities' cellStep): the curtain's top row meets its lip cut
     const grid = size / Math.max(1, Math.round(size / field.voxelSize));
-    if (material) entities[`fall_${index}`] = fallCurtain(fall, x0, z0, material, curtainSpan(field, fall), grid);
+    if (material) entities[`fall_${index}`] = fallCurtain(fall, x0, z0, material, curtainSpan(field, fall), grid, field);
     const spread = Math.max(4, fall.width * 0.9);
     entities[`mist_${index}`] = {
       name: `${fall.river} falls mist`,
@@ -729,6 +773,9 @@ function fallSiteRocks(field: WorldField, cx: number, cz: number, entities: Chun
       if (x < x0 || x >= x0 + size || z < z0 || z >= z0 + size) continue;
       const rule = recipe.scatter[rock.ruleIndex];
       if (!rule || !scatterUsable(rule, options.assetExists)) continue;
+      // the rule's variant pick and cap, from the rock's own id and position (seed-stable like scatter)
+      const variant = rule.modelVariants ? modelVariantIndex(rule, scatterVariation(rock.id, 15, recipe.seed)) : undefined;
+      const rockCap = rule.cap || rule.rockBase !== undefined || rule.rockBaseByCliff ? rockCapResolver(field)(rule, x, y, z) : undefined;
       entities[rock.id] = propEntity(rule, {
         rule: rule.id,
         ruleIndex: rock.ruleIndex,
@@ -737,13 +784,25 @@ function fallSiteRocks(field: WorldField, cx: number, cz: number, entities: Chun
         rotation: rock.rotation,
         scale: rock.scale,
         biome: "",
-      });
+        ...(variant !== undefined ? { variant } : {}),
+        ...(rockCap ? { rockCap } : {}),
+      }, options.assetExists);
     }
   }
 }
 
 /** Where a fall's lip line stands, upstream of its foot (the solved lip is this long). */
-const FALL_LIP_OFFSET = 3;
+export const FALL_LIP_OFFSET = 3;
+
+/**
+ * The world's falls, each moved onto the lip its terrain REALLY has (fall-fit.ts measureFallLip, cached per field):
+ * the solved lip goes stale as soon as planar cliffs, terraces, gorges or buttes carve the ground after the river is
+ * solved. Only a cut-back lip moves the fall (shift <= 0): a lip that reaches further out leaves the solved water levels
+ * standing on the line, and the curtain's face hug carries the water over the shelf instead.
+ */
+export function fittedFalls(field: WorldField): RiverFall[] {
+  return field.falls.map((fall) => fitFall(field, fall, FALL_LIP_OFFSET));
+}
 
 /**
  * Where the upper water is cut and the curtain takes over: this far upstream
@@ -814,7 +873,9 @@ function curtainSpan(field: WorldField, fall: RiverFall): [number, number] {
       // it) over the ground; a dry step shorter than a lattice square does
       // not end it. The lip pieces of the upper water are clipped to this
       // span in waterEntities, so the two agree by construction.
-      const water = fall.top + WATER_OVERLAP > lattice(x, z) && field.waterSurface(x, z, sample) && sample.y >= fall.top - 0.6;
+      // rock standing through the surface (an "add" blob, a formation: density the heightfield does not carry) ends
+      // it too — the water runs on into the rock, hidden; a curtain there would hang inside it
+      const water = fall.top + WATER_OVERLAP > lattice(x, z) && field.waterSurface(x, z, sample) && sample.y >= fall.top - 0.6 && field.density(x, fall.top - 0.25, z) >= 0;
       if (water) last = w;
       else if (w - last > vs) break;
     }
@@ -857,7 +918,7 @@ function curtainSpan(field: WorldField, fall: RiverFall): [number, number] {
  * double-sided and shades a steep face as its front from both sides.
  * `grid` is the water lattice's square (field.voxelSize at full detail).
  */
-function fallCurtain(fall: RiverFall, x0: number, z0: number, material: string, span: [number, number], grid: number): ChunkDoc["entities"][string] {
+function fallCurtain(fall: RiverFall, x0: number, z0: number, material: string, span: [number, number], grid: number, field?: FallFitField): ChunkDoc["entities"][string] {
   const h = fall.top - fall.bottom;
   const [lo, hi] = span;
   const mid = (lo + hi) / 2;
@@ -914,7 +975,21 @@ function fallCurtain(fall: RiverFall, x0: number, z0: number, material: string, 
   const uv1s: number[] = [];
   const indices: number[] = [];
   const round = (v: number): number => Math.round(v * 100) / 100;
-  profile.forEach(([outBase, drop]) => {
+  // the falling rows HUG the face (fall-fit.ts): each column rides the running maximum of where the rock gives way to
+  // air at its height, plus a hand's clearance — never tucking back under an overhang it has passed, bulging out over
+  // anything that juts; where no rock stands in the row it keeps the thrown sheet
+  const columns = field ? across.map((w) => fallColumn(field, fall, lxWorld, lzWorld, w)) : null;
+  // each column starts from its OWN lip (the real edge curves; the cut line is straight): where its ground leaves the
+  // probe height under the river, if that is behind the brink
+  const owns = across.map((_, c) => (columns ? profileFace(columns[c]!, fall.top - fallProbeDepth(fall), -7.5, lastOut + 4).face : null));
+  // a column whose own lip stands upstream of the line starts its brink there too (its water ends there, clipped by
+  // the ground): the sheet's top follows the real, curved edge instead of a straight line out over the drop
+  const start = owns.map((own) => (own !== null && own < FALL_ROLL_BACK - 0.25 ? Math.max(-6, own - FALL_ROLL_BACK) : 0));
+  const env = across.map((_, c) => {
+    const own = owns[c];
+    return own === null || own === undefined ? lastOut : Math.min(lastOut + start[c]!, own + FALL_FACE_CLEAR);
+  });
+  profile.forEach(([outBase, drop], row) => {
     // 1 at the sheet's bottom, 0.8 m under the pool: the pool's surface is ~0.95
     const down = Math.max(0, Math.min(1, drop / (h + 0.8)));
     // the upper edge's current on the level rows, speeding up to 4 m/s over the roll
@@ -923,8 +998,20 @@ function fallCurtain(fall: RiverFall, x0: number, z0: number, material: string, 
       const centre = 1 - ((w - mid) / halfSpan) ** 2;
       // the thrown sheet bulges: the middle carries furthest out (the roll
       // is the same all along the brink, so the top row stays on the cut line)
-      const out = outBase <= lastOut ? outBase : lastOut + (outBase - lastOut) * (0.78 + 0.3 * Math.max(0, centre));
-      positions.push(round(lx + fall.dirX * out + px * w), round(fall.top - drop), round(lz + fall.dirZ * out + pz * w));
+      let landedAt: number | null = null;
+      const c = across.indexOf(w);
+      let out = start[c]! + (outBase <= lastOut ? outBase : lastOut + (outBase - lastOut) * (0.78 + 0.3 * Math.max(0, centre)));
+      if (field && row >= brink.length) {
+        const face = profileFace(columns![c]!, fall.top - drop, Math.max(-7.5, env[c]! - 3), env[c]! + 10);
+        // landed (a ledge or the floor under it): the sheet lies on it there (the gate reports a landing above the
+        // pool); a face: hug it; no rock at this height: the thrown sheet
+        if (face.landed) landedAt = groundAtProfile(columns![c]!, env[c]!);
+        else if (face.face !== null) env[c] = Math.max(env[c]!, face.face + FALL_FACE_CLEAR);
+        // no rock at this height (still the river's depth above the bed, or an undercut): the thrown sheet, without
+        // committing the envelope to it — the face below is hugged again where it starts
+        out = face.face === null && !face.landed ? Math.max(env[c]!, out) : env[c]!;
+      }
+      positions.push(round(lx + fall.dirX * out + px * w), round(landedAt === null ? fall.top - drop : Math.max(fall.top - drop, landedAt + 0.05)), round(lz + fall.dirZ * out + pz * w));
       uvs.push(flowU, flowV);
       uv1s.push(Math.round(((w - lo) / (hi - lo)) * 1e4) / 1e4, Math.round(down * 1e4) / 1e4);
     }
@@ -954,6 +1041,51 @@ function fallCurtain(fall: RiverFall, x0: number, z0: number, material: string, 
       },
     },
   };
+}
+
+/**
+ * Surf at the foot of sea cliffs (`terrain.seaCliffs`): where rock rises straight out of the sea, spray thrown up
+ * the wall and foam rings spreading off it, every ~16 m of wall. Two particle configurations shared by every cell,
+ * so all the surf in view is two draws. Near cells only; nothing without sea cliffs.
+ */
+function surfEntities(field: WorldField, cx: number, cz: number, entities: ChunkDoc["entities"]): void {
+  const sea = field.seaCliffs();
+  if (!sea) return;
+  const size = field.recipe.cellSize;
+  const x0 = cx * size, z0 = cz * size, y = field.recipe.seaLevel;
+  sea.surfIn(x0, z0, x0 + size, z0 + size, 16, field.height).forEach((p, i) => {
+    const at: [number, number, number] = [p.x - x0 + p.nx * 0.6, y + 0.1, p.z - z0 + p.nz * 0.6];
+    entities[`surf_spray_${i}`] = {
+      name: "sea cliff spray",
+      parent: null,
+      tags: ["surf"],
+      components: {
+        transform: { position: at },
+        particles: {
+          emitting: true, rate: 14, max: 30, lifetime: [0.7, 1.5], shape: "box", shapeSize: [7, 0.3, 1.5], coneAngle: 25, spread: 14,
+          turbulence: 0, turbulenceSpeed: 0, fadeIn: 0, direction: [p.nx * 0.25, 1, p.nz * 0.25], radial: "none", speed: [2.5, 7.5],
+          gravity: 9.8, drag: 0.25, sizeStart: 0.45, sizeEnd: 0.25, spin: 0, colorStart: "#ffffff", colorEnd: "#d8ecef",
+          opacityStart: 0.9, opacityEnd: 0, blending: "normal", sprite: "pixel", filter: "nearest", steps: 0, snap: 0,
+          frameRate: 0, softFade: 0, stretch: 0.05, orient: "velocity", space: "world",
+        },
+      },
+    };
+    entities[`surf_foam_${i}`] = {
+      name: "sea cliff foam",
+      parent: null,
+      tags: ["surf"],
+      components: {
+        transform: { position: [at[0] + p.nx * 2, y + 0.06, at[2] + p.nz * 2] },
+        particles: {
+          emitting: true, rate: 3, max: 10, lifetime: [1.6, 2.8], shape: "box", shapeSize: [9, 0, 2.5], coneAngle: 0, spread: 0,
+          turbulence: 0, turbulenceSpeed: 0, fadeIn: 0.15, direction: [p.nx, 0, p.nz], radial: "none", speed: [0.3, 0.9],
+          gravity: 0, drag: 0.3, sizeStart: 2, sizeEnd: 7, spin: 0, colorStart: "#ffffff", colorEnd: "#e4f1f3",
+          opacityStart: 0.65, opacityEnd: 0, blending: "normal", sprite: "ring", filter: "nearest", steps: 0, snap: 0,
+          frameRate: 0, softFade: 0, stretch: 0, orient: "ground", space: "world",
+        },
+      },
+    };
+  });
 }
 
 /** The parameter range [t0, t1] of segment a-b inside the rect (Liang-Barsky), or null. */
@@ -1085,6 +1217,17 @@ export function clipPolylineToRect(
  * time, in Node and in the browser. That is what lets the worldgen CLI reason
  * about a cell the player is standing in without the two ever exchanging data.
  */
+/**
+ * Only a cell's water: the terrain-clipped sheets and each fall's curtain + mist, exactly as voxelChunkDoc emits them
+ * (same functions), without meshing the terrain — what the water-edges gate judges, at a fraction of a chunk build.
+ */
+export function voxelWaterEntities(field: WorldField, cx: number, cz: number): ChunkDoc["entities"] {
+  const entities: ChunkDoc["entities"] = {};
+  if (field.recipe.waterMaterial) waterEntities(field, cx, cz, field.recipe.waterMaterial, entities);
+  mistEntities(field, cx, cz, entities);
+  return entities;
+}
+
 export function voxelChunkDoc(
   field: WorldField,
   world: string,
@@ -1103,7 +1246,8 @@ export function voxelChunkDoc(
         world,
         cell: [cx, cz],
         ...(options.lodStep && options.lodStep > 1 ? { lodStep: options.lodStep } : {}),
-        ...(options.mesher && options.mesher !== "mc" ? { mesher: options.mesher } : {}),
+        // "auto" is resolved here, per cell, so the doc names the mesher it was built with (and HLOD reuses it)
+        ...((m) => (m !== "mc" ? { mesher: m } : {}))(resolveCellMesher(field, cx, cz, options.mesher)),
       },
       ...(options.material ?? recipe.material ? { material: options.material ?? recipe.material } : {}),
       // NOT `static: true`, which would opt the cell into static draw-call
@@ -1135,7 +1279,7 @@ export function voxelChunkDoc(
         if (!usable[instance.ruleIndex]) continue;
         const rule = recipe.scatter[instance.ruleIndex];
         if (!rule) continue;
-        entities[instance.id] = propEntity(rule, instance);
+        entities[instance.id] = propEntity(rule, instance, options.assetExists);
       }
     }
   }
@@ -1144,6 +1288,7 @@ export function voxelChunkDoc(
     waterEntities(field, cx, cz, recipe.waterMaterial, entities, options.lodStep);
     // mist only near: an HLOD far cell is a kilometre off
     if (!(options.lodStep && options.lodStep > 1)) mistEntities(field, cx, cz, entities);
+    if (!(options.lodStep && options.lodStep > 1)) surfEntities(field, cx, cz, entities);
     fallSiteRocks(field, cx, cz, entities, options);
   }
   if (recipe.features.bridges.length > 0) bridgeEntities(field, cx, cz, entities);
@@ -1174,7 +1319,65 @@ export function voxelChunkDoc(
     };
   }
 
+  // Terrace walls: the fitted retaining-wall pieces, one prefab instance each, in the cell its origin stands in.
+  terraceWallEntities(recipe.features.terraceWalls, recipe.cellSize, cx, cz, entities, options.assetExists);
+  // Bridge spans: the fitted arch / rope bridge pieces, one prefab instance each, in the cell its origin stands in.
+  bridgeSpanEntities(recipe.features.bridgeSpans, recipe.cellSize, cx, cz, entities, options.assetExists);
+  // Operator kit walls (`terrace` risers): one prefab instance per piece, in the cell its origin stands in.
+  kitWallEntities(recipe.features.kitWalls, recipe.cellSize, cx, cz, entities, options.assetExists);
+  landmarkEntities(recipe.features.landmarks, recipe.cellSize, cx, cz, entities, options.assetExists);
+  // Path ribbons: the walk surface + stair treads (one surface mesh per ribbon per cell, with its collider) and wall pieces.
+  if (recipe.features.ribbons?.length) ribbonEntities(recipe.features.ribbons, ribbonSurfaces(recipe, field), recipe.cellSize, cx, cz, entities, options.assetExists);
+
   return { version: 1, entities };
+}
+
+/**
+ * Which palette surfaces a ribbon draws with, all read from the zone at the ribbon's middle (a nested town zone with
+ * no tiles of its own uses its parent's): its own `surface`, else cobble / slab -> the zone's `paving`, dirt -> the
+ * zone's `road` tile as trodden earth (its main worn surface, never the grass the ribbon happens to lie on; `ground`
+ * when the zone has no road tile) drawn by a `--trodden` material (a smoothed, slightly lifted copy of the tile), else
+ * plain `dirt` / `gravel`. Walls wear the zone's stone (`ground.cliff`) unless `wallSkin` says otherwise.
+ */
+export function ribbonSurfaces(recipe: WorldRecipe, field?: Pick<WorldField, "tintAt">): RibbonSurfaceResolver {
+  const names = new Map(recipe.surfaces.map((s) => [s.name, s]));
+  const regions = recipe.regions ?? [];
+  const zoneTile = (r: RibbonDoc, role: string): string | null => {
+    const mid = r.samples[Math.floor(r.samples.length / 2)]!;
+    let zone = regionAt(regions, mid[0], mid[2]);
+    for (let hop = 0; zone && !(zone.ground as Record<string, string> | undefined)?.[role] && zone.within && hop < 4; hop++) {
+      const parent: string = zone.within;
+      zone = regions.find((q) => q.id === parent) ?? null;
+    }
+    const pick = (zone?.ground as Record<string, string> | undefined)?.[role];
+    return pick && names.has(pick) ? pick : null;
+  };
+  /** The tile a default dirt ribbon wears as trodden earth: the zone's road, else its ground; null = not trodden. */
+  const trodden = (r: RibbonDoc): string | null => {
+    if (r.style !== "dirt" || (r.surface && names.has(r.surface))) return null;
+    return zoneTile(r, "road") ?? zoneTile(r, "ground");
+  };
+  return {
+    surfaceOf(r: RibbonDoc): string {
+      if (r.surface && names.has(r.surface)) return r.surface;
+      const t = trodden(r);
+      if (t) return t;
+      const role = r.style === "dirt" ? "road" : "paving";
+      const pick = zoneTile(r, role);
+      if (pick) return pick;
+      const fallback = role === "road" ? "dirt" : "gravel";
+      return names.has(fallback) ? fallback : recipe.surfaces[0]?.name ?? "dirt";
+    },
+    uvScaleOf: (name) => names.get(name)?.uvScale ?? 4,
+    troddenToward: (r) => trodden(r),
+    // the biome tint the terrain mesher writes into COLOR_0 under the same tile: the ribbon wears it per vertex
+    ...(field ? { tintAt: (x: number, y: number, z: number): [number, number, number] => { const o = new Float32Array(3); field.tintAt(x, y, z, 1, o, 0); return [o[0]!, o[1]!, o[2]!]; } } : {}),
+    wallSkinOf(r: RibbonDoc): string | null {
+      if (r.wallSkin === "kit") return null;
+      if (r.wallSkin) return names.has(r.wallSkin) ? r.wallSkin : null;
+      return r.pieces.length ? zoneTile(r, "cliff") : null;
+    },
+  };
 }
 
 /**

@@ -11,7 +11,7 @@
 
 import { randomBytes, scrypt as scryptCb, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
-import type { CharacterBuild } from "@hitreg/core";
+import type { CharacterBuild, StaffRole } from "@hitreg/core";
 
 const scrypt = promisify(scryptCb) as (password: string, salt: string, keylen: number) => Promise<Buffer>;
 
@@ -44,6 +44,12 @@ export interface AccountRecord {
   hash: string;
   createdAt: string;
   characters: CharacterRecord[];
+  /**
+   * Staff role (absent on a player account): a GM or dev runs the console's authority commands (`/give`,
+   * `/soulbind`) on a live server. Granted ONLY on the server machine (`pnpm -F @hitreg/server account-role
+   * <name> gm`), carried to the layers in the signed play ticket, never taken from a client.
+   */
+  role?: StaffRole;
 }
 
 export interface AccountStore {

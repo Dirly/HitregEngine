@@ -28,6 +28,53 @@ export const vegetationTintSchema = z.object({
 }).describe("Linear RGB multipliers for materials/textures named Bark/Trunk/Wood and Leaves/Leaf/Foliage/Branch/Bush. [1,1,1] preserves the original texture; other material roles remain unchanged.");
 export type VegetationTint = z.infer<typeof vegetationTintSchema>;
 
+/**
+ * One placed rock's top cap and body texture, drawn by the `rock-cap` material over the SAME mesh
+ * (world-kit rock kit): what a world's scatter resolves per rock from the zone (`regions[].rockCap`)
+ * or the ground under it (scatter `cap: "auto"`). Per-instance data, never a material variant: every
+ * rock of one model is one batch whatever its cap.
+ */
+export const rockCapSchema = z
+  .object({
+    layer: z
+      .number()
+      .int()
+      .min(0)
+      .max(63)
+      .default(0)
+      .describe(
+        "Cap surface: an index into the rock-cap material's `palette` (the world's indexed terrain material, so the " +
+          "index IS the recipe's `surfaces` order: snow, a grass for moss, sand, a zone's own ground...).",
+      ),
+    amount: z
+      .number()
+      .min(0)
+      .max(1)
+      .default(0)
+      .describe("How far the cap reaches: 0 = bare rock, 0.4 = flat tops only, 0.7 = tops and ledges, 1 = everything short of the steep sides."),
+    tint: tintMultiplier
+      .optional()
+      .describe("Linear RGB multiplier on the cap: the terrain's biome tint under the rock, so a grass cap matches the grass beside it. Omit = white."),
+    base: z
+      .number()
+      .int()
+      .min(0)
+      .max(7)
+      .default(0)
+      .describe("Which of the material's `bases` the rock body draws (0 = the first, e.g. granite; 1 = sandstone). Rides in the cap's per-instance slot."),
+    wet: z
+      .number()
+      .min(0)
+      .max(1)
+      .optional()
+      .describe(
+        "WATERLINE as a fraction of the model's height (0 = its foot, 1 = its top): the body darkens below it and a hand " +
+          "above it (wet stone). Scatter writes it for rules with `water`; omit = dry.",
+      ),
+  })
+  .describe("Per-instance rock cap + body texture for the rock-cap material. Ignored by other materials.");
+export type RockCap = z.infer<typeof rockCapSchema>;
+
 export const transformSchema = z.object({
   position: vec3.default([0, 0, 0]),
   rotation: quat.default([0, 0, 0, 1]),
@@ -318,6 +365,12 @@ export const meshSchema = z.object({
           "and draw batches: tint values are instance attributes, not material variants. Carried through near/mid " +
           "LOD and role-mask impostors. An external impostor baker must supply a vegetationMask to retain separate roles.",
       ),
+      rockCap: rockCapSchema.optional().describe(
+        "Per-instance top cap (layer, amount, tint) and body base for a rock drawn by the `rock-cap` material (see that " +
+          "shader). Static instanced asset meshes only: it rides in the same per-instance slot as vegetationTint, " +
+          "through near/mid LOD and the impostors, so capped and bare rocks of one model stay one batch. Scatter " +
+          "writes it from the rule's `cap` and the zone's `rockCap`; a placed prefab may set it by hand.",
+      ),
       uvRotation: z
         .number()
         .optional()
@@ -415,6 +468,13 @@ export const meshSchema = z.object({
               "the upper water beside a lip writes (across the curtain's span 0..1, -1 - t, t 0 on the lip line " +
               "to 1 a few metres upstream) and fades its side bands with the curtain's top.",
           ),
+        colors: z
+          .array(z.number())
+          .optional()
+          .describe(
+            "Optional flat r, g, b, a quadruples, one per vertex (drawn when the material sets `vertexColors`). A " +
+              "path ribbon writes white with the verge / end fade in alpha, drawn dithered by an `alphaHash` material.",
+          ),
       })
       .describe(
         "Raw triangle mesh written by a generator, never by hand: the water a voxel world clips from its " +
@@ -480,9 +540,9 @@ export const meshSchema = z.object({
         .optional()
         .describe("Explicit vertical band to mesh. Omit and it is derived from this cell's own terrain plus the recipe's verticalRange."),
       mesher: z
-        .enum(["mc", "dc", "nets"])
+        .enum(["mc", "dc", "nets", "auto"])
         .optional()
-        .describe("EXPERIMENT: which mesher builds this cell. Omit for marching cubes; 'dc'/'nets' contour the same field dually. Written by the voxel streamer from the scene's voxelWorld component."),
+        .describe("Which mesher builds this cell. Omit for marching cubes; 'dc'/'nets' contour the same field dually; 'auto' picks DC where planar cliffs reach the cell, MC elsewhere. Written by the voxel streamer from the scene's voxelWorld component."),
     }),
     z.object({
       /**
@@ -633,6 +693,14 @@ export const meshSchema = z.object({
     .describe(
       "Marks geometry static: eligible for HLOD/batch merge into distant proxies. No effect on gameplay; set it for scenery, not for anything a script moves.",
     ),
+  hlod: z
+    .boolean()
+    .default(true)
+    .describe(
+      "Static streamed content only: false keeps this mesh OUT of HLOD and far-ring supercell bakes, so it is drawn " +
+        "only while its cell is in the full-render ring (`voxelWorld.rings.fullRender`) and culled beyond. For small " +
+        "clutter (pebbles, small rocks) that reads as nothing past ~150 m but would cost a merged bucket per supercell.",
+    ),
 });
 
 export const lightSchema = z.object({
@@ -651,9 +719,12 @@ export const lightSchema = z.object({
     .default(1)
     .describe(
       'BRIGHTNESS IS THE #1 AUTHORING MISTAKE in enclosed spaces: values that look right on paper render nearly black. ' +
-      'Rule of thumb, calibrated against measured screen brightness (an interior shot of a lit room should average ' +
-      'mean luma 70-100/255): directional sun 1-2 (exteriors only - it does not reach under a ceiling); ambient 1.2-1.8 ' +
-      'for interiors that must read on screen; POINT/SPOT lights in rooms need 6-15, i.e. roughly 3-4x your first ' +
+      'Rule of thumb, calibrated against measured screen brightness. Interior targets are ONE readability table ' +
+      '(tools/dungeon-pipeline/thresholds.json readability.standard): in a room\'s lit floor area a mid-grey probe at ' +
+      'chest height reads luma 60-80/255, a light-gear character >= 55, a dark-gear one >= 20; a whole player-height ' +
+      'view averages 20-45 (dim, with pools of light; never a flat wash). Directional sun 1-2 (exteriors only - it does ' +
+      'not reach under a ceiling); an interior\'s readability fill is ONE ambient with groundColor (a hemisphere) at ' +
+      'about 4 in mid tones (tools/dungeon-pipeline/lighting.json), not a bright flat ambient; POINT/SPOT lights in rooms need 6-15, i.e. roughly 3-4x your first ' +
       'instinct - a torch at intensity 2 is a glowing dot that lights nothing. When a whole scene reads dark, also ' +
       'consider postfx.tonemap.exposure (the correct global brightness knob) before touching every light.',
     ),
@@ -1036,11 +1107,12 @@ export const seaWaterSchema = z.object({
 /** PBR material — a data asset referenced by mesh.material GUID. */
 export const materialSchema = z.object({
   shader: z
-    .enum(["standard", "unlit", "toon", "wireframe", "terrain-splat", "water", "portal"])
+    .enum(["standard", "unlit", "toon", "wireframe", "terrain-splat", "water", "portal", "rock-cap"])
     .default("standard")
     .describe(
       "Built-in shader. unlit = flat/PS1-style, ignores lights; toon = banded; standard = PBR; " +
         "terrain-splat = blends `splat.layers` by height/slope (seamless heightmap terrain, no per-tile hard edges); " +
+        "rock-cap = faceted rock with a zone-chosen top cap (see `rockCap`); " +
         "portal = persistent unlit FX Lab procedural gate using color/opacity and optional map luminance as rotating paint detail on local 0..1 UVs; visual only, no zone transfer. water = animated fresnel/ripple shader driven by `water` (bounded brightness — safe under bloom).",
     ),
   color: hexColor.default("#9aa0a8"),
@@ -1180,6 +1252,13 @@ export const materialSchema = z.object({
     .describe(
       "Texture asset id — GREYSCALE opacity mask (black = cut away). Needs `transparent: true` for soft " +
         "edges, or `alphaTest` > 0 for hard cutout; with neither it has no visible effect.",
+    ),
+  alphaHash: z
+    .boolean()
+    .optional()
+    .describe(
+      "Dithered (hashed) alpha: each fragment is kept with probability alpha, so a fade writes depth and never " +
+        "sorts. With `vertexColors` the vertex alpha fades it (a path ribbon's verge into the ground). PSX-style stipple.",
     ),
   alphaTest: z
     .number()
@@ -1578,6 +1657,58 @@ export const materialSchema = z.object({
         .max(8)
         .default(3)
         .describe("Quantisation levels in the foam band. Fewer = chunkier, more poster-like; 1 is a hard on/off edge."),
+      shoreFoam: z
+        .object({
+          breakup: z
+            .number()
+            .min(0)
+            .max(1)
+            .default(0.6)
+            .describe(
+              "How much of the shore band a blocky world-space noise mask removes: 0 is the unbroken band, 0.6 leaves " +
+                "scattered patches, 1 almost nothing. The mask is sampled on the `foamPixel` grid, so the gaps step in " +
+                "squares like the terrain's texels.",
+            ),
+          patch: z.number().positive().default(3.5).describe("Metres across one foam patch (and one gap) of the mask."),
+          still: z
+            .number()
+            .min(0)
+            .max(1)
+            .default(0.15)
+            .describe(
+              "Share of the shore foam kept where the water does not move: lakes, pools, marsh (drift water counts as " +
+                "still). Low keeps still water nearly clean, so foam gathers only where a current meets a bank or a rock.",
+            ),
+          flow: z
+            .tuple([z.number().min(0), z.number().min(0)])
+            .default([0.2, 1])
+            .describe(
+              "flowMode \"field\": current (m/s) over which the shore foam rises from `still` to full. A river run is " +
+                "about 1 m/s, rapids 1.2-3, a plunge pool 3.4; the plunge churn and rapids froth are separate.",
+            ),
+          steep: z
+            .tuple([z.number().min(0).max(1), z.number().min(0).max(1)])
+            .default([0.55, 0.75])
+            .describe(
+              "Bed steepness gate, as the up-component of the bed normal seen through the water: foam is full on a bed " +
+                "flatter than the second value and gone on one steeper than the first. Foam washes up a gentle shore; a " +
+                "steep bank or a rock meets the water with a wet line instead (`wet`). [1, 1] = no foam anywhere but flat " +
+                "beds, [0, 0] = the old band on every bank (the flat white strips along river banks; `worldgen water-edges` " +
+                "reports a material that draws them). Not applied to the sea.",
+            ),
+          wet: z
+            .number()
+            .min(0)
+            .max(1)
+            .default(0.35)
+            .describe("How much the contact band darkens where a steep bank or a rock meets the water (the wet line the foam gives way to). 0 = none."),
+        })
+        .optional()
+        .describe(
+          "Shape of the SHORELINE foam band (the band along every bank and round every rock that breaks the surface). " +
+            "Omit for the plain continuous band. With it the band is broken by a stepped noise mask and fades on still " +
+            "water, so it gathers where the current hits banks and rocks instead of outlining every shore.",
+        ),
       flow: z
         .tuple([z.number(), z.number()])
         .default([0.012, 0.008])
@@ -1644,6 +1775,71 @@ export const materialSchema = z.object({
         "color and shoreline foam read the depth buffer against whatever's actually beneath the " +
         "surface, so they need real opaque geometry (terrain/seafloor) there to work. Add `texture` " +
         "for scrolling surface detail on top.",
+    ),
+  rockCap: z
+    .object({
+      bases: z
+        .array(
+          z.object({
+            map: z.string().describe("Texture asset id of a tiling rock texture (the body)."),
+            metres: z.number().positive().default(6.4).describe("Metres one tile spans, projected in the MODEL's own space: 256 px over 6.4 m is the 40 texels/m standard."),
+            color: hexColor.default("#ffffff").describe("Multiplier on the tile."),
+          }),
+        )
+        .min(1)
+        .max(8)
+        .describe("Body textures, indexed by `mesh.source.rockCap.base` (0 = granite, 1 = sandstone in the world kit). Packed into one array texture: one binding however many."),
+      palette: z
+        .string()
+        .describe(
+          "Material asset id of the world's INDEXED terrain-splat material. Its layers are the cap palette (index = " +
+            "`rockCap.layer` = the recipe's `surfaces` order) and the cap samples the SAME packed array texture the ground " +
+            "does, at each layer's own `uvScale`, projected from above in world space, so a snow cap is the snow beside it.",
+        ),
+      extraLayers: z
+        .array(
+          z.object({
+            name: z.string().min(1).describe("Name a scatter rule's `capLayers` and a zone's `rockCap.layer` use."),
+            map: z.string().describe("Texture asset id of the cover (tiling, projected from above in world metres)."),
+            uvScale: z.number().positive().default(3.2).describe("Metres per tile (128 px over 3.2 m = 40 texels/m)."),
+            color: hexColor.default("#ffffff").describe("Multiplier on the tile: how a stock texture becomes THIS cover (a saturated dark green for moss)."),
+            roughness: z.number().min(0).max(1).default(0.95),
+          }),
+        )
+        .max(16)
+        .default([])
+        .describe(
+          "Cap layers that are no ground surface (moss), indexed AFTER the palette: layer = palette length + i. Listed in " +
+            "the same order as the scatter rules' `capLayers`. One extra array binding; the cap then costs two fetches.",
+        ),
+      start: z
+        .number()
+        .min(-1)
+        .max(1)
+        .default(0.72)
+        .describe(
+          "Facing (world normal Y) where a FULL cap (amount 1) begins: 0.72 = faces within ~44 degrees of straight up, so " +
+            "a cap sits on the TOP and never runs down the sides. Amount 0 pushes it past straight up (nothing caps).",
+        ),
+      thicken: z
+        .number()
+        .min(0)
+        .max(1)
+        .default(0.55)
+        .describe("How far the cap wraps over the top rim: near the model's highest point (TEXCOORD_1.x) the facing threshold drops by this much, so the top faces read thick."),
+      softness: z.number().min(0.01).max(1).default(0.06).describe("Width of the cap's ragged edge band in normal-Y units: whole noise cells either side of the threshold are dithered in or out (each cell is capped or bare, PSX)."),
+      noise: z.number().min(0).max(1).default(0.04).describe("Extra ordered-dither spread of the edge (normal-Y units). Small: the edge is a crisp stepped line, not blotches."),
+      noiseMetres: z.number().positive().default(0.25).describe("World metres per dither cell (a 2x2 ordered pattern, hard-edged): the edge's PSX pixel size."),
+      crevice: z.number().min(0).max(1).default(0.7).describe("How strongly the model's baked occlusion (vertex colour) keeps the cap out of crevices and the ground contact."),
+      occlusion: z.number().min(0).max(1).default(0.35).describe("How much that baked occlusion darkens the body (1 = as baked, 0 = none)."),
+    })
+    .optional()
+    .describe(
+      "Only read when shader is 'rock-cap': the world-kit rock kit's one material. Body = `bases[rockCap.base]`, " +
+        "object-space box projection (one fetch: the kit is faceted, so each face has one axis); cap = the palette layer " +
+        "`rockCap.layer` from above (one fetch), blended in by world-up facing x amount, a stepped noise edge and the " +
+        "baked crevice mask. Two fetches and one hash a fragment: far below the terrain's twelve. Per-instance values " +
+        "come from `mesh.source.rockCap`; a non-instanced mesh draws the bare first base.",
     ),
 });
 
@@ -2918,9 +3114,13 @@ export const grassSchema = z.object({
         .default([0.25, 2.5])
         .describe("`surface` / `bed`: water depth [min, max] metres the layer floats on or grows under."),
       kinds: z
-        .array(z.enum(["lake", "river", "sea"]))
+        .array(z.enum(["lake", "river", "sea", "marsh"]))
         .default(["lake", "river"])
-        .describe("Which water counts. Rivers flowing faster than `maxFlow` never carry `surface` layers."),
+        .describe(
+          "Which water counts. `lake` means ANY still inland water — lakes and every still-water kind the world adds; `marsh` alone = " +
+            "only a zone's marsh water table (a zone anchor's `waterTable`), for layers that belong to the bog and not to every lake. " +
+            "Rivers flowing faster than `maxFlow` never carry `surface` layers.",
+        ),
       maxFlow: z.number().min(0).default(0.6).describe("`surface` / `bed`: fastest current (m/s) the layer tolerates."),
     })
     .optional()
@@ -3116,6 +3316,26 @@ export const waterSchema = z
       .min(0)
       .optional()
       .describe("Murk, overriding `postfx.underwater.density` — how fast sight fades with distance under this water."),
+    finishes: z
+      .array(
+        z.object({
+          kind: z
+            .enum(["drain", "lip-fall", "dark", "built"])
+            .describe(
+              "How this stretch of edge ends on purpose: drain (the water goes down into dark: a sump, a grate), " +
+                "lip-fall (a small curtain over an edge), dark (the channel goes on into darkness: a black card or fog " +
+                "where it leaves the light), built (flush under a built edge: a kerb, a quay, a hull).",
+            ),
+          from: z.tuple([z.number(), z.number()]).describe("Start of the finished stretch of the outline, world [x, z]."),
+          to: z.tuple([z.number(), z.number()]).describe("End of the finished stretch, world [x, z]."),
+          entity: z.string().optional().describe("The entity that draws the finish (the dark card, the curtain, the kerb)."),
+        }),
+      )
+      .optional()
+      .describe(
+        "Deliberate ends of this water's outline. Every edge must be buried in solid (a wall, a rock lip, a shore) or " +
+          "stand at one of these — an edge in open air is a fault (`worldgen water-edges` / `tools/water-edges.mts scene`).",
+      ),
   })
   .describe(
     "Marks an authored water surface as a swimmable VOLUME (surface down by `depth`). Procedural worlds answer " +

@@ -16,11 +16,23 @@ export const nineSliceSchema = z.object({
 
 export const chatLayoutSchema = z.object({
   active: z.string().default("all"), opacity: z.number().min(0).max(1).default(0.9),
+  enabled: z.boolean().default(true), timestamps: z.boolean().default(false),
+  fontSize: z.number().int().min(11).max(18).default(13),
+  windows: z.array(z.object({
+    id: z.string().regex(/^[a-z0-9-]+$/).max(64), name: z.string().min(1).max(24),
+    active: z.string().default("all"),
+    opacity: z.number().min(0).max(1).default(0.75),
+    idleOpacity: z.number().min(0).max(1).default(0.25).describe("Background opacity while neither hovered nor focused; message text retains its contrast."),
+    border: z.enum(["ornate", "simple", "none"]).default("ornate"),
+    locked: z.boolean().default(true).describe("Locks moving and resizing during play. Edit UI always unlocks the window."),
+  })).max(12).default([]).refine(a => new Set(a.map(w => w.id)).size === a.length, "duplicate chat window id"),
   tabs: z.array(z.object({
     id: z.string().regex(/^[a-z0-9-]+$/).max(64), name: z.string().min(1).max(24),
-    channels: z.array(z.enum(["proximity", "zone", "global", "team", "party", "guild", "system"])).min(1),
+    channels: z.array(z.enum(["proximity", "zone", "global", "team", "party", "guild", "system", "combat", "loot"])).min(1)
+      .describe("Receive-only feeds. Combat and loot are local gameplay notices, never sendable chat channels."),
+    windowId: z.string().regex(/^[a-z0-9-]+$/).max(64).optional().describe("Owning chat window. Absent = migrate the legacy detached preference."),
     detached: z.boolean().default(false), opacity: z.number().min(0).max(1).default(0.9),
-  })).min(1).max(12),
+  })).min(1).max(12).refine(a => new Set(a.map(t => t.id)).size === a.length, "duplicate chat tab id"),
 }).describe("Local chat receive filters and detached-window preferences. Filters operate only on messages delivered to this player; they never change server routing or membership.");
 
 export const gameHudSchema = z.object({

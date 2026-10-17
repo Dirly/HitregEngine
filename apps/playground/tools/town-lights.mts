@@ -20,8 +20,8 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { ComponentRegistry, applyOps, createWorldField, registerCoreComponents, worldRecipeSchema, type Op, type SceneDoc } from "@hitreg/core";
-import { checkTownLights, loadStreetLighting, planTownLights, streetLightingFile, type Lantern, type LightKind, type TownLightInput } from "./town-lights-rule.mts";
+import { ComponentRegistry, applyOps, createWorldField, fieldSolidProbe, registerCoreComponents, worldRecipeSchema, type Op, type SceneDoc } from "@hitreg/core";
+import { checkTownLights, loadStreetLighting, planTownLights, streetLightingFile, townWealth, type Lantern, type LightKind, type TownLightInput } from "./town-lights-rule.mts";
 
 type XZ = [number, number];
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -44,9 +44,14 @@ const readJson = (f: string): J => JSON.parse(fs.readFileSync(f, "utf8").replace
 const townDoc = readJson(path.join(towns, `${townName}.json`));
 const recipeFile = path.join(projectDir, "assets", "worlds", `${townDoc.world}.json`);
 const sceneFile = path.join(projectDir, "assets", "scenes", `${townDoc.scene}.scene.json`);
-const rule = loadStreetLighting(projectDir);
+// the town's standing picks the rule's profile (wealth/size factor): plan `tier`, plan `wealth` or the residents' median
+const planNow = ((f: string): J => (fs.existsSync(f) ? readJson(f) : {}))(path.join(towns, `${townName}-plan.json`));
+const standing = { tier: planNow.tier as string | undefined, wealth: townWealth(planNow) };
+const { rule, profile } = loadStreetLighting(projectDir, standing);
+console.log(`rule: ${path.relative(projectDir, streetLightingFile(projectDir)).replaceAll("\\", "/")} (${standing.tier ?? "?"}, ${standing.wealth ?? "?"}) -> profile ${profile ?? "base"}`);
 const raw = readJson(recipeFile);
 const field = createWorldField(worldRecipeSchema.parse(raw));
+const solid = fieldSolidProbe(field);
 const tag = `town-lights:${townName}`;
 const rootId = `town-${townName}-lights`;
 
@@ -95,10 +100,14 @@ function inputFor(scene: SceneDoc): TownLightInput {
     ] },
     roads: (raw.features.roads as J[]).map((r) => ({ id: r.id, points: r.points.map((q: number[]) => [q[0], q[1]] as XZ), width: r.width ?? 3 })),
     bridges: ((raw.features.bridges ?? []) as J[]).map((b) => ({ id: b.id, points: b.points, width: b.width ?? 6, deckY: b.deckY })),
-    buildings: (layout.buildings as J[]).map((b) => ({ id: b.id, poly: b.full ?? b.corners, ...(b.door ? { door: b.door } : {}) })),
+    buildings: (layout.buildings as J[]).map((b) => {
+      const use = ((plan.buildings ?? []) as J[]).find((x) => x.id === b.id)?.use;
+      return { id: b.id, poly: b.full ?? b.corners, ...(b.door ? { door: b.door } : {}), ...(use ? { use } : {}), ...(b.facing ? { facing: b.facing } : {}) };
+    }),
     docks,
     obstacles,
-    ground: { height: (x, z) => field.height(x, z), waterY: (x, z) => field.waterY(x, z) },
+    // the REAL solid (voxel/seat.ts): a stair cut, a carve or a planar tread is ground; the drawn height() is not there
+    ground: { height: (x, z) => { const h = field.height(x, z); return solid.floor(x, z, h + 3, h - 8) ?? h; }, waterY: (x, z) => field.waterY(x, z) },
   };
 }
 
@@ -122,7 +131,7 @@ function check(scene: SceneDoc): number {
   const res = checkTownLights(inp, rule, installed);
   const report = {
     town: townName, world: townDoc.world, scene: townDoc.scene, ok: res.ok, at: new Date().toISOString(),
-    rule: path.relative(projectDir, streetLightingFile(projectDir)).replaceAll("\\", "/"),
+    rule: path.relative(projectDir, streetLightingFile(projectDir)).replaceAll("\\", "/"), profile, standing,
     counts: res.counts, total: installed.length, failures: res.failures,
     lanterns: installed.map((l) => ({ id: l.id, prefab: l.prefab, kind: l.kind, ref: l.ref, at: l.at.map((v) => +v.toFixed(2)) })),
   };

@@ -163,6 +163,15 @@ export const groundPaletteSchema = z.object({
         "`worldgen zone-textures` registers each as palette surface `<palette>-<role>` and sets every cast zone's " +
         "`regions[].ground`; a role left out keeps the world's base surface. Tiles match the base ground tiles' pixel size.",
     ),
+  rock: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "The zone's ROCK SKIN: body texture (assets/textures/) for every scatter rock, boulder and cliff mass that stands in " +
+        "this palette's cliff. Default: `rock.png` beside the cliff tile, else the cliff tile itself (40 texels/m). " +
+        "`worldgen zone-textures` adds it as a slice of the world's rock material and maps it in `recipe.rockSkins`.",
+    ),
 });
 export type GroundPalette = z.infer<typeof groundPaletteSchema>;
 
@@ -226,7 +235,7 @@ export const placeSchema = z.object({
   site: z
     .object({
       candidate: z.string().default("").describe("The `zonegen sites` candidate id it was picked from (s07); ids change when the finder re-runs, `at` is what counts."),
-      kind: z.string().min(1).describe("The ground feature: canyon-end, cliff-water, plateau, peak, saddle, wall-gap, cove, waterfall, path-end, switchback, empty-land, or other (say what)."),
+      kind: z.string().min(1).describe("The ground feature: canyon-end, cliff-water, plateau, peak, saddle, wall-gap, cove, waterfall, path-end, switchback, empty-land, island; on DC terrain also fall-lip, plunge-pool, sea-stack, stack-cluster, headland, butte-top, canyon-bend; or other (say what)."),
       at: z.tuple([z.number(), z.number()]).describe("World [x, z] of the feature the place is built on/around."),
       faces: z.string().default("").describe("Which way the place faces and why: its approach (\"the canyon mouth, NE, where the Ironspur road arrives\")."),
     })

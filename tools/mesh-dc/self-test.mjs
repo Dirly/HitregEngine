@@ -270,6 +270,28 @@ test("decimateRough keeps a noised extraction closed and manifold while cutting 
   assert.ok(meshAudit(out).passed, JSON.stringify(meshAudit(out)));
 });
 
+test("decimateRough audits clean when indices are split at one exact position (meshAudit welds by position)", async () => {
+  const { decimateRough } = await import("./decimate.mjs");
+  const { meshAudit } = await import("../dc-construction/mesh-audit.mjs");
+  const src = source([cube("Rock", [0, 0, 0])]);
+  src.palette[0].id = "basalt";
+  const noise = { version: 1, roles: Object.fromEntries(src.palette.map(p => [p.id, { amount: 0.3, scale: 0.9 }])) };
+  const doc = convertMeshStamp(src, { voxelSize: 0.08, noise }).volumes[0].doc;
+  const raw = buildVolumeMesh(createVolume(doc));
+  // split every vertex used by the first half of the triangles into its own copy at the same point
+  const n = raw.positions.length / 3, S = doc.palette.length, copy = new Map();
+  const P = Array.from(raw.positions), N = Array.from(raw.normals), W = Array.from(raw.splat), I = Array.from(raw.indices);
+  for (let i = 0; i < I.length / 2; i++) {
+    const v = I[i];
+    if (!copy.has(v)) { copy.set(v, P.length / 3); P.push(...P.slice(v * 3, v * 3 + 3)); N.push(...N.slice(v * 3, v * 3 + 3)); W.push(...W.slice(v * S, v * S + S)); }
+    I[i] = copy.get(v);
+  }
+  const mesh = { ...raw, positions: Float32Array.from(P), normals: Float32Array.from(N), splat: Float32Array.from(W), indices: Uint32Array.from(I), vertexCount: P.length / 3, surfaceCount: S };
+  assert.ok(P.length / 3 > n && meshAudit(mesh).passed);
+  const out = decimateRough(mesh, { error: 0.04 });
+  assert.ok(meshAudit(out).passed, JSON.stringify(meshAudit(out)));
+});
+
 const BLENDER = process.env.BLENDER || "P:/Program Files/Blender Foundation/Blender 5.2/blender.exe";
 test("cave_tunnel: width/height per path point, full width (was half), mitred sharp bends without folds", { skip: !fs.existsSync(BLENDER) && "no Blender" }, async () => {
   const { spawnSync } = await import("node:child_process");

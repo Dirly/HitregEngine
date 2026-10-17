@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as THREE from "three/webgpu";
-import { INSTANCE_MATRIX_ATTRIBUTES, InstancedProps, applyInstancedProps, isInstancedPropMaterial } from "../src/instancing.js";
+import { INSTANCE_MATRIX_ATTRIBUTES, InstancedProps, applyInstancedProps, isInstancedPropMaterial, mirrorSignOf } from "../src/instancing.js";
 
 /**
  * Pins the properties that make an InstancedProps batch share one shader
@@ -126,5 +126,74 @@ describe("InstancedProps", () => {
     windy.positionNode = wind;
     applyInstancedProps(windy);
     expect(windy.positionNode).not.toBe(wind);
+  });
+});
+
+/**
+ * A mirrored instance (negative determinant: the right shoulder pad is the
+ * left one at scale z = -1) reverses its triangles' winding, and a batch is
+ * one draw with one front face. The shader pre-negates such an instance's
+ * normal (instanceMirrorSign) so a double-sided material's back-face
+ * negation lands it on the true normal. This replays that pipeline on the
+ * CPU: winding -> GPU facing -> negateOnBackSide -> the normal lighting sees.
+ */
+describe("mirrored instances", () => {
+  /** Right pad as character-look mounts it: rotated, scaled, z mirrored, through a moved group. */
+  function rightPadMatrix(): THREE.Matrix4 {
+    const local = new THREE.Matrix4().compose(
+      new THREE.Vector3(0.12, 0.05, -0.02),
+      new THREE.Quaternion().setFromEuler(new THREE.Euler(0.3, -1.1, 0.4)),
+      new THREE.Vector3(1.05, 1.05, -1.05),
+    );
+    // the slot group decomposes it (character-look) and the batch recomposes it
+    const group = new THREE.Object3D();
+    local.decompose(group.position, group.quaternion, group.scale);
+    group.position.add(new THREE.Vector3(4, 1.4, -7));
+    group.updateMatrixWorld(true);
+    return group.matrixWorld.clone();
+  }
+
+  /** The normal lighting sees for the face a camera at `eye` looks at, as the GPU draws instance `m`. */
+  function shadedNormal(m: THREE.Matrix4, eye: THREE.Vector3, sign: number): { normal: THREE.Vector3; toEye: THREE.Vector3 } {
+    // one triangle of a pad, CCW about its outward normal +z (local)
+    const tri = [new THREE.Vector3(0, 0, 0), new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0)].map((v) => v.applyMatrix4(m));
+    const centre = tri[0]!.clone().add(tri[1]!).add(tri[2]!).divideScalar(3);
+    const toEye = eye.clone().sub(centre).normalize();
+    const winding = new THREE.Vector3().subVectors(tri[1]!, tri[0]!).cross(new THREE.Vector3().subVectors(tri[2]!, tri[0]!));
+    const gpuFront = winding.dot(toEye) > 0; // the batch's front face is CCW for every instance
+    // transformNormal = inverse-transpose; then the instance sign; then negateOnBackSide (DoubleSide)
+    const normal = new THREE.Vector3(0, 0, 1).applyNormalMatrix(new THREE.Matrix3().getNormalMatrix(m)).multiplyScalar(sign);
+    if (!gpuFront) normal.negate();
+    return { normal, toEye };
+  }
+
+  it("signs a matrix by its determinant, as three's plain-mesh front-face flip does", () => {
+    const right = rightPadMatrix();
+    expect(mirrorSignOf(right)).toBe(-1);
+    expect(Math.sign(right.determinant())).toBe(-1);
+    expect(mirrorSignOf(new THREE.Matrix4().makeRotationY(2).scale(new THREE.Vector3(2, 2, 2)))).toBe(1);
+    expect(mirrorSignOf(new THREE.Matrix4().makeScale(-1, -1, 1))).toBe(1); // two flips are a rotation
+    expect(mirrorSignOf(new THREE.Matrix4().makeScale(-1, 1, 1))).toBe(-1);
+  });
+
+  it("shades a mirrored instance's outer face toward the viewer (it shaded inside out before)", () => {
+    const m = rightPadMatrix();
+    // the camera on the outer side of the mirrored pad
+    const outward = new THREE.Vector3(0, 0, 1).applyNormalMatrix(new THREE.Matrix3().getNormalMatrix(m));
+    const at = new THREE.Vector3().setFromMatrixPosition(m);
+    for (const eye of [at.clone().addScaledVector(outward, 3), at.clone().addScaledVector(outward.clone().negate(), 3)]) {
+      const fixed = shadedNormal(m, eye, mirrorSignOf(m));
+      expect(fixed.normal.dot(fixed.toEye)).toBeGreaterThan(0);
+      const before = shadedNormal(m, eye, 1);
+      expect(before.normal.dot(before.toEye)).toBeLessThan(0);
+    }
+  });
+
+  it("leaves an unmirrored instance as it was", () => {
+    const m = new THREE.Matrix4().compose(new THREE.Vector3(1, 2, 3), new THREE.Quaternion().setFromEuler(new THREE.Euler(0.3, -1.1, 0.4)), new THREE.Vector3(1, 1, 1));
+    const eye = new THREE.Vector3(0, 0, 1).applyMatrix4(m).multiplyScalar(4);
+    expect(mirrorSignOf(m)).toBe(1);
+    const s = shadedNormal(m, eye, mirrorSignOf(m));
+    expect(s.normal.dot(s.toEye)).toBeGreaterThan(0);
   });
 });

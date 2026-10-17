@@ -317,6 +317,13 @@ export interface WaterSample {
   density?: number;
   /** Entity that owns the surface, or null when it came from a procedural world. */
   entity: EntityId | null;
+  /**
+   * What kind of water a procedural world says this is: "sea", "river", or a
+   * still-water kind ("lake", or any other the world's field reports — a marsh
+   * pool). Absent for authored water. Presentation reads it (which bed to
+   * play); physics does not.
+   */
+  kind?: string;
 }
 
 /**
@@ -480,6 +487,8 @@ export interface WaterField {
   waterY(x: number, z: number): number | null;
   height(x: number, z: number): number;
   readonly worldLimit: number;
+  /** Optional: the inland sheet over (x, z) and its kind (WorldField.waterSurface); false = none, so the water is the sea. */
+  waterSurface?(x: number, z: number, out: { y: number; flowX: number; flowZ: number; kind: string; floor: number }): boolean;
 }
 
 export function waterQuery(
@@ -513,6 +522,7 @@ export function waterQuery(
           current: NO_CURRENT,
           entity: null,
         };
+        if (world.waterSurface) generated.kind = world.waterSurface(x, z, kindScratch) ? kindScratch.kind : "sea";
       }
     }
     if (!authored) return generated;
@@ -525,6 +535,7 @@ export function waterQuery(
 }
 
 const NO_CURRENT: readonly [number, number] = [0, 0];
+const kindScratch = { y: 0, flowX: 0, flowZ: 0, kind: "lake" as string, floor: 0 };
 
 /**
  * How far under a water volume's own floor still counts as being in it.

@@ -1,8 +1,9 @@
 import * as THREE from "three/webgpu";
-import { texture as tslTexture, uniform, uv } from "three/tsl";
+import { PRECOMPILE_SAFE } from "../../precompile-safe.js";
+import { texture as tslTexture, uv } from "three/tsl";
 import type { VfxModuleOf } from "@hitreg/core";
 import { LiveModule, easeOut, loadTexture, presentationOnly, unlitMaterial, type LiveModuleHost } from "../base.js";
-import { quantize, type N } from "../shaders.js";
+import { bindValues, objectUniform, quantize, type N } from "../shaders.js";
 
 const camPos = new THREE.Vector3();
 const bodyPos = new THREE.Vector3();
@@ -62,6 +63,30 @@ interface Body {
   spinAxis: THREE.Vector3;
 }
 
+/** One card material per object sheet; each card brings its tint, opacity and grid (shaders.ts sharedUniforms). */
+const cardVariants = new Map<string, THREE.MeshBasicNodeMaterial>();
+
+function cardVariant(map: THREE.Texture | null): THREE.MeshBasicNodeMaterial {
+  const key = map?.uuid ?? "-";
+  let material = cardVariants.get(key);
+  if (material) return material;
+  material = unlitMaterial(false);
+  const tint: N = objectUniform("c", "uTint", new THREE.Color(1, 1, 1));
+  const opacity: N = objectUniform("c", "uOpacity", 1);
+  const grid: N = objectUniform("c", "uGrid", new THREE.Vector2(0, 0));
+  if (map) {
+    const s: N = tslTexture(map, quantize(uv() as N, grid));
+    material.colorNode = s.rgb.mul(tint);
+    material.opacityNode = s.a.mul(opacity);
+  } else {
+    material.colorNode = tint;
+    material.opacityNode = opacity.mul(0);
+  }
+  material.name = `vfx-card:${key}`;
+  cardVariants.set(key, material);
+  return material;
+}
+
 /**
  * Real bodies in an effect: the rock a meteor drops, the crystals a frost
  * nova throws up, the orbs that orbit a buffed body, the thing a summon
@@ -82,11 +107,10 @@ export class MeshLive extends LiveModule<MeshModule> {
   private loaded: THREE.Object3D | null = null;
   private loadedFor = "";
   private useLoaded = false;
-  private readonly cardMaterial: THREE.MeshBasicNodeMaterial;
-  private readonly uTint = uniform(new THREE.Color(1, 1, 1));
-  private readonly uOpacity = uniform(1, "float");
+  private readonly uTint = { value: new THREE.Color(1, 1, 1) };
+  private readonly uOpacity = { value: 1 };
   /** texel grid across the whole sheet (cols·k, rows·k); 0 = the art's own texels */
-  private readonly uGrid = uniform(new THREE.Vector2(0, 0));
+  private readonly uGrid = { value: new THREE.Vector2(0, 0) };
   private cardMap: THREE.Texture | null = null;
   private cardUrl = "";
   private drawn = false;
@@ -96,14 +120,16 @@ export class MeshLive extends LiveModule<MeshModule> {
   constructor(host: LiveModuleHost) {
     super(host);
     this.material = new THREE.MeshStandardMaterial({ roughness: 0.55, metalness: 0.05, transparent: true });
-    this.cardMaterial = unlitMaterial(false);
+    // lit, but reads no scene depth: compile it with the rest of the spell looks
+    this.material.userData[PRECOMPILE_SAFE] = true;
     for (let i = 0; i < MAX_BODIES; i++) {
       const mesh = new THREE.Mesh(primitive("crystal"), this.material);
       // presentation only: a shadow-casting effect body drags the whole
       // shadow pass into every spell, for a shadow nobody reads
       presentationOnly(mesh);
       this.primMeshes.push(mesh);
-      const card = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), this.cardMaterial);
+      const card = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), cardVariant(null));
+      bindValues(card, "c", { uTint: this.uTint, uOpacity: this.uOpacity, uGrid: this.uGrid });
       presentationOnly(card);
       card.visible = false;
       const node = new THREE.Group();
@@ -121,10 +147,8 @@ export class MeshLive extends LiveModule<MeshModule> {
   }
 
   private buildCardShader(map: THREE.Texture): void {
-    const s: N = tslTexture(map, quantize(uv() as N, this.uGrid));
-    this.cardMaterial.colorNode = s.rgb.mul(this.uTint);
-    this.cardMaterial.opacityNode = s.a.mul(this.uOpacity);
-    this.cardMaterial.needsUpdate = true;
+    const material = cardVariant(map);
+    for (const b of this.bodies) b.card.material = material;
   }
 
   /** Point body `i`'s quad at its cell of the sheet (row 0 is the TOP of the image). */
@@ -318,7 +342,7 @@ export class MeshLive extends LiveModule<MeshModule> {
   dispose(): void {
     this.group.removeFromParent();
     this.material.dispose();
-    this.cardMaterial.dispose();
+    // card materials are shared per sheet and outlive this module
     for (const b of this.bodies) b.card.geometry.dispose();
   }
 }

@@ -209,6 +209,8 @@ export interface BarrierPlanOptions extends BorderReportOptions {
   safe: boolean;
   /** Lake outlines: samples inside one are skipped entirely. */
   lakes: ReadonlyArray<{ polygon?: readonly P[] | undefined; center?: readonly [number, number] | undefined; radius?: number | undefined }>;
+  /** Level ground no wall is raised on (a swamp or fen zone: anchor `flatten` over 0.5): samples there are skipped. */
+  flat?: (x: number, z: number) => boolean;
 }
 
 export interface BarrierPlan {
@@ -268,7 +270,7 @@ export function planBarriers(regions: readonly RegionDoc[], paths: ReadonlyArray
       // a run is measured in samples, a piece in the intervals between them: a run
       // of exactly minRun is minRun - step of intervals and still wants its wall
       for (const piece of ridgePieces(run, planned, step, Math.max(step, minRun - step))) {
-        const kept = piece.filter((s) => !inLake(s.x, s.z));
+        const kept = piece.filter((s) => !inLake(s.x, s.z) && !(opts.flat?.(s.x, s.z) ?? false));
         if (kept.length < 2) continue;
         const points = simplifyPolyline(
           kept.map((s) => [s.x, s.z] as [number, number]),

@@ -20,6 +20,15 @@
  *   switchback    the top of a run of hairpins
  *   empty-land    the largest disc of walkable land with no place, town or reservation in it
  *
+ * DC set pieces (opt-in terrain the field reports itself; docs/voxel-worlds.md §30/§30a):
+ *   fall-lip      the edge a solved fall pours over: stand over the drop                     (a lookout, a shrine)
+ *   plunge-pool   the pool under a fall, the curtain seen from the water                     (a grotto, a hermit)
+ *   sea-stack     one stack offshore (`terrain.seaCliffs`), arch flagged                      (a nest, a beacon)
+ *   stack-cluster 2-4 stacks close together near the cliff: a bridge chain or a ferry rock   (a Pyke, a pirate hold)
+ *   headland      coast that juts into the sea: sea on most sides                            (a lighthouse, a watch)
+ *   butte-top     the flat top of a mesa or butte (`terrain.buttes`)                          (a summit hold)
+ *   canyon-bend   a river or canyon turning between high walls                               (an ambush, a view)
+ *
  * Approach (every candidate): the nearest road or path, how far, the height change from it, how many metres of road
  * see a landmark standing there (line of sight over the sampled ground, eye 1.7 m, landmark 8 m), the farthest
  * point it is first seen from, and the bearing it should FACE (toward the road that sees it).
@@ -33,6 +42,15 @@ export interface FieldLike {
   height(x: number, z: number): number;
   waterSurface(x: number, z: number, out: { y: number; kind?: string }): boolean;
   readonly falls?: readonly { river: string; x: number; z: number; top: number; bottom: number; dirX: number; dirZ: number }[];
+  /** The DRAWN ground on planar (DC) terrain: treads, lips, stacks and arches the heightfield lacks (null = none).
+   *  Sampled instead of `height` when `FindInput.planar` is set. */
+  ground?(x: number, z: number): number | null;
+  /** `terrain.seaCliffs`: the stacks (and arches) offshore. */
+  seaCliffs?(): { stacksIn(x0: number, z0: number, x1: number, z1: number): readonly { x: number; z: number; radius: number; top: number; arch: boolean }[] } | null;
+  /** `terrain.buttes`: the monuments of every butte field. */
+  buttes?(): { monumentsIn(x0: number, z0: number, x1: number, z1: number): readonly { x: number; z: number; kind: string; radius: number; top: number }[] } | null;
+  /** Solved river centrelines: canyon bends are read along them. */
+  readonly rivers?: readonly { id: string; points: readonly (readonly [number, number])[] }[];
 }
 
 export interface Content {
@@ -54,7 +72,8 @@ export interface RoadLine {
   trail: boolean;
 }
 
-export type SiteKind = "cliff-water" | "canyon-end" | "plateau" | "peak" | "saddle" | "wall-gap" | "cove" | "waterfall" | "path-end" | "switchback" | "empty-land" | "island" | "access";
+export type SiteKind = "cliff-water" | "canyon-end" | "plateau" | "peak" | "saddle" | "wall-gap" | "cove" | "waterfall" | "path-end" | "switchback" | "empty-land" | "island" | "access"
+  | "fall-lip" | "plunge-pool" | "sea-stack" | "stack-cluster" | "headland" | "butte-top" | "canyon-bend";
 
 /** The access device proposed for a strong site no walking body can reach from a road (sites.md "access devices"). */
 export type AccessDevice = "ladder" | "cliff-stair" | "lift" | "rope-way" | "bridge-or-ferry";
@@ -141,6 +160,20 @@ export const MAIN_ROAD_END = 60;
 /** Islands: dry ground wholly ringed by water, between these areas. */
 export const ISLAND_MIN_M2 = 150;
 export const ISLAND_MAX_HA = 60;
+/** Stack cluster: stacks whose centres lie within CLUSTER_LINK m of another are one cluster; 2..CLUSTER_MAX make a
+ *  bridge chain, and one of them must stand within CLUSTER_SHORE m (edge to edge) of the mainland. */
+export const CLUSTER_LINK = 120;
+export const CLUSTER_MAX = 4;
+export const CLUSTER_SHORE = 150;
+/** Headland: a coast cell at least HEADLAND_MIN_H m up, from which HEADLAND_RAYS of 16 rays reach the sea within
+ *  HEADLAND_RANGE m (a straight coast gives ~8). */
+export const HEADLAND_RAYS = 10;
+export const HEADLAND_RANGE = 260;
+export const HEADLAND_MIN_H = 8;
+/** Canyon bend: the course turns BEND_TURN degrees over two 40 m legs, between walls BEND_DEPTH m over the water/floor
+ *  on both sides (looked for 12-80 m out). */
+export const BEND_TURN = 25;
+export const BEND_DEPTH = 15;
 /** Score at or above which a site no walking body reaches from a road gets an access-device proposal. */
 export const ACCESS_SCORE = 5;
 /** How far from the site the foot of an access device may stand (m). */
@@ -295,6 +328,7 @@ export class Grid {
     readonly step: number,
     seaLevel: number,
     polygon: Vec2[],
+    planar = false,
   ) {
     this.nx = Math.floor((x1 - x0) / step) + 1;
     this.nz = Math.floor((z1 - z0) / step) + 1;
@@ -310,7 +344,8 @@ export class Grid {
         const x = x0 + i * step;
         const z = z0 + j * step;
         const k = j * this.nx + i;
-        const h = field.height(x, z);
+        // on planar (DC) terrain the drawn ground is the truth: stacks, lips and walls are not in height()
+        const h = planar && field.ground ? (field.ground(x, z) ?? field.height(x, z)) : field.height(x, z);
         this.h[k] = h;
         if (field.waterSurface(x, z, ws) && ws.y > h + 0.3) {
           this.wy[k] = ws.y;
@@ -458,6 +493,8 @@ export interface FindInput {
   margin?: number;
   /** Per-kind cap in the output. */
   perKind?: number;
+  /** Sample `field.ground` instead of `height` (a world with planarCliffs / seaCliffs / buttes: DC terrain). */
+  planar?: boolean;
 }
 
 export function findSites(input: FindInput): SiteReport {
@@ -466,7 +503,7 @@ export function findSites(input: FindInput): SiteReport {
   const xs = input.polygon.map((p) => p[0]);
   const zs = input.polygon.map((p) => p[1]);
   const box: [number, number, number, number] = [Math.min(...xs) - margin, Math.min(...zs) - margin, Math.max(...xs) + margin, Math.max(...zs) + margin];
-  const g = new Grid(input.field, box[0], box[1], box[2], box[3], step, input.seaLevel, input.polygon);
+  const g = new Grid(input.field, box[0], box[1], box[2], box[3], step, input.seaLevel, input.polygon, input.planar ?? false);
   const { nx, nz } = g;
   const raw: Raw[] = [];
   const stride = 2; // ray-based detectors run on every 2nd cell (16 m)
@@ -888,6 +925,185 @@ export function findSites(input: FindInput): SiteReport {
     raw.push({ kind: "waterfall", x: f.x, z: f.z, score: 4 + Math.min(4, drop / 5), why: `${f.river} falls ${drop.toFixed(1)} m`, detail: { river: f.river, drop: +drop.toFixed(1) } });
   }
 
+  // ---- 8b. DC set pieces: what the opt-in planar features put on the map (fall lips and pools, stacks, headlands,
+  //      butte tops, canyon bends). Each is read from the field, so a world without those features finds none.
+  for (const f of input.field.falls ?? []) {
+    const drop = f.top - f.bottom;
+    const pours = compass(bearing(f.dirX, f.dirZ));
+    const lx = f.x - f.dirX * 3;
+    const lz = f.z - f.dirZ * 3;
+    const kl = g.cell(lx, lz);
+    if (kl >= 0 && g.zone[kl])
+      raw.push({ kind: "fall-lip", x: lx, z: lz, score: 5 + Math.min(3.5, drop / 10), why: `the lip of ${f.river}'s ${drop.toFixed(1)} m fall, pouring ${pours}: stand over the drop`, detail: { river: f.river, drop: +drop.toFixed(1), top: +f.top.toFixed(1), pours } });
+    const d = Math.min(30, drop * 0.6) + 4;
+    const px = f.x + f.dirX * d;
+    const pz = f.z + f.dirZ * d;
+    const kp = g.cell(px, pz);
+    if (kp >= 0 && g.zone[kp])
+      raw.push({ kind: "plunge-pool", x: px, z: pz, score: 4.5 + Math.min(3.5, drop / 10), why: `the plunge pool ${Math.round(d)} m below ${f.river}'s ${drop.toFixed(1)} m fall: the curtain seen from the water`, detail: { river: f.river, drop: +drop.toFixed(1), bottom: +f.bottom.toFixed(1), lip: [Math.round(lx), Math.round(lz)] } });
+  }
+  // mainland: the dry components too big to be an island (stacks and islets are not it)
+  const mainland = new Uint8Array(nx * nz);
+  {
+    const lab = new Int32Array(nx * nz).fill(-1);
+    let next = 0;
+    for (let s0 = 0; s0 < nx * nz; s0++) {
+      if (lab[s0]! >= 0 || g.wet(s0)) continue;
+      const cells = [s0];
+      lab[s0] = next;
+      for (let q = 0; q < cells.length; q++) {
+        const k = cells[q]!;
+        const i = k % nx;
+        const j = (k - i) / nx;
+        for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+          const ii = i + di;
+          const jj = j + dj;
+          if (ii < 0 || jj < 0 || ii >= nx || jj >= nz) continue;
+          const kk = jj * nx + ii;
+          if (lab[kk]! < 0 && !g.wet(kk)) (lab[kk] = next), cells.push(kk);
+        }
+      }
+      if (cells.length * step * step > ISLAND_MAX_HA * 1e4) for (const k of cells) mainland[k] = 1;
+      next++;
+    }
+  }
+  /** Nearest mainland cell within `range` m of (x, z): its point and distance. */
+  const nearestMainland = (x: number, z: number, range: number): { at: Vec2; d: number } | null => {
+    const r = Math.ceil(range / step);
+    const i0 = Math.round((x - g.x0) / step);
+    const j0 = Math.round((z - g.z0) / step);
+    let best: { at: Vec2; d: number } | null = null;
+    for (let dj = -r; dj <= r; dj++)
+      for (let di = -r; di <= r; di++) {
+        const ii = i0 + di;
+        const jj = j0 + dj;
+        if (ii < 0 || jj < 0 || ii >= nx || jj >= nz || !mainland[jj * nx + ii]) continue;
+        const d = Math.hypot(di, dj) * step;
+        if (d <= range && (!best || d < best.d)) best = { at: [g.xOf(ii), g.zOf(jj)], d };
+      }
+    return best;
+  };
+  // headlands: coast standing over the sea with the sea on most sides
+  const headlands: Raw[] = [];
+  for (let j = 0; j < nz; j += stride)
+    for (let i = 0; i < nx; i += stride) {
+      const k = g.idx(i, j);
+      if (!g.zone[k] || !mainland[k] || g.h[k]! < input.seaLevel + HEADLAND_MIN_H) continue;
+      let coast = false;
+      for (let dj = -3; dj <= 3 && !coast; dj++)
+        for (let di = -3; di <= 3 && !coast; di++) {
+          const kk = g.cell(g.xOf(i) + di * step, g.zOf(j) + dj * step);
+          if (kk >= 0 && g.wkind[kk] === 3) coast = true;
+        }
+      if (!coast) continue;
+      let n = 0;
+      for (const d of DIRS16) {
+        let hit = false;
+        g.ray(i, j, d, HEADLAND_RANGE, (kk) => {
+          if (g.wkind[kk] === 3) hit = true;
+          return hit;
+        });
+        if (hit) n++;
+      }
+      if (n < HEADLAND_RAYS) continue;
+      const h = g.h[k]! - input.seaLevel;
+      headlands.push({ kind: "headland", x: g.xOf(i), z: g.zOf(j), score: 3.5 + (n - HEADLAND_RAYS + 1) * 0.7 + Math.min(2, h / 60), why: `headland ${Math.round(h)} m over the sea, sea on ${n}/16 sides within ${HEADLAND_RANGE} m`, detail: { seaRays: n, height: Math.round(h) } });
+    }
+  raw.push(...headlands);
+  // sea stacks, and clusters of them a bridge chain could join
+  const stacks = (input.field.seaCliffs?.()?.stacksIn(box[0], box[1], box[2], box[3]) ?? []).filter((t) => pointInPolygon(t.x, t.z, input.polygon));
+  const shoreOf = stacks.map((t) => nearestMainland(t.x, t.z, CLUSTER_SHORE + t.radius + 200));
+  stacks.forEach((t, n) => {
+    const over = t.top - input.seaLevel;
+    const shore = shoreOf[n] ? Math.max(0, shoreOf[n]!.d - t.radius) : Infinity;
+    raw.push({
+      kind: "sea-stack",
+      x: t.x,
+      z: t.z,
+      score: 4.5 + Math.min(2, over / 50) + (t.arch ? 1.5 : 0) + (shore <= 60 ? 0.5 : 0),
+      why: `sea stack ${Math.round(2 * t.radius)} m across, ${Math.round(over)} m over the sea, ${Number.isFinite(shore) ? `${Math.round(shore)} m off the cliff` : "far offshore"}${t.arch ? ", an arch joins it to the wall" : ""}`,
+      detail: { radius: +t.radius.toFixed(1), top: Math.round(t.top), arch: t.arch, shore: Number.isFinite(shore) ? Math.round(shore) : null },
+    });
+  });
+  {
+    const group = stacks.map((_, n) => n);
+    const root = (n: number): number => (group[n] === n ? n : (group[n] = root(group[n]!)));
+    for (let a = 0; a < stacks.length; a++)
+      for (let b = a + 1; b < stacks.length; b++) if (Math.hypot(stacks[a]!.x - stacks[b]!.x, stacks[a]!.z - stacks[b]!.z) <= CLUSTER_LINK) group[root(a)] = root(b);
+    const sets = new Map<number, number[]>();
+    stacks.forEach((_, n) => sets.set(root(n), [...(sets.get(root(n)) ?? []), n]));
+    for (const members of sets.values()) {
+      if (members.length < 2) continue;
+      const gapOf = (n: number): number => shoreOf[n]!.d - stacks[n]!.radius;
+      const near = members.filter((n) => shoreOf[n] && gapOf(n) <= CLUSTER_SHORE).sort((a, b) => gapOf(a) - gapOf(b));
+      if (!near.length) continue;
+      const first = near[0]!;
+      const cx = members.reduce((s2, n) => s2 + stacks[n]!.x, 0) / members.length;
+      const cz = members.reduce((s2, n) => s2 + stacks[n]!.z, 0) / members.length;
+      // the chain: each stack to its nearest neighbour, edge to edge
+      const gaps = members.map((a) => Math.min(...members.filter((b) => b !== a).map((b) => Math.hypot(stacks[a]!.x - stacks[b]!.x, stacks[a]!.z - stacks[b]!.z) - stacks[a]!.radius - stacks[b]!.radius)));
+      const head = headlands.filter((h) => Math.hypot(h.x - stacks[first]!.x, h.z - stacks[first]!.z) <= 300).sort((a, b) => b.score - a.score)[0];
+      const meanTop = members.reduce((s2, n) => s2 + stacks[n]!.top, 0) / members.length - input.seaLevel;
+      const size = members.length;
+      const shoreGap = Math.max(0, gapOf(first));
+      raw.push({
+        kind: "stack-cluster",
+        x: cx,
+        z: cz,
+        score: 5.5 + Math.min(size, CLUSTER_MAX) * 0.5 - Math.max(0, size - CLUSTER_MAX) * 0.6 + (head ? 1.5 : 0) + Math.min(1, meanTop / 100),
+        why: `${size} sea stacks at most ${Math.round(Math.max(...gaps))} m apart (edge to edge), the nearest ${Math.round(shoreGap)} m off ${head ? "a headland" : "the cliff"}${size > CLUSTER_MAX ? " (more than a bridge chain: pick a few)" : ""}: a bridge chain or a ferry rock`,
+        detail: {
+          stacks: members.map((n) => ({ at: [Math.round(stacks[n]!.x), Math.round(stacks[n]!.z)], radius: +stacks[n]!.radius.toFixed(1), top: Math.round(stacks[n]!.top), arch: stacks[n]!.arch })),
+          gaps: gaps.map((v) => Math.round(v)),
+          shore: { stack: [Math.round(stacks[first]!.x), Math.round(stacks[first]!.z)], to: shoreOf[first]!.at, gap: Math.round(shoreGap) },
+          headland: head ? [Math.round(head.x), Math.round(head.z)] : null,
+        },
+      });
+    }
+  }
+  // butte and mesa tops (a spire is a landmark, not somewhere to stand)
+  for (const m of input.field.buttes?.()?.monumentsIn(box[0], box[1], box[2], box[3]) ?? []) {
+    if (m.kind === "spire" || !pointInPolygon(m.x, m.z, input.polygon)) continue;
+    let plain = Infinity;
+    for (const d of DIRS16) plain = Math.min(plain, g.ground(m.x + d[0] * (m.radius + 60), m.z + d[1] * (m.radius + 60)));
+    const rise = m.top - plain;
+    raw.push({ kind: "butte-top", x: m.x, z: m.z, score: 5 + Math.min(3.5, rise / 30) + (m.kind === "mesa" ? 0.5 : 0), why: `${m.kind} top ~${Math.round(2 * m.radius)} m across, ${Math.round(rise)} m over the plain: a summit hold seen from all round`, detail: { monument: m.kind, top: Math.round(m.top), rise: Math.round(rise), radius: Math.round(m.radius) } });
+  }
+  // canyon bends: a river or canyon turning between high walls
+  {
+    const courses: { id: string; points: Vec2[] }[] = [...(input.field.rivers ?? []).map((r) => ({ id: r.id, points: r.points.map((p) => [p[0], p[1]] as Vec2) })), ...(input.canyons ?? [])];
+    for (const c of courses) {
+      const pts = resample(c.points, 8);
+      for (let i = 5; i + 5 < pts.length; i++) {
+        const a = pts[i - 5]!;
+        const b = pts[i]!;
+        const e = pts[i + 5]!;
+        const h1 = Math.atan2(b[1] - a[1], b[0] - a[0]);
+        const h2 = Math.atan2(e[1] - b[1], e[0] - b[0]);
+        let turn = (Math.abs(h2 - h1) * 180) / Math.PI;
+        if (turn > 180) turn = 360 - turn;
+        if (turn < BEND_TURN) continue;
+        const k = g.cell(b[0], b[1]);
+        if (k < 0 || !g.zone[k]) continue;
+        const floor = g.wet(k) ? g.wy[k]! : g.h[k]!;
+        const ux = e[0] - a[0];
+        const uz = e[1] - a[1];
+        const ul = Math.hypot(ux, uz) || 1;
+        const side = (sgn: number): number => {
+          let hi = -Infinity;
+          for (let d = 12; d <= 80; d += 8) hi = Math.max(hi, g.ground(b[0] - (uz / ul) * sgn * d, b[1] + (ux / ul) * sgn * d));
+          return hi - floor;
+        };
+        const depth = Math.min(side(1), side(-1));
+        if (depth < BEND_DEPTH) continue;
+        // the outside of the bend: away from the turn
+        const cross = (b[0] - a[0]) * (e[1] - b[1]) - (b[1] - a[1]) * (e[0] - b[0]);
+        const out = cross > 0 ? -1 : 1;
+        raw.push({ kind: "canyon-bend", x: b[0], z: b[1], score: 4 + Math.min(2, turn / 30) + Math.min(3, depth / 15), why: `${c.id} turns ${Math.round(turn)}° between walls ${Math.round(depth)} m high: the view up the gorge opens here`, detail: { course: c.id, turn: Math.round(turn), depth: Math.round(depth), outside: compass(bearing(-(uz / ul) * out, (ux / ul) * out)) } });
+      }
+    }
+  }
+
   // ---- 9. paths: dead ends, climbing tops, hairpins, wasted climbs
   const paths: PathFinding[] = [];
   const connected = (x: number, z: number, self: string): string | null => {
@@ -1134,7 +1350,7 @@ export function findSites(input: FindInput): SiteReport {
   }
 
   // ---- rank, suppress, approach
-  const sep: Record<SiteKind, number> = { "cliff-water": 160, "canyon-end": 200, plateau: 250, peak: 250, saddle: 220, "wall-gap": 220, cove: 220, waterfall: 60, "path-end": 40, switchback: 120, "empty-land": 1, island: 30, access: 1 };
+  const sep: Record<SiteKind, number> = { "cliff-water": 160, "canyon-end": 200, plateau: 250, peak: 250, saddle: 220, "wall-gap": 220, cove: 220, waterfall: 60, "path-end": 40, switchback: 120, "empty-land": 1, island: 30, access: 1, "fall-lip": 40, "plunge-pool": 40, "sea-stack": 40, "stack-cluster": 150, headland: 300, "butte-top": 100, "canyon-bend": 120 };
   const perKind = input.perKind ?? 15;
   const kinds = [...new Set(raw.map((r) => r.kind))];
   const kept = kinds.flatMap((kind) => suppress(raw.filter((r) => r.kind === kind), sep[kind]).slice(0, kind === "path-end" || kind === "empty-land" ? 99 : perKind));

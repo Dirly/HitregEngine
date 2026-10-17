@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { checkCatalog } from './catalog-check.mjs';
+import { checkCatalog, isDcModel, seeThroughProp } from './catalog-check.mjs';
 
 function fixture(t) {
   const parent = fs.realpathSync(os.tmpdir()), project = fs.mkdtempSync(path.join(parent, 'hitreg-catalog-'));
@@ -87,4 +87,24 @@ test('structurally invalid declarations fail', t => {
   f.write('authoring/dressing.json', { version: 1, props: { brazier: { mount: 'slot', size: [0.9, 0, 0.8], provides: [{ id: 'bay', kind: 'slot' }] } } });
   const failures = f.check(['assets/prefabs/brazier.json']).failures.join('\n');
   assert.match(failures, /three positive metres/); assert.match(failures, /must name its slotKind/); assert.match(failures, /accepts nothing/);
+});
+
+test('a big DC prop needs a passing see-through review newer than its model', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'see-through-prop-'));
+  const glb = (generator) => { const j = Buffer.from(JSON.stringify({ asset: { version: '2.0', generator } }).padEnd(48, ' ')); const h = Buffer.alloc(20); h.writeUInt32LE(0x46546c67, 0); h.writeUInt32LE(2, 4); h.writeUInt32LE(20 + j.length, 8); h.writeUInt32LE(j.length, 12); h.writeUInt32LE(0x4e4f534a, 16); return Buffer.concat([h, j]); };
+  const dc = path.join(root, 'ship.glb'), plain = path.join(root, 'tent.glb');
+  fs.writeFileSync(dc, glb('HitReg scoped carved DC library (coplanar-merged)'));
+  fs.writeFileSync(plain, glb('Blockbench'));
+  assert.equal(isDcModel(dc), true);
+  assert.equal(isDcModel(plain), false);
+  assert.equal(seeThroughProp({ id: 'wrecks/ship', size: [4, 3, 6], models: [dc], root }), null); // small
+  assert.equal(seeThroughProp({ id: 'camp/tent', size: [12, 5, 9], models: [plain], root }), null); // not DC
+  assert.match(seeThroughProp({ id: 'wrecks/ship', size: [30, 9, 8], models: [dc], root }), /no see-through review/);
+  const rep = path.join(root, 'authoring', 'prop-reviews', 'see-through', 'wrecks__ship.json');
+  fs.mkdirSync(path.dirname(rep), { recursive: true });
+  fs.writeFileSync(rep, JSON.stringify({ ok: false, counts: { sites: 3 } }));
+  assert.match(seeThroughProp({ id: 'wrecks/ship', size: [30, 9, 8], models: [dc], root }), /3 hole site/);
+  fs.writeFileSync(rep, JSON.stringify({ ok: true, counts: { sites: 0 } }));
+  const later = new Date(Date.now() + 60000); fs.utimesSync(rep, later, later);
+  assert.equal(seeThroughProp({ id: 'wrecks/ship', size: [30, 9, 8], models: [dc], root }), null);
 });

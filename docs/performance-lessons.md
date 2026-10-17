@@ -514,6 +514,54 @@ FIRST play of any spell created 10–12 pipelines on the main thread — a
 Cheap guard for next time: play the effect twice and compare pipeline
 counts — if the second play is zero, it was compile, not the effect.
 
+### 2026-10-09: it still stalled — the warmup compiled nothing, and every module was its own shader
+
+"I cast a spell and it chunks my fps." Measured with
+`projects/foundation/tools/spell-perf.mjs` (casts every spell ability at the
+dummy through the real combat scripts, prints the worst frame and every shader
+codegen per cast, named by material): first casts 100–700 ms, 30–50 builds of
+~10 ms each, and 11 more builds every few seconds even on repeat casts. Five
+causes, all fixed:
+
+- **The render-object sweep freed the post chain every ~4 s.** Three records
+  its own placeholder Scene as `renderObject.scene` for anything drawn without
+  a `THREE.Scene` (every post-processing QuadMesh). Nothing ever renders the
+  placeholder, so the sweep judged the quads "made for a scene no longer
+  drawn" and disposed them; bloom ×7, sharpen, RTT and the output pass
+  rebuilt next frame (25–50 ms), casting or not. The scene check now only
+  counts scenes that were ever passed to `render()` (render-object-sweep.ts).
+- **A VFX module's shader was per INSTANCE.** Three keys a shader by its node
+  graph, and a node's key defaults to its `id` — so a graph built per instance
+  is a shader built per instance, and every pooled module a spell needed (and
+  every second caster of the same spell) paid ~10 ms. Module materials are now
+  shared per LOOK (blend, sheet, halo, grid…): the graph is built once with
+  `uniform().onObjectUpdate(...)` nodes reading each mesh's own values
+  (`vfx/shaders.ts` `sharedUniforms` / `objectUniform` / `bindValues`). Twelve
+  more shells after the first cost 0 builds. Any new TSL material that is
+  instantiated per object should follow the same pattern.
+- **The warmup skipped every transparent mesh** — i.e. all of VFX — because
+  `compileInSceneContext` hides transparent materials (the water's depth read
+  fails when compiled off-frame). Materials that read no scene depth or colour
+  now opt in with `material.userData[PRECOMPILE_SAFE] = true`
+  (precompile-safe.ts): every `unlitMaterial`, particle batches without soft
+  fade, the VFX mesh bodies.
+- **Transparent + DoubleSide draws twice.** Three renders such a material as
+  a back-face pass then a front-face pass: two draws per effect mesh AND two
+  shader builds per look. `unlitMaterial` sets `forceSinglePass`.
+- **The warm compiled for the wrong context.** It ran on the editor's first
+  frame; Play draws through a post chain with another render-target layout,
+  so every warmed pipeline failed validation there ("Color target has no
+  corresponding fragment stage output"), was healed away, and rebuilt on first
+  cast. The editor now warms per (mode, built scene), one warm at a time, and
+  `VfxSystem.warmSpells(spells, …, effects)` compiles every distinct look the
+  project's spells and `vfx` assets draw (73 looks, ~1.5 s at load).
+
+Result: first casts 0–2 VFX builds (soft-faded particles cannot be
+precompiled), worst frames 14–28 ms against a 7 ms median; repeat casts 0
+builds. Left over, not VFX: the first time something is TARGETED, its
+unit-frame face shot (`face-shots.ts`) compiles the body's materials for its
+own render target — 70–150 ms per new look.
+
 ## Particles: sharing a program is not sharing a draw — batch emitters by look
 
 Found 2026-09-13 on a seven-fire test scene that drew **94 draw calls**. The
@@ -1866,3 +1914,21 @@ Measured as an fps timeline after `?scene=proving` loads (edit mode, editor UI v
   alone can exceed the 50 ms data-op budget.
 After: steady 60 fps at ~80 s, worst frame 12.9 s. Probe: an rAF fps timeline from page load in
 edit mode (play-mode probes that wait 60 s for "settle" never see any of this).
+
+## One shader over WebGPU's inter-stage limit dropped whole frames' work (2026-10-10)
+
+The rock impostor page (`rock-cap-impostor-page`, trees and rock-cap rocks in one draw) needed 18
+vertex outputs; WebGPU guarantees 16 (`maxInterStageShaderVariables`). The pipeline failed to
+build, and an invalid pipeline does not just skip its own draw: every command encoder that sets it
+is invalid ("[Invalid RenderPipeline] is invalid due to a previous error", logged against
+unrelated pipelines), so distant rocks were missing and a cliffy view measured ~2 ms more GPU than
+a rock-free copy of the world even with every near rock hidden. With the shader packed, that view
+is +0.7 ms over the copy, all of it rock geometry (near rock-cap batches and their shadows).
+
+Why the count ran away: TSL makes a varying for every attribute the FRAGMENT graph reaches (an
+`instanceMatrixNode()` there is four), and every `vertexStage(...)` call is a new varying even for
+the same attribute (`vegetationMaskTintNode` called once per blended frame was six). The impostor
+shader now decides its frames once per vertex and hands the fragment stage five packed vec4s
+(`impostor.ts`); `test/impostor-varyings.test.ts` counts fragment-reachable varyings and stray
+attributes on the node graph, so a new per-instance term has to be packed to land. Check any
+console run for "infringes limits" / "Invalid RenderPipeline" before measuring GPU time.

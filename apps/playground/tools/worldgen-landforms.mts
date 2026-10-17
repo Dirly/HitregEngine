@@ -545,6 +545,8 @@ interface Built {
   blobs: BlobDoc[];
   fills: FillDoc[];
   notes: string[];
+  /** Component ids not built (a raise landform in a flattened zone). */
+  dropped: string[];
 }
 
 /** Signed distance (m, + outside) to a component's outline, on a local window of the label grid. */
@@ -635,8 +637,35 @@ function tableFill(id: string, c: Component, g: Grid, field: WorldField, rand: (
     note: `top ${top} m (+${r1(rise)} over q${mesa ? 90 : 85} ground), bank ${r1(bank)} m, ${rays}-point outline`,
   };
 }
+/** Classes that RAISE ground into a table or a crest: never in a flattened (swamp, fen) zone. */
+const FLAT_ZONE_BARRED = new Set(["mesa", "plateau", "ridge-spur"]);
+/** Share of a component's cells that may lie in a flattened zone before it is dropped. */
+const FLAT_ZONE_MAX_SHARE = 0.25;
+
+/**
+ * Share of a component's cells in a zone whose blended anchor `flatten` is
+ * over 0.5 — a swamp or a fen, which is level ground by definition. A
+ * plateau standing in one put the marsh 130 m up on a table.
+ */
+export function flatZoneShare(recipe: WorldRecipe, field: WorldField, c: Component, g: Grid): number {
+  const anchors = recipe.climate.zones?.anchors ?? [];
+  if (!anchors.some((a) => a.flatten > 0.5)) return 0;
+  const stride = Math.max(1, Math.floor(c.cells.length / 96));
+  let n = 0;
+  let flat = 0;
+  for (let k = 0; k < c.cells.length; k += stride) {
+    const [x, z] = cellXZ(c.cells[k]!, g.n, g.cell, g.m);
+    const w = field.zone(x, z).weights;
+    let f = 0;
+    anchors.forEach((a, i) => (f += (w[i] ?? 0) * a.flatten));
+    n++;
+    if (f > 0.5) flat++;
+  }
+  return n > 0 ? flat / n : 0;
+}
+
 function buildFeatures(recipe: WorldRecipe, comps: Component[], g: Grid, field: WorldField): Built {
-  const out: Built = { ridges: [], canyons: [], blobs: [], fills: [], notes: [] };
+  const out: Built = { ridges: [], canyons: [], blobs: [], fills: [], notes: [], dropped: [] };
   const counters = new Map<string, number>();
   const sea = recipe.seaLevel;
   for (const c of comps) {
@@ -644,6 +673,15 @@ function buildFeatures(recipe: WorldRecipe, comps: Component[], g: Grid, field: 
     const k = (counters.get(cls.id) ?? 0) + 1;
     counters.set(cls.id, k);
     const base = `${PREFIX}${cls.id}-${k}`;
+    // numbered before the drop, so the other components keep their ids
+    if (FLAT_ZONE_BARRED.has(cls.id)) {
+      const share = flatZoneShare(recipe, field, c, g);
+      if (share > FLAT_ZONE_MAX_SHARE) {
+        out.dropped.push(base);
+        out.notes.push(`${base.padEnd(30)} DROPPED: ${Math.round(share * 100)}% of it lies in a flattened (swamp/fen) zone`);
+        continue;
+      }
+    }
     // seeded per component: world seed + class + where it is (not its index),
     // so adding a landform elsewhere does not reshuffle this one
     const seed = hash32(`${recipe.seed}:${cls.id}:${Math.round(c.cx / 10)}:${Math.round(c.cz / 10)}`);
@@ -794,7 +832,7 @@ interface Ledger {
   options: ClassifyOptions;
   base: BaseMapping;
   ids: { ridges: string[]; canyons: string[]; blobs: string[]; fills?: string[]; heightPatches?: string[] };
-  components: { id: string; class: string; area: number; center: [number, number]; length: number; width: number; reach: number; cells: number }[];
+  components: { id: string; class: string; area: number; center: [number, number]; length: number; width: number; reach: number; cells: number; dropped?: string }[];
 }
 
 function readLedger(dir: string): Ledger | null {
@@ -891,7 +929,8 @@ function commandApply(host: LandformsHost, world: string): void {
       const cls = LANDFORM_CLASSES[c.cls]!.id;
       const k = (counters.get(cls) ?? 0) + 1;
       counters.set(cls, k);
-      return { id: `${PREFIX}${cls}-${k}`, class: cls, area: Math.round(c.area), center: [Math.round(c.cx), Math.round(c.cz)], length: Math.round(c.length), width: Math.round(c.width), reach: Math.round(c.reach), cells: c.cells.length };
+      const id = `${PREFIX}${cls}-${k}`;
+      return { id, ...(built.dropped.includes(id) ? { dropped: "flat zone (swamp/fen)" } : {}), class: cls, area: Math.round(c.area), center: [Math.round(c.cx), Math.round(c.cz)], length: Math.round(c.length), width: Math.round(c.width), reach: Math.round(c.reach), cells: c.cells.length };
     }),
   };
   fs.writeFileSync(path.join(dir, "ledger.json"), `${JSON.stringify(ledger, null, 2)}\n`);
@@ -924,6 +963,8 @@ function commandCheck(host: LandformsHost, world: string): void {
   const findings: string[] = [];
   const sea = recipe.seaLevel;
   const ids = ledger.components.map((c) => c.id);
+  // components apply dropped (a raise in a flattened zone) are not on the ground
+  const droppedAt = new Set(ledger.components.flatMap((c, k) => (c.dropped ? [k] : [])));
 
   // 0. features a later stage wiped (`worldgen canyons` rewrites every canyon)
   const lost = lostIds(recipe, ledger);
@@ -940,6 +981,7 @@ function commandCheck(host: LandformsHost, world: string): void {
   }
   let covered = 0;
   components.forEach((c, k) => {
+    if (droppedAt.has(k)) return;
     const cls = LANDFORM_CLASSES[c.cls]!;
     const id = ids[k] ?? `${cls.id}?`;
     const onLand = c.cells.reduce((s, i) => s + isLand[i]!, 0) / c.cells.length;
@@ -963,6 +1005,7 @@ function commandCheck(host: LandformsHost, world: string): void {
   // and any feature under a landform-* height patch (none are written now; hand-added ones apply after every feature)
   const influence = (cls: string): number => (cls === "plateau" ? 90 : cls === "ridge-spur" ? 120 : cls === "mesa" ? 20 : 60);
   for (let a = 0; a < components.length; a++) for (let b = a + 1; b < components.length; b++) {
+    if (droppedAt.has(a) || droppedAt.has(b)) continue;
     const A = components[a]!, B = components[b]!;
     const ca = LANDFORM_CLASSES[A.cls]!.id, cb = LANDFORM_CLASSES[B.cls]!.id;
     const incompatible = (RAISE.has(ca) && CUT.has(cb)) || (CUT.has(ca) && RAISE.has(cb));

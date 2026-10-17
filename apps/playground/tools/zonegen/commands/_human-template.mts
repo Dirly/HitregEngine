@@ -3,7 +3,7 @@
  * becomes a dressed, armed, animated subtree cloned from a working PATTERN entity, instead of a capsule.
  *
  * Everything project-specific is DECLARED in `authoring/zonegen/human-template.json`:
- *   pattern    { scene, entity }  a placed armed hostile human (root: rigidbody + collider + controller; children:
+ *   pattern    { scene, entity }  (scene found across the dependsOn closure) a placed armed hostile human (root: rigidbody + collider + controller; children:
  *              visual/animator, character-look mounts, bone-socket weapon + equipment-look, character-sheet,
  *              weapon-stance, mob-brain, combat-actor, combat-caster)
  *   creation   the creation asset whose appearance options the look is picked from (hash of the template id)
@@ -102,8 +102,8 @@ export function loadHumanKit(projectDir: string, f: Finding[]): HumanKit | null 
     f.push({ level: "error", code: "human-template", message: `${path.basename(file)}: ${message}` });
     return null;
   };
-  const assets = path.join(projectDir, "assets");
-  const sceneFile = path.join(assets, "scenes", `${cfg.pattern.scene}.scene.json`);
+  // the pattern scene resolves through the dependsOn closure (a shared pattern lives in foundation)
+  const sceneFile = assetPath(projectDir, `scenes/${cfg.pattern.scene}.scene.json`);
   if (!fs.existsSync(sceneFile)) return bad(`pattern scene ${cfg.pattern.scene} not found`);
   const scene = read(sceneFile) as { entities: Record<string, EntityDoc> };
   const rootId = cfg.pattern.entity;

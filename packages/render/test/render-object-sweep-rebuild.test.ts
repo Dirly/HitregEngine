@@ -61,4 +61,21 @@ describe("render object sweep across a scene rebuild", () => {
     expect(disposed).toEqual([{ object: chunk, scene: oldScene }]);
     expect(sweep.stats.live).toBe(1); // the new scene's render object stays
   });
+
+  it("keeps the render objects of a root drawn without a Scene (post-processing quads)", () => {
+    // three records its own placeholder Scene for a QuadMesh drawn on its own;
+    // the placeholder is never passed to render()
+    const camera = new THREE.PerspectiveCamera();
+    const placeholder = new THREE.Scene();
+    const quad = new THREE.Mesh();
+    const { renderer, disposed } = fakeRenderer();
+    const sweep = trackRenderObjects(renderer)!;
+    const internals = renderer as unknown as { _objects: { createRenderObject(o: THREE.Object3D, s: THREE.Object3D): unknown } };
+    internals._objects.createRenderObject(quad, placeholder);
+    for (let i = 0; i < 4; i++) {
+      renderer.render(quad, camera);
+      expect(sweep.sweep()).toBe(0);
+    }
+    expect(disposed).toEqual([]);
+  });
 });

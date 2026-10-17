@@ -178,6 +178,19 @@ describe("weather fronts", () => {
     expect(late.overcast!).toBeGreaterThan(0.99);
   });
 
+  it("dims a snowfall by snowGloom's share of the gloom, and nothing else about it", () => {
+    biomeField = () => ({ tundra: 1 });
+    const snow = (snowGloom: number) => run(150, { force: "storm", changeMinutes: 4, fadeSeconds: 2, snowGloom }).last();
+    const full = snow(1);
+    const half = snow(0.5);
+    biomeField = null;
+    expect(full.weather!.gloom!).toBeGreaterThan(0.3);
+    expect(half.weather!.gloom!).toBeCloseTo(full.weather!.gloom! * 0.5, 3);
+    expect(half.weather!.cloudDark!).toBeCloseTo(full.weather!.cloudDark!, 5);
+    expect(half.weather!.overcast!).toBeCloseTo(full.weather!.overcast!, 5);
+    expect(half.fog!.density!).toBeCloseTo(full.fog!.density!, 8);
+  });
+
   it("leans the rain downwind, and the streaks carry the wind's own speed", () => {
     const { emitters } = run(150, { force: "storm", changeMinutes: 4, rainWind: 14, rainSpeed: 24 });
     const rain = emitters.get("weather-rain")!;

@@ -291,6 +291,61 @@ function fbm2Eroded(spec: FbmSpec, x: number, z: number, worldSeed: number, eros
   return (sum / (norm || 1)) * spec.amplitude;
 }
 
+/**
+ * Musgrave's ridged multifractal, 2D, raw (not scaled by `spec.amplitude`).
+ *
+ * Each octave folds the noise into a ridge `(offset - |n|)^2` and is weighted
+ * by the PREVIOUS octave's ridge times `gain` (clamped to 1): detail piles up
+ * on crests and dies out in valleys, which is what makes a range read as
+ * ridgelines and drainage rather than as uniformly crinkled lumps. Every
+ * octave's lattice is turned by `rotate` radians and scaled by `lacunarity`,
+ * so no two octaves share grid axes. `crest` rounds the fold as in
+ * {@link fbm2}. Range about 0..`offset^2 * sum(lacunarity^(-iH))`; the caller
+ * normalizes. Pure and deterministic like every band here.
+ */
+export function ridgedMultifractal2(
+  spec: FbmSpec,
+  x: number,
+  z: number,
+  worldSeed: number,
+  offset: number,
+  gain: number,
+  H: number,
+  rotCos: number,
+  rotSin: number,
+): number {
+  const seed = (worldSeed + spec.seed) | 0;
+  const crest = spec.crest ?? 0;
+  const octaves = Math.max(1, Math.floor(spec.octaves));
+  let px = x * spec.frequency;
+  let pz = z * spec.frequency;
+  let n = perlin2(px, pz, seed);
+  let a = crest > 0 ? Math.sqrt(n * n + crest * crest) - crest : Math.abs(n);
+  let signal = offset - a;
+  signal *= signal;
+  let result = signal;
+  let weightOct = 1;
+  const lac = spec.lacunarity;
+  const fallOff = Math.pow(lac, -H);
+  for (let o = 1; o < octaves; o++) {
+    // turn and scale the lattice
+    const nx = (px * rotCos - pz * rotSin) * lac;
+    const nz = (px * rotSin + pz * rotCos) * lac;
+    px = nx + 17.31 * o;
+    pz = nz - 9.77 * o;
+    let w = signal * gain;
+    if (w > 1) w = 1;
+    else if (w < 0) w = 0;
+    n = perlin2(px, pz, (seed + o * 1013) | 0);
+    a = crest > 0 ? Math.sqrt(n * n + crest * crest) - crest : Math.abs(n);
+    signal = offset - a;
+    signal *= signal * w;
+    weightOct *= fallOff;
+    result += signal * weightOct;
+  }
+  return result;
+}
+
 /** 3D fBm — the overhang/cave bands, where the field genuinely needs a volume. */
 export function fbm3(spec: FbmSpec, x: number, y: number, z: number, worldSeed: number): number {
   const seed = (worldSeed + spec.seed) | 0;

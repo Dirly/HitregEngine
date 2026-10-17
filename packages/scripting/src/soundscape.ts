@@ -1,3 +1,4 @@
+import type { RegionSound, RegionSoundBands } from "@hitreg/core";
 import { Script, type BiomeAt, type ScriptCommandDecl } from "./script.js";
 
 /**
@@ -78,6 +79,17 @@ const DEFAULT_BIOME_ALIAS: Record<string, string> = { seabed: "beach", mountains
 const COASTAL = ["beach", "seabed"];
 const MOUNTAIN = ["montane", "alpine", "crag", "highland"];
 const DRY = ["desert", "badlands", "savanna"];
+const DEFAULT_STILL_WATER_BEDS: Record<string, string> = {
+  marsh: "ambience/water/swamp-water.ogg",
+  swamp: "ambience/water/swamp-water.ogg",
+  fen: "ambience/water/swamp-water.ogg",
+};
+
+/** A region sound's value for one band: the band's own, else `*`; `{band}` filled in. */
+export function regionBand(bands: RegionSoundBands | undefined, band: string): string | undefined {
+  const v = bands ? ((bands as Record<string, string | undefined>)[band] ?? bands["*"]) : undefined;
+  return v ? v.replace(/{band}/g, band) : undefined;
+}
 
 interface Voice {
   slot: string;
@@ -131,6 +143,12 @@ export class Soundscape extends Script {
     townBiomeMix: { default: 0.45, min: 0, max: 1, description: "How much of the biome bed is left under the town layer." },
     riverBed: { default: "ambience/water/river-medium.ogg", description: "Bed near flowing water." },
     lakeBed: { default: "ambience/water/lake-shore-lapping.ogg", description: "Bed near still inland water." },
+    stillWaterBeds: {
+      default: DEFAULT_STILL_WATER_BEDS,
+      description:
+        "Still-water kind (the world's water kind: lake, marsh...) or biome id -> bed played near still water there instead of lakeBed. " +
+        "The water's own kind is tried first, then the dominant biome; a zone's `sound.stillWater` beats both.",
+    },
     oceanBed: { default: "ambience/water/ocean-shore-calm.ogg", description: "Bed near the sea (water in beach/seabed country)." },
     waterRadius: { default: 28, min: 1, max: 120, description: "Metres at which a water bed starts to be heard; full at the water's edge." },
     waterMix: { default: 0.9, min: 0, max: 2, description: "Water bed gain at the edge." },
@@ -191,6 +209,8 @@ export class Soundscape extends Script {
   private strikeIn = 0;
   private bellAt: [number, number, number] | null = null;
   private variantCache = new Map<string, string[]>();
+  /** The zone's own sound at the last sample (recipe `regions[].sound`), or null. */
+  private regionSound: RegionSound | null = null;
   private status = { biomes: {} as Record<string, number>, bands: {} as Record<string, number>, region: "", zone: "", combat: false, underwater: false };
 
   override onStart(): void {
@@ -336,6 +356,8 @@ export class Soundscape extends Script {
     const biomes = this.biomeBlend(x, z);
     const region = this.ctx.regionAt?.(x, z) ?? null;
     const town = !!region?.tags.includes("town");
+    const sound: RegionSound | undefined = region?.sound;
+    this.regionSound = sound ?? null;
     const zoneHit = this.activeZone(player.position);
     const water = this.ctx.waterAt?.(x, y + this.param<number>("headHeight"), z) ?? null;
     const underwater = !!water && water.depth > 0;
@@ -345,11 +367,17 @@ export class Soundscape extends Script {
     const amb = this.param<number>("ambienceVolume");
     // an interior swallows most of the outdoors
     const outdoor = zoneHit ? 1 - zoneHit.weight * (1 - zoneHit.zone.outdoorMix) : 1;
-    const biomeGain = amb * outdoor * (town ? this.param<number>("townBiomeMix") : 1);
+    const placeGain = amb * outdoor * (town ? this.param<number>("townBiomeMix") : 1);
+    // a zone's own bed replaces the biome beds (all but `biomeMix` of them)
+    const zoneBed = !!sound?.bed;
+    const biomeGain = placeGain * (zoneBed ? sound!.biomeMix : 1);
     for (const [biome, share] of Object.entries(biomes)) {
       for (const band of BANDS) {
         if (bands[band] > 0) add(this.bedFor(biome, band), share * bands[band] * biomeGain);
       }
+    }
+    if (zoneBed) {
+      for (const band of BANDS) if (bands[band] > 0) add(regionBand(sound!.bed, band), bands[band] * placeGain * sound!.bedMix);
     }
     const day = bands.day + bands.dawn * 0.5 + bands.dusk * 0.5;
     if (town) {
@@ -363,20 +391,25 @@ export class Soundscape extends Script {
       const R = this.param<number>("waterRadius");
       let near = Infinity;
       let flowing = false;
+      let kind: string | undefined;
       for (const scale of [0, 0.35, 1]) {
         for (const [dx, dz] of scale === 0 ? [[0, 0] as const] : RING) {
           const wx = x + dx * R * scale, wz = z + dz * R * scale;
           const w = this.ctx.waterAt(wx, y + 50, wz);
           if (!w) continue;
           const d = Math.hypot(wx - x, wz - z);
-          if (d < near) near = d;
-          if (Math.hypot(w.current[0], w.current[1]) > 0.08) flowing = true;
+          if (d < near) {
+            near = d;
+            kind = w.kind;
+          }
+          if (Math.hypot(w.current[0], w.current[1]) > 0.08 || w.kind === "river") flowing = true;
         }
         if (near < Infinity) break;
       }
       if (near < Infinity) {
-        const coastal = COASTAL.reduce((a, b) => a + (biomes[b] ?? 0), 0) > 0.15;
-        const bed = flowing ? this.param<string>("riverBed") : coastal ? this.param<string>("oceanBed") : this.param<string>("lakeBed");
+        // a world that reports its water's kind says sea or not; one that does not is judged by the country
+        const coastal = kind !== undefined ? kind === "sea" : COASTAL.reduce((a, b) => a + (biomes[b] ?? 0), 0) > 0.15;
+        const bed = flowing ? this.param<string>("riverBed") : coastal ? this.param<string>("oceanBed") : this.stillBed(kind, biomes, sound);
         add(bed, amb * outdoor * this.param<number>("waterMix") * Math.max(0.25, 1 - near / R));
       }
     }
@@ -410,6 +443,10 @@ export class Soundscape extends Script {
     } else if (zoneHit && zoneHit.weight > 0.5 && zoneHit.zone.music) {
       context = `zone:${zoneHit.zone.music}`;
       list = this.split(zoneHit.zone.music.replace(/\{daynight\}/g, daynight));
+    } else if (sound?.music && regionBand(sound.music, dominantBand(bands)) && region) {
+      const band = dominantBand(bands);
+      context = `region:${region.id}:${band}`;
+      list = this.split(regionBand(sound.music, band)!.replace(/{daynight}/g, daynight));
     } else if (town && region) {
       context = `town:${region.id}:${daynight}`;
       list = this.townTracks(region.id, biomes, daynight);
@@ -431,6 +468,16 @@ export class Soundscape extends Script {
         this.musicGap = this.param<number>("combatFadeOut") + 4;
       } else this.startTrack(this.param<number>("musicFade"));
     }
+  }
+
+  /** The bed near still water: the zone's own, else by the water's kind, else by the dominant biome, else lakeBed. */
+  private stillBed(kind: string | undefined, biomes: Record<string, number>, sound: RegionSound | undefined): string {
+    if (sound?.stillWater) return sound.stillWater;
+    const table = this.param<Record<string, string>>("stillWaterBeds") ?? {};
+    if (kind && table[kind] && this.exists(table[kind]!)) return table[kind]!;
+    const dominant = Object.entries(biomes).sort((a, b) => b[1] - a[1])[0]?.[0];
+    if (dominant && table[dominant] && this.exists(table[dominant]!)) return table[dominant]!;
+    return this.param<string>("lakeBed");
   }
 
   private fadeFor(context: string): number {
@@ -591,9 +638,14 @@ export class Soundscape extends Script {
     if (this.status.underwater) return;
     const zone = this.activeZone(player.position);
     let pool: string[];
+    const band = (Object.entries(this.status.bands).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "day") as Band;
+    const own = this.regionSound?.spots ? regionBand(this.regionSound.spots, band) : undefined;
     if (zone && zone.weight > 0.5) pool = this.split(zone.zone.spots);
-    else {
-      const band = (Object.entries(this.status.bands).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "day") as Band;
+    else if (own !== undefined) {
+      // the zone's own table: a town inside it still keeps its spot sounds rare
+      if (this.ctx.regionAt?.(player.position.x, player.position.z)?.tags.includes("town") && Math.random() > this.param<number>("townSpotChance")) return;
+      pool = this.split(own);
+    } else {
       const spots = this.param<Record<string, Partial<Record<Band | "*", string>>>>("spots") ?? {};
       const alias = this.param<Record<string, string>>("biomeAlias") ?? {};
       const biomes = Object.entries(this.status.biomes);
@@ -842,6 +894,13 @@ export class SoundEmitter extends Script {
       priority: 1,
     });
   }
+}
+
+/** The band with the most weight right now. */
+function dominantBand(bands: Record<Band, number>): Band {
+  let best: Band = "day";
+  for (const b of BANDS) if (bands[b] > bands[best]) best = b;
+  return best;
 }
 
 function split(list: string): string[] {

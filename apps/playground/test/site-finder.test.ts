@@ -117,3 +117,97 @@ test("strong sites with no walkable way up get an access device candidate", () =
   assert.ok(boat, "an access device for the island");
   assert.equal(boat.detail.device, "bridge-or-ferry");
 });
+
+// ---- DC set pieces (docs/voxel-worlds.md §30/§30a): the field reports stacks, monuments, falls and rivers itself, and
+// on planar terrain the DRAWN ground (field.ground) carries what height() lacks. A 60 m mainland west of x = 400 with a
+// headland jutting to x = 560 (|z| < 50), three stacks off it and one alone far out, a mesa, and a river in a 50 m deep
+// gorge that bends 45 degrees and falls 40 m.
+const gorge: [number, number][] = [[-500, -300], [-200, -300], [-100, -300], [-40, -240], [20, -180], [80, -120]];
+const gorgeDist = (x: number, z: number): number => {
+  let d = Infinity;
+  for (let i = 1; i < gorge.length; i++) {
+    const [ax, az] = gorge[i - 1]!;
+    const [bx, bz] = gorge[i]!;
+    const t = Math.max(0, Math.min(1, ((x - ax) * (bx - ax) + (z - az) * (bz - az)) / ((bx - ax) ** 2 + (bz - az) ** 2)));
+    d = Math.min(d, Math.hypot(x - ax - t * (bx - ax), z - az - t * (bz - az)));
+  }
+  return d;
+};
+const dcStacks = [
+  { x: 600, z: -20, radius: 10, top: 45, arch: false },
+  { x: 650, z: 40, radius: 9, top: 50, arch: true },
+  { x: 700, z: -30, radius: 8, top: 40, arch: false },
+  { x: 750, z: 500, radius: 10, top: 35, arch: false },
+];
+const onStack = (x: number, z: number) => dcStacks.find((t) => Math.hypot(x - t.x, z - t.z) < t.radius);
+const mesaAt = (x: number, z: number): boolean => Math.abs(x + 300) < 80 && Math.abs(z - 300) < 60;
+const dcHeight = (x: number, z: number): number => (x > 400 && !(x < 560 && Math.abs(z) < 50) ? -20 : mesaAt(x, z) ? 160 : gorgeDist(x, z) < 15 ? 10 : 60);
+const dcField: FieldLike = {
+  height: dcHeight,
+  // stacks are in the drawn ground only, as on a real planar world
+  ground: (x, z) => onStack(x, z)?.top ?? dcHeight(x, z),
+  waterSurface: (x, z, out) => {
+    if (gorgeDist(x, z) >= 8 || x > 400) return false;
+    out.y = x < -150 ? 52 : 13;
+    out.kind = "river";
+    return true;
+  },
+  falls: [{ river: "r1", x: -150, z: -300, top: 52, bottom: 12, dirX: 1, dirZ: 0 }],
+  rivers: [{ id: "r1", points: gorge }],
+  seaCliffs: () => ({ stacksIn: () => dcStacks }),
+  buttes: () => ({ monumentsIn: () => [{ x: -300, z: 300, kind: "mesa", radius: 70, top: 160 }, { x: 0, z: 500, kind: "spire", radius: 8, top: 150 }] }),
+};
+const dcReport = findSites({
+  field: dcField,
+  seaLevel: 0,
+  polygon: [[-700, -700], [900, -700], [900, 700], [-700, 700]],
+  zone: "z",
+  roads: [{ id: "road", trail: false, points: [[-650, 0], [300, 0]] }],
+  content: [{ id: "t", kind: "town", x: -600, z: -600, radius: 30 }],
+  planar: true,
+});
+const ofKind = (k: string) => dcReport.candidates.filter((c) => c.kind === k);
+
+test("planar ground: the stacks are sampled from field.ground, so a stack is dry and high", () => {
+  const s = ofKind("sea-stack");
+  assert.equal(s.length, 4);
+  const arch = s.find((c) => c.detail.arch);
+  assert.ok(arch && Math.hypot(arch.at[0] - 650, arch.at[1] - 40) < 2, "the arch stack");
+  assert.ok(s.every((c) => c.reachable === false), "a stack is reached by a bridge or a boat");
+});
+
+test("three stacks off the headland are one cluster; the lone stack far out is not", () => {
+  const cl = ofKind("stack-cluster");
+  assert.equal(cl.length, 1);
+  assert.equal(cl[0]!.detail.stacks.length, 3);
+  assert.ok(cl[0]!.detail.headland, "near a headland");
+  assert.ok(cl[0]!.detail.shore.gap <= 60, `shore gap ${cl[0]!.detail.shore.gap}`);
+});
+
+test("the headland is found where the land juts into the sea, not along the straight coast", () => {
+  const h = ofKind("headland");
+  assert.ok(h.length >= 1);
+  assert.ok(h.some((c) => c.at[0] > 480 && Math.abs(c.at[1]) < 60), `headlands at ${h.map((c) => c.at).join(" ")}`);
+  assert.ok(!h.some((c) => c.at[0] < 420 && Math.abs(c.at[1]) > 300), "no headland on the straight coast");
+});
+
+test("a mesa top is a butte-top site; a spire is not", () => {
+  const b = ofKind("butte-top");
+  assert.equal(b.length, 1);
+  assert.ok(Math.hypot(b[0]!.at[0] + 300, b[0]!.at[1] - 300) < 2 && b[0]!.detail.rise >= 90);
+});
+
+test("a fall gives a lip and a plunge pool, and the gorge bend is a canyon bend", () => {
+  const lip = ofKind("fall-lip")[0];
+  const pool = ofKind("plunge-pool")[0];
+  assert.ok(lip && lip.at[0] < -150 && pool && pool.at[0] > -150, `lip ${lip?.at} pool ${pool?.at}`);
+  const bend = ofKind("canyon-bend");
+  assert.ok(bend.length >= 1, "a bend");
+  assert.ok(bend.some((c) => Math.hypot(c.at[0] + 100, c.at[1] + 300) < 60 && c.detail.depth >= 40), `bends ${bend.map((c) => c.at + ":" + c.detail.depth).join(" ")}`);
+});
+
+test("a world without DC features finds none of the DC kinds", () => {
+  const dc = new Set(["fall-lip", "plunge-pool", "sea-stack", "stack-cluster", "butte-top", "canyon-bend"]);
+  assert.ok(!report.candidates.some((c) => dc.has(c.kind)));
+  assert.ok(!report2.candidates.some((c) => dc.has(c.kind)));
+});

@@ -30,6 +30,30 @@ describe('raster terrain patches', () => {
     expect(field.density(48,-5,48)).toBeGreaterThan(0);
     expect(field.waterY(48,48)).toBe(world.seaLevel);
   });
+  it('a MASKED patch (weights) pulls toward its heights only where weighted, and lets later ground show through elsewhere', () => {
+    const world=defaultWorldRecipe();
+    // 3x3 raster over 96 m: only the centre sample is held (weight 1), every other weight is 0
+    const masked={id:'masked',origin:[0,0],size:[96,96],columns:3,rows:3,heights:[50,50,50,50,50,50,50,50,50],weights:[0,0,0,0,1,0,0,0,0],blend:4,filter:0};
+    expect(heightPatchSchema.safeParse({...masked,weights:[0,1]}).success).toBe(false);
+    const field=createWorldField(applyRecipeEdits(world,[{edit:'add-feature',kind:'heightPatches',feature:masked}]).recipe);
+    const base=createWorldField(world);
+    // the held sample is at 50; half way to a zero-weight corner the weight is a quarter (bilinear)
+    expect(field.height(48,48)).toBeCloseTo(50,6);
+    const q=base.height(24,24);
+    expect(field.height(24,24)).toBeCloseTo(q+(50-q)*0.25,6);
+    // a zero-weight sample is the ground under the patch, NOT a frozen copy: a patch applied BEFORE it shows through
+    const under={id:'under',origin:[0,0],size:[96,96],columns:2,rows:2,heights:[-3,-3,-3,-3],blend:4,feather:4,filter:0};
+    const both=createWorldField(applyRecipeEdits(world,[{edit:'add-feature',kind:'heightPatches',feature:under},{edit:'add-feature',kind:'heightPatches',feature:masked}]).recipe);
+    const w=(8/48)**2;
+    expect(both.height(8,8)).toBeCloseTo(-3+(50+3)*w,6);
+    expect(both.height(48,48)).toBeCloseTo(50,6);
+    // all-ones weights = the opaque patch
+    const opaque={...masked,id:'opaque',weights:undefined};
+    const ones={...masked,id:'ones',weights:masked.heights.map(()=>1)};
+    const fo=createWorldField(applyRecipeEdits(world,[{edit:'add-feature',kind:'heightPatches',feature:opaque}]).recipe);
+    const f1=createWorldField(applyRecipeEdits(world,[{edit:'add-feature',kind:'heightPatches',feature:ones}]).recipe);
+    for(const p of [[10,10],[30,70],[48,48],[90,5]]) expect(f1.height(p[0]!,p[1]!)).toBeCloseTo(fo.height(p[0]!,p[1]!),8);
+  });
   it('gives neighbouring mesher blocks identical shared samples through the blend and interior', () => {
     const world=applyRecipeEdits(defaultWorldRecipe(),[{edit:'add-feature',kind:'heightPatches',feature:patch}]).recipe;
     const field=createWorldField(world),step=2;

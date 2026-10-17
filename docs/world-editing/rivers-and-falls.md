@@ -149,6 +149,11 @@ this before regenerating a world, before changing a river rule in
     3 m above both neighbours 4 m away (a knife ridge between two cuts) is
     trimmed (unblade), unless it holds water back.
 
+25. **With DC (planarCliffs.falls) the lip is a wall, not a smear.** The rock face stands
+    exactly on the lip line, the plunge bowl climbs in `bowl` sheer walls, the gorge below
+    steps in `gorgeStep` benches and banks in cliff country become low walls. All of it is
+    cut (never built over the water), so every rule above still holds. See voxel-worlds.md §30a.
+
 ## How the water is drawn (do not undo these)
 
 - The water surface is one function, `field.waterSurface(x, z)`: the lake
@@ -165,6 +170,13 @@ this before regenerating a world, before changing a river rule in
 - Shoreline foam comes from the water depth, and a fall face stands a hand in
   front of its rock, so the foam fades out with steepness. Otherwise every fall
   paints solid white and the fall texture never shows.
+- River (and plain-lake) water has NO breaker lines or whitecaps: the sea
+  layer's `breakers` drew three parallel white stripes along every bank.
+  `worldgen rivers` zeroes them when it copies the lake material. Its shore
+  band is `shoreFoam`: thin (`foamBand` ~1.4 m), cut into stepped patches by a
+  noise mask, and faded on still water (`still`), so foam gathers where the
+  current meets a bank or a rock breaking the surface. Falls keep their own
+  plunge churn and rapids froth.
 - The texture is laid out in world metres and advected along the current
   (`flowMode: "field"`; the current rides in the mesh's uv). A steep face
   switches to `fallTexture`, which is sampled down world Y and scrolls

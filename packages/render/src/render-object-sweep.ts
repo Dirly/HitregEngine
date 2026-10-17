@@ -78,6 +78,14 @@ export function trackRenderObjects(renderer: THREE.WebGPURenderer): RenderObject
   // roots drawn since the last sweep: a strong set, cleared every sweep, so a
   // one-off scene is let go within one interval
   let drawn = new Set<THREE.Object3D>();
+  // every root ever passed to render(): a render object's `scene` is only
+  // evidence of a rebuild when it is one of these. Three records its own
+  // placeholder Scene as the `scene` of anything drawn WITHOUT a THREE.Scene
+  // (every post-processing QuadMesh), and nobody ever renders the placeholder —
+  // so judged on it, the whole post chain was freed every second sweep and
+  // all of its shaders (bloom, sharpen, output: 11) rebuilt on the next frame,
+  // a 25-50 ms hitch every ~4 s, casting or not.
+  const everDrawn = new WeakSet<THREE.Object3D>();
   const stats = { live: 0, freed: 0 };
 
   objects.createRenderObject = function (this: unknown, ...args: unknown[]) {
@@ -97,6 +105,7 @@ export function trackRenderObjects(renderer: THREE.WebGPURenderer): RenderObject
   const render = internals.render;
   internals.render = function (this: unknown, scene: THREE.Object3D, camera: THREE.Camera) {
     drawn.add(scene);
+    everDrawn.add(scene);
     return render.call(this, scene, camera);
   };
 
@@ -112,7 +121,7 @@ export function trackRenderObjects(renderer: THREE.WebGPURenderer): RenderObject
       // them here kept every previous scene graph alive, ~18k objects and
       // ~45 MB per rebuild (each agent edit to the open scene while playing).
       const madeFor = renderObject.scene;
-      if (drawn.has(rootOf(renderObject.object)) && (!madeFor || drawn.has(madeFor))) {
+      if (drawn.has(rootOf(renderObject.object)) && (!madeFor || !everDrawn.has(madeFor) || drawn.has(madeFor))) {
         marked.delete(renderObject);
       } else if (marked.has(renderObject)) {
         renderObject.dispose(); // onDispose above drops it from both sets

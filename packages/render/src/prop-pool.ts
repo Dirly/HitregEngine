@@ -76,8 +76,20 @@ interface Group {
   node: string | undefined;
   submeshes: GltfSubmesh[];
   gltf: GLTF;
-  flags: { castShadow: boolean; receiveShadow: boolean; lod: boolean; lodDistance?: number };
+  flags: PoolFlags;
+  /** The batch's material override (a scatter rule's `material`, e.g. the world's rock-cap), or null for the model's own. */
+  override: THREE.Material | null;
   pages: Page[];
+}
+
+/** What splits a pool group: the model's shadow/LOD policy and the material it draws with. */
+export interface PoolFlags {
+  castShadow: boolean;
+  receiveShadow: boolean;
+  lod: boolean;
+  lodDistance?: number;
+  /** Material asset id overriding the model's own (part of the group key). */
+  material?: string;
 }
 
 export interface PoolEntry {
@@ -129,16 +141,17 @@ export class InstancedPropPool {
     node: string | undefined,
     gltf: GLTF,
     submeshes: GltfSubmesh[],
-    flags: { castShadow: boolean; receiveShadow: boolean; lod: boolean; lodDistance?: number },
+    flags: PoolFlags,
     entries: readonly PoolEntry[],
     owner: object,
     options: BuildOptions,
+    override: THREE.Material | null = null,
   ): void {
     if (this.released.has(owner) || entries.length === 0) return;
-    const key = JSON.stringify([assetId, node, flags.castShadow, flags.receiveShadow, flags.lod, flags.lodDistance]);
+    const key = JSON.stringify([assetId, node, flags.castShadow, flags.receiveShadow, flags.lod, flags.lodDistance, flags.material ?? null]);
     let group = this.groups.get(key);
     if (!group) {
-      group = { key, assetId, node, submeshes, gltf, flags, pages: [] };
+      group = { key, assetId, node, submeshes, gltf, flags, override, pages: [] };
       this.groups.set(key, group);
     }
     let owned = this.owners.get(owner);
@@ -285,7 +298,9 @@ export class InstancedPropPool {
    * PAGE_CAPACITY with no instances placed.
    */
   private createPage(group: Group, options: BuildOptions): Page {
-    const { assetId, node, submeshes, gltf, flags } = group;
+    const { assetId, node, submeshes, gltf, flags, override } = group;
+    // same cache key scheme as instanceGltfInto's per-build batches, so a page and a base-scene batch share shaders
+    const materialKey = (index: number) => `${assetId}#${node ?? ""}#${index}#${flags.material ?? ""}#vegetation`;
     const capacity = PAGE_CAPACITY;
     const matrices: THREE.Matrix4[] = [];
     const positions: THREE.Vector3[] = [];
@@ -299,7 +314,7 @@ export class InstancedPropPool {
     const near: InstancedProps[] = submeshes.map((sub, index) => {
       const mesh = new InstancedProps(
         sub.geometry,
-        cachedInstancedMaterial(`${assetId}#${node ?? ""}#${index}#vegetation`, sub.material, { vegetationTint: true }),
+        cachedInstancedMaterial(materialKey(index), override ?? sub.material, { vegetationTint: true }),
         capacity,
       );
       mesh.castShadow = flags.castShadow;
@@ -318,7 +333,7 @@ export class InstancedPropPool {
         mid = submeshes.map((sub, index) => {
           const mesh = new InstancedProps(
             midTiers[index]?.geometry ?? sub.geometry,
-            cachedInstancedMaterial(`${assetId}#${node ?? ""}#${index}#vegetation`, sub.material, { vegetationTint: true }),
+            cachedInstancedMaterial(materialKey(index), override ?? sub.material, { vegetationTint: true }),
             capacity,
           );
           mesh.castShadow = false;
@@ -333,7 +348,7 @@ export class InstancedPropPool {
       }
       const bounds = submeshBounds(submeshes);
       const source: THREE.Object3D = node ? (gltf.scene.getObjectByName(node) ?? gltf.scene) : gltf.scene;
-      const baked = cachedImpostor(assetId, node, source, bounds, options);
+      const baked = cachedImpostor(assetId, node, source, bounds, options, override);
       if (baked) {
         far = new InstancedProps(impostorGeometry(bounds, capacity), baked.material, capacity);
         impostor = { rotations: new Float32Array(capacity * 4), scales: new Float32Array(capacity) };

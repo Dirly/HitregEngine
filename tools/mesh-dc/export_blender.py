@@ -133,7 +133,9 @@ def export_mesh_stamp(filepath, *, objects=None, anchor=(0,0,0), palette=None,
             if group_name is None:
                 continue
             group = groups.setdefault(group_name, {'name':group_name,'positions':[], 'indices':[],
-                                     'solidTriangleCounts':[], 'triangleMaterials':[], 'solidNoise':[]})
+                                     'solidTriangleCounts':[], 'triangleMaterials':[], 'solidNoise':[],
+                                     # per solid: the source object (the thin-walls gate's exemption tags) and dc_thin_ok
+                                     'solidObjects':[], 'solidThinOk':[]})
             noise_key = obj.get('dc_noise') or None
             object_audit = {'object':obj.name, 'group':group_name, 'sourceSolids':len(parts), 'exportedSolids':0}
             for part_index, source_tris in enumerate(parts.values()):
@@ -164,6 +166,8 @@ def export_mesh_stamp(filepath, *, objects=None, anchor=(0,0,0), palette=None,
                 group['indices'].extend(i+offset for tri in triangles for i in tri)
                 group['solidTriangleCounts'].append(len(triangles))
                 group['solidNoise'].append(str(noise_key) if noise_key else None)
+                group['solidObjects'].append(obj.name)
+                group['solidThinOk'].append(1 if obj.get('dc_thin_ok') else 0)
                 for tri in source_tris:
                     material = mesh.materials[tri.material_index] if tri.material_index < len(mesh.materials) else None
                     group['triangleMaterials'].append(material_index(material,obj.get('dc_material')))
@@ -175,6 +179,8 @@ def export_mesh_stamp(filepath, *, objects=None, anchor=(0,0,0), palette=None,
     for g in groups:
         if not any(g['solidNoise']):
             del g['solidNoise']
+        if not any(g['solidThinOk']):
+            del g['solidThinOk']
     report = {'sourceObjects':len(objects),'groups':len(groups), 'objects':audits,
               'excludedComponents':excluded_components,'closureFailures':failures,
               'closedSolids':sum(len(g['solidTriangleCounts']) for g in groups),

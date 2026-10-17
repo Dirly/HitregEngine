@@ -8,6 +8,7 @@ import {
   EventRegistry,
   NetStateStore,
   registerCharacterNetState,
+  registerStaffNetState,
   registerCoreAssetTypes,
   registerCoreComponents,
   registerCoreEvents,
@@ -176,7 +177,9 @@ describe("character-sheet builtin", () => {
     expect(events.replicationOf("inventory.move")).toBe("to-authority");
     expect(events.replicationOf("character.allocate")).toBe("to-authority");
     expect(events.replicationOf("character.xp")).toBe("none");
-    expect(events.replicationOf("inventory.give")).toBe("none");
+    // a staff peer's console grant has to reach the authority (the sheet refuses it from anyone else)
+    expect(events.replicationOf("inventory.give")).toBe("to-authority");
+    expect(events.replicationOf("inventory.soulbind")).toBe("to-authority");
     expect(events.replicationOf("character.leveled")).toBe("to-peers");
     expect(events.replicationOf("character.refused")).toBe("to-peers");
   });
@@ -238,6 +241,54 @@ describe("character-sheet builtin", () => {
     bus.injectFromPeer("peer-a", [{ name: "character.xp", payload: { actorId: "player", amount: 5000 } }]);
     tick();
     expect(sheet().level).toBe(1);
+  });
+
+  it("takes the console's grants from a STAFF peer only, and only for its own body", () => {
+    const { bus, tick, sheet, heard, netState } = harness([{ itemId: "helm", equip: true }]);
+    registerStaffNetState(netState);
+    bus.setNetRole("authority");
+    netState.set("owner/player", "peer-gm");
+    const give = (from: string) => bus.injectFromPeer(from, [{ name: "inventory.give", payload: { actorId: "player", itemId: "potion", qty: 2 } }]);
+    const potions = () => Object.values(sheet().items).filter((i) => i.itemId === "potion").reduce((n, i) => n + (i.qty ?? 1), 0);
+    // a player, even the body's owner, never grants itself items
+    give("peer-gm");
+    tick();
+    expect(potions()).toBe(0);
+    // the server marked the account staff (from its signed ticket): its /give is honoured
+    netState.set("staff/peer-gm", "gm");
+    give("peer-gm");
+    tick();
+    expect(potions()).toBe(2);
+    // a staff peer still acts only on a body it owns
+    netState.set("staff/peer-other", "dev");
+    give("peer-other");
+    tick();
+    expect(potions()).toBe(2);
+    expect(heard.at(-1)).toMatchObject({ name: "character.refused", payload: { error: /not your character/ } });
+    // /soulbind the same way
+    bus.injectFromPeer("peer-gm", [{ name: "inventory.soulbind", payload: { actorId: "player", slot: "helm" } }]);
+    tick();
+    expect(sheet().soulslots?.helm).toBeDefined();
+  });
+
+  it("sets attributes outright for the console and a staff peer, never for a player", () => {
+    const { bus, tick, sheet, netState } = harness();
+    registerStaffNetState(netState);
+    bus.setNetRole("authority");
+    netState.set("owner/player", "peer-a");
+    const stats = (from: string, payload: Record<string, unknown>) => bus.injectFromPeer(from, [{ name: "character.setstats", payload: { actorId: "player", ...payload } }]);
+    const before = { ...sheet().attributes };
+    stats("peer-a", { value: 40 });
+    tick();
+    expect(sheet().attributes).toEqual(before); // a player
+    netState.set("staff/peer-a", "dev");
+    stats("peer-a", { value: 40 });
+    tick();
+    expect(Object.values(sheet().attributes).every((v) => v === 40)).toBe(true);
+    stats("peer-a", { value: 12, attribute: "wisdom" });
+    tick();
+    expect(sheet().attributes.wisdom).toBe(12);
+    expect(sheet().attributes.strength).toBe(40);
   });
 
   it("ignores requests for other bodies and does nothing on a peer", () => {

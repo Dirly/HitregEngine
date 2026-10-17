@@ -17,6 +17,27 @@ from parts import sized_part
 
 SIDES = {"S": (0, -1), "E": (1, 0), "N": (0, 1), "W": (-1, 0)}
 
+# Shell rules (docs/see-through.md). Dual contouring samples the solid at voxel corners: a wall thinner than ~2 voxels
+# falls between samples and the bake comes out closed but PERFORATED (holes you can see through the map). So every
+# shell piece the kit makes is at least MIN_SHELL_VOXELS voxels thick, and the floor and the vault that end at an open
+# side (a neighbour room, often another dc_group baked on its own) run JOINT_VOXELS voxels on into the neighbour, so the
+# two bakes overlap instead of meeting edge to edge (a seam crack). Walls stop on the open line (no stubs). The voxel is the plan's (rooms.json "voxel",
+# a room's own "voxel"), 0.12 m by default. tools/mesh-dc/thin-walls.mjs is the gate that checks the result.
+DEFAULT_VOXEL = 0.12
+MIN_SHELL_VOXELS = 3
+JOINT_VOXELS = 2
+
+
+def shell_rules(style, voxel=DEFAULT_VOXEL):
+    """The style with every shell thickness raised to the minimum (a copy; the style file is untouched)."""
+    st = dict(style)
+    st["voxel"] = voxel = float(voxel or DEFAULT_VOXEL)
+    least = MIN_SHELL_VOXELS * voxel
+    for key in ("wall", "floor", "ceiling"):
+        if isinstance(st.get(key), dict) and "thickness" in st[key]:
+            st[key] = dict(st[key], thickness=max(float(st[key]["thickness"]), least))
+    return st
+
 
 # ----------------------------------------------------------- the room --
 class Room:
@@ -67,7 +88,8 @@ class Room:
     def skin(self, wt):
         """The outline grown by the wall thickness, except across open sides (a neighbour's floor/roof is there)."""
         # walled sides: past the wall and its outer plinth projection, so no solid ends flush on a slab edge (DC non-manifold)
-        lines = [(add(e["a"], mul(e["n"], 0.0 if e["open"] else -(wt + 0.15))), e["d"]) for e in self.edges]
+        # open sides: on into the neighbour by the joint lap, so the two groups' bakes overlap (no seam crack)
+        lines = [(add(e["a"], mul(e["n"], -self.joint if e["open"] else -(wt + 0.15))), e["d"]) for e in self.edges]
         pts = []
         for i in range(self.n):
             (p0, d0), (p1, d1) = lines[i - 1], lines[i]
@@ -80,9 +102,21 @@ class Room:
         return pts
 
     def ext(self, along, end, wt):
-        """How far an along-axis vault/roof runs past its end wall (end 0 = start, 1 = far end): 0 over an open side."""
+        """How far an along-axis vault/roof runs past its end wall (end 0 = start, 1 = far end): the joint lap over an
+        open side (into the neighbour, so the bakes overlap)."""
+        return self.joint if self.end_open(along, end) else wt
+
+    def end_open(self, along, end):
         nb = self.edges[along["i"] - 1] if end == 0 else self.edges[(along["i"] + 1) % self.n]
-        return 0.0 if nb["open"] else wt
+        return nb["open"]
+
+    @property
+    def joint(self):
+        return JOINT_VOXELS * self.style.get("voxel", DEFAULT_VOXEL)
+
+    @property
+    def min_shell(self):
+        return MIN_SHELL_VOXELS * self.style.get("voxel", DEFAULT_VOXEL)
 
     def edge_for_side(self, side):
         want = SIDES[side]
@@ -140,6 +174,9 @@ def corner_ext(r, e, wt):
     prev, nxt = r.edges[i - 1], r.edges[(i + 1) % r.n]
     cross_in = prev["d"][0] * e["d"][1] - prev["d"][1] * e["d"][0]   # > 0: left turn at e's start (convex)
     cross_out = e["d"][0] * nxt["d"][1] - e["d"][1] * nxt["d"][0]
+    # a run ending at an open side stops on the open line: carried on, it stands as a stub inside the neighbour room
+    # (its doorway reveal is narrower than this room) and the dressing maps read it as wall. The joint overlap across an
+    # open side is horizontal only: the floor (skin) and the vault (ext) lap on into the neighbour.
     return (wt if cross_in > 1e-6 and not prev["open"] else 0.0), (wt if cross_out > 1e-6 and not nxt["open"] else 0.0)
 
 
@@ -334,6 +371,16 @@ def barrel(r, top, cs, roles):
     cross_dir = mul(along["n"], -1)  # u grows from the far wall toward `along`
     fr = (mid, cross_dir, A)
     r.piece("vault", [frame_prism(poly, fr, -r.ext(along, 0, wt), L + r.ext(along, 1, wt), roles["ceiling"])])
+    # the lunettes: a walled end of the barrel is closed up to the vault's back. The end wall stops at the springing,
+    # so without this the half-moon between the springing line and the intrados looks straight out of the map (the
+    # see-through gate's "open-mesh" holes at y ~ springing in First King's Barrow and Wreck Hole). The tympanum
+    # fills the end wall's thickness, reaching down into the wall by the shell minimum so the joint is solid.
+    # across, it stops on an open springing side (u = +c is the `along` edge, -c the opposite one): no stub in the neighbour
+    up_, um_ = c + (0.0 if along["open"] else wt), c + (0.0 if r.edges[(along["i"] + 2) % r.n]["open"] else wt)
+    tym = [(-um_, top - r.min_shell), (up_, top - r.min_shell), (up_, top + rise + t), (-um_, top + rise + t)]
+    for end, (u0, u1) in ((0, (-wt, 0.0)), (1, (L, L + wt))):
+        if not r.end_open(along, end):
+            r.piece("wall", [frame_prism(tym, fr, u0, u1, roles["wall"])])
     stations = []
     if cs.get("ribs", True):
         n = max(1, round(L / r.style["pilasters"]["every"]))
@@ -645,6 +692,20 @@ def build_natural(r):
     r.pieces.append({"name": f"{r.id}.roof.1", "kind": "roof", "shape": "cave_ceiling", "noise": ns.get("roofNoise", "rock-roof"),
                      "args": {"outline": r.outline, "z_spring": top, "rise": rise, "thickness": 0.8, "material": roof,
                               "seed": r.spec.get("seed", 1), "lap": wt * 0.6, "jitter": ns.get("jitter", 0.35)}})
+    # the roof's rim collar: the walls stop 0.3 m over the springing, so the dome's lapped rim stood above them as a
+    # thin wedge (0.2 m at a 0.12 m voxel: the bake perforates it, a slit to the outside along the springing). A crisp
+    # band behind the walls' inner half, from the springing to the roof's flat top, backs the rim: hidden inside the
+    # wall and the roof, it changes nothing seen from the room.
+    roof_top = top + rise + ns.get("jitter", 0.35) + 0.8
+    inner, outer = G.offset_poly(r.outline, -0.3), G.offset_poly(r.outline, -(wt + 0.3))
+    for e in r.edges:
+        if e["open"]:
+            continue
+        i, j = e["i"], (e["i"] + 1) % r.n
+        # each run's inner edge carries on 0.3 m past its mitre into the next (the outer corner stays on the mitre, no nub): two pieces meeting exactly on the mitre plane left a
+        # zero-width crack down the diagonal that the bake reads as a non-manifold edge at the top
+        dx = mul(e["d"], 0.3)
+        r.piece("wall", [prism([add(inner[i], mul(dx, -1)), add(inner[j], dx), outer[j], outer[i]], top, roof_top, rock)])
     lanes = lane_segments(r)
     c = G.centroid(r.outline)
     area = abs(G.area2(r.outline))
@@ -729,8 +790,8 @@ def sample(r, rng, count, min_wall, lanes, lane, spacing, max_wall=None):
 BUILDERS = {"masonry": build_masonry, "timber": build_timber, "natural": build_natural}
 
 
-def build_room(spec, style):
-    r = Room(spec, style)
+def build_room(spec, style, voxel=None):
+    r = Room(spec, shell_rules(style, spec.get("voxel", voxel)))
     (build_stair if spec.get("kind") == "stair" or "stair" in spec else BUILDERS[style["construction"]])(r)
     return r
 
@@ -785,7 +846,9 @@ def build_stair(r):
     opp = {"N": "S", "S": "N", "E": "W", "W": "E"}
     if not (r.edge_for_side(ss["up"])["open"] and r.edge_for_side(opp[ss["up"]])["open"]):
         raise ValueError(f"{r.id}: both ends of a stair room are openSides (each runs into a neighbour's doorway)")
-    ex0 = ex1 = ss.get("lap", 0.3)   # into the neighbours' walls (same dc_group: the field unions the joint)
+    # into the neighbours' walls (same dc_group: the field unions the joint); at least the shell minimum, so the
+    # lapped vault end is not a sliver the bake can perforate
+    ex0 = ex1 = max(ss.get("lap", 0.3), r.min_shell + 0.02)
     us = [-ex0 + k * (L + ex0 + ex1) / max(1, round((L + ex0 + ex1) / 0.25)) for k in range(round((L + ex0 + ex1) / 0.25) + 1)]
     z0, z1 = pitch(0), pitch(L)
     # landings and treads: crisp (null noise), full width plus into the walls
@@ -819,7 +882,8 @@ def build_stair(r):
     wall, trim, ceil_role = r.role("wall"), r.role("trim"), r.role("ceiling")
     for s in (-1, 1):
         a_in, a_out = s * c, s * (c + wt)
-        ring = lambda u: [P(a_in, u, min(z0, z1) - 0.6), P(a_out, u, min(z0, z1) - 0.6), P(a_out, u, spring(u) + 0.12), P(a_in, u, spring(u) + 0.12)]
+        # the side walls lap up into the vault's springing by the shell minimum (was 0.12 m, one voxel: a thin joint)
+        ring = lambda u: [P(a_in, u, min(z0, z1) - 0.6), P(a_out, u, min(z0, z1) - 0.6), P(a_out, u, spring(u) + r.min_shell), P(a_in, u, spring(u) + r.min_shell)]
         r.piece("wall", [G.loft_rings([ring(u) for u in us], wall)])
         # raking plinth on the pitch line and a raking string course at the springing (parallel to the flight)
         pl = lambda u: [P(s * (c - 0.1), u, pitch(u) - 0.2), P(s * (c + 0.05), u, pitch(u) - 0.2), P(s * (c + 0.05), u, pitch(u) + 0.38), P(s * (c - 0.1), u, pitch(u) + 0.38)]

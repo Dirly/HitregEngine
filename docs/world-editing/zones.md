@@ -203,6 +203,22 @@ have already drawn and named):
   pass does; `draft` is dropped once named). Once a world has ANY town
   zone, the audit requires one per town, enclosing radius + falloff.
 
+## A zone's senses: mood, sound, ambient particles
+
+A zone (or a nested place) can carry its own air, sound and motes; each is
+optional and resolved over place -> zone -> parent, nearest first
+(`regionLookAt` in core; fields in the `regions` entry of `spec.json`):
+
+- `mood` — air and light (skill `zone-mood`; `mistTop` makes the mist hug the
+  local low ground instead of an absolute height).
+- `sound` — bed, spots and music per day/night band, and `stillWater`; the
+  `soundscape` builtin plays them INSTEAD of the biome patterns and falls back
+  to the biomes for anything left out. A town zone inherits its parent's bed and
+  still water, never its music or spots (it has its own).
+- `ambient` — particle layers (spores, ash) the `ambient-particles` builtin
+  drives while the player is in the zone. Zone-bound layers belong here, not in
+  the scene's `layers` param (still honoured for older scenes).
+
 ## The band, and spawn areas (hosting)
 
 Since 2026-09-05 the cluster really does key placement by zone and moves a

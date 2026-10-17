@@ -46,14 +46,14 @@ export interface PropGeometry {
   warnings: string[];
 }
 
-type M4 = number[]; // column-major
+export type M4 = number[]; // column-major
 const I4: M4 = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
-function mul(a: M4, b: M4): M4 {
+export function mul(a: M4, b: M4): M4 {
   const o = new Array(16).fill(0);
   for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) for (let k = 0; k < 4; k++) o[c * 4 + r] += a[k * 4 + r] * b[c * 4 + k];
   return o;
 }
-function trs(t: number[] = [0, 0, 0], q: number[] = [0, 0, 0, 1], s: number[] = [1, 1, 1]): M4 {
+export function trs(t: number[] = [0, 0, 0], q: number[] = [0, 0, 0, 1], s: number[] = [1, 1, 1]): M4 {
   const [x, y, z, w] = q;
   return [
     (1 - 2 * (y * y + z * z)) * s[0], 2 * (x * y + z * w) * s[0], 2 * (x * z - y * w) * s[0], 0,
@@ -71,6 +71,8 @@ const apply = (m: M4, p: number[]): V3 => [
 // ---------------------------------------------------------------- glTF ----
 interface Gltf { json: any; buffers: Buffer[] }
 const gltfCache = new Map<string, Gltf>();
+/** Forget every parsed glTF (a tool that rewrote a model on disk reads it again). */
+export function clearGltfCache(): void { gltfCache.clear(); }
 function loadGltf(file: string): Gltf {
   const hit = gltfCache.get(file);
   if (hit) return hit;
@@ -138,7 +140,7 @@ function gltfTex(g: Gltf, file: string, matIndex: number | undefined): TexInfo |
   const size = bytes && imageSize(bytes);
   return size ? { key: `${path.basename(file)}#image${g.json.textures[ti].source}`, size, repeat: [1, 1] } : undefined;
 }
-function gltfTris(file: string, m: M4, material: string | undefined, out: Tri[], tex?: TexInfo): void {
+export function gltfTris(file: string, m: M4, material: string | undefined, out: Tri[], tex?: TexInfo): void {
   const g = loadGltf(file), json = g.json;
   const walk = (ni: number, parent: M4) => {
     const n = json.nodes[ni], local = n.matrix ?? trs(n.translation, n.rotation, n.scale), w = mul(parent, local);
@@ -563,3 +565,75 @@ export function texelDensity(geo: PropGeometry, opts: { grid?: number; pixels?: 
 }
 /** Forget cached models and material textures (after a tool rewrote them on disk). */
 export function clearGeometryCaches(): void { gltfCache.clear(); matTexCache.clear(); }
+
+// ------------------------------------------------------------ scenes ----
+export interface SceneEntityGeometry {
+  id: string;
+  name?: string;
+  prefabId?: string;
+  /** World matrix (column-major) of the entity. */
+  m: number[];
+  /** Root-frame bounds of the entity's own geometry (a prefab instance: the prefab's; a mesh: its mesh's). */
+  min: V3;
+  max: V3;
+  /** World-space triangles, nine numbers each. */
+  world: number[];
+}
+
+/**
+ * Every entity of a scene (or prefab) doc that HAS geometry — prefab instances (through nested prefabs and GLBs,
+ * cached per prefab id) and plain mesh entities (asset GLB / primitive) — with its world matrix, its root-frame
+ * bounds and its world triangles. What `float` seats objects on (seat.ts triangle probe) and measures them by.
+ */
+export function sceneGeometry(assets: string, doc: { entities: Record<string, any> }, skip?: (id: string, e: any) => boolean): SceneEntityGeometry[] {
+  const ents = doc.entities ?? {};
+  const world = new Map<string, M4>();
+  const worldOf = (eid: string): M4 => {
+    const hit = world.get(eid);
+    if (hit) return hit;
+    const e = ents[eid];
+    const t = e?.components?.transform ?? {};
+    const local = trs(t.position, t.rotation, t.scale);
+    const m = e?.parent != null && ents[e.parent] ? mul(worldOf(e.parent), local) : local;
+    world.set(eid, m);
+    return m;
+  };
+  const prefabCache = new Map<string, PropGeometry>();
+  const out: SceneEntityGeometry[] = [];
+  for (const [eid, e] of Object.entries(ents)) {
+    if (skip?.(eid, e)) continue;
+    const c = e.components ?? {};
+    const tris: Tri[] = [];
+    let prefabId: string | undefined;
+    if (c.prefab?.prefabId) {
+      prefabId = c.prefab.prefabId as string;
+      let g = prefabCache.get(prefabId);
+      if (!g) prefabCache.set(prefabId, (g = prefabGeometry(assets, prefabId)));
+      tris.push(...g.tris);
+    } else if (c.mesh?.source?.kind === "asset") {
+      const f = locate(assets, "models", c.mesh.source.assetId);
+      if (fs.existsSync(f)) gltfTris(f, I4, undefined, tris);
+    } else if (c.mesh?.source?.kind === "primitive") {
+      boxTris(c.mesh.source.size ?? [1, 1, 1], I4, tris, { box: (c.mesh.source.shape ?? "box") === "box" });
+    } else if (c.mesh?.source?.kind === "surface" && c.mesh.source.positions && c.mesh.source.indices) {
+      const p: number[] = c.mesh.source.positions, ix: number[] = c.mesh.source.indices;
+      const v = (i: number): V3 => [p[i * 3], p[i * 3 + 1], p[i * 3 + 2]];
+      for (let i = 0; i + 2 < ix.length; i += 3) tris.push({ a: v(ix[i]), b: v(ix[i + 1]), c: v(ix[i + 2]) });
+    } else if (c.collider?.shape === "box" && !c.collider.isTrigger) {
+      // a bare box collider (a deck, a step, an invisible floor): solid the player stands on
+      const o = c.collider.offset ?? [0, 0, 0];
+      boxTris(c.collider.size ?? [1, 1, 1], trs(o), tris, { box: true });
+    } else continue;
+    if (!tris.length) continue;
+    const m = worldOf(eid);
+    const mn: V3 = [Infinity, Infinity, Infinity], mx: V3 = [-Infinity, -Infinity, -Infinity];
+    const w: number[] = [];
+    for (const t of tris)
+      for (const p of [t.a, t.b, t.c]) {
+        for (let k = 0; k < 3; k++) { mn[k] = Math.min(mn[k], p[k]); mx[k] = Math.max(mx[k], p[k]); }
+        w.push(m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12], m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13], m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14]);
+      }
+    out.push({ id: eid, name: e.name, prefabId, m, min: mn, max: mx, world: w });
+  }
+  return out;
+}

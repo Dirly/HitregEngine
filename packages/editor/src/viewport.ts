@@ -53,6 +53,11 @@ export interface ViewportOptions {
   getObject(id: string): THREE.Object3D | undefined;
   /** Fires while the gizmo drags — use to disable camera controls. */
   onDraggingChanged?(dragging: boolean): void;
+  /**
+   * Fires on every move of a single translated object (not a group), after the editor's own adjustments: the host may
+   * adjust the object further (snap it onto the surface under it). The commit writes whatever the object then holds.
+   */
+  onTranslateMove?(id: string, object: THREE.Object3D): void;
 }
 
 /**
@@ -153,6 +158,10 @@ export class ViewportTools {
         object.scale.lerpVectors(s.scale, object.scale, 0.1);
       }
       if (this.gripProxy?.start) this.followGripProxy();
+      if (object && !this.gripProxy && this.controls.mode === "translate") {
+        const id = this.opts.selection.get();
+        if (id) this.opts.onTranslateMove?.(id, object);
+      }
       if (!object || !this.altDown || this.controls.mode !== "scale" || !this.scaleAnchor) return;
       object.position.y = this.scaleAnchor.bottomY + this.scaleAnchor.k * object.scale.y;
     });

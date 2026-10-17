@@ -240,6 +240,16 @@ const approaches = roads
     const inside = densify(ordered, 1).filter(inBox);
     return { id: r.id, seed: inside.at(-1)! };
   });
+// An UNGATED town (a village with no wall) is entered by any road that crosses
+// the survey box: seed each from both ends of its run inside the box.
+if (gates.length === 0) {
+  for (const r of roads) {
+    const inside = densify(r.points as Pt[], 1).filter(inBox);
+    if (inside.length === 0) continue;
+    approaches.push({ id: r.id, seed: inside[0]! });
+    approaches.push({ id: `${r.id}:end`, seed: inside.at(-1)! });
+  }
+}
 
 interface Anchor { id: string; kind: string; at: Pt; y: number }
 const anchors: Anchor[] = [];

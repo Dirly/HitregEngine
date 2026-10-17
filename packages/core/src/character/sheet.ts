@@ -414,6 +414,21 @@ export function allocate(sheet: CharacterSheet, attribute: Attribute, _env: Shee
   return { ok: true, sheet: next };
 }
 
+/**
+ * Set attributes outright — every one, or the one named. A testing override (the console's `/stats` for staff and
+ * single player): no points spent, no cap from progression, so any item's requirement can be met.
+ */
+export function setAttributes(sheet: CharacterSheet, value: number, attribute?: Attribute): SheetResult {
+  if (!Number.isInteger(value) || value < 1 || value > MAX_SET_ATTRIBUTE) return fail(`an attribute is set to 1-${MAX_SET_ATTRIBUTE}`);
+  if (attribute !== undefined && !ATTRIBUTES.includes(attribute)) return fail(`unknown attribute "${attribute}"`);
+  const next = structuredClone(sheet);
+  for (const a of attribute ? [attribute] : ATTRIBUTES) next.attributes[a] = value;
+  return { ok: true, sheet: next };
+}
+
+/** The highest value `/stats` sets. */
+export const MAX_SET_ATTRIBUTE = 99;
+
 // -- inventory reducers ---------------------------------------------------------
 
 /** Mint the next stack uid (bumps `seq` — call on a draft copy). */

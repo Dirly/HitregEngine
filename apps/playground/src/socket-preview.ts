@@ -42,8 +42,32 @@ export interface SocketPreviewDeps {
   /** Show the second (holstered) pose instead of the hand — the editor's "holstered" toggle. */
   showAlt(): boolean;
   selected(): string | null;
-  item(itemId: string): { slots?: string[]; stance?: string[]; appearance?: { model?: string; parts?: string[]; texture?: string } } | undefined;
+  item(itemId: string): { slots?: string[]; stance?: string[]; twoHanded?: boolean; appearance?: { model?: string; parts?: string[]; texture?: string } } | undefined;
   setLook(entityId: string, look: ModelLook): void;
+  /** Any item drawn with this model that fits this slot — for a slot no starting item uses. */
+  itemOfModel(model: string, slot: string): ReturnType<SocketPreviewDeps["item"]>;
+  /** A held item's handle ends in its entity's local space (MovingInstanceSystem.handleOf). */
+  handleOf(entityId: string): [THREE.Vector3, THREE.Vector3] | null;
+}
+
+/** Palm centre: midway from the wrist to the index knuckle. */
+function palmOf(hand: THREE.Object3D): THREE.Vector3 {
+  let knuckle: THREE.Object3D | null = null;
+  hand.traverse((b) => {
+    if (!knuckle && b !== hand && /Index1$/.test(b.name)) knuckle = b;
+  });
+  const palm = hand.getWorldPosition(new THREE.Vector3());
+  if (knuckle) palm.lerp((knuckle as THREE.Object3D).getWorldPosition(new THREE.Vector3()), 0.5);
+  return palm;
+}
+
+/** The mirror hand of a socket bone: CC_Base_R_Hand -> CC_Base_L_Hand, mixamorig:RightHand -> LeftHand. */
+function otherHand(bone: string): string | null {
+  if (/_R_/.test(bone)) return bone.replace(/_R_/, "_L_").replace(/Forearm.*$/, "Hand");
+  if (/_L_/.test(bone)) return bone.replace(/_L_/, "_R_").replace(/Forearm.*$/, "Hand");
+  if (/Right/.test(bone)) return bone.replace("Right", "Left").replace(/ForeArm.*$/, "Hand");
+  if (/Left/.test(bone)) return bone.replace("Left", "Right").replace(/ForeArm.*$/, "Hand");
+  return null;
 }
 
 interface SocketEntity {
@@ -123,8 +147,16 @@ export function createSocketPreview(deps: SocketPreviewDeps) {
     const fits = startingOf(socket).filter((s) => s.item?.appearance?.model === socket.model && (s.item.slots ?? []).includes(slot));
     const chosen = isSelected(socket, selected);
     // a held item being placed has its hand to itself
-    if (!chosen && !holstered && sockets.some((o) => o !== socket && o.parent === socket.parent && slotOf(o) === slot && isSelected(o, selected))) return undefined;
-    return (fits.find((s) => s.equip) ?? (chosen || holstered ? fits[0] : undefined))?.item;
+    if (!chosen && !holstered) {
+      const placing = sockets.find((o) => o !== socket && o.parent === socket.parent && isSelected(o, selected));
+      if (placing && slotOf(placing) === slot) return undefined;
+      // ...and a two-hander being placed has both hands to itself
+      if (placing && itemFor(placing, selected, holstered)?.twoHanded) return undefined;
+    }
+    const found = (fits.find((s) => s.equip) ?? (chosen || holstered ? fits[0] : undefined))?.item;
+    // a slot nobody starts with (a greatsword on a sword-and-board character)
+    // still shows, while selected, with any item made from its model
+    return found ?? (chosen ? deps.itemOfModel(socket.model, slot) : undefined);
   }
 
   function lookFor(socket: SocketEntity, selected: string | null, holstered: boolean): ModelLook {
@@ -201,6 +233,47 @@ export function createSocketPreview(deps: SocketPreviewDeps) {
         object.position.copy(parent.worldToLocal(pos));
         object.quaternion.copy(parent.getWorldQuaternion(parentQ).invert().multiply(quat));
       }
+    },
+    /**
+     * The character the pose scrubber poses: the carrier of the selected held
+     * item, or the selection itself when it carries held items. Null otherwise.
+     */
+    actorOf(selected: string | null): string | null {
+      if (!selected) return null;
+      const socket = sockets.find((s) => isSelected(s, selected));
+      if (socket) return socket.parent;
+      return sockets.some((s) => s.parent === selected) ? selected : null;
+    },
+    /**
+     * The OTHER hand against the selected held item's handle, as placed by the
+     * last update(): palm centre (midway from the wrist to the index knuckle)
+     * to the handle's line, and where along it. Null when nothing held is
+     * selected, it is holstered, or its model has no handle part.
+     */
+    secondHand(): { hand: string; distance: number; along: number; holding: number } | null {
+      const selected = deps.selected();
+      if (deps.showAlt()) return null;
+      const socket = sockets.find((s) => isSelected(s, selected));
+      const object = socket && deps.objectOf(socket.id);
+      const ends = socket && deps.handleOf(socket.id);
+      const carrier = object?.parent;
+      if (!socket?.params.bone || !object || !ends || !carrier) return null;
+      const hand = otherHand(socket.params.bone);
+      const bone = hand ? findSocketBone(carrier, hand) : null;
+      const own = findSocketBone(carrier, socket.params.bone.replace(/Fore[aA]rm.*$/, "Hand"));
+      if (!hand || !bone) return null;
+      object.updateWorldMatrix(true, false);
+      const a = object.localToWorld(ends[0].clone());
+      const b = object.localToWorld(ends[1].clone());
+      const ab = b.clone().sub(a);
+      const measure = (wrist: THREE.Object3D) => {
+        const palm = palmOf(wrist);
+        const t = THREE.MathUtils.clamp(palm.clone().sub(a).dot(ab) / Math.max(ab.lengthSq(), 1e-9), 0, 1);
+        return { distance: palm.distanceTo(a.clone().addScaledVector(ab, t)), along: t };
+      };
+      const off = measure(bone);
+      // the gripping hand's own reading: what "on the handle" measures for this rig
+      return { hand, ...off, holding: own ? measure(own).distance : NaN };
     },
     /** actor entity -> the `<Stance>_Idle` clips to stand it in, best first; empty = its own clip. */
     stanceClips(): ReadonlyMap<string, readonly string[]> {

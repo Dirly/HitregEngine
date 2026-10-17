@@ -158,6 +158,7 @@ export function materialMapKey(data: MaterialData): string {
     // both of these change the compiled shader, not just a uniform
     data.vertexColors === true ? "vc" : "-",
     (data.alphaTest ?? 0) > 0 ? "cutout" : "-",
+    data.alphaHash === true ? "hash" : "-",
     // the overlay adds a whole noise branch to the graph, and its mask decides
     // whether that branch samples the map; its numbers are uniforms
     data.overlay ? `overlay:${data.overlay.mask ?? "map"}` : "-",
@@ -422,6 +423,25 @@ export function materialMapsLoading(material: THREE.Material): boolean {
   return materialState.get(material)?.loading === true;
 }
 
+const wiredListeners = new WeakMap<THREE.Material, Array<() => void>>();
+
+/**
+ * Run `listener` once, when `material`'s maps are next wired into its graph.
+ * Returns false (and never runs it) when no maps are in flight: the material
+ * is already final. For COPIES of a cached material: `applyMaterialMaps`
+ * wires the textures into the source's node graph asynchronously, so a copy
+ * taken while they load keeps the flat untextured graph (an instanced batch of
+ * a textured material drawing white) unless it re-syncs here. One-shot, so a
+ * source cached for the session does not pin every copy ever made of it.
+ */
+export function onMaterialMapsWired(material: THREE.Material, listener: () => void): boolean {
+  if (!materialMapsLoading(material)) return false;
+  let list = wiredListeners.get(material);
+  if (!list) wiredListeners.set(material, (list = []));
+  list.push(listener);
+  return true;
+}
+
 /** The material-asset data object a cached material was built from. */
 export function materialSourceOf(material: THREE.Material): unknown {
   return materialSources.get(material);
@@ -558,6 +578,8 @@ export function applyMaterialCommon(material: THREE.Material, data: MaterialData
   // face-tinted meshes by cloning the material after it is built, and the
   // schema field exists for the OTHER case (imported geometry with COLOR_0).
   if (data.vertexColors === true) material.vertexColors = true;
+  // dithered alpha (a path ribbon's verge fade): a compile-time switch, keyed above
+  material.alphaHash = data.alphaHash === true;
   if ((data.shader ?? "standard") === "standard") {
     const pbr = material as THREE.Material & { envMapIntensity?: number; envMap?: THREE.Texture | null };
     pbr.envMapIntensity = data.envMapIntensity ?? 1;
@@ -1089,6 +1111,12 @@ export function wireMaterialMaps(
   }
 
   material.needsUpdate = true;
+  // copies taken while the textures loaded re-sync from the wired graph
+  const listeners = wiredListeners.get(material);
+  if (listeners) {
+    wiredListeners.delete(material);
+    for (const listener of listeners) listener();
+  }
 }
 
 // ---------------------------------------------------------------------------

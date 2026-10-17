@@ -1,8 +1,8 @@
 import * as THREE from "three/webgpu";
-import { attribute, uniform } from "three/tsl";
+import { attribute } from "three/tsl";
 import type { VfxModuleOf } from "@hitreg/core";
 import { LiveModule, presentationOnly, unlitMaterial, type LiveModuleHost } from "../base.js";
-import type { N } from "../shaders.js";
+import { bindValues, objectUniform, type N } from "../shaders.js";
 
 type BoltModule = VfxModuleOf<"bolt">;
 
@@ -17,15 +17,28 @@ const tmpSide = new THREE.Vector3();
 const tmpToCam = new THREE.Vector3();
 const camPos = new THREE.Vector3();
 
+/** Every ribbon's material: one shader for all bolts, each mesh brings its own colour and opacity. */
+let ribbonMaterial: THREE.MeshBasicNodeMaterial | null = null;
+
+function sharedRibbonMaterial(): THREE.MeshBasicNodeMaterial {
+  if (ribbonMaterial) return ribbonMaterial;
+  const material = unlitMaterial(true);
+  const fade: N = attribute("aFade", "float");
+  material.colorNode = objectUniform("r", "color", new THREE.Color(1, 1, 1));
+  material.opacityNode = fade.mul(objectUniform("r", "opacity", 1));
+  material.name = "vfx-bolt";
+  ribbonMaterial = material;
+  return material;
+}
+
 /** A camera-facing ribbon strip: two verts per point, a fade per point. */
 class Ribbon {
   readonly mesh: THREE.Mesh;
   readonly geometry = new THREE.BufferGeometry();
-  readonly material: THREE.MeshBasicNodeMaterial;
   readonly positions: Float32Array;
   readonly fades: Float32Array;
-  readonly uColor = uniform(new THREE.Color(1, 1, 1));
-  readonly uOpacity = uniform(1, "float");
+  readonly uColor = { value: new THREE.Color(1, 1, 1) };
+  readonly uOpacity = { value: 1 };
   private readonly posAttr: THREE.BufferAttribute;
   private readonly fadeAttr: THREE.BufferAttribute;
   private readonly index: THREE.BufferAttribute;
@@ -41,12 +54,8 @@ class Ribbon {
     this.geometry.setAttribute("aFade", this.fadeAttr);
     this.geometry.setIndex(this.index);
     this.geometry.setDrawRange(0, 0);
-    this.material = unlitMaterial(true);
-    const fade: N = attribute("aFade", "float");
-    this.material.colorNode = this.uColor;
-    this.material.opacityNode = fade.mul(this.uOpacity);
-    this.material.needsUpdate = true;
-    this.mesh = new THREE.Mesh(this.geometry, this.material);
+    this.mesh = new THREE.Mesh(this.geometry, sharedRibbonMaterial());
+    bindValues(this.mesh, "r", { color: this.uColor, opacity: this.uOpacity });
     presentationOnly(this.mesh);
     this.mesh.visible = false;
     root.add(this.mesh);
@@ -110,7 +119,7 @@ class Ribbon {
   dispose(): void {
     this.mesh.removeFromParent();
     this.geometry.dispose();
-    this.material.dispose();
+    // the ribbon material is shared by every bolt
   }
 }
 

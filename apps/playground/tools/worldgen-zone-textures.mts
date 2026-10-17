@@ -3,7 +3,8 @@
  *
  * The cast (authoring/zonegen/<world>/cast.json) names each zone's `palette`; a palette's ground LOOK is
  * authoring/zonegen/palettes/<palette>.json (`groundPaletteSchema`): one tile per ground role (grass, ground,
- * cliff, road, paving, accent). This stage:
+ * cliff, road, paving, accent). Palettes and their tiles (assets/textures) are looked up across the project's
+ * dependsOn closure (tools/_closure.mjs), own project first — a world reuses the foundation's tiles. This stage:
  *
  *   1. tags the base palette's surfaces with their roles if nothing is tagged yet (grass/drygrass = grass,
  *      dirt/mud = ground, cliff/rock = cliff, sand = accent) — edit `surfaces[].role` to change it;
@@ -23,6 +24,8 @@ import { NATURAL_SURFACE_ROLES, recipeSplatIndexed, type WorldRecipe } from "@hi
 // @ts-expect-error plain JS helper
 import { decodePng } from "./_png.mjs";
 import { groundPaletteSchema, type GroundPalette } from "./zonegen/schemas.mts";
+import { closure, findAsset } from "./_closure.mjs";
+import { writeRockSkinTemplate } from "./rock-skins.mts";
 
 export interface ZoneTexturesHost {
   argv: string[];
@@ -65,8 +68,18 @@ function readCast(project: string, world: string): CastRowLite[] {
   return (doc.rows ?? []).filter((r) => r && typeof r.zone === "string" && typeof r.palette === "string");
 }
 
+/** A palette's ground look: the first `authoring/zonegen/palettes/<id>.json` across the project's dependsOn closure (own first). */
 function paletteFile(project: string, id: string): string {
+  for (const p of closure(project) as string[]) {
+    const f = path.join(projectDir(p), "authoring", "zonegen", "palettes", `${id}.json`);
+    if (fs.existsSync(f)) return f;
+  }
   return path.join(projectDir(project), "authoring", "zonegen", "palettes", `${id}.json`);
+}
+
+/** A ground tile's PNG: `assets/textures/<rel>` across the closure (where the running game resolves it), or null. */
+function textureFile(project: string, rel: string): string | null {
+  return findAsset(project, path.join("textures", rel)) as string | null;
 }
 
 function readPalette(project: string, id: string): GroundPalette | null {
@@ -137,6 +150,7 @@ export function commandZoneTextures(host: ZoneTexturesHost, world: string): void
   }
 
   let applied = 0;
+  const rockPrefer: Record<string, string> = {};
   for (const row of rows) {
     const palette = readPalette(project, row.palette);
     if (!palette) {
@@ -149,8 +163,8 @@ export function commandZoneTextures(host: ZoneTexturesHost, world: string): void
     if (!region) host.fail(`${row.zone}: no such region in ${world} (run worldgen zones, or fix the cast)`);
     const ground: Record<string, string> = {};
     for (const e of entries(palette)) {
-      const png = path.join(host.assetsRoot(), "textures", e.texture);
-      if (!fs.existsSync(png)) host.fail(`${row.palette}.${e.role}: texture ${e.texture} not found under ${path.relative(process.cwd(), path.join(host.assetsRoot(), "textures"))}`);
+      const png = textureFile(project, e.texture);
+      if (!png) host.fail(`${row.palette}.${e.role}: texture ${e.texture} not found under assets/textures of ${(closure(project) as string[]).join(", ")}`);
       const name = surfaceName(row.palette, e.role);
       const base = recipe.surfaces.find((s) => s.role === e.role);
       const surface = {
@@ -166,11 +180,14 @@ export function commandZoneTextures(host: ZoneTexturesHost, world: string): void
       ground[e.role] = name;
     }
     region.ground = ground as typeof region.ground;
+    if (palette.rock && ground["cliff"]) rockPrefer[ground["cliff"]] = palette.rock;
     applied++;
     console.log(`  ${row.zone} (${region.name}) <- ${row.palette}: ${Object.entries(ground).map(([r, s]) => `${r}=${s}`).join(", ")}`);
   }
   if (applied === 0) host.fail("no zone had a ground look to apply");
   recipe.splat = "indexed";
+  // 5. the stone follows the place: each zone's cliff gets a slice of the world's rock material (recipe.rockSkins)
+  writeRockSkinTemplate(project, recipe, rockPrefer);
   host.writeRecipe(recipe, file);
   host.writeTerrainMaterial(recipe, recipe.material ?? `terrain/${recipe.name}`, true);
   console.log(

@@ -2,7 +2,7 @@ import * as THREE from "three/webgpu";
 import { abs, float, mix, smoothstep, sub, texture as tslTexture, uv, vec2, vec3 } from "three/tsl";
 import type { VfxModuleOf } from "@hitreg/core";
 import { LiveModule, easeIn, easeOut, loadTexture, presentationOnly, unlitMaterial, type LiveModuleHost } from "../base.js";
-import { makeUniforms, ringEnergy, posterize, quantize, ringBand, type N } from "../shaders.js";
+import { bindValues, makeValues, ringEnergy, posterize, quantize, ringBand, sharedUniforms, type N } from "../shaders.js";
 
 type RingModule = VfxModuleOf<"ring">;
 
@@ -16,6 +16,55 @@ const roll = new THREE.Quaternion();
 const X = new THREE.Vector3(1, 0, 0);
 const Y = new THREE.Vector3(0, 1, 0);
 const Z = new THREE.Vector3(0, 0, 1);
+
+/**
+ * One material per (blend, mask texture), shared by every ring of that look;
+ * each mesh carries its own values (shaders.ts sharedUniforms).
+ */
+const variants = new Map<string, THREE.MeshBasicNodeMaterial>();
+
+function variant(additive: boolean, map: THREE.Texture | null): THREE.MeshBasicNodeMaterial {
+  const key = `${additive ? "add" : "norm"}:${map?.uuid ?? ""}`;
+  let material = variants.get(key);
+  if (material) return material;
+  material = unlitMaterial(additive);
+  const u = sharedUniforms("u");
+  // a = arc half-angle (rad, >= PI disables), b = pixel cells, c = posterize steps
+  const x = sharedUniforms("x");
+  // PSX: quantise the disc coordinates before anything reads them
+  const quv: N = quantize(uv() as N, x.b);
+  const p: N = quv.sub(vec2(0.5, 0.5)).mul(2);
+  const r: N = p.length();
+  const angle: N = p.y.atan(p.x);
+  const band: N = ringBand(u.a, u.b, r);
+  // arc: keep the sector within the half-angle of +Y (the spell direction
+  // after the ground tilt); a half-angle >= PI keeps everything
+  const off: N = abs(angle.sub(float(Math.PI / 2)));
+  const offWrapped: N = off.min(abs(angle.add(float(Math.PI * 1.5))));
+  const sector: N = sub(float(1), smoothstep(x.a, x.a.add(0.06), offWrapped));
+  const inArc: N = sector.max(smoothstep(float(Math.PI - 0.02), float(Math.PI), x.a));
+  let alpha: N;
+  let color: N;
+  if (map) {
+    // A mask ring is a drawn sigil: band × sector × the mask, and NO noise.
+    // The old path evaluated two fractal noises per pixel under every mask
+    // it never used — on a 5 m floor that was most of a big spell's GPU time.
+    const s: N = tslTexture(map, quv);
+    alpha = band.mul(inArc).mul(s.a);
+    color = mix(u.color, u.glow, band.mul(0.15)).mul(s.rgb);
+  } else {
+    // Noise breaks the band into energy; swirl turns it into a spiral. One
+    // evaluation: the coordinates blend between flat and polar, not the results.
+    const broken: N = ringEnergy(quv, r, angle, u.d, u.time, u.e, u.c);
+    alpha = band.mul(broken).mul(inArc);
+    color = mix(u.color, u.glow, band.mul(0.35).mul(u.c));
+  }
+  material.colorNode = color;
+  material.opacityNode = posterize(alpha, x.c).mul(u.opacity);
+  material.name = `vfx-ring:${key}`;
+  variants.set(key, material);
+  return material;
+}
 
 /**
  * A disc or annulus: shockwaves, runes, portal faces, lingering floors.
@@ -32,11 +81,9 @@ export class RingLive extends LiveModule<RingModule> {
   private readonly mesh: THREE.Mesh;
   private readonly geometry: THREE.CircleGeometry;
   private readonly baseY: Float32Array;
-  private readonly material: THREE.MeshBasicNodeMaterial;
-  private readonly texMaterial: THREE.MeshBasicNodeMaterial;
-  private readonly u = makeUniforms();
+  private readonly u = makeValues();
   /** a = arc half-angle (rad, >= PI disables), b = pixel cells, c = posterize steps */
-  private readonly x = makeUniforms();
+  private readonly x = makeValues();
   private map: THREE.Texture | null = null;
   private mapUrl = "";
   private mapReady = false;
@@ -46,49 +93,12 @@ export class RingLive extends LiveModule<RingModule> {
     super(host);
     this.geometry = new THREE.CircleGeometry(1, SEGMENTS);
     this.baseY = new Float32Array(this.geometry.attributes["position"]!.count);
-    this.material = unlitMaterial(true);
-    this.texMaterial = unlitMaterial(true);
-    this.buildShader(this.material, null);
-    this.mesh = new THREE.Mesh(this.geometry, this.material);
+    this.mesh = new THREE.Mesh(this.geometry, variant(true, null));
+    bindValues(this.mesh, "u", this.u);
+    bindValues(this.mesh, "x", this.x);
     presentationOnly(this.mesh);
     this.mesh.visible = false;
     host.root.add(this.mesh);
-  }
-
-  private buildShader(material: THREE.MeshBasicNodeMaterial, map: THREE.Texture | null): void {
-    const u = this.u;
-    const x = this.x;
-    // PSX: quantise the disc coordinates before anything reads them
-    const quv: N = quantize(uv() as N, x.b);
-    const p: N = quv.sub(vec2(0.5, 0.5)).mul(2);
-    const r: N = p.length();
-    const angle: N = p.y.atan(p.x);
-    const band: N = ringBand(u.a, u.b, r);
-    // arc: keep the sector within the half-angle of +Y (the spell direction
-    // after the ground tilt); a half-angle >= PI keeps everything
-    const off: N = abs(angle.sub(float(Math.PI / 2)));
-    const offWrapped: N = off.min(abs(angle.add(float(Math.PI * 1.5))));
-    const sector: N = sub(float(1), smoothstep(x.a, x.a.add(0.06), offWrapped));
-    const inArc: N = sector.max(smoothstep(float(Math.PI - 0.02), float(Math.PI), x.a));
-    let alpha: N;
-    let color: N;
-    if (map) {
-      // A mask ring is a drawn sigil: band × sector × the mask, and NO noise.
-      // The old path evaluated two fractal noises per pixel under every mask
-      // it never used — on a 5 m floor that was most of a big spell's GPU time.
-      const s: N = tslTexture(map, quv);
-      alpha = band.mul(inArc).mul(s.a);
-      color = mix(u.color, u.glow, band.mul(0.15)).mul(s.rgb);
-    } else {
-      // Noise breaks the band into energy; swirl turns it into a spiral. One
-      // evaluation: the coordinates blend between flat and polar, not the results.
-      const broken: N = ringEnergy(quv, r, angle, u.d, u.time, u.e, u.c);
-      alpha = band.mul(broken).mul(inArc);
-      color = mix(u.color, u.glow, band.mul(0.35).mul(u.c));
-    }
-    material.colorNode = color;
-    material.opacityNode = posterize(alpha, x.c).mul(u.opacity);
-    material.needsUpdate = true;
   }
 
   protected naturalLife(): number {
@@ -98,8 +108,6 @@ export class RingLive extends LiveModule<RingModule> {
   protected onBegin(): void {
     const m = this.module;
     const additive = m.blend === "additive";
-    this.material.blending = additive ? THREE.AdditiveBlending : THREE.NormalBlending;
-    this.texMaterial.blending = this.material.blending;
     this.u.color.value.copy(this.color);
     this.u.glow.value.copy(this.color).lerp(new THREE.Color(1, 1, 1), 0.6);
     this.u.a.value = m.inner;
@@ -124,15 +132,14 @@ export class RingLive extends LiveModule<RingModule> {
           t.minFilter = THREE.NearestFilter;
           t.needsUpdate = true;
           this.map = t;
-          this.buildShader(this.texMaterial, t);
           this.mapReady = true;
-          this.mesh.material = this.texMaterial;
+          this.mesh.material = variant(this.module.blend === "additive", t);
         });
       } else if (url && this.mapReady) {
-        this.mesh.material = this.texMaterial;
+        this.mesh.material = variant(additive, this.map);
       }
     } else {
-      this.mesh.material = this.material;
+      this.mesh.material = variant(additive, null);
     }
 
     // drape
@@ -221,7 +228,6 @@ export class RingLive extends LiveModule<RingModule> {
   dispose(): void {
     this.mesh.removeFromParent();
     this.geometry.dispose();
-    this.material.dispose();
-    this.texMaterial.dispose();
+    // variant materials are shared and outlive this ring
   }
 }

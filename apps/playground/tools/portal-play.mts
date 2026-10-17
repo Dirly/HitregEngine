@@ -73,7 +73,19 @@ if (DUNGEON) {
     const hit = walkThroughPortals(JSON.parse(text) as SceneDoc).find(([, p]) => p["scene"] === DUNGEON && !p["back"]);
     if (hit) { SCENE = w; PORTAL = hit[0]; break; }
   }
-  if (!PORTAL) { console.error(`STOP: no walk-through portal into ${DUNGEON} in ${prefer || "any world scene"}`); process.exit(2); }
+  if (!PORTAL) {
+    // the world's door is not built yet (its world place is unbuilt): nothing to walk in by. Record the stage as WAITING
+    // for the door (the dungeon pipeline shows WAITING, not FAILED); the dungeon's own return portal is proven by the
+    // `portals` stage (portal-cover) until the door exists, then this runs for real.
+    const own = sceneFile(DUNGEON);
+    if (own) {
+      const rep = path.join(PG, "projects", own.project, "reports", "portal-play.json");
+      fs.mkdirSync(path.dirname(rep), { recursive: true });
+      fs.writeFileSync(rep, JSON.stringify({ passed: false, waiting: "world door", note: `no walk-through portal into ${DUNGEON} in ${prefer || "any world scene"}: the world's door is not built; re-run once it is`, at: new Date().toISOString() }, null, 1) + "\n");
+    }
+    console.error(`WAITING: no walk-through portal into ${DUNGEON} in ${prefer || "any world scene"} (the world door is not built) — recorded as waiting for the door`);
+    process.exit(2);
+  }
   const dd = loadScene(DUNGEON);
   const entry = String(paramsOf(loadScene(SCENE), PORTAL)!["anchor"] ?? "");
   const tag = (dd.entities[entry]?.tags ?? []).find((t) => t.startsWith("portal:"));
@@ -144,7 +156,10 @@ const where = (id: string) => H((h, id: string) => {
 const me = () => H((h) => { const id = h.playerId(); const o = id && h.object(id); if (!o) return null; const p = o.position.clone(); o.getWorldPosition(p); return [p.x, p.y, p.z]; }) as Promise<V3 | null>;
 type St = { scene: string; mode: string; curtain: boolean; travelling: boolean; sim: boolean; pid: string | null };
 const state = () => H((h) => ({ scene: h.sceneName(), mode: h.playMode.get(), curtain: h.portalCurtain(), travelling: h.travelling(), sim: !!h.sim, pid: h.playerId() })) as Promise<St>;
-const settled = async (scene: string, ms = 90000) => waitUntil(async () => { const s = await state(); return s.scene === scene && s.mode === "playing" && !s.curtain && !s.travelling && s.sim && !!s.pid; }, ms);
+/** `anyHold`: also accept a body still held for ground. The trip run fast-travels at once, and a world's dev spawn
+ *  (the scene's `player` entity) may stand where no ground ever streams (skelmorrow's sat at 0,56,0 with nothing in
+ *  the 60 m below: the hold never released) — not what this test is about. */
+const settled = async (scene: string, ms = 90000, anyHold = false) => waitUntil(async () => { const s = await state(); return s.scene === scene && s.mode === "playing" && !s.curtain && (anyHold || !s.travelling) && s.sim && !!s.pid; }, ms);
 
 /** listen on the live event bus (one per play session) for trips and refusals */
 const hookEvents = () => H((h) => {
@@ -188,7 +203,7 @@ async function walkInto(goal: V3, from: string, door: string, doorAt: V3, ms: nu
 }
 
 /** A fresh page on `scene`, in play, settled. */
-async function openInPlay(scene: string): Promise<void> {
+async function openInPlay(scene: string, travelNext = false): Promise<void> {
   if (page) await page.close().catch(() => {});
   page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
   // tsx keeps function names with an injected __name() helper: the functions evaluated in the page need it too
@@ -201,7 +216,7 @@ async function openInPlay(scene: string): Promise<void> {
   await sleep(1500);
   await page.locator("canvas").first().focus().catch(() => {});
   await page.keyboard.press("Backquote");
-  if (!(await settled(scene, 180000))) throw new Fail(`play never started in ${scene}: ${JSON.stringify(await state())}`);
+  if (!(await settled(scene, 180000, travelNext))) throw new Fail(`play never started in ${scene}: ${JSON.stringify(await state())}`);
   await H(() => document.exitPointerLock?.());
   await sleep(1500);
 }
@@ -242,7 +257,23 @@ console.log(`portal-play: ${SCENE}/${PORTAL} -> ${DEST}, out by ${EXIT}`);
 const exitParams = paramsOf(destDoc, EXIT);
 await phase("trip", async () => {
   if (!exitParams) throw new Fail(`${EXIT} in ${DEST} is not a portal: a player cannot leave`);
-  await openInPlay(SCENE);
+  // The dev app loads only the boot scene's project closure (project.json dependsOn); a portal into a project
+  // outside it RELOADS the page, which drops the trip (arrives in edit mode, "could not open scene"). A world lists
+  // its instance projects in its own dependsOn (proving does) — check before spending minutes in a browser.
+  const worldProject = sceneFile(SCENE)!.project;
+  if (destInfo!.project !== worldProject) {
+    const closure = new Set<string>();
+    const visit = (p: string): void => {
+      if (closure.has(p)) return;
+      closure.add(p);
+      const f = path.join(PG, "projects", p, "project.json");
+      const deps = fs.existsSync(f) ? ((JSON.parse(fs.readFileSync(f, "utf8")) as { dependsOn?: string[] }).dependsOn ?? []) : [];
+      deps.forEach(visit);
+    };
+    visit(worldProject);
+    if (!closure.has(destInfo!.project)) throw new Fail(`project ${destInfo!.project} (scene ${DEST}) is not in ${worldProject}'s dependsOn closure: the editor reloads the page at the door and the trip is lost — add "${destInfo!.project}" to projects/${worldProject}/project.json dependsOn (as proving lists its dungeons)`);
+  }
+  await openInPlay(SCENE, true);
   const porch = (sp["returnAnchor"] ? await where(String(sp["returnAnchor"])) : null);
   const door = await where(PORTAL);
   if (!door) throw new Fail(`no entity ${PORTAL} in ${SCENE}`);

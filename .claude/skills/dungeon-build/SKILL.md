@@ -19,11 +19,12 @@ node ../../../../tools/dungeon-pipeline/quality.mjs <gate> --dry --metrics      
 node tools/dungeon-room-kit/roomkit.mjs all <rooms.json> [--voxel .12]               # engine root: build+noise+bake
 node tools/dungeon-room-kit/roomkit.mjs counts <source-audit.json>                   # detail as the recipe gate counts
 ```
-Order: plan, export, noise, originality, dc-bake, import, merged bake, split-floor, stairs, materials, atlas, matte,
+Order: plan, export, noise, originality, thin-walls, dc-bake, import, merged bake, split-floor, stairs, materials, atlas, matte,
 dress maps, scene, portals, lighting, recipe, culling, walk, fight, views, readability, compare, loading art,
 portal play. A FAILED gate blocks `--next` and shows on the dungeon's `zonegen status` row.
 
 ## Gates: failure -> fix (numbers: `thresholds.json`, never edited for one dungeon)
+- `thin-walls` (pre-bake, `tools/mesh-dc/thin-walls.mjs <stamp> --plan authoring/plan.json`): a SHELL wall (one side looks out of the map) under 3 DC voxels -> the bake perforates it; thicken the source (room kit: `MIN_SHELL_VOXELS`, barrel lunettes closed, `JOINT_VOXELS` lap at open sides) or bake finer. Planks/hulls/decals/flat-art are exempt by name or `dc_thin_ok`; never exempt a shell.
 - `noise`: no `authoring/noise.json`, stamp not embedding it, < 90% natural triangles noised, flat-slab roofs, box
   `rock` lumps -> write the role table (defaults in `docs/blender-dc-authoring.md` "DC role noise"), re-export; replace
   flat roofs with shaped volumes (`shapes_blender.py`: domes, lofted tunnels). Noise on a flat slab still reads as a slab.
@@ -38,6 +39,12 @@ portal play. A FAILED gate blocks `--next` and shows on the dungeon's `zonegen s
   bones and unlit runs; dungeon-wide prop kinds, decal textures, ambient, sourceless lights, prefabs outside a plan ->
   room kit for detail; dressing plans for props/decals; `room-sheet.json` `setPieceObjects` names a set piece the
   counter misses; a long passage meant dark says "unlit" in the plan.
+- `decals` (optional, owner 2026-10-13): a decal texture that another dungeon uses (same file, byte copy, perceptual
+  near copy), one decal > 40% of them, or a decal missing from `authoring/decals/set.json` -> make this dungeon's own
+  set from its concept frames: that file is an `image-request.mjs gen-set` manifest (ids `<project>-decal-*`, `ref` =
+  a concept frame, alpha); `gen-set --manifest projects/<id>/authoring/decals/set.json`.
+- `flat-art`: a slab picture (door relief, plaque) upside down or mirrored -> `tools/flat-art.mts check <id> --fix`
+  (engine material maps load flipY: a slab stores v = 1 - row; from Blender write bpy v = row).
 - `culling`: a room's dressing appears > 2 m after entering -> the scene `cullingProfile` (lighting stage writes it).
 - `readability` / `compare`: see `dungeon-lighting`; `compare --build` makes the side-by-side sheet; a person judges it.
 - Real-body `walk` / `fight` / follow-sim fail -> clearance is soffit minus the floor UNDER each sample, 2.6 m
@@ -55,6 +62,8 @@ only (a tomb over the bone cap, an intended ice shine, a passage lit only by the
 - Walk the route with the real body right after the first bake, before dressing.
 - The merged bake ships; volumes stay as the editable source. Never verify with a raised browser heap.
 - Frames fit the noised opening, overlapping into the rock; never floating proud on the old outline.
+- Water fills to its walls: author a pool/channel as a rough rect at its level, then `tools/water-edges.mts scene <id> --fix` re-cuts it to the walls and puts a dark card / drain where it really goes on; the `water-edges` stage must pass (no edge in open air).
+- No holes you can see through the map: the `see-through` stage (`tools/see-through.mts scene <id> --batch k/3`) draws the shipped scene with a magenta sentinel from eye height along the walk route and must pass; a hole's cause comes with it (thin DC shell: thicken the source wall to >= 3 voxels, `tools/mesh-dc/thin-walls.mjs` finds them before the bake; seam: overlap the groups; single-sided: close or double-side; culled: raise `cullingProfile.interiorReveal`). Real openings go in `authoring/see-through-openings.json` (docs/see-through.md).
 - Scale to the creature: giant halls take a coarser voxel; ramps (<= 20 %) where risers would hit the autostep limit.
 - No stacked fight floors (combat finds ground with a ray straight down): storeys side by side, joined by stairs.
 - Noised caves have no straight wall spans: wall-backed props cannot go there; light them with posted lights.

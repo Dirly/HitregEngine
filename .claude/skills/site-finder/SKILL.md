@@ -46,3 +46,7 @@ Record each place's pick in the brief as `places[].site`; the reserve lint refus
 - Measure what a place depends on before the freeze (a conduit's source level; a trail's grade-capped length).
 - A dungeon door needs rock behind it along its facing, deep enough for its creatures' door height.
 - Ranking is heuristic: rim perches on one cliff crowd the top; look at the picture, not only rank 1.
+- DC terrain (recipe `planarCliffs` / `seaCliffs` / `buttes`): the finder samples the drawn ground (`field.ground`) and adds
+  `fall-lip`, `plunge-pool`, `sea-stack`, `stack-cluster` (2-4 stacks near the cliff, a bridge chain), `headland`,
+  `butte-top`, `canyon-bend`. Stacks and butte tops are unreachable by design: their `access` candidate is the bridge,
+  ferry or lift to plan.

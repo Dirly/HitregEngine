@@ -1,3 +1,4 @@
+import { assetFileUrl } from "./asset-url.js";
 import * as THREE from "three/webgpu";
 import {
   expandScene,
@@ -150,7 +151,7 @@ export class SubsceneManager {
       const content: string =
         rawContent ??
         (await fetch(
-          `/__hitreg/asset-file?file=${encodeURIComponent(`scenes/${inst.data.scene}.scene.json`)}`,
+          assetFileUrl(`scenes/${inst.data.scene}.scene.json`),
         ).then((r) => {
           if (!r.ok) throw new Error(`scene "${inst.data.scene}" not found`);
           return r.text();

@@ -14,7 +14,8 @@
     "typecheck": "tsc --noEmit",
     "serve": "tsx bin/serve.ts",
     "main": "tsx bin/main.ts",
-    "zone-budget": "tsx bin/zone-budget.ts"
+    "zone-budget": "tsx bin/zone-budget.ts",
+    "account-role": "tsx bin/account-role.ts"
   },
   "dependencies": {
     "@hitreg/comms": "workspace:*",

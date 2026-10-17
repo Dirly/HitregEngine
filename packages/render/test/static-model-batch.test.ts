@@ -82,3 +82,30 @@ describe("static imported props", () => {
     expect(skinned.children[0]!.userData[STATIC_BATCH_FLAG]).toBeUndefined();
   });
 });
+
+describe("pruning keeps effect drivers visible", () => {
+  it("never hides a prop whose only unbatched child is a standing vfx (its flame plays only while visible)", async () => {
+    const source = new THREE.Group();
+    source.add(new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshBasicMaterial()));
+    vi.spyOn(GLTFLoader.prototype, "loadAsync").mockResolvedValue({ scene: source, animations: [] } as never);
+    let done!: () => void;
+    const loaded = new Promise<void>(resolve => { done = resolve; });
+    let n = 0;
+    const entities: Record<string, unknown> = {};
+    for (const id of ["a", "b"]) {
+      entities[id] = { name: id, parent: null, tags: [], components: {} };
+      entities[`${id}-bowl`] = { name: "bowl", parent: id, tags: [], components: { mesh: { source: { kind: "asset", assetId: "bowl" }, static: true } } };
+      entities[`${id}-fire`] = { name: "fire", parent: id, tags: [], components: { vfx: { effect: "env/fire-brazier", playing: true, cullDistance: 60 } } };
+    }
+    const built = buildScene({ version: 1, name: "fires", entities } as never, { resolveModel: () => "test:effect-prune", onModelLoaded: () => { if (++n === 2) done(); } });
+    await loaded;
+    const batch = batchStaticMeshes(built.scene, { prunable: () => true })!;
+    expect(batch.stats.merged).toBe(2);
+    for (const id of ["a", "b"]) {
+      expect(built.objects.get(id)!.visible).toBe(true);
+      expect(built.objects.get(`${id}-fire`)!.visible).toBe(true);
+      expect(built.objects.get(`${id}-bowl`)!.visible).toBe(false); // the batch still draws the bowl
+    }
+    batch.dispose();
+  });
+});

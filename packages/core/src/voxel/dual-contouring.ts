@@ -54,10 +54,13 @@
  * that the surface is closed.
  *
  * **What this does NOT do**, and what a real swap would owe:
- * - No skirts. `addSkirts` finds boundary edges by testing whether vertices
- *   lie exactly on the cell plane, which is an MC property — DC vertices sit
- *   in cell interiors and never do. Equal-LOD neighbours agree exactly and
- *   need no skirt; an LOD TRANSITION (the HLOD ring) will crack.
+ * - LOD steps need `clip` (below). With face ownership a dual chunk ends
+ *   inside a cell, not on the chunk plane, so no skirt can close an LOD
+ *   TRANSITION (the HLOD ring): measured ~850-1000 see-through probes per 3x3
+ *   cliff block. Clipped to its column, the border lies on the plane and
+ *   `mesh.ts` hangs in-plane skirts from it (13-200 probes, MC's level).
+ * - Exact data is per world: a streamed world supplies Hermite access only
+ *   where it has an analytic feature to keep (`terrain.planarCliffs`).
  * - No recovery of features invisible to the sample lattice. Separate
  *   boundary disks in one cell have separate QEF vertices, and collapsed
  *   collinear facets are triangulated conformingly without moving vertices.
@@ -90,6 +93,15 @@ export interface HermiteSource {
   value(x: number, y: number, z: number): number;
   /** The exact gradient at a point, written to `out[0..2]`. Need not be normalised. */
   gradient(x: number, y: number, z: number, out: Float64Array): void;
+  /**
+   * Optional gate, in this block's lattice indices: true where the sampled
+   * value IS `value` at that lattice point. An edge is refined only when both
+   * its ends are active (an ambiguous face only when all four corners are);
+   * everything else takes the sampled path. This is what lets a field supply
+   * exact data for one feature (a planar cliff band) without having to be
+   * exact everywhere (caves, blobs and band cuts stay sampled).
+   */
+  activeAt?(i: number, j: number, k: number): boolean;
 }
 
 export interface DualContourOptions extends MarchOptions {
@@ -124,7 +136,51 @@ export interface DualContourOptions extends MarchOptions {
    * original paper.
    */
   svdTolerance?: number;
+  /**
+   * World-space XZ column this block's surface is CLIPPED to, replacing face
+   * ownership on X and Z. Every reachable quad is emitted and cut exactly at
+   * the column's planes, so the mesh ends ON the chunk boundary the way a
+   * marching-cubes chunk does — which is what lets the MC skirts hang from it
+   * and close an LOD step. Neighbours clip the same triangles from opposite
+   * sides with the same arithmetic (intersections are computed from the
+   * lexicographically lower endpoint), so equal-LOD seams stay bit-exact.
+   * Y keeps the ownership rule (streamed terrain is one band per column).
+   */
+  clip?: { x: readonly [number, number]; z: readonly [number, number] };
+  /**
+   * Radians. Where a cell's crossing normals spread wider than this, its vertex
+   * is split into one copy per normal cluster and each quad takes the copy that
+   * holds its own edge's normal, so a rim or a strata ledge SHADES sharp instead
+   * of being smoothed across. Cell-local and deterministic, so neighbouring
+   * chunks agree. 0 / omitted = one averaged normal per vertex (the old look).
+   */
+  creaseAngle?: number;
+  /**
+   * Bisection steps when refining a Hermite crossing (default 6, then the
+   * bracket's midpoint). Setting it switches the finish to a SECANT step inside
+   * the last bracket, which is exact on a piecewise-planar field, so 3 steps +
+   * secant beats 6 steps of bisection at half the field evaluations.
+   */
+  hermiteSteps?: number;
+  /**
+   * Cosine. With a Hermite source, an edge whose two ends' SAMPLED gradients agree closer than
+   * this takes the cheap sampled crossing instead (smooth there: nothing for the exact path to
+   * sharpen). Omit = every active edge is refined.
+   */
+  hermiteGate?: number;
 }
+
+// Scratch buffers kept between dualContour calls (synchronous, never re-entered), grown on demand and
+// handed out as exact-length views.
+const pools = new Map<string, Int32Array | Uint8Array | Float64Array>();
+function pooled<T extends Int32Array | Uint8Array | Float64Array>(name: string, n: number, make: (n: number) => T): T {
+  let buf = pools.get(name) as T | undefined;
+  if (!buf || buf.length < n) { buf = make(Math.ceil(n * 1.25)); pools.set(name, buf); }
+  return buf.subarray(0, n) as T;
+}
+const scratchI32 = (name: string, n: number): Int32Array => pooled(name, n, (k) => new Int32Array(k));
+const scratchU8 = (name: string, n: number): Uint8Array => pooled(name, n, (k) => new Uint8Array(k));
+const scratchF64 = (name: string, n: number): Float64Array => pooled(name, n, (k) => new Float64Array(k));
 
 const EMPTY: MarchResult = {
   positions: new Float32Array(0),
@@ -208,69 +264,55 @@ function solveQef(
   tolerance: number,
   out: Float64Array,
 ): void {
-  const a = [
-    [ata[0]!, ata[1]!, ata[2]!],
-    [ata[1]!, ata[3]!, ata[4]!],
-    [ata[2]!, ata[4]!, ata[5]!],
-  ];
-  const v = [
-    [1, 0, 0],
-    [0, 1, 0],
-    [0, 0, 1],
-  ];
-  const pairs: readonly (readonly [number, number])[] = [
-    [0, 1],
-    [0, 2],
-    [1, 2],
-  ];
+  // Scalars, not nested arrays: this runs once per surface component (thousands per cell block), and the
+  // three small arrays it used to allocate per call were a visible share of the mesher's garbage.
+  let a00 = ata[0]!, a01 = ata[1]!, a02 = ata[2]!, a11 = ata[3]!, a12 = ata[4]!, a22 = ata[5]!;
+  let v00 = 1, v01 = 0, v02 = 0, v10 = 0, v11 = 1, v12 = 0, v20 = 0, v21 = 0, v22 = 1;
   for (let sweep = 0; sweep < 8; sweep++) {
-    const off = Math.abs(a[0]![1]!) + Math.abs(a[0]![2]!) + Math.abs(a[1]![2]!);
+    const off = Math.abs(a01) + Math.abs(a02) + Math.abs(a12);
     if (off < 1e-14) break;
-    for (const pair of pairs) {
-      const p = pair[0]!;
-      const q = pair[1]!;
-      const apq = a[p]![q]!;
-      if (Math.abs(apq) < 1e-16) continue;
-      const theta = (a[q]![q]! - a[p]![p]!) / (2 * apq);
-      const sign = theta < 0 ? -1 : 1;
-      const t = sign / (Math.abs(theta) + Math.sqrt(theta * theta + 1));
-      const c = 1 / Math.sqrt(t * t + 1);
-      const s = t * c;
-      for (let k = 0; k < 3; k++) {
-        const akp = a[k]![p]!;
-        const akq = a[k]![q]!;
-        a[k]![p] = c * akp - s * akq;
-        a[k]![q] = s * akp + c * akq;
-      }
-      for (let k = 0; k < 3; k++) {
-        const apk = a[p]![k]!;
-        const aqk = a[q]![k]!;
-        a[p]![k] = c * apk - s * aqk;
-        a[q]![k] = s * apk + c * aqk;
-        const vkp = v[k]![p]!;
-        const vkq = v[k]![q]!;
-        v[k]![p] = c * vkp - s * vkq;
-        v[k]![q] = s * vkp + c * vkq;
-      }
+    // pair (0, 1)
+    if (Math.abs(a01) >= 1e-16) {
+      const theta = (a11 - a00) / (2 * a01), t = (theta < 0 ? -1 : 1) / (Math.abs(theta) + Math.sqrt(theta * theta + 1));
+      const c = 1 / Math.sqrt(t * t + 1), s = t * c;
+      const n00 = c * c * a00 - 2 * s * c * a01 + s * s * a11, n11 = s * s * a00 + 2 * s * c * a01 + c * c * a11;
+      const n02 = c * a02 - s * a12, n12 = s * a02 + c * a12;
+      a00 = n00; a11 = n11; a01 = 0; a02 = n02; a12 = n12;
+      let p = v00, q = v01; v00 = c * p - s * q; v01 = s * p + c * q;
+      p = v10; q = v11; v10 = c * p - s * q; v11 = s * p + c * q;
+      p = v20; q = v21; v20 = c * p - s * q; v21 = s * p + c * q;
+    }
+    // pair (0, 2)
+    if (Math.abs(a02) >= 1e-16) {
+      const theta = (a22 - a00) / (2 * a02), t = (theta < 0 ? -1 : 1) / (Math.abs(theta) + Math.sqrt(theta * theta + 1));
+      const c = 1 / Math.sqrt(t * t + 1), s = t * c;
+      const n00 = c * c * a00 - 2 * s * c * a02 + s * s * a22, n22 = s * s * a00 + 2 * s * c * a02 + c * c * a22;
+      const n01 = c * a01 - s * a12, n12 = s * a01 + c * a12;
+      a00 = n00; a22 = n22; a02 = 0; a01 = n01; a12 = n12;
+      let p = v00, q = v02; v00 = c * p - s * q; v02 = s * p + c * q;
+      p = v10; q = v12; v10 = c * p - s * q; v12 = s * p + c * q;
+      p = v20; q = v22; v20 = c * p - s * q; v22 = s * p + c * q;
+    }
+    // pair (1, 2)
+    if (Math.abs(a12) >= 1e-16) {
+      const theta = (a22 - a11) / (2 * a12), t = (theta < 0 ? -1 : 1) / (Math.abs(theta) + Math.sqrt(theta * theta + 1));
+      const c = 1 / Math.sqrt(t * t + 1), s = t * c;
+      const n11 = c * c * a11 - 2 * s * c * a12 + s * s * a22, n22 = s * s * a11 + 2 * s * c * a12 + c * c * a22;
+      const n01 = c * a01 - s * a02, n02 = s * a01 + c * a02;
+      a11 = n11; a22 = n22; a12 = 0; a01 = n01; a02 = n02;
+      let p = v01, q = v02; v01 = c * p - s * q; v02 = s * p + c * q;
+      p = v11; q = v12; v11 = c * p - s * q; v12 = s * p + c * q;
+      p = v21; q = v22; v21 = c * p - s * q; v22 = s * p + c * q;
     }
   }
-
-  const eig = [a[0]![0]!, a[1]![1]!, a[2]![2]!];
-  let maxEig = 0;
-  for (const e of eig) maxEig = Math.max(maxEig, Math.abs(e));
+  const maxEig = Math.max(Math.abs(a00), Math.abs(a11), Math.abs(a22));
   const cut = maxEig * tolerance;
-  out[0] = 0;
-  out[1] = 0;
-  out[2] = 0;
-  for (let k = 0; k < 3; k++) {
-    const lambda = eig[k]!;
-    if (Math.abs(lambda) <= cut) continue;
-    const dot = v[0]![k]! * atb[0]! + v[1]![k]! * atb[1]! + v[2]![k]! * atb[2]!;
-    const scale = dot / lambda;
-    out[0] = out[0]! + v[0]![k]! * scale;
-    out[1] = out[1]! + v[1]![k]! * scale;
-    out[2] = out[2]! + v[2]![k]! * scale;
-  }
+  const b0 = atb[0]!, b1 = atb[1]!, b2 = atb[2]!;
+  let o0 = 0, o1 = 0, o2 = 0;
+  if (Math.abs(a00) > cut) { const k = (v00 * b0 + v10 * b1 + v20 * b2) / a00; o0 += v00 * k; o1 += v10 * k; o2 += v20 * k; }
+  if (Math.abs(a11) > cut) { const k = (v01 * b0 + v11 * b1 + v21 * b2) / a11; o0 += v01 * k; o1 += v11 * k; o2 += v21 * k; }
+  if (Math.abs(a22) > cut) { const k = (v02 * b0 + v12 * b1 + v22 * b2) / a22; o0 += v02 * k; o1 += v12 * k; o2 += v22 * k; }
+  out[0] = o0; out[1] = o1; out[2] = o2;
 }
 
 /** Internal box-constrained QEF. Active faces/edges/corners retain the plane
@@ -278,7 +320,7 @@ function solveQef(
  * caller supplies a feasible mass point and an unconstrained displacement. */
 export function constrainCellQef(ata: Float64Array, atb: Float64Array,
   mass: readonly number[], tolerance: number, out: Float64Array): void {
-  if ([0,1,2].every(i => mass[i]! + out[i]! >= 0 && mass[i]! + out[i]! <= 1)) return;
+  { const x = mass[0]! + out[0]!, y = mass[1]! + out[1]!, z = mass[2]! + out[2]!; if (x >= 0 && x <= 1 && y >= 0 && y <= 1 && z >= 0 && z <= 1) return; }
   const a = [[ata[0]!,ata[1]!,ata[2]!],[ata[1]!,ata[3]!,ata[4]!],[ata[2]!,ata[4]!,ata[5]!]];
   const cost = (d: number[]) => d.reduce((s,v,i) => s + v *
     (a[i]!.reduce((t,c,j) => t+c*d[j]!,0)-2*atb[i]!),0);
@@ -346,8 +388,12 @@ export function dualContour(block: SampledBlock, options: DualContourOptions = {
   const normals: number[] = [];
   const indices: number[] = [];
   const attrSpecs = Object.entries(options.attributes ?? {});
-  const attrOut: Record<string, number[]> = {};
-  for (const [name] of attrSpecs) attrOut[name] = [];
+  // Attributes (on terrain: the whole biome stack per vertex) are DEFERRED: each vertex records where its
+  // values come from — computed at its own exact position and normal (-1), or copied from vertex n — and only
+  // the vertices that survive clipping and compaction are evaluated. A clipped cell builds a ring of vertices
+  // outside its column that the clip then throws away; evaluating them eagerly was ~15% of the attribute cost.
+  const attrSrc: number[] = [];
+  const apos: number[] = [];
   const scratch = new Float32Array(Math.max(16, ...attrSpecs.map(([, spec]) => spec.size)));
 
   // Cells that can be solved at all: every corner needs a valid central
@@ -362,9 +408,9 @@ export function dualContour(block: SampledBlock, options: DualContourOptions = {
   const hiZ = nz - 3;
 
   /** Vertex index per cell, keyed by the cell's minimum lattice corner. -1 = none. */
-  const vertexOf = new Int32Array(nx * ny * nz).fill(-1);
+  const vertexOf = scratchI32("vertexOf", nx * ny * nz).fill(-1);
   const splitVertices = new Map<number, Int32Array>();
-  const cellMasks = new Uint8Array(nx * ny * nz);
+  const cellMasks = scratchU8("cellMasks", nx * ny * nz); // read only where a vertex was written
   const ambiguousCrossings = new Map<number, Float64Array>();
   const resolvedFacePairs = new Map<number, Int8Array>();
 
@@ -381,9 +427,29 @@ export function dualContour(block: SampledBlock, options: DualContourOptions = {
   // path's crossing is three subtractions and caching it would cost more than
   // recomputing it.
   const hermite = options.hermite;
-  const edgeCache = hermite ? new Float64Array(values.length * 3 * 4) : null;
-  const edgeSeen = hermite ? new Uint8Array(values.length * 3) : null;
+  const clip = options.clip;
+  const bisectSteps = Math.max(1, Math.floor(options.hermiteSteps ?? 6));
+  const secant = options.hermiteSteps !== undefined;
+  // Reused between calls (the mesher is synchronous): a fresh 12-float-per-sample cache was ~7 MB of zeroed
+  // memory per cell. Only `edgeSeen` needs clearing; `edgeCache` is read only where it says so.
+  const edgeCache = hermite ? scratchF64("edgeCache", values.length * 3 * 4) : null;
+  const edgeSeen = hermite ? scratchU8("edgeSeen", values.length * 3).fill(0) : null;
   const grad = new Float64Array(3);
+  // Skip the exact path where the sampled field is visibly smooth across an edge: the two
+  // ends' lattice gradients agree, so the crossing and normal the samples give are already
+  // right and there is no corner for the QEF to find. A pure function of lattice values, so
+  // both chunks sharing the edge decide alike.
+  const gateCos = options.hermiteGate ?? -2;
+  const smoothEdge = (ia: number, ja: number, ka: number, ib: number, jb: number, kb: number): boolean => {
+    if (gateCos < -1) return false;
+    const ax = gradX(ia, ja, ka), ay = gradY(ia, ja, ka), az = gradZ(ia, ja, ka), bx = gradX(ib, jb, kb), by = gradY(ib, jb, kb), bz = gradZ(ib, jb, kb);
+    const la = Math.sqrt(ax * ax + ay * ay + az * az), lb = Math.sqrt(bx * bx + by * by + bz * bz);
+    return la > 1e-9 && lb > 1e-9 && (ax * bx + ay * by + az * bz) / (la * lb) > gateCos;
+  };
+  const crease = (options.creaseAngle ?? 0) > 0;
+  const creaseCos = Math.cos(options.creaseAngle ?? 0);
+  /** Per crease-split cell: local edge -> the normal-cluster copy of its vertex. Topology still uses the base vertex. */
+  const creaseOf = new Map<number, Int32Array>();
 
   const resolveComponents = (mask: number, cx: number, cy: number, cz: number, key: number): number[][] => {
     if (!AMBIGUOUS_CASE[mask]) return SURFACE_COMPONENTS[mask]!;
@@ -396,7 +462,8 @@ export function dualContour(block: SampledBlock, options: DualContourOptions = {
       if (crossing.length === 2) connect(crossing[0]!, crossing[1]!);
       else if (crossing.length === 4) {
         const axis = Math.floor(f / 2), side = f % 2;
-        const value = hermite ? hermite.value(world(0, cx, axis === 0 ? side : 0.5), world(1, cy, axis === 1 ? side : 0.5), world(2, cz, axis === 2 ? side : 0.5)) : face.corners.reduce((sum, c) => sum + cornerValue[c]!, 0) / 4;
+        const exact = hermite && (!hermite.activeAt || face.corners.every((c) => { const o = CORNER_OFFSETS[c]!; return hermite.activeAt!(cx + o[0]!, cy + o[1]!, cz + o[2]!); }));
+        const value = exact ? hermite.value(world(0, cx, axis === 0 ? side : 0.5), world(1, cy, axis === 1 ? side : 0.5), world(2, cz, axis === 2 ? side : 0.5)) : face.corners.reduce((sum, c) => sum + cornerValue[c]!, 0) / 4;
         const centerInside = value < iso;
         // Connect around corners opposite the face centre's sign. A static
         // choice can join two different source planes across a real air gap,
@@ -415,9 +482,45 @@ export function dualContour(block: SampledBlock, options: DualContourOptions = {
     return [...groups.values()];
   };
 
+  // Per sample column: the lowest and highest row where the sign flips going up. Outside that span a column is
+  // one sign (its bottom sample's below, its top's above), so where four columns agree on both, every cell
+  // outside the union of their spans is pure rock or pure air: a streamed cell is a tall band with the surface
+  // in a few rows of it, and this is most of the lattice skipped without reading a corner.
+  const columns = nx * nz;
+  const flipLo = new Int32Array(columns).fill(ny), flipHi = new Int32Array(columns).fill(-1);
+  const bottomIn = new Uint8Array(columns), topIn = new Uint8Array(columns);
+  for (let k = 0; k < nz; k++) for (let i = 0; i < nx; i++) {
+    const c = i + k * nx;
+    let prev = at(i, 0, k) < iso;
+    bottomIn[c] = prev ? 1 : 0;
+    for (let j = 1; j < ny; j++) {
+      const cur = at(i, j, k) < iso;
+      if (cur !== prev) { if (flipLo[c] === ny) flipLo[c] = j - 1; flipHi[c] = j - 1; }
+      prev = cur;
+    }
+    topIn[c] = prev ? 1 : 0;
+  }
+  /** Rows [lo, hi] a cell column (or an edge between columns) can hold a crossing in, for columns a..d. */
+  const span = new Int32Array(2);
+  const spanOf = (a: number, b: number, c: number, d: number): Int32Array => {
+    if (bottomIn[a] !== bottomIn[b] || bottomIn[a] !== bottomIn[c] || bottomIn[a] !== bottomIn[d] || topIn[a] !== topIn[b] || topIn[a] !== topIn[c] || topIn[a] !== topIn[d]) {
+      span[0] = 0; span[1] = ny; return span;
+    }
+    span[0] = Math.min(flipLo[a]!, flipLo[b]!, flipLo[c]!, flipLo[d]!);
+    span[1] = Math.max(flipHi[a]!, flipHi[b]!, flipHi[c]!, flipHi[d]!);
+    return span;
+  };
+  const cellLo = new Int32Array(columns), cellHi = new Int32Array(columns);
+  for (let cz = loZ; cz <= hiZ; cz++) for (let cx = loX; cx <= hiX; cx++) {
+    const c = cx + cz * nx, s = spanOf(c, c + 1, c + nx, c + nx + 1);
+    cellLo[c] = s[0]!; cellHi[c] = s[1]!;
+  }
+
   for (let cz = loZ; cz <= hiZ; cz++) {
     for (let cy = loY; cy <= hiY; cy++) {
       for (let cx = loX; cx <= hiX; cx++) {
+        const cc = cx + cz * nx;
+        if (cy < cellLo[cc]! || cy > cellHi[cc]!) continue;
         let mask = 0;
         for (let c = 0; c < 8; c++) {
           const o = CORNER_OFFSETS[c]!;
@@ -456,7 +559,7 @@ export function dualContour(block: SampledBlock, options: DualContourOptions = {
           let gy: number;
           let gz: number;
 
-          if (hermite && edgeCache && edgeSeen) {
+          if (hermite && edgeCache && edgeSeen && (!hermite.activeAt || (hermite.activeAt(ia, ja, ka) && hermite.activeAt(ib, jb, kb))) && !smoothEdge(ia, ja, ka, ib, jb, kb)) {
             // key this edge the way MC keys a welded vertex: lower lattice
             // point along the axis it runs, so all four cells sharing it agree
             const axis = oa[0]! !== ob[0]! ? 0 : oa[1]! !== ob[1]! ? 1 : 2;
@@ -493,14 +596,18 @@ export function dualContour(block: SampledBlock, options: DualContourOptions = {
               // samples cost anything.
               let lo = 0;
               let hi = 1;
+              let flo = va, fhi = vb;
               const loInside = va < iso;
-              for (let s = 0; s < 6; s++) {
+              for (let s = 0; s < bisectSteps; s++) {
                 const mid = (lo + hi) / 2;
                 const f = hermite.value(ax + (bx - ax) * mid, ay + (by - ay) * mid, az + (bz - az) * mid);
-                if (f < iso === loInside) lo = mid;
-                else hi = mid;
+                if (f < iso === loInside) { lo = mid; flo = f; }
+                else { hi = mid; fhi = f; }
               }
-              t = (lo + hi) / 2;
+              // secant finish: exact wherever the field is linear across the
+              // remaining bracket — which a planar field is, between its creases
+              t = secant && Math.abs(fhi - flo) > 1e-12 ? lo + ((hi - lo) * (iso - flo)) / (fhi - flo) : (lo + hi) / 2;
+              if (!(t >= lo && t <= hi)) t = (lo + hi) / 2;
               px = oa[0]! + (ob[0]! - oa[0]!) * t;
               py = oa[1]! + (ob[1]! - oa[1]!) * t;
               pz = oa[2]! + (ob[2]! - oa[2]!) * t;
@@ -620,13 +727,41 @@ export function dualContour(block: SampledBlock, options: DualContourOptions = {
         // same corner; the resulting collapsed face has no area to emit.
         positions.push(Math.fround(wx), Math.fround(wy), Math.fround(wz));
         normals.push(vnx, vny, vnz);
-        for (const [name, spec] of attrSpecs) {
-          spec.compute(wx, wy, wz, vnx, vny, vnz, scratch, 0);
-          const sink = attrOut[name]!;
-          for (let s = 0; s < spec.size; s++) sink.push(scratch[s]!);
-        }
+        attrSrc.push(-1);
+        apos.push(wx, wy, wz);
         vertexOf[cellKey] = index;
         if (split) for (const edge of component) split[edge] = index;
+        if (crease && component.length > 1) {
+          // Greedy clusters in edge order (deterministic: both chunks see the
+          // same crossings for a shared cell, so they split it identically).
+          const seeds: number[] = [], sums: number[] = [], members: number[][] = [];
+          for (const edge of component) {
+            const o = edge * 6, ex = crossings[o + 3]!, ey = crossings[o + 4]!, ez = crossings[o + 5]!;
+            let g = 0;
+            for (; g < members.length; g++) if (seeds[g * 3]! * ex + seeds[g * 3 + 1]! * ey + seeds[g * 3 + 2]! * ez >= creaseCos) break;
+            if (g === members.length) { seeds.push(ex, ey, ez); sums.push(0, 0, 0); members.push([]); }
+            sums[g * 3] = sums[g * 3]! + ex; sums[g * 3 + 1] = sums[g * 3 + 1]! + ey; sums[g * 3 + 2] = sums[g * 3 + 2]! + ez;
+            members[g]!.push(edge);
+          }
+          if (members.length > 1) {
+            const map = creaseOf.get(cellKey) ?? new Int32Array(12).fill(-1);
+            for (let g = 0; g < members.length; g++) {
+              const l = Math.hypot(sums[g * 3]!, sums[g * 3 + 1]!, sums[g * 3 + 2]!) || 1;
+              const gnx = sums[g * 3]! / l, gny = sums[g * 3 + 1]! / l, gnz = sums[g * 3 + 2]! / l;
+              const copy = positions.length / 3;
+              positions.push(Math.fround(wx), Math.fround(wy), Math.fround(wz));
+              normals.push(gnx, gny, gnz);
+              // Attributes are a function of position and normal; a copy whose normal is
+              // close to the base one (two facets of one face) reuses the base's rather
+              // than paying for another evaluation (on terrain: the whole biome stack).
+              const reuse = Math.abs(gny - vny) < 0.06 && Math.abs(gnx - vnx) < 0.25 && Math.abs(gnz - vnz) < 0.25;
+              attrSrc.push(reuse ? index : -1);
+              apos.push(wx, wy, wz);
+              for (const edge of members[g]!) map[edge] = copy;
+            }
+            creaseOf.set(cellKey, map);
+          }
+        }
         }
       }
     }
@@ -635,7 +770,8 @@ export function dualContour(block: SampledBlock, options: DualContourOptions = {
   if (positions.length === 0) return EMPTY;
 
   const quad = new Int32Array(4);
-  const quadCells: number[][] = Array.from({ length: 4 }, () => [0, 0, 0, 0, 0]);
+  const quadCells: Int32Array[] = Array.from({ length: 4 }, () => new Int32Array(5));
+  const extra = new Int32Array(4);
   const faceVertices = new Map<string, number>();
   const collinearPoints = new Map<string, number>();
   const pointKey = (i: number): string => `${positions[i * 3]},${positions[i * 3 + 1]},${positions[i * 3 + 2]}`;
@@ -655,15 +791,13 @@ export function dualContour(block: SampledBlock, options: DualContourOptions = {
     }
     if (outward) indices.push(i0, i1, i2); else indices.push(i0, i2, i1);
   };
-  const appendVertex = (position: readonly number[], normal: readonly number[], cell: readonly number[]): number => {
+  const appendVertex = (position: readonly number[], normal: readonly number[], cell: ArrayLike<number>): number => {
     const wx = world(0, cell[0]!, position[0]!), wy = world(1, cell[1]!, position[1]!), wz = world(2, cell[2]!, position[2]!);
     const length = Math.hypot(...normal), nx = length ? normal[0]! / length : 0, ny = length ? normal[1]! / length : 1, nz = length ? normal[2]! / length : 0;
     const index = positions.length / 3;
     positions.push(Math.fround(wx), Math.fround(wy), Math.fround(wz)); normals.push(nx, ny, nz);
-    for (const [name, spec] of attrSpecs) {
-      spec.compute(wx, wy, wz, nx, ny, nz, scratch, 0);
-      for (let s = 0; s < spec.size; s++) attrOut[name]!.push(scratch[s]!);
-    }
+    attrSrc.push(-1);
+    apos.push(wx, wy, wz);
     return index;
   };
   const vertexForEdge = (key: number, edge: number): number => splitVertices.get(key)?.[edge] ?? vertexOf[key]!;
@@ -721,15 +855,22 @@ export function dualContour(block: SampledBlock, options: DualContourOptions = {
     // the next, so neither claims it and the face is never emitted at all.
     // It survives a two-blocks-side-by-side test (both share the other two
     // axes) and shows up only once you tile in more than one direction.
-    const loI = axis === 0 ? ownLo : ownLo + 1;
-    const hiI = axis === 0 ? ownHiX : ownHiX + 1;
+    // Clip mode: X and Z emit everything that can reach the column (one face
+    // past the owned range each way) and the clip pass below trims it.
+    const loI = clip ? ownLo - 1 : axis === 0 ? ownLo : ownLo + 1;
+    const hiI = clip ? ownHiX + 2 : axis === 0 ? ownHiX : ownHiX + 1;
     const loJ = axis === 1 ? ownLo : ownLo + 1;
     const hiJ = axis === 1 ? ownHiY : ownHiY + 1;
-    const loK = axis === 2 ? ownLo : ownLo + 1;
-    const hiK = axis === 2 ? ownHiZ : ownHiZ + 1;
+    const loK = clip ? ownLo - 1 : axis === 2 ? ownLo : ownLo + 1;
+    const hiK = clip ? ownHiZ + 2 : axis === 2 ? ownHiZ : ownHiZ + 1;
     for (let k = loK; k < hiK; k++) {
-      for (let j = loJ; j < hiJ; j++) {
-        for (let i = loI; i < hiI; i++) {
+      for (let i = loI; i < hiI; i++) {
+        // only the rows where this edge's two columns can differ (see flipLo/flipHi)
+        const ca = i + k * nx, cb = ca + di + dk * nx;
+        const agree = bottomIn[ca] === bottomIn[cb] && topIn[ca] === topIn[cb];
+        const j0 = agree ? Math.max(loJ, Math.min(flipLo[ca]!, flipLo[cb]!)) : loJ;
+        const j1 = agree ? Math.min(hiJ - 1, Math.max(flipHi[ca]!, flipHi[cb]!)) : hiJ - 1;
+        for (let j = j0; j <= j1; j++) {
           const inA = at(i, j, k) < iso;
           const inB = at(i + di, j + dj, k + dk) < iso;
           if (inA === inB) continue;
@@ -758,12 +899,13 @@ export function dualContour(block: SampledBlock, options: DualContourOptions = {
               break;
             }
             quad[c] = vi;
-            quadCells[c] = [cxx, cyy, czz, cellKey, localEdge];
+            const qc = quadCells[c]!;
+            qc[0] = cxx; qc[1] = cyy; qc[2] = czz; qc[3] = cellKey; qc[4] = localEdge;
           }
           if (!ok) continue;
 
-          const extra = [faceVertex(0, p, 1), faceVertex(1, q, 1), faceVertex(2, p, 0), faceVertex(3, q, 0)];
-          if (extra.some((v) => v >= 0)) {
+          extra[0] = faceVertex(0, p, 1); extra[1] = faceVertex(1, q, 1); extra[2] = faceVertex(2, p, 0); extra[3] = faceVertex(3, q, 0);
+          if (extra[0]! >= 0 || extra[1]! >= 0 || extra[2]! >= 0 || extra[3]! >= 0) {
             const polygon: number[] = [];
             for (let c = 0; c < 4; c++) { polygon.push(quad[c]!); if (extra[c]! >= 0) polygon.push(extra[c]!); }
             const cell = quadCells[0]!, data = ambiguousCrossings.get(cell[3]!);
@@ -797,17 +939,19 @@ export function dualContour(block: SampledBlock, options: DualContourOptions = {
           if (dAC === 0 || dBD === 0) continue;
           const areaAC = Math.min(areaSq(a, b, c2), areaSq(a, c2, d)), areaBD = Math.min(areaSq(b, c2, d), areaSq(b, d, a));
           const useAC = areaAC === 0 && areaBD > 0 ? false : areaBD === 0 && areaAC > 0 ? true : dAC <= dBD;
-          const tris = useAC ? [a, b, c2, a, c2, d] : [b, c2, d, b, d, a];
+          let ra = a, rb = b, rc = c2, rd = d;
+          if (creaseOf.size) {
+            // Same positions, so every decision above stands; only the normal
+            // (and the attributes computed from it) changes per quad.
+            const copyOf = (c: number): number => { const qc = quadCells[c]!, copy = creaseOf.get(qc[3]!)?.[qc[4]!] ?? -1; return copy >= 0 ? copy : quad[c]!; };
+            ra = copyOf(0); rb = copyOf(1); rc = copyOf(2); rd = copyOf(3);
+          }
 
           // RING points along +axis. Orient both triangles from the lattice
           // sign transition. Independent normal-based flips break shared-edge
           // winding at sharp/noisy joins and appear as backface-culling slits.
-          for (let t = 0; t < 6; t += 3) {
-            const i0 = tris[t]!;
-            const i1 = tris[t + 1]!;
-            const i2 = tris[t + 2]!;
-            emitTriangle(i0, i1, i2, inA);
-          }
+          if (useAC) { emitTriangle(ra, rb, rc, inA); emitTriangle(ra, rc, rd, inA); }
+          else { emitTriangle(rb, rc, rd, inA); emitTriangle(rb, rd, ra, inA); }
         }
       }
     }
@@ -848,9 +992,35 @@ export function dualContour(block: SampledBlock, options: DualContourOptions = {
     for (const i of conforming) indices.push(i);
   }
 
+  if (clip) {
+    clipToColumn(positions, normals, [], indices, clip);
+    // vertices the clip made sit on the column plane: evaluated there, from their own position and normal
+    for (let v = attrSrc.length; v < positions.length / 3; v++) { attrSrc.push(-1); apos.push(positions[v * 3]!, positions[v * 3 + 1]!, positions[v * 3 + 2]!); }
+  }
   if (indices.length === 0) return EMPTY;
-  const attributes: Record<string, Float32Array> = {};
-  for (const [name] of attrSpecs) attributes[name] = Float32Array.from(attrOut[name]!);
+  let order: Int32Array | null = null; // new vertex -> old vertex, when compacted
+  if (clip || creaseOf.size) {
+    // Clipped-away triangles and crease-split base vertices leave orphans;
+    // the one shared mesh carries none (same rule as the skirts).
+    const remap = new Int32Array(positions.length / 3).fill(-1);
+    let kept = 0;
+    for (const i of indices) if (remap[i] === -1) remap[i] = -2;
+    for (let v = 0; v < remap.length; v++) if (remap[v] === -2) remap[v] = kept++;
+    if (kept < remap.length) {
+      const P = new Float32Array(kept * 3), N = new Float32Array(kept * 3);
+      order = new Int32Array(kept);
+      for (let v = 0; v < remap.length; v++) {
+        const to = remap[v]!;
+        if (to < 0) continue;
+        order[to] = v;
+        for (let c = 0; c < 3; c++) { P[to * 3 + c] = positions[v * 3 + c]!; N[to * 3 + c] = normals[v * 3 + c]!; }
+      }
+      for (let i = 0; i < indices.length; i++) indices[i] = remap[indices[i]!]!;
+      const attributes = evaluateAttributes(attrSpecs, attrSrc, apos, normals, order, scratch);
+      return { positions: P, normals: N, indices: Uint32Array.from(indices), attributes, vertexCount: kept, triangleCount: indices.length / 3 };
+    }
+  }
+  const attributes = evaluateAttributes(attrSpecs, attrSrc, apos, normals, order, scratch);
   return {
     positions: Float32Array.from(positions),
     normals: Float32Array.from(normals),
@@ -859,5 +1029,138 @@ export function dualContour(block: SampledBlock, options: DualContourOptions = {
     vertexCount: positions.length / 3,
     triangleCount: indices.length / 3,
   };
+}
+
+/** Evaluate the deferred attributes of the kept vertices (`order[new] = old`; null = all, in order). */
+function evaluateAttributes(
+  specs: [string, { size: number; compute: (x: number, y: number, z: number, nx: number, ny: number, nz: number, out: Float32Array, offset: number) => void }][],
+  src: readonly number[],
+  apos: readonly number[],
+  normals: readonly number[],
+  order: Int32Array | null,
+  scratch: Float32Array,
+): Record<string, Float32Array> {
+  const out: Record<string, Float32Array> = {};
+  const n = order ? order.length : src.length;
+  for (const [name, spec] of specs) {
+    const size = spec.size, data = new Float32Array(n * size);
+    /** old vertex -> its row in `data` (kept ones) or in `extra` (a dropped base a copy reads) */
+    const row = new Map<number, number>();
+    if (order) for (let i = 0; i < n; i++) row.set(order[i]!, i);
+    const extra: Float32Array[] = [];
+    const valueOf = (v: number): Float32Array | number => {
+      const r = row.get(v);
+      if (r !== undefined || !order) return r ?? v;
+      const tmp = new Float32Array(size);
+      spec.compute(apos[v * 3]!, apos[v * 3 + 1]!, apos[v * 3 + 2]!, normals[v * 3]!, normals[v * 3 + 1]!, normals[v * 3 + 2]!, tmp, 0);
+      extra.push(tmp);
+      return tmp;
+    };
+    // own evaluations first, then the copies (a copy's base is always an own evaluation)
+    for (let i = 0; i < n; i++) {
+      const v = order ? order[i]! : i;
+      if (src[v] !== -1) continue;
+      spec.compute(apos[v * 3]!, apos[v * 3 + 1]!, apos[v * 3 + 2]!, normals[v * 3]!, normals[v * 3 + 1]!, normals[v * 3 + 2]!, scratch, 0);
+      data.set(scratch.subarray(0, size), i * size);
+    }
+    for (let i = 0; i < n; i++) {
+      const v = order ? order[i]! : i;
+      const from = src[v]!;
+      if (from === -1) continue;
+      const got = valueOf(from);
+      if (typeof got === "number") data.copyWithin(i * size, got * size, got * size + size);
+      else data.set(got, i * size);
+    }
+    out[name] = data;
+  }
+  return out;
+}
+
+/**
+ * Cut every triangle to the column [x0,x1] x [z0,z1] (Sutherland-Hodgman, in
+ * place). Seam exactness is the whole point, so an intersection is computed
+ * from the lexicographically LOWER endpoint of its segment: the chunk on the
+ * other side of the plane cuts the same segment with the same arithmetic and
+ * gets the same bits. A polygon lying IN a high plane belongs to the next
+ * column (half-open), so a facet coinciding with a chunk plane is not emitted twice.
+ */
+function clipToColumn(
+  positions: number[],
+  normals: number[],
+  attrs: { data: number[]; size: number }[],
+  indices: number[],
+  clip: { x: readonly [number, number]; z: readonly [number, number] },
+): void {
+  const planes = [
+    { a: 0, v: clip.x[0], ge: true },
+    { a: 0, v: clip.x[1], ge: false },
+    { a: 2, v: clip.z[0], ge: true },
+    { a: 2, v: clip.z[1], ge: false },
+  ];
+  // nothing near a plane: the common case for an interior triangle, decided without allocating
+  const minX = clip.x[0], maxX = clip.x[1], minZ = clip.z[0], maxZ = clip.z[1];
+  const cache = new Map<string, number>();
+  const lexLess = (i: number, j: number): boolean => {
+    for (let c = 0; c < 3; c++) { const d = positions[i * 3 + c]! - positions[j * 3 + c]!; if (d !== 0) return d < 0; }
+    return i < j;
+  };
+  const cut = (i: number, j: number, p: number): number => {
+    const key = i < j ? `${p}:${i}:${j}` : `${p}:${j}:${i}`;
+    const hit = cache.get(key);
+    if (hit !== undefined) return hit;
+    const { a, v } = planes[p]!;
+    const [A, B] = lexLess(i, j) ? [i, j] : [j, i];
+    const pa = positions[A * 3 + a]!, pb = positions[B * 3 + a]!;
+    const t = (v - pa) / (pb - pa);
+    let index: number;
+    if (t <= 0) index = A;
+    else if (t >= 1) index = B;
+    else {
+      index = positions.length / 3;
+      for (let c = 0; c < 3; c++) positions.push(c === a ? v : Math.fround(positions[A * 3 + c]! + (positions[B * 3 + c]! - positions[A * 3 + c]!) * t));
+      let nx = normals[A * 3]! + (normals[B * 3]! - normals[A * 3]!) * t;
+      let ny = normals[A * 3 + 1]! + (normals[B * 3 + 1]! - normals[A * 3 + 1]!) * t;
+      let nz = normals[A * 3 + 2]! + (normals[B * 3 + 2]! - normals[A * 3 + 2]!) * t;
+      const l = Math.hypot(nx, ny, nz) || 1; nx /= l; ny /= l; nz /= l;
+      normals.push(nx, ny, nz);
+      for (const at of attrs) for (let c = 0; c < at.size; c++) at.data.push(at.data[A * at.size + c]! + (at.data[B * at.size + c]! - at.data[A * at.size + c]!) * t);
+    }
+    cache.set(key, index);
+    return index;
+  };
+  const out: number[] = [];
+  const areaZero = (a: number, b: number, c: number): boolean => {
+    const ux = positions[b * 3]! - positions[a * 3]!, uy = positions[b * 3 + 1]! - positions[a * 3 + 1]!, uz = positions[b * 3 + 2]! - positions[a * 3 + 2]!;
+    const vx = positions[c * 3]! - positions[a * 3]!, vy = positions[c * 3 + 1]! - positions[a * 3 + 1]!, vz = positions[c * 3 + 2]! - positions[a * 3 + 2]!;
+    return uy * vz - uz * vy === 0 && uz * vx - ux * vz === 0 && ux * vy - uy * vx === 0;
+  };
+  for (let t = 0; t < indices.length; t += 3) {
+    const i0 = indices[t]!, i1 = indices[t + 1]!, i2 = indices[t + 2]!;
+    const xs = [positions[i0 * 3]!, positions[i1 * 3]!, positions[i2 * 3]!], zs = [positions[i0 * 3 + 2]!, positions[i1 * 3 + 2]!, positions[i2 * 3 + 2]!];
+    const lox = Math.min(...xs), hix = Math.max(...xs), loz = Math.min(...zs), hiz = Math.max(...zs);
+    if (hix < minX || lox > maxX || hiz < minZ || loz > maxZ) continue; // wholly outside
+    if ((lox === hix && lox === maxX) || (loz === hiz && loz === maxZ)) continue; // lies in a high plane: the neighbour's
+    if (lox > minX && hix < maxX && loz > minZ && hiz < maxZ) { out.push(i0, i1, i2); continue; } // wholly inside
+    let poly = [i0, i1, i2];
+    for (let p = 0; p < planes.length && poly.length >= 3; p++) {
+      const { a, v, ge } = planes[p]!;
+      const inside = (i: number): boolean => (ge ? positions[i * 3 + a]! >= v : positions[i * 3 + a]! <= v);
+      const next: number[] = [];
+      for (let e = 0; e < poly.length; e++) {
+        const s = poly[e]!, f = poly[(e + 1) % poly.length]!;
+        const sIn = inside(s), fIn = inside(f);
+        if (fIn) {
+          if (!sIn) next.push(cut(s, f, p));
+          next.push(f);
+        } else if (sIn) next.push(cut(s, f, p));
+      }
+      poly = next.filter((v2, k) => v2 !== next[(k + 1) % next.length]);
+    }
+    if (poly.length < 3) continue;
+    if (poly.every((i) => positions[i * 3]! === maxX) || poly.every((i) => positions[i * 3 + 2]! === maxZ)) continue;
+    for (let k = 1; k + 1 < poly.length; k++) if (!areaZero(poly[0]!, poly[k]!, poly[k + 1]!)) out.push(poly[0]!, poly[k]!, poly[k + 1]!);
+  }
+  indices.length = 0;
+  for (const i of out) indices.push(i);
 }
 

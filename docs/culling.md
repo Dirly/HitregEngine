@@ -69,6 +69,8 @@ past `CullingSystem.shadowDistance` (120 m, the cascades' reach).
 
 ## Diagnostics
 
+- A group culled while still in sight shows as the void: the see-through gate (docs/see-through.md) reports it as `culled` with the entity; raise `interiorReveal` past the sight line.
+
 - Stats HUD: `culling: N units · N behind terrain · N small · N interiors ·
   N props · ms`.
 - Profiler scope `update/culling`.

@@ -13,6 +13,7 @@
     "place": "tsx tools/place.mts",
     "worldgen": "tsx tools/worldgen.mts",
     "retarget": "node tools/retarget.mjs",
+    "hands": "node tools/humanoid-hands.mjs",
     "autorig": "node tools/autorig.mjs",
     "legrig": "node tools/legrig.mjs",
     "unwrap-weapon": "node tools/unwrap-weapon.mjs",

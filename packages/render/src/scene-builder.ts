@@ -1,8 +1,9 @@
 import * as THREE from "three/webgpu";
 import type { VegetationTint } from "@hitreg/core";
 import { applyInstanceVegetationTint, encodeVegetationTint } from "./vegetation-tint.js";
+import { applyInstanceRockCap, buildRockCapMaterial, instanceTintOf, isRockCapMaterial, rockImpostorLook } from "./rock-cap.js";
 import { buildPortalMaterial } from "./portal-material.js";
-import { STATIC_BATCH_FLAG } from "./static-batch.js";
+import { EFFECT_GROUP, STATIC_BATCH_FLAG } from "./static-batch.js";
 import { modelScope, nameEmbeddedTextures, shareModelMaterials } from "./gltf-dedupe.js";
 import { applyAtlasMaterials } from "./town-atlas.js";
 import { enableSkinnedBounds } from "./skinned-bounds.js";
@@ -60,6 +61,8 @@ import {
   min,
   Fn,
   reflect,
+  dFdx,
+  dFdy,
 } from "three/tsl";
 import { GLTFLoader, type GLTF } from "three/addons/loaders/GLTFLoader.js";
 import { applyFoliageNormals } from "./foliage-normals.js";
@@ -79,6 +82,7 @@ import {
   type VoxelMesh,
   type CsgMeshSource,
   type VoxelMeshSource,
+  SHORE_FOAM_STEEP_DEFAULT,
 } from "@hitreg/core";
 import { simplifierReady, simplifyGeometry } from "./mesh-simplify.js";
 import {
@@ -128,6 +132,7 @@ import {
   materialMapKeyOf,
   materialSourceOf,
   materialUniformsOf,
+  onMaterialMapsWired,
   resolveTransparency,
   setMaterialSource,
   writeMaterialUniforms,
@@ -480,7 +485,20 @@ export interface SplatLayerData {
 }
 
 export interface MaterialData {
-  shader: "standard" | "unlit" | "toon" | "wireframe" | "terrain-splat" | "water" | "portal";
+  shader: "standard" | "unlit" | "toon" | "wireframe" | "terrain-splat" | "water" | "portal" | "rock-cap";
+  /** Only read by shader 'rock-cap' (see rock-cap.ts and the core schema). */
+  rockCap?: {
+    bases: { map: string; metres?: number; color?: string }[];
+    palette: string;
+    extraLayers?: { name: string; map: string; uvScale?: number; color?: string; roughness?: number }[];
+    thicken?: number;
+    start?: number;
+    softness?: number;
+    noise?: number;
+    noiseMetres?: number;
+    crevice?: number;
+    occlusion?: number;
+  };
   portal?: {aperture?: 'disc' | 'opening'};
   color: string;
   map?: string;
@@ -508,6 +526,7 @@ export interface MaterialData {
   triplanarScale?: number;
   alphaMap?: string;
   alphaTest?: number;
+  alphaHash?: boolean;
   envMapIntensity?: number;
   side?: "front" | "back" | "double";
   vertexColors?: boolean;
@@ -572,6 +591,8 @@ export interface MaterialData {
     textureStrength?: number;
     foamPixel?: number;
     foamSteps?: number;
+    /** Shore-band shape: noise breakup, stillness fade, current ramp (core water schema). Absent = the plain band. */
+    shoreFoam?: { breakup: number; patch: number; still: number; flow: [number, number]; steep?: [number, number]; wet?: number };
     flow?: [number, number];
     /** drift = standing water laid out in world space; channel = the geometry's `flow` attribute + metre uvs carry the current. */
     flowMode?: "drift" | "channel" | "field";
@@ -616,6 +637,7 @@ interface MeshData {
         cameraFade?: boolean;
         uvRotation?: number;
         vegetationTint?: VegetationTint;
+        rockCap?: import("@hitreg/core").RockCap;
         atlasTile?: [number, number, number];
         partMask?: number;
       }
@@ -1683,17 +1705,71 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
   const foamJitter = foamBreakup
     ? mul(sub(foamBreakup, float(0.42)), mul(foamBandM, float(1.6)))
     : float(0);
-  const foamRaw = mul(
+  const foamBandShape = mul(
     sub(float(1), smoothstep(mul(foamBandM, float(0.1)), foamBandM, add(shoreDistance, foamJitter))),
     sub(float(1), smoothstep(mul(foamWidth, float(0.5)), mul(foamWidth, float(2.5)), verticalDepth)),
-  ).mul(foamBreakup ? saturate(add(mul(sub(foamBreakup, float(0.3)), float(2.5)), float(0.35))) : float(1));
+  );
+  // ONLY ON A GENTLE BED. The band is a distance from the shore, so it lined every bank and every rock base alike:
+  // along a river's steep banks it drew flat pale strips a metre wide (Skelmorrow's ochreburn pool). Foam washes up a
+  // gentle shore; a steep bank or a rock meets the water with a WET line instead. The bed seen through the water is
+  // rebuilt in view space from the depth read, its normal from screen derivatives (view-independent, unlike the
+  // band's own slope estimate, which reads a wall as gentle at a grazing view) and its up-component gates the foam
+  // (core shoreFoamOnBank: the same thresholds the water-edges gate checks). The sea's breakers and surf are their
+  // own terms and keep their white; only this band is gated (a river material may carry a `sea` block for its sky).
+  let steepBank: THREE.Node<"float"> | null = null;
+  {
+    const [flatLo, flatHi] = w.shoreFoam?.steep ?? SHORE_FOAM_STEEP_DEFAULT;
+    const fragDir = normalize(positionView);
+    const bedView = add(positionView, mul(fragDir, div(waterDepth, max(abs(fragDir.z), float(0.05)))));
+    const bedNormal = normalize(cross(dFdx(bedView), dFdy(bedView)));
+    const upView = normalize(cameraViewMatrix.mul(vec4(float(0), float(1), float(0), float(0))).xyz);
+    const bedUp = abs(dot(bedNormal, upView));
+    steepBank = sub(float(1), smoothstep(float(Math.min(flatLo, flatHi)), float(Math.max(flatHi, flatLo + 1e-3)), bedUp));
+  }
+  // the texture's luminance thins the plain band (on a dark tile it thinned it to nothing)
+  const foamTexThin = foamBreakup ? saturate(add(mul(sub(foamBreakup, float(0.3)), float(2.5)), float(0.35))) : float(1);
+  const foamRaw = foamBandShape.mul(foamTexThin);
+  // SHAPED shore foam (`shoreFoam`): the band is cut by a blocky noise mask into
+  // scattered patches and fades on still water, so it gathers where a current
+  // meets a bank or a rock breaking the surface (both are "shore" to the depth
+  // read) and a lake or a marsh keeps only a trace. Without it every bank was
+  // outlined by an unbroken white line. The mask is value noise sampled on the
+  // `foamPixel` grid (PSX-stepped gaps), drifting slowly with `flow`.
+  let shoreMask: THREE.Node<"float"> | null = null;
+  if (w.shoreFoam) {
+    const sf = w.shoreFoam;
+    const pixel = Math.max(0, w.foamPixel ?? 0.7);
+    const snapped = pixel > 0 ? mul(floor(div(worldXZ, float(pixel))), float(pixel)) : worldXZ;
+    const drift = vec2(mul(time, float((w.flow ?? [0.012, 0.008])[0] * 2)), mul(time, float((w.flow ?? [0.012, 0.008])[1] * 2)));
+    const cellHash = (c: THREE.Node<"vec2">): THREE.Node<"float"> => hash(add(abs(dot(c, vec2(float(1), float(157)))), float(7)));
+    const valueNoise = (p: THREE.Node<"vec2">): THREE.Node<"float"> => {
+      const i = floor(p);
+      const f = fract(p);
+      const u = mul(mul(f, f), sub(float(3), mul(f, float(2))));
+      const a = cellHash(i), b = cellHash(add(i, vec2(float(1), float(0))));
+      const c = cellHash(add(i, vec2(float(0), float(1)))), d = cellHash(add(i, vec2(float(1), float(1))));
+      return mix(mix(a, b, u.x), mix(c, d, u.x), u.y) as unknown as THREE.Node<"float">;
+    };
+    const p = add(div(snapped, float(Math.max(0.1, sf.patch))), drift);
+    const n = add(mul(valueNoise(p), float(0.68)), mul(valueNoise(add(mul(p, float(2.7)), vec2(float(17.3), float(5.1)))), float(0.32)));
+    const cut = Math.min(0.95, Math.max(0, sf.breakup)) * 0.75 + 0.15;
+    const patchKeep = smoothstep(float(cut), float(cut + 0.12), n);
+    // the current under this point: field water carries it in its uv, a channel in its flow attribute; drift is still
+    const speed: THREE.Node<"float"> = fieldFlow ? length(uv()) : channel && flowSpeed ? flowSpeed : float(0);
+    const [lo, hi] = sf.flow;
+    const moving = smoothstep(float(Math.min(lo, hi)), float(Math.max(hi, lo + 1e-3)), speed);
+    shoreMask = mul(patchKeep, mix(float(Math.min(1, Math.max(0, sf.still))), float(1), moving));
+  }
+  // (shaped: the mask does the breaking, so the texture only frays it a little instead of multiplying it out)
+  const foamShaped = shoreMask ? mul(mul(foamBandShape, shoreMask), add(float(0.7), mul(foamTexThin, float(0.3)))) : foamRaw;
   const foamSteps = float(Math.max(1, Math.round(w.foamSteps ?? 3)));
   // top step deliberately short of 1: solid white froth reads as a painted
   // ring, and the shore should still show water through the foam
   // `foamSteps` levels, top step short of solid white so water still shows
   // through the froth rather than a painted ring
   // soft: the top step is well short of white, so it reads as froth on water
-  const foamEdge = saturate(mul(floor(mul(foamRaw, foamSteps)), float(0.5).div(max(sub(foamSteps, float(1)), float(1)))));
+  const foamGentle = steepBank ? mul(foamShaped, sub(float(1), steepBank)) : foamShaped;
+  const foamEdge = saturate(mul(floor(mul(foamGentle, foamSteps)), float(0.5).div(max(sub(foamSteps, float(1)), float(1)))));
   // A wake's CRESTS break into froth — a thin highlight riding the tops of the
   // ripples, which is a different thing from the wake itself: the wake is the
   // relief above, and this is the little the water spills doing it. Keep it
@@ -1720,6 +1796,12 @@ function buildWaterMaterial(data: MaterialData, options?: TextureResolver): THRE
     if (breakers) foamAmount = max(foamAmount, breakers);
     const caps = seaShelter ? seaWhitecaps(sea, worldXZ, swell, seaShelter) : null;
     if (caps) foamAmount = max(foamAmount, mul(caps, float(0.8)));
+  }
+  // the wet line: where a steep bank or a rock gave up its foam, the contact band darkens instead (stepped like the foam)
+  const wetAmount = w.shoreFoam?.wet ?? 0.35;
+  if (steepBank && wetAmount > 0) {
+    const wetBand = floor(mul(mul(foamBandShape, steepBank), float(2))).mul(float(0.5));
+    base = mul(base as THREE.Node<"vec3">, sub(float(1), mul(saturate(wetBand), float(wetAmount))));
   }
   base = mix(base as THREE.Node<"vec3">, tslColor(w.foamColor), foamAmount);
   // A fall's face is the fall texture, not water tinted by depth: the rock is
@@ -1974,6 +2056,9 @@ export function makeMaterial(data: MaterialData, options?: TextureResolver): THR
       return buildTerrainSplatMaterial(data, options);
     case "portal":
       return buildPortalMaterial(data, options);
+    case "rock-cap":
+      // resolves its own body textures and its palette material (the world's terrain), like terrain-splat
+      return buildRockCapMaterial(data, options as TextureResolver & { resolveMaterial?(assetId: string): unknown });
     case "water":
       return buildWaterMaterial(data, options);
     case "standard":
@@ -2034,7 +2119,7 @@ export function patchMaterial(existing: THREE.Material, data: MaterialData): boo
   const shader = data.shader ?? "standard";
   // procedural shaders bake their colours/bands into the node graph as
   // constants — there are no uniforms to write, so they always decline
-  if (shader === "terrain-splat" || shader === "water" || shader === "portal") return false;
+  if (shader === "terrain-splat" || shader === "water" || shader === "portal" || shader === "rock-cap") return false;
 
   const uniforms = materialUniformsOf(existing);
   const builtKey = materialMapKeyOf(existing);
@@ -2368,8 +2453,11 @@ function populateEntityGroup(
         const id = meshData.source.materials?.[slot] || meshData.material;
         let material = materialForId(id, options, materialCache);
         if (compiled.colors) {
-          material = material.clone();
-          material.vertexColors = true;
+          material = mapSyncedCopy(material, (m) => {
+            const tinted = cloneMaterial(m);
+            tinted.vertexColors = true;
+            return tinted;
+          });
         }
         materials.push(material);
       }
@@ -2530,7 +2618,8 @@ function populateEntityGroup(
         wind: meshData.source.wind,
         cameraFade: meshData.source.cameraFade,
         uvRotation: meshData.source.uvRotation,
-        vegetationTint: meshData.source.vegetationTint,
+        // the per-instance slot: a vegetation tint, or a rock cap in the same six floats (rock-cap.ts)
+        vegetationTint: instanceTintOf(meshData.source),
         material: meshData.material,
         atlasTile: meshData.source.atlasTile,
         partMask: meshData.source.partMask,
@@ -2756,11 +2845,13 @@ function populateEntityGroup(
       }
     }
 
+    // An effect draws from its own batches (nothing under `group`) but plays only while `group` is visible:
+    // EFFECT_GROUP keeps the static batch's pruning from hiding this empty group as "drawn by the batch".
     const particlesData = entity.components["particles"] as ParticlesData | undefined;
-    if (particlesData) options.onParticles?.(id, group, particlesData);
+    if (particlesData) { group.userData[EFFECT_GROUP] = true; options.onParticles?.(id, group, particlesData); }
 
     const vfxData = entity.components["vfx"] as AmbientVfxData | undefined;
-    if (vfxData) options.onVfx?.(id, group, vfxData);
+    if (vfxData) { group.userData[EFFECT_GROUP] = true; options.onVfx?.(id, group, vfxData); }
 
     const billboardData = entity.components["billboard"] as BillboardData | undefined;
     if (billboardData) options.onBillboard?.(id, group, billboardData);
@@ -2966,8 +3057,11 @@ export function cachedImpostor(
   source: THREE.Object3D,
   bounds: THREE.Box3,
   options: BuildOptions,
+  /** The batch's material override: a rock-cap material gives the impostor its base/cap look. */
+  look?: THREE.Material | THREE.Material[] | null,
 ): { atlas: ImpostorAtlas; material: THREE.Material } | null {
   const key = `${assetId}#${node ?? ""}`;
+  const rock = rockImpostorLook(look);
   let atlas: ImpostorAtlas | null;
   if (impostorCache.has(key)) {
     atlas = impostorCache.get(key)!;
@@ -2977,10 +3071,13 @@ export function cachedImpostor(
     impostorCache.set(key, atlas);
   }
   if (!atlas) return null;
-  let material = impostorMaterialCache.get(key);
+  const materialKey = rock ? `${key}#rock:${rock.key}` : key;
+  let material = impostorMaterialCache.get(materialKey);
   if (!material) {
-    material = impostorMaterial(atlas, bounds);
-    impostorMaterialCache.set(key, material);
+    material = impostorMaterial(atlas, bounds, rock);
+    // named, so a draw-count probe can tell rock impostors from tree ones
+    if (rock) material.name = "rock-cap-impostor";
+    impostorMaterialCache.set(materialKey, material);
   }
   return { atlas, material };
 }
@@ -3002,6 +3099,8 @@ export interface ImpostorPageItem {
   submeshes: GltfSubmesh[];
   matrices: readonly THREE.Matrix4[];
   vegetationTints?: readonly (VegetationTint | undefined)[];
+  /** Material override of these placements (a rock-cap rock keeps its own impostor material, off the shared page). */
+  look?: THREE.Material | null;
 }
 
 const impostorPageMaterialCache = new Map<string, THREE.Material>();
@@ -3038,10 +3137,14 @@ export function impostorPageBatchFor(
     group.entries.push({ item, atlas: baked.atlas, bounds });
   }
   const batches: InstancedProps[] = [];
-  for (const [key, group] of byPage) {
+  for (const [pageKey, group] of byPage) {
+    // a page that holds rock-cap rocks recolours them per instance (base, cap) in the SAME draw as the trees
+    const rock = group.entries.map((e) => rockImpostorLook(e.item.look)).find((look) => look) ?? null;
+    const key = rock ? `${pageKey}#rock:${rock.key}` : pageKey;
     let material = impostorPageMaterialCache.get(key);
     if (!material) {
-      material = impostorPageMaterial(group.page);
+      material = impostorPageMaterial(group.page, rock);
+      if (rock) material.name = "rock-cap-impostor-page";
       impostorPageMaterialCache.set(key, material);
     }
     const total = group.entries.reduce((n, e) => n + e.item.matrices.length, 0);
@@ -3108,11 +3211,12 @@ export function impostorBatchFor(
   matrices: readonly THREE.Matrix4[],
   options: BuildOptions,
   vegetationTints?: readonly (VegetationTint | undefined)[],
+  look?: THREE.Material | null,
 ): InstancedProps | null {
   if (matrices.length === 0) return null;
   const source: THREE.Object3D = node ? (gltf.scene.getObjectByName(node) ?? gltf.scene) : gltf.scene;
   const bounds = submeshBounds(submeshes);
-  const impostor = cachedImpostor(assetId, node, source, bounds, options);
+  const impostor = cachedImpostor(assetId, node, source, bounds, options, look);
   if (!impostor) return null;
   const far = new InstancedProps(impostorGeometry(bounds, matrices.length), impostor.material, matrices.length);
   far.enableVegetationTint();
@@ -3154,13 +3258,36 @@ const instancedMaterialCache = new Map<string, THREE.Material | THREE.Material[]
  * so an HLOD bake can strip wind from its clone without touching the batch's.
  */
 const mergedMaterialCache = new Map<string, THREE.Material | THREE.Material[]>();
+
+/**
+ * `make(source)`, kept in step with a source whose texture maps are still
+ * loading. A material asset's maps are wired into its node graph only when
+ * they land (applyMaterialMaps), so a copy taken before then — every cached
+ * instanced/merged copy is taken at the first chunk build, usually exactly
+ * then — kept the flat graph forever and the whole batch drew white. The copy
+ * is rebuilt IN PLACE when the maps are wired, so every batch already holding
+ * it (and the cache entry) picks the textures up; nothing runs per frame.
+ */
+function mapSyncedCopy(source: THREE.Material, make: (m: THREE.Material) => THREE.Material): THREE.Material {
+  const copy = make(source);
+  onMaterialMapsWired(source, () => {
+    const fresh = make(source);
+    copy.copy(fresh);
+    copy.alphaTest = fresh.alphaTest; // NodeMaterial.copy drops it (see cloneMaterial)
+    copy.needsUpdate = true;
+    fresh.dispose();
+  });
+  return copy;
+}
+
 export function cachedMergedMaterial(
   cacheKey: string,
   source: THREE.Material | THREE.Material[],
 ): THREE.Material | THREE.Material[] {
   const cached = mergedMaterialCache.get(cacheKey);
   if (cached) return cached;
-  const cloned = Array.isArray(source) ? source.map(cloneMaterial) : cloneMaterial(source);
+  const merged = (m: THREE.Material): THREE.Material => mapSyncedCopy(m, cloneMaterial);
+  const cloned = Array.isArray(source) ? source.map(merged) : merged(source);
   mergedMaterialCache.set(cacheKey, cloned);
   return cloned;
 }
@@ -3200,10 +3327,15 @@ export function cachedInstancedMaterial(
     if (options.glow) applyInstanceGlow(clone);
     // per-part tiles and skin tint, replacing the colour node the uber hook set
     if (options.appearance && options.uber) applyInstanceAppearance(clone, options.appearance.tiles, { skin: options.appearance.skin });
-    if (options.vegetationTint) applyInstanceVegetationTint(clone);
+    // the rock-cap shader reads the same per-instance slot with rock semantics (layer, amount, base, tint)
+    if (options.vegetationTint) {
+      if (isRockCapMaterial(clone)) applyInstanceRockCap(clone);
+      else applyInstanceVegetationTint(clone);
+    }
     return clone;
   };
-  const cloned = Array.isArray(source) ? source.map(instancedClone) : instancedClone(source);
+  const synced = (m: THREE.Material): THREE.Material => mapSyncedCopy(m, instancedClone);
+  const cloned = Array.isArray(source) ? source.map(synced) : synced(source);
   instancedMaterialCache.set(cacheKey, cloned);
   return cloned;
 }
@@ -3223,8 +3355,13 @@ export function buildMidTier(cacheKey: string, geometry: THREE.BufferGeometry): 
   const cached = midTierGeometryCache.get(cacheKey);
   if (cached !== undefined) return cached;
   const vertexCount = geometry.attributes["position"]?.count ?? 0;
+  // A FLAT-SHADED mesh (every triangle its own three vertices: the faceted rock kit) has three vertices per
+  // triangle, so its vertex count overstates it threefold; and decimating it collapses corners that carry
+  // different UVs and face normals, which smears the texture into streaks. Judge it by its triangles.
+  const unwelded = geometry.index ? geometry.index.count === vertexCount : true;
+  const size = unwelded ? vertexCount / 3 : vertexCount;
   let tier: MidTier | null = null;
-  if (vertexCount >= MID_TIER_MIN_VERTS) {
+  if (size >= MID_TIER_MIN_VERTS) {
     const simplified = simplifyGeometry(geometry, { targetRatio: MID_TIER_KEEP_RATIO });
     if (simplified) tier = { geometry: simplified.geometry, error: simplified.error };
   }
@@ -3441,15 +3578,19 @@ function instanceGltfInto(
       entry.group.updateWorldMatrix(true, false);
       return { id: entry.id, matrix: entry.group.matrixWorld.clone(), vegetationTint: entry.vegetationTint };
     });
+    // the batch draws ONE material (the first entry's, as below); a rock-cap rule names one
+    const poolMaterialId = first.material;
+    const poolOverride = poolMaterialId ? materialForId(poolMaterialId, options, sharedAssetMaterialCache) : null;
     pool.add(
       assetId,
       node,
       gltf,
       submeshes,
-      { castShadow: first.castShadow, receiveShadow: first.receiveShadow, lod: first.lod, lodDistance: first.lodDistance },
+      { castShadow: first.castShadow, receiveShadow: first.receiveShadow, lod: first.lod, lodDistance: first.lodDistance, material: poolMaterialId },
       placed,
       owner,
       options,
+      poolOverride,
     );
     return;
   }
@@ -3576,7 +3717,7 @@ function instanceGltfInto(
         const geometry = cachedTier?.geometry ?? sub.geometry;
         const instanced = new InstancedProps(
           geometry,
-          cachedInstancedMaterial(`${assetId}#${node ?? ""}#${index}${materialKeySuffix}`, sub.material, {
+          cachedInstancedMaterial(`${assetId}#${node ?? ""}#${index}#${materialId ?? ""}${materialKeySuffix}`, override ?? sub.material, {
             uvRotation: rotated,
             vegetationTint: true,
             uber: ubered,
@@ -3616,7 +3757,7 @@ function instanceGltfInto(
   // Without a baker (headless build, or the app opted out) the primitive
   // proxies stand in: a cross-billboard for tall props, a box for squat ones.
   const bounds = submeshBounds(submeshes);
-  const impostor = authoredProxy ? null : cachedImpostor(assetId, node, source, bounds, options);
+  const impostor = authoredProxy ? null : cachedImpostor(assetId, node, source, bounds, options, override);
   let far: InstancedProps;
   let impostorData: ImpostorInstanceData | undefined;
   if (authoredProxy) {

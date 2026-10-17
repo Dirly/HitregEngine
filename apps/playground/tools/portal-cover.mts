@@ -19,6 +19,8 @@
  *     on the veil's plane: a GAP is a visible point of the opening outside the veil; a PROTRUSION is a visible point of
  *     the veil more than 0.15 m outside the opening with rock within 1.5 m behind it (showing over rock). Pass = no gap larger
  *     than 0.05 m^2, no protrusion.
+ *  4. FINISH. The veil reads as the way in, never as sky: its material resolves in the scene project's closure (an
+ *     unresolved one draws as a flat grey card, lit by the sky) and is the portal swirl or dark (_portal-veil-ops veilFinish).
  *
  * --fit: the box is resized to the narrowest closed section near the anchor (its full walkable width and the body's
  * reach, 0.3 m into the rock all round) and the veil to that section's whole visible opening plus 0.3 m (the rock clips
@@ -36,7 +38,8 @@ import { fileURLToPath } from "node:url";
 import * as THREE from "three";
 import { applyOps, ComponentRegistry, registerChunkComponents, registerCoreComponents, type Op, type SceneDoc } from "@hitreg/core";
 import { loadContent, playgroundRoots, PortalHarness } from "../../../packages/server/src/index.ts";
-import { portalDigest, portalVeilOps, readStated, statedFileOf, triggerOf, veilOf, walkThroughPortals, type StatedFile, type V3 } from "./_portal-veil-ops.mts";
+import { findAsset } from "./_closure.mjs";
+import { portalDigest, portalVeilOps, veilFinish, readStated, statedFileOf, triggerOf, veilOf, walkThroughPortals, type StatedFile, type V3 } from "./_portal-veil-ops.mts";
 
 const PG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const arg = (n: string) => { const i = process.argv.indexOf(n); return i >= 0 ? process.argv[i + 1] : undefined; };
@@ -362,7 +365,11 @@ function measure(id: string, params: Record<string, unknown>, stated: StatedFile
     const p = poseOf(ref).pos, l = f.local([p.x, p.y + BODY_HALF, p.z]);
     if (Math.abs(l[0] - trig.offset[0]) <= trig.halfExtents[0] && Math.abs(l[1] - trig.offset[1]) <= trig.halfExtents[1] && Math.abs(l[2] - trig.offset[2]) <= trig.halfExtents[2]) notes.push(`${ref} (a landing spot) stands inside the box`);
   }
-  const r: Result = { id, status: t.pass && v.pass ? "PASS" : "FAIL", approach: `${side > 0 ? "+z" : "-z"} (${from})`, narrowest: narrow ? describe(narrow) : null, atBox: describe(atBox), trigger: t, veil: v, notes, digest: portalDigest(doc, id) };
+  // 4. FINISH: the veil must read as the way in, never as sky (its material resolved in this project's closure)
+  const veilMat = (doc.entities[`${id}-veil`]?.components?.["mesh"] as { material?: string } | undefined)?.material;
+  const finish = veilMat ? veilFinish(veilMat, (() => { const mf = findAsset(project, `materials/${veilMat}.json`); return mf ? JSON.parse(fs.readFileSync(mf, "utf8")) : null; })()) : { pass: false, why: "no veil: the doorway frames whatever is behind it (sky through a cut passage)" };
+  if (!finish.pass) notes.push(`FINISH: ${finish.why}`);
+  const r: Result = { id, status: t.pass && v.pass && finish.pass ? "PASS" : "FAIL", approach: `${side > 0 ? "+z" : "-z"} (${from})`, narrowest: narrow ? describe(narrow) : null, atBox: describe(atBox), trigger: t, veil: v, notes, digest: portalDigest(doc, id) };
   return { r, sections, f, side };
 }
 

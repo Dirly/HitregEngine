@@ -18,6 +18,10 @@
  *   --max-players <n>
  *   --no-persist          do not write terraformed recipes back to their file
  *   --workers <n>         cell-generation worker threads (default min(4, cpus-1); 0 = inline)
+ *   --terrain-bake <m>    baked terrain-collision cache: auto (default: use it; bake it in the background if nobody
+ *                         is), read (never bake here — what main starts layers with), force (rebake), off (cook on demand)
+ *   --bake-workers <n>    threads for a bake run here (default min(8, cpus-1))
+ *   --terrain-cache <dir> cache root (default <playground>/.hitreg/terrain-cache)
  *   --compress            permessage-deflate on the game socket (off by default: see WebSocketHostTransportOptions.compress)
  *   --profile             profile every tick for GET /admin/profile (phases, per-script rows, spikes)
  *   --interest <m>        send each player what moves within this many metres (default 250; 0 = everything to everyone)
@@ -41,6 +45,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { serve } from "../src/serve.js";
+import { parseBakeMode } from "../src/terrain-cache.js";
 
 function arg(name: string, fallback?: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -74,6 +79,9 @@ async function main(): Promise<void> {
     maxPlayers: num("max-players"),
     persistRecipe: !process.argv.includes("--no-persist"),
     workers: num("workers"),
+    terrainBake: parseBakeMode(arg("terrain-bake")),
+    ...(num("bake-workers") !== undefined ? { bakeWorkers: num("bake-workers")! } : {}),
+    ...(arg("terrain-cache") ? { terrainCacheDir: path.resolve(arg("terrain-cache")!) } : {}),
     profile: process.argv.includes("--profile"),
     compress: process.argv.includes("--compress"),
     ...(process.argv.includes("--no-state-interest") ? { stateInterest: false } : {}),

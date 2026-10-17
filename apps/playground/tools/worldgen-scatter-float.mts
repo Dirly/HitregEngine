@@ -41,7 +41,8 @@ interface CellSurface {
 }
 
 function cellSurface(field: WorldField, cx: number, cz: number): CellSurface {
-  const mesh = buildVoxelMesh(field, { kind: "voxel", world: field.recipe.name, cell: [cx, cz] });
+  // "auto": the mesher the streamer uses (DC on planar-cliff cells, MC elsewhere; MC everywhere without planarCliffs)
+  const mesh = buildVoxelMesh(field, { kind: "voxel", world: field.recipe.name, cell: [cx, cz], mesher: "auto" });
   const size = field.recipe.cellSize;
   const x0 = cx * size;
   const z0 = cz * size;
@@ -224,6 +225,9 @@ export function commandScatterFloat(host: ScatterFloatHost): void {
     features: { ...recipe.features, passages: [], tunnels: [], blobs: recipe.features.blobs.filter((b) => b.op === "add") },
   });
   const attributable = (r: Row): boolean => {
+    // planar cliffs (terrain.planarCliffs) rebuild the ground as treads and walls: a fault there is placement's,
+    // never the 2 m mesh's disagreement with the heightfield
+    if (field.planarNear(r.x, r.z)) return true;
     if (patches.some((h) => r.x > h.origin[0] - 4 && r.z > h.origin[1] - 4 && r.x < h.origin[0] + h.size[0] + 4 && r.z < h.origin[1] + h.size[1] + 4)) return true;
     // a carve counts only where it CHANGED the ground within 3 m: a tunnel
     // 300 m under a mountain is near in plan and irrelevant to the grass

@@ -14,10 +14,11 @@
  */
 
 import { marchingCubes, type MarchResult, type SampledBlock } from "./marching-cubes.js";
-import { dualContour, type DualContourOptions } from "./dual-contouring.js";
-import { createWorldField, type WorldField } from "./field.js";
+import { dualContour, type DualContourOptions, type HermiteSource } from "./dual-contouring.js";
+import { createWorldField, type SampleBlockExact, type WorldField } from "./field.js";
 import { recipeSplatIndexed, worldRecipeSchema, type WorldRecipe } from "./recipe.js";
 import { reduceSplatTop4 } from "./splat-top4.js";
+import { planarReach } from "./planar-cliffs.js";
 import { zoneGroundRoles } from "./zone-ground.js";
 
 /** The `mesh.source` shape for a streamed voxel cell. */
@@ -36,10 +37,10 @@ export interface VoxelMeshSource {
    *
    * `"dc"` and `"nets"` are the EXPERIMENT (`./dual-contouring.ts`) — the same
    * field, contoured dually so a comparison is one field flip on one scene
-   * rather than a branch. They have no skirts, so an LOD transition cracks;
-   * keep a scene using them inside its `fullRender` ring.
+   * rather than a branch. They are clipped to the cell and skirted
+   * (`addInwardSkirts`), and take exact Hermite data from a planar-cliffs world.
    */
-  mesher?: VoxelMesher;
+  mesher?: VoxelMesherChoice;
 }
 
 /**
@@ -49,6 +50,36 @@ export interface VoxelMeshSource {
  * of the QEF, i.e. DC's cheap half, smooth rather than sharp.
  */
 export type VoxelMesher = "mc" | "dc" | "nets";
+/** A mesher, or `"auto"`: per cell, DC where planar cliffs reach it (plus `planarCliffs.dcMargin`), MC elsewhere. */
+export type VoxelMesherChoice = VoxelMesher | "auto";
+
+const autoCache = new WeakMap<WorldField, Map<string, VoxelMesher>>();
+/**
+ * The mesher one cell is built with. `"auto"` is a pure function of the
+ * world and the cell (never of the LOD or the host), so the server, the
+ * client, the HLOD bake and every tool choose alike: dual contouring where a
+ * planar-cliff mask lies within the cell plus `dcMargin` metres, marching
+ * cubes elsewhere. The margin is what keeps every MC/DC border on smooth
+ * ground (measured: a border inside the cliff band opens holes; on smooth
+ * ground the two meshers meet within a skirt). A world without
+ * `terrain.planarCliffs` is MC everywhere.
+ */
+export function resolveCellMesher(field: WorldField, cx: number, cz: number, choice: VoxelMesherChoice | undefined): VoxelMesher {
+  if (choice !== "auto") return choice ?? "mc";
+  const pc = field.recipe.terrain.planarCliffs;
+  if (!pc) return "mc";
+  let cache = autoCache.get(field);
+  if (!cache) autoCache.set(field, (cache = new Map()));
+  const key = cx + "," + cz;
+  let m = cache.get(key);
+  if (m === undefined) {
+    const S = field.recipe.cellSize, g = pc.dcMargin;
+    m = field.planarMaskIn(cx * S - g, cz * S - g, (cx + 1) * S + g, (cz + 1) * S + g) ? "dc" : "mc";
+    if (cache.size > 100000) cache.clear();
+    cache.set(key, m);
+  }
+  return m;
+}
 
 export interface VoxelMesh {
   positions: Float32Array;
@@ -310,6 +341,15 @@ export function voxelMesh(source: VoxelMeshSource): VoxelMesh {
 }
 
 /**
+ * The cached mesh for a source, or null — never builds one and does not
+ * refresh recency. For main-thread readers (ground cover) that must not mesh
+ * a cell themselves but can use one the streamer already holds.
+ */
+export function cachedVoxelMesh(source: VoxelMeshSource): VoxelMesh | null {
+  return meshCache.get(cacheKey(source)) ?? null;
+}
+
+/**
  * Hand the cache a mesh built ELSEWHERE — a worker thread that ran
  * `buildVoxelMesh` against its own copy of the field. The next `voxelMesh`
  * for the same source is then a hit, so render, physics and placement keep
@@ -346,7 +386,7 @@ export function buildVoxelMesh(field: WorldField, source: VoxelMeshSource): Voxe
   // meshers need TWO, because a dual face spans four cells and so reaches one
   // cell into the neighbour — and that cell's own vertex has to be solved from
   // true central differences, or the two chunks place it differently.
-  const mesher = source.mesher ?? "mc";
+  const mesher = resolveCellMesher(field, cx, cz, source.mesher);
   const pad = mesher === "mc" ? 1 : 2;
   const { yMin, cellsY, cut } = verticalBand(field, source, x0, z0, step, pad, cells + 2 * pad + 1);
   if (cellsY < 1) return EMPTY_MESH;
@@ -355,9 +395,16 @@ export function buildVoxelMesh(field: WorldField, source: VoxelMeshSource): Voxe
   const nz = cells + 2 * pad + 1;
   const origin: [number, number, number] = [x0 - pad * step, yMin - pad * step, z0 - pad * step];
 
-  const values = field.sampleBlock({ origin, nx, ny, nz, step });
+  // A world with `terrain.planarCliffs` hands the dual meshers exact Hermite
+  // data for its cliff band (crossings + gradients of the planar field), gated
+  // per sample; anything the band cut or the seal then rewrites drops out of it.
+  const exact: SampleBlockExact = {};
+  const values = field.sampleBlock({ origin, nx, ny, nz, step }, mesher !== "mc" ? exact : undefined);
+  const before = exact.active ? values.slice() : null;
   if (cut) applyBandCut(values, nx, ny, nz, origin, step, cut);
   sealVertically(values, nx, ny, nz);
+  if (before && exact.active) for (let i = 0; i < values.length; i++) if (values[i] !== before[i]) exact.active[i] = 0;
+  const hermite: HermiteSource | undefined = exact.hermite;
 
   const contour: (block: SampledBlock, options: DualContourOptions) => MarchResult =
     mesher === "mc" ? marchingCubes : dualContour;
@@ -365,7 +412,17 @@ export function buildVoxelMesh(field: WorldField, source: VoxelMeshSource): Voxe
   const result: MarchResult = (mesher === "mc" ? flatCellMesh(field, block) : null) ?? contour(
     block,
     {
-      ...(mesher === "mc" ? {} : { pad, sharpness: mesher === "nets" ? 0 : 1 }),
+      ...(mesher === "mc"
+        ? {}
+        : {
+            pad,
+            sharpness: mesher === "nets" ? 0 : 1,
+            // End the dual mesh ON the cell's planes, like an MC cell, so the
+            // same skirts close an LOD step (see clipToColumn).
+            ...(dualMeshExperiment.seams === "clip" ? { clip: { x: [x0, x0 + recipe.cellSize] as const, z: [z0, z0 + recipe.cellSize] as const } } : {}),
+            ...(mesher === "dc" ? { creaseAngle: dualMeshExperiment.crease } : {}),
+            ...(hermite ? { hermite, hermiteSteps: dualMeshExperiment.hermiteSteps, hermiteGate: dualMeshExperiment.hermiteGate } : {}),
+          }),
       // ONE interleaved stream, split below. Splat weights and biome tint come
       // from the SAME biome evaluation, so asking for them as two attributes
       // resolved the climate noise and every rule's membership twice per
@@ -397,15 +454,17 @@ export function buildVoxelMesh(field: WorldField, source: VoxelMeshSource): Voxe
   // Skirts hang from every boundary edge, so a neighbour meshed at a
   // different lattice step (the HLOD ring) cannot open a crack at the join.
   //
-  // They are MARCHING-CUBES ONLY, and not by choice: `addSkirts` finds the
-  // boundary by testing which vertices lie exactly on the cell plane, which is
-  // true of an MC vertex (it sits on a lattice edge) and never true of a dual
-  // one (it sits in a cell interior). Equal-LOD dual neighbours agree exactly
-  // and need no skirt; across an LOD step they crack, which is the honest
-  // limit of the experiment.
+  // `addSkirts` finds the boundary by testing which vertices lie exactly on
+  // the cell plane — true of an MC vertex (it sits on a lattice edge), never of
+  // a dual one (it sits in a cell interior). So the dual meshers are CLIPPED to
+  // the cell's column (`dualMeshExperiment.seams`), which puts their border on the plane too,
+  // and then take the same skirts. Unclipped ("own"), equal-LOD dual
+  // neighbours still agree exactly but an LOD step cracks.
   const skirted =
     mesher === "mc"
       ? addSkirts(result, splat, tint, surfaceCount, x0, z0, recipe.cellSize, step * SKIRT_STEPS, block)
+      : dualMeshExperiment.seams === "clip"
+      ? addInwardSkirts(result, splat, tint, surfaceCount, x0, z0, recipe.cellSize, Math.max(step * SKIRT_STEPS, dualMeshExperiment.skirtMin), block)
       : { ...result, splat, tint };
   const positions = skirted.positions;
   let minX = Infinity;
@@ -514,6 +573,21 @@ function flatCellMesh(field: WorldField, block: SampledBlock): MarchResult | nul
   for (let i = 0; i < perimeter; i++) indices.set([0, 1 + (i + 1) % perimeter, 1 + i], i * 3);
   return { positions, normals, indices, attributes: { surface: attributes }, vertexCount, triangleCount: perimeter };
 }
+
+/**
+ * EXPERIMENT switches for the dual meshers, mutable so a measuring tool can
+ * A/B them (`tools/voxel-seams.mts`); the shipping MC path never reads them.
+ * - `seams`: "clip" ends each dual cell on its column planes and skirts it
+ *   like MC, so an LOD step closes; "own" is the original face-ownership rule
+ *   (no skirts — equal-LOD seams exact, LOD steps crack).
+ * - `crease`: radians; `"dc"` splits a vertex's normal where its cell's
+ *   crossing normals spread wider (0 = one averaged normal). 0.6 = 34 deg.
+ * - `skirtMin`: metres; the dual meshers' skirts hang at least this far (0 = SKIRT_STEPS lattice steps). Measured
+ *   on terrace cliffs at the 1:4 HLOD join: 0, 12, 16 and 24 m leak alike — the leaks there were the FIELD moving
+ *   with the lattice (fixed in sampleBlock: coarse blocks read the full-detail planar function), not skirt depth.
+ * Meshes are cached by source, so flip these before meshing, not between.
+ */
+export const dualMeshExperiment: { seams: "clip" | "own"; crease: number; hermiteSteps: number; hermiteGate: number; skirtMin: number } = { seams: "clip", crease: 0.6, hermiteSteps: 3, hermiteGate: -2, skirtMin: 0 };
 
 /** Skirt depth in lattice steps: a full-detail cell drops 6 m, an HLOD cell (4x lattice) 24 m. */
 const SKIRT_STEPS = 3;
@@ -728,6 +802,168 @@ function addSkirts(
 }
 
 /**
+ * Skirts for the CLIPPED dual meshers: the same strip from every boundary edge
+ * on a side plane, but extruded INTO THE ROCK along the surface's inward normal
+ * projected into that plane, instead of straight down (or up).
+ *
+ * Down/up is right for ground and for undersides, and wrong for a vertical
+ * face: there the two LOD levels' borders are offset SIDEWAYS in the plane, a
+ * downward strip hung from a vertical border has no area, and the slot between
+ * the faces stays open. DC keeps faces vertical (that is the point of it), so
+ * its skirts follow the face: a floor's skirt still hangs down, an underside's
+ * still rises, a wall's goes back into the wall. Same rock-run clamp as
+ * {@link addSkirts}, measured along the new direction.
+ */
+function addInwardSkirts(
+  mesh: SkirtInput,
+  splat: Float32Array,
+  tint: Float32Array,
+  surfaceCount: number,
+  x0: number,
+  z0: number,
+  cellSize: number,
+  depth: number,
+  block: SampledBlock,
+): SkirtInput & { splat: Float32Array; tint: Float32Array } {
+  const { positions, normals, indices, vertexCount, triangleCount } = mesh;
+  const eps = 1e-4;
+  const planes: { axis: 0 | 2; at: number; outward: number }[] = [
+    { axis: 0, at: x0, outward: -1 },
+    { axis: 0, at: x0 + cellSize, outward: 1 },
+    { axis: 2, at: z0, outward: -1 },
+    { axis: 2, at: z0 + cellSize, outward: 1 },
+  ];
+  const on = (v: number, plane: (typeof planes)[number]): boolean => Math.abs(positions[v * 3 + plane.axis]! - plane.at) < eps;
+  const edges: number[] = [];
+  for (let t = 0; t < triangleCount; t++) {
+    const i0 = indices[t * 3]!, i1 = indices[t * 3 + 1]!, i2 = indices[t * 3 + 2]!;
+    for (let p = 0; p < planes.length; p++) {
+      const plane = planes[p]!;
+      const a = on(i0, plane), b = on(i1, plane), c = on(i2, plane);
+      if (a && b && !c) edges.push(i0, i1, p);
+      else if (b && c && !a) edges.push(i1, i2, p);
+      else if (c && a && !b) edges.push(i2, i0, p);
+    }
+  }
+  const count = edges.length / 3;
+  if (count === 0) return { ...mesh, splat, tint };
+  const { values, nx, ny, origin, step } = block;
+  const strideZ = nx * ny;
+  const sample = (x: number, y: number, z: number): number => {
+    const fx = Math.min(nx - 1.0001, Math.max(0, (x - origin[0]) / step));
+    const fy = (y - origin[1]) / step;
+    const fz = Math.min(block.nz - 1.0001, Math.max(0, (z - origin[2]) / step));
+    if (fy <= 0) return -1;
+    if (fy >= ny - 1) return 1;
+    const i = Math.floor(fx), j = Math.floor(fy), k = Math.floor(fz);
+    const tx = fx - i, ty = fy - j, tz = fz - k;
+    const at = (di: number, dj: number, dk: number): number => values[i + di + (j + dj) * nx + (k + dk) * strideZ]!;
+    const lerp = (p: number, q: number, t: number): number => p + (q - p) * t;
+    const x00 = lerp(at(0, 0, 0), at(1, 0, 0), tx), x10 = lerp(at(0, 1, 0), at(1, 1, 0), tx);
+    const x01 = lerp(at(0, 0, 1), at(1, 0, 1), tx), x11 = lerp(at(0, 1, 1), at(1, 1, 1), tx);
+    return lerp(lerp(x00, x10, ty), lerp(x01, x11, ty), tz);
+  };
+  const probe = step / 4;
+  /** Per (vertex, plane): unit in-plane inward direction and how far it stays in rock along it. */
+  const runs = new Map<number, [number, number, number, number]>();
+  const runOf = (v: number, p: number): [number, number, number, number] => {
+    const key = v * 4 + p;
+    let r = runs.get(key);
+    if (r) return r;
+    const plane = planes[p]!;
+    // inward = -normal with the plane-axis component removed
+    let dx = -normals[v * 3]!, dy = -normals[v * 3 + 1]!, dz = -normals[v * 3 + 2]!;
+    if (plane.axis === 0) dx = 0;
+    else dz = 0;
+    const l = Math.hypot(dx, dy, dz);
+    if (l < 0.2) {
+      dx = 0;
+      dy = -1;
+      dz = 0;
+    } else {
+      dx /= l;
+      dy /= l;
+      dz /= l;
+    }
+    const x = positions[v * 3]!, y = positions[v * 3 + 1]!, z = positions[v * 3 + 2]!;
+    let run = depth, prevT = 0, prevD = 0;
+    for (let t = probe; t <= depth + 1e-6; t += probe) {
+      const d = sample(x + dx * t, y + dy * t, z + dz * t);
+      if (d >= 0) {
+        const cross = prevD < 0 ? prevT + (t - prevT) * (prevD / (prevD - d)) : prevT;
+        run = cross - probe > probe * 0.5 ? cross - probe : 0;
+        break;
+      }
+      prevT = t;
+      prevD = d;
+    }
+    r = [dx, dy, dz, run];
+    runs.set(key, r);
+    return r;
+  };
+  const outPositions = new Float32Array((vertexCount + count * 2) * 3);
+  const outNormals = new Float32Array((vertexCount + count * 2) * 3);
+  const outSplat = new Float32Array((vertexCount + count * 2) * surfaceCount);
+  const outTint = new Float32Array((vertexCount + count * 2) * 3);
+  const outIndices = new Uint32Array((triangleCount + count * 2) * 3);
+  outPositions.set(positions);
+  outNormals.set(normals);
+  outSplat.set(splat);
+  outTint.set(tint);
+  outIndices.set(indices);
+  let v = vertexCount, tri = triangleCount;
+  // one skirt vertex per (boundary vertex, plane), shared by the two strips that meet at it
+  const skirtVertex = new Map<number, number>();
+  const extruded = (from: number, p: number): number => {
+    const [dx, dy, dz, run] = runOf(from, p);
+    if (run <= 0) return from;
+    const key = from * 4 + p;
+    const hit = skirtVertex.get(key);
+    if (hit !== undefined) return hit;
+    const to = v++;
+    outPositions[to * 3] = positions[from * 3]! + dx * run;
+    outPositions[to * 3 + 1] = positions[from * 3 + 1]! + dy * run;
+    outPositions[to * 3 + 2] = positions[from * 3 + 2]! + dz * run;
+    for (let k = 0; k < 3; k++) outNormals[to * 3 + k] = normals[from * 3 + k]!;
+    for (let k = 0; k < surfaceCount; k++) outSplat[to * surfaceCount + k] = splat[from * surfaceCount + k]!;
+    for (let k = 0; k < 3; k++) outTint[to * 3 + k] = tint[from * 3 + k]!;
+    skirtVertex.set(key, to);
+    return to;
+  };
+  const P = (i: number): [number, number, number] => [outPositions[i * 3]!, outPositions[i * 3 + 1]!, outPositions[i * 3 + 2]!];
+  for (let e = 0; e < count; e++) {
+    const a = edges[e * 3]!, b = edges[e * 3 + 1]!, p = edges[e * 3 + 2]!;
+    const plane = planes[p]!;
+    const a2 = extruded(a, p), b2 = extruded(b, p);
+    if (a2 === a && b2 === b) continue;
+    // wind so the strip faces OUT of the cell: its normal's plane-axis component along `outward`
+    const far = b2 !== b ? b2 : a2;
+    const pa = P(a), pb = P(b), pf = P(far);
+    const u = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]], w = [pf[0] - pa[0], pf[1] - pa[1], pf[2] - pa[2]];
+    const n = plane.axis === 0 ? u[1]! * w[2]! - u[2]! * w[1]! : u[0]! * w[1]! - u[1]! * w[0]!;
+    const pair = n * plane.outward >= 0 ? [a, b, b2, a, b2, a2] : [a, b2, b, a, a2, b2];
+    for (let q = 0; q < 6; q += 3) {
+      const p0 = pair[q]!, p1 = pair[q + 1]!, p2 = pair[q + 2]!;
+      if (p0 === p1 || p1 === p2 || p2 === p0) continue;
+      outIndices[tri * 3] = p0;
+      outIndices[tri * 3 + 1] = p1;
+      outIndices[tri * 3 + 2] = p2;
+      tri++;
+    }
+  }
+  const full = v === vertexCount + count * 2;
+  return {
+    positions: full ? outPositions : outPositions.slice(0, v * 3),
+    normals: full ? outNormals : outNormals.slice(0, v * 3),
+    indices: tri === triangleCount + count * 2 ? outIndices : outIndices.slice(0, tri * 3),
+    splat: full ? outSplat : outSplat.slice(0, v * surfaceCount),
+    tint: full ? outTint : outTint.slice(0, v * 3),
+    vertexCount: v,
+    triangleCount: tri,
+  };
+}
+
+/**
  * The vertical band to polygonize for a cell, snapped to the GLOBAL lattice.
  *
  * Snapping is not cosmetic: two neighbouring cells derive different bands from
@@ -822,18 +1058,31 @@ function bandLimits(field: WorldField, ox: number, oz: number, n: number, step: 
   const hi = new Float32Array(n * n);
   let min = Infinity;
   let max = -Infinity;
+  // Planar cliffs warp rock SIDEWAYS: a column at a cliff's foot can hold rock
+  // up to the height of any column within the warp's reach, so its ceiling is
+  // the highest ground in that window (a pure function of world position, so
+  // neighbours still agree). Without this the pushed-out face is flat-capped.
+  const pc = recipe.terrain.planarCliffs;
+  const reach = pc ? planarReach(pc, recipe.seed) : null;
+  const rr = reach ? Math.ceil(reach.maxPush / step) + 1 : 0;
+  const sink = reach && reach.sink > 0 ? reach.sink + 2 * step : 0;
+  const gn = n + 2 * rr;
+  const grounds = rr > 0 ? new Float64Array(gn * gn) : null;
+  if (grounds) for (let k = 0; k < gn; k++) for (let i = 0; i < gn; i++) grounds[i + k * gn] = field.height(ox + (i - rr) * step, oz + (k - rr) * step);
   for (let k = 0; k < n; k++) {
     const z = oz + k * step;
     for (let i = 0; i < n; i++) {
       const x = ox + i * step;
-      const ground = field.height(x, z);
+      const ground = grounds ? grounds[i + rr + (k + rr) * gn]! : field.height(x, z);
       let b = ground;
+      if (grounds) for (let dk = 0; dk <= 2 * rr; dk++) for (let di = 0; di <= 2 * rr; di++) b = Math.max(b, grounds[i + di + (k + dk) * gn]!);
       for (const box of boxes) {
         if (x < box.x0 || x > box.x1 || z < box.z0 || z > box.z1) continue;
         if (box.hi > b) b = box.hi;
       }
       b += above;
-      const a = floorAt(field, x, z, ground);
+      // terrace walls open treads up to a riser below the ground: the floor goes down with them
+      const a = floorAt(field, x, z, ground) - sink;
       lo[i + k * n] = a;
       hi[i + k * n] = b;
       if (a < min) min = a;

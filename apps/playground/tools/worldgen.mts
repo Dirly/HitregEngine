@@ -33,6 +33,9 @@
  *   pnpm -F playground worldgen scatter <world>       (audit every rule against its model + the REALIZED density per biome)
  *   pnpm -F playground worldgen scatter-float <world> [--near x,z,r] [--list]  (fails if any plant or cover stands over air/an opening)
  *   pnpm -F playground worldgen lips <world> [--near x,z,r] [--list] [--json] [--allow ids]  (fails on sawtooth/wall/rim the 2 m lattice draws at patch edges and road cuts)
+ *   pnpm -F playground worldgen rock-skins <world> [--near x,z,r | --rect x0,z0,x1,z1 | --stamp] [--list] (fails when a rock wears another place's stone or a cap the ground beside it does not)
+ *   pnpm -F playground worldgen water-edges <world> [--near x,z,r] [--stamp] [--no-scene]  (fails when a curtain stands off its lip/face or placed water ends in open air)
+ *   pnpm -F playground worldgen float <world> [--near x,z,r | --rect x0,z0,x1,z1] [--json] [--out f]  (fails when any placed object or scatter rock is off its real support)
  *   pnpm -F playground worldgen seated <world> --slab x,z,hx,hz,yawDeg,baseY | --slabs f.json  (fails when a built slab hangs or the ground clips through it)
  *   pnpm -F playground worldgen vegetation <world> [--region <id> --set <json|file> | --clear | --count] [--clearings <file>] [--remove-clearings <owner|id>] [--at x,z] [--dry-run]
  *       (what grows in a zone/town/place region, and clearings — docs/voxel-worlds.md section 31)
@@ -84,9 +87,18 @@ import { modelBounds } from "./_gltf-bounds.mjs";
 import { borderClassifier, borderReport, planBarriers, snowLineOf, stripBarrierFeatures, type BorderPairReport } from "./worldgen-borders.mts";
 import { commandLandforms, landformsStageCheck } from "./worldgen-landforms.mts";
 import { commandZoneTextures, zoneTexturesStageCheck } from "./worldgen-zone-textures.mts";
+import { stageStamp } from "./_stage-stamp.mts";
 import { commandScatterFloat } from "./worldgen-scatter-float.mts";
-import { commandLips, commandSeated } from "./worldgen-lips.mts";
+import { commandLips, commandSeated, runLipsGate } from "./worldgen-lips.mts";
+import { commandFloat } from "./float.mts";
+import { commandRockSkins, writeRockSkinTemplate } from "./rock-skins.mts";
+import { commandWaterEdges } from "./water-edges.mts";
+import { riverWaterDoc } from "./_river-water.mts";
+import { commandTerracePlace, loadTerraceKit, removeTownTerraceWalls, townTerraceWalls, type TownRiserLink } from "./worldgen-terrace-walls.mts";
+import { commandBridgePlace } from "./worldgen-bridge-spans.mts";
 import { commandVegetation } from "./worldgen-vegetation.mts";
+import { commandFine, commandOp, commandOpPreview, fineStatusLine } from "./worldgen-operators.mts";
+import { findAsset } from "./_closure.mjs";
 
 // ---------------------------------------------------------------- cli plumbing
 
@@ -160,7 +172,10 @@ function findRecipeFile(name: string): string | null {
 }
 
 function loadRecipe(name = worldName): { recipe: WorldRecipe; file: string } {
-  const file = findRecipeFile(name);
+  // --recipe <file>: work on a scratch copy (operator trials, gates on a what-if) instead of the world's own file
+  const scratch = name === worldName ? stringOption("recipe", "") : "";
+  const file = scratch ? path.resolve(scratch) : findRecipeFile(name);
+  if (scratch && !fs.existsSync(file!)) fail(`--recipe ${scratch} does not exist`);
   if (!file) {
     fail(`no world recipe "${name}" — run: worldgen init ${name}${project ? ` --project ${project}` : ""}`);
   }
@@ -173,7 +188,23 @@ function writeRecipe(recipe: WorldRecipe, file: string): void {
   // Stamp the stage that is writing. One place rather than fifteen: every
   // stage goes through here, so `worldgen status` can tell what has run and
   // what went stale underneath it without any stage having to remember to say so.
-  if (currentStage) recipe.pipeline = { ...recipe.pipeline, [currentStage]: new Date().toISOString() };
+  // …but a stage that changed NOTHING keeps the stamp it had: re-running `terrace` on a world whose one town needs no
+  // shelves must not make `zones` (and everything after it) STALE
+  if (currentStage) {
+    let unchanged = false;
+    const had = recipe.pipeline?.[currentStage];
+    if (had && fs.existsSync(file)) {
+      try {
+        const old = worldRecipeSchema.parse(JSON.parse(fs.readFileSync(file, "utf8")));
+        unchanged = JSON.stringify({ ...old, pipeline: {} }) === JSON.stringify(worldRecipeSchema.parse({ ...recipe, pipeline: {} }));
+      } catch { /* unreadable: stamp */ }
+    }
+    const deps = pipelineStages().find((s) => s.name === currentStage)?.after ?? [];
+    const next = stageStamp(had, deps.map((d) => recipe.pipeline?.[d]), unchanged);
+    recipe.pipeline = { ...recipe.pipeline, [currentStage]: next.stamp };
+    if (next.moved) console.log(`  (${currentStage} changed nothing; re-checked against a newer upstream stage, stamp moved just past it)`);
+    else if (unchanged) console.log(`  (${currentStage} changed nothing: its stamp is kept, so nothing downstream goes stale)`);
+  }
   // validate BEFORE writing: a stage must never leave a broken world on disk
   const parsed = worldRecipeSchema.safeParse(recipe);
   if (!parsed.success) fail(`refusing to write an invalid recipe:\n${parsed.error.message}`);
@@ -202,11 +233,14 @@ const HELP = `worldgen — procedural world pipeline
   continents <world> re-lay the landmasses (--count 1 --islands 2 --radius 2200 --gap 900 --lobes 2
                    --limit auto --land-floor 4 --variation 0.55 --ocean -45); lobes stop a landmass being a disc
   rivers <world>   HYDROLOGY: fill depressions, accumulate rain, trace the channel network,
-                   fill the LAKES (--lakes 16) and the hollows on the network; rivers are AUTHORED
+                   fill the LAKES (--lakes 16; --dry-zones badlands keeps none in those anchors) and the hollows on the network; rivers are AUTHORED
                    (write { points, width } into features.rivers — the field solves the bed) unless
                    --trace carves the traced network (--catchment 0.12 km² --step 16 --wet-grade Infinity: every reach wet, steep ones as cascading pools)
   descend <world>  --from x,z: follow the water downhill from a point to the sea, a lake or a pit,
                    and print the valley-floor polyline as --points (--simplify 30 m)
+  landform-calm <world>  write features.landformCalm: a disc over every town (pad + terraces), place region,
+                   hand-built height patch and terrace wall, so anchor landform profiles and valleys leave the
+                   ground they were built on alone (--falloff 120 m, --margin 30 m, --dry)
   profile <world>  --points "x,z;…" [--width 14]: ground, grade and bank heights along a route —
                    what to read before writing a river
   status <world>   the build plan: every stage, procedural AND agentic, as ok / STALE / MISSING, in dependency
@@ -221,15 +255,20 @@ const HELP = `worldgen — procedural world pipeline
                    Idempotent and exactly reversible: it all carries a story:<id> tag, --clear takes it off.
                    Prefabs that do not exist yet are printed as a TO BUILD list, not treated as an error
   towns  <world>   dry, off-the-beach sites near water, spread across the landmasses and BUCKETED BY SIZE:
-                   a capital on the coast of EVERY continent (--capitals 4 is a floor, --capital-shore 500,
+                   a capital on the coast of EVERY continent (--capitals left out = 4 with one per continent as the floor;
+                   an explicit --capitals N is exact, 0 = none; --tier <name> sites every new town at that size;
+                   --count is never exceeded, pins included), --capital-shore 500,
                    --continent-km2 1.5), then cities/towns/villages/hamlets down the ladder, best site first
                    (--city-share .12 --town-share .28 --village-share .35 --hamlet-share .25,
-                   --capital-radius 78 --city-radius 60 …; --keep <ids> or a "pinned" tag leaves a town where a
-                   builder has already built on it). Relief is allowed now (--max-relief 55
+                   --capital-radius 78 --city-radius 60 …; a town with "keep: true" in the recipe, a "pinned" tag or
+                   named in --keep <ids|all> stays where it is — and --keep is RECORDED as "keep: true", so the next
+                   plain run keeps it too; --release <ids|all> lets a town move again). Relief is allowed now (--max-relief 55
                    --max-slope 0.42 --max-altitude 220 --relief-weight 1.1) — the old 16 m cap is why every
                    town in every world stood on a table top — with QUOTAS for the places worth walking to:
                    --cliff-towns (15%, a face of --cliff-slope 0.7 inside the footprint) and --mountain-towns
                    (12%, over --mountain-height 110 m). "terrace" turns the fall into shelves
+  town-pins <world> record which towns stay put (\`keep: true\`) without re-siting anything: --keep <ids|all>,
+                   --release <ids|all>; lists every town as pinned (tag) / kept / free
   terrace <world>  VERTICALITY: read the natural ground under each town and, where there is real fall across
                    it, cut it into contour shelves (terraces) joined by ramps that WIND — an ordinary route
                    search on a 4 m grid at a hard grade cap — or by a STAIR where no ramp fits. Every town
@@ -238,7 +277,9 @@ const HELP = `worldgen — procedural world pipeline
                    market towns, but anything with --dramatic 2.5x the --min-relief 8 m always steps.
                    --town <id> for one town; --step-height 6 --max-terraces 5 --riser 5 --min-shelf 9
                    --max-shelf --ramp-grade 0.12 --ramp-width 7 --sample 4 set the middle of each range.
-                   Idempotent (lifts the last run's pads and ramps off first); re-run "paths" after
+                   Idempotent (lifts the last run's pads and ramps off first); re-run "paths" after.
+                   --walls / --no-walls (default: recipe townTerraces.walls): risers become retaining walls
+                   (terraceWalls <town>-riser-<n>, ramps/stairs as wall inserts); pinned towns untouched
   gates  <world>   where a town's own roads meet the world's. With no options it AUDITS: every gate and
                    whether a path arrives at it, every walled town a path crosses instead of entering,
                    the towns still routed to their centre (exit 1 on findings). To record one after a
@@ -248,9 +289,14 @@ const HELP = `worldgen — procedural world pipeline
   paths  <world>   footpaths between the towns that FOLLOW the ground (--width 3.4 --max-grade 0.18, cut-only,
                    --max-cross 1.0 keeps them off hillsides steeper than 45° — the cut bank would be a wall;
                    --turn-weight 24 --max-turn 1 give them a turning radius, --smooth-passes 2 rounds the corners;
-                   --surface dirt, gravel across every snow biome — --surface-by-biome alpine=gravel,… to say which)
+                   --surface dirt, gravel across every snow biome — --surface-by-biome alpine=gravel,… to say which;
+                   --scramble: tread that fails the lip gate comes out as a scramble, as trails do, --scramble-margin 12)
   trails <world>   footpaths from the path network up to the peaks (--to peak,cave; --turn-weight 20 --max-turn 1;
-                   a summit no 88 % scramble can reach gets a trail to the highest walkable point below it)
+                   a summit no 88 % scramble can reach gets a trail to the highest walkable point below it).
+                   Never through a butte monument's, a sea stack's or a sea-cliff wall's clearance (a road there
+                   erases it; a summit ON one gets no trail). The tread rides the ground (--tread-cut 1.5
+                   --tread-fill 1) and must pass \`worldgen lips\`: over karst/DC steps it can't, the tread is cut
+                   out (a scramble over natural rock, --scramble-margin 12; --no-lips skips the pass)
   pois   <world>   place landmark points on distinctive ground
   caves  <world>   dig cave systems into steep faces and MEASURE that a player fits
   canyons <world>  cut terraced gorges (--count 6; --zone badlands to keep them in one kind of place)
@@ -289,11 +335,44 @@ const HELP = `worldgen — procedural world pipeline
   scatter-float <world>  do plants float over terrain EDITS? solves real scatter cells and samples cover over every
                    cell a passage/tunnel/blob/height patch touches (or --near x,z,r), measures each against the
                    drawn mesh; exit 1 on a base > --tol 0.35 m over it or a footing over a drop (--list for all)
+  op     <world>   LANDFORM OPERATORS (features.operators: terrace, path, ...): --apply <file|id> compiles a doc into its
+                   op:<id>:* pieces (inverse kept: <project>/authoring/terrain/undo/), --remove <id>, --undo <inverse.json>, --list, --check
+  op-preview <world> --near x,z,r [--op <file|id>] [--out dir]: map PNG (height, contours, too-steep mask, footprint,
+                   before|after) + a standalone three.js page of the area (before/after toggle, orbit + walk), in seconds
+  fine   <world>   the 6 m gate: carves/patches/blobs finer than 6 m fail ("too fine for terrain: use a kit/hero piece or
+                   an operator"); [--near x,z,r] [--out f.json] [--list]; --record-legacy records the current ones as legacy
+                   (every command: --recipe <file> works on a scratch copy)
   lips   <world>   the lip/sawtooth gate: every height patch and graded road measured on the 2 m lattice against the
                    world without them; exit 1 on teeth (--alias 0.5 m), walls (--max-slope 1.6) or one-sample rims
                    (--lip 0.6 m). --near x,z,r, --list, --json, --allow id,id
-  seated <world>   is a built slab sitting on the DRAWN ground? --slab x,z,halfX,halfZ,yawDeg,baseY (repeat) or
+  float  <world>   THE float gate: every scene prop/fire/torch/lantern/structure (contact from the catalogue) and every
+                   scatter rock in --near x,z,r | --rect x0,z0,x1,z1, seated on the REAL solid (field density: cuts,
+                   carves, planar treads, buttes; + other objects' triangles, decks, colliders) by voxel/seat.ts;
+                   exit 1 on a contact off by > --tol 0.05 m or no support. --json, --out f, --list, --no-scene,
+                   --no-scatter, --legacy-scatter (measure the pre-seat placement). Scenes/dungeons: tools/float.mts scene.
+  water-edges <world>  no water ends in the air: every fall curtain (hung from the MEASURED lip, hugging the face) against
+                   the river surface and the rock face (top gap, face gap, floating, in rock, landing on a ledge), and every
+                   placed water body's outline (buried / finished / open). --near x,z,r | --stamp. Scenes/dungeons:
+                   tools/water-edges.mts scene <project> [--fix]. docs/voxel-worlds.md "Water edges".
+  rock-skins <world>  is every rock the stone of its place, and every cap the ground band beside it? Recipe (each zone's
+                   cliff has a rockSkins slice of its own tone) + scatter rocks in --near/--rect (or --stamp: whole world)
+                   + scene rocks; exit 1 on a skin > --tone 9 (CIELAB a*b*) off its cliff, a cap on stone ground or a cap
+                   other than the climate band's own surface (snow over the snow line). --json, --out f, --list.
+  seated <world>   is a built slab sitting on the REAL ground (density; --drawn = the old lattice height)? --slab x,z,halfX,halfZ,yawDeg,baseY (repeat) or
                    --slabs file.json; exit 1 on a gap > --gap 0.25 m or ground through it > --clip 0.6 m
+  terrace-place <world>  a terrace held up by REAL retaining walls (features.terraceWalls): --spec doc.json, or --id x
+                   --footprint "x,z …" | --path "x,z …" (pad on the left) [--style masonry-common|masonry-stone|natural]
+                   [--height m] [--top-y m] [--insert stair-turn@4:1 …] [--walls auto|0,2]; fits the pad patch, wall
+                   cuts and kit pieces (build.mts make for a new height), runs lips + seated + riser gates (exit 1).
+                   --refit [--id a,b | --all] after a terrain rebuild; --check; --remove id; --dry-run
+  bridge-place <world>  a REAL bridge across a gap (features.bridgeSpans, world-kit bridge kits): --spec doc.json, or
+                   --id x --a "x,z[,y|ground]" --b "x,z[,y|ground]" [--kind arch|rope] [--style gnawspur|coastal]
+                   [--channel] [--tiers auto|1|2] [--bay 6..16] [--sag 0.035] [--width 1.8] [--seat pad|rock];
+                   measures the gap and the ground/seabed under it, plans bays + pier stacks (or makes the rope
+                   catenary piece), seats both ends, runs lips + seated + footing + walk gates (exit 1).
+                   Rope spans: STRAIGHT between NATURAL TOPS (--seat rock), height taken as SLOPE (<= 30 deg end to
+                   end, deck <= 35 deg); no stairs, stages or towers to meet a deck: pick a different anchor pair.
+                   --refit [--id a,b | --all] after a terrain rebuild; --check; --remove id; --dry-run
   river-path <world> add a DRAWN river centreline the rivers stage will solve (--id r1 --points "x,z;x,z;…"
                    --width 18, or --from-scene <scene> --entity <id> to import a path-tool entity; --remove <id>)
   audit  <world>   water & paths: every river ends somewhere, every lake has a river, beds descend,
@@ -305,7 +384,8 @@ const HELP = `worldgen — procedural world pipeline
   barriers <world> RIDGES over every open run (>= --min-run 60 m) of a zone border, a PASS wherever a path
                    crosses (one guaranteed pass per pair no path crosses), a waystation sanctuary at each pass
                    and at every town gate (--height 35 --width 24 --falloff 60 --sample 15 --pass-width auto
-                   --sanctuary-radius 35 --no-safe --dry); idempotent — rewrites barrier-*/pass-* only
+                   --sanctuary-radius 35 --no-safe --dry; --paths-only: passes for town paths only, then
+                   trails last); idempotent — rewrites barrier-*/pass-* only
   regions <world>  audit the zones: area, towns and pois per zone, hubs outside, overlaps, unclaimed towns, and
                    every shared border measured — metres of water/steep/canyon/coast/ridge/town/pass/OPEN; an
                    open run >= 60 m is a finding (exit 1) until 'barriers' walls it
@@ -333,19 +413,25 @@ function commandInit(): void {
   // Only the seed, the landmasses, the features and the zones start fresh.
   const from = stringOption("from", "");
   const source = from ? loadRecipe(from) : null;
+  // the source's own material ids (`terrain/<src>…`, `<src>-…`) become this world's: their files are copied below
+  const own = source ? ownMaterialId(source.recipe.name, worldName) : (id: string) => id;
   const recipe = worldRecipeSchema.parse({
     ...(source ? source.recipe : preset),
     ...(source ? { bounds: preset.bounds } : {}),
     name: worldName,
     seed,
     material,
-    waterMaterial,
-    riverMaterial: undefined,
+    waterMaterial: source?.recipe.waterMaterial ? own(source.recipe.waterMaterial) : waterMaterial,
+    riverMaterial: source?.recipe.riverMaterial ? own(source.recipe.riverMaterial) : undefined,
+    marshMaterial: source?.recipe.marshMaterial ? own(source.recipe.marshMaterial) : undefined,
     bridgeMaterial: source?.recipe.bridgeMaterial ? `${worldName}-bridge` : undefined,
     scatter: source ? source.recipe.scatter : defaultScatter(),
     features: {},
     regions: [],
+    // a fresh world has run nothing: the source's stage stamps would mark its stages done (writeRecipe stamps init)
+    pipeline: {},
   });
+  if (source) borrowLookCleanly(recipe, source.recipe.name, own);
   writeRecipe(recipe, file);
   writeTerrainMaterial(recipe, material, source !== null);
   if (source) {
@@ -360,15 +446,23 @@ function commandInit(): void {
         if (!entry.startsWith(`${source.recipe.name}-`) || !entry.endsWith(".json")) continue;
         const suffix = entry.slice(source.recipe.name.length);
         fs.mkdirSync(path.join(dstMaterials, "terrain"), { recursive: true });
-        fs.copyFileSync(path.join(terrainDir, entry), path.join(dstMaterials, "terrain", `${worldName}${suffix}`));
+        copyOwnMaterial(path.join(terrainDir, entry), path.join(dstMaterials, "terrain", `${worldName}${suffix}`), own);
         copied++;
       }
     }
     const bridge = path.join(srcMaterials, `${source.recipe.name}-bridge.json`);
     if (fs.existsSync(bridge)) {
-      fs.copyFileSync(bridge, path.join(dstMaterials, `${worldName}-bridge.json`));
+      copyOwnMaterial(bridge, path.join(dstMaterials, `${worldName}-bridge.json`), own);
       copied++;
     }
+    // every material the recipe names must now resolve in this project's closure
+    const named = [recipe.material, recipe.waterMaterial, recipe.riverMaterial, recipe.marshMaterial, recipe.bridgeMaterial, ...recipe.scatter.map((r) => (r as { material?: string }).material)];
+    for (const id of new Set(named.filter((x): x is string => !!x))) {
+      if (!resolvesInClosure(`materials/${id}.json`)) console.warn(`  ! material ${id} does not resolve in ${project || "the playground"}'s closure`);
+    }
+    // the stone follows the place from the start: every stone surface of the borrowed palette gets its rock slice
+    // (zone cliffs join when zone-textures gives the zones their ground)
+    if (writeRockSkinTemplate(project, recipe)) writeRecipe(recipe, file);
     console.log(`took the look of ${source.recipe.name}: ${recipe.surfaces.length} surfaces (${recipe.surfaces.filter((s) => s.map).length} textured), ${recipe.biomes.length} biomes, ${recipe.patches.length} patches, ${recipe.scatter.length} scatter rules, ${copied} material file(s) copied`);
   } else writeWaterMaterial(recipe, waterMaterial);
   if (flag("scene")) writeScene(recipe);
@@ -379,6 +473,99 @@ function commandInit(): void {
       `next:\n  worldgen rivers ${worldName}${project ? ` --project ${project}` : ""}\n` +
       `  worldgen towns ${worldName}\n  worldgen paths ${worldName}\n  worldgen trails ${worldName}\n  worldgen map ${worldName}`,
   );
+}
+
+/** `terrain/<src>`, `terrain/<src>-x`, `<src>-x` -> the same id under the new world's name; anything else unchanged. */
+function ownMaterialId(src: string, dst: string): (id: string) => string {
+  const esc = src.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`^(terrain/)?${esc}(?=-|$)`);
+  return (id) => id.replace(re, (_m, t: string | undefined) => `${t ?? ""}${dst}`);
+}
+
+/** Does `assets/<rel>` exist where the new world will run: its project's dependsOn closure (or the flat playground tree)? */
+function resolvesInClosure(rel: string): boolean {
+  return project ? findAsset(project, rel) !== null : fs.existsSync(path.join(PLAYGROUND, "assets", rel));
+}
+
+const TEXTURE_KEYS = new Set(["map", "texture", "stillTexture", "normalMap"]);
+
+/**
+ * Copy a source world's material file under the new world's name: its own material ids renamed, and every layer whose
+ * texture does not resolve in the new project's closure dropped (a source's zone tiles live in the source project).
+ */
+function copyOwnMaterial(from: string, to: string, own: (id: string) => string): void {
+  let dropped = 0;
+  const walk = (v: unknown): unknown => {
+    if (typeof v === "string") return own(v);
+    if (Array.isArray(v)) {
+      const kept = v.filter((x) => {
+        if (!x || typeof x !== "object" || Array.isArray(x)) return true;
+        const bad = Object.entries(x).some(([k, t]) => TEXTURE_KEYS.has(k) && typeof t === "string" && !resolvesInClosure(`textures/${t}`));
+        if (bad) dropped++;
+        return !bad;
+      });
+      return kept.map(walk);
+    }
+    if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, TEXTURE_KEYS.has(k) ? x : walk(x)]));
+    return v;
+  };
+  const doc = walk(JSON.parse(fs.readFileSync(from, "utf8")));
+  fs.writeFileSync(to, `${JSON.stringify(doc, null, 2)}\n`);
+  if (dropped) console.log(`  ${path.basename(to)}: dropped ${dropped} layer(s) whose texture lives outside this project's closure`);
+}
+
+/**
+ * `init --from`: keep the source's LOOK, never its places. Rename the source's own material ids, and drop what only the
+ * source project can resolve or what names the source's map: zone-palette surfaces (their tiles live in the source's
+ * textures; zones start fresh) with the cover layers and patches that paint them, scatter rules whose model or prefab is
+ * not in the new closure, cover sprites that are not, and the positional terrain features (sea cliffs, butte fields,
+ * per-region cliff styles) that were drawn for the source's coast and regions.
+ */
+function borrowLookCleanly(recipe: WorldRecipe, src: string, own: (id: string) => string): void {
+  const notes: string[] = [];
+  for (const r of recipe.scatter as { material?: string }[]) if (r.material) r.material = own(r.material);
+  // surfaces: a biome's weight vector indexes the first N; past those a surface is reached only by name
+  const indexed = Math.max(0, ...recipe.biomes.map((b) => b.surface.length));
+  const gone = new Set<string>();
+  recipe.surfaces = recipe.surfaces.filter((sf, i) => {
+    if (!sf.map || resolvesInClosure(`textures/${sf.map}`)) return true;
+    if (i < indexed) {
+      notes.push(`! surface ${sf.name}: texture ${sf.map} is outside the closure (kept: biomes index it)`);
+      return true;
+    }
+    gone.add(sf.name);
+    return false;
+  });
+  if (gone.size) notes.push(`dropped ${gone.size} surface(s) whose texture lives outside the closure (${[...gone].slice(0, 4).join(", ")}${gone.size > 4 ? ", …" : ""})`);
+  const coverBefore = recipe.cover.length;
+  recipe.cover = recipe.cover.filter((c) => {
+    const cs = c as { surfaces?: string[]; texture?: string };
+    if (cs.texture && !resolvesInClosure(`textures/${cs.texture}`)) return false;
+    if (!cs.surfaces?.length) return true;
+    cs.surfaces = cs.surfaces.filter((n) => !gone.has(n));
+    return cs.surfaces.length > 0;
+  });
+  if (recipe.cover.length < coverBefore) notes.push(`dropped ${coverBefore - recipe.cover.length} cover layer(s) on dropped surfaces or with sprites outside the closure`);
+  const patchesBefore = recipe.patches.length;
+  recipe.patches = recipe.patches.filter((pt) => !gone.has((pt as { surface?: string }).surface ?? ""));
+  if (recipe.patches.length < patchesBefore) notes.push(`dropped ${patchesBefore - recipe.patches.length} paint patch(es) on dropped surfaces`);
+  const scatterBefore = recipe.scatter.length;
+  recipe.scatter = recipe.scatter.filter((rule) => {
+    const r = rule as { model?: string; prefab?: string; modelVariants?: { model: string }[] };
+    if (r.modelVariants?.length) {
+      r.modelVariants = r.modelVariants.filter((v) => resolvesInClosure(`models/${v.model}`));
+      if (r.modelVariants.length === 0) return false;
+    }
+    if (r.model && !resolvesInClosure(`models/${r.model}`)) return false;
+    if (r.prefab && !r.model && !resolvesInClosure(`prefabs/${r.prefab}.json`)) return false;
+    return true;
+  });
+  if (recipe.scatter.length < scatterBefore) notes.push(`dropped ${scatterBefore - recipe.scatter.length} scatter rule(s) whose model/prefab is outside the closure`);
+  const t = recipe.terrain as { seaCliffs?: unknown[]; buttes?: unknown[]; planarCliffs?: { zones?: unknown[] } };
+  if (t.seaCliffs?.length) { notes.push(`dropped ${t.seaCliffs.length} sea-cliff stretch(es) drawn for ${src}'s coast`); delete t.seaCliffs; }
+  if (t.buttes?.length) { notes.push(`dropped ${t.buttes.length} butte field(s) placed on ${src}'s map`); delete t.buttes; }
+  if (t.planarCliffs?.zones?.length) { notes.push(`dropped ${t.planarCliffs.zones.length} per-region cliff style(s) (regions start fresh)`); t.planarCliffs.zones = []; }
+  for (const n of notes) console.log(`  ${n}`);
 }
 
 /**
@@ -587,6 +774,11 @@ function writeDerivedWaterMaterial(baseId: string, id: string, overrides: Record
   console.log(`wrote ${path.relative(process.cwd(), file)}  (${label})`);
 }
 
+/** A texture id resolves for this world: its own assets folder, or anywhere in its project's dependsOn closure. */
+function textureInClosure(root: string, id: string): boolean {
+  return fs.existsSync(path.join(root, "textures", id)) || resolvesInClosure(`textures/${id}`);
+}
+
 function writeRiverWaterMaterial(baseId: string, id: string): void {
   const root = assetsRoot();
   const file = path.join(root, "materials", `${id}.json`);
@@ -597,43 +789,7 @@ function writeRiverWaterMaterial(baseId: string, id: string): void {
   } catch {
     // no base material yet: the defaults below stand on their own
   }
-  let texture = base.water?.["texture"] as string | undefined;
-  if (texture) {
-    const flowing = texture.replace(/(\.[a-z0-9]+)$/i, "Flowing$1");
-    if (flowing !== texture && fs.existsSync(path.join(root, "textures", flowing))) texture = flowing;
-  }
-  const baseTexture = base.water?.["texture"] as string | undefined;
-  const fallName = baseTexture ? baseTexture.replace(/(\.[a-z0-9]+)$/i, "Fall$1") : undefined;
-  const fallTexture = fallName && fallName !== baseTexture && fs.existsSync(path.join(root, "textures", fallName)) ? fallName : undefined;
-  const doc = {
-    shader: "water",
-    color: base.color ?? "#2f7fa8",
-    transparent: true,
-    opacity: base.opacity ?? 0.9,
-    water: {
-      ...(base.water ?? {}),
-      flowMode: "field",
-      // a river is a few metres deep at most: the depth ramp must turn
-      // over inside it or every channel reads as the shallowest band
-      depthFadeDistance: 10,
-      foamWidth: 0.6,
-      // the current itself makes the motion; big standing waves on a
-      // narrow channel look like a shaken tray, and a crisp two-step foam
-      // band along the ribbon's edge read as a painted white rectangle
-      waveAmplitude: 0.03,
-      waveFrequency: 0.5,
-      waveSpeed: 1.2,
-      foamSteps: 3,
-      foamPixel: 0.7,
-      displace: false,
-      // one tile size for rivers AND plain lakes: they share this material
-      ...(texture ? { texture, textureScale: 10 } : {}),
-      // the falling-water tile for waterfall faces: a `<Name>Fall` sibling of the base texture
-      ...(fallTexture ? { fallTexture, fallTextureScale: 4, fallSpeed: 7 } : {}),
-      // still water (lakes, and a river leaving one) keeps the standing-water tile, faded by the current
-      ...(baseTexture ? { stillTexture: baseTexture, stillTextureScale: (base.water?.["textureScale"] as number | undefined) ?? 26 } : {}),
-    },
-  };
+  const doc = riverWaterDoc(base, (tile) => textureInClosure(root, tile));
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, `${JSON.stringify(doc, null, 2)}\n`);
   console.log(`wrote ${path.relative(process.cwd(), file)}  (river water)`);
@@ -1079,6 +1235,12 @@ function sampleWorldGrid(field: WorldField, extent: number, step: number): World
  * the ground made one, and a WATERFALL wherever the bed drops a cliff's worth
  * in one step — none of it placed, all of it derived.
  */
+/** How far over a marsh's water table a road crossing it is pinned (m): a causeway, not a ford. */
+const MARSH_CAUSEWAY = 0.35;
+
+/** Depth range of a marsh pool (m): wading water over a mud bed. */
+const MARSH_LAKE_DEPTH = [1, 1.5] as const;
+
 function commandRivers(): void {
   const { recipe, file } = loadRecipe();
   /**
@@ -1097,6 +1259,9 @@ function commandRivers(): void {
   const handRivers = recipe.features.rivers.filter((r) => (!r.bedY || r.bedY.length !== r.points.length) && !r.id.endsWith("-split"));
   // this stage replaces its own features: sample the world WITHOUT them
   recipe.features.rivers = [];
+  // hand-placed lakes (carve: true — a tarn an author dug to head a river) are the author's like hand rivers: kept and
+  // written back; the traced ones (carve: false) are this stage's and re-found every run
+  const handLakes = recipe.features.lakes.filter((l) => l.carve !== false);
   recipe.features.lakes = [];
   // landform-* fills (mesas, plateaus) are not this stage's: kept, and sampled as ground
   const keptFills = recipe.features.fills.filter((f) => f.id.startsWith("landform-"));
@@ -1177,6 +1342,8 @@ function commandRivers(): void {
   const lakeSurface = stringOption("lake-surface", paletteSurface("wetsand", "sand"));
   const riverSurface = stringOption("surface", paletteSurface("gravel", "sand"));
   const maxLakes = Math.round(option("lakes", 16));
+  // --dry-zones badlands,desert: climate anchors that keep no hydrology lake (their hollows are filled instead)
+  const dryZones = new Set(stringOption("dry-zones", "").split(",").map((s) => s.trim()).filter(Boolean));
   /**
    * Connected hollows that are not kept as lakes are FILLED: raised to
    * their spill level so the river cuts a channel through a flat valley
@@ -1248,8 +1415,40 @@ function commandRivers(): void {
   let raised = 0;
   /** Basin index per written lake, for the diagnostics at the end. */
   const lakeBasin: number[] = [];
+  // MARSH LAKES. In a zone holding a water table (anchor `waterTable`) a
+  // hollow whose floor reaches the table is already marsh water — neither a
+  // lake nor a fill. A marsh sits lower than the land round it, so the fill
+  // finds the WHOLE marsh as one basin spilling metres over the table; taken
+  // as a lake it drowned the zone 8 m deep (proving, first rebuild). A hollow
+  // perched over the table and shallow (MARSH_POOL_MAX) is a pool
+  // (MARSH_LAKE_DEPTH, a mud shore or none), outside the --lakes cap and the
+  // minimum area: a marsh is pocked with them, a lake is an event. Anything
+  // deeper over the table follows the ordinary lake rules.
+  const MARSH_LAKE_RISE = 0.15;
+  const MARSH_POOL_MAX = 2;
+  const marshTableOf = (centroid: readonly [number, number]): number | null => field.marshTable(grid.worldX(centroid[0]), grid.worldZ(centroid[1]));
+  const marshKind = (basin: { centroid: [number, number]; floor: number; level: number }): "held" | "pool" | null => {
+    const t = marshTableOf(basin.centroid);
+    if (t === null) return null;
+    if (basin.floor < t + MARSH_LAKE_RISE || basin.level <= t + MARSH_LAKE_RISE) return "held";
+    return basin.level - basin.floor <= MARSH_POOL_MAX ? "pool" : null;
+  };
+  const marshSurface = paletteSurface("mud");
+  const marshMaterialId = recipe.marshMaterial ?? (recipe.waterMaterial ? `${recipe.waterMaterial}-swamp` : undefined);
+  let marshLakes = 0;
+  let marshHeld = 0;
   basins.forEach((basin, index) => {
-    if (lakes.length >= maxLakes) {
+    const kind = marshKind(basin);
+    if (kind === "held") {
+      marshHeld++;
+      return;
+    }
+    const table = kind === "pool" ? 0 : null;
+    if (table === null && dryZones.size > 0 && dryZones.has(field.zone(grid.worldX(basin.centroid[0]), grid.worldZ(basin.centroid[1])).id)) {
+      fillBasin(basin);
+      return;
+    }
+    if (table === null && lakes.length - marshLakes >= maxLakes) {
       fillBasin(basin);
       return;
     }
@@ -1264,7 +1463,7 @@ function commandRivers(): void {
       drained++;
       if (waterY > basin.floor + lakeFill + 1e-6) raised++;
       if (!footprint || footprint.cells.length < 8) {
-        fillBasin(basin);
+        if (table === null) fillBasin(basin);
         return;
       }
     }
@@ -1282,13 +1481,18 @@ function commandRivers(): void {
       ([cx, cz]) => [round(grid.worldX(cx) - grid.step / 2), round(grid.worldZ(cz) - grid.step / 2)] as [number, number],
     );
     if (traced.length < 4) {
-      fillBasin(basin);
+      if (table === null) fillBasin(basin);
       return;
     }
     // then onto the ground: each vertex slides along its outward normal to
     // where the field actually crosses the water level, so the polygon is
     // the shoreline of THIS terrain and not of a 16 m grid's idea of it
     const outline = refineShoreline(traced, waterY, field, grid.step);
+    if (table !== null) {
+      marshLakes++;
+      lakes.push(marshLake(outline, footprint, waterY, basin.floor));
+      return;
+    }
     // a lake in a swamp or a fen is standing, murky water: its own material
     const centreCell = grid.nearest(grid.worldX(footprint.centroid[0]), grid.worldZ(footprint.centroid[1]));
     const marsh = grid.swamp[centreCell]! > 0.4;
@@ -1310,6 +1514,43 @@ function commandRivers(): void {
       tags: [],
     });
   });
+  /** A marsh pool: shallow, still, murky, a mud shore (or none), its basin left as the ground made it. */
+  function marshLake(outline: [number, number][], footprint: { cells: number[]; centroid: [number, number] }, waterY: number, floor: number): LakeDoc {
+    if (marshMaterialId && !recipe.marshMaterial) writeSwampWaterMaterial(recipe, marshMaterialId);
+    return {
+      id: `lake-${lakes.length + 1}`,
+      ...(marshMaterialId ? { material: marshMaterialId } : {}),
+      center: [round(grid.worldX(footprint.centroid[0])), round(grid.worldZ(footprint.centroid[1]))],
+      polygon: outline,
+      radius: round(Math.sqrt((footprint.cells.length * cellArea) / Math.PI)),
+      waterY: round(waterY),
+      depth: round(Math.min(MARSH_LAKE_DEPTH[1], Math.max(MARSH_LAKE_DEPTH[0], waterY - floor))),
+      bank: 8,
+      carve: false,
+      surface: marshSurface,
+      shore: marshSurface ? 4 : 0,
+      tags: ["marsh"],
+    };
+  }
+  // the small ones the network never visits: every hollow in a marsh that
+  // stands over the table, down to two cells and 0.4 m
+  if (recipe.climate.zones?.anchors.some((a) => a.waterTable !== undefined)) {
+    const taken = new Uint8Array(grid.n * grid.n);
+    for (const cells of basinCells.values()) for (const c of cells) taken[c] = 1;
+    for (const basin of basins) for (const c of basin.cells) taken[c] = 1;
+    for (const basin of extractBasins(grid, hydro, 0.4, 2)) {
+      if (basin.cells.some((c) => taken[c] === 1)) continue;
+      if (marshKind(basin) !== "pool") continue;
+      const traced = simplifyLoop(basin.outline, 0.6, 48).map(
+        ([cx, cz]) => [round(grid.worldX(cx) - grid.step / 2), round(grid.worldZ(cz) - grid.step / 2)] as [number, number],
+      );
+      if (traced.length < 3) continue;
+      lakes.push(marshLake(refineShoreline(traced, basin.level, field, grid.step), basin, basin.level, basin.floor));
+      lakeBasin.push(-1);
+      marshLakes++;
+    }
+  }
+  if (marshLakes > 0 || marshHeld > 0) console.log(`  marsh: ${marshLakes} shallow pools over the water table, ${marshHeld} hollows the table already holds`);
 
   const rivers: RiverDoc[] = [];
   const falls: PoiDoc[] = [];
@@ -1765,6 +2006,7 @@ function commandRivers(): void {
     );
     if (near) continue;
     const bi = lakeIndexToBasin.get(lake.id)!;
+    if (bi === undefined || bi < 0) continue; // a marsh pool off the network
     const basin = basins[bi]!;
     const low = channelLow[bi]!;
     const member = new Set(basin.cells);
@@ -1779,7 +2021,7 @@ function commandRivers(): void {
     );
   }
   recipe.features.rivers = [...rivers, ...handRivers];
-  recipe.features.lakes = lakes;
+  recipe.features.lakes = [...lakes, ...handLakes.filter((h) => !lakes.some((l) => l.id === h.id))];
   recipe.features.fills = [...keptFills, ...fills];
   recipe.features.pois = [...recipe.features.pois, ...falls];
   if (handRivers.length > 0) console.log(`  ${handRivers.length} hand-written rivers kept (the field solves their beds)`);
@@ -2144,6 +2386,57 @@ function commandFallSite(): void {
   const after = createWorldField(recipe);
   const near = after.falls.filter((f) => f.river === fall.river && Math.hypot(f.x - fall.x, f.z - fall.z) < tiers * pool + 40);
   console.log(`wrote ${id}: ${template}, ${near.length} fall(s) now at the site: ${near.map((f) => `${(f.top - f.bottom).toFixed(1)} m`).join(", ")}; ${rocks.length} rocks (${rockRule ?? "no rock rule"})`);
+}
+
+/**
+ * worldgen landform-calm <world>: discs over the authored places (towns with their shelves, `place` regions,
+ * hand-built height patches, terrace walls) inside which anchor `landform` profiles give way to the gains
+ * the place was built on (core `features.landformCalm`). Re-run after adding a place; idempotent.
+ */
+function commandLandformCalm(): void {
+  const { recipe, file } = loadRecipe();
+  const falloff = option("falloff", 120);
+  const margin = option("margin", 30);
+  const discs: { id: string; center: [number, number]; radius: number; falloff: number }[] = [];
+  const disc = (id: string, pts: readonly (readonly [number, number])[], pad: number): void => {
+    if (pts.length === 0) return;
+    const cx = pts.reduce((a, p) => a + p[0], 0) / pts.length;
+    const cz = pts.reduce((a, p) => a + p[1], 0) / pts.length;
+    const r = Math.max(...pts.map((p) => Math.hypot(p[0] - cx, p[1] - cz))) + pad + margin;
+    discs.push({ id, center: [round(cx), round(cz)], radius: round(r), falloff });
+  };
+  for (const t of recipe.features.towns) {
+    const pts: [number, number][] = [];
+    for (let a = 0; a < 16; a++) pts.push([t.center[0] + Math.cos((a / 16) * Math.PI * 2) * (t.radius + t.falloff), t.center[1] + Math.sin((a / 16) * Math.PI * 2) * (t.radius + t.falloff)]);
+    for (const tr of t.terraces) for (const p of tr.points) pts.push([p[0], p[1]]);
+    disc(t.id, pts, 0);
+  }
+  for (const r of recipe.regions ?? []) if (r.tags.includes("place")) disc(r.id, r.polygon, 0);
+  for (const p of recipe.features.heightPatches ?? []) {
+    if (p.id.startsWith("tw-")) continue;
+    const doc = p as unknown as { origin?: [number, number]; size?: [number, number] };
+    if (!doc.origin || !doc.size) continue;
+    disc(p.id, [doc.origin, [doc.origin[0] + doc.size[0], doc.origin[1] + doc.size[1]]], 0);
+  }
+  for (const tw of recipe.features.terraceWalls ?? []) disc(tw.id, tw.footprint, 8);
+  // hand-built tracks (a POI install's own road; generated paths, trails and town ramps are re-solved by their stages)
+  for (const road of recipe.features.roads) {
+    if (/^(path|trail)-/.test(road.id) || /-(ramp|stair)-\d+$/.test(road.id)) continue;
+    let along = Infinity;
+    for (let i = 0; i < road.points.length; i++) {
+      const p = road.points[i]!;
+      if (i > 0) along += Math.hypot(p[0] - road.points[i - 1]![0], p[1] - road.points[i - 1]![1]);
+      if (along < 70 && i < road.points.length - 1) continue;
+      along = 0;
+      // a track is narrow: a shorter fade keeps 500 discs from costing every column near a road
+      discs.push({ id: road.id, center: [round(p[0]), round(p[1])], radius: round(road.width / 2 + road.shoulder + 30), falloff: Math.min(falloff, 60) });
+    }
+  }
+  console.log(`landform-calm: ${discs.length} discs (${recipe.features.towns.length} towns, places, patches, terrace walls), falloff ${falloff} m`);
+  for (const d of discs) console.log(`  ${d.id.padEnd(28)} [${d.center.join(", ")}] r${d.radius}`);
+  if (flag("dry")) return;
+  recipe.features.landformCalm = discs;
+  writeRecipe(recipe, file);
 }
 
 function commandProfile(): void {
@@ -2644,6 +2937,42 @@ function tierOf(town: TownDoc): NonNullable<TownDoc["tier"]> {
  *   A site's relief is recorded on the doc so that stage does not have to
  *   re-derive it.
  */
+/**
+ * The town pins of a run: `keep: true` in the recipe, a `pinned` tag, `--keep <ids|all>`, less `--release <ids|all>`
+ * (release clears the recorded `keep` on the towns it names; a `pinned` tag is a builder's and stays).
+ */
+function parseTownPins(recipe: WorldRecipe): { kept: (t: TownDoc) => boolean; released: string[] } {
+  const list = (name: string) => stringOption(name, "").split(",").map((s) => s.trim()).filter(Boolean);
+  const keep = list("keep"), release = list("release");
+  const ids = new Set(recipe.features.towns.map((t) => t.id));
+  for (const id of [...keep, ...release]) if (id !== "all" && !ids.has(id)) fail(`no town "${id}" to keep or release`);
+  const released: string[] = [];
+  for (const t of recipe.features.towns) {
+    if ((release.includes("all") || release.includes(t.id)) && t.keep) { delete t.keep; released.push(t.id); }
+  }
+  const forced = new Set(keep.includes("all") ? [...ids] : keep);
+  return { kept: (t) => t.tags.includes("pinned") || t.keep === true || forced.has(t.id), released };
+}
+
+/**
+ * `worldgen town-pins <world> [--keep <ids|all>] [--release <ids|all>]` — record (or clear) the towns' `keep` pins
+ * without re-siting anything, and list them. What `worldgen towns` will keep on its next run.
+ */
+function commandTownPins(): void {
+  const { recipe, file } = loadRecipe();
+  const pins = parseTownPins(recipe);
+  let changed = pins.released.length;
+  for (const t of recipe.features.towns) {
+    if (pins.kept(t) && !t.tags.includes("pinned") && t.keep !== true) { t.keep = true; changed++; }
+  }
+  for (const t of recipe.features.towns) {
+    console.log(`  ${t.id.padEnd(10)} ${(t.tier ?? "").padEnd(8)} ${t.tags.includes("pinned") ? "pinned (tag)" : t.keep ? "kept" : "free"}`);
+  }
+  const kept = recipe.features.towns.filter((t) => pins.kept(t)).length;
+  if (changed) writeRecipe(recipe, file);
+  console.log(`${kept} of ${recipe.features.towns.length} town(s) stay put on the next \`worldgen towns\`${changed ? "" : " (nothing changed)"}`);
+}
+
 function commandTowns(): void {
   const { recipe, file } = loadRecipe();
   const field = createWorldField(recipe);
@@ -2680,7 +3009,13 @@ function commandTowns(): void {
   // to be dealt there.
   const continentCells = option("continent-km2", 1.5) * 1e6 / (grid.step * grid.step);
   const continents = [...landArea.entries()].filter(([, cells]) => cells >= continentCells).sort((a, b) => b[1] - a[1]).map(([id]) => id);
-  const capitals = Math.max(0, Math.min(count, Math.max(Math.round(option("capitals", 4)), continents.length)));
+  // an EXPLICIT --capitals is the number asked for (0 = none, even on a continent); left out, it is 4 with one per
+  // continent as the floor. --tier <name> sites every new town at that size (a one-town island: --count 1 --tier
+  // village), and no capital unless the tier is "capital".
+  const forcedTier = stringOption("tier", "");
+  if (forcedTier && !tiers.some((t) => t.name === forcedTier)) fail(`--tier ${forcedTier}: expected one of ${tiers.map((t) => t.name).join(", ")}`);
+  const askedCapitals = flag("capitals") ? Math.max(0, Math.round(option("capitals", 0))) : forcedTier ? (forcedTier === "capital" ? count : 0) : Math.max(4, continents.length);
+  const capitals = Math.min(count, askedCapitals);
   console.log(
     `  ${landKm2.toFixed(1)} km² of land -> ${count} towns, ${capitals} capitals on the coast ` +
       `(${continents.length} continent${continents.length === 1 ? "" : "s"}, one each)`,
@@ -2764,8 +3099,13 @@ function commandTowns(): void {
   // town, its walls and its gate are pinned to a place; move the pad out from
   // under them and the buildings stand on a hillside. They keep their ids, they
   // count against `--count`, and everything else is sited around them.
-  const keepIds = new Set(stringOption("keep", "").split(",").map((s) => s.trim()).filter(Boolean));
-  const pinned = recipe.features.towns.filter((t) => t.tags.includes("pinned") || keepIds.has(t.id));
+  // PINS ARE DURABLE: a town is kept when it carries `keep: true` (recorded in the recipe), a `pinned` tag, or is
+  // named in --keep (ids, or "all") — and --keep is written back as `keep: true`, so the next plain run keeps it too
+  // (a rerun used to re-site every town whose pin lived only on the command line). --release <ids|all> clears it.
+  const pins = parseTownPins(recipe);
+  const pinned = recipe.features.towns.filter((t) => pins.kept(t));
+  for (const t of pinned) if (!t.tags.includes("pinned")) t.keep = true;
+  if (pins.released.length) console.log(`  released ${pins.released.length} pin(s): ${pins.released.join(", ")}`);
   const taken = new Set(pinned.map((t) => t.id));
   let nextId = 1;
   const towns: TownDoc[] = [...pinned];
@@ -2841,16 +3181,16 @@ function commandTowns(): void {
   }
 
   // ---- then everything else, down the ladder, best site first
-  const rest = tiers.slice(1);
-  const shareTotal = rest.reduce((sum, t) => sum + t.share, 0) || 1;
+  const rest = forcedTier ? (forcedTier === "capital" ? [] : tiers.filter((t) => t.name === forcedTier)) : tiers.slice(1);
+  const shareTotal = forcedTier ? 1 : rest.reduce((sum, t) => sum + t.share, 0) || 1;
   const remaining = Math.max(0, count - towns.length);
-  const quota = rest.map((t) => Math.round((remaining * t.share) / shareTotal));
+  const quota = rest.map((t) => (forcedTier ? remaining : Math.round((remaining * t.share) / shareTotal)));
   // rounding must not lose or invent a town
   quota[quota.length - 1] = Math.max(0, remaining - quota.slice(0, -1).reduce((a, b) => a + b, 0));
 
   // every landmass over ~1.5 km² gets something before the best sites are filled in
   const bigMasses = [...landArea.entries()].filter(([, cells]) => cells * grid.step * grid.step > 1.5e6).map(([id]) => id);
-  const midTier = rest[Math.min(1, rest.length - 1)]!;
+  const midTier = rest[Math.min(1, rest.length - 1)] ?? capitalTier;
   for (const mass of bigMasses) {
     if (towns.length >= count) break;
     if (towns.some((t) => landmass[grid.nearest(t.center[0], t.center[1])] === mass)) continue;
@@ -2905,12 +3245,17 @@ function commandTowns(): void {
   // A capital alone on its island has no road: the path network is a spanning
   // tree PER LANDMASS, and a landmass with one settlement has no edge to cut.
   // Give every capital a neighbour, even if the island only really wants one
-  // town — a seat of power reachable by nothing is not a place.
+  // town — a seat of power reachable by nothing is not a place. Never past the count, though: an explicit --count
+  // (with --keep's pins counted in it) is what the island gets.
   const settlementsOn = (mass: number): number => settlementTowns(towns).filter((t) => landmass[grid.nearest(t.center[0], t.center[1])] === mass).length;
   const lonelyTier = rest[rest.length - 1] ?? capitalTier;
   for (const capital of towns.filter((t) => tierOf(t) === "capital")) {
     const mass = landmass[grid.nearest(capital.center[0], capital.center[1])]!;
     if (settlementsOn(mass) > 1) continue;
+    if (towns.length >= count) {
+      console.warn(`  ! ${capital.id} is alone on landmass ${mass}; --count ${count} leaves no room for a neighbour — it will have no road`);
+      continue;
+    }
     const mate = scored.find((site) => site.mass === mass && clearOf(site, lonelyTier));
     if (mate) {
       console.log(`  ${capital.id} was alone on landmass ${mass} — giving it a neighbour so it can have a road`);
@@ -3190,6 +3535,13 @@ function commandTerrace(): void {
     share: option("terrace-share", 0.65),
   };
   const paint = pathSurfaces(recipe);
+  // RETAINING WALLS (recipe `townTerraces.walls`, or --walls / --no-walls): every riser becomes a terrace wall from
+  // the retaining-wall kit (`features.terraceWalls`, owner = the town, ids `<town>-riser-<n>`), its ramp or stair
+  // a wall insert. Steps are capped at `townTerraces.maxStep` so each riser is one kit wall.
+  const wallsOn = !flag("no-walls") && (flag("walls") || recipe.townTerraces?.walls === true);
+  const maxStep = option("max-step", recipe.townTerraces?.maxStep ?? 6);
+  // a re-cut town's old riser walls go too (they are derived from the shelves this run replaces)
+  for (const t of targets) removeTownTerraceWalls(recipe, t.id);
 
   // The natural ground: every pad we are about to re-cut lifted off, and the
   // ramps of the last run with them. Without this the second run terraces its
@@ -3223,7 +3575,7 @@ function commandTerrace(): void {
     const high = quantile(heights, 0.95);
     const relief = high - low;
     const me = terraceCharacter(town, recipe.seed, { ...base, maxShelf: base.maxShelf || Math.max(14, town.radius * 0.45) });
-    const stepHeight = me.steps;
+    const stepHeight = wallsOn ? Math.min(me.steps, maxStep) : me.steps;
     const leaveFlat = (why: string): void => {
       town.flatten = 0.95;
       town.terraces = [];
@@ -3361,6 +3713,7 @@ function commandTerrace(): void {
   // a ramp is.
   recipe.features.roads = recipe.features.roads.filter((r) => ![...targetIds].some((id) => (r.id.startsWith(`${id}-ramp-`) || r.id.startsWith(`${id}-stair-`))));
   const ramps: RoadDoc[] = [];
+  const townLinks = new Map<string, TownRiserLink[]>();
   for (const { town, terraces, character } of plans.values()) {
     const rampGrade = character.rampGrade;
     const grid = sampleLocalGrid(bareField, town.center[0], town.center[1], town.radius * 1.3, sampleStep);
@@ -3499,6 +3852,8 @@ function commandTerrace(): void {
         }
       }
       ramps.push(...link.roads);
+      if (!townLinks.has(town.id)) townLinks.set(town.id, []);
+      townLinks.get(town.id)!.push({ k, kind: asStair ? "stair" : "ramp", at: [bestA[0], bestA[1]], roads: link.roads.map((r) => r.id) });
       const climb = upper.groundY - lower.groundY;
       const run = route.length * grid.step;
       console.log(
@@ -3509,8 +3864,18 @@ function commandTerrace(): void {
   }
 
   recipe.features.roads = [...recipe.features.roads, ...ramps];
+  let walled = 0;
+  if (wallsOn && plans.size > 0) {
+    const kit = loadTerraceKit(project || "proving");
+    for (const { town } of plans.values()) {
+      console.log(`  ${town.id}: retaining walls (${town.tier ?? "town"})`);
+      const { dropRoads, fits } = townTerraceWalls(recipe, town, kit, townLinks.get(town.id) ?? [], console.log, maxStep);
+      recipe.features.roads = recipe.features.roads.filter((r) => !dropRoads.includes(r.id));
+      walled += fits.length;
+    }
+  }
   writeRecipe(recipe, file);
-  console.log(`terraced ${stepped} town(s) with ${ramps.length} ramps; ${flat} left flat`);
+  console.log(`terraced ${stepped} town(s) with ${ramps.length} ramps; ${flat} left flat${wallsOn ? `; ${walled} riser wall(s)` : ""}`);
   if (stepped > 0) console.log(`  the ground moved — re-run: worldgen paths ${worldName}${project ? ` --project ${project}` : ""}`);
 }
 
@@ -4041,6 +4406,11 @@ function commandZones(): void {
   const { recipe, file } = loadRecipe();
   if (recipe.regions.length > 0 && !flag("force")) {
     console.log(`${recipe.regions.length} regions already in ${recipe.name} — pass --force to redraft (the geometry is redrawn; names are inherited by proximity)`);
+    // hand-drawn zones still claiming every town are re-checked, not redrafted: the stage's stamp moves past a towns /
+    // terrace re-run (writeRecipe), so `status` stops calling them STALE; an unclaimed town keeps the row STALE
+    const unclaimed = recipe.features.towns.filter((t) => !recipe.regions.some((r) => r.within === undefined && pointInPolygon(r.polygon, t.center[0], t.center[1])));
+    if (unclaimed.length > 0) console.log(`  ${unclaimed.length} town(s) in no zone (${unclaimed.map((t) => t.id).join(", ")}): fix the borders (zone-setup) or redraft`);
+    else writeRecipe(recipe, file);
     return;
   }
   // the zones being replaced, so their names can outlive them
@@ -4708,7 +5078,213 @@ function routeGridFor(
       }
     }
   }
+  const keepOut = landmarkKeepOut(field, recipe);
+  if (keepOut.discs.length || keepOut.seaBand) {
+    let walled = 0;
+    for (let i = 0; i < total; i++) {
+      if (!Number.isFinite(cost[i]!)) continue;
+      if (keepOut.blocked(grid.worldX(i % n), grid.worldZ((i / n) | 0))) { cost[i] = Infinity; walled++; }
+    }
+    if (walled) console.log(`  keep-out: ${walled} route cells walled round ${keepOut.summary}`);
+  }
   return { n, step: grid.step, height: grid.height, cost, river, gradX, gradZ, exempt };
+}
+
+/**
+ * Where a road must never run: a road is a clearance obstacle for butte fields (`terrain.buttes`) and sea cliffs
+ * (`terrain.seaCliffs`), so one routed through a monument's clearance deletes the monument, one past a stack takes it
+ * out, and one along a cliff top inside the stretch's clearance pushes the wall back. Measured on the field the route
+ * is planned on (the recipe without the roads being re-cut), with `reach` = the road's obstacle radius (half width +
+ * shoulder + smooth, ~10 m for a trail) plus a lattice node of slack.
+ */
+function landmarkKeepOut(field: WorldField, recipe: WorldRecipe, reach = 18): {
+  discs: { x: number; z: number; r: number }[];
+  seaBand: boolean;
+  summary: string;
+  blocked(x: number, z: number): boolean;
+} {
+  const discs: { x: number; z: number; r: number }[] = [];
+  const bt = field.buttes();
+  const butteClear = Math.max(0, ...(recipe.terrain.buttes ?? []).map((b) => b.clearance[1]));
+  let monuments = 0;
+  if (bt) {
+    const [x0, z0, x1, z1] = bt.bbox;
+    for (const m of bt.monumentsIn(x0, z0, x1, z1)) { discs.push({ x: m.x, z: m.z, r: m.radius + butteClear + reach }); monuments++; }
+  }
+  const sea = field.seaCliffs();
+  const seaDocs = recipe.terrain.seaCliffs ?? [];
+  const seaClear = Math.max(0, ...seaDocs.map((d) => d.clearance[1]));
+  let stacks = 0;
+  if (sea) {
+    const [x0, z0, x1, z1] = sea.bbox;
+    for (const st of sea.stacksIn(x0, z0, x1, z1)) { discs.push({ x: st.x, z: st.z, r: st.radius + seaClear + reach }); stacks++; }
+  }
+  const col = sea?.newColumn();
+  const band = seaClear + reach;
+  return {
+    discs,
+    seaBand: !!sea,
+    summary: [monuments && `${monuments} butte monument(s)`, stacks && `${stacks} sea stack(s)`, sea && `the sea-cliff walls (${band.toFixed(0)} m)`].filter(Boolean).join(", "),
+    blocked(x, z) {
+      for (const d of discs) if ((x - d.x) ** 2 + (z - d.z) ** 2 < d.r * d.r) return true;
+      // the wall: inside a stretch at full hold, within the clearance band of the wall line (q = 0) on the land side
+      return !!(sea && col && sea.column(x, z, col) > 0.5 && col.q < band);
+    },
+  };
+}
+
+/**
+ * Cut the spans [s0, s1] (metres along the road) out of a graded road: the ground there is left as it is. What is
+ * left is returned as pieces (`<id>`, `<id>.s2`, …) keeping their per-point profile; a piece shorter than
+ * `minLength` is dropped.
+ */
+function cutRoadSpans(road: RoadDoc, spans: [number, number][], minLength: number): RoadDoc[] {
+  const pts = road.points;
+  const along: number[] = [0];
+  for (let i = 1; i < pts.length; i++) along.push(along[i - 1]! + Math.hypot(pts[i]![0] - pts[i - 1]![0], pts[i]![1] - pts[i - 1]![1]));
+  const total = along[along.length - 1]!;
+  const merged = spans.map(([a, b]) => [Math.max(0, a), Math.min(total, b)] as [number, number]).filter(([a, b]) => b > a).sort((a, b) => a[0] - b[0]);
+  const cuts: [number, number][] = [];
+  for (const sp of merged) {
+    const last = cuts[cuts.length - 1];
+    if (last && sp[0] <= last[1] + minLength) last[1] = Math.max(last[1], sp[1]);
+    else cuts.push([...sp]);
+  }
+  const keep: [number, number][] = [];
+  let from = 0;
+  for (const [a, b] of cuts) { keep.push([from, a]); from = b; }
+  keep.push([from, total]);
+  const arrays = (["surfaceY", "leftY", "rightY"] as const).filter((k) => Array.isArray(road[k]));
+  /** The road's point and per-point values at `t` metres along it. */
+  const at = (t: number): { p: [number, number]; v: Record<string, number> } => {
+    let i = 1;
+    while (i < along.length - 1 && along[i]! < t) i++;
+    const a = along[i - 1]!, b = along[i]!, f = b > a ? (t - a) / (b - a) : 0;
+    const v: Record<string, number> = {};
+    for (const k of arrays) v[k] = round(road[k]![i - 1]! + (road[k]![i]! - road[k]![i - 1]!) * f);
+    return { p: [round(pts[i - 1]![0] + (pts[i]![0] - pts[i - 1]![0]) * f), round(pts[i - 1]![1] + (pts[i]![1] - pts[i - 1]![1]) * f)], v };
+  };
+  const out: RoadDoc[] = [];
+  for (const [a, b] of keep) {
+    if (b - a < minLength) continue;
+    const idx = along.map((t, i) => (t > a + 0.5 && t < b - 0.5 ? i : -1)).filter((i) => i >= 0);
+    const head = at(a), tail = at(b);
+    const piece: RoadDoc = { ...road, id: out.length === 0 ? road.id : `${road.id}.s${out.length + 1}`, points: [head.p, ...idx.map((i) => pts[i]!), tail.p] };
+    for (const k of arrays) (piece as Record<string, unknown>)[k] = [head.v[k]!, ...idx.map((i) => road[k]![i]!), tail.v[k]!];
+    out.push(piece);
+  }
+  return out;
+}
+
+/**
+ * A simplified road can dip under water BETWEEN its kept points where it fords a falling stream at an angle (each
+ * point was lifted to a ford, the line between them was not). Sampled every 4 m as `worldgen status` does; wherever the
+ * line runs deeper than `fordDepth` under the water a point is inserted at the ford (its side heights interpolated).
+ */
+function liftFords(road: RoadDoc, field: WorldField, fordDepth = 0.4): number {
+  if (!road.surfaceY) return 0;
+  const arrays = (["surfaceY", "leftY", "rightY"] as const).filter((k) => Array.isArray(road[k]));
+  let lifted = 0;
+  for (let i = 0; i + 1 < road.points.length; i++) {
+    const a = road.points[i]!, b = road.points[i + 1]!;
+    const steps = Math.max(1, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) / 4));
+    for (let k = 1; k < steps; k++) {
+      const t = k / steps, x = a[0] + (b[0] - a[0]) * t, z = a[1] + (b[1] - a[1]) * t;
+      const water = field.waterY(x, z);
+      if (water === null || water <= field.recipe.seaLevel + 0.05) continue;
+      const y = road.surfaceY[i]! + (road.surfaceY[i + 1]! - road.surfaceY[i]!) * t;
+      if (y >= water - fordDepth - 0.3) continue;
+      road.points.splice(i + 1, 0, [round(x), round(z)]);
+      for (const key of arrays) {
+        const arr = road[key]!;
+        arr.splice(i + 1, 0, key === "surfaceY" ? round(water - fordDepth) : round(arr[i]! + (arr[i + 1]! - arr[i]!) * t));
+      }
+      lifted++;
+      break; // the segment is now two: the loop re-reads from the inserted point
+    }
+  }
+  return lifted;
+}
+
+/** The id of the road whose centreline passes nearest (x, z). */
+function nearestRoadId(roads: readonly RoadDoc[], x: number, z: number): string {
+  let best = Infinity;
+  let id = roads[0]?.id ?? "";
+  for (const road of roads) {
+    for (let i = 1; i < road.points.length; i++) {
+      const [ax, az] = road.points[i - 1]!, [bx, bz] = road.points[i]!;
+      const dx = bx - ax, dz = bz - az, l2 = dx * dx + dz * dz;
+      const u = l2 > 0 ? Math.max(0, Math.min(1, ((x - ax) * dx + (z - az) * dz) / l2)) : 0;
+      const d = Math.hypot(x - ax - dx * u, z - az - dz * u);
+      if (d < best) { best = d; id = road.id; }
+    }
+  }
+  return id;
+}
+
+/**
+ * Trails the lip gate passes. A trail across karst steps or a DC cliff's risers cannot be graded there without
+ * steepening the step into a wall the lattice draws as a saw (the cut and fill only ever add to a step that is
+ * already near the lattice's limit). So the trail is measured with the gate itself (`runLipsGate`) and the tread is
+ * taken out over every fault and `margin` metres round it — a short scramble over the natural rock — and measured
+ * again, until it passes or `rounds` run out. Returns the trails and how many scrambles were left.
+ */
+function trailsPassingLips(recipe: WorldRecipe, trails: RoadDoc[], margin: number, rounds = 5, keep: readonly (readonly [number, number])[] = []): { trails: RoadDoc[]; scrambles: number; faults: number } {
+  let work = trails;
+  let scrambles = 0;
+  let faults = 0;
+  // A trail laid along a path re-grades the path's tread a little differently, and the gate books that saw to the
+  // PATH (the older edit's band). Faults the world did not have before these roads are theirs whoever owns the band:
+  // they go to the nearest of them (skelmorrow: 83 alias cells on a town path, all under trails that shared its line).
+  const before = new Set(runLipsGate(recipe).faults.map((f) => `${f.owner}|${f.x}|${f.z}`));
+  for (let pass = 0; pass < rounds; pass++) {
+    const test: WorldRecipe = { ...recipe, features: { ...recipe.features, roads: [...recipe.features.roads, ...work] } };
+    const ids = new Set(work.map((r) => r.id));
+    const gate = runLipsGate(test);
+    const mine = gate.faults
+      .filter((f) => ids.has(f.owner) || !before.has(`${f.owner}|${f.x}|${f.z}`))
+      .map((f) => (ids.has(f.owner) ? f : { ...f, owner: nearestRoadId(work, f.x, f.z) }))
+      // never cut the tread off a bridge's abutment (keep): a deck with no road at its end is an audit fault
+      .filter((f) => !keep.some(([kx, kz]) => Math.hypot(f.x - kx, f.z - kz) < margin * 2.5));
+    faults = mine.length;
+    if (mine.length === 0) break;
+    const next: RoadDoc[] = [];
+    for (const road of work) {
+      const own = mine.filter((f) => f.owner === road.id);
+      if (own.length === 0) { next.push(road); continue; }
+      // each fault projected onto the road: the span of tread round it comes out
+      const spans: [number, number][] = own.map((f) => {
+        let best = Infinity, t = 0, acc = 0;
+        for (let i = 1; i < road.points.length; i++) {
+          const [ax, az] = road.points[i - 1]!, [bx, bz] = road.points[i]!;
+          const dx = bx - ax, dz = bz - az, l2 = dx * dx + dz * dz, l = Math.sqrt(l2);
+          const u = l2 > 0 ? Math.max(0, Math.min(1, ((f.x - ax) * dx + (f.z - az) * dz) / l2)) : 0;
+          const d = Math.hypot(f.x - ax - dx * u, f.z - az - dz * u);
+          if (d < best) { best = d; t = acc + u * l; }
+          acc += l;
+        }
+        return [t - margin * (1 + pass * 0.5), t + margin * (1 + pass * 0.5)];
+      });
+      const pieces = cutRoadSpans(road, spans, margin);
+      scrambles += Math.max(0, pieces.length - 1) + (pieces.length === 0 ? 1 : 0);
+      next.push(...pieces);
+    }
+    work = next;
+  }
+  // Rounds ran out: a piece that still draws a fault of its own is left out whole (a stub of tread between two
+  // scrambles is not worth a saw), unless it carries a bridge's abutment.
+  if (faults > 0) {
+    const ids = new Set(work.map((r) => r.id));
+    const gate = runLipsGate({ ...recipe, features: { ...recipe.features, roads: [...recipe.features.roads, ...work] } });
+    const bad = new Set(gate.faults.filter((f) => ids.has(f.owner)).map((f) => f.owner));
+    const onBridge = (r: RoadDoc): boolean =>
+      [r.points[0]!, r.points[r.points.length - 1]!].some(([x, z]) => keep.some(([kx, kz]) => Math.hypot(x - kx, z - kz) < 1));
+    const kept = work.filter((r) => !bad.has(r.id) || onBridge(r));
+    scrambles += work.length - kept.length;
+    work = kept;
+    faults = gate.faults.filter((f) => kept.some((r) => r.id === f.owner)).length;
+  }
+  return { trails: work, scrambles, faults };
 }
 
 /** A slope given as rise-over-run, printed as the angle a reader can picture. */
@@ -4993,6 +5569,10 @@ function roadFrom(
     return water;
   };
   const pins: (number | undefined)[] = points.map((p, i) => {
+    // across a marsh the road is a causeway: a hand over the water table,
+    // embankment and all, rather than a ford wading the whole zone
+    const table = field.marshTable(p[0], p[1]);
+    if (table !== null && natural[i]! < table + MARSH_CAUSEWAY) return table + MARSH_CAUSEWAY;
     const water = waterAt(p);
     return water !== null && natural[i]! < water - fordDepth ? water - fordDepth : undefined;
   });
@@ -5092,12 +5672,24 @@ function roadFrom(
     if (b - a < 1) return null;
     const pts = points.slice(a, b + 1);
     const ys = surfaceY.slice(a, b + 1);
-    const keep = simplify3(
+    const simplified = simplify3(
       pts.map((p) => [p[0] / step, p[1] / step] as [number, number]),
       ys,
       0.25,
       0.25 / 0.5,
     );
+    // …and wherever the line between two kept points would dip under water deeper than the ford its own points were
+    // lifted to (a lake shore between two kept points), the dense point there is kept too
+    const keep: number[] = [];
+    for (let k = 0; k < simplified.length; k++) {
+      const a = simplified[k]!, b = simplified[k + 1];
+      keep.push(a);
+      if (b === undefined) continue;
+      for (let j = a + 1; j < b; j++) {
+        const t = (j - a) / (b - a), y = ys[a]! + (ys[b]! - ys[a]!) * t;
+        if (y < ys[j]! - 0.3 && waterAt(pts[j]!) !== null) keep.push(j);
+      }
+    }
     const leftY: number[] = [];
     const rightY: number[] = [];
     for (let k = 0; k < keep.length; k++) {
@@ -5314,7 +5906,15 @@ function commandPaths(): void {
   // next `worldgen paths`.
   recipe.features.roads = recipe.features.roads.filter((r) => !r.id.startsWith("path-"));
   recipe.features.bridges = recipe.features.bridges.filter((b) => !b.id.startsWith("bridge-path-"));
-  const field = createWorldField(recipe);
+  // --under-barriers: route and grade on the ground WITHOUT the zone-border ridges (barrier-*). `barriers` rewrites them
+  // after paths and opens a pass wherever a path crosses, so a path laid over the last run's ridge crest became a 35 m
+  // embankment across the new pass (skelmorrow: lips step 36 m). Run `barriers` after it.
+  // Nor on the last run's TRAILS: they come after paths and are rebuilt from them, and their cuts in the field made the
+  // same paths command route differently on every round (skelmorrow: 5 path pieces, then 4).
+  const routedOn: WorldRecipe = { ...recipe, features: { ...recipe.features, roads: recipe.features.roads.filter((r) => !r.id.startsWith("trail-")) } };
+  const field = flag("under-barriers")
+    ? createWorldField({ ...routedOn, features: { ...routedOn.features, ridges: recipe.features.ridges.filter((r) => !r.id.startsWith("barrier-")) } })
+    : createWorldField(routedOn);
   const extent = extentFor(recipe);
   const grid = sampleWorldGrid(field, extent, option("step", 16));
   const routeGrid = routeGridFor(field, recipe, grid, { sealGatedTowns: true });
@@ -5440,6 +6040,22 @@ function commandPaths(): void {
     }
   }
 
+  // --scramble: the trails' lip pass on the town paths too. Where a path must climb a flank past the grade cap (the
+  // cap ladder relaxed) over planar/DC strata, its graded tread is a saw/wall on the 2 m lattice; the tread comes out
+  // over each fault (+ --scramble-margin) and that stretch is walked on the natural ground. Measured WITH the current
+  // barrier ridges, as the gate sees them: run paths, barriers, then paths --scramble once the passes have settled
+  // (then barriers, pois, trails as usual).
+  if (flag("scramble")) {
+    const t0 = performance.now();
+    // without the trails: they are rebuilt after the paths and their own lip pass answers for where they meet a path
+    const ground: WorldRecipe = { ...recipe, features: { ...recipe.features, roads: recipe.features.roads.filter((r) => !r.id.startsWith("trail-")) } };
+    const passed = trailsPassingLips(ground, paths, option("scramble-margin", 12), option("scramble-rounds", 8), bridges.flatMap((b) => b.points));
+    console.log(
+      `  lips: ${passed.faults === 0 ? "pass" : `${passed.faults} fault(s) left`}; ${passed.scrambles} path tread cut(s) left as natural ground ` +
+        `(${paths.length} -> ${passed.trails.length} pieces, ${((performance.now() - t0) / 1000).toFixed(1)}s)`,
+    );
+    paths.splice(0, paths.length, ...passed.trails);
+  }
   recipe.features.roads = [...paths, ...recipe.features.roads];
   recipe.features.bridges = [...bridges, ...recipe.features.bridges];
   if (bridges.length > 0 && !recipe.bridgeMaterial) {
@@ -5485,6 +6101,15 @@ function commandTrails(): void {
   const extent = extentFor(recipe);
   const grid = sampleWorldGrid(field, extent, option("step", 16));
   const routeGrid = routeGridFor(field, recipe, grid, { sealGatedTowns: true });
+  // a summit ON a monument, a stack or a sea-cliff wall's band is not climbed: the trail would erase what it climbs
+  const keepOut = landmarkKeepOut(field, recipe);
+  for (let i = targets.length - 1; i >= 0; i--) {
+    const t = targets[i]!;
+    if (keepOut.blocked(t.position[0], t.position[2])) {
+      console.log(`  ${t.id}: on a landmark a road would erase (butte monument, sea stack or cliff wall) — no trail`);
+      targets.splice(i, 1);
+    }
+  }
   const maxGrade = option("max-grade", 0.22);
   const n = grid.n;
   const paint = pathSurfaces(recipe);
@@ -5574,6 +6199,9 @@ function commandTrails(): void {
       surface: paint.surface,
       surfaceByBiome: paint.surfaceByBiome,
     });
+    // the tread never trenches deeper than --tread-cut or stands higher than --tread-fill over the ground (the field
+    // clamps the roadway point by point): a footpath rides the slope
+    for (const r of builtTrail.roads) { r.maxCut = option("tread-cut", 1.5); r.maxFill = option("tread-fill", 1); }
     trails.push(...builtTrail.roads);
     trailBridges.push(...builtTrail.bridges);
     network.push(route);
@@ -5584,6 +6212,17 @@ function commandTrails(): void {
     const trailPts = builtTrail.roads.reduce((n, r) => n + r.points.length, 0);
     console.log(`  trail-${poi.id}: ${trailPts} points, ${((route.length * grid.step) / 1000).toFixed(1)} km, climbs ${climb.toFixed(0)}m${builtTrail.bridges.length > 0 ? `, ${builtTrail.bridges.length} footbridge(s)` : ""}${short} (${((performance.now() - t0) / 1000).toFixed(1)}s)`);
   }
+  if (!flag("no-lips")) {
+    const t0 = performance.now();
+    const passed = trailsPassingLips(recipe, trails, option("scramble-margin", 12), option("scramble-rounds", 8), trailBridges.flatMap((b) => b.points));
+    console.log(
+      `  lips: ${passed.faults === 0 ? "pass" : `${passed.faults} fault(s) left`}; ${passed.scrambles} tread cut(s) left as natural ground (scrambles over steps) ` +
+        `(${trails.length} -> ${passed.trails.length} tread pieces, ${((performance.now() - t0) / 1000).toFixed(1)}s)`,
+    );
+    trails.splice(0, trails.length, ...passed.trails);
+  }
+  const fords = trails.reduce((n, r) => n + liftFords(r, field), 0);
+  if (fords) console.log(`  lifted ${fords} ford point(s) the simplified line had dipped under the water`);
   recipe.features.roads = [...recipe.features.roads, ...trails];
   recipe.features.bridges = [...recipe.features.bridges, ...trailBridges];
   if (trailBridges.length > 0 && !recipe.bridgeMaterial) {
@@ -5876,6 +6515,16 @@ function riversNotFromLakes(recipe: WorldRecipe): string[] {
  * field reports AT THE TIME IT RUNS: after the rivers change, or after the
  * engine's water rules change, every old crossing is a road under a river.
  */
+/** The blended zone-anchor `flatten` at (x, z): over 0.5 is a swamp or a fen, level ground by definition. */
+function flattenAt(recipe: WorldRecipe, field: WorldField, x: number, z: number): number {
+  const anchors = recipe.climate.zones?.anchors ?? [];
+  if (!anchors.some((a) => a.flatten > 0)) return 0;
+  const w = field.zone(x, z).weights;
+  let f = 0;
+  anchors.forEach((a, i) => (f += (w[i] ?? 0) * a.flatten));
+  return f;
+}
+
 function roadsUnderWater(recipe: WorldRecipe, prefix: string): number {
   const field = statusField(recipe);
   let under = 0;
@@ -5945,7 +6594,8 @@ function pipelineStages(): PipelineStage[] {
       after: ["towns"],
       by: "procedural",
       how: "worldgen terrace <world>",
-      check: (r) => (r.features.towns.some((t) => t.terraces.length > 0) ? null : "no town has been stepped — has it run?"),
+      // ran (stamped) and found no town that wants shelves = done; never ran = MISSING
+      check: (r) => (r.features.towns.some((t) => t.terraces.length > 0) || r.pipeline?.terrace ? null : "no town has been stepped — has it run?"),
     },
     { name: "zones", after: ["towns", "terrace"], by: "procedural", how: "worldgen zones <world>", check: (r) => has(r.regions.length) },
     {
@@ -5978,7 +6628,8 @@ function pipelineStages(): PipelineStage[] {
       // "Does a path actually arrive here" is the question anyway.
       check: (r) => {
         const paths = r.features.roads.filter((x) => x.id.startsWith("path-"));
-        if (paths.length === 0) return "no paths";
+        // one settlement: there is nothing to link (its trails start from it)
+        if (paths.length === 0) return settlementTowns(r.features.towns).length <= 1 ? null : "no paths";
         const arrives = (t: TownDoc): boolean =>
           paths.some((road) =>
             road.points.some((p) =>
@@ -6046,6 +6697,33 @@ function pipelineStages(): PipelineStage[] {
       },
     },
     { name: "map", after: ["paths", "trails", "zone-names"], by: "procedural", how: "worldgen map <world>", check: () => null },
+    {
+      // nothing placed may hang in the air: every scene object and scatter rock seated on the REAL solid (seat.ts).
+      // Per zone it is zonegen's `float` row; this stamp is a clean whole-world sweep.
+      name: "float",
+      after: ["pois", "paths", "trails", "terrace"],
+      by: "procedural",
+      how: "worldgen float <world> --stamp   (per area: --near x,z,r --list; fix props with tools/float.mts scene --fix)",
+      check: (r) => (r.pipeline?.["float"] ? null : "never swept clean (worldgen float <world> --stamp)"),
+    },
+    {
+      // the stone follows the place and the cap follows the ground: every rock in its zone's (or its cliff's) skin, every
+      // cap on the ground band beside it (core voxel/rock-cap.ts). Per zone it is zonegen's `rock-skins` row.
+      name: "rock-skins",
+      after: ["zone-textures", "pois"],
+      by: "procedural",
+      how: "worldgen rock-skins <world> --stamp   (per area: --near x,z,r --list; fix: recipe.rockSkins + the rock material bases, docs/voxel-worlds.md \"Rock skins\")",
+      check: (r) => (r.pipeline?.["rock-skins"] ? null : "never swept clean (worldgen rock-skins <world> --stamp)"),
+    },
+    {
+      // no water ends in the air: every curtain hangs from the lip the terrain REALLY has and hugs its face, every placed
+      // water body's edge is buried or finished (core water-edges.ts, voxel/fall-fit.ts). Per zone: zonegen's row.
+      name: "water-edges",
+      after: ["rivers", "terrace", "pois"],
+      by: "procedural",
+      how: "worldgen water-edges <world> --stamp   (per area: --near x,z,r --list; dungeons: tools/water-edges.mts scene <project> --fix; docs/voxel-worlds.md \"Water edges\")",
+      check: (r) => (r.pipeline?.["water-edges"] ? null : "never swept clean (worldgen water-edges <world> --stamp)"),
+    },
   ];
 }
 
@@ -6066,7 +6744,7 @@ function pipelineStages(): PipelineStage[] {
  * `--next` prints just the next command to run, for scripting the loop.
  */
 function commandStatus(): void {
-  const { recipe } = loadRecipe();
+  const { recipe, file: recipeFile } = loadRecipe();
   const stages = pipelineStages();
   const at = (name: string): number => {
     const stamp = recipe.pipeline[name];
@@ -6104,6 +6782,10 @@ function commandStatus(): void {
     const opt = row.state === "MISSING" && row.stage.optional ? " (optional)" : "";
     console.log(`  ${mark} ${row.stage.name.padEnd(13)}${who.padEnd(9)}${why}${opt}`);
   }
+  // gates that are not stages: the 6 m rule (legacy carves counted, not failed)
+  const fine = fineStatusLine(recipe, recipeFile);
+  console.log(`  ${fine.line}`);
+  if (!fine.ok) process.exitCode = 1;
   if (next) {
     console.log(`\nnext: ${next.stage.by === "agent" ? "AGENT — " : ""}${next.stage.how.replace("<world>", worldName)}`);
     console.log("  (--next prints just that line)");
@@ -7923,7 +8605,11 @@ function commandBarriers(): void {
   const classify = borderClassifier(field, recipe, { ridge: geometry.ridge });
   const explicitPass = option("pass-width", 0);
   const pathGeometry = explicitPass > 0 ? { width: explicitPass - geometry.ridge.width - 2 * geometry.ridge.falloff, shoulder: 0 } : geometry.path;
-  const plan = planBarriers(recipe.regions, recipe.features.roads, {
+  // --paths-only: passes only where a town PATH crosses. Peak trails then route over the walled ground (run trails
+  // AFTER this, and no barriers after them): a trail moving re-places the passes, which moves ridges under the
+  // trails already cut, and the pair never settles (measured on skelmorrow: lips alias 642 -> 1744 per round).
+  const crossing = flag("paths-only") ? recipe.features.roads.filter((r) => r.id.startsWith("path-")) : recipe.features.roads;
+  const plan = planBarriers(recipe.regions, crossing, {
     sample: option("sample", 15),
     tolerance: option("border-tolerance", 48),
     minRun: option("min-run", 60),
@@ -7936,6 +8622,8 @@ function commandBarriers(): void {
     sanctuaryRadius: option("sanctuary-radius", 35),
     safe,
     lakes: recipe.features.lakes,
+    // a marsh is level ground: a ridge across it stood a dry wall over the water
+    flat: (x, z) => flattenAt(recipe, field, x, z) > 0.5,
   });
   const passWidth = geometry.ridge.width + 2 * geometry.ridge.falloff + pathGeometry.width + 2 * pathGeometry.shoulder;
   console.log(`${plan.report.length} shared borders; ridge ${geometry.height} m high, ${geometry.ridge.width} m crest, ${geometry.ridge.falloff} m flanks; pass ${Math.round(passWidth)} m; crest cap ${Math.round(snowLine + 40)} m (snow line ${Math.round(snowLine)} + 40)${safe ? "" : "; sanctuaries OFF"}`);
@@ -8169,7 +8857,7 @@ function commandStats(): void {
     cells.push([cx, cz]);
   }
   for (const [cx, cz] of cells.slice(0, 3)) {
-    buildVoxelMesh(field, { kind: "voxel", world: recipe.name, cell: [cx, cz] });
+    buildVoxelMesh(field, { kind: "voxel", world: recipe.name, cell: [cx, cz], mesher: "auto" });
     scatterCell(field, cx, cz);
   }
   let triangles = 0;
@@ -8180,7 +8868,7 @@ function commandStats(): void {
   let worst = 0;
   for (const [cx, cz] of cells) {
     const t0 = performance.now();
-    const mesh = buildVoxelMesh(field, { kind: "voxel", world: recipe.name, cell: [cx, cz] });
+    const mesh = buildVoxelMesh(field, { kind: "voxel", world: recipe.name, cell: [cx, cz], mesher: "auto" });
     const dt = performance.now() - t0;
     meshMs += dt;
     worst = Math.max(worst, dt);
@@ -8403,9 +9091,10 @@ function commandScatter(): void {
       rows.push(`  ${rule.id.padEnd(20)} prefab:${rule.prefab}  ${Math.round(perKm2)}/km²  ${where}`);
       continue;
     }
-    const file = path.join(modelsRoot, rule.model);
+    // models usually live in a dependency (foundation, world-kit), found the way the game finds them
+    const file = (project ? findAsset(project, path.join("models", rule.model)) : null) ?? path.join(modelsRoot, rule.model);
     if (!fs.existsSync(file)) {
-      findings.push(`${rule.id}: model ${rule.model} does not exist under ${path.relative(PLAYGROUND, modelsRoot)}`);
+      findings.push(`${rule.id}: model ${rule.model} does not exist under assets/models in ${project ? "the project's dependsOn closure" : path.relative(PLAYGROUND, modelsRoot)}`);
       continue;
     }
     let box;
@@ -8466,8 +9155,8 @@ function commandScatter(): void {
         );
       }
     }
-    // 3. the wind filter has to match a real texture name
-    const names = box.textures.map((t) => t.toLowerCase());
+    // 3. the wind filter has to match a real material or texture name (render foliage-wind windMaterialMatches)
+    const names = [...box.textures, ...(box.materials ?? [])].map((t) => t.toLowerCase());
     if (rule.wind?.materials) {
       const needles = rule.wind.materials.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
       if (!needles.some((needle) => names.some((name) => name.includes(needle)))) {
@@ -8508,10 +9197,16 @@ function commandCover(): void {
   if (apply) {
     // the rule set is project content (it names the project's own atlas
     // pages); the recipe carries a validated copy so every world the pipeline
-    // produces from it grows the same cover, and `--from` passes it on
-    const raw = JSON.parse(fs.readFileSync(path.resolve(apply), "utf8")) as unknown;
-    const layers = Array.isArray(raw) ? raw : (raw as { layers?: unknown[] }).layers;
-    if (!Array.isArray(layers)) fail(`${apply}: expected an array of layers, or { "layers": [...] }`);
+    // produces from it grows the same cover, and `--from` passes it on.
+    // Comma-separated files concatenate: the shared set first, then a world's
+    // own layers (ones that name its zone surfaces).
+    const layers: unknown[] = [];
+    for (const one of apply.split(",")) {
+      const raw = JSON.parse(fs.readFileSync(path.resolve(one), "utf8")) as unknown;
+      const list = Array.isArray(raw) ? raw : (raw as { layers?: unknown[] }).layers;
+      if (!Array.isArray(list)) fail(`${one}: expected an array of layers, or { "layers": [...] }`);
+      layers.push(...list);
+    }
     recipe.cover = layers as WorldRecipe["cover"];
     writeRecipe(recipe, file);
     Object.assign(recipe, worldRecipeSchema.parse(recipe));
@@ -8525,11 +9220,13 @@ function commandCover(): void {
   }
   const biomeIds = new Set(recipe.biomes.map((b) => b.id));
   const surfaceNames = new Set(recipe.surfaces.map((s) => s.name.toLowerCase()));
-  const textures = path.join(assetsRoot(), "textures");
+  // the pages usually live in a dependency (foundation), found the way the game finds them
+  const textureFile = (rel: string): string =>
+    (project ? findAsset(project, path.join("textures", rel)) : null) ?? path.join(assetsRoot(), "textures", rel);
   for (const layer of layers) {
     const bits: string[] = [];
     if (layer.texture) {
-      const file = path.join(textures, layer.texture);
+      const file = textureFile(layer.texture);
       if (!fs.existsSync(file)) findings.push(`${layer.id}: texture ${layer.texture} does not exist (the layer draws NOTHING — cutout of an empty placeholder)`);
       else if (layer.atlas) {
         const buf = fs.readFileSync(file);
@@ -8657,9 +9354,33 @@ function commandCover(): void {
           waterPts.push([px, pz]);
         }
       }
-      console.log(`\n  water cover (${lakes.length} lakes, ${riverDocs.length} rivers; ${shorePts.length} shore / ${waterPts.length} water probes, each a 6 m neighbourhood):`);
+      // marsh sheets (zone anchors with a waterTable) are water too: probe their
+      // pools (ground under the table) and their edges (dry ground beside a pool)
+      const marshShore: [number, number][] = [];
+      const marshWater: [number, number][] = [];
+      for (let mz = -limit; mz <= limit; mz += 37) {
+        for (let mx = -limit; mx <= limit; mx += 37) {
+          const table = field.marshTable(mx, mz);
+          if (table === null) continue;
+          if (field.height(mx, mz) < table) marshWater.push([mx, mz]);
+          else if ([[4, 0], [-4, 0], [0, 4], [0, -4]].some(([dx, dz]) => field.height(mx + dx!, mz + dz!) < table)) marshShore.push([mx, mz]);
+        }
+      }
+      const thin = (pts: [number, number][], n: number): [number, number][] => pts.filter((_, i) => i % Math.max(1, Math.floor(pts.length / n)) === 0);
+      const marshShorePts = thin(marshShore, 280);
+      const marshWaterPts = thin(marshWater, 280);
+      console.log(
+        `\n  water cover (${lakes.length} lakes, ${riverDocs.length} rivers; ${shorePts.length} shore / ${waterPts.length} water probes; ` +
+          `marsh ${marshShorePts.length} edge / ${marshWaterPts.length} pool probes; each a 6 m neighbourhood):`,
+      );
       for (const layer of waterLayers) {
-        const set = layer.water!.mode === "shore" ? shorePts : waterPts;
+        // a layer is probed on the water kinds it grows on: open water (lake/river/sea) and/or marsh
+        const kinds = (layer.water as { kinds?: string[] }).kinds ?? ["lake", "river"];
+        const shore = layer.water!.mode === "shore";
+        const set = [
+          ...(kinds.some((k) => k !== "marsh") ? (shore ? shorePts : waterPts) : []),
+          ...(kinds.includes("marsh") ? (shore ? marshShorePts : marshWaterPts) : []),
+        ];
         let hit = 0;
         for (const [px, pz] of set) {
           for (let k = 0; k < 24; k++) {
@@ -8672,7 +9393,7 @@ function commandCover(): void {
           }
         }
         const share = set.length ? hit / set.length : 0;
-        console.log(`    ${layer.id.padEnd(18)} ${layer.water!.mode.padEnd(7)} ${Math.round(share * 100)}% of ${layer.water!.mode === "shore" ? "shore" : "water"} probes`);
+        console.log(`    ${layer.id.padEnd(18)} ${layer.water!.mode.padEnd(7)} ${Math.round(share * 100)}% of ${set.length} ${shore ? "shore" : "water"} probes (${kinds.join("/")})`);
         if (set.length >= 10 && share === 0) findings.push(`${layer.id}: water layer found on none of ${set.length} ${layer.water!.mode} probes`);
       }
     }
@@ -8704,6 +9425,9 @@ switch (command) {
     break;
   case "towns":
     commandTowns();
+    break;
+  case "town-pins":
+    commandTownPins();
     break;
   case "status":
     commandStatus();
@@ -8802,8 +9526,35 @@ switch (command) {
   case "seated":
     commandSeated({ argv, loadRecipe: () => loadRecipe(), fail });
     break;
+  case "float":
+    commandFloat({ argv, loadRecipe: () => loadRecipe(), fail, writeRecipe });
+    break;
+  case "rock-skins":
+    commandRockSkins({ argv, loadRecipe: () => loadRecipe(), fail, writeRecipe });
+    break;
+  case "water-edges":
+    commandWaterEdges({ argv, loadRecipe: () => loadRecipe(), fail, writeRecipe });
+    break;
+  case "op":
+    commandOp({ argv, project, loadRecipe: () => loadRecipe(), writeRecipe, fail });
+    break;
+  case "op-preview":
+    commandOpPreview({ argv, project, loadRecipe: () => loadRecipe(), writeRecipe, fail });
+    break;
+  case "fine":
+    commandFine({ argv, project, loadRecipe: () => loadRecipe(), writeRecipe, fail });
+    break;
+  case "terrace-place":
+    commandTerracePlace({ argv, project: project || "proving", loadRecipe: () => loadRecipe(), writeRecipe, fail });
+    break;
+  case "bridge-place":
+    commandBridgePlace({ argv, project: project || "proving", loadRecipe: () => loadRecipe(), writeRecipe, fail });
+    break;
   case "stats":
     commandStats();
+    break;
+  case "landform-calm":
+    commandLandformCalm();
     break;
   case "all": {
     // One line from nothing to a hostable world: `all <world> --from <look>

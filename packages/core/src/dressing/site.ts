@@ -36,13 +36,16 @@ const segD = (p: V2, a: V2, b: V2): number => {
   const dx = b[0] - a[0], dz = b[1] - a[1], l2 = dx * dx + dz * dz || 1, t = Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dz) / l2));
   return Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dz);
 };
-const lineD = (p: V2, pts: V2[]): number => (pts.length === 1 ? Math.hypot(p[0] - pts[0]![0], p[1] - pts[0]![1]) : Math.min(...pts.slice(1).map((b, i) => segD(p, pts[i]!, b))));
+const lineD = (p: V2, pts: V2[]): number => (pts.length === 0 || !pts[0] ? Infinity : pts.length === 1 ? Math.hypot(p[0] - pts[0]![0], p[1] - pts[0]![1]) : Math.min(...pts.slice(1).map((b, i) => segD(p, pts[i]!, b))));
 const inRect = (p: V2, b: SiteBlocker, m: number): boolean => {
   const dx = p[0] - b.centre[0], dz = p[1] - b.centre[1], c = Math.cos(b.yaw), s = Math.sin(b.yaw);
   return Math.abs(dx * c - dz * s) <= b.half[0] + m && Math.abs(dx * s + dz * c) <= b.half[1] + m;
 };
 const yawDeg = (d: V2): number => +((Math.atan2(d[0], d[1]) * 180) / Math.PI).toFixed(1);
 const norm = (d: V2): V2 => { const l = Math.hypot(d[0], d[1]) || 1; return [d[0] / l, d[1] / l]; };
+
+/** The kept-clear routes minus the chamber passages an area dresses: `room` is one passage id or a comma-separated list. */
+export const keepWithoutRooms = (keep: SiteKeep[], room?: string): SiteKeep[] => { const ids = (room ?? "").split(",").map((x) => x.trim()).filter(Boolean); return keep.filter((q) => !ids.includes(q.id)); };
 
 export function buildSiteSocketMap(input: SiteInput, sample: SiteSampler): { map: SocketMap; report: SiteReport[] } {
   const step = input.step ?? 0.25;
@@ -144,7 +147,7 @@ export function buildSiteSocketMap(input: SiteInput, sample: SiteSampler): { map
     };
     const inArea = (p: V2, pad = 0): boolean => Math.hypot(p[0] - area.centre[0], p[1] - area.centre[1]) <= R + pad;
     for (const a of input.anchors) {
-      if (!inArea(a.at, 2)) continue;
+      if (!a.at || !inArea(a.at, 2)) continue; // an anchor with no coordinates is skipped
       // the owner's point itself, so `near: "<kind>"` finds it
       anchors.push({ id: `${area.id}/${a.id}`, kind: a.kind, level: li, position: [a.at[0], sample.ground(a.at[0], a.at[1]) ?? floorY, a.at[1]], yaw: a.facing ? yawDeg(a.facing) : 0, mount: "floor", outdoor: true });
       const f = norm(a.facing ?? [area.centre[0] - a.at[0], area.centre[1] - a.at[1]]), sd: V2 = [-f[1], f[0]];

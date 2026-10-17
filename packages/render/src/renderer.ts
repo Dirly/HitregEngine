@@ -2,6 +2,7 @@ import * as THREE from "three/webgpu";
 import { patchShadowPassAlphaTest } from "./shadow-pass-material.js";
 import { GpuUploadProbe } from "./gpu-uploads.js";
 import { cacheUniformUploads } from "./uniform-upload-cache.js";
+import { PRECOMPILE_SAFE } from "./precompile-safe.js";
 import { trackRenderObjects, type RenderObjectSweep } from "./render-object-sweep.js";
 import { materialMapsLoading } from "./material-maps.js";
 import { beginSkinnedBoundsFrame, endSkinnedBoundsFrame } from "./skinned-bounds.js";
@@ -50,7 +51,7 @@ interface RendererInternals {
   _renderContexts?: { get: (rt: unknown, mrt: unknown, depth?: number) => unknown };
   _createObjectPipeline?: (...args: unknown[]) => void;
   _objects?: { get: (...args: unknown[]) => RenderObjectLike };
-  _nodes?: { getForRender: (renderObject: unknown) => unknown };
+  _nodes?: { getForRender: (renderObject: unknown) => unknown; getForRenderAsync?: (renderObject: unknown) => Promise<unknown> };
   _pipelines?: { get: (renderObject: unknown) => { pipeline?: unknown } | undefined };
   _currentRenderContext?: unknown;
   backend?: { get: (object: unknown) => { error?: boolean } | undefined };
@@ -677,6 +678,57 @@ export class EngineRenderer {
   private chainRendered = false;
   /** Precompiles waiting for the chain's first frame. */
   private renderWaiters: Array<() => void> = [];
+  /** The scene pass's RenderContext as last borrowed by a precompile (see guardAsyncBuilds). */
+  private sceneContext: { context: unknown; pass: PostChain["scenePass"] } | null = null;
+  private asyncBuildsGuarded = false;
+
+  /**
+   * compileAsync's second half walks its queued render objects over many
+   * frames (a yield after each), and `RenderObjects.get` RECREATES any whose
+   * dynamic cache key moved since the prologue — a light joined or left the
+   * budget, the fog changed: the night/weather lights do this constantly. The
+   * new object's shader is then built by `getForRenderAsync` with whatever the
+   * renderer holds between frames (the canvas, no MRT): one fragment output
+   * for a scene-pass context with two targets, and three rejects the pipeline
+   * ("Color target has no corresponding fragment stage output ... targets[1]")
+   * for vfx cards, decals, particles, impostors alike — they then never draw.
+   * Build those render objects synchronously inside the scene pass's target
+   * and MRT, exactly as the borrowed window does for the prologue.
+   */
+  private guardAsyncBuilds(internals: RendererInternals): void {
+    const nodes = internals._nodes;
+    if (this.asyncBuildsGuarded || !nodes || typeof nodes.getForRenderAsync !== "function") return;
+    this.asyncBuildsGuarded = true;
+    const original = nodes.getForRenderAsync;
+    const self = this;
+    const renderer = this.renderer;
+    nodes.getForRenderAsync = function (this: NonNullable<RendererInternals["_nodes"]>, renderObject: unknown) {
+      const scene = self.sceneContext;
+      if (!scene || self.chain?.scenePass !== scene.pass || (renderObject as { context?: unknown }).context !== scene.context) {
+        return original.call(this, renderObject);
+      }
+      const target = scene.pass.renderTarget;
+      const mrtNode = scene.pass.getMRT();
+      const previousTarget = renderer.getRenderTarget();
+      const previousMrt = renderer.getMRT();
+      const previousContext = internals._currentRenderContext;
+      const swap = previousTarget !== target || previousMrt !== mrtNode;
+      if (swap) {
+        renderer.setRenderTarget(target);
+        renderer.setMRT(mrtNode);
+      }
+      internals._currentRenderContext = scene.context;
+      try {
+        return Promise.resolve(this.getForRender(renderObject));
+      } finally {
+        internals._currentRenderContext = previousContext;
+        if (swap) {
+          renderer.setRenderTarget(previousTarget);
+          renderer.setMRT(previousMrt);
+        }
+      }
+    };
+  }
 
   private async compileInSceneContext(
     root: THREE.Object3D,
@@ -721,7 +773,10 @@ export class EngineRenderer {
     root.traverse((object) => {
       if (!(object as THREE.Mesh).isMesh) return;
       const material = (object as THREE.Mesh).material;
-      const transparent = Array.isArray(material) ? material.some((m) => m.transparent) : material?.transparent;
+      // ...unless the material says it reads nothing of the frame (VFX: see
+      // PRECOMPILE_SAFE) — those are exactly what a first cast must not build
+      const risky = (m: THREE.Material): boolean => m.transparent && m.userData[PRECOMPILE_SAFE] !== true;
+      const transparent = Array.isArray(material) ? material.some(risky) : material ? risky(material) : false;
       if (transparent && object.visible) {
         object.visible = false;
         hidden.push(object);
@@ -772,8 +827,12 @@ export class EngineRenderer {
       renderer.setRenderTarget(scenePass.renderTarget);
       renderer.setMRT(scenePass.getMRT());
       const depth = this.scenePassCallDepth;
+      const self = this;
+      this.guardAsyncBuilds(internals);
       contexts.get = function (rt: unknown, mrt: unknown) {
-        return originalGet.call(this, rt, mrt, depth);
+        const context = originalGet.call(this, rt, mrt, depth);
+        if (rt === scenePass.renderTarget) self.sceneContext = { context, pass: scenePass };
+        return context;
       };
       // Shader CODE is generated by three from live renderer state — it reads
       // getRenderTarget()/getMRT()/isOutputTarget while building — and

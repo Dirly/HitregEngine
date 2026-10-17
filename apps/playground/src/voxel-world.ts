@@ -21,6 +21,7 @@ import {
   type VoxelMeshSource,
   type VoxelWorldData,
   type WorldField,
+  voxelRecipeAssetRefs,
 } from "@hitreg/core";
 import type { ChunkProvider } from "./chunk-manager.js";
 import type { VoxelWorkerRequest, VoxelWorkerResponse } from "./voxel-worker.js";
@@ -225,11 +226,10 @@ let activeIdentity: { field: WorldField; optionsKey: string } | null = null;
  */
 function cellOptionsKey(world: ResolvedVoxelWorld, options: VoxelChunkOptions): string {
   const { assetExists: _drop, ...plain } = options;
-  const resolvable: string[] = [];
-  for (const rule of world.field.recipe.scatter) {
-    const id = rule.prefab ?? rule.model;
-    if (id && options.assetExists?.(id, rule.prefab ? "prefab" : "model")) resolvable.push(id);
-  }
+  // every asset the generator may ask about (variants, POIs, terrace-wall pieces too), not only rule models
+  const resolvable = voxelRecipeAssetRefs(world.field.recipe)
+    .filter((ref) => options.assetExists?.(ref.id, ref.kind))
+    .map((ref) => ref.id);
   return `${JSON.stringify(plain)}|${resolvable.sort().join(",")}`;
 }
 
@@ -279,12 +279,12 @@ function createVoxelWorkerPool(
 
   // `assetExists` is a closure and cannot be structured-cloned, so the answers
   // travel instead of the question: every scatter/POI asset the recipe names
-  // that actually resolves today.
-  const present: string[] = [];
-  for (const rule of world.field.recipe.scatter) {
-    const id = rule.prefab ?? rule.model;
-    if (id && options.assetExists?.(id, rule.prefab ? "prefab" : "model")) present.push(id);
-  }
+  // that actually resolves today. ALL of them (voxelRecipeAssetRefs): the list once held only the scatter
+  // rules' own assets, so worker-built cells dropped every POI and terrace-wall piece and drew every rock
+  // variant as its rule's reference model, while the same cell built inline (the one under the player) had them.
+  const present = voxelRecipeAssetRefs(world.field.recipe)
+    .filter((ref) => options.assetExists?.(ref.id, ref.kind))
+    .map((ref) => ref.id);
   const { assetExists: _drop, ...plain } = options;
 
   /**

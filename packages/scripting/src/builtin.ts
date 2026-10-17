@@ -2967,6 +2967,14 @@ function smooth01(x: number): number {
   const t = Math.min(1, Math.max(0, x));
   return t * t * (3 - 2 * t);
 }
+/** `hue` (sRGB 0..1) rescaled in linear light to `ref`'s relative luminance: a tint that neither darkens nor brightens. */
+function sameLuminance(hue: Rgb, ref: Rgb): Rgb {
+  const lin = (c: number) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  const enc = (c: number) => (c <= 0.0031308 ? c * 12.92 : 1.055 * c ** (1 / 2.4) - 0.055);
+  const lum = (c: Rgb) => 0.2126 * lin(c[0]) + 0.7152 * lin(c[1]) + 0.0722 * lin(c[2]);
+  const k = lum(ref) / Math.max(1e-6, lum(hue));
+  return [enc(lin(hue[0]) * k), enc(lin(hue[1]) * k), enc(lin(hue[2]) * k)];
+}
 const NET_HOUR_KEY = WORLD_HOUR_KEY;
 
 /** "2h 30m" / "45s" — console output, where a raw 9000 means nothing to anyone. */
@@ -3006,7 +3014,9 @@ class DayNight extends Script {
     moonIntensity: { default: 0.25, min: 0, max: 5, description: "Moonlight intensity at its peak. The sun light's authored intensity is the noon value." },
     nightTop: { default: "#070a14", description: "Sky top colour at full night." },
     nightBottom: { default: "#121828", description: "Sky horizon and fog colour at full night." },
-    nightAmbient: { default: 0.35, min: 0, max: 2, description: "Fraction of the authored ambient, hemisphere and IBL intensity kept at full night." },
+    nightAmbient: { default: 0.35, min: 0, max: 2, description: "Fraction of the authored AMBIENT light's intensity kept at full night (its colour turns toward moonColor at the same luminance). The hemisphere and IBL fill are not scaled: their colour is the sky gradient, which already darkens to nightTop/nightBottom — scaling them as well dimmed the night twice." },
+    sunColorRise: { default: 0.6, min: 0.05, max: 1, description: "Sun elevation (sine: 0.5 = 30 degrees, 0.87 = 60) at which the sun light reaches its authored colour; below it the colour is mixed from dawnColor. Larger keeps mid-morning and mid-afternoon visibly warmer than noon." },
+    lowSunIntensity: { default: 0.8, min: 0, max: 1, description: "Fraction of the authored sun intensity at a low (about 10 degrees) sun, easing to the full authored value at the arc's peak (noon), so the light climbs through the morning instead of holding flat from 8 to 16." },
     envRefreshHours: { default: 2, min: 0.25, max: 24, description: "Game hours between image-based-lighting refreshes. Each one is a prefilter pass — cheap a few times a day, not per frame." },
     syncSeconds: { default: 5, min: 1, max: 60, description: "Multiplayer: how often the host publishes the clock." },
     stars: { default: 1, min: 0, max: 4, description: "Star-field brightness at full night; 0 for no stars." },
@@ -3189,8 +3199,13 @@ class DayNight extends Script {
 
     // ONE light: the sun until it sets, then the moon from the other side
     let lightDir = sunDir;
-    let lightColor = mixRgb(dawn, baseSunColor, smooth01(e / 0.35));
-    let lightIntensity = baseSunIntensity * smooth01(e / 0.2);
+    // Colour and intensity both follow the elevation up to the arc's peak, so
+    // 9:00 and 12:00 differ (warmer and a little dimmer in the morning) rather
+    // than both saturating by 8:00.
+    const peak = Math.max(0.05, Math.cos(tilt)); // sine of the noon elevation
+    let lightColor = mixRgb(dawn, baseSunColor, smooth01(e / Math.min(this.param<number>("sunColorRise"), peak)));
+    const low = this.param<number>("lowSunIntensity");
+    let lightIntensity = baseSunIntensity * smooth01(e / 0.2) * (low + (1 - low) * smooth01((e - 0.17) / Math.max(0.05, peak - 0.17)));
     if (e <= 0) {
       lightDir = moonDir;
       lightColor = moonRgb;
@@ -3213,7 +3228,9 @@ class DayNight extends Script {
       top: rgbToHex(top),
       bottom: rgbToHex(bottom),
       fog: { color: rgbToHex(bottom) },
-      hemisphere: (base?.hemisphere ?? 0.5) * keep,
+      // Not × keep: the hemisphere's colours ARE the sky top/bottom above,
+      // already darkened to nightTop/nightBottom (see nightAmbient).
+      hemisphere: base?.hemisphere ?? 0.5,
       sun: {
         direction: lightDir,
         color: rgbToHex(lightColor),
@@ -3251,14 +3268,22 @@ class DayNight extends Script {
         rotation: { axis: [0, Math.sin(tilt), Math.cos(tilt)], angle: -theta },
       },
       ...(base?.ambient
-        ? { ambient: { color: rgbToHex(mixRgb(mixRgb(nightBottom, hexToRgb(base.ambient.color), 0.5), hexToRgb(base.ambient.color), day)), intensity: base.ambient.intensity * keep } }
+        ? (() => {
+            // moonlit hue at night, the authored hue by day, warmed by the
+            // horizon glow around sunrise/sunset — all at the authored
+            // luminance, so the colour is tone only and `keep` is the one dimming
+            const authored = hexToRgb(base.ambient.color);
+            const hue = mixRgb(mixRgb(moonRgb, authored, day), dawn, 0.6 * horizonGlow);
+            return { ambient: { color: rgbToHex(sameLuminance(hue, authored)), intensity: base.ambient.intensity * keep } };
+          })()
         : {}),
       // Published for the WEATHER layer, which owns a tint but not the clock:
       // a tint is the colour of falling rain/sand/snow LIT, so at midnight it
       // has to be dimmed or it lights the fog back up (scene-lighting.ts
       // applyEffective). Nothing else reads it.
       daylight: day,
-      environmentIntensity: (base?.environmentIntensity ?? 1) * keep,
+      // not × keep either: the IBL is refilled from the night-darkened gradient
+      environmentIntensity: base?.environmentIntensity ?? 1,
       ...(refresh ? { refreshEnvironment: true } : {}),
     });
   }
@@ -3280,6 +3305,10 @@ interface MoodVec {
   saturation: number;
   contrast: number;
   temperature: number;
+  /** Ground-relative mist: metres above the local low ground, its fade, and how far it replaces the scene's absolute top. */
+  mistTop: number;
+  mistThick: number;
+  mistLocal: number;
 }
 
 const NEUTRAL_MOOD: MoodVec = {
@@ -3295,6 +3324,9 @@ const NEUTRAL_MOOD: MoodVec = {
   saturation: 1,
   contrast: 1,
   temperature: 0,
+  mistTop: 4,
+  mistThick: 0,
+  mistLocal: 0,
 };
 
 function moodVec(mood: NonNullable<RegionAt["mood"]> | undefined, strength: number): MoodVec {
@@ -3315,6 +3347,10 @@ function moodVec(mood: NonNullable<RegionAt["mood"]> | undefined, strength: numb
     saturation: lerp(1, mood.saturation),
     contrast: lerp(1, mood.contrast),
     temperature: lerp(0, mood.temperature),
+    // ground-relative mist is a place's shape, not a strength: strength 0 still turns it off
+    mistTop: mood.mistTop ?? NEUTRAL_MOOD.mistTop,
+    mistThick: mood.mistThickness ?? 0,
+    mistLocal: mood.mistTop !== undefined && k > 0 ? 1 : 0,
   };
 }
 
@@ -3337,12 +3373,24 @@ class ZoneMood extends Script {
     blendSeconds: { default: 6, min: 0, max: 60, description: "Seconds to ease from one zone's mood to the next after crossing a border. Borders follow ridges and rivers, so a few seconds reads as the air changing, not a switch." },
     strength: { default: 1, min: 0, max: 2, description: "Scales every zone's mood at once (0 = moods off, 1 = as authored)." },
     sampleSeconds: { default: 0.5, min: 0.05, max: 5, description: "How often the zone under the player is looked up." },
+    mistReach: {
+      default: 40,
+      min: 0,
+      max: 300,
+      description:
+        "Metres around the player searched for the LOCAL LOW GROUND a zone's ground-relative mist (`mood.mistTop`) sits on: the lowest " +
+        "ground or still-water surface on two rings. Larger = the mist level follows the basin, not every hummock.",
+    },
+    mistFollowSeconds: { default: 3, min: 0.1, max: 30, description: "Seconds the ground-relative mist level takes to follow the low ground as the player moves." },
   };
   private current: MoodVec = NEUTRAL_MOOD;
   private target: MoodVec = NEUTRAL_MOOD;
   private sinceSample = Infinity;
   private zoneId: string | null = null;
   private settled = true;
+  /** Local low ground under ground-relative mist: where it is easing to, and where it is. NaN = not yet measured. */
+  private lowTarget = Number.NaN;
+  private low = Number.NaN;
 
   override onFixedUpdate(dt: number): void {
     if (!this.ctx.setSky) return; // a dedicated server has no sky to tint
@@ -3351,7 +3399,11 @@ class ZoneMood extends Script {
       this.sinceSample = 0;
       this.sample();
     }
-    if (this.settled) return;
+    const following = this.followLow(dt);
+    if (this.settled) {
+      if (following) this.apply();
+      return;
+    }
     const blend = this.param<number>("blendSeconds");
     const t = blend > 0 ? Math.min(1, dt / (blend / 4)) : 1; // exponential ease: ~98% there after `blend` seconds
     const a = this.current;
@@ -3371,10 +3423,14 @@ class ZoneMood extends Script {
       saturation: n(a.saturation, b.saturation),
       contrast: n(a.contrast, b.contrast),
       temperature: n(a.temperature, b.temperature),
+      mistTop: n(a.mistTop, b.mistTop),
+      mistThick: n(a.mistThick, b.mistThick),
+      mistLocal: n(a.mistLocal, b.mistLocal),
     };
     const gap = Math.abs(this.current.skyAmt - b.skyAmt) + Math.abs(this.current.hazeAmt - b.hazeAmt) + Math.abs(this.current.lightScale - b.lightScale) +
       Math.abs(this.current.fogDensity - b.fogDensity) + Math.abs(this.current.mist - b.mist) + Math.abs(this.current.saturation - b.saturation) + Math.abs(this.current.light[0] - b.light[0]) +
-      Math.abs(this.current.shade[2] - b.shade[2]) + Math.abs(this.current.temperature - b.temperature);
+      Math.abs(this.current.shade[2] - b.shade[2]) + Math.abs(this.current.temperature - b.temperature) +
+      Math.abs(this.current.mistLocal - b.mistLocal) + Math.abs(this.current.mistTop - b.mistTop) * 0.1;
     if (gap < 1e-3) {
       this.current = b;
       this.settled = true;
@@ -3400,10 +3456,49 @@ class ZoneMood extends Script {
     if (!player) return;
     const region = this.ctx.regionAt?.(player.position.x, player.position.z) ?? null;
     const zoneId = region?.mood ? region.id : null;
+    // ground-relative mist: measure the low ground while any of it is showing or coming
+    if (region?.mood?.mistTop !== undefined || this.current.mistLocal > 0) {
+      const low = this.lowGround(player.position.x, player.position.z);
+      if (low !== null) {
+        this.lowTarget = low;
+        if (Number.isNaN(this.low)) this.low = low;
+      }
+    }
     if (zoneId === this.zoneId) return;
     this.zoneId = zoneId;
     this.target = moodVec(region?.mood, this.param<number>("strength"));
     this.settled = false;
+  }
+
+  /** Ease the measured low ground toward its target; true while it moved enough to be worth sending. */
+  private followLow(dt: number): boolean {
+    if (Number.isNaN(this.lowTarget) || Number.isNaN(this.low) || !(this.current.mistLocal > 0)) return false;
+    const gap = this.lowTarget - this.low;
+    if (Math.abs(gap) < 0.02) return false;
+    this.low += gap * Math.min(1, dt / Math.max(0.1, this.param<number>("mistFollowSeconds") / 4));
+    return true;
+  }
+
+  /**
+   * The local low ground: the lowest of (ground, or the still water standing on
+   * it) at the player and on two rings out to `mistReach`. Mist that sits on
+   * THIS fills the pools and hollows around the player, at any altitude.
+   */
+  private lowGround(x: number, z: number): number | null {
+    const biomeAt = this.ctx.biomeAt;
+    if (!biomeAt) return null;
+    const reach = this.param<number>("mistReach");
+    let low = Infinity;
+    const at = (px: number, pz: number): void => {
+      const b = biomeAt(px, pz);
+      if (!b) return;
+      const water = this.ctx.waterAt?.(px, b.ground + 50, pz);
+      const level = water && water.surfaceY > b.ground ? water.surfaceY : b.ground;
+      if (level < low) low = level;
+    };
+    at(x, z);
+    if (reach > 0) for (const f of [0.5, 1]) for (const [dx, dz] of RING) at(x + dx * reach * f, z + dz * reach * f);
+    return Number.isFinite(low) ? low : null;
   }
 
   private apply(): void {
@@ -3420,6 +3515,9 @@ class ZoneMood extends Script {
         shade: rgbToHex(m.shade),
         fogDensity: m.fogDensity,
         mist: m.mist,
+        ...(m.mistLocal > 0 && !Number.isNaN(this.low)
+          ? { mistTop: this.low + m.mistTop, ...(m.mistThick > 0 ? { mistThickness: m.mistThick } : {}), mistLocal: m.mistLocal }
+          : {}),
       },
     });
     this.ctx.setPostFx?.({ grade: { saturation: m.saturation, contrast: m.contrast, temperature: m.temperature } });
@@ -3703,6 +3801,15 @@ class Weather extends Script {
         "the sky over whatever this says. Console: /clouds.",
     },
     gloomMax: { default: 0.6, min: 0, max: 1, description: "How much a full storm dims sun, fill, ambient and IBL." },
+    snowGloom: {
+      default: 1,
+      min: 0,
+      max: 1,
+      description:
+        "Share of that gloom falling SNOW brings, 0..1 (rain = 1). Snow scatters light rather than soaking it up — " +
+        "a snowfall under a closed deck reads brighter than rain under the same deck — so below 1 keeps a blizzard " +
+        "near overcast brightness while rain still darkens. Fog, cloud and overcast are unchanged.",
+    },
     cloudDarkMax: { default: 0.85, min: 0, max: 1, description: "How far a full storm drives the cloud deck itself toward slate. Gloom dims what the cloud lights; this darkens the cloud you are looking AT, and a storm needs both or the world goes dim under a bright white sky." },
     windMax: { default: 3, min: 0, max: 10, description: "Foliage wind multiplier at full storm (1 = authored)." },
     syncSeconds: { default: 5, min: 1, max: 60, description: "Multiplayer: how often the authority publishes the state." },
@@ -4473,7 +4580,12 @@ class Weather extends Script {
           (1 + this.param<number>("fogBoost") * wetDrive + this.param<number>("sandFog") * dustFog),
       },
       weather: {
-        gloom: Math.min(1, this.param<number>("gloomMax") * cover * (1 + 0.5 * sandDrive)),
+        gloom: Math.min(
+          1,
+          this.param<number>("gloomMax") *
+            Math.max(this.local.rain, this.local.sand, this.local.snow * this.param<number>("snowGloom")) *
+            (1 + 0.5 * sandDrive),
+        ),
         tint: tint.color,
         tintAmount: tint.amount * cover,
         wind: 1 + this.param<number>("windMax") * storm * (0.5 + 0.5 * gust),

@@ -48,6 +48,7 @@ command). Tool manual: header of `apps/playground/tools/props.mts`. Vocabulary: 
 ## Judgment
 - No bare primitive stands in for an object; a catalogue entry built from raw primitives is a bad entry.
 - Real size per kind and user (a chain waist-high, a door ~2 m for its user), size variety in a set; never scaled up to read from afar. Encoded: tools/prop-kind-sizes.json (+ registry `realSize`); `props status` flags, `dress check` `wrong-size`.
+- A DC prop 8 m or more on a side (ships, hulls, big ruins) needs the see-through prop review before `catalog-check` passes: `tools/see-through.mts prop <scene> --entity <id> --out <project>/authoring/prop-reviews/see-through/<id>.json` — an orbit plus inside views against a magenta sentinel; light through the hull is a hole (docs/see-through.md).
 - Scaling a small prop up does not make a big one: a giant version needs its own silhouette, mapped at the texel standard.
 - Every scale and culture that holds rooms needs small lights and wall-free furniture of its own.
 - Pieces that work are exported and catalogued for reuse; pieces the owner rejected are not.

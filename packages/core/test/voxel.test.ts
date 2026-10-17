@@ -801,6 +801,17 @@ describe("terrain features", () => {
     expect(field.featureClearance(0,0)).toBeLessThan(0);
   });
 
+  it("lets ground cover onto a `cover` town while scatter stays off it", () => {
+    const field = createWorldField(testRecipe({ features: {
+      ...noFeatures(),
+      towns: [{id:"grassy",center:[0,0],radius:40,falloff:10,groundY:12,flatten:1,gates:[],terraces:[],tags:[],cover:true}],
+      roads: [{id:"street",points:[[-5,0],[5,0]],width:4,shoulder:1,smooth:0,flatten:1,surfaceY:[12,12],surface:"",surfaceEdge:0}],
+    }}));
+    expect(field.featureClearance(0,20)).toBeLessThan(0);
+    expect(field.featureClearance(0,20,true)).toBeGreaterThan(0);
+    expect(field.featureClearance(0,0,true)).toBeLessThan(0);
+  });
+
   it("steps a terraced town up its hill instead of flattening it", () => {
     const flat = createWorldField(testRecipe({ features: { ...noFeatures() } }));
     const lower = flat.height(0, 0);

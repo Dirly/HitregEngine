@@ -18,6 +18,17 @@ export {
   type ResolvedServerWorld,
 } from "./terrain.js";
 export {
+  TerrainCacheReader,
+  bakeTerrainCache,
+  cleanupTerrainCache,
+  parseBakeMode,
+  prepareTerrainCache,
+  terrainCacheKey,
+  type PreparedCache,
+  type TerrainBakeMode,
+  type TerrainCacheInputs,
+} from "./terrain-cache.js";
+export {
   PLAYER_TAG,
   CLIENT_CONTROLLER,
   extractPlayerTemplate,

@@ -16,12 +16,13 @@ import {
   buildSceneMenu,
   newSceneMenuEntrySchema,
   describeMissingTools,
-  projectDependencyClosure,
   projectManifestSchema,
   resolveProjectTools,
   type ProjectToolReport,
   type SceneMenuProjectInput,
 } from "../../packages/core/src/project.ts";
+import { projectClosure, resolveAssetFile, sceneOwnerProject } from "./tools/_asset-resolve.mts";
+import { ownerCatalog, ownerInfo, recordOwnerEdits, sceneProject } from "./tools/_owner-edit-bridge.mts";
 
 /**
  * The dev server is the AI/file bridge:
@@ -63,6 +64,8 @@ const BRIDGE_ENDPOINTS = [
   { method: "GET", path: "/__hitreg/context", purpose: "What the user currently sees: scene, selection, camera, in-view entities, play mode, diagnostics, plus `focus` — where their attention is, ranked (focus.strongest names which of manipulating/hover/selection/asset to resolve \"this\" against, and focus.mode says what they are doing: edit, graybox, terrain-sculpt, editing-prefab:<id>, playing, …). Keyed per browser tab (bridgeSessionId) — with exactly one tab connected this just returns its data; with more than one, returns { multipleClients: true, clients: [...] } instead of guessing, pass ?id=<id> from that list to pick one." },
   { method: "GET", path: "/__hitreg/camera", purpose: "Where the editor camera is: { id, scene, playMode, mode, camera: { position:[x,y,z], target:[x,y,z] }, lastSeen } — the camera block of /__hitreg/context without the rest of the payload. Same per-tab keying as /__hitreg/context (?id=<id>; { multipleClients, clients } when several tabs are live)." },
   { method: "POST", path: "/__hitreg/camera", purpose: "Aim the editor camera — this is how an agent looks at its own work (screenshots, \"show me what you mean\"). Body: { position:[x,y,z], target?:[x,y,z] } or { frame: \"<entityId>\" } (or frame:\"selection\"), plus transitionMs (default 0 = snap this frame, which is what a screenshot tool wants; >0 eases over roughly that long and holds the request open until the camera actually comes to rest). Returns the pose the camera ACTUALLY reached: { ok, id, cmdId, camera:{position,target}, playMode }. FOOTGUN: this drives the EDITOR camera. In play mode that camera is often not what is on screen — a follow/chase rig re-aims it every frame, and a scene camera or a script's active camera replaces it outright — so the move can be instantly overwritten or simply not rendered. Trust the returned `camera` over the one you asked for; if it snapped back, something else owns the view. Same per-tab keying as /__hitreg/context: pass ?id=<id>, and with several tabs live and no id this answers 409 { ok:false, multipleClients, clients } rather than aiming somebody else's window." },
+  { method: "POST", path: "/__hitreg/owner-edit", purpose: "The editor reports the OWNER's hand edits of placed props ({ scene, edits: [{ entity, tags, name, parent, before, after }] }, scene frame; after:null = deleted). Each is written as an owner override on what placed it: a dressed prop (tag dress:<plan>) -> <plan>.owner.json in the plan's map frame; any other catalogued prop -> projects/<p>/authoring/owner-overrides/<scene>.json. Agents never POST here: owner overrides are the owner's. Schema: spec dataAssets['owner-overrides']; read them with `dress overrides <project>`." },
+  { method: "GET", path: "/__hitreg/owner-edit?scene=<s>&entity=<id>&tags=<a,b>&name=<n>", purpose: "Who placed this prop (plan item or scene), the place's scale/cultures and the owner override on it, for the editor's Prop panel. ?catalog=<project> instead returns the swap catalogue (the closure's prop index) and the real-size kinds table." },
   { method: "GET", path: "/__hitreg/assets-index", purpose: "Every asset file on disk, bucketed by kind (scenes, prefabs, materials, models, chunks, …)." },
   { method: "GET", path: "/__hitreg/asset-file?file=<rel>", purpose: "Read one asset file fresh from disk (bypasses Vite's cache)." },
   { method: "POST", path: "/__hitreg/write-asset", purpose: "Write an asset file ({file, content, project?}); live-syncs into the running app. An existing file is overwritten where it lives; a NEW file goes into projects/<project>/assets/ when `project` names one." },
@@ -185,37 +188,16 @@ function hitregBridge(): Plugin {
       ] as const;
 
       // A virtual path like "materials/heli-island/beacon-glow.json" may live
-      // under the flat assets/ tree OR under some projects/<name>/assets/ tree
-      // — try the flat location first, then search each project. New files
-      // (neither exists yet) default to the flat tree.
-      const resolveAssetPath = (file: string): string => {
-        const flat = path.resolve(assetsRoot, file);
-        if (fs.existsSync(flat)) return flat;
-        if (fs.existsSync(projectsRoot)) {
-          const projects = fs
-            .readdirSync(projectsRoot, { withFileTypes: true })
-            .filter((entry) => entry.isDirectory());
-          // An existing file wins outright.
-          for (const entry of projects) {
-            const candidate = path.resolve(projectsRoot, entry.name, "assets", file);
-            if (fs.existsSync(candidate)) return candidate;
-          }
-          // A NEW file belongs beside its siblings: if exactly one project
-          // already owns that folder, write there. Without this, creating an
-          // asset from the editor drops it in the flat tree — which is for
-          // throwaway experiments, so a project's first new scene or material
-          // silently landed outside the project and outside its git repo.
-          const dir = path.dirname(file);
-          if (dir && dir !== "." && dir !== path.sep) {
-            const owners = projects.filter((entry) =>
-              fs.existsSync(path.resolve(projectsRoot, entry.name, "assets", dir)),
-            );
-            if (owners.length === 1) {
-              return path.resolve(projectsRoot, owners[0]!.name, "assets", file);
-            }
-          }
-        }
-        return flat;
+      // under the flat assets/ tree OR under some projects/<name>/assets/ tree.
+      // `scope` is the requesting scene's project closure: it resolves there
+      // first, so an unrelated project's same-named file (a lab's stale copy)
+      // never shadows it — tools/_asset-resolve.mts has the full order.
+      const resolveAssetPath = (file: string, scope: readonly string[] | null = null): string =>
+        resolveAssetFile({ assetsRoot, projectsRoot }, file, scope);
+      /** The closure named by a request's ?project=<owner> (the client's loaded scope), or null. */
+      const requestScope = (params: URLSearchParams): string[] | null => {
+        const project = params.get("project");
+        return project ? projectClosure(projectsRoot, project) : null;
       };
       const withinKnownRoot = (target: string): boolean =>
         target.startsWith(assetsRoot + path.sep) || target.startsWith(projectsRoot + path.sep);
@@ -307,25 +289,8 @@ function hitregBridge(): Plugin {
        * id no project owns), which keeps the old load-everything behaviour.
        */
       const projectScopeOf = (scene: string | null): string[] | null => {
-        if (!scene || !/^[a-z0-9][a-z0-9/_-]*$/i.test(scene) || !fs.existsSync(projectsRoot)) return null;
-        const owner = fs
-          .readdirSync(projectsRoot, { withFileTypes: true })
-          .find(
-            (entry) =>
-              entry.isDirectory() &&
-              fs.existsSync(path.join(projectsRoot, entry.name, "assets", "scenes", `${scene}.scene.json`)),
-          );
-        if (!owner) return null;
-        return projectDependencyClosure(owner.name, (name) => {
-          try {
-            const parsed = projectManifestSchema.safeParse(
-              JSON.parse(fs.readFileSync(path.join(projectsRoot, name, "project.json"), "utf8")),
-            );
-            return parsed.success ? parsed.data : null;
-          } catch {
-            return null;
-          }
-        });
+        const owner = scene ? sceneOwnerProject(projectsRoot, scene) : null;
+        return owner ? projectClosure(projectsRoot, owner) : null;
       };
 
       // The editor's scene menu: groups → projects → scenes, from each
@@ -513,6 +478,71 @@ function hitregBridge(): Plugin {
           });
       });
 
+      // OWNER EDITS: the owner's hand edits of placed props, kept on what placed them (tools/_owner-edit-bridge.mts)
+      server.middlewares.use("/__hitreg/owner-edit", (req, res) => {
+        res.setHeader("content-type", "application/json");
+        res.setHeader("cache-control", "no-store");
+        if (req.method === "GET") {
+          try {
+            const url = new URL(req.url ?? "", "http://x");
+            const catalog = url.searchParams.get("catalog");
+            if (catalog) {
+              if (!/^[a-z0-9][a-z0-9-]*$/.test(catalog)) throw new Error("bad project");
+              res.end(JSON.stringify(ownerCatalog(projectsRoot, catalog, path.resolve(server.config.root, "tools", "prop-kind-sizes.json"))));
+              return;
+            }
+            const scene = url.searchParams.get("scene") ?? "";
+            const entity = url.searchParams.get("entity") ?? "";
+            const tags = (url.searchParams.get("tags") ?? "").split(",").filter(Boolean);
+            res.end(JSON.stringify({ ok: true, ...ownerInfo(projectsRoot, scene, entity, tags, url.searchParams.get("name") ?? undefined) }));
+          } catch (error) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ ok: false, error: String(error) }));
+          }
+          return;
+        }
+        if (req.method !== "POST") {
+          res.statusCode = 405;
+          res.end();
+          return;
+        }
+        let body = "";
+        req.on("data", (chunk: Buffer) => (body += chunk));
+        // ?seat=1: the seat rule for one prop (tools/owner-seat.mts, off the editor's thread): { scene, entity, transform }
+        if ((req.url ?? "").includes("seat=1")) {
+          req.on("end", () => {
+            try {
+              const r = JSON.parse(body) as { scene: string };
+              const project = sceneProject(projectsRoot, r.scene);
+              if (!project) throw new Error(`scene ${r.scene} is not in a project`);
+              const tmp = path.join(server.config.root, ".hitreg", `owner-seat-${Date.now()}.json`);
+              fs.mkdirSync(path.dirname(tmp), { recursive: true });
+              fs.writeFileSync(tmp, JSON.stringify({ ...r, project }));
+              void import("node:child_process").then(({ execFile }) =>
+                execFile(process.execPath, ["node_modules/tsx/dist/cli.mjs", "tools/owner-seat.mts", tmp], { cwd: server.config.root, timeout: 60000 }, (err, stdout) => {
+                  fs.rmSync(tmp, { force: true });
+                  const line = stdout.trim().split("\n").pop() ?? "";
+                  res.end(line.startsWith("{") ? line : JSON.stringify({ ok: false, why: String(err ?? "no answer") }));
+                }),
+              );
+            } catch (error) {
+              res.statusCode = 400;
+              res.end(JSON.stringify({ ok: false, why: String(error) }));
+            }
+          });
+          return;
+        }
+        req.on("end", () => {
+          try {
+            const results = recordOwnerEdits(projectsRoot, JSON.parse(body));
+            res.end(JSON.stringify({ ok: true, results: results.map((r) => ({ ...r, file: path.relative(projectsRoot, r.file).replaceAll("\\", "/") })) }));
+          } catch (error) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ ok: false, error: String(error) }));
+          }
+        });
+      });
+
       server.middlewares.use("/__hitreg/write-asset", (req, res) => {
         if (req.method !== "POST") {
           res.statusCode = 405;
@@ -528,7 +558,7 @@ function hitregBridge(): Plugin {
               content: string;
               project?: string;
             };
-            let target = resolveAssetPath(file);
+            let target = resolveAssetPath(file, project ? projectClosure(projectsRoot, project) : null);
             // A NEW file with a named project goes into that project. Without
             // it, a new scene lands in the flat tree whenever more than one
             // project has a scenes/ folder, which is every working copy.
@@ -600,7 +630,7 @@ function hitregBridge(): Plugin {
         try {
           const url = new URL(req.url ?? "", "http://x");
           const file = url.searchParams.get("file") ?? "";
-          const target = resolveAssetPath(file);
+          const target = resolveAssetPath(file, requestScope(url.searchParams));
           if (!withinKnownRoot(target)) throw new Error("path outside assets/ or projects/");
           const data = fs.readFileSync(target);
           res.setHeader(
@@ -693,7 +723,7 @@ function hitregBridge(): Plugin {
         if (pins.length === 0) return pins;
         let entities: Record<string, unknown> = {};
         try {
-          const sceneFile = resolveAssetPath(`scenes/${scene}.scene.json`);
+          const sceneFile = resolveAssetPath(`scenes/${scene}.scene.json`, projectScopeOf(scene));
           if (fs.existsSync(sceneFile)) {
             const doc = JSON.parse(fs.readFileSync(sceneFile, "utf8")) as {
               entities?: Record<string, unknown>;

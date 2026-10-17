@@ -14,7 +14,12 @@ import type { SceneDoc } from "./scene.js";
  * was swapped and derived state must be rebuilt from scratch.
  */
 export type StoreChange =
-  | { kind: "ops"; result: ApplyResult }
+  | {
+      kind: "ops";
+      result: ApplyResult;
+      /** Who applied it: unset = the editor UI (or undo/redo); "file" = a scene file changed on disk (live-sync); hosts may add their own. */
+      origin?: string;
+    }
   | { kind: "replace" };
 
 /**
@@ -55,12 +60,12 @@ export class SceneStore {
   }
 
   /** Throws OpError (leaving the doc untouched) if any op in the batch is invalid. */
-  apply(ops: Op[]): void {
+  apply(ops: Op[], origin?: string): void {
     const result = applyOps(this.current, ops, this.registry);
     this.commit(result);
     this.undoStack.push(result.inverse);
     this.redoStack = [];
-    this.emit({ kind: "ops", result });
+    this.emit(origin ? { kind: "ops", result, origin } : { kind: "ops", result });
   }
 
   /** Advance the doc and keep the cached index (if any) consistent with it. */

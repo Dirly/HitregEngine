@@ -28,7 +28,11 @@
 
 import type { Vec3 } from "../math.js";
 import { prepareHeightPatch, type PreparedHeightPatch } from "./height-patch.js";
-import { clamp, fbm2, fbm3, hashUnit, perlin2, smoothstep, type FbmSpec } from "./noise.js";
+import type { HermiteSource } from "./dual-contouring.js";
+import { createPlanarCliffs, createPlanarSetup, planarBlock, planarHermite, planarPoint, type PlanarBlock, type PlanarPoint, type PlanarSetup, type PlanarLipHit, type PlanarFeatureSource } from "./planar-cliffs.js";
+import { createSeaCliffs, type SeaCliffs } from "./sea-cliffs.js";
+import { createButtes, type Buttes } from "./buttes.js";
+import { clamp, fbm2, fbm3, hashUnit, perlin2, ridgedMultifractal2, smoothstep, type FbmSpec } from "./noise.js";
 import { PolygonIndex, type OutlineSpec } from "./polygon-index.js";
 import { createZoneMembership, surfaceRoleIndex, zoneGroundRoles } from "./zone-ground.js";
 import {
@@ -45,6 +49,7 @@ import {
   type TownDoc,
   type WorldRecipe,
   type ZoneAnchorDoc,
+  type LandformProfileDoc,
 } from "./recipe.js";
 import { applyFallSites, fallSiteGorge, fallSiteLedge, type SolvedFallSite } from "./fall-sites.js";
 
@@ -127,6 +132,21 @@ export const RIVER_MAX_BUILD = 10;
  * RIVER_MAX_BUILD: that is under the water, sediment in a hollow.)
  */
 export const SHORE_MAX_BUILD = 1.2;
+
+/**
+ * Marsh water (zone anchors with a `waterTable`). A point holds marsh water
+ * where its wet share (zone membership x anchor flatten x the coast's relief
+ * fade) is at least MARSH_WET and the ground is under the table; the ground
+ * rises into a dry rim just inside that line, so the sheet always ends on
+ * land. Hummock noise is fBm, whose spread is well under its amplitude:
+ * MARSH_HUMMOCK_GAIN scales it so `hummocks` metres is the real ± range.
+ */
+const MARSH_WET = 0.5;
+const MARSH_HUMMOCK_GAIN = 1.8;
+/** A wet river through a marsh banks itself in a levee up to this much over the ground (SHORE_MAX_BUILD elsewhere). */
+const MARSH_LEVEE_BUILD = 2.5;
+/** Out to this share of a river's bank (from the channel's edge) the river owns the ground: no marsh sheet, a levee at its crest. */
+const MARSH_RIVER_RIM = 0.76;
 
 /** How near a fall's foot (m) the blade filter looks, the neighbour distance, and the height that makes a blade. */
 const BLADE_RADIUS = 70;
@@ -261,8 +281,8 @@ export interface SurfaceSample {
   /** Current in m/s along world X and Z (0 for a lake). */
   flowX: number;
   flowZ: number;
-  /** "lake" inside a lake's sheet, "river" in a channel. */
-  kind: "lake" | "river";
+  /** "lake" inside a lake's sheet, "river" in a channel, "marsh" on a zone's water table (anchor `waterTable`). */
+  kind: "lake" | "river" | "marsh";
   /** A lake's own material, when it names one. */
   material?: string;
   /** The river bed (or lake shore level) under this point: how deep the water may reach before it is a pit, not a channel. */
@@ -679,6 +699,18 @@ export interface SampleBlockRequest {
   step: number;
 }
 
+/**
+ * Optional OUTPUT of `sampleBlock` for the dual meshers. Filled only by a
+ * world with `terrain.planarCliffs`: exact Hermite access to the planar cliff
+ * band, and a per-sample flag (same layout as the values) marking where the
+ * sampled value IS that function. Callers that rewrite samples afterwards
+ * (band cut, seal) must clear the flag there.
+ */
+export interface SampleBlockExact {
+  hermite?: HermiteSource;
+  active?: Uint8Array;
+}
+
 export interface WorldField {
   readonly recipe: WorldRecipe;
   /** cellSize / resolution — the world units between voxel lattice samples. */
@@ -698,8 +730,14 @@ export interface WorldField {
   readonly rivers: readonly RiverDoc[];
   /** Every waterfall the rivers were solved with (at most one per river): what the mist, the map and the audit read. */
   readonly falls: readonly RiverFall[];
-  /** Ground height at (x, z) with every 2D feature applied. */
+  /** Ground height at (x, z) with every 2D feature applied. In front of a terrace wall face: the wall's foot. */
   height(x: number, z: number): number;
+  /**
+   * The heightfield the mesher samples: like `height` but WITHOUT the terrace-wall carve (it keeps the lattice
+   * berm in front of each face that the 3D cut removes). Only tools that write height patches over other terrace
+   * walls need it (a patch copying the carved ground would erase a neighbour's berm).
+   */
+  heightfield(x: number, z: number): number;
   /** Ground height from the noise bands ALONE — what the land would be with no rivers/roads/towns. */
   naturalHeight(x: number, z: number): number;
   /** Signed density; negative is solid. */
@@ -718,9 +756,28 @@ export interface WorldField {
   /** Splat weights at `offset..` AND tint in the three floats after them, from ONE biome evaluation. */
   surfaceAt(x: number, y: number, z: number, ny: number, out: Float32Array, offset: number): void;
   /** Sample a padded block for the mesher, honouring the column optimisation. */
-  sampleBlock(request: SampleBlockRequest): Float32Array;
+  sampleBlock(request: SampleBlockRequest, exact?: SampleBlockExact): Float32Array;
   /** Ground height range over an XZ rectangle, sampled on a coarse lattice. */
   heightRange(x0: number, z0: number, x1: number, z1: number, samples?: number): { min: number; max: number };
+  /**
+   * Does a planar-cliff mask (`terrain.planarCliffs`) reach any full-detail lattice column in the rectangle?
+   * Always false without planarCliffs. What `voxelWorld.mesher: "auto"` decides a cell's mesher by.
+   */
+  planarMaskIn(x0: number, z0: number, x1: number, z1: number): boolean;
+  /**
+   * The real top surface where planar cliffs rebuild the ground (treads and walls are not the heightfield),
+   * and exactly `height()` everywhere else — so worlds without planarCliffs read the same number as before.
+   * What scatter stands props on.
+   */
+  ground(x: number, z: number): number;
+  /** True where planar cliffs can change the ground at (x, z): there `height()` is not the surface. */
+  planarNear(x: number, z: number): boolean;
+  /** Steepness (0 flat, 1 vertical; the units of `slope`) of the DENSITY surface at a point on it — a tread is flat here even where the heightfield under it is steep. */
+  surfaceSlope(x: number, y: number, z: number): number;
+  /** Unit outward normal of the density surface at a point on it. */
+  surfaceNormal(x: number, y: number, z: number): [number, number, number];
+  /** Rock a voxel below (x, y, z) and below eight points `r` out from it: ground a prop can stand on (see scatter's planar footing). */
+  planarFooting(x: number, y: number, z: number, r: number): boolean;
   /** Topmost solid surface at (x, z) accounting for overhangs/caves, or null if none in range. */
   surfaceCast(x: number, z: number, fromY?: number, toY?: number): number | null;
   /**
@@ -730,8 +787,15 @@ export interface WorldField {
    * density is (see `editedGround` in scatter.ts).
    */
   carveSpan(x0: number, z0: number, x1: number, z1: number): { min: number; max: number } | null;
-  /** Distance to the nearest river/road/town/lake edge — what `scatter.clearance` tests. */
-  featureClearance(x: number, z: number): number;
+  /**
+   * Distance to the nearest river/road/town/lake edge — what `scatter.clearance` tests.
+   * `cover` asks for ground cover instead: a town with `cover: true` does not count.
+   */
+  featureClearance(x: number, z: number, cover?: boolean): number;
+  /** The world's sea-cliff stretches (`terrain.seaCliffs`): stacks and surf points for tools and the chunk's surf emitters. Null without. */
+  seaCliffs(): SeaCliffs | null;
+  /** The world's butte fields (`terrain.buttes`), for tools. Null without. */
+  buttes(): Buttes | null;
   /**
    * Height of the water surface over (x, z), or null on dry land: the sea
    * where the ground is below seaLevel, a lake inside its outline, a river
@@ -747,8 +811,19 @@ export interface WorldField {
    * (chunk.ts builds each cell's water mesh this way).
    */
   waterSurface(x: number, z: number, out: SurfaceSample): boolean;
-  /** Could any lake or wet river reach into this XZ rectangle? A cheap bucket test to skip dry cells. */
+  /** Could any lake, wet river or marsh reach into this XZ rectangle? A cheap test to skip dry cells. */
   waterNear(x0: number, z0: number, x1: number, z1: number): boolean;
+  /**
+   * The highest LAKE level over (x, z) (inside its outline plus the same 3/4 bank `waterY` counts), or null: no
+   * rivers, no sea, no marsh, and no ground read, so a bucket lookup and a polygon distance. What a shore probe asks.
+   */
+  lakeY(x: number, z: number): number | null;
+  /**
+   * The marsh water table over (x, z) — the level of the still sheet a zone anchor with a `waterTable`
+   * holds — or null outside every marsh. Like `waterSurface` it does not look at the ground: the sheet
+   * is water only where the ground is under it.
+   */
+  marshTable(x: number, z: number): number | null;
   /**
    * Signed distance to the nearest coastline in metres, positive inland, or
    * +Infinity for a recipe without `bounds`. Where the shore profile is on
@@ -801,6 +876,137 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
    * open on the coast — 2.4 world units of disagreement, latent until then.
    */
   const overhangReach = t.overhang.strength * 1.35 + voxelSize;
+  // Opt-in planar cliffs (./planar-cliffs.ts). Null = every path below is the old one.
+  const planar = t.planarCliffs ? createPlanarCliffs(t.planarCliffs, seed) : null;
+  let planarPt: PlanarPoint | null = null;
+  // Built on first use: it reads height(), zones and regions, which exist only once the field is assembled.
+  let planarSetup: PlanarSetup | null = null;
+  const setupOf = (): PlanarSetup =>
+    (planarSetup ??= createPlanarSetup(planar!.spec, seed, height, calmFactor, {
+      clearance: (x, z) => featureClearance(x, z),
+      features: planar!.spec.falls || hasSeaCliffs || hasButtes ? planarFeatures() : undefined,
+      anchorIds: recipe.climate.zones?.anchors.map((a) => a.id) ?? [],
+      anchors: (x, z) => {
+        zoneAtWarped(x, z);
+        return zoneScratch;
+      },
+      regions: (ids, band) => {
+        const zones = ids.map((id) => {
+          const r = recipe.regions.find((g) => g.id === id);
+          const poly = r?.polygon ?? [];
+          let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
+          for (const [px, pz] of poly) { x0 = Math.min(x0, px); z0 = Math.min(z0, pz); x1 = Math.max(x1, px); z1 = Math.max(z1, pz); }
+          return { id, polygon: poly, bbox: [x0, z0, x1, z1] as [number, number, number, number], parent: -1, targets: new Int16Array(0) };
+        }).filter((zn) => zn.polygon.length >= 3);
+        for (const zn of zones) { const r = recipe.regions.find((g) => g.id === zn.id); if (r?.within) zn.parent = zones.findIndex((o) => o.id === r.within); }
+        const membership = createZoneMembership({ ...recipe, zoneGround: { band, jitter: 0.2 } }, { baseRole: new Int8Array(0), overrideRole: new Int8Array(0), zones, unresolved: [] });
+        const tmp = new Float32Array(Math.max(1, zones.length));
+        return (x, z, out) => {
+          membership(x, z, tmp);
+          for (let k = 0; k < ids.length; k++) { const at = zones.findIndex((zn) => zn.id === ids[k]); out[k] = at >= 0 ? tmp[at]! : 0; }
+        };
+      },
+    }));
+  const terraceOf = () => setupOf().terr;
+  // Opt-in sea cliffs (./sea-cliffs.ts): built on first use (they read the shore distance, which needs the continents).
+  const seaDocs = t.seaCliffs ?? [];
+  let seaCliffs: SeaCliffs | null = null;
+  /**
+   * What sea cliffs and butte fields keep clear of: recipe data, never solved data — the features that shape their
+   * own ground over a wide area (towns, roads, rivers, lakes, big fills). NOT height patches or POIs: a patch is
+   * applied over the finished profile (heightThroughPatches) and levels its own footprint, and the planar walls hand
+   * the column back to the patched heightfield under it (`hold`), so a pad or a POI on a stack top or a cliff top
+   * levels locally. Clearing round them pushed the whole wall back 40-90 m and dropped any stack whose site weight
+   * fell under 0.6 — a POI sited on a stack erased the stack.
+   */
+  const featureObstacles = () => [
+        // big fills only: a raised landform (a mesa, a plateau) is a place; a small one is a drained hollow the plain may cover
+        ...recipe.features.fills.filter((fl) => Math.abs(fl.polygon.reduce((s, p, i, a) => s + p[0] * a[(i + 1) % a.length]![1] - a[(i + 1) % a.length]![0] * p[1], 0)) / 2 > 50000).map((fl) => ({ points: fl.polygon, radius: fl.bank, closed: true })),
+        ...recipe.features.towns.map((tw) => ({ points: [tw.center] as [number, number][], radius: tw.radius + tw.falloff })),
+        ...recipe.features.roads.map((r) => ({ points: r.points, radius: r.width / 2 + r.shoulder + r.smooth })),
+        ...recipe.features.rivers.map((r) => ({ points: r.points, radius: r.width / 2 + r.bank * 3 })),
+        ...recipe.features.lakes.map((l) => (l.polygon ? { points: l.polygon, radius: l.bank, closed: true } : { points: [l.center] as [number, number][], radius: l.radius + l.bank })),
+      ];
+  const seaOf = (): SeaCliffs =>
+    (seaCliffs ??= createSeaCliffs(seaDocs, {
+      seaLevel: recipe.seaLevel,
+      seed,
+      shore: (x, z) => shoreAt(x, z).distance,
+      region: (id) => recipe.regions.find((g) => g.id === id)?.polygon ?? null,
+      obstacles: featureObstacles(),
+    }));
+  // Opt-in butte fields (./buttes.ts)
+  const butteDocs = t.buttes ?? [];
+  const hasButtes = butteDocs.length > 0;
+  let buttes: Buttes | null = null;
+  const buttesOf = (): Buttes => (buttes ??= createButtes(butteDocs, { seed, obstacles: featureObstacles() }));
+  /** The planar path's view of the water and coast features (`planarCliffs.falls`, `terrain.seaCliffs`). */
+  function planarFeatures(): PlanarFeatureSource {
+    const own: OwnerHit[] = [];
+    const src: PlanarFeatureSource = { dryClearance };
+    if (hasSeaCliffs) src.sea = seaOf();
+    if (hasButtes) src.buttes = buttesOf();
+    if ((hasSeaCliffs || hasButtes) && heightPatchDocs.length > 0) {
+      // the strongest patch over the column, by the same rule heightThroughPatches applies them
+      src.hold = (x, z) => {
+        let w = 0;
+        for (let k = 0; k < heightPatchDocs.length; k++) {
+          if (!memoReady && builtWorkPatch[k]) continue;
+          const doc = heightPatchDocs[k]!;
+          const dx = x - doc.origin[0], dz = z - doc.origin[1];
+          if (dx <= 0 || dz <= 0 || dx >= doc.size[0] || dz >= doc.size[1]) continue;
+          w = Math.max(w, preparedPatch(k).weight(x, z));
+          if (w >= 1) break;
+        }
+        return w;
+      };
+    }
+    if (planar!.spec.falls) {
+      src.lips = (x, z, out, pad = 0) => {
+        let n = 0;
+        if (lipList.length === 0) return 0;
+        for (const lip of bucketAt(lipBuckets, x, z) as readonly Lip[]) {
+          const px = x - lip.lx, pz = z - lip.lz;
+          const rel = px * lip.dx + pz * lip.dz, across = Math.abs(-px * lip.dz + pz * lip.dx);
+          // lipAt's band: FALL_WALL_UP + 3 upstream of the line, the drop + 30 past it, `reach` across
+          const up = FALL_WALL_UP + 3, down = lip.top - lip.bottom + 30;
+          if (across > lip.reach + pad || rel < -up - pad || rel > down + pad) continue;
+          const w = smoothstep(-up + 1, -up + 5, rel) * (1 - smoothstep(down - 8, down - 2, rel)) * (1 - smoothstep(lip.reach - 8, lip.reach - 1.5, across));
+          const wc = smoothstep(-up, -up + 3, rel) * (1 - smoothstep(down - 6, down, rel)) * (1 - smoothstep(lip.reach - 6, lip.reach, across));
+          if (wc <= 0 && pad <= 0) continue;
+          const o = (out[n] ??= { rel: 0, across: 0, dx: 0, dz: 0, top: 0, bottom: 0, w: 0, wc: 0 } as PlanarLipHit);
+          o.rel = rel; o.across = across; o.dx = lip.dx; o.dz = lip.dz; o.top = lip.top; o.bottom = lip.bottom; o.w = w; o.wc = pad > 0 ? 1 : wc;
+          n++;
+        }
+        return n;
+      };
+      src.bank = (x, z, out) => {
+        let best = Infinity, acc = 0, sum = 0;
+        const count = nearestPerOwner(riverSegs, x, z, own);
+        const take = (d: number, level: number): void => {
+          if (d < best) best = d;
+          const w = Math.exp(-Math.max(0, d) / 4);
+          acc += w * level; sum += w;
+        };
+        for (let k = 0; k < count; k++) {
+          const hit = own[k]!, river = riverDocs[hit.owner]!;
+          if (!river.water || Number.isNaN(hit.value)) continue;
+          const grow = river.taper > 0 ? smoothstep(0, river.taper, hit.along) : 1;
+          if (grow < HEAD_WET) continue;
+          const width = Number.isNaN(hit.width) ? river.width : hit.width;
+          take(hit.distance - (width / 2 + riverBank(river, hit.width) * 0.5), riverSurface(river, hit.value, hit.side));
+        }
+        for (const lake of bucketAt(lakes, x, z) as readonly LakeDoc[]) take(lakeDistance(lake, x, z) - lake.bank * 0.75, lake.waterY);
+        if (sum <= 0) return false;
+        // the levels of every body within reach, weighted by nearness: continuous where two banks meet
+        out.level = acc / sum;
+        out.dist = best;
+        return true;
+      };
+    }
+    return src;
+  }
+  const planarAt = (): PlanarPoint => (planarPt ??= planarPoint(setupOf().pc, height, setupOf().maskAt, voxelSize, terraceOf()));
   const caveA: FbmSpec = { frequency: t.caves.frequency, amplitude: 1, octaves: 2, lacunarity: 2.1, gain: 0.5, ridged: false, seed: t.caves.seed };
   const caveB: FbmSpec = { ...caveA, seed: t.caves.seed + 4001 };
 
@@ -814,6 +1020,8 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
   const landFloor = recipe.bounds?.landFloor ?? 0;
   const shelf = recipe.bounds?.shelf ?? 0.58;
   const hasShoreProfile = hasBounds && landFloor > 0;
+  /** Sea cliffs need the shore profile: their wall is drawn on its shoreline distance. */
+  const hasSeaCliffs = seaDocs.length > 0 && hasShoreProfile;
   const worldLimit = recipe.bounds?.limit ?? Infinity;
   const limitFalloff = recipe.bounds?.limitFalloff ?? 600;
   /** One warp per landmass, separately seeded so two coasts aren't the same shape. */
@@ -871,8 +1079,164 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
   const zoneSeed = ((seed + (zones?.seed ?? 0)) ^ 0x20e5) | 0;
   const latitude = zones?.latitude;
   const anchorWeightSum = anchors.reduce((s, a) => s + a.weight, 0);
+  // Marsh water tables (anchor `waterTable`), opt-in: a world whose anchors
+  // set none takes none of the paths below, so its ground is unchanged.
+  const anchorTable = Float64Array.from(anchors, (a) => (a.waterTable === undefined || a.flatten <= 0 ? NaN : a.waterTable));
+  const anchorHummocks = Float64Array.from(anchors, (a) => a.hummocks ?? 1);
+  const hasMarsh = hasZones && anchorTable.some((v) => !Number.isNaN(v));
+  const marshDoc = zones?.marsh;
+  const hummockSpec: FbmSpec = { frequency: marshDoc?.frequency ?? 0.018, amplitude: 1, octaves: 3, lacunarity: 2.1, gain: 0.5, ridged: false, seed: marshDoc?.seed ?? 2741 };
+  const MARSH_MAX_DEPTH = marshDoc?.maxDepth ?? 1.1;
+  const MARSH_RIM = marshDoc?.rim ?? 0.4;
+  const MARSH_BIAS = marshDoc?.wetBias ?? 0;
+  const marshMaterial = recipe.marshMaterial ?? recipe.waterMaterial;
   /** Which anchor a zone site picks — cached, since every column near a site asks. */
   const siteAnchorCache = new Map<number, number>();
+
+  // ------------------------------------------------------------- landforms
+  //
+  // Anchor `landform` profiles (opt-in). A profile is a weighted mix of shape
+  // families; each Voronoi site of an anchor draws one of the anchor's
+  // profiles (the landform and its variants) by a stable hash, and the
+  // per-site membership weights blend the profiles' OUTPUTS — every family is
+  // a continuous function of (x, z), and the weights are continuous, so the
+  // blend is too. A world whose anchors carry no `landform` builds no profile
+  // and takes none of these paths.
+  const rmf = t.ridgedMultifractal;
+  const hasRmf = !!rmf && rmf.enabled && t.mountains.amplitude !== 0;
+  interface Fam { w: number; spec: FbmSpec; amp: number; sharp: number }
+  interface Profile {
+    rolling: number;
+    hummocky: Fam | null;
+    drumlin: (Fam & { cos: number; sin: number; stretch: number }) | null;
+    karst: (Fam & { cell: number; towers: number; density: number; seed: number }) | null;
+    cuesta: (Fam & { cos: number; sin: number; steps: number; warp: FbmSpec; period: number }) | null;
+    wetland: (Fam & { level: number }) | null;
+    mesa: (Fam & { steps: number }) | null;
+    cliffs: number;
+    frame: number;
+    valley: { shape: number; width: number; depth: number; strength: number; floor: number } | null;
+    /** Any additive family (everything but rolling / wetland) has weight. */
+    bands: boolean;
+  }
+  const profiles: Profile[] = [];
+  /** Per anchor: its profile indices and their cumulative draw weights, or null (no landform). */
+  const anchorProfiles: ({ ids: number[]; cum: number[]; total: number } | null)[] = [];
+  /** Range directions (radians) for the multifractal frames; frame 0 is the recipe's default angle. */
+  const frameAngles: number[] = [rmf?.angle ?? 0];
+  const hasAnchorCliffs = anchors.some((a) => a.landform !== undefined && (a.landform.cliffs !== undefined || (a.landform.variants ?? []).some((v) => v.cliffs !== undefined)));
+  /** Cliff strength an anchor or profile gets when it does not say. */
+  const defaultCliffs = t.cliffs.enabled ? 1 : 0;
+  {
+    const frameOf = (angle: number | undefined): number => {
+      if (angle === undefined || !hasRmf) return 0;
+      let i = frameAngles.indexOf(angle);
+      if (i < 0) i = frameAngles.push(angle) - 1;
+      return i;
+    };
+    const spec = (frequency: number, seedN: number, octaves: number): FbmSpec => ({ frequency, amplitude: 1, octaves, lacunarity: 2.05, gain: 0.5, ridged: false, seed: seedN });
+    const build = (p: LandformProfileDoc): Profile => {
+      const hum = p.hummocky && p.hummocky.weight > 0 ? p.hummocky : null;
+      const dr = p.drumlin && p.drumlin.weight > 0 ? p.drumlin : null;
+      const ka = p.karst && p.karst.weight > 0 ? p.karst : null;
+      const cu = p.cuesta && p.cuesta.weight > 0 ? p.cuesta : null;
+      const we = p.wetland && p.wetland.weight > 0 ? p.wetland : null;
+      const me = p.mesa && p.mesa.weight > 0 ? p.mesa : null;
+      const drAngle = dr?.angle ?? t.dunes.angle;
+      return {
+        rolling: p.rolling ? p.rolling.weight * p.rolling.amplitude : 0,
+        hummocky: hum ? { w: hum.weight, spec: spec(hum.frequency, hum.seed, 3), amp: hum.amplitude, sharp: hum.sharpness } : null,
+        drumlin: dr
+          ? { w: dr.weight, spec: spec(dr.frequency, dr.seed, 2), amp: dr.amplitude, sharp: dr.sharpness, cos: Math.cos(drAngle), sin: Math.sin(drAngle), stretch: dr.stretch }
+          : null,
+        karst: ka
+          ? { w: ka.weight, spec: spec(ka.frequency, ka.seed, 1), amp: ka.amplitude, sharp: ka.sharpness, cell: 1 / ka.frequency, towers: ka.towers, density: ka.density, seed: ka.seed }
+          : null,
+        cuesta: cu
+          ? {
+              w: cu.weight,
+              spec: spec(cu.frequency * 0.35, cu.seed, 2),
+              amp: cu.amplitude,
+              sharp: cu.sharpness,
+              cos: Math.cos(cu.angle),
+              sin: Math.sin(cu.angle),
+              steps: cu.steps,
+              warp: spec(cu.frequency * 0.8, cu.seed + 7, 2),
+              period: 1 / cu.frequency,
+            }
+          : null,
+        wetland: we ? { w: we.weight, spec: spec(we.frequency, we.seed, 3), amp: we.amplitude, sharp: 0, level: we.level } : null,
+        mesa: me ? { w: me.weight, spec: { frequency: me.frequency, amplitude: 1, octaves: 3, lacunarity: 2.1, gain: 0.5, ridged: false, seed: me.seed }, amp: me.amplitude, sharp: me.sharpness, steps: me.steps } : null,
+        cliffs: p.cliffs ?? defaultCliffs,
+        frame: frameOf(p.rangeAngle),
+        valley:
+          p.valley && p.valley.strength > 0
+            ? { shape: p.valley.shape === "U" ? 0 : p.valley.shape === "V" ? 1 : 2, width: p.valley.width, depth: p.valley.depth, strength: p.valley.strength, floor: p.valley.floor }
+            : null,
+        bands: !!(hum || dr || ka || cu || me),
+      };
+    };
+    for (const a of anchors) {
+      const lf = a.landform;
+      if (!lf) {
+        anchorProfiles.push(null);
+        continue;
+      }
+      const ids: number[] = [];
+      const cum: number[] = [];
+      let total = 0;
+      for (const [doc, w] of [[lf, lf.weight] as const, ...(lf.variants ?? []).map((v) => [v, v.weight] as const)]) {
+        ids.push(profiles.push(build(doc)) - 1);
+        total += w;
+        cum.push(total);
+      }
+      anchorProfiles.push({ ids, cum, total });
+    }
+  }
+  const hasLandforms = profiles.length > 0;
+  // Calm discs (features.landformCalm): authored places keep the ground they
+  // were built on. Only read when the world has landform profiles.
+  const calmDiscs = hasLandforms ? (recipe.features.landformCalm ?? []) : [];
+  const hasLandformCalm = calmDiscs.length > 0;
+  const calmDiscBuckets = makeBuckets(calmDiscs, (d) => [d.center[0] - d.radius - d.falloff, d.center[1] - d.radius - d.falloff, d.center[0] + d.radius + d.falloff, d.center[1] + d.radius + d.falloff]);
+  /** 1 where landform profiles apply in full, 0 inside a calm disc. */
+  function landformCalmAt(x: number, z: number): number {
+    let c = 1;
+    const near = bucketAt(calmDiscBuckets, x, z);
+    for (let i = 0; i < near.length; i++) {
+      const d = near[i]!;
+      const dx = x - d.center[0];
+      const dz = z - d.center[1];
+      const reach = d.radius + d.falloff;
+      const d2 = dx * dx + dz * dz;
+      if (d2 >= reach * reach) continue;
+      const r = Math.sqrt(d2) - d.radius;
+      if (r <= 0) return 0;
+      if (r < d.falloff) c = Math.min(c, smoothstep(0, d.falloff, r));
+    }
+    return c;
+  }
+  const hasValleys = profiles.some((p) => p.valley !== null);
+  const maxValleyWidth = profiles.reduce((m, p) => Math.max(m, p.valley?.width ?? 0), 0);
+  /**
+   * The valley the last `naturalHeight` column asked for, stashed for
+   * `applyFeatures` (always called on that same column's natural height):
+   * per-shape strength (U, V, flat) and the membership-weighted width,
+   * depth and floor.
+   */
+  const valleyHere = { u: 0, v: 0, flat: 0, width: 0, depth: 0, floor: 0 };
+  /** Per-profile blended weight at the last `zoneAt`, and which profiles are non-zero. */
+  const profileW = new Float64Array(Math.max(1, profiles.length));
+  const activeProfiles: number[] = [];
+  const frameW = new Float64Array(frameAngles.length);
+  /** The profile a zone site of anchor `a` draws: a stable hash of the site, by the profiles' weights. */
+  function siteProfile(gx: number, gz: number, a: number): number {
+    const ap = anchorProfiles[a]!;
+    if (ap.ids.length === 1) return ap.ids[0]!;
+    const pick = hashUnit(gx, gz, 11, zoneSeed) * ap.total;
+    for (let i = 0; i < ap.ids.length; i++) if (pick < ap.cum[i]!) return ap.ids[i]!;
+    return ap.ids[ap.ids.length - 1]!;
+  }
 
   /**
    * Latitude 0..1 of a point along the recipe's cold-to-hot axis. Sites are
@@ -919,7 +1283,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
 
   /** Per-anchor blended weights at the last `zoneAt` call, plus the landform multipliers it implies. */
   const zoneScratch = new Float32Array(Math.max(anchorCount, 1));
-  const zoneForm = { relief: 1, hills: 1, dunes: -1, mesas: 0, flatten: 0, temperature: 0.5, moisture: 0.5, best: -1 };
+  const zoneForm = { relief: 1, hills: 1, dunes: -1, mesas: 0, flatten: 0, temperature: 0.5, moisture: 0.5, best: -1, wet: 0, marsh: 0, table: 0, hummocks: 0, cliffs: 1, legacyHills: 0, legacyMesas: 0 };
 
   /**
    * Zone membership at (x, z): jittered Voronoi over a `size` grid, borders
@@ -931,6 +1295,10 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
   function zoneAt(x: number, z: number): void {
     zoneScratch.fill(0);
     if (!hasZones) return;
+    if (hasLandforms) {
+      for (const p of activeProfiles) profileW[p] = 0;
+      activeProfiles.length = 0;
+    }
     let sx = x;
     let sz = z;
     if (zoneWarpA.amplitude > 0) {
@@ -965,6 +1333,11 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
         const a = siteAnchor(gx, gz, px, pz);
         zoneScratch[a] = zoneScratch[a]! + w;
         total += w;
+        if (hasLandforms && anchorProfiles[a]) {
+          const p = siteProfile(gx, gz, a);
+          if (profileW[p] === 0) activeProfiles.push(p);
+          profileW[p] = profileW[p]! + w;
+        }
       }
     }
     let relief = 0;
@@ -972,19 +1345,44 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     let dunes = 0;
     let mesas = 0;
     let flatten = 0;
+    let wet = 0;
+    let marsh = 0;
+    let tableSum = 0;
+    let humSum = 0;
     let temperature = 0;
     let moisture = 0;
     let best = 0;
+    let cliffsSum = 0;
+    let legacyHills = 0;
+    let legacyMesas = 0;
+    if (hasRmf) frameW.fill(0);
     for (let i = 0; i < anchorCount; i++) {
       const w = zoneScratch[i]! / total;
       zoneScratch[i] = w;
       if (w <= 0) continue;
       const a = anchors[i]!;
       relief += a.relief * w;
-      hillsMul += a.hills * w;
+      if (hasLandformCalm) {
+        legacyHills += a.hills * w;
+        legacyMesas += a.mesas * w;
+      }
+      if (!hasLandforms || !anchorProfiles[i]) {
+        hillsMul += a.hills * w;
+        mesas += a.mesas * w;
+        if (hasAnchorCliffs) cliffsSum += defaultCliffs * w;
+        if (hasRmf) frameW[0] = frameW[0]! + w;
+      }
       dunes += a.dunes * w;
-      mesas += a.mesas * w;
       flatten += a.flatten * w;
+      if (hasMarsh) {
+        const table = anchorTable[i]!;
+        if (!Number.isNaN(table)) {
+          wet += a.flatten * w;
+          marsh += w;
+          tableSum += table * w;
+          humSum += anchorHummocks[i]! * w;
+        }
+      }
       temperature += a.temperature * w;
       moisture += a.moisture * w;
       if (w > zoneScratch[best]!) best = i;
@@ -994,9 +1392,26 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     zoneForm.dunes = dunes;
     zoneForm.mesas = mesas;
     zoneForm.flatten = flatten;
+    zoneForm.wet = wet;
+    zoneForm.marsh = marsh;
+    zoneForm.table = marsh > 0 ? tableSum / marsh : 0;
+    zoneForm.hummocks = marsh > 0 ? humSum / marsh : 0;
     zoneForm.temperature = temperature;
     zoneForm.moisture = moisture;
     zoneForm.best = best;
+    if (hasLandforms) {
+      for (const p of activeProfiles) {
+        const w = (profileW[p] = profileW[p]! / total);
+        const pr = profiles[p]!;
+        hillsMul += pr.rolling * w;
+        if (hasAnchorCliffs) cliffsSum += pr.cliffs * w;
+        if (hasRmf) frameW[pr.frame] = frameW[pr.frame]! + w;
+      }
+      zoneForm.hills = hillsMul;
+    }
+    if (hasAnchorCliffs) zoneForm.cliffs = cliffsSum;
+    zoneForm.legacyHills = legacyHills;
+    zoneForm.legacyMesas = legacyMesas;
   }
 
   /**
@@ -1057,6 +1472,30 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       (i) => riverReach(docs[i]!),
     );
   let riverSegs = buildRiverSegs(riverDocs);
+  // Valleys read the same segments, bucketed as wide as the widest valley;
+  // rebuilt lazily whenever the rivers are (riverSegs is replaced then).
+  let valleySegs: FeatureBuckets<PolySegment> | null = null;
+  let valleyFor: FeatureBuckets<PolySegment> | null = null;
+  let valleyDocs: readonly RiverDoc[] = [];
+  function valleyBuckets(): FeatureBuckets<PolySegment> {
+    if (valleyFor !== riverSegs || valleyDocs !== riverDocs) {
+      valleyFor = riverSegs;
+      valleyDocs = riverDocs;
+      const docs = riverDocs;
+      valleySegs = segmentBuckets(
+        segmentsOf(
+          docs,
+          (r) => r.bedY,
+          (r) => {
+            const surface = surfaceOf(r);
+            return surface ? [surface, surface] : [undefined, undefined];
+          },
+        ),
+        (i) => (riverWidest(docs[i]!) * maxValleyWidth) / 2 + 4,
+      );
+    }
+    return valleySegs!;
+  }
   const roadSegs = segmentBuckets(
     segmentsOf(
       roadDocs,
@@ -1132,6 +1571,77 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       ? [Math.min(p.start[0], end) - pad, p.start[2] - half, Math.max(p.start[0], end) + pad, p.start[2] + half]
       : [p.start[0] - half, Math.min(p.start[2], end) - pad, p.start[0] + half, Math.max(p.start[2], end) + pad];
   });
+  // Overhang noise is natural rock: it has no business on ground levelled for built works. A fitted terrace wall's
+  // pad, strip and riser are CALM (overhang mask 0), fading back to the noise over CALM_FADE m. Without this the
+  // riser the wall stands in measures as a cliff and the noise heaves the wall foot and the pad edge by metres.
+  const CALM_FADE = 6;
+  const calmRects: [number, number, number, number][] = [];
+  for (const tw of recipe.features.terraceWalls ?? []) {
+    if (!tw.solved) continue;
+    const reach = tw.strip + 2;
+    let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
+    for (const [x, z] of tw.footprint) { x0 = Math.min(x0, x); z0 = Math.min(z0, z); x1 = Math.max(x1, x); z1 = Math.max(z1, z); }
+    calmRects.push([x0 - reach, z0 - reach, x1 + reach, z1 + reach]);
+  }
+  // operator kit walls (`features.kitWalls`): each module's face, both sides, is built ground too
+  for (const kw of recipe.features.kitWalls ?? []) for (const c of kw.cuts) {
+    const ex = c.origin[0] + c.dir[0] * c.s[1], ez = c.origin[1] + c.dir[1] * c.s[1], reach = c.n[1] + 1;
+    calmRects.push([Math.min(c.origin[0], ex) - reach, Math.min(c.origin[1], ez) - reach, Math.max(c.origin[0], ex) + reach, Math.max(c.origin[1], ez) + reach]);
+  }
+  const calmBuckets = makeBuckets(calmRects, (r) => [r[0] - CALM_FADE, r[1] - CALM_FADE, r[2] + CALM_FADE, r[3] + CALM_FADE]);
+  /** 0 on built ground (a terrace wall's footprint), 1 where natural overhang noise applies in full. */
+  function calmFactor(x: number, z: number): number {
+    if (calmRects.length === 0) return 1;
+    let f = 1;
+    for (const r of bucketAt(calmBuckets, x, z)) {
+      const d = Math.hypot(Math.max(r[0] - x, 0, x - r[2]), Math.max(r[1] - z, 0, z - r[3]));
+      if (d < CALM_FADE) f = Math.min(f, smoothstep(0, CALM_FADE, d));
+    }
+    return f;
+  }
+  // Terrace wall cuts (`features.terraceWalls[].solved.cuts`): oriented boxes, any heading. Their signed field is
+  // kept OUTSIDE too (like a passage's) so an MC crossing lands on the box plane, not on the lattice.
+  interface TerraceCut { ox: number; oz: number; dx: number; dz: number; s0: number; s1: number; n0: number; n1: number; y0: number; y1: number; face: boolean }
+  const CUT_FALLOFF = 4;
+  const terraceCuts: TerraceCut[] = [];
+  // path ribbons (`features.ribbons`, compiled by the `path` operator) cut the low side of their retaining walls the same way
+  const wallCutSets = [...(recipe.features.terraceWalls ?? []).map((tw) => tw.solved?.cuts ?? []), ...(recipe.features.ribbons ?? []).map((r) => r.cuts), ...(recipe.features.kitWalls ?? []).map((w) => w.cuts)];
+  for (const cuts of wallCutSets) {
+    for (const c of cuts) {
+      const l = Math.hypot(c.dir[0], c.dir[1]) || 1;
+      terraceCuts.push({ ox: c.origin[0], oz: c.origin[1], dx: c.dir[0] / l, dz: c.dir[1] / l, s0: c.s[0], s1: c.s[1], n0: c.n[0], n1: c.n[1], y0: c.y[0], y1: c.y[1], face: c.kind === "face" });
+    }
+  }
+  const cutBounds = (c: TerraceCut): [number, number, number, number] => {
+    // the four corners of the (s, n) rectangle, n to the right of dir: (-dz, dx)
+    let a = Infinity, b = Infinity, e = -Infinity, f = -Infinity;
+    for (const s of [c.s0, c.s1]) for (const n of [c.n0, c.n1]) {
+      const x = c.ox + c.dx * s - c.dz * n, z = c.oz + c.dz * s + c.dx * n;
+      a = Math.min(a, x); b = Math.min(b, z); e = Math.max(e, x); f = Math.max(f, z);
+    }
+    return [a - CUT_FALLOFF, b - CUT_FALLOFF, e + CUT_FALLOFF, f + CUT_FALLOFF];
+  };
+  const cutBuckets = makeBuckets(terraceCuts, cutBounds);
+  function terraceCutsAt(x: number, y: number, z: number, d: number): number {
+    for (const c of bucketAt(cutBuckets, x, z) as readonly TerraceCut[]) {
+      const rx = x - c.ox, rz = z - c.oz;
+      const s = rx * c.dx + rz * c.dz, n = -rx * c.dz + rz * c.dx;
+      if (s < c.s0 - CUT_FALLOFF || s > c.s1 + CUT_FALLOFF || n < c.n0 - CUT_FALLOFF || n > c.n1 + CUT_FALLOFF || y < c.y0 - CUT_FALLOFF || y > c.y1 + CUT_FALLOFF) continue;
+      d = Math.max(d, Math.min(s - c.s0, c.s1 - s, n - c.n0, c.n1 - n, y - c.y0, c.y1 - y));
+    }
+    return d;
+  }
+  /** The ground a query sees in front of a terrace wall: its foot, not the lattice berm the cut removes. */
+  function cutHeight(x: number, z: number, h: number): number {
+    if (terraceCuts.length === 0) return h;
+    for (const c of bucketAt(cutBuckets, x, z) as readonly TerraceCut[]) {
+      if (!c.face) continue;
+      const rx = x - c.ox, rz = z - c.oz;
+      const s = rx * c.dx + rz * c.dz, n = -rx * c.dz + rz * c.dx;
+      if (n >= -1e-6 && n <= c.n1 && s >= c.s0 && s <= c.s1 && h > c.y0) h = c.y0;
+    }
+    return h;
+  }
   const hits: OwnerHit[] = [];
   /** While solving a hand-written river's bed: applyFeatures stops after the water stage (no towns, no roads). */
   let waterStageOnly = false;
@@ -1204,13 +1714,15 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
   // ---------------------------------------------------------------- ceiling
   const ceiling = t.ceiling;
   const hasCeiling = !!ceiling && ceiling.height > 0;
+  const ceilingWander = hasCeiling ? (ceiling.variation ?? 0) : 0;
+  const ceilingSpec: FbmSpec = { frequency: ceiling?.variationFrequency ?? 0.00035, amplitude: 1, octaves: 2, lacunarity: 2, gain: 0.5, ridged: false, seed: ceiling?.variationSeed ?? 1931 };
 
   // ------------------------------------------------------------------ coast
   const coast = t.coast;
   const hasCoastCliffs = coast.cliff > 0 && coast.band > 0;
   const coastSpec: FbmSpec = { frequency: coast.frequency, amplitude: 1, octaves: 3, lacunarity: 2.1, gain: 0.5, ridged: false, seed: coast.seed };
   const cliffs = t.cliffs;
-  const hasCliffs = cliffs.enabled && cliffs.sharpness > 0 && cliffs.strength > 0 && t.mountains.amplitude !== 0;
+  const hasCliffs = (cliffs.enabled || hasAnchorCliffs) && cliffs.sharpness > 0 && cliffs.strength > 0 && t.mountains.amplitude !== 0;
   const cliffMaskSpec: FbmSpec = {
     frequency: cliffs.mask.frequency,
     amplitude: 1,
@@ -1229,6 +1741,36 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     ridged: false,
     seed: cliffs.seed,
   };
+
+  // ---------------------------------------------- ridged multifractal ranges
+  const rmfWarpA: FbmSpec = { frequency: rmf?.warpFrequency ?? 0.00042, amplitude: rmf?.warp ?? 0, octaves: 2, lacunarity: 2, gain: 0.5, ridged: false, seed: (rmf?.seed ?? 4201) + 1 };
+  const rmfWarpB: FbmSpec = { ...rmfWarpA, seed: (rmf?.seed ?? 4201) + 2 };
+  const frameCos = Float64Array.from(frameAngles, (a) => Math.cos(a));
+  const frameSin = Float64Array.from(frameAngles, (a) => Math.sin(a));
+  const rmfRotCos = Math.cos(rmf?.rotate ?? 0);
+  const rmfRotSin = Math.sin(rmf?.rotate ?? 0);
+  const rmfStretch = rmf?.stretch ?? 1;
+  /**
+   * Scale that gives the multifractal the plain ridged band's MEAN, so the
+   * band's `amplitude` (and the ceiling and cliffs tuned against it) keep
+   * their meaning. Measured once on a fixed lattice — deterministic.
+   */
+  const rmfScale = ((): number => {
+    if (!hasRmf) return 1;
+    const unit: FbmSpec = { ...t.mountains, amplitude: 1 };
+    const step = 0.37 / t.mountains.frequency;
+    let plain = 0;
+    let multi = 0;
+    for (let j = 0; j < 40; j++) {
+      for (let i = 0; i < 40; i++) {
+        const x = (i - 20) * step + 13.7;
+        const z = (j - 20) * step - 29.1;
+        plain += fbm2(unit, x, z, seed);
+        multi += ridgedMultifractal2(unit, x, z, seed, rmf!.offset, rmf!.gain, rmf!.H, rmfRotCos, rmfRotSin);
+      }
+    }
+    return multi > 0 ? plain / multi : 1;
+  })();
 
   const surfaceCount = recipe.surfaces.length;
   const biomeCount = recipe.biomes.length;
@@ -1276,17 +1818,49 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     }
     return zoneMSum;
   }
+  // Sea-cliff turf (terrain.seaCliffs[].turf): a stretch takes its zone's ground roles everywhere it holds the
+  // ground — its stacks stand offshore, outside the zone polygon — and an optional turf surface on its flat tops.
+  const seaTurfDocs = (t.seaCliffs ?? []).map((d) => d.turf);
+  const hasSeaTurf = seaTurfDocs.some((d) => d !== undefined) && seaDocs.length > 0 && hasShoreProfile;
+  const seaTurfZone = Int16Array.from((t.seaCliffs ?? []).map((d) => {
+    const id = d.turf?.zone ?? d.region;
+    return d.turf && id !== undefined ? groundZones.findIndex((g) => g.id === id) : -1;
+  }));
+  const seaTurfSurface = Int16Array.from(seaTurfDocs.map((d) => (d?.surface ? surfaceIndex(d.surface) : -1)));
+  const turfHit = { k: -1, w: 0 };
+  const turfM = new Float32Array(Math.max(1, groundZones.length));
+  const CLIFF_ROLE = surfaceRoleIndex("cliff");
+  /** The stretch turf at (x, z) into `turfHit` (k = -1: none). */
+  let turfX = Number.NaN, turfZ = Number.NaN;
+  function seaTurfAt(x: number, z: number): number {
+    if (x === turfX && z === turfZ) return turfHit.w;
+    turfX = x; turfZ = z;
+    turfHit.k = -1; turfHit.w = 0;
+    return hasSeaTurf ? seaOf().turf(x, z, turfHit) : 0;
+  }
   /** Move each role-tagged surface's weight onto the zones' surfaces for that role. */
   function remapNaturalRoles(x: number, z: number, out: Float32Array, offset: number): void {
-    if (zoneWeights(x, z) <= 1e-4) return;
+    let zm: Float32Array = zoneM;
+    if (hasSeaTurf && seaTurfAt(x, z) > 0 && seaTurfZone[turfHit.k]! >= 0) {
+      // the turf's zone holds at least the turf's share; the others give up what that leaves short
+      const tz = seaTurfZone[turfHit.k]!, tw = turfHit.w;
+      zoneWeights(x, z);
+      let others = 0;
+      for (let k = 0; k < groundZones.length; k++) if (k !== tz) others += zoneM[k]!;
+      const own = Math.max(zoneM[tz]!, tw), room = Math.max(0, 1 - own), scale = others > room ? room / others : 1;
+      for (let k = 0; k < groundZones.length; k++) turfM[k] = k === tz ? own : zoneM[k]! * scale;
+      zm = turfM;
+    } else if (zoneWeights(x, z) <= 1e-4) return;
     const base = zoneRoles.baseRole;
     for (let s = 0; s < surfaceCount; s++) {
       const role = base[s]!;
       if (role < 0) continue;
       const w = out[offset + s]!;
       if (w <= 0) continue;
+      // (turf leaves the CLIFF role alone: the wall and the stacks' sides keep the stretch's own rock)
+      const turfOnly = zm === turfM && role === CLIFF_ROLE;
       for (let k = 0; k < groundZones.length; k++) {
-        const m = zoneM[k]!;
+        const m = turfOnly ? zoneM[k]! : zm[k]!;
         if (m <= 0) continue;
         const t = groundZones[k]!.targets[role]!;
         if (t < 0 || t === s) continue;
@@ -1453,7 +2027,11 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
   /** The level a `flatten`ed zone sinks toward: just above the land floor, so a swamp is dry land that is barely so. */
   const swampLevel = floorY + 2.5;
 
+  /** The relief fade the last boundAt applied (1 inland, 0 at sea): how far a marsh's pull reaches toward the coast. */
+  let lastRelief = 1;
+
   function naturalHeight(x: number, z: number): number {
+    lastRelief = 1;
     let relief = 1;
     let hillsMul = 1;
     let dunesMul = -1;
@@ -1471,33 +2049,158 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     const wz = z + (t.warp.strength > 0 ? fbm2(warpB, x + 137.5, z - 91.25, seed) : 0);
     let h = t.base + fbm2(continent, wx, wz, seed);
     // a flattened zone (swamp, marsh) is pulled down toward the waterline and
-    // loses most of its hills, but never its detail: it is level, not smooth
+    // loses most of its hills, but never its detail: it is level, not smooth.
+    // The share of it that holds a water table is pulled LAST instead
+    // (marshAt), onto the table itself, once bounds have had their say.
+    const wet = hasMarsh ? zoneForm.wet : 0;
+    const marshTable = hasMarsh ? zoneForm.table : 0;
+    const marshHummocks = hasMarsh ? zoneForm.hummocks : 0;
+    // calm: inside an authored place the profile gives way to the legacy gains
+    const calm = hasLandformCalm && hasZones ? landformCalmAt(x, z) : 1;
+    if (calm < 1) {
+      hillsMul = zoneForm.legacyHills + (hillsMul - zoneForm.legacyHills) * calm;
+      mesasMul = zoneForm.legacyMesas + (mesasMul - zoneForm.legacyMesas) * calm;
+    }
     if (flatten > 0) {
-      h += (swampLevel - h) * flatten;
+      h += (swampLevel - h) * (flatten - wet);
       hillsMul *= 1 - flatten * 0.8;
     }
     if (hillsMul > 0) h += fbm2(hills, wx, wz, seed) * hillsMul;
+    const zoneCliffs = hasAnchorCliffs && hasZones ? (calm < 1 ? defaultCliffs + (zoneForm.cliffs - defaultCliffs) * calm : zoneForm.cliffs) : 1;
     if (t.mountains.amplitude !== 0 && relief > 0) {
-      // the mask is what keeps ridged noise from putting a peak in every field
-      const raw = fbm2(maskSpec, wx, wz, seed) * 0.5 + 0.5;
-      const mask = smoothstep(t.mountainMask.start, t.mountainMask.end, raw) * Math.min(relief, 1.5);
-      if (mask > 0) {
-        let mrelief = fbm2(mountains, wx, wz, seed) * mask;
-        if (hasCliffs) mrelief = terraceAt(mrelief, wx, wz, mask);
-        h += mrelief;
+      if (hasRmf) h += rangesAt(wx, wz, relief, zoneCliffs);
+      else {
+        // the mask is what keeps ridged noise from putting a peak in every field
+        const raw = fbm2(maskSpec, wx, wz, seed) * 0.5 + 0.5;
+        const mask = smoothstep(t.mountainMask.start, t.mountainMask.end, raw) * Math.min(relief, 1.5);
+        if (mask > 0) {
+          let mrelief = fbm2(mountains, wx, wz, seed) * mask;
+          if (hasCliffs && zoneCliffs > 0) mrelief = terraceAt(mrelief, wx, wz, mask, zoneCliffs);
+          h += mrelief;
+        }
       }
     }
     if (hasMesas && mesasMul > 0) h += mesaAt(wx, wz) * mesasMul;
+    // landform profiles: additive families now, the wetland pull after the detail
+    let wetPull = 0;
+    let wetTarget = 0;
+    if (hasValleys) {
+      valleyHere.u = valleyHere.v = valleyHere.flat = valleyHere.width = valleyHere.depth = valleyHere.floor = 0;
+    }
+    if (hasLandforms && hasZones && activeProfiles.length > 0) {
+      let vw = 0;
+      for (const p of activeProfiles) {
+        const w = profileW[p]!;
+        const pr = profiles[p]!;
+        const vy = pr.valley;
+        if (vy) {
+          const k = w * vy.strength * calm;
+          if (vy.shape === 0) valleyHere.u += k;
+          else if (vy.shape === 1) valleyHere.v += k;
+          else valleyHere.flat += k;
+          valleyHere.width += vy.width * w;
+          valleyHere.depth += vy.depth * w;
+          valleyHere.floor += vy.floor * w;
+          vw += w;
+        }
+        if (pr.bands && calm > 0) h += landformBands(pr, wx, wz) * w * calm;
+        if (pr.wetland) {
+          const pull = Math.min(1, pr.wetland.w) * w * calm;
+          wetTarget += (floorY + pr.wetland.level + fbm2(pr.wetland.spec, wx, wz, seed) * pr.wetland.amp) * pull;
+          wetPull += pull;
+        }
+      }
+      if (vw > 0) {
+        valleyHere.width /= vw;
+        valleyHere.depth /= vw;
+        valleyHere.floor /= vw;
+      }
+    }
     h += fbm2(detail, wx, wz, seed);
+    if (wetPull > 0) h += (wetTarget / wetPull - h) * Math.min(1, wetPull);
     if (hasDunes) h += duneAt(x, z, dunesMul);
-    if (hasCeiling) h = ceilingAt(h);
+    if (hasCeiling) h = ceilingAt(h, wx, wz);
     // Bounds govern every band above: a mountain that strays past the coast is
     // pulled under with everything else rather than standing offshore.
     if (hasBounds) h = boundAt(x, z, h);
     // Coast cliffs LAST: they steepen whatever profile crosses sea level, and
     // with a shore profile that profile is the one bounds just built.
     if (hasCoastCliffs) h = coastAt(x, z, h);
+    // Sea cliffs after the coast: they replace the whole profile near the shoreline of their stretches
+    if (hasSeaCliffs) h = seaOf().height(x, z, h);
+    if (hasButtes) h = buttesOf().height(x, z, h);
+    if (wet > 0) h = marshGround(h, wx, wz, wet * lastRelief, floorY + marshTable, marshHummocks);
     return h;
+  }
+
+  /**
+   * Marsh ground: `h` pulled by `em` (the zone's wet share times the coast's
+   * relief fade) onto the water table plus hummock noise, pools soft-capped
+   * at MARSH_MAX_DEPTH, and a dry rim at the marsh's own edge. Water stands
+   * wherever `em` >= MARSH_WET and the ground is under the table
+   * (marshAt), and the rim holds the ground over the table across
+   * MARSH_WET..MARSH_WET+0.05 — so the sheet always ends on ground, never in
+   * the air (a low neighbour zone, the beach).
+   */
+  /**
+   * The marsh at (x, z): `em` is the wet share naturalHeight pulled the
+   * ground by (zone membership x anchor flatten x the coast's relief fade —
+   * the same product, so the water and the ground agree), `table` the
+   * water table's height. em 0 outside every marsh. Clobbers the zone
+   * scratch, so never call it from inside naturalHeight.
+   */
+  const marshScratch = { em: 0, table: 0 };
+  function marshAt(x: number, z: number): typeof marshScratch {
+    marshScratch.em = 0;
+    if (!hasMarsh) return marshScratch;
+    zoneAtWarped(x, z);
+    const wet = zoneForm.wet;
+    if (wet <= 0) return marshScratch;
+    marshScratch.table = floorY + zoneForm.table;
+    let r = 1;
+    if (hasBounds) {
+      if (!hasShoreProfile) r = clamp(continentMask(x, z), 0, 1);
+      else {
+        const shore = shoreAt(x, z);
+        r = smoothstep(0, Math.max(40, shore.band * (1 - shelf)), shore.distance);
+      }
+    }
+    marshScratch.em = wet * r;
+    return marshScratch;
+  }
+  /** The marsh water table over (x, z), or null where no marsh holds water (em under MARSH_WET). */
+  function marshTableAt(x: number, z: number): number | null {
+    const m = marshAt(x, z);
+    return m.em >= MARSH_WET ? m.table : null;
+  }
+  /** Cheap and conservative: could any marsh reach into this rectangle? Zone membership on a coarse lattice. */
+  function marshNear(x0: number, z0: number, x1: number, z1: number): boolean {
+    if (!hasMarsh) return false;
+    const pad = 24;
+    const step = Math.max(16, Math.min(64, zoneBorder / 4));
+    const nx = Math.max(1, Math.ceil((x1 - x0 + 2 * pad) / step));
+    const nz = Math.max(1, Math.ceil((z1 - z0 + 2 * pad) / step));
+    for (let j = 0; j <= nz; j++) {
+      for (let i = 0; i <= nx; i++) {
+        zoneAtWarped(x0 - pad + ((x1 - x0 + 2 * pad) * i) / nx, z0 - pad + ((z1 - z0 + 2 * pad) * j) / nz);
+        if (zoneForm.wet >= MARSH_WET * 0.6) return true;
+      }
+    }
+    return false;
+  }
+
+  function marshGround(h: number, wx: number, wz: number, em: number, table: number, hummocks: number): number {
+    if (em <= 0) return h;
+    let target = table + (MARSH_BIAS !== 0 ? fbm2(hummockSpec, wx, wz, seed) - MARSH_BIAS : fbm2(hummockSpec, wx, wz, seed)) * hummocks * MARSH_HUMMOCK_GAIN;
+    // pools are wading water: depth under the table eases toward the cap
+    if (target < table) target = table - MARSH_MAX_DEPTH * (1 - Math.exp(-(table - target) / MARSH_MAX_DEPTH));
+    // the pull is complete well inside the zone's border blend rather than
+    // only at its heart: a linear pull left a third of every marsh a slope
+    // part-way between its neighbour and the table, dry
+    let out = h + (target - h) * smoothstep(MARSH_WET - 0.2, MARSH_WET + 0.35, em);
+    const rim = smoothstep(MARSH_WET - 0.2, MARSH_WET, em) * (1 - smoothstep(MARSH_WET + 0.05, MARSH_WET + 0.25, em));
+    if (rim > 0) out += rim * softPositive(table + MARSH_RIM - out, 0.25);
+    return out;
   }
 
   /**
@@ -1507,8 +2210,13 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
    * what lets the mountain band have a big amplitude for tall steep flanks
    * without a single summit being sliced flat at `maxY`.
    */
-  function ceilingAt(h: number): number {
-    const top = ceiling!.height;
+  function ceilingAt(h: number, wx: number, wz: number): number {
+    let top = ceiling!.height;
+    const c0Base = top - ceiling!.softness;
+    if (h <= c0Base - ceilingWander) return h;
+    // a wandering summit line: whole ranges stand higher or lower, so the
+    // world's big peaks do not all converge on one flattened altitude
+    if (ceilingWander > 0) top += Math.tanh(fbm2(ceilingSpec, wx, wz, seed) * 2.2) * ceilingWander;
     const c0 = top - ceiling!.softness;
     if (h <= c0) return h;
     const room = top - c0;
@@ -1605,6 +2313,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
   function boundAt(x: number, z: number, h: number): number {
     if (!hasShoreProfile) {
       const m = continentMask(x, z);
+      lastRelief = clamp(m, 0, 1);
       if (m >= 1) return h;
       if (m <= 0) return oceanFloor;
       return oceanFloor + (h - oceanFloor) * m;
@@ -1618,6 +2327,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     // narrow and the fade is short: that is where the sea cliffs are
     const reliefBand = Math.max(40, shore.band * (1 - shelf));
     const r = smoothstep(0, reliefBand, s);
+    lastRelief = r;
     if (r <= 0) return base;
     return base + softPositive(h - floorY, 3) * r;
   }
@@ -1644,7 +2354,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
    * the band boundaries per place so the whole world does not share one set of
    * altitudes to step at.
    */
-  function terraceAt(relief: number, wx: number, wz: number, mountain: number): number {
+  function terraceAt(relief: number, wx: number, wz: number, mountain: number, zoneCliffs = 1): number {
     // THREE gates, and each one is here because of a distinct way this went
     // wrong on a real world:
     //
@@ -1671,7 +2381,8 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     // vertical, so the net effect measured over a world is LESS sheer ground
     // than no terracing at all. The blend wants to be mostly 0 or mostly 1,
     // with the transition narrow enough that little ground sits inside it.
-    const m = smoothstep(0.22, 0.55, gates) * cliffs.strength;
+    let m = smoothstep(0.22, 0.55, gates) * cliffs.strength;
+    if (hasAnchorCliffs) m *= zoneCliffs;
     if (m <= 0.002) return relief;
     const step = cliffs.step;
     const offset = cliffs.jitter > 0 ? fbm2(cliffJitterSpec, wx, wz, seed) : 0;
@@ -1756,6 +2467,117 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
    * high, buttes where a high spot is small, and every wall a stack of risers
    * and treads — the silhouette that reads as badland from any distance.
    */
+  /**
+   * The mountain band as ranges (`terrain.ridgedMultifractal`): the domain is
+   * bent by a large warp, then read in each range frame — turned to that
+   * frame's direction and stretched along it — with the mask in the same frame,
+   * so a range is long and has a heading. Frames are blended by the zone
+   * weights (`frameW`, per anchor `landform.rangeAngle`), outputs not
+   * coordinates, so a change of heading across a zone border is continuous.
+   */
+  function rangesAt(wx: number, wz: number, relief: number, zoneCliffs: number): number {
+    let mx = wx;
+    let mz = wz;
+    if (rmfWarpA.amplitude > 0) {
+      mx += fbm2(rmfWarpA, wx, wz, seed);
+      mz += fbm2(rmfWarpB, wx + 211.3, wz - 377.9, seed);
+    }
+    const reliefCap = Math.min(relief, 1.5);
+    const frames = hasZones ? frameAngles.length : 1;
+    let mrelief = 0;
+    let maskSum = 0;
+    for (let f = 0; f < frames; f++) {
+      const w = hasZones ? frameW[f]! : 1;
+      if (w <= 0) continue;
+      const c = frameCos[f]!;
+      const s = frameSin[f]!;
+      const u = (mx * c + mz * s) / rmfStretch;
+      const v = -mx * s + mz * c;
+      const raw = fbm2(maskSpec, u, v, seed) * 0.5 + 0.5;
+      const mask = smoothstep(t.mountainMask.start, t.mountainMask.end, raw) * reliefCap;
+      if (mask <= 0) continue;
+      const n = ridgedMultifractal2(mountains, u, v, seed, rmf!.offset, rmf!.gain, rmf!.H, rmfRotCos, rmfRotSin);
+      mrelief += w * mask * n * rmfScale * t.mountains.amplitude;
+      maskSum += w * mask;
+    }
+    if (hasCliffs && zoneCliffs > 0 && maskSum > 0) mrelief = terraceAt(mrelief, wx, wz, maskSum, zoneCliffs);
+    return mrelief;
+  }
+
+  /** One landform profile's additive families at (wx, wz), each weighted by its family weight. */
+  function landformBands(pr: Profile, wx: number, wz: number): number {
+    let out = 0;
+    const hm = pr.hummocky;
+    if (hm) {
+      // billowed noise: rounded knobs, creased hollows; sharper = tighter crease
+      const n = fbm2(hm.spec, wx, wz, seed);
+      const c = 0.02 + 0.3 * (1 - hm.sharp);
+      out += hm.w * hm.amp * ((Math.sqrt(n * n + c * c) - c) * 2 - 0.5);
+    }
+    const dr = pr.drumlin;
+    if (dr) {
+      // the dune wind frame: slow along the grain, fast across it
+      const u = (wx * dr.cos + wz * dr.sin) / dr.stretch;
+      const v = -wx * dr.sin + wz * dr.cos;
+      const n = fbm2(dr.spec, u, v, seed);
+      const lo = 0.05 + 0.25 * dr.sharp;
+      out += dr.w * dr.amp * smoothstep(lo, lo + 0.5 - 0.3 * dr.sharp, n);
+    }
+    if (pr.karst) out += pr.karst.w * karstAt(pr.karst, wx, wz);
+    const cu = pr.cuesta;
+    if (cu) {
+      // strata dipping toward `angle`: a long dip slope (ledged by terrace())
+      // rising against the dip, then a short scarp facing back down it.
+      // Periodic in `along` and 0 at both ends of a period, so continuous.
+      const along = -(wx * cu.cos + wz * cu.sin) + fbm2(cu.warp, wx, wz, seed) * cu.period * 0.45;
+      const tt = along / cu.period;
+      const f = tt - Math.floor(tt);
+      const w = 0.04 + 0.3 * (1 - cu.sharp);
+      const rise = f < 1 - w ? terrace(f / (1 - w), cu.steps, 0.6) : 1 - smoothstep(1 - w, 1, f);
+      const strength = 0.55 + 0.45 * fbm2(cu.spec, wx, wz, seed);
+      out += cu.w * cu.amp * strength * rise;
+    }
+    const me = pr.mesa;
+    if (me) out += me.w * me.amp * terrace(clamp(fbm2(me.spec, wx, wz, seed) * 0.5 + 0.5, 0, 1), me.steps, me.sharp);
+    return out;
+  }
+
+  /**
+   * Karst: a jittered grid of cells, each holding a sinkhole (a smooth bowl)
+   * or a tower (steep walls, rounded top) — or nothing. Every feature's
+   * radius is under half a cell and its shape is 0 with zero slope at that
+   * radius, so summing the 3x3 neighbourhood is continuous everywhere.
+   */
+  function karstAt(k: NonNullable<Profile["karst"]>, wx: number, wz: number): number {
+    const C = k.cell;
+    const cx = Math.floor(wx / C);
+    const cz = Math.floor(wz / C);
+    let sum = 0;
+    for (let dz = -1; dz <= 1; dz++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const gx = cx + dx;
+        const gz = cz + dz;
+        if (hashUnit(gx, gz, 3, k.seed) >= k.density) continue;
+        const px = (gx + 0.1 + 0.8 * hashUnit(gx, gz, 1, k.seed)) * C;
+        const pz = (gz + 0.1 + 0.8 * hashUnit(gx, gz, 2, k.seed)) * C;
+        const r = C * (0.3 + 0.2 * hashUnit(gx, gz, 4, k.seed));
+        const ddx = wx - px;
+        const ddz = wz - pz;
+        const d2 = ddx * ddx + ddz * ddz;
+        if (d2 >= r * r) continue;
+        const u = Math.sqrt(d2) / r;
+        if (hashUnit(gx, gz, 5, k.seed) < k.towers) {
+          const wall = 0.15 + 0.6 * (1 - k.sharp);
+          sum += k.amp * 1.6 * smoothstep(1, 1 - wall, u) * (1 - 0.15 * u * u);
+        } else {
+          const b = 1 - u * u;
+          sum -= k.amp * b * b;
+        }
+      }
+    }
+    return sum;
+  }
+
   function mesaAt(wx: number, wz: number): number {
     const n = fbm2(mesaSpec, wx, wz, seed) * 0.5 + 0.5;
     return terrace(clamp(n, 0, 1), mesas.steps, mesas.sharpness) * mesas.amplitude;
@@ -1780,6 +2602,58 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     return (i + eased) / steps;
   }
 
+  /**
+   * Lower `out` into the valley of the authored rivers near (x, z). The floor
+   * is a membership-free weighted mean of the nearby segments' water surfaces
+   * (weights fall to 0, with zero slope, at each valley's edge), and the
+   * profile is read off the NEAREST valley's normalized distance — both
+   * continuous, so no seam on the inside of a meander however wide the
+   * valley. Never lowers under the floor, never more than `depth`.
+   */
+  function valleyAt(out: number, x: number, z: number): number {
+    const near = bucketAt(valleyBuckets(), x, z);
+    if (near.length === 0) return out;
+    let uMin = 1;
+    let fw = 0;
+    let fsum = 0;
+    for (let i = 0; i < near.length; i++) {
+      const s = near[i]!;
+      const r = riverDocs[s.owner];
+      if (!r) continue;
+      const half = (r.width * valleyHere.width) / 2;
+      const inner = r.width / 2 + r.bank;
+      if (half <= inner) continue;
+      const dx = s.bx - s.ax;
+      const dz = s.bz - s.az;
+      const lenSq = dx * dx + dz * dz;
+      const t = lenSq < 1e-12 ? 0 : clamp(((x - s.ax) * dx + (z - s.az) * dz) / lenSq, 0, 1);
+      const px = x - (s.ax + dx * t);
+      const pz = z - (s.az + dz * t);
+      const d = Math.sqrt(px * px + pz * pz);
+      if (d >= half) continue;
+      let surf = Number.isNaN(s.la) ? NaN : s.la + (s.lb - s.la) * t;
+      if (Number.isNaN(surf)) {
+        if (Number.isNaN(s.va)) continue;
+        surf = s.va + (s.vb - s.va) * t + r.depth * 0.7;
+      }
+      const u = clamp((d - inner) / (half - inner), 0, 1);
+      const w = (1 - u) * (1 - u);
+      fsum += surf * w;
+      fw += w;
+      if (u < uMin) uMin = u;
+    }
+    if (fw <= 0 || uMin >= 1) return out;
+    const floor = fsum / fw + valleyHere.floor;
+    if (out <= floor) return out;
+    // U: trough floor then steep walls; V: straight-ish sides; flat: floodplain, a rise only at the edge
+    const u = uMin;
+    const pU = 1 - u * u * u * u;
+    const pV = Math.pow(1 - u, 1.5);
+    const pF = 1 - smoothstep(0.55, 1, u);
+    const p = Math.min(1, valleyHere.u * pU + valleyHere.v * pV + valleyHere.flat * pF);
+    return out - Math.min(out - floor, valleyHere.depth) * p;
+  }
+
   function applyFeatures(h: number, x: number, z: number): number {
     if (!hasFeatures) return h;
     let out = h;
@@ -1799,6 +2673,11 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       // surrounding land already sits below its floor
       if (carved < out) out = carved;
     }
+
+    // River valleys (anchor `landform.valley`): before the ridges (a barrier
+    // across a valley still stands) and the channel cut (which then sits in
+    // the valley floor).
+    if (hasValleys && valleyHere.u + valleyHere.v + valleyHere.flat > 0 && riverDocs.length > 0) out = valleyAt(out, x, z);
 
     // Ridges after canyons, before water: a barrier RAISED along a zone
     // border that had none (docs/world-editing/barriers.md). Flat crest
@@ -2268,6 +3147,8 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
   function containWaterEdges(x: number, z: number, out: number): number {
     let target = -Infinity;
     let weight = 0;
+    /** The strongest wet-river rim weight here, for the marsh levee. */
+    let riverW = 0;
     const lipNow = lipAt(x, z);
     for (const lake of bucketAt(lakes, x, z) as readonly LakeDoc[]) {
       // a lake spilling over a fall ends at the lip line: no rim past it
@@ -2310,15 +3191,50 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       if (lipNow && lipNow.lip!.owner === hit.owner && hit.along >= lipNow.lip!.along - 0.5 && hit.along <= lipNow.lip!.along + RIVER_FALL_LIP + 30) {
         level = lipNow.rel < 0 ? lipNow.lip!.top : Math.min(level, lipNow.lip!.bottom);
       }
-      weight = Math.max(weight, smoothstep(bank * 0.58, bank * 0.68, inside) * (1 - smoothstep(bank * 0.76, bank, inside)));
+      const w = smoothstep(bank * 0.58, bank * 0.68, inside) * (1 - smoothstep(bank * MARSH_RIVER_RIM, bank, inside));
+      weight = Math.max(weight, w);
       target = Math.max(target, level + 0.3);
+      // through a marsh the river banks itself in a levee over the table, so
+      // the marsh sheet beyond ends on its crest (MARSH_RIVER_RIM), never
+      // hanging over the bank sloping down to the river
+      if (hasMarsh && w > 0) riverW = Math.max(riverW, w);
     }
-    if (weight <= 0 || target <= out) return out;
-    return out + (Math.min(target, out + SHORE_MAX_BUILD) - out) * weight;
+    let lifted = out;
+    if (weight > 0 && target > out) lifted = out + (Math.min(target, out + SHORE_MAX_BUILD) - out) * weight;
+    if (riverW > 0) {
+      const m = marshAt(x, z);
+      if (m.em > 0) {
+        const levee = m.table + MARSH_RIM;
+        const w = riverW * smoothstep(MARSH_WET - 0.2, MARSH_WET, m.em);
+        if (w > 0 && levee > lifted) lifted = Math.max(lifted, out + (Math.min(levee, out + MARSH_LEVEE_BUILD) - out) * w);
+      }
+    }
+    return lifted;
   }
 
+  // ONE-ENTRY MEMOS on height() and slope(): scatter asks slope(x, z) for a candidate's gate and then
+  // surfaceCast(x, z) asks height(x, z) and slope(x, z) again for the same point (measured: the repeat was a
+  // quarter of a proving chunk's generation). An exact-coordinate match returns the identical number, so this
+  // changes no result anywhere; a miss costs two compares. OFF while the field is still being built (the river
+  // solve swaps the rivers in and out, so a height then is not the final height) and inside `unblade`, whose
+  // nested reads deliberately see the ground without the blade fix.
+  let memoReady = false;
+  // The height memo holds the last FOUR reads: slope()'s four-point stencil, then a caller's surface normal from the
+  // same four points (scatter's groundNormal, a formation's normalAt), hit all four.
+  const heightMemoX = [NaN, NaN, NaN, NaN], heightMemoZ = [NaN, NaN, NaN, NaN], heightMemo = [0, 0, 0, 0];
+  let heightMemoAt = 0;
   function height(x: number, z: number): number {
-    return heightThroughPatches(x, z, heightPatchDocs.length);
+    const memo = memoReady && !inBlade;
+    if (memo) {
+      for (let i = 0; i < 4; i++) if (x === heightMemoX[i] && z === heightMemoZ[i]) return heightMemo[i]!;
+    }
+    const h = heightThroughPatches(x, z, heightPatchDocs.length);
+    if (!memo) return h;
+    heightMemoX[heightMemoAt] = x;
+    heightMemoZ[heightMemoAt] = z;
+    heightMemo[heightMemoAt] = h;
+    heightMemoAt = (heightMemoAt + 1) & 3;
+    return h;
   }
 
   // Height patches, prepared lazily (the automatic edge feather reads the
@@ -2332,10 +3248,15 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     }
     return p;
   }
+  // A terrace wall's patch (`tw-*`, derived from `features.terraceWalls`) is levelled ground for built works: the
+  // river solve and refine that run while the field is being built must not see it, or every terrace fitted near a
+  // river re-routes that river's bed and moves the ground under the terraces fitted before it.
+  const builtWorkPatch = heightPatchDocs.map((p) => p.afterRivers === true || p.id.startsWith("tw-") || p.id.startsWith("bs-"));
   /** Ground with only the first `n` height patches applied. */
   function heightThroughPatches(x: number, z: number, n: number): number {
     let out = applyFeatures(naturalHeight(x, z), x, z);
     for (let k = 0; k < n; k++) {
+      if (!memoReady && builtWorkPatch[k]) continue;
       const doc = heightPatchDocs[k]!;
       const dx = x - doc.origin[0], dz = z - doc.origin[1];
       if (dx <= 0 || dz <= 0 || dx >= doc.size[0] || dz >= doc.size[1]) continue;
@@ -2378,9 +3299,17 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     return Math.sqrt(Math.max(0, 1 - ny * ny));
   }
 
+  let slopeMemoX = NaN, slopeMemoZ = NaN, slopeMemo = 0;
   function slope(x: number, z: number): number {
+    const memo = memoReady && !inBlade;
+    if (memo && x === slopeMemoX && z === slopeMemoZ) return slopeMemo;
     const e = Math.max(voxelSize, 0.5);
-    return slopeFromHeights(height(x - e, z), height(x + e, z), height(x, z - e), height(x, z + e), e);
+    const s = slopeFromHeights(height(x - e, z), height(x + e, z), height(x, z - e), height(x, z + e), e);
+    if (!memo) return s;
+    slopeMemoX = x;
+    slopeMemoZ = z;
+    slopeMemo = s;
+    return s;
   }
 
   /**
@@ -2712,6 +3641,14 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     // ground this is) and BEFORE feature paint (a road's dirt is a road, not
     // the zone's open ground — paint re-aims through its own role)
     if (hasZoneGround) remapNaturalRoles(x, z, out, offset);
+    // a sea-cliff stretch's turf surface on its flat tops (the cliff top and the stacks)
+    if (hasSeaTurf && seaTurfAt(x, z) > 0 && seaTurfSurface[turfHit.k]! >= 0) {
+      const w = turfHit.w * (1 - smoothstep(PAINT_STEEP_START, PAINT_STEEP_END, steep));
+      if (w > 0) {
+        const target = seaTurfSurface[turfHit.k]!;
+        for (let i = 0; i < surfaceCount; i++) out[offset + i] = out[offset + i]! * (1 - w) + (i === target ? w : 0);
+      }
+    }
     // Feature paint (lake shores, river beds and banks, road treads) is for
     // GROUND: it fades out between PAINT_STEEP_START and PAINT_STEEP_END so a
     // near-vertical face keeps the biome's cliff rock. It used to paint by
@@ -2768,8 +3705,13 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
    * vertex would dominate meshing, and on the surface they agree anyway.
    * Overhang undersides then correctly read as cliff, which is what you want.
    */
+  /** Sea-cliff stretches have no beach: their platform, wall foot and stack bases paint as cliff rock (steep). */
+  function seaRock(x: number, y: number, z: number, steep: number): number {
+    return hasSeaCliffs && steep < 1 ? Math.max(steep, seaOf().rock(x, y, z)) : steep;
+  }
+
   function splatAt(x: number, y: number, z: number, normalY: number, out: Float32Array, offset: number): void {
-    const steep = steepnessFromNormalY(normalY);
+    const steep = seaRock(x, y, z, steepnessFromNormalY(normalY));
     const { temperature, moisture, heightOffset } = climateAt(x, z, y);
     memberships(y + heightOffset, temperature, moisture, steep, scratchMembership);
     blendSurface(scratchMembership, steep, out, offset);
@@ -2800,7 +3742,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
   }
 
   function tintAt(x: number, y: number, z: number, normalY: number, out: Float32Array, offset: number): void {
-    const steep = steepnessFromNormalY(normalY);
+    const steep = seaRock(x, y, z, steepnessFromNormalY(normalY));
     const { temperature, moisture, heightOffset } = climateAt(x, z, y);
     memberships(y + heightOffset, temperature, moisture, steep, scratchMembership);
     blendTint(out, offset);
@@ -2822,7 +3764,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     out: Float32Array,
     offset: number,
   ): void {
-    const steep = steepnessFromNormalY(normalY);
+    const steep = seaRock(x, y, z, steepnessFromNormalY(normalY));
     const { temperature, moisture, heightOffset } = climateAt(x, z, y);
     memberships(y + heightOffset, temperature, moisture, steep, scratchMembership);
     blendSurface(scratchMembership, steep, out, offset);
@@ -2834,7 +3776,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
 
   function overhangAt(x: number, y: number, z: number, steep: number): number {
     if (t.overhang.strength <= 0) return 0;
-    const mask = smoothstep(t.overhang.slopeStart, t.overhang.slopeEnd, steep);
+    const mask = smoothstep(t.overhang.slopeStart, t.overhang.slopeEnd, steep) * calmFactor(x, z);
     if (mask <= 0) return 0;
     return fbm3(overhangSpec, x, y, z, seed) * t.overhang.strength * mask;
   }
@@ -3037,7 +3979,15 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     if (y <= recipe.minY) return -1;
     if (y >= recipe.maxY) return 1;
     let d = y - h;
-    if (t.overhang.strength > 0 && Math.abs(d) < overhangReach) d += overhangAt(x, y, z, steep);
+    let ohScale = 1;
+    if (planar) {
+      // the same rule as sampleBlock's, so a point query and a full-detail cell agree at every sample
+      const pp = planarAt(), m = pp.mask(x, z);
+      if (m > 0) ohScale = 1 - planar.spec.overhangSuppress * m;
+      const [lo, hi] = pp.range(x, z);
+      if (y >= lo && y <= hi) d = pp.base(x, y, z);
+    }
+    if (t.overhang.strength > 0 && ohScale > 0 && Math.abs(d) < overhangReach) d += overhangAt(x, y, z, steep) * ohScale;
     const cave = caveAt(x, y, z, h, steep);
     if (cave > 0) d = Math.max(d, cave);
     if (hasTunnels) {
@@ -3046,6 +3996,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     }
     if (hasBlobs) d = blobsAt(x, y, z, d);
     if (passageDocs.length) d = passagesAt(x, y, z, d);
+    if (terraceCuts.length) d = terraceCutsAt(x, y, z, d);
     // hard floor last so nothing — not caves, not blobs — can open the world's underside
     if (y < recipe.minY + 2) d = Math.min(d, y - (recipe.minY + 2));
     return d;
@@ -3061,7 +4012,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
    * outside the band where they can possibly matter. On a 27x27 lattice that
    * is ~700 height evaluations instead of ~40,000.
    */
-  function sampleBlock(request: SampleBlockRequest): Float32Array {
+  function sampleBlock(request: SampleBlockRequest, exact?: SampleBlockExact): Float32Array {
     const { origin, nx, ny, nz, step } = request;
     const values = new Float32Array(nx * ny * nz);
     const columns = nx * nz;
@@ -3070,6 +4021,21 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     // cave MOUTHS are slope-driven too, so the column slope is needed whenever
     // either feature is on — not just for overhangs
     const needColumnSlope = t.overhang.strength > 0 || (t.caves.enabled && t.caves.entrances.enabled);
+    // at full detail the block's lattice IS the point query's: read heights through its cache (the 'auto' mesher
+    // decision and neighbouring cells paid for most of them already)
+    const pp = planar && step === voxelSize ? planarAt() : null;
+    const blockHeight = pp ? (x: number, z: number) => pp.heightAt(Math.round(x / step), Math.round(z / step)) : height;
+    // A COARSER block (HLOD, far terrain) evaluates the FULL-DETAIL planar function — the point query's — at its
+    // own samples. Building the walls from the coarse block's own bilinear heights put a 26 m riser 10-19 m off
+    // the full-detail one (its contour moves with the lattice), which no skirt could close at the LOD join.
+    const coarse = planar !== null && step !== voxelSize;
+    const pb0 = !planar ? null : coarse ? coarsePlanarBlock(origin, nx, nz, step) : planarBlock(setupOf().pc, blockHeight, setupOf().maskAt, origin[0], origin[2], nx, nz, step, terraceOf());
+    // no cliff mask anywhere in the block: every sample is the plain field (the band test below would pick it
+    // nowhere), so drop the planar path and its exact data — a cell off the cliffs costs what it did
+    // (the band test, not the mask: an edge column beside a masked neighbour OUTSIDE the block takes the planar
+    // value and its exact data, and the neighbouring block — where that column is interior — does the same)
+    const pb = pb0 && pb0.lo.some((v) => v !== Infinity) ? pb0 : null;
+    const active = pb && exact ? new Uint8Array(nx * ny * nz) : null;
 
     // Heights on a lattice ONE RING WIDER than the block, so slope can come
     // from central differences over neighbours we already paid for instead of
@@ -3087,7 +4053,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     for (let k = 0; k < ez; k++) {
       const wz = origin[2] + (k - 1) * step;
       for (let i = 0; i < ex; i++) {
-        extended[i + k * ex] = height(origin[0] + (i - 1) * step, wz);
+        extended[i + k * ex] = pb0 ? pb0.heightAt(i - 1, k - 1) : height(origin[0] + (i - 1) * step, wz);
       }
     }
     const inv2Step = 1 / (2 * step);
@@ -3147,6 +4113,8 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     }
 
     const strideZ = nx * ny;
+    // Per-column overhang weight, kept for the Hermite source (it interpolates it between columns).
+    const ohw = active ? new Float32Array(columns) : null;
     for (let k = 0; k < nz; k++) {
       const wz = origin[2] + k * step;
       for (let i = 0; i < nx; i++) {
@@ -3155,9 +4123,10 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
         const h = columnHeight[c]!;
         const steep = columnSlope[c]!;
         const overhangMask =
-          t.overhang.strength > 0 ? smoothstep(t.overhang.slopeStart, t.overhang.slopeEnd, steep) : 0;
+          t.overhang.strength > 0 ? smoothstep(t.overhang.slopeStart, t.overhang.slopeEnd, steep) * calmFactor(wx, wz) : 0;
         const caveMin = caveMinDepth(steep);
         const caveTop = h - caveMin;
+        if (ohw) ohw[c] = overhangMask * (pb ? 1 - planar!.spec.overhangSuppress * pb.m[c]! : 1);
         for (let j = 0; j < ny; j++) {
           const wy = origin[1] + j * step;
           let d: number;
@@ -3165,9 +4134,13 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
           else if (wy >= recipe.maxY) d = 1;
           else {
             d = wy - h;
-            if (overhangMask > 0 && Math.abs(d) < overhangReach) {
-              d += fbm3(overhangSpec, wx, wy, wz, seed) * t.overhang.strength * overhangMask;
+            const oh = pb ? overhangMask * (1 - planar!.spec.overhangSuppress * pb.m[c]!) : overhangMask;
+            const flat = pb !== null && wy >= pb.lo[c]! && wy <= pb.hi[c]!;
+            if (flat) d = pb.base(wx, wy, wz);
+            if (oh > 0 && Math.abs(d) < overhangReach) {
+              d += fbm3(overhangSpec, wx, wy, wz, seed) * t.overhang.strength * oh;
             }
+            const planarD = d;
             if (caveCorner && wy < caveTop && wy > t.caves.floorY) {
               const cave = caveShape(caveLerp(caveCorner, wx, wy, wz), wy, h, caveMin);
               if (cave > 0) d = Math.max(d, cave);
@@ -3178,13 +4151,54 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
             }
             if (hasBlobs) d = blobsAt(wx, wy, wz, d);
             if (passageDocs.length) d = passagesAt(wx, wy, wz, d);
+            if (terraceCuts.length) d = terraceCutsAt(wx, wy, wz, d);
             if (wy < recipe.minY + 2) d = Math.min(d, wy - (recipe.minY + 2));
+            if (active && flat && d === planarD) active[i + j * nx + k * strideZ] = 1;
           }
           values[i + j * nx + k * strideZ] = d;
         }
       }
     }
+    if (pb && active && ohw && exact) {
+      // The exact function between samples: the planar base plus the same
+      // overhang term, its weight interpolated between columns exactly as the
+      // warp is. At a lattice point this is bit-for-bit the sampled value.
+      const strength = t.overhang.strength;
+      const value = (x: number, y: number, z: number): number => {
+        let d = pb.base(x, y, z);
+        if (strength > 0 && Math.abs(d) < overhangReach) {
+          const fx = Math.min(nx - 1, Math.max(0, (x - origin[0]) / step)), fz = Math.min(nz - 1, Math.max(0, (z - origin[2]) / step));
+          const i0 = Math.min(nx - 2, Math.floor(fx)), k0 = Math.min(nz - 2, Math.floor(fz)), tx = fx - i0, tz = fz - k0, c0 = i0 + k0 * nx;
+          const w = (ohw[c0]! * (1 - tx) + ohw[c0 + 1]! * tx) * (1 - tz) + (ohw[c0 + nx]! * (1 - tx) + ohw[c0 + nx + 1]! * tx) * tz;
+          if (w > 0) d += fbm3(overhangSpec, x, y, z, seed) * strength * w;
+        }
+        return d;
+      };
+      exact.active = active;
+      exact.hermite = planarHermite(value, active, nx, ny, step);
+    }
     return values;
+  }
+
+  /** The point query's planar function on a coarse block's columns (see sampleBlock). */
+  function coarsePlanarBlock(origin: Vec3, nx: number, nz: number, step: number): PlanarBlock {
+    const pp = planarAt();
+    const lod = Math.round(step / voxelSize);
+    // a FULL-DETAIL block over the same footprint: the point query's function (they agree to 1e-5) on flat arrays,
+    // which is what makes the coarse block's samples and Hermite refinement affordable
+    const fine = planarBlock(setupOf().pc, (x, z) => pp.heightAt(Math.round(x / voxelSize), Math.round(z / voxelSize)), setupOf().maskAt, origin[0], origin[2], (nx - 1) * lod + 1, (nz - 1) * lod + 1, voxelSize, terraceOf());
+    const fnx = (nx - 1) * lod + 1;
+    const m = new Float32Array(nx * nz), lo = new Float32Array(nx * nz), hi = new Float32Array(nx * nz);
+    for (let k = 0; k < nz; k++) for (let i = 0; i < nx; i++) {
+      const c = i + k * nx, f = i * lod + k * lod * fnx;
+      m[c] = fine.m[f]!; lo[c] = fine.lo[f]!; hi[c] = fine.hi[f]!;
+    }
+    return {
+      ring: 1,
+      heightAt: (i, k) => pp.heightAt(Math.round((origin[0] + i * step) / voxelSize), Math.round((origin[2] + k * step) / voxelSize)),
+      m, lo, hi,
+      base: fine.base,
+    };
   }
 
   function heightRange(x0: number, z0: number, x1: number, z1: number, samples = 9): { min: number; max: number } {
@@ -3235,12 +4249,60 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     return { min, max };
   }
 
+  function surfaceNormalAt(x: number, y: number, z: number): [number, number, number] {
+    // the column's steepness once (four heights) for all six samples; each sample still reads its own height
+    const e = 0.25, steep = t.overhang.strength > 0 ? slope(x, z) : 0, h = height(x, z);
+    const gx = densityAt(x + e, y, z, height(x + e, z), steep) - densityAt(x - e, y, z, height(x - e, z), steep);
+    const gy = densityAt(x, y + e, z, h, steep) - densityAt(x, y - e, z, h, steep);
+    const gz = densityAt(x, y, z + e, height(x, z + e), steep) - densityAt(x, y, z - e, height(x, z - e), steep);
+    const l = Math.hypot(gx, gy, gz);
+    return l > 1e-9 ? [gx / l, gy / l, gz / l] : [0, 1, 0];
+  }
+
   function surfaceCast(x: number, z: number, fromY?: number, toY?: number): number | null {
     const h = height(x, z);
     // A pure heightfield column has its answer already — no reason to march it
-    if (t.overhang.strength <= 0 && fromY === undefined && toY === undefined) return h;
+    if (t.overhang.strength <= 0 && !planar && fromY === undefined && toY === undefined) return cutHeight(x, z, h);
     const steep = t.overhang.strength > 0 ? slope(x, z) : 0;
-    const top = fromY ?? h + t.overhang.strength * 1.5 + 2;
+    // Planar cliffs (terrace): treads can open a riser BELOW the heightfield and lips stand above it, so the search
+    // covers the column's whole planar band. That band is ~60 m tall, so it is marched with steps scaled by the
+    // density (metric through walls and treads; capped at 4 m, floored at 0.25 m), then bisected at the crossing.
+    // Rock thinner than one voxel under the crossing (the tip of a lip: the lattice the mesh is built on does not
+    // hold it, so the mesh has no surface there) is not ground: the march goes on below it.
+    if (planar && fromY === undefined && toY === undefined && planarAt().touches(x, z)) {
+      const [lo, hi] = planarAt().span(x, z);
+      const reach = t.overhang.strength * 1.5 + 2;
+      const floor = Math.min(lo, h - reach);
+      let y = Math.max(hi, h) + reach;
+      let d = densityAt(x, y, z, h, steep);
+      const thick = (c: number): boolean => densityAt(x, c - voxelSize * 0.5, z, h, steep) < 0 && densityAt(x, c - voxelSize, z, h, steep) < 0;
+      if (d < 0) {
+        if (thick(y)) return y;
+        while (y > floor && d < 0) { y -= 0.5; d = densityAt(x, y, z, h, steep); }
+      }
+      while (y > floor) {
+        const y2 = Math.max(floor, y - Math.min(4, Math.max(0.25, d * 0.6)));
+        const d2 = densityAt(x, y2, z, h, steep);
+        if (d2 < 0) {
+          let a = y2, b = y, fa = d2, fb = d;
+          for (let i = 0; i < 4; i++) {
+            const m = (a + b) / 2, fm = densityAt(x, m, z, h, steep);
+            if (fm < 0) { a = m; fa = fm; } else { b = m; fb = fm; }
+          }
+          const c = a + (b - a) * (fa / (fa - fb));
+          if (thick(c)) return c;
+          // a sliver: step through it to the air under it and keep looking
+          let u = c - voxelSize;
+          while (u > floor && densityAt(x, u, z, h, steep) < 0) u -= 0.5;
+          y = u; d = densityAt(x, y, z, h, steep);
+          continue;
+        }
+        y = y2; d = d2;
+      }
+      return null;
+    }
+    // planar cliffs warp rock sideways, up to the highest column within reach
+    const top = fromY ?? Math.max(h, planar && planarAt().mask(x, z) > 0 ? planarAt().top(x, z) : h) + t.overhang.strength * 1.5 + 2;
     const bottom = toY ?? h - t.overhang.strength * 1.5 - 2;
     const step = Math.max(voxelSize * 0.5, 0.25);
     let prevY = top;
@@ -3273,6 +4335,14 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     for (let bz = bz0; bz <= bz1; bz++) {
       for (let bx = bx0; bx <= bx1; bx++) {
         const cx = bx * BUCKET + 1, cz = bz * BUCKET + 1;
+        if (terraceCuts.length) {
+          for (const c of bucketAt(cutBuckets, cx, cz) as readonly TerraceCut[]) {
+            const [ax0, az0, ax1, az1] = cutBounds(c);
+            if (ax1 < x0 || ax0 > x1 || az1 < z0 || az0 > z1) continue;
+            min = Math.min(min, c.y0 - CUT_FALLOFF);
+            max = Math.max(max, c.y1 + CUT_FALLOFF);
+          }
+        }
         if (passageDocs.length) {
           for (const p of bucketAt(passages, cx, cz) as readonly PassageDoc[]) {
             const pad = p.falloff + (p.footprint === "ellipse" ? p.wallNoise : 0), half = p.width / 2 + p.wallNoise + p.falloff;
@@ -3309,7 +4379,23 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     return min <= max ? { min, max } : null;
   }
 
-  function featureClearance(x: number, z: number): number {
+  /** The dry half of featureClearance: roads (from the shoulder's edge) and towns (pad and shelves). */
+  const dryHits: OwnerHit[] = [];
+  function dryClearance(x: number, z: number): number {
+    let best = Infinity;
+    const count = nearestPerOwner(roadClearSegs, x, z, dryHits);
+    for (let k = 0; k < count; k++) {
+      const road = roadDocs[dryHits[k]!.owner]!;
+      best = Math.min(best, dryHits[k]!.distance - (road.width / 2 + road.shoulder));
+    }
+    for (const town of bucketAt(towns, x, z) as readonly TownDoc[]) {
+      best = Math.min(best, Math.sqrt((x - town.center[0]) ** 2 + (z - town.center[1]) ** 2) - town.radius);
+      for (const terrace of town.terraces) best = Math.min(best, distanceToPolyline(terrace.points, x, z) - terrace.radius);
+    }
+    return best;
+  }
+
+  function featureClearance(x: number, z: number, cover = false): number {
     let best = Infinity;
     let count = nearestPerOwner(riverSegs, x, z, hits);
     // from the bank's foot, not the bed's edge: a tree on the bank slope reads
@@ -3342,7 +4428,7 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       best = Math.min(best, Math.sqrt((x - blob.center[0]) ** 2 + (z - blob.center[2]) ** 2) - reach);
     }
     for (const town of bucketAt(towns, x, z) as readonly TownDoc[]) {
-      if (town.excludeScatter === false) continue;
+      if (town.excludeScatter === false || (cover && town.cover)) continue;
       best = Math.min(best, Math.sqrt((x - town.center[0]) ** 2 + (z - town.center[1]) ** 2) - town.radius);
       // a shelf cut below the pad's edge is still the town's ground, and a
       // tree standing on it is a tree in the street
@@ -3380,6 +4466,14 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     return best;
   }
 
+  function lakeY(x: number, z: number): number | null {
+    let best: number | null = null;
+    for (const lake of bucketAt(lakes, x, z) as readonly LakeDoc[]) {
+      if (lakeDistance(lake, x, z) <= lake.bank * 0.75 && (best === null || lake.waterY > best)) best = lake.waterY;
+    }
+    return best;
+  }
+
   function waterY(x: number, z: number): number | null {
     let best: number | null = null;
     for (const lake of bucketAt(lakes, x, z) as readonly LakeDoc[]) {
@@ -3392,6 +4486,18 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     }
     const river = riverWaterY(x, z);
     if (river !== null && (best === null || river > best)) best = river;
+    if (hasMarsh) {
+      // a marsh is water only where the ground is under its table (between
+      // the hummocks), unlike a lake's outline — its sheet is the whole zone
+      const m = marshAt(x, z);
+      if (m.em >= MARSH_WET && (best === null || m.table > best)) {
+        const table = m.table;
+        const ground = height(x, z);
+        if (ground < table) return table;
+        if (best === null && ground < recipe.seaLevel) best = recipe.seaLevel;
+        return best;
+      }
+    }
     if (best === null && height(x, z) < recipe.seaLevel) best = recipe.seaLevel;
     return best;
   }
@@ -4802,6 +5908,11 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     // beside the lip, and cutting it made a straight gash across open water)
     if (lipW && lipW.rel > 0 && lakeOutside && lakeY >= lipW.lip!.top - 0.5) lakeY = -Infinity;
     if (lakeY > -Infinity) {
+      // a lake under a marsh's table is drowned in it: the marsh is the surface
+      if (hasMarsh) {
+        const m = marshAt(x, z);
+        if (m.em >= MARSH_WET && m.table > lakeY + 0.01) return marshSurface(m.table, out);
+      }
       // a river through a lake is flush with it: the lake is the surface
       out.y = lakeY;
       out.material = lakeMaterial;
@@ -4819,6 +5930,9 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     // the LOWEST bed of every channel reaching here: at a confluence the
     // tributary's bed stands over the trunk's, and the trunk is still water
     let floor = Infinity;
+    /** Inside a wet river's levee (MARSH_RIVER_RIM): the river owns the ground, never the marsh. */
+    let riverRim = false;
+    let groundHere = NaN;
     for (let k = 0; k < count; k++) {
       const hit = hits[k]!;
       const river = riverDocs[hit.owner]!;
@@ -4828,7 +5942,9 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
       if (grow < HEAD_WET) continue;
       const width = Number.isNaN(hit.width) ? river.width : hit.width;
       const half = (width / 2) * (0.2 + 0.8 * grow);
-      let reach = half + riverBank(river, hit.width) * (0.35 + 0.65 * grow) * RIVER_WATER_REACH;
+      const bankNow = riverBank(river, hit.width) * (0.35 + 0.65 * grow);
+      if (hasMarsh && hit.distance - half < bankNow * MARSH_RIVER_RIM) riverRim = true;
+      let reach = half + bankNow * RIVER_WATER_REACH;
       // a crafted plunge pool fills its bowl (the carve and this read one shape)
       if (siteGorges.length > 0 && hit.distance > reach) {
         const pool = sitePoolReach(x, z, hit.owner);
@@ -4853,7 +5969,13 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
         const lip = lipList.find((l) => l.owner === hit.owner && Math.abs(l.along - narrowAt.along) < 1e-6);
         if (!lip) continue;
         const upper = (x - lip.lx) * lip.dx + (z - lip.lz) * lip.dz < 0;
-        if (height(x, z) < (upper ? lip.bedTop : lip.bedBottom) - 0.5) continue;
+        // height() runs nearestPerOwner into the same shared `hits` this loop is walking: read the ground once
+        // and refill `hits` (same inputs, same contents), or the rest of the loop reads another point's segments
+        if (Number.isNaN(groundHere)) {
+          groundHere = height(x, z);
+          nearestPerOwner(riverSegs, x, z, hits);
+        }
+        if (groundHere < (upper ? lip.bedTop : lip.bedBottom) - 0.5) continue;
         held = upper ? lip.top : lip.bottom;
       }
       // past either END of the polyline is not this river's water: the next
@@ -4873,7 +5995,11 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
         bestHeld = held;
       }
     }
-    if (best < 0) return false;
+    if (best < 0) {
+      if (!hasMarsh || riverRim) return false;
+      const m = marshAt(x, z);
+      return m.em >= MARSH_WET ? marshSurface(m.table, out) : false;
+    }
     const hit = hits[best]!;
     const river = riverDocs[hit.owner]!;
     const seg = segmentAt(hit.owner, hit.along);
@@ -4945,8 +6071,20 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     return true;
   }
 
+  /** Fill `out` with the marsh sheet at `table`: still, the marsh material, no bed limit (the mesh clips it to the ground). */
+  function marshSurface(table: number, out: SurfaceSample): true {
+    out.y = table;
+    out.material = marshMaterial;
+    out.flowX = 0;
+    out.flowZ = 0;
+    out.kind = "marsh";
+    out.floor = -Infinity;
+    return true;
+  }
+
   function waterNear(x0: number, z0: number, x1: number, z1: number): boolean {
     if (lakes.all.length > 0 || riverSegs.all.length > 0) return true;
+    if (marshNear(x0, z0, x1, z1)) return true;
     for (let bz = Math.floor(z0 / BUCKET); bz <= Math.floor(z1 / BUCKET); bz++) {
       for (let bx = Math.floor(x0 / BUCKET); bx <= Math.floor(x1 / BUCKET); bx++) {
         const k = bucketKey(bx, bz);
@@ -4963,6 +6101,12 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
   riverFalls = findFalls();
   roadPaint = buildPaint();
   hasRoadPaint = roadPaint.map.size > 0;
+  // Height patches prepare lazily, and the river solve above already read the ground (with waterStageOnly: no
+  // towns, no roads) — so any patch it touched sized its automatic edge feather against the WRONG ground and kept
+  // it: a patch beside a road came out with a 10 m feather that blended it a quarter of the way back. Prepare them
+  // again against the finished field.
+  preparedPatches.length = 0;
+  memoReady = true;
 
   return {
     recipe,
@@ -4971,7 +6115,9 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     voxelSize,
     surfaceCount,
     worldLimit,
-    height,
+    // public ground: in front of a terrace wall face this is the wall's foot (the berm the mesher keeps is carved)
+    height: terraceCuts.length ? (x: number, z: number) => cutHeight(x, z, height(x, z)) : height,
+    heightfield: height,
     naturalHeight,
     density,
     slope,
@@ -4991,11 +6137,37 @@ export function createWorldField(recipe: WorldRecipe): WorldField {
     sampleBlock,
     heightRange,
     surfaceCast,
+    planarMaskIn: (x0, z0, x1, z1) => (planar ? planarAt().anyMask(x0, z0, x1, z1) : false),
+    planarNear: (x, z) => (planar && !(globalThis as any).__NOPLANAR ? planarAt().touches(x, z) : false),
+    surfaceSlope: (x, y, z) => {
+      const n = surfaceNormalAt(x, y, z);
+      return Math.sqrt(n[0] * n[0] + n[2] * n[2]);
+    },
+    surfaceNormal: surfaceNormalAt,
+    planarFooting: (x, y, z, r) => {
+      const steep = t.overhang.strength > 0 ? slope(x, z) : 0, d = y - voxelSize;
+      if (densityAt(x, d, z, height(x, z), steep) >= 0) return false;
+      for (let k = 0; k < 8; k++) {
+        const a = (k / 8) * Math.PI * 2, px = x + Math.cos(a) * r, pz = z + Math.sin(a) * r;
+        if (densityAt(px, d, pz, height(px, pz), steep) >= 0) return false;
+      }
+      return true;
+    },
+    ground: planar
+      ? (x, z) => {
+          const h = terraceCuts.length ? cutHeight(x, z, height(x, z)) : height(x, z);
+          return planarAt().touches(x, z) ? surfaceCast(x, z) ?? h : h;
+        }
+      : terraceCuts.length ? (x, z) => cutHeight(x, z, height(x, z)) : height,
     carveSpan,
     featureClearance,
+    seaCliffs: () => (hasSeaCliffs ? seaOf() : null),
+    buttes: () => (hasButtes ? buttesOf() : null),
     waterY,
     waterSurface,
     waterNear,
+    lakeY,
+    marshTable: marshTableAt,
     shoreDistance: (x, z) => (hasBounds ? shoreAt(x, z).distance : Infinity),
   };
 }

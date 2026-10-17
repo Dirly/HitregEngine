@@ -4,6 +4,15 @@ import { hexColor, meshWindSchema, spawnAreaSchema, MAX_SPLAT_LAYERS, grassSchem
 import { regionSchema } from "./regions.js";
 import { clearingSchema } from "./vegetation.js";
 import { NATURAL_SURFACE_ROLES } from "./roles.js";
+import { terraceWallSchema } from "./terrace-walls.js";
+import { bridgeSpanSchema } from "./bridge-spans.js";
+import { planarCliffsSchema } from "./planar-cliffs.js";
+import { seaCliffsSchema } from "./sea-cliffs.js";
+import { buttesSchema } from "./buttes.js";
+import { operatorDocSchema } from "./operator-registry.js";
+import { ribbonSchema } from "./ribbon.js";
+import { kitWallSchema } from "./kit-walls.js";
+import { landmarkSchema } from "./ledge-landmark.js";
 
 /**
  * The world recipe: a small, hand-editable JSON document that fully determines
@@ -421,13 +430,25 @@ export const heightPatchSchema = z.object({
   columns: z.number().int().min(2).max(1025),
   rows: z.number().int().min(2).max(1025),
   heights: z.array(z.number().finite()).max(1050625).describe("Absolute world Y samples, row-major (row * columns + column). Bilinear interpolation; importers decode image brightness into metres before storing."),
+  weights: z
+    .array(z.number().min(0).max(1))
+    .max(1050625)
+    .optional()
+    .describe(
+      "Per-sample opacity in [0, 1], row-major like `heights` (bilinear). Present = a MASKED edit: the ground under the patch is " +
+        "pulled toward `heights` by this weight (times the edge feather), so where it is 0 the ground beneath shows through and " +
+        "is never frozen into the raster (a later road, a neighbouring patch or a terrain rebuild under the untouched part of " +
+        "the box still shows). Omitted = opaque: the raster replaces the ground inside the feather.",
+    ),
   blend: z.number().positive().describe("Metres INSIDE every patch edge used to smoothstep from existing terrain to these heights. Exactly zero influence and zero blend derivative on the boundary; neighbouring chunks sample the same field. A MINIMUM: the evaluated feather is never narrower than two voxel steps and, unless `feather` is set, widens per edge until the blend is no steeper than `edgeSlope` for the height the patch differs from the ground along that edge (capped at half the extent)."),
   feather: z.number().positive().optional().describe("Explicit feather width in metres inside every edge (at least `blend`), replacing the automatic per-edge width. A feather narrower than two voxel steps draws as a sawtooth on any edge that is not level with the ground."),
   edgeSlope: z.number().positive().optional().describe("Steepest rise/run the automatic edge feather allows (default 1 = 45 degrees). Lower = softer edges."),
   maxSlope: z.number().positive().optional().describe("Steepest rise/run allowed INSIDE the raster. Risers drawn steeper (a terrace or tier wall, a bench edge) are filled at the foot into a talus at this slope, keeping every top level where it is. Omitted = the raster as written. A wall steeper than about 1.6 between 2 m lattice samples draws as a zig-zag; `worldgen lips` reports where."),
+  afterRivers: z.boolean().optional().describe("Ground the river solve must NOT see (like terrace-wall `tw-*` and bridge-span `bs-*` patches): banks raised beside a channel, a lip shoulder. Without it the solve re-reads the raised ground and can move the river, its levels and its falls. The patch still shapes the finished ground, the water clip and every gate."),
   filter: z.number().min(0).optional().describe("Half-width in metres of the tent prefilter applied to the raster before sampling (default: the voxel step). Anti-aliases cliffs and terrace edges drawn sharper than the lattice so diagonal edges do not stair-step. 0 = raw raster."),
 }).superRefine((p, ctx) => {
   if (p.heights.length !== p.columns * p.rows) ctx.addIssue({ code: "custom", path: ["heights"], message: "Expected rows * columns height samples" });
+  if (p.weights && p.weights.length !== p.columns * p.rows) ctx.addIssue({ code: "custom", path: ["weights"], message: "Expected rows * columns weight samples" });
   if (p.blend * 2 > Math.min(...p.size)) ctx.addIssue({ code: "custom", path: ["blend"], message: "Blend cannot exceed half the shorter extent" });
 });
 export type HeightPatchDoc = z.infer<typeof heightPatchSchema>;
@@ -435,6 +456,7 @@ export type HeightPatchDoc = z.infer<typeof heightPatchSchema>;
 export const townSchema = z.object({
   id: z.string().default("town"),
   excludeScatter: z.boolean().optional().describe("When omitted or true, exclude scatter and ground cover across the whole town pad. Set false for landscaped towns whose roads and building foundations provide local clearances."),
+  cover: z.boolean().optional().describe("Let ground cover (grass, flowers) grow on the pad while scatter stays excluded. Streets keep it off through the road clearance, building plots through `clearings` (one per plot, `cover: true`) — install those first, or grass stands inside the buildings. Omitted = no cover on the pad. Implied by `excludeScatter: false`."),
   tier: z
     .enum(["capital", "city", "town", "village", "hamlet"])
     .optional()
@@ -443,6 +465,15 @@ export const townSchema = z.object({
         "into a few capitals on the coast, some cities, and a long tail of villages and hamlets, because a world of forty " +
         "identical 45 m discs reads as forty identical places. Absent on a recipe written before tiers existed — read it as " +
         "\"capital\" when `tags` says so, \"town\" otherwise.",
+    ),
+  keep: z
+    .boolean()
+    .optional()
+    .describe(
+      "Pinned in place: `worldgen towns` keeps this town where it is (id, centre, tier) instead of re-siting it, exactly as a " +
+        "`pinned` tag or `--keep <id>` does, but recorded in the recipe so a plain rerun keeps it too. `worldgen towns --keep` " +
+        "writes it; `worldgen town-pins` sets or clears it without re-siting anything; `--release <ids|all>` lets a town move again. " +
+        "Unlike the `pinned` tag it does not stop `worldgen terrace` from re-cutting the town's shelves.",
     ),
   center: z.tuple([z.number(), z.number()]),
   radius: z.number().positive().default(45),
@@ -892,6 +923,79 @@ export type PatchDoc = z.infer<typeof patchSchema>;
  * stands proud. The face's own outward direction gives each one its facing.
  */
 const cliffScatterSchema = z.object({
+  mode: z
+    .enum(["face", "crest", "foot"])
+    .default("face")
+    .describe(
+      "Where on the cliff the props go, from a lattice point on its steep ground. \"face\": a column down the face " +
+        "(below). \"crest\": along the TOP edge, leaning out over the drop (`lean` tips OUT here), so a rounded lip " +
+        "reads as a jagged skyline and the zone cap marks it. \"foot\": a talus apron on the ground below the face, " +
+        "`apron` x the cliff's height deep, the props growing with distance out (scree near, blocks further).",
+    ),
+  orient: z
+    .enum(["lean", "normal", "slope"])
+    .default("lean")
+    .describe(
+      "Face mode: \"lean\" = upright, turned out of the face and tipped back by `lean` (menhir-like props). \"normal\" = " +
+        "the model's UP axis on the face's own 3D normal (a slab or outcrop bedded INTO the face like a rock facet), " +
+        "`embed` then measured along that normal. Use \"normal\" for the rock kit: two thirds of the model's height sunk. " +
+        "\"slope\" = the model's UP axis up the face's fall line and its front (+Z) out along the face normal: a tall " +
+        "piece (the kit's `buttress`) lies against the face as a rib running up it, `embed` along the normal.",
+    ),
+  fit: z
+    .object({
+      fraction: z
+        .tuple([z.number().positive(), z.number().positive()])
+        .default([0.15, 0.4])
+        .describe("Piece size as a fraction of the LOCAL DROP (the crest-to-foot height measured from the lattice point), picked per piece."),
+      axis: z
+        .enum(["height", "length"])
+        .default("height")
+        .describe("Which model dimension the fraction sizes: \"height\" (a buttress, a crag) or \"length\" along the face (a ledge band)."),
+      scale: z
+        .tuple([z.number().positive(), z.number().positive()])
+        .default([0.7, 1.4])
+        .describe(
+          "Instance scales a variant may be stretched over. The kit's body texture is model-space, so the fit picks the " +
+            "VARIANT whose own size needs a scale in this range (several do: a hashed, weighted pick) and clamps the rest. " +
+            "A drop too small for the smallest variant at the low end places nothing.",
+        ),
+      reach: z
+        .number()
+        .positive()
+        .default(45)
+        .describe("Metres walked up and down the fall line from the lattice point to find the crest and the foot (one height read per 3 m)."),
+      at: z
+        .tuple([z.number().min(0).max(1), z.number().min(0).max(1)])
+        .optional()
+        .describe(
+          "Face mode: where the first piece's foot sits, as a fraction of the drop above the cliff's foot, hashed per lattice point. " +
+            "Set it to dress a WALL from candidates on the gentler ground above and below it (a vertical face has almost no plan " +
+            "area of its own, so a lattice point rarely lands on it): pair it with a low `slopeMin`. Omit = at the lattice point.",
+        ),
+      overlap: z.number().min(0).max(1).default(0.8).describe("Face mode stacks: the next piece down starts this fraction of the piece above's height lower (under 1 = they overlap into one rib)."),
+    })
+    .optional()
+    .describe(
+      "CLIFF-SCALE MASSES: size each piece from the local drop instead of `scale` (which it replaces), so a 50-100 m " +
+        "cliff gets 10-40 m ribs, ledges and crest teeth and an 8 m bank never does. Face mode places the first piece AT " +
+        "the lattice point's own spot on the face (no march from the top, so a big piece stays within its owning cell) and " +
+        "`stack` more below it; crest mode on the lip. Few, big pieces: use a low density.",
+    ),
+  band: z
+    .number()
+    .min(0)
+    .default(0)
+    .describe(
+      "Face mode: metres between STRATA. >0 snaps each prop's height to a world level (a multiple of this), so " +
+        "neighbouring columns put their rocks at the same heights and the face reads as bedded layers rather than " +
+        "random boulders. 0 = free heights (the original behaviour).",
+    ),
+  apron: z
+    .number()
+    .min(0)
+    .default(0.6)
+    .describe("Foot mode: how far out the talus reaches, as a fraction of the cliff's measured height (a 30 m cliff at 0.6 = 18 m)."),
   stack: z
     .tuple([z.number().int().min(1), z.number().int().min(1)])
     .default([2, 5])
@@ -1030,6 +1134,128 @@ export const coverLayerSchema = grassSchema.extend({
 
 export type CoverLayerDoc = z.infer<typeof coverLayerSchema>;
 
+/**
+ * Rock FORMATIONS: one lattice point becomes a group of instances in a shape. Built on the ordinary
+ * scatter lattice (so `density` is still the peak, and `clump`/`biomeDensity` still thin it), the members
+ * are hashed off the anchor's lattice coordinate: chunk-independent like everything else in scatter.
+ */
+export const scatterFormationSchema = z.object({
+  kinds: z
+    .array(
+      z.object({
+        kind: z
+          .enum(["single", "row", "cluster", "stack", "arc", "spill", "steps"])
+          .describe(
+            "single: one rock. row: 3-7 along a line or gentle curve sharing a strike and lean, tapering to the ends " +
+              "(an exposed band). cluster: one big rock with smaller ones tucked against its base. stack: a rock leaning " +
+              "on the anchor, or two leaning together (a tent). arc: a broken half-ring (ruins, POIs). spill: a cluster " +
+              "with a scree trail running downhill from it. steps: stepping stones, even-sized and evenly spaced ACROSS " +
+              "a river's current (along the contour elsewhere); a stone the water gate refuses (too deep) leaves a gap.",
+          ),
+        weight: z.number().positive().default(1).describe("Relative weight among kinds (a stable hash picks one per formation)."),
+      }),
+    )
+    .min(1)
+    .describe("Which shapes this rule makes, weighted. Keep `single` a minority."),
+  members: z
+    .tuple([z.number().int().min(1), z.number().int().min(1)])
+    .default([3, 6])
+    .describe("Members per formation (rows and arcs; a cluster/spill uses up to this many around its anchor, a stack 2-3)."),
+  gap: z
+    .tuple([z.number(), z.number()])
+    .default([-0.3, 0.8])
+    .describe("Edge-to-edge spacing between neighbours, metres: negative = overlapping, up to ~1 m apart. Members touch or nearly."),
+  taper: z.number().min(0).max(0.9).default(0.5).describe("How much smaller the ends of a row/arc and the tucked members of a cluster are than the anchor (0.5 = half)."),
+  contour: z.boolean().default(true).describe("Rows strike ALONG the slope contour (an outcropping band); false = a random strike."),
+  lean: z.number().min(0).default(0.2).describe("Radians: the shared lean of a row about its strike, and the tilt of a stack's leaning member is 0.45 + this."),
+  spill: z.number().min(0).default(6).describe("Spill: how far (m) the scree trail runs downhill from the cluster."),
+  memberVariants: z
+    .array(
+      z.object({
+        model: z.string(),
+        weight: z.number().positive().default(1),
+        colliderSize: z.tuple([z.number(), z.number(), z.number()]).optional(),
+      }),
+    )
+    .optional()
+    .describe(
+      "Models for the NON-anchor members (smaller rocks round a big one); omit to use the rule's own variants. Name " +
+        "models other rules already scatter with the same material and flags, or each new one is a new batch.",
+    ),
+  fillers: z
+    .number()
+    .min(0)
+    .max(1)
+    .default(0.65)
+    .describe(
+      "A member smaller than this fraction of the anchor is FILLER: no collider and `hlod: false` (culled with the " +
+        "full-render ring), while the anchor and the big members keep both, so the silhouette survives at distance.",
+    ),
+});
+export type ScatterFormationDoc = z.infer<typeof scatterFormationSchema>;
+
+/** Water-aware placement (field.waterY / waterSurface / marshTable: the gates ground cover uses). */
+export const scatterWaterSchema = z.object({
+  mode: z
+    .enum(["shore", "in", "river", "marsh"])
+    .describe(
+      "shore: on lake/sea banks, standing half in the water (denser on steep banks and headlands, sparse on gentle " +
+        "beaches). in: on the bed of shallow lake/sea water, the top breaking the surface. river: in a river's shallow " +
+        "runs (the deep centre stays clear), bigger below waterfalls. marsh: on a marsh's water table, rare.",
+    ),
+  top: z
+    .tuple([z.number(), z.number()])
+    .default([0.2, 1.5])
+    .describe("in/river/marsh: metres the rock's top must stand above the water surface; the instance is rescaled within the rule's range to fit or dropped. Never a submerged blob."),
+  maxDepth: z.number().positive().default(1.6).describe("in/river: deepest water (surface minus bed, metres) a rock is placed in."),
+  reach: z.number().positive().default(4).describe("shore: metres from the candidate to look for the water's edge."),
+  steepness: z.number().min(0).default(1.6).describe("shore: how much a steep bank raises the odds (keep = 0.2 + steepness x slope)."),
+  waters: z
+    .enum(["lake", "river", "both"])
+    .default("lake")
+    .describe(
+      "shore/in: which water's banks or shallows. lake = lakes and the sea (the old behaviour); river = river channels " +
+        "(not their plunge pools); both. A river's shore needs `snap` (its bank is read from the ground, not a lake outline).",
+    ),
+  snap: z
+    .boolean()
+    .default(false)
+    .describe(
+      "shore: read the waterline from a grid of water reads precomputed once per cell (`snapStep` m) and move each " +
+        "candidate within `reach` of it ONTO it, so every rock stands at the edge and rows run along it; also what " +
+        "`headland` measures. false keeps the old per-candidate reach probes (lakes and sea only).",
+    ),
+  snapStep: z.number().positive().default(6).describe("shore + snap: metres between the cell grid's water reads. Coarser is cheaper and blunter."),
+  wade: z
+    .tuple([z.number(), z.number()])
+    .default([-0.35, 0.45])
+    .describe("shore + snap: where across the waterline the anchor stands, as a fraction of its footprint radius (+ into the water)."),
+  headland: z
+    .number()
+    .min(0)
+    .default(0)
+    .describe("shore + snap: odds added where the water wraps round the bank point (a headland, a spit, the outside of a point bar), by how far over half the ground round it is water."),
+  keep: z.number().min(0).max(1).default(1).describe("Share of the candidates this rule keeps before the bank/bend odds (river mode: of every shallow candidate)."),
+  bend: z
+    .object({
+      turn: z.number().positive().default(0.5).describe("Radians the channel turns over 50 m at which a reach is a full bend (half of it counts half)."),
+      scale: z.number().positive().default(1.4).describe("Scale multiplier on the outer bank of a full bend."),
+      boost: z.number().min(1).default(3).describe("Odds multiplier on the outer bank of a full bend."),
+    })
+    .optional()
+    .describe("river, or shore on river banks: the OUTER bank of a bend, where the current drives into the bank, gets bigger blocks and more of them."),
+  fall: z
+    .object({
+      radius: z.number().positive().default(18).describe("Metres round a fall's foot that count as its plunge pool."),
+      scale: z.number().positive().default(1.6).describe("Scale multiplier for rocks there."),
+      maxDepth: z.number().positive().default(3).describe("Deepest water allowed there."),
+      only: z.boolean().default(false).describe("Place this rule ONLY in plunge pools (the blocks below a fall), nowhere else on the river."),
+    })
+    .prefault({})
+    .describe("river: the plunge pool below a waterfall gets bigger blocks."),
+});
+export type ScatterWaterDoc = z.infer<typeof scatterWaterSchema>;
+
 /** One kind of thing scattered across the world: trees, rocks, bushes, grass tufts. */
 const scatterSchema = z.object({
   id: z.string(),
@@ -1135,8 +1361,71 @@ const scatterSchema = z.object({
       "ground embedding and collision use the resulting scale; spacing can therefore thin larger cohorts. " +
       "Omit to preserve existing scatter exactly.",
   ),
+  modelVariants: z.array(z.object({
+    model: z.string().describe("Model asset id of this variant (same kind, same scale class as `model`)."),
+    weight: z.number().positive().default(1).describe("Relative selection weight; normalized automatically."),
+    colliderSize: z.tuple([z.number(), z.number(), z.number()]).optional().describe(
+      "This variant's own model-space collider box (base at y = 0, NOT pre-scaled, like `colliderSize`). Omit to use the rule's.",
+    ),
+  })).min(1).optional().describe(
+    "Weighted alternative models for a `model` rule (three rocks of one kind, say), picked per instance by a separate " +
+      "stable lattice hash: placement, scale, yaw, footprint and spacing are the rule's and do not change. Each variant " +
+      "is its own instanced batch. `model` stays the rule's reference model (the one `worldgen scatter` and the far-ring " +
+      "clutter test read). Omit to place `model` everywhere, exactly as before.",
+  ),
+  cap: z.string().min(1).optional().describe(
+    "Rock cap for a rule drawn with the `rock-cap` material: \"auto\" = the ground surface under the rock (sampled from " +
+      "the field like the waterfall rims, with its biome tint) but ONLY when that dominant surface is cap-worthy (role " +
+      "grass, or a name with snow / sand / moss / grass; never dirt, mud, gravel, road or cliff), else bare; or a surface " +
+      "NAME (palette or `capLayers`) for a fixed cap. A zone's `regions[].rockCap` overrides either. Omit = never capped " +
+      "(trees, bushes). Cosmetic, seed-stable: a pure function of the field and the instance position.",
+  ),
+  capLayers: z.array(z.string().min(1)).max(16).optional().describe(
+    "Cap layers the rule's rock-cap material adds AFTER the world palette (its `rockCap.extraLayers`, same names, same " +
+      "order): a moss that is no ground surface. A cap or zone `rockCap.layer` naming one resolves to index palette + i.",
+  ),
+  capAmount: z.number().min(0).max(1).optional().describe(
+    "Default 0.6. How far the rule's own cap reaches (see `mesh.source.rockCap.amount`); with \"auto\" it is scaled by how much of " +
+      "the ground under the rock that surface covers. Under a zone's `rockCap` the zone's amount is used, SCALED by this over the 0.6 " +
+      "default (0.3 = half the zone's cap: small cliff facets that would read as white flecks; 0.8 = more: ledge tops).",
+  ),
+  rockBase: z.number().int().min(0).max(7).optional().describe(
+    "Body texture index of the rock-cap material for every instance of this rule (0 = granite, 1 = sandstone in the " +
+      "world kit): one mesh set, two looks, still one batch per model. The world's `rockSkins` table, when set, wins (the stone follows the place).",
+  ),
+  rockBaseByCliff: z.record(z.string(), z.number().int().min(0).max(7)).optional().describe(
+    "Body texture from the ZONE's own cliff: palette surface name -> rock-cap material base index. Each rock looks up " +
+      "its zone's `ground.cliff` (place -> zone -> parent, as caps do) and wears that base, so a cliff mass is the same " +
+      "stone as the face it breaks out of. Key \"*\" is the fallback (else `rockBase`). The material must list those " +
+      "bases (the cliff tile at the terrain's own metres per tile and tint). Still one batch per model. Legacy: the world's " +
+      "`rockSkins` table (stone sampled where the rock stands) wins over it.",
+  ),
+  hlod: z.boolean().optional().describe(
+    "Passed to the emitted mesh: false keeps the props out of HLOD supercell bakes, so they draw only in the " +
+      "full-render ring (~150 m on a 48 m cell, 3 rings). Small rocks and pebbles. See the mesh component's `hlod`.",
+  ),
+  formation: scatterFormationSchema.optional().describe(
+    "Turn each placed instance into a FORMATION of several (rows, piles, leaning stacks, arcs, scree spills), so " +
+      "rocks group into shapes instead of standing alone. The lattice point is the anchor; members are a pure " +
+      "function of it, emitted only by the cell owning it (seam-safe), seated on the ground each, sharing the " +
+      "anchor's cap. Members are more instances of the same models: no new batches. Density is per FORMATION.",
+  ),
+  water: scatterWaterSchema.optional().describe(
+    "Place this rule IN or AT water instead of keeping it out (the default is no prop within 0.35 m of any " +
+      "water). See the schema for the modes: shoreline, in shallow lake/sea water, river runs and plunge pools, marsh.",
+  ),
   alignToNormal: z.number().min(0).max(1).default(0).describe("0 = always upright, 1 = fully laid onto the slope."),
   yOffset: z.number().default(0).describe("Sink (negative) or lift the instance along its own up axis."),
+  contact: z
+    .enum(["embed", "none"])
+    .optional()
+    .describe(
+      "How an instance is SEATED on the real ground under its whole footprint (voxel/seat.ts, docs/voxel-worlds.md \"Seat\"). " +
+        "`embed`: a rock — where the ground under its collider footprint falls below its (slope-tilted) underside it is sunk until " +
+        "the low side is bedded, and where the footprint straddles a step taller than the rock (a monument edge, a cliff lip) it is " +
+        "dropped. `none`: placed by its centre only (plants). Omitted = `embed` for rock-like models/ids (rock, boulder, outcrop, " +
+        "scree, hoodoo, stone, crag) and never for `cliff` rules, which hang on faces by design.",
+    ),
   jitter: z.number().min(0).max(1).default(0.85).describe("How far off its lattice point each instance may wander."),
   /** Keep clear of towns/paths/rivers by this much — nobody wants a tree in the high street. */
   clearance: z
@@ -1265,6 +1554,146 @@ const boundsSchema = z.object({
 });
 
 /**
+ * Landform profiles (anchor `landform`): what SHAPE of ground a kind of place
+ * has, as a weighted mix of shape families. Every family is a pure,
+ * continuous function of (x, z) — an additive band (rolling, hummocky,
+ * drumlin, karst, cuesta, mesa) or a monotone pull (wetland) — so the field
+ * stays a function and seams/parity hold. Families with weight 0 (or absent)
+ * cost nothing.
+ */
+const familyWeight = z.number().min(0).max(2).describe("Share of this family in the mix (0 = off, 1 = full amplitude).");
+const landformProfileShape = {
+  rolling: z
+    .object({
+      weight: familyWeight,
+      amplitude: z.number().min(0).default(1).describe("Multiplier on the world's hills band (`terrain.hills`). 1 = today's rolling country."),
+    })
+    .optional()
+    .describe("ROLLING: the world's own hills band (today's look). With a `landform`, this replaces the anchor's `hills` gain."),
+  hummocky: z
+    .object({
+      weight: familyWeight,
+      frequency: z.number().positive().default(0.022).describe("1/m; 0.022 = a knob every ~45 m."),
+      amplitude: z.number().min(0).default(4).describe("Metres from hollow to knob top."),
+      sharpness: z.number().min(0).max(1).default(0.5).describe("0 = soft swells; 1 = tight knobs with creased hollows between (billowed noise)."),
+      seed: z.number().int().default(3301),
+    })
+    .optional()
+    .describe("HUMMOCKY: a jumble of small rounded knobs and kettle hollows (moraine, broken heath)."),
+  drumlin: z
+    .object({
+      weight: familyWeight,
+      frequency: z.number().positive().default(0.005).describe("1/m across the grain; 0.005 = whalebacks ~200 m apart."),
+      amplitude: z.number().min(0).default(14).describe("Metres a drumlin stands over the ground between them."),
+      sharpness: z.number().min(0).max(1).default(0.4).describe("0 = gentle swells; 1 = discrete flat-topped whalebacks with level ground between."),
+      stretch: z.number().min(1).default(3.2).describe("Length/width of each hill along the grain."),
+      angle: z.number().optional().describe("Grain direction in radians. Default `terrain.dunes.angle` (the world's wind frame)."),
+      seed: z.number().int().default(3407),
+    })
+    .optional()
+    .describe("DRUMLIN: stretched elliptical whalebacks all aligned to one grain (glaciated lowland)."),
+  karst: z
+    .object({
+      weight: familyWeight,
+      frequency: z.number().positive().default(0.007).describe("1/m; 0.007 = one sinkhole or tower per ~140 m cell."),
+      amplitude: z.number().min(0).default(18).describe("Metres: pit depth; a tower stands 1.6x this."),
+      sharpness: z.number().min(0).max(1).default(0.6).describe("How sheer the tower walls are (0 = domes, 1 = near-vertical)."),
+      towers: z.number().min(0).max(1).default(0.3).describe("Share of cells that raise a tower instead of sinking a pit."),
+      density: z.number().min(0).max(1).default(0.8).describe("Share of cells that hold anything at all."),
+      seed: z.number().int().default(3511),
+    })
+    .optional()
+    .describe("KARST: cellular sinkholes (dolines) and steep limestone towers on a jittered grid."),
+  cuesta: z
+    .object({
+      weight: familyWeight,
+      frequency: z.number().positive().default(0.0028).describe("1/m along the dip; 0.0028 = one scarp every ~360 m."),
+      amplitude: z.number().min(0).default(28).describe("Metres of each scarp's riser."),
+      sharpness: z.number().min(0).max(1).default(0.8).describe("How short (steep) the scarp face is against the long dip slope."),
+      steps: z.number().int().min(1).max(6).default(2).describe("Strata ledges on each dip slope (terrace()); 1 = a smooth dip slope."),
+      angle: z.number().default(0.9).describe("Dip direction, radians: scarps face the opposite way."),
+      seed: z.number().int().default(3613),
+    })
+    .optional()
+    .describe("CUESTA: tilted strata — long gentle dip slopes ending in one-sided scarps, ledged by terrace()."),
+  wetland: z
+    .object({
+      weight: familyWeight,
+      level: z.number().default(1.5).describe("Metres over the land floor the ground is pulled toward."),
+      frequency: z.number().positive().default(0.02),
+      amplitude: z.number().min(0).default(1.2).describe("Metres of hummock relief around `level`."),
+      seed: z.number().int().default(3719),
+    })
+    .optional()
+    .describe(
+      "WETLAND: a monotone pull of the ground down onto a low basin level (weight = how far). Dry ground unless the " +
+        "anchor also has a `waterTable`, which stays the way to hold standing water.",
+    ),
+  mesa: z
+    .object({
+      weight: familyWeight,
+      frequency: z.number().positive().default(0.0034),
+      amplitude: z.number().min(0).default(60).describe("Metres of table height."),
+      steps: z.number().int().min(1).max(8).default(4),
+      sharpness: z.number().min(0).max(0.98).default(0.82),
+      seed: z.number().int().default(3821),
+    })
+    .optional()
+    .describe("MESA: terraced tables and buttes (own band). With a `landform`, this replaces the anchor's `mesas` gain."),
+  cliffs: z
+    .number()
+    .min(0)
+    .max(1)
+    .optional()
+    .describe(
+      "Strength of `terrain.cliffs` terracing on this anchor's mountains (0..1). Any anchor setting it switches " +
+        "terracing on for the world even with `terrain.cliffs.enabled` false; anchors that omit it then get 0 " +
+        "(or 1 when `enabled` is true). Set it only where the profile wants scarps.",
+    ),
+  rangeAngle: z
+    .number()
+    .optional()
+    .describe("Ranges run along this direction (radians) here, with `terrain.ridgedMultifractal` on. Default its `angle`."),
+  valley: z
+    .object({
+      shape: z
+        .enum(["U", "V", "flat"])
+        .describe("U: glacial trough (flat floor, steep walls) for cold anchors. V: a hill valley. flat: a lowland floodplain with a gentle rise at its edge."),
+      width: z.number().min(2).max(40).default(14).describe("Valley width as a multiple of the river's channel width."),
+      depth: z.number().min(0).default(35).describe("Most metres the valley lowers the ground (it never goes under the floodplain level)."),
+      strength: z.number().min(0).max(1).default(1),
+      floor: z.number().min(0).default(1.6).describe("Metres the valley floor stands over the river's water surface."),
+    })
+    .optional()
+    .describe(
+      "River VALLEY: around every authored river within this anchor, the ground is lowered toward a floor over the " +
+        "river's water surface across a band `width` channel widths wide — read from the solved beds before the " +
+        "channel cut, so the channel then sits in a valley rather than a slot. Weighted by zone membership.",
+    ),
+};
+const landformProfileSchema = z.object(landformProfileShape);
+const landformSchema = z
+  .object({
+    ...landformProfileShape,
+    weight: z.number().positive().default(1).describe("This profile's weight in the per-zone draw against `variants`."),
+    variants: z
+      .array(landformProfileSchema.extend({ weight: z.number().positive().default(1) }))
+      .optional()
+      .describe(
+        "Alternative profiles: each Voronoi zone site of this anchor draws ONE of [this profile, ...variants] by " +
+          "weight (a stable hash), so two zones of the same anchor can have different silhouettes. Variants do not nest.",
+      ),
+  })
+  .describe(
+    "LANDFORM PROFILE (opt-in): the shape of ground here as a weighted mix of families — rolling, hummocky, " +
+      "drumlin, karst, cuesta, wetland, mesa — each with its own frequency/amplitude/sharpness, plus per-anchor " +
+      "cliff strength and range direction. Replaces the anchor's `hills` and `mesas` gains (relief, dunes, " +
+      "flatten and waterTable still apply). Omit = the gains as before, byte-identical.",
+  );
+export type LandformProfileDoc = z.infer<typeof landformProfileSchema>;
+export type LandformDoc = z.infer<typeof landformSchema>;
+
+/**
  * One kind of place a zone can be. A zone is assigned exactly one anchor, so
  * a zone IS a desert, or a forest, or a badland — never a gradient between
  * them. Its climate values are what the biome rules window on, and the
@@ -1296,7 +1725,50 @@ const zoneAnchorSchema = z.object({
     .max(1)
     .default(0)
     .describe("Pulls the continent band down toward the land floor. 1 = a low, level plain hugging the waterline — swamp ground."),
+  waterTable: z
+    .number()
+    .optional()
+    .describe(
+      "Opt-in WATER TABLE: metres above the land floor (`seaLevel + bounds.landFloor`) at which this zone holds " +
+        "standing water. With it, `flatten` pulls the ground to this level plus `hummocks` noise instead of to " +
+        "the dry floor, and wherever the ground is under the table a shallow still sheet (kind \"marsh\", " +
+        "`marshMaterial`) covers it — clipped against the terrain like lakes and rivers, reported by " +
+        "`waterSurface`/`waterY`, so cover, scatter and swimming see it. The ground rises into a low dry rim " +
+        "where the zone ends and along wet rivers, so a sheet never ends in the air. Omit = a dry flattened zone.",
+    ),
+  hummocks: z
+    .number()
+    .min(0)
+    .max(4)
+    .optional()
+    .describe(
+      "Metres of island/pool relief around `waterTable` (default 1): ground ranges about ±this, so islands and " +
+        "pools mix roughly half and half. Pools are soft-capped at `climate.zones.marsh.maxDepth` deep. Only " +
+        "read with `waterTable`.",
+    ),
+  landform: landformSchema.optional(),
 });
+
+/** Shared shape of the marsh water table (zone anchors with `waterTable`). */
+const marshSchema = z
+  .object({
+    frequency: z.number().positive().optional().describe("Frequency (1/m) of the hummock/pool noise. Default 0.018 (~55 m from one island to the next)."),
+    maxDepth: z.number().positive().optional().describe("Soft cap on pool depth under the table, m. Default 1.1: marsh water is wading water, never a lake."),
+    rim: z.number().min(0).optional().describe("Metres over the table the dry rim stands where a marsh ends (zone edge, coast, wet river bank). Default 0.4."),
+    wetBias: z
+      .number()
+      .min(-1)
+      .max(1)
+      .optional()
+      .describe(
+        "Shifts the hummock noise down (>0, wetter) or up (<0, drier) by this many `hummocks` x 1.8 m, so more or " +
+          "less of a marsh sits under its table. Default 0 (about half wet in a marsh's heart; borders and levees " +
+          "are drier). ~0.25 brings a whole swamp toward half wet.",
+      ),
+    seed: z.number().int().optional().describe("Seed of the hummock noise. Default 2741."),
+  })
+  .optional()
+  .describe("Opt-in tuning for every anchor's `waterTable`. Omit for the defaults.");
 
 /**
  * Zones: the world cut into large regions, each one kind of place.
@@ -1326,6 +1798,7 @@ const zonesSchema = z.object({
     })
     .prefault({}),
   anchors: z.array(zoneAnchorSchema).min(1),
+  marsh: marshSchema,
   seed: z
     .number()
     .int()
@@ -1473,6 +1946,21 @@ export const worldRecipeSchema = z.object({
         .object({
           height: z.number().positive().default(560).describe("The highest the ground can be, asymptotically. Peaks approach it and never reach it."),
           softness: z.number().positive().default(140).describe("Metres below `height` at which the compression begins. Wider = gentler summits."),
+          variation: z
+            .number()
+            .min(0)
+            .optional()
+            .describe(
+              "Opt-in. Metres the ceiling `height` wanders up and down with low-frequency noise, so the summit " +
+                "line is not one altitude: a few ranges stand above the rest instead of every big peak converging " +
+                "on the same flattened top. Keep `height + variation` under `maxY`. Omit = one flat ceiling.",
+            ),
+          variationFrequency: z
+            .number()
+            .positive()
+            .optional()
+            .describe("Frequency (1/m) of the ceiling wander. Default 0.00035 (~3 km): whole ranges rise and fall, not single peaks."),
+          variationSeed: z.number().int().optional().describe("Seed of the ceiling wander. Default 1931."),
         })
         .optional()
         .describe(
@@ -1570,6 +2058,28 @@ export const worldRecipeSchema = z.object({
             "self-intersections — and rivers/roads/towns still carve on top of the result. OFF by default; it " +
             "costs one extra noise evaluation per column.",
         ),
+      ridgedMultifractal: z
+        .object({
+          enabled: z.boolean().default(false),
+          offset: z.number().min(0.5).max(1.5).default(1).describe("Musgrave's offset: the ridge height each octave folds about. 1 = classic."),
+          gain: z.number().min(0).max(4).default(2).describe("How strongly a ridge's own height lets the next octave add detail (detail on crests, calm valleys)."),
+          H: z.number().min(0).max(2).default(1).describe("Spectral exponent: octave weight falls as lacunarity^(-i*H). Higher = smoother."),
+          rotate: z.number().default(0.65).describe("Radians each octave's lattice is turned, so no octave lines up with another (no grid alignment)."),
+          angle: z.number().default(0.5).describe("Default range direction, radians (anchor `landform.rangeAngle` overrides per anchor)."),
+          stretch: z.number().min(1).max(6).default(2.2).describe("Ranges are this many times longer than wide along their direction (noise and mask)."),
+          warp: z.number().min(0).default(380).describe("Metres of a large, low-frequency domain warp that bends ranges so they wander instead of running ruler-straight."),
+          warpFrequency: z.number().positive().default(0.00042),
+          seed: z.number().int().default(4201),
+        })
+        .optional()
+        .describe(
+          "Opt-in: the mountain band (`terrain.mountains`, its frequency/amplitude/octaves/lacunarity/crest) is " +
+            "evaluated as Musgrave ridged multifractal noise with per-octave rotation, in a stretched, warped " +
+            "frame along a range direction, and the mountain mask is read in the same frame so ranges are long " +
+            "and directed instead of blobs. Normalized to the plain ridged band's mean so `amplitude` keeps its " +
+            "meaning. `erosion` is not used on this path (the multifractal's own gain already calms valleys). " +
+            "Omit (or enabled false) = the plain band, byte-identical.",
+        ),
       overhang: z
         .object({
           strength: z.number().min(0).default(6).describe("World units the surface can bulge horizontally. 0 = a pure heightfield."),
@@ -1579,6 +2089,9 @@ export const worldRecipeSchema = z.object({
         })
         .default({ strength: 6, frequency: 0.02, slopeStart: 0.35, slopeEnd: 0.7 })
         .describe("THE reason to use marching cubes over a heightmap: a true 3D perturbation, so cliffs undercut and arches exist."),
+      planarCliffs: planarCliffsSchema.optional(),
+      seaCliffs: seaCliffsSchema.optional(),
+      buttes: buttesSchema.optional(),
       caves: z
         .object({
           enabled: z
@@ -1740,6 +2253,20 @@ export const worldRecipeSchema = z.object({
         "it (unknown biome/surface names, missing textures, realized density per biome).",
     ),
 
+  townTerraces: z
+    .object({
+      walls: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Build every stepped town's shelf risers as retaining walls (`features.terraceWalls`, owner = the town) instead of " +
+            "voxel slopes, with the stage's ramps and stairs as wall inserts. Towns tagged `pinned` are never touched.",
+        ),
+      maxStep: z.number().min(1.6).max(6.4).default(6).describe("With walls on: tallest shelf step (m) a town draws, so every riser fits one kit wall."),
+    })
+    .optional()
+    .describe("Options for `worldgen terrace` (the town shelf stage). Omitted = walls off."),
+
   pipeline: z
     .record(z.string(), z.string())
     .default({})
@@ -1771,9 +2298,38 @@ export const worldRecipeSchema = z.object({
         ),
       roads: z.array(roadSchema).default([]),
       towns: z.array(townSchema).default([]),
+      landformCalm: z
+        .array(
+          z.object({
+            id: z.string().describe("Owner of the calm disc (a town, place region or patch id)."),
+            center: z.tuple([z.number(), z.number()]),
+            radius: z.number().positive().describe("Metres of full calm: inside, landform families and valleys do not apply."),
+            falloff: z.number().min(0).default(120).describe("Metres over which the families fade back in outside `radius`."),
+          }),
+        )
+        .optional()
+        .describe(
+          "Discs where anchor `landform` families (and river valleys) are faded out, so authored places — towns, " +
+            "dressed sites, height patches, terrace walls — keep the ground they were built on when a profile is " +
+            "added or retuned. Written by `worldgen landform-calm`. Omit = no calm (and no cost).",
+        ),
       heightPatches: z.array(heightPatchSchema).default([]).describe("Raster elevation edits applied after ordinary heightfield features. Affect terrain mesh, collision and placement together; later patches win. Existing 3D density modifiers still apply."),
       lakes: z.array(lakeSchema).default([]).describe("Standing water at its own level, basin carved beneath. Written by `worldgen rivers`."),
-      bridges: z.array(bridgeSchema).default([]).describe("Road decks spanning rivers. Written by `worldgen roads`."),
+      bridges: z
+        .array(bridgeSchema)
+        .default([])
+        .describe(
+          "Road decks spanning rivers. Written by `worldgen roads`. The streamer draws each as a PLACEHOLDER (a flat slab and box " +
+            "piers); a real bridge is a `bridgeSpans` entry (`worldgen bridge-place`, the world-kit bridge kits).",
+        ),
+      bridgeSpans: z
+        .array(bridgeSpanSchema)
+        .optional()
+        .describe(
+          "Real bridges across gaps (stone arch bridges / aqueducts with piers founded on the ground or seabed, or rope " +
+            "suspension bridges) — authoring truth. `worldgen bridge-place` fits each to the ground and writes its `solved` " +
+            "pieces plus the derived `bs-<id>*` height patches and clearing; `--refit` re-solves them after the terrain changes.",
+        ),
       fills: z.array(fillSchema).default([]).describe("Sediment-filled hollows on the river network. Written by `worldgen rivers`."),
       riverPaths: z
         .array(riverPathSchema)
@@ -1782,11 +2338,53 @@ export const worldRecipeSchema = z.object({
       tunnels: z.array(tunnelSchema).default([]).describe("Carved cave passages. Written by `worldgen caves`."),
       blobs: z.array(blobSchema).default([]),
       passages: z.array(passageSchema).default([]).describe("Bounded rectangular flat-floor passage cutters applied after blobs. Signed exterior samples avoid tunnel floor snapping. They remove rock only; a supported floor and roof must already exist. Render, collision and placement share this field."),
+      operators: z
+        .array(operatorDocSchema)
+        .optional()
+        .describe(
+          "LANDFORM OPERATORS — authoring truth for shaped ground: `{ id, op, ...params }` (terrace, path, ...; the engine " +
+            "spec's `landformOperators` lists them). Agents write these, never raw carve boxes. `worldgen op <world> --apply` " +
+            "compiles each into derived features with ids `op:<id>:*` (regenerable, never hand-edited; re-applying replaces " +
+            "exactly them) and stamps `compiled`. The field reads only the compiled pieces. docs/voxel-worlds.md \"Landform operators\".",
+        ),
+      kitWalls: z
+        .array(kitWallSchema)
+        .optional()
+        .describe(
+          "Retaining-wall RUNS on shelf risers, COMPILED by a landform operator (`terrace`; ids `op:<id>:wall-<n>`); never " +
+            "hand-edited. The streamer places each world-kit piece (2 m straights + caps); the field carves each face cut down to " +
+            "the wall foot. docs/voxel-worlds.md \"Landform operators\".",
+        ),
+      landmarks: z
+        .array(landmarkSchema)
+        .optional()
+        .describe(
+          "LANDMARKS: baked rock built from a landform operator's solve (`ledges` mode landmark; ids `op:<id>:landmark`), never " +
+            "hand-edited. The streamer places the prefab (merged DC mesh + trimesh collider, the terrain material) in the cell its " +
+            "origin stands in; the operator's height patch keeps the terrain inside it. docs/voxel-worlds.md 'Landform operators'.",
+        ),
+      ribbons: z
+        .array(ribbonSchema)
+        .optional()
+        .describe(
+          "Path RIBBONS: solved walk surfaces laid over graded ground (steps, switchbacks, retaining walls). COMPILED by the " +
+            "`path` landform operator (ids `op:<id>:ribbon`); never hand-edited. The streamer draws each as a surface mesh with a " +
+            "collider; the field carves its wall faces; vegetation keeps its outline clear. Paths are ribbons: never carve a path.",
+        ),
       fallSites: z
         .array(fallSiteSchema)
         .optional()
         .describe("Agent-crafted waterfalls: a solved fall split into a cascade of pools and dressed with rocks. Written by `worldgen fall-site`; see docs/world-editing/rivers-and-falls.md."),
       pois: z.array(poiSchema).default([]),
+      terraceWalls: z
+        .array(terraceWallSchema)
+        .optional()
+        .describe(
+          "Terraces held up by real retaining walls (pad outline, drop, inserts) — authoring truth. `worldgen terrace-place` " +
+            "fits each to the ground and writes its `solved` pieces plus the derived `tw-<id>*` height patch, passages and " +
+            "clearing; `--refit` re-solves them after the terrain changes. `worldgen terrace` writes the `<town>-riser-*` ones " +
+            "for towns when `townTerraces.walls` is on.",
+        ),
       clearings: z
         .array(clearingSchema)
         .optional()
@@ -1899,6 +2497,13 @@ export const worldRecipeSchema = z.object({
         "the water visibly runs downstream along the current each vertex carries. Falls back to `waterMaterial` " +
         "(standing water). `worldgen rivers` writes `<waterMaterial>-river` and sets this.",
     ),
+  marshMaterial: z
+    .string()
+    .optional()
+    .describe(
+      "Material asset id for the marsh sheet (zone anchors with a `waterTable`): still, murky standing water. " +
+        "Falls back to `waterMaterial`.",
+    ),
   bridgeMaterial: z
     .string()
     .optional()
@@ -1934,6 +2539,18 @@ export const worldRecipeSchema = z.object({
     })
     .prefault({})
     .describe("How zone ground overrides (`regions[].ground`) blend across zone borders."),
+  rockSkins: z
+    .record(z.string().min(1), z.number().int().min(0).max(7))
+    .optional()
+    .describe(
+      "ROCK SKINS — the world's stone follows the place. Cliff surface NAME -> body slice (`rockCap.bases` index) of the world's " +
+        "rock-cap material. Every scatter rock, boulder and cliff mass (rules with `cap`, `rockBase` or `rockBaseByCliff`) samples " +
+        "the cliff the terrain draws where it stands (zone `ground.cliff` overrides included, so it is its zone's stone, or the " +
+        "sea cliff / butte it leans on) and wears that slice; this table wins over a rule's `rockBase` / `rockBaseByCliff`. " +
+        "Key \"*\" is the fallback. The slice should be the cliff's own tile (the zone's rock texture or its cliff tile at the " +
+        "40 texels/m standard): `worldgen rock-skins` measures the tone of each. Same meshes, one material, one batch per model. " +
+        "Omit for the legacy per-rule bases. Written by `worldgen init` / `zone-textures`.",
+    ),
 });
 
 export type WorldRecipe = z.infer<typeof worldRecipeSchema>;

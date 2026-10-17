@@ -31,6 +31,7 @@ import {
   corpseClaimed,
   releaseCorpse,
   HAND_NETSTATE,
+  STAFF_NETSTATE,
   isLootLocked,
   isTransferLocked,
   LOOT_LOCK_NETSTATE,
@@ -45,6 +46,7 @@ import {
   waterQuery,
   waterVolumes,
   type CharacterBuild,
+  type StaffRole,
   type EntityDoc,
   type LootBag,
   type NetObjectData,
@@ -201,6 +203,7 @@ export function clearPlayerState(world: HeadlessWorld, bodyId: string, peerId: s
   // `notice` likewise: a body that left sneaking must not come back unnoticeable
   for (const ns of ["character", "build", HAND_NETSTATE, CAST_NETSTATE, BADGE_NETSTATE, "landing", "notice", "transferLock", LOOT_LOCK_NETSTATE, "owner", "name", ...PERSISTED_PLAYER_NAMESPACES]) world.netState.delete(`${ns}/${bodyId}`);
   world.netState.delete(`player/${peerId}`);
+  world.netState.delete(`${STAFF_NETSTATE}/${peerId}`);
 }
 
 /** Who a peer is, from the ticket it presented (absent on an open dev server). */
@@ -214,6 +217,8 @@ export interface PlayerIdentity {
   rev?: Record<string, number>;
   /** Character-creation build from the ticket; seeds a fresh sheet (netState build/<bodyId>). */
   build?: CharacterBuild;
+  /** Staff role from the signed ticket; published as netState staff/<peerId> (see STAFF_NETSTATE). */
+  role?: StaffRole;
 }
 
 /** The save authority's two calls. Without one, nothing persists (dev). */
@@ -1315,6 +1320,8 @@ export class GameServer {
       this.world.netState.set(`owner/${bodyId}`, peerId);
       this.world.netState.set(`player/${peerId}`, bodyId);
       this.world.netState.set(`name/${bodyId}`, name); // what a party frame or a nameplate shows
+      // a staff account (from its signed ticket) may run the console's authority commands: handlers read staff/<peer>
+      if (identity?.role) this.world.netState.set(`${STAFF_NETSTATE}/${peerId}`, identity.role);
       // landing grace: brains leave a body that just logged in / arrived alone for a few seconds
       if (this.landingSeconds > 0) this.world.netState.set(`landing/${bodyId}`, this.world.timeMs + this.landingSeconds * 1000);
       // everyone else learns the newcomer's body; the newcomer gets the whole runtime set below

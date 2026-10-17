@@ -243,7 +243,17 @@ export const ccBaseFromMixamo = {
   keepBind: ccBaseFromUeMannequin.keepBind,
 };
 
+/** Reuse the installed human library on another CC humanoid, including reduced hands. */
+export const ccBaseFromCcBase = {
+  ...ccBaseFromUeMannequin,
+  id: 'cc-base<-cc-base',
+  sourceMeasure: ccBaseFromUeMannequin.measure,
+  bones: Object.fromEntries([...Object.keys(ccBaseFromUeMannequin.bones), 'CC_Base_NeckTwist02'].map(n => [n,n])),
+  keepBind: [...ccBaseFromUeMannequin.keepBind, 'CC_Base_NeckTwist02'],
+};
+
 export const RIG_MAPS = {
+  'cc-base<-cc-base': ccBaseFromCcBase,
   "cc-base<-ue-mannequin": ccBaseFromUeMannequin,
   "cc-base<-mixamo": ccBaseFromMixamo,
 };

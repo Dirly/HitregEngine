@@ -13,6 +13,12 @@
  *  - every height patch: its whole raster and 6 m beyond its edge;
  *  - along every graded road (flatten > 0 with a surface): out to its reach.
  *
+ * A terrace wall's own riser is exempt: the lattice cell holding each fitted
+ * `features.terraceWalls` face (and the cell in front, holding the berm the cut removes) is the wall, drawn by the
+ * retaining-wall geometry and cut sharp by the terrace's passages, not a fault
+ * of its patch. Its strip, pad and feathers are measured like any patch. A path ribbon's retaining walls
+ * (`features.ribbons[].cuts`, kind face) and operator kit walls (`features.kitWalls[].cuts`) are exempt the same way.
+ *
  * Faults are attributed to the nearest patch / road and the command exits 1
  * when any are found (an `--allow`ed id is reported, not failed). Thresholds:
  * `--alias 0.5` (m the drawn ground misses the field by), `--max-slope 1.6`
@@ -31,6 +37,7 @@ import {
   createWorldField,
   measureTerrainLips,
   seatReport,
+  fieldSolidProbe,
   type TerrainLipFault,
   type WorldRecipe,
 } from "@hitreg/core";
@@ -120,6 +127,28 @@ export interface LipsResult {
   totals: { alias: number; step: number; lip: number; cells: number; touched: number };
 }
 
+/** Cells whose centre is in a fitted terrace wall's riser band (the lattice cell behind each face). */
+export function terraceRiserBand(recipe: WorldRecipe): (x: number, z: number) => boolean {
+  const faces: { a: readonly number[]; b: readonly number[]; normal: readonly number[]; reach?: number }[] = (recipe.features.terraceWalls ?? []).flatMap((t) => t.solved?.faces ?? []);
+  // a path ribbon's retaining walls: each face cut is one wall face (n = right of its run = the low side)
+  // operator kit walls (`features.kitWalls`, e.g. terrace risers) the same way
+  for (const r of [...(recipe.features.ribbons ?? []), ...(recipe.features.kitWalls ?? [])]) for (const c of r.cuts) {
+    if (c.kind !== "face") continue;
+    faces.push({ a: c.origin, b: [c.origin[0] + c.dir[0] * c.s[1], c.origin[1] + c.dir[1] * c.s[1]], normal: [-c.dir[1], c.dir[0]], reach: c.n[1] + 0.5 });
+  }
+  if (!faces.length) return () => false;
+  return (x, z) => {
+    for (const f of faces) {
+      const dx = f.b[0] - f.a[0], dz = f.b[1] - f.a[1];
+      const len = Math.hypot(dx, dz);
+      const s = ((x - f.a[0]) * dx + (z - f.a[1]) * dz) / len;
+      const n = (x - f.a[0]) * f.normal[0] + (z - f.a[1]) * f.normal[1];
+      if (s >= -2.2 && s <= len + 2.2 && n >= -2.2 && n <= (f.reach ?? 2.2)) return true;
+    }
+    return false;
+  };
+}
+
 /** The gate as a function, so installers and `zonegen status` can call it in-process. */
 export function runLipsGate(recipe: WorldRecipe, opts: { near?: [number, number, number]; aliasTol?: number; maxSlope?: number; lipTol?: number; allow?: string[] } = {}): LipsResult & { faults: (TerrainLipFault & { owner: string })[] } {
   const field = createWorldField(recipe);
@@ -130,6 +159,16 @@ export function runLipsGate(recipe: WorldRecipe, opts: { near?: [number, number,
     list = list.filter((o) => o.box[0] < nx + nr && o.box[2] > nx - nr && o.box[1] < nz + nr && o.box[3] > nz - nr);
   }
   const allow = new Set(opts.allow ?? []);
+  const riser = terraceRiserBand(recipe);
+  const withoutTerrace = (fid: string) => createWorldField({
+    ...recipe,
+    features: {
+      ...recipe.features,
+      heightPatches: recipe.features.heightPatches.filter((p) => p.id !== fid),
+      passages: (recipe.features.passages ?? []).filter((p) => !p.id.startsWith(`${fid}-`)),
+      terraceWalls: (recipe.features.terraceWalls ?? []).filter((t) => `tw-${t.id}` !== fid),
+    },
+  });
   const rows: LipsResult["owners"] = [];
   const all: (TerrainLipFault & { owner: string })[] = [];
   const totals = { alias: 0, step: 0, lip: 0, cells: 0, touched: 0 };
@@ -142,12 +181,17 @@ export function runLipsGate(recipe: WorldRecipe, opts: { near?: [number, number,
     }
     if (x1 <= x0 || z1 <= z0) continue;
     const others = list.filter((q) => q !== o && q.box[0] < x1 && q.box[2] > x0 && q.box[1] < z1 && q.box[3] > z0);
-    const rep = measureTerrainLips(field, reference, {
+    // a terrace wall's patch (`tw-*`) is levelled ground under built works, blended back into whatever was there,
+    // trails included: it is measured against the world without IT, so a trail's own teeth inside its raster are
+    // not charged to it
+    const ref = o.kind === "patch" && o.id.startsWith("tw-") ? withoutTerrace(o.id) : reference;
+    const rep = measureTerrainLips(field, ref, {
       x0, z0, x1, z1,
       aliasTol: opts.aliasTol, maxSlope: opts.maxSlope, lipTol: opts.lipTol,
       include: (x, z) => {
         const mine = o.band(x, z);
         if (mine > 0) return false;
+        if (riser(x, z)) return false;
         for (const q of others) if (q.band(x, z) < mine) return false;
         return true;
       },
@@ -211,13 +255,20 @@ export function commandSeated(host: LipsHost): void {
   if (!slabs.length) host.fail("give --slab x,z,halfX,halfZ,yawDeg,baseY (repeatable) or --slabs <file.json> ([{id,x,z,halfX,halfZ,yaw(rad),baseY}])");
   const field = createWorldField(recipe);
   const maxGap = num(argv, "gap", 0.25), maxClip = num(argv, "clip", 0.6);
-  let bad = 0;
+  // the REAL solid (seat.ts): a stair cut, a carve or a planar tread is ground; the drawn heightfield is not the
+  // truth there (--drawn keeps the old lattice-height reading). Objects other than slabs: `worldgen float`.
+  const probe = argv.includes("--drawn") ? null : fieldSolidProbe(field);
+  const ground = probe ? (x: number, z: number, y: number): number => probe.floor(x, z, y + maxClip + 2, y - 30) ?? -Infinity : undefined;
+  // --allow id,id: slabs proved seated another way (e.g. a density probe where the drawn height() cannot see a cut) are
+  // reported, never counted (as lips --allow); the reason belongs in the caller's evidence
+  const allow = new Set((str(argv, "allow") ?? "").split(",").filter(Boolean));
+  let bad = 0, allowed = 0;
   for (const s of slabs) {
-    const r = seatReport(field, s);
-    const fail = r.gap > maxGap || r.clip > maxClip;
-    if (fail) bad++;
-    console.log(`  ${fail ? "FAIL" : "ok  "} ${s.id ?? ""} @ ${s.x.toFixed(1)},${s.z.toFixed(1)}: gap ${r.gap} m, clip ${r.clip} m`);
+    const r = seatReport(field, s, 1, ground);
+    const over = r.gap > maxGap || r.clip > maxClip, ok = !over || allow.has(s.id ?? ""), fail = !ok;
+    if (fail) bad++; else if (over) allowed++;
+    console.log(`  ${fail ? "FAIL" : over ? "allow" : "ok  "} ${s.id ?? ""} @ ${s.x.toFixed(1)},${s.z.toFixed(1)}: gap ${r.gap} m, clip ${r.clip} m`);
   }
-  console.log(bad ? `FAIL: ${bad}/${slabs.length} slabs not seated (gap > ${maxGap} m or clip > ${maxClip} m)` : `OK: ${slabs.length} slabs seated`);
+  console.log(bad ? `FAIL: ${bad}/${slabs.length} slabs not seated (gap > ${maxGap} m or clip > ${maxClip} m)${allowed ? `, ${allowed} allowed` : ""}` : `OK: ${slabs.length} slabs seated${allowed ? ` (${allowed} allowed by --allow)` : ""}`);
   if (bad) process.exitCode = 1;
 }

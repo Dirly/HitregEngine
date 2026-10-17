@@ -1,5 +1,5 @@
 export { newId, type EntityId } from "./ids.js";
-export { vegetationTintSchema, type VegetationTint } from "./components/core.js";
+export { vegetationTintSchema, type VegetationTint, rockCapSchema, type RockCap } from "./components/core.js";
 export {
   createScene,
   childrenOf,
@@ -338,6 +338,31 @@ export {
   type VoxelWorldData,
 } from "./components/voxel.js";
 export * from "./voxel/index.js";
+export {
+  WATER_FINISH_KINDS,
+  solidAt,
+  classifyWaterEdge,
+  classifyOutline,
+  classifyEdges,
+  ringSegments,
+  meshOutline,
+  clipWaterToSolid,
+  openStretches,
+  curtainFit,
+  curtainColumns,
+  SHORE_FOAM_STEEP_DEFAULT,
+  shoreFoamOnBank,
+  foamLinedBank,
+  type WaterFinish,
+  type WaterFinishKind,
+  type WaterEdgeClass,
+  type WaterOpenWhy,
+  type WaterEdgeSample,
+  type OutlineReport,
+  type WaterEdgeSegment,
+  type WaterClip,
+  type CurtainFit,
+} from "./water-edges.js";
 export * from "./vfx/index.js";
 export * from "./character/index.js";
 export {
@@ -380,6 +405,8 @@ export {
   type PortalTravel,
 } from "./portal.js";
 export { LANDING_NETSTATE, landingKey, landingSchema, registerLandingNetState, isLanding, clearLanding } from "./landing.js";
+export { STAFF_NETSTATE, STAFF_ROLES, staffKey, staffSchema, registerStaffNetState, staffRole } from "./staff.js";
+export type { StaffRole } from "./staff.js";
 export { NOTICE_NETSTATE, noticeKey, noticeSchema, registerNoticeNetState, readNotice } from "./notice.js";
 export {
   MOB_EVENTS,

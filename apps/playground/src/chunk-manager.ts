@@ -1,3 +1,4 @@
+import { assetFileUrl } from "./asset-url.js";
 import * as THREE from "three/webgpu";
 import {
   assembleHlodBuildDoc,
@@ -1110,7 +1111,7 @@ export class ChunkManager {
     if (!file) return null;
     const content: string =
       rawContent ??
-      (await fetch(`/__hitreg/asset-file?file=${encodeURIComponent(`chunks/${file}`)}`).then(
+      (await fetch(assetFileUrl(`chunks/${file}`)).then(
         (r) => r.text(),
       ));
     const parsed = chunkDocSchema.safeParse(JSON.parse(content));

@@ -1,4 +1,4 @@
-import { WORLD_WEATHER_KEY } from "@hitreg/core";
+import { WORLD_WEATHER_KEY, type RegionAmbientLayer } from "@hitreg/core";
 import { Script, type BiomeAt, type RegionAt, type ScriptCommandDecl } from "./script.js";
 
 /**
@@ -40,7 +40,7 @@ export interface AmbientLayer {
 export interface AmbientSample {
   /** Biome share (0..1) of the land around the player, by lowercase biome id. */
   biomes: Record<string, number>;
-  region: Pick<RegionAt, "id" | "name" | "tags"> | null;
+  region: Pick<RegionAt, "id" | "name" | "tags" | "ambient"> | null;
   /** 0..1 daylight. */
   daylight: number;
   /** 0..1 how close water is (1 = at the edge, 0 = none within range). */
@@ -95,6 +95,21 @@ export function normalizeLayer(raw: Partial<AmbientLayer> & { id: string }): Amb
   };
 }
 
+/**
+ * A zone's own layer (recipe `regions[].ambient`) as a layer the rule can
+ * judge: the zone IS where it lives, so it carries no `zones` of its own and
+ * only its `biomes` narrow it inside the zone. Cached per recipe object.
+ */
+const zoneLayerCache = new WeakMap<RegionAmbientLayer, AmbientLayer>();
+export function zoneLayer(raw: RegionAmbientLayer): AmbientLayer {
+  let layer = zoneLayerCache.get(raw);
+  if (!layer) {
+    layer = normalizeLayer({ ...raw, zones: "", match: "all" });
+    zoneLayerCache.set(raw, layer);
+  }
+  return layer;
+}
+
 /** How much of the day a `when` is awake: eased so a layer fades through dusk rather than switching at it. */
 export function timeWeight(when: AmbientLayer["when"], daylight: number): number {
   if (when === "always") return 1;
@@ -144,7 +159,12 @@ const RING: ReadonlyArray<readonly [number, number]> = [
 ];
 
 interface LayerState {
+  /** The layer driving the emitter right now (the stronger of base and zone). */
   layer: AmbientLayer;
+  /** From the scene's `layers` param, or null for a layer only a zone declares. */
+  base: AmbientLayer | null;
+  /** From the zone the player stands in (recipe `regions[].ambient`), or null. */
+  zone: AmbientLayer | null;
   emitter: string | null;
   target: number;
   current: number;
@@ -162,6 +182,10 @@ interface LayerState {
  * Ambient particles around the local player — fireflies at night, leaves in a
  * forest, ash in a burned zone, marsh spores, dust in dry country, moths in a
  * town after dark, spray on the shore.
+ *
+ * Zone-bound layers belong in the world recipe (`regions[].ambient`, read
+ * through `ctx.regionAt`); the `layers` param keeps the biome-wide ones and
+ * still honours older scenes that name zones there.
  *
  * Each LAYER (the `layers` param) names one emitter hung off the player body
  * (tag `ambient-<id>`, like the weather's) and the rule for when it lives: a
@@ -186,7 +210,9 @@ export class AmbientParticles extends Script {
         "match (all = biome AND zone; any = either — ash in a volcanic zone or in blight), town (any|only|never), " +
         "needWater (bool: only near water), waterBoost (extra rate × closeness to water), rate (particles/s at full), " +
         "storm (extra rate per unit storm; negative thins it out), wind (m/s the wind carries it at full gust; 0 = authored aim), " +
-        "rise (vertical drift m/s, negative falls), glow (night brightness floor: 1 = self-lit) }. Missing fields default.",
+        "rise (vertical drift m/s, negative falls), glow (night brightness floor: 1 = self-lit) }. Missing fields default. " +
+        "A voxel world's zones add their own layers (recipe `regions[].ambient`, preferred for anything tied to a zone): " +
+        "a zone layer with the same id as one here drives that emitter by whichever rule is stronger at the player.",
     },
     sampleHz: { default: 2, min: 0.2, max: 10, description: "World samples per second (biome disc, zone, water, weather). Rates ease between samples." },
     fadeSeconds: { default: 4, min: 0.1, max: 60, description: "Seconds a layer takes to fade in or out when where/when you are changes." },
@@ -226,13 +252,17 @@ export class AmbientParticles extends Script {
     this.layersSource = raw;
     const arr = Array.isArray(raw) ? raw : [];
     const prev = new Map(this.layers.map((l) => [l.layer.id, l]));
+    const ids = new Set<string>();
     this.layers = [];
     for (const entry of arr) {
       if (!entry || typeof entry !== "object" || typeof (entry as { id?: unknown }).id !== "string") continue;
       const layer = normalizeLayer(entry as AmbientLayer);
       const old = prev.get(layer.id);
+      ids.add(layer.id);
       this.layers.push({
         layer,
+        base: layer,
+        zone: old?.zone ?? null,
         emitter: old?.emitter ?? null,
         target: 0,
         current: old?.current ?? 0,
@@ -243,6 +273,41 @@ export class AmbientParticles extends Script {
         dir: [0, 0, 0],
         spd: [0, 0],
       });
+    }
+    // layers only a zone declares outlive a params edit
+    for (const old of prev.values()) {
+      if (ids.has(old.layer.id) || !old.zone) continue;
+      old.base = null;
+      this.layers.push(old);
+    }
+  }
+
+  /** Attach the current zone's layers (recipe `regions[].ambient`), creating a state for an id the scene never named. */
+  private syncZoneLayers(): void {
+    for (const s of this.layers) s.zone = null;
+    const own = this.sample.region?.ambient;
+    if (!own) return;
+    for (const raw of own) {
+      const layer = zoneLayer(raw);
+      let s = this.layers.find((l) => l.layer.id === layer.id);
+      if (!s) {
+        s = {
+          layer,
+          base: null,
+          zone: null,
+          emitter: null,
+          target: 0,
+          current: 0,
+          sentRate: -1,
+          sentScale: -1,
+          sentAngle: Number.NaN,
+          msg: { emitting: false, rate: 0, colorScale: 1 },
+          dir: [0, 0, 0],
+          spd: [0, 0],
+        };
+        this.layers.push(s);
+      }
+      s.zone = layer;
     }
   }
 
@@ -265,12 +330,18 @@ export class AmbientParticles extends Script {
     const step = 1 / Math.max(0.2, this.param<number>("sampleHz"));
     this.sampleTimer = step;
     this.takeSample();
+    this.syncZoneLayers();
     const k = Math.min(1, step / Math.max(0.1, this.param<number>("fadeSeconds")));
     const majority = this.param<number>("biomeMajority");
     for (const s of this.layers) {
       if (!s.emitter) s.emitter = this.ownEmitter(`ambient-${s.layer.id}`);
       const force = this.forced.get(s.layer.id);
-      s.target = this.underwater ? 0 : force !== undefined ? force : layerStrength(s.layer, this.sample, majority);
+      // the scene's rule and the zone's own, whichever is stronger here
+      const a = s.base ? layerStrength(s.base, this.sample, majority) : 0;
+      const b = s.zone ? layerStrength(s.zone, this.sample, majority) : 0;
+      if (s.zone && b > a) s.layer = s.zone;
+      else if (s.base) s.layer = s.base;
+      s.target = this.underwater ? 0 : force !== undefined ? force : Math.max(a, b);
       s.current += (s.target - s.current) * k;
       if (s.current < 0.01 && s.target === 0) s.current = 0;
       this.drive(s);

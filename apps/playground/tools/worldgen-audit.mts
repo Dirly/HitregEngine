@@ -82,6 +82,17 @@ export interface WaterAudit {
   };
 }
 
+/**
+ * A river's water level at point `i`: the SOLVED level (`surfaceY`, pools held to their lips and a lake outlet held
+ * to the lake) when the field has one, else most of the channel depth over the bed. Recomputing it from the bed
+ * alone put every hand river 0.8 m under the tarn it leaves (the bed sits 3 m under a held level, not 0.7 x depth).
+ */
+export function riverSurfaceAt(r: { points: readonly unknown[]; bedY?: readonly number[]; surfaceY?: readonly number[]; depths?: readonly number[]; depth: number }, i: number): number {
+  if (r.surfaceY && r.surfaceY.length === r.points.length) return r.surfaceY[i]!;
+  const depth = r.depths && r.depths.length === r.points.length ? r.depths[i]! : r.depth;
+  return r.bedY![i]! + Math.max(0.4, depth * 0.7);
+}
+
 export function auditWorld(recipe: WorldRecipe, field: WorldField): WaterAudit {
   // the field's rivers: a hand-written river (an agent's `{ points, width }`)
   // has its bed solved there and none in the recipe
@@ -96,10 +107,7 @@ export function auditWorld(recipe: WorldRecipe, field: WorldField): WaterAudit {
   const lakes = recipe.features.lakes;
   const problems: string[] = [];
   const detail: string[] = [];
-  const surfaceAt = (r: (typeof rivers)[number], i: number): number => {
-    const depth = r.depths && r.depths.length === r.points.length ? r.depths[i]! : r.depth;
-    return r.bedY![i]! + Math.max(0.4, depth * 0.7);
-  };
+  const surfaceAt = riverSurfaceAt;
   const lakeBounds = lakes.map((l) => (l.polygon ? bounds(l.polygon) : [l.center[0] - l.radius, l.center[1] - l.radius, l.center[0] + l.radius, l.center[1] + l.radius]));
   /**
    * The lake containing (x, z); with several (a tarn's outline overlapping the

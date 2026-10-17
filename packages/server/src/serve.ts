@@ -15,6 +15,7 @@
  */
 
 import fs from "node:fs";
+import path from "node:path";
 import http from "node:http";
 import { WebSocketHostTransport } from "@hitreg/net/server";
 import {
@@ -34,6 +35,7 @@ import { loadContent, playgroundRoots } from "./assets.js";
 import { loadProjectScripts, type ScriptLoadReport } from "./scripts.js";
 import { HeadlessWorld, defaultEvents, defaultRegistry, defaultScripts } from "./world.js";
 import { TerrainStreamer, resolveServerVoxelWorld } from "./terrain.js";
+import { prepareTerrainCache, type PreparedCache, type TerrainBakeMode } from "./terrain-cache.js";
 import { GameServer, type PlayerIdentity, type PlayerPersistence } from "./server.js";
 import { extractPlayerTemplate } from "./players.js";
 import { NpcManager } from "./npcs.js";
@@ -66,6 +68,16 @@ export interface ServeOptions {
   persistRecipe?: boolean;
   /** Cell-generation worker threads (default min(4, cpus-1); 0 = inline). */
   workers?: number;
+  /**
+   * The baked terrain-collision cache (terrain-cache.ts): `auto` uses it, bakes it in the background when
+   * nobody is, or waits for whoever is; `read` never bakes here; `force` rebakes; `off` (the library
+   * default — tests) cooks every cell on demand as before. The CLI defaults to `auto`.
+   */
+  terrainBake?: TerrainBakeMode;
+  /** Threads for a bake run here (default min(8, cpus-1)). */
+  bakeWorkers?: number;
+  /** Cache root (default <playground>/.hitreg/terrain-cache). */
+  terrainCacheDir?: string;
   /** Profile every tick (phases + per-script rows) for GET /admin/profile. Off by default. */
   profile?: boolean;
   /** permessage-deflate on the game socket (default false: it starves under an overloaded tick; WebSocketHostTransportOptions.compress). */
@@ -286,6 +298,23 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
   const terrain = voxel
     ? new TerrainStreamer(world, voxel, opts.workers === undefined ? {} : { pool: opts.workers > 0 ? { workers: opts.workers } : false })
     : null;
+  let terrainCache: PreparedCache | null = null;
+  if (terrain && (opts.terrainBake ?? "off") !== "off") {
+    terrainCache = prepareTerrainCache({
+      root: opts.terrainCacheDir ?? path.join(opts.playground, ".hitreg", "terrain-cache"),
+      inputs: terrain.cacheInputs(),
+      mode: opts.terrainBake!,
+      ...(opts.bakeWorkers !== undefined ? { workers: opts.bakeWorkers } : {}),
+      log,
+    });
+    if (terrainCache.reader) terrain.useCache(terrainCache.reader);
+    else
+      void terrainCache.ready.then((reader) => {
+        if (!reader) return;
+        if (terrain.useCache(reader)) log(`[serve] terrain cache in use from now on (${reader.size} cells)`);
+        else log("[serve] terrain cache landed for an older recipe (terraformed meanwhile) — still cooking on demand");
+      });
+  }
   log(
     `[serve] scene "${opts.scene}": ${world.entities.size} entities` +
       (voxel ? `, voxel world "${voxel.data.world}" (cell ${voxel.streamer.cellSize}m, ring ${voxel.streamer.rings!.simulation}, ${terrain!.workers} generation worker(s))` : ", no voxel world"),
@@ -320,6 +349,7 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
               name: v.claims.name,
               ...(v.claims.rev ? { rev: v.claims.rev } : {}),
               ...(v.claims.build ? { build: v.claims.build } : {}),
+              ...(v.claims.role ? { role: v.claims.role } : {}),
             });
             return { peerId: v.claims.chr, name: v.claims.name };
           },
@@ -638,7 +668,7 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
     }
     if (!secret) throw new Error("cannot mint a ticket without a secret");
     const { signTicket } = await import("./cluster/ticket.js");
-    return signTicket(secret, { sub: identity.playerId, chr: identity.characterId, ...(identity.saveId ? { saveId: identity.saveId } : {}), name: identity.name, srv, rev, reason });
+    return signTicket(secret, { sub: identity.playerId, chr: identity.characterId, ...(identity.saveId ? { saveId: identity.saveId } : {}), name: identity.name, srv, rev, reason, ...(identity.role ? { role: identity.role } : {}) });
   };
 
   const moveOut = async (characterId: string, to: { srv: string; url: string; scene?: string }, reason: string): Promise<boolean> => {
@@ -860,6 +890,7 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
         server.close();
         link?.close();
         transport.close();
+        terrainCache?.dispose();
         terrain?.dispose();
         world.dispose();
         httpServer.close(() => resolve());

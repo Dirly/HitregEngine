@@ -3,6 +3,7 @@ import * as THREE from "three/webgpu";
 import type { SceneDoc } from "@hitreg/core";
 import { buildScene, makeMaterial, type MaterialData } from "../src/scene-builder.js";
 import { sceneLighting } from "../src/scene-lighting.js";
+import { freezeStaticSubtree } from "../src/static-transforms.js";
 import { currentMaterialEnvironment } from "../src/material-maps.js";
 import { DEFAULT_VOLUMETRIC_SETTINGS, volumetricSignature } from "../src/atmosphere.js";
 import { passPlan, pipelineSignature, resolvePostFx, POST_PASS_ORDER } from "../src/post.js";
@@ -297,6 +298,26 @@ describe("scene-builder lighting integration", () => {
   });
 });
 
+describe("live sun direction", () => {
+  it("re-aims a sun whose entity subtree play mode has frozen", () => {
+    const built = buildScene(doc({ sun: sunEntity({ shadow: { enabled: false } }), sky: skyEntity({ environment: { mode: "none" } }) }));
+    const sun = findLight(built, "sun") as THREE.DirectionalLight;
+    const holder = sun.parent!;
+    holder.updateMatrixWorld(true);
+    freezeStaticSubtree(holder);
+    const aim = new THREE.Vector3(0.3, 0.5, -0.8).normalize();
+    built.lighting.setSkyLive({ sun: { direction: [aim.x, aim.y, aim.z] } });
+    holder.updateMatrixWorld(); // the renderer's per-frame walk over a frozen root
+    const from = sun.getWorldPosition(new THREE.Vector3());
+    const to = sun.target.getWorldPosition(new THREE.Vector3());
+    const toward = from.sub(to).normalize();
+    expect(toward.x).toBeCloseTo(aim.x, 4);
+    expect(toward.y).toBeCloseTo(aim.y, 4);
+    expect(toward.z).toBeCloseTo(aim.z, 4);
+    built.lighting.dispose();
+  });
+});
+
 describe("post plan with volumetrics", () => {
   const fx = resolvePostFx(null);
   const light = new THREE.DirectionalLight();
@@ -371,6 +392,19 @@ describe("weather tint follows the daylight", () => {
     expect(lum(day)).toBeGreaterThan(lum(dark));
     // and the night result stays near the authored night fog, not halfway to grey
     expect(lum(dark)).toBeLessThan(lum(night) * 1.6);
+  });
+
+  it("darkens the fog with the storm deck, as it does the horizon", () => {
+    const built = buildScene(doc({ sky: skyEntity({ fog: { color: "#7a705f", near: 40, far: 180 } }) }), new THREE.Scene());
+    const lighting = sceneLighting(built.scene)!;
+    lighting.setSkyLive({ fog: { color: "#7a705f" }, daylight: 1 });
+    const fog = () => (built.scene.fog as THREE.Fog).color.clone();
+    const open = fog();
+    lighting.setSkyLive({ weather: { cloudDark: 1 } });
+    const closed = fog();
+    expect(closed.r).toBeCloseTo(open.r * 0.35, 3);
+    lighting.setSkyLive({ weather: { cloudDark: 0 } });
+    expect(fog().r).toBeCloseTo(open.r, 5);
   });
 
   it("is unchanged at full daylight, and for a scene that never publishes daylight", () => {

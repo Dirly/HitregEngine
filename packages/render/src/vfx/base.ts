@@ -1,4 +1,5 @@
 import * as THREE from "three/webgpu";
+import { PRECOMPILE_SAFE } from "../precompile-safe.js";
 import { dot, fract, sin, vec3 } from "three/tsl";
 import type { Anchor, Palette, SpritesheetDoc, VfxModule, VfxModuleKind } from "@hitreg/core";
 import { resolveColor } from "@hitreg/core";
@@ -378,6 +379,13 @@ export function unlitMaterial(additive: boolean): THREE.MeshBasicNodeMaterial {
     blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
   });
   m.toneMapped = false;
+  // ONE pass: three draws a transparent double-sided material as a back-face
+  // pass then a front-face pass — two draws per effect mesh and two shader
+  // builds per look. Additive blending is order-free and the quads, discs
+  // and tubes here read the same either way.
+  m.forceSinglePass = true;
+  // reads no scene depth or colour: safe to compile before the first cast
+  m.userData[PRECOMPILE_SAFE] = true;
   return m;
 }
 

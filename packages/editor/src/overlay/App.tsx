@@ -25,6 +25,7 @@ import type {
   Pin,
   Pins,
   PlayMode,
+  PoseScrub,
   Selection,
   TerrainBrushSettings,
 } from "../state.js";
@@ -86,6 +87,7 @@ export interface AppProps {
   assetsVersion: Observable<number>;
   /** Entity id -> bone names of its loaded skinned model (host-populated). */
   modelBones?: Observable<Record<string, string[]>>;
+  poseScrub?: PoseScrub;
   saveAsset?: (file: string, content: string) => void;
   /** Installed engine/plugin tools; manifests drive their editor forms. */
   tools?: Observable<ToolDefinition[]>;
@@ -390,6 +392,7 @@ export function App(props: AppProps) {
             assetSelection={props.assetSelection}
             assetsVersion={props.assetsVersion}
             modelBones={props.modelBones}
+            poseScrub={props.poseScrub}
             saveAsset={props.saveAsset}
             thumbnails={props.thumbnails}
             onEditPrefab={props.onEditPrefab}

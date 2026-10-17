@@ -33,11 +33,16 @@ export const gridTargetSchema = z.object({
 export const CHARACTER_EVENTS = {
   /** client → authority: spend one point. */
   allocate: "character.allocate",
+  /** staff/console → authority: set attributes outright (`/stats`); refused from a player. */
+  setStats: "character.setstats",
   /** authority-internal: grant experience (a kill, a quest turn-in). */
   xp: "character.xp",
   /** authority → everyone: a level was gained. */
   leveled: "character.leveled",
-  /** authority-internal: give items (loot, a vendor, a reward). */
+  /**
+   * give items (loot, a vendor, a reward) — authority-internal, plus the console's `/give` from a STAFF peer
+   * (staff/<peer>): it travels to the authority, which refuses it from anyone else.
+   */
   give: "inventory.give",
   /** authority-internal: wear every worn item (a death: 10% of each maximum). */
   wear: "character.wear",
@@ -75,7 +80,10 @@ export const CHARACTER_EVENTS = {
   roll: "loot.roll",
   /** authority → everyone: a party loot roll was settled (who won, with what). */
   rolled: "loot.rolled",
-  /** authority-internal: soulbind (or free) one equipment slot to what is worn there — an admin/console override of the soul binder. */
+  /**
+   * soulbind (or free) one equipment slot to what is worn there — an admin/console override of the soul binder;
+   * authority-internal, plus the console's `/soulbind` from a STAFF peer (refused from anyone else).
+   */
   soulbind: "inventory.soulbind",
   /** authority-internal: a character died — their bags' contents and copper leave them into a CORPSE at the body. */
   corpse: "inventory.corpse",
@@ -94,6 +102,17 @@ export const characterEventDecls: readonly CharacterEventDecl[] = [
   {
     name: CHARACTER_EVENTS.allocate,
     schema: z.object({ actorId, attribute: z.enum(ATTRIBUTES) }),
+    options: toAuthority,
+  },
+  {
+    name: CHARACTER_EVENTS.setStats,
+    schema: z
+      .object({
+        actorId,
+        value: z.number().int().min(1).describe("The value every named attribute is set to."),
+        attribute: z.enum(ATTRIBUTES).optional().describe("Only this attribute; omitted = all of them."),
+      })
+      .describe("The console's /stats: set attributes outright, a testing override. Honoured on the authority from a local emission or a STAFF peer (staff/<peer>), for a body it owns; refused from a player."),
     options: toAuthority,
   },
   {
@@ -117,6 +136,8 @@ export const characterEventDecls: readonly CharacterEventDecl[] = [
         .optional()
         .describe("Rolled twists for each new instance (opaque to the engine; the game gives them meaning). Only for items that do not stack."),
     }),
+    // a staff peer's console grant reaches the authority; the sheet refuses it from anyone else
+    options: toAuthority,
   },
   {
     name: CHARACTER_EVENTS.wear,
@@ -327,8 +348,10 @@ export const characterEventDecls: readonly CharacterEventDecl[] = [
       })
       .describe(
         "Authority-internal (admin, the console's /soulbind): set one soulbound slot directly, ignoring the binder's slot " +
-          "count and price. Never accepted from a peer; players use a soul binder (soul.attune).",
+          "count and price. Accepted from a peer only when it is STAFF (staff/<peer>, a gm/dev account); players use a " +
+          "soul binder (soul.attune).",
       ),
+    options: toAuthority,
   },
   {
     name: CHARACTER_EVENTS.corpse,

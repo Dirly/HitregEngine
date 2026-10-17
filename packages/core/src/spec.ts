@@ -1,5 +1,6 @@
 import type { ComponentRegistry } from "./components/registry.js";
 import type { AssetLibrary } from "./assets.js";
+import { operatorSpecs } from "./voxel/operators.js";
 import type { EventRegistry } from "./events.js";
 import type { NetStateStore } from "./net-state.js";
 import type { ToolDescription, ToolRegistry } from "./tools.js";
@@ -86,6 +87,11 @@ export interface EngineSpec {
    * fields. Only blocks the quest runtime implements are listed.
    */
   questBlocks: Record<QuestBlockSlot, Record<string, unknown>>;
+  /**
+   * Landform operators for voxel worlds (`features.operators` in a world recipe): op -> description and the JSON
+   * Schema of its params. Agents shape ground through these, never through raw carve boxes (the 6 m rule).
+   */
+  landformOperators: Record<string, { description: string; schema: unknown }>;
 }
 
 /** Current spec shape version — bump on a breaking change to EngineSpec. */
@@ -106,5 +112,6 @@ export function buildEngineSpec(inputs: EngineSpecInputs): EngineSpec {
     prefabProp: z.toJSONSchema(propSpecSchema, { io: "input" }),
     projectManifest: z.toJSONSchema(projectManifestSchema, { io: "input" }),
     questBlocks: (inputs.questBlocks ?? questBlocks).describe(),
+    landformOperators: operatorSpecs(),
   };
 }

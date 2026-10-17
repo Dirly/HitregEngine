@@ -24,12 +24,17 @@ export function vegetationTintNode(role: VegetationRole) {
   return vertexStage(vec3(attribute<"vec3">(VEGETATION_TINT_ATTRIBUTES[role === "bark" ? 0 : 1], "vec3")));
 }
 
-/** The normal atlas alpha carries 0=other, .5=bark, 1=leaves; interpolate at filtered edges. */
-export function vegetationMaskTintNode(mask: Node<"float">) {
+/**
+ * The normal atlas alpha carries 0=other, .5=bark, 1=leaves; interpolate at filtered edges.
+ * Pass `tints` when the caller already carries the two slots across the stages: every
+ * `vegetationTintNode` call is a NEW varying, and the impostor shader calls this per frame
+ * it blends (three times), which alone was six of WebGPU's sixteen inter-stage locations.
+ */
+export function vegetationMaskTintNode(mask: Node<"float">, tints?: { bark: Node<"vec3">; leaves: Node<"vec3"> }) {
   const barkWeight = mask.mul(2).min(mask.oneMinus().mul(2)).clamp(0, 1);
   const leafWeight = mask.mul(2).sub(1).clamp(0, 1);
-  return mix(vec3(1), vegetationTintNode("bark"), barkWeight)
-    .add(vegetationTintNode("leaves").sub(vec3(1)).mul(leafWeight));
+  return mix(vec3(1), tints?.bark ?? vegetationTintNode("bark"), barkWeight)
+    .add((tints?.leaves ?? vegetationTintNode("leaves")).sub(vec3(1)).mul(leafWeight));
 }
 
 export function applyInstanceVegetationTint(material: THREE.Material): void {

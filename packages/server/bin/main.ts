@@ -31,6 +31,11 @@
  *   --no-supervisor         do not start layers here (docker compose / systemd start them)
  *   --playground <dir>      playground checkout (default: this repo's)
  *   --child-args "…"        extra args for every layer (e.g. "--workers 2 --hz 30")
+ *   --terrain-bake <m>      the world's baked terrain-collision cache (packages/server/src/terrain-cache.ts):
+ *                           auto (default) bakes it here in the background when it is missing or stale (layers
+ *                           cook on demand until it lands, then read it); force rebakes; off = no cache anywhere
+ *   --bake-workers <n>      threads for the bake (default min(8, cpus-1))
+ *   --terrain-cache <dir>   cache root (default <playground>/.hitreg/terrain-cache), shared with the layers
  *
  * Clients: open the playground with `?gateway=http://<public-host>:8780` and sign in.
  * Admin:   curl -s -H "Authorization: Bearer <secret>" http://127.0.0.1:8780/admin/status
@@ -39,13 +44,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { findCreation, regionAt, worldRecipeSchema, type RegionDoc } from "@hitreg/core";
+import { findCreation, getVoxelRecipe, regionAt, voxelWorldSchema, worldRecipeSchema, type RegionDoc } from "@hitreg/core";
 import { loadContent, playgroundRoots } from "../src/assets.js";
 import { FileAccountStore, FilePlayerDataBackend } from "../src/persistence/file.js";
 import { PostgresStore } from "../src/persistence/postgres.js";
 import { Supervisor } from "../src/main/supervisor.js";
 import { startMain } from "../src/main/main.js";
 import { reservedNamesFromEntities } from "../src/moderation/names.js";
+import { parseBakeMode, prepareTerrainCache, type PreparedCache } from "../src/terrain-cache.js";
 
 function arg(name: string, fallback?: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -122,6 +128,46 @@ async function main(): Promise<void> {
   const reservedNames = reservedNamesFromEntities(Object.values(sceneDoc.entities));
   console.log(`[main] reserved names: ${reservedNames.length} from the scene's NPCs`);
   console.log(creation ? `[main] character creation: ${creation.archetypes.length} archetypes, ${creation.traits.length} birth traits, ${creation.appearance.length} appearance slots` : "[main] character creation: none (name-only characters)");
+  // the terrain-collision cache: baked once per recipe hash, here, in the background — before the
+  // supervisor starts a layer, so this process holds the bake lock and the layers wait for it
+  const bakeMode = parseBakeMode(arg("terrain-bake"));
+  const cacheRoot = path.resolve(arg("terrain-cache", path.join(playground, ".hitreg", "terrain-cache"))!);
+  let terrainCache: PreparedCache | null = null;
+  {
+    const raw = Object.values(sceneDoc.entities).map((e) => e.components["voxelWorld"]).find((v) => !!v);
+    if (raw && bakeMode !== "off") {
+      try {
+        const data = voxelWorldSchema.parse(raw);
+        const recipe = getVoxelRecipe(data.world);
+        if (recipe) {
+          terrainCache = prepareTerrainCache({
+            root: cacheRoot,
+            inputs: {
+              world: data.world,
+              recipe,
+              data,
+              assetExists: (id, kind) => (kind === "prefab" ? content.assets.getPrefab(id) : content.assets.getModel(id)) !== undefined,
+            },
+            mode: bakeMode,
+            ...(num("bake-workers") !== undefined ? { workers: num("bake-workers")! } : {}),
+            log: (line) => console.log(line),
+          });
+          if (!terrainCache.reader) {
+            const t0 = Date.now();
+            void terrainCache.ready.then((reader) => {
+              if (reader) console.log(`[main] terrain cache ready after ${((Date.now() - t0) / 1000).toFixed(1)} s (${reader.size} cells)`);
+              reader?.close(); // main only bakes; the layers read
+            });
+          } else terrainCache.reader.close();
+        }
+      } catch (error) {
+        console.warn(`[main] terrain cache skipped: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
+  const childArgs = (arg("child-args") ?? "").split(/\s+/).filter(Boolean);
+  if (!childArgs.includes("--terrain-bake") && bakeMode === "off") childArgs.push("--terrain-bake", "off");
+  if (!childArgs.includes("--terrain-cache") && arg("terrain-cache")) childArgs.push("--terrain-cache", cacheRoot);
   const mainUrl = `ws://127.0.0.1:${port}`;
   const supervisor = flag("no-supervisor")
     ? null
@@ -133,7 +179,7 @@ async function main(): Promise<void> {
         publicScheme: arg("public-scheme") === "wss" ? "wss" : "ws",
         bindHost: arg("layer-host", "0.0.0.0")!,
         ports: { from, to },
-        extraArgs: (arg("child-args") ?? "").split(/\s+/).filter(Boolean),
+        extraArgs: childArgs,
         log: (line) => console.log(line),
       });
 
@@ -172,6 +218,7 @@ async function main(): Promise<void> {
   const shutdown = (): void => {
     console.log("[main] shutting down");
     void (async () => {
+      terrainCache?.dispose();
       await supervisor?.closeAll();
       await handle.close();
       await db?.close();

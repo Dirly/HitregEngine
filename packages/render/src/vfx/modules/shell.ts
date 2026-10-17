@@ -2,13 +2,52 @@ import * as THREE from "three/webgpu";
 import { abs, float, mix, normalLocal, positionLocal, smoothstep, step, sub, vec3 } from "three/tsl";
 import type { VfxModuleOf } from "@hitreg/core";
 import { LiveModule, presentationOnly, sampleCurve, unlitMaterial, type LiveModuleHost } from "../base.js";
-import { fresnel, makeUniforms, noise01, posterize, quantize, type N } from "../shaders.js";
+import { bindValues, fresnel, makeValues, noise01, posterize, quantize, sharedUniforms, type N } from "../shaders.js";
 
 type ShellModule = VfxModuleOf<"shell">;
 
 const roll = new THREE.Quaternion();
 const Y = new THREE.Vector3(0, 1, 0);
 let sphere: THREE.SphereGeometry | null = null;
+
+/**
+ * One material per (blend, side): every shell of that look shares its shader
+ * and reads its own values off the mesh (shaders.ts sharedUniforms).
+ */
+const variants = new Map<string, THREE.MeshBasicNodeMaterial>();
+
+function variant(additive: boolean, doubleSide: boolean): THREE.MeshBasicNodeMaterial {
+  const key = `${additive ? "add" : "norm"}:${doubleSide ? 2 : 1}`;
+  let material = variants.get(key);
+  if (material) return material;
+  material = unlitMaterial(additive);
+  material.side = doubleSide ? THREE.DoubleSide : THREE.FrontSide;
+  const u = sharedUniforms("u");
+  const x = sharedUniforms("x");
+  // u.a = noise amount, u.b = noise scale, u.c = fresnel power, u.d = dissolve, u.e = body opacity
+  // x.a = displace, x.b = wire, x.c = speed, x.d = pixel cells, x.e = posterize steps
+  const flow: N = vec3(u.time.mul(x.c), u.time.mul(x.c).mul(0.6), u.time.mul(x.c).mul(-0.4));
+  const pl: N = quantize((positionLocal as N).mul(0.5).add(0.5), x.d).sub(0.5).mul(2);
+  // one octave — see tube.ts; a lingering dome is the biggest surface a spell draws
+  const n: N = noise01(pl.mul(u.b).add(flow), 1);
+  const rim: N = fresnel(u.c.max(0.01));
+  // wire: bright lines where noise crosses its midpoint
+  const lines: N = sub(float(1), smoothstep(float(0), float(0.1), abs(n.sub(0.5))));
+  const surface: N = mix(float(1), n.mul(1.5), u.a);
+  // Rim capped below 1: a full-strength silhouette on a squashed dome reads as
+  // a solid white bowl from above, not as a rim.
+  const body: N = mix(u.e, float(0.7), rim).mul(surface);
+  const shape: N = mix(body, lines.add(rim.mul(0.4)), x.b);
+  // dissolve: burn away where noise < threshold, with a glowing edge
+  const keep: N = step(u.d, n);
+  const edge: N = sub(float(1), smoothstep(float(0), float(0.12), n.sub(u.d))).mul(keep);
+  material.colorNode = mix(mix(u.color, u.glow, rim), u.glow, edge);
+  material.opacityNode = posterize(shape.mul(keep), x.e).mul(u.opacity);
+  material.positionNode = (positionLocal as N).add((normalLocal as N).mul(n.sub(0.5)).mul(x.a));
+  material.name = `vfx-shell:${key}`;
+  variants.set(key, material);
+  return material;
+}
 
 /** Body opacity (face-on) per style; the rim is always brighter. */
 const BODY: Record<ShellModule["style"], number> = { energy: 0.22, glass: 0.06, smoke: 0.8, wire: 0 };
@@ -21,55 +60,24 @@ const BODY: Record<ShellModule["style"], number> = { energy: 0.22, glass: 0.06, 
 export class ShellLive extends LiveModule<ShellModule> {
   readonly kind = "shell" as const;
   private readonly mesh: THREE.Mesh;
-  private readonly material: THREE.MeshBasicNodeMaterial;
-  private readonly u = makeUniforms();
-  private readonly uDisplace: THREE.UniformNode<"float", number>;
-  private readonly uWire: THREE.UniformNode<"float", number>;
-  private readonly uSpeed: THREE.UniformNode<"float", number>;
-  private readonly uPixel: THREE.UniformNode<"float", number>;
-  private readonly uSteps: THREE.UniformNode<"float", number>;
+  private readonly u = makeValues();
+  /** a = displace, b = wire, c = speed, d = pixel cells, e = posterize steps */
+  private readonly x = makeValues();
+  private readonly uDisplace = this.x.a;
+  private readonly uWire = this.x.b;
+  private readonly uSpeed = this.x.c;
+  private readonly uPixel = this.x.d;
+  private readonly uSteps = this.x.e;
 
   constructor(host: LiveModuleHost) {
     super(host);
     sphere ??= new THREE.SphereGeometry(1, 48, 32);
-    const extra = makeUniforms();
-    this.uDisplace = extra.a;
-    this.uWire = extra.b;
-    this.uSpeed = extra.c;
-    this.uPixel = extra.d;
-    this.uSteps = extra.e;
-    this.material = unlitMaterial(true);
-    this.material.side = THREE.FrontSide;
-    this.buildShader();
-    this.mesh = new THREE.Mesh(sphere, this.material);
+    this.mesh = new THREE.Mesh(sphere, variant(true, false));
+    bindValues(this.mesh, "u", this.u);
+    bindValues(this.mesh, "x", this.x);
     presentationOnly(this.mesh);
     this.mesh.visible = false;
     host.root.add(this.mesh);
-  }
-
-  private buildShader(): void {
-    const u = this.u;
-    // u.a = noise amount, u.b = noise scale, u.c = fresnel power, u.d = dissolve, u.e = body opacity
-    const flow: N = vec3(u.time.mul(this.uSpeed), u.time.mul(this.uSpeed).mul(0.6), u.time.mul(this.uSpeed).mul(-0.4));
-    const pl: N = quantize((positionLocal as N).mul(0.5).add(0.5), this.uPixel).sub(0.5).mul(2);
-    // one octave — see tube.ts; a lingering dome is the biggest surface a spell draws
-    const n: N = noise01(pl.mul(u.b).add(flow), 1);
-    const rim: N = fresnel(u.c.max(0.01));
-    // wire: bright lines where noise crosses its midpoint
-    const lines: N = sub(float(1), smoothstep(float(0), float(0.1), abs(n.sub(0.5))));
-    const surface: N = mix(float(1), n.mul(1.5), u.a);
-    // Rim capped below 1: a full-strength silhouette on a squashed dome reads as
-    // a solid white bowl from above, not as a rim.
-    const body: N = mix(u.e, float(0.7), rim).mul(surface);
-    const shape: N = mix(body, lines.add(rim.mul(0.4)), this.uWire);
-    // dissolve: burn away where noise < threshold, with a glowing edge
-    const keep: N = step(u.d, n);
-    const edge: N = sub(float(1), smoothstep(float(0), float(0.12), n.sub(u.d))).mul(keep);
-    const color: N = mix(mix(u.color, u.glow, rim), u.glow, edge);
-    this.material.colorNode = color;
-    this.material.opacityNode = posterize(shape.mul(keep), this.uSteps).mul(u.opacity);
-    this.material.positionNode = (positionLocal as N).add((normalLocal as N).mul(n.sub(0.5)).mul(this.uDisplace));
-    this.material.needsUpdate = true;
   }
 
   protected naturalLife(): number {
@@ -79,8 +87,7 @@ export class ShellLive extends LiveModule<ShellModule> {
   protected onBegin(): void {
     const m = this.module;
     const additive = m.blend === "additive" && m.style !== "smoke";
-    this.material.blending = additive ? THREE.AdditiveBlending : THREE.NormalBlending;
-    this.material.side = m.style === "smoke" ? THREE.DoubleSide : THREE.FrontSide;
+    this.mesh.material = variant(additive, m.style === "smoke");
     this.u.color.value.copy(this.color);
     this.u.glow.value.copy(this.color).lerp(new THREE.Color(1, 1, 1), 0.7);
     this.u.a.value = m.noise;
@@ -117,7 +124,7 @@ export class ShellLive extends LiveModule<ShellModule> {
   }
 
   dispose(): void {
+    // the variant material is shared by every shell and outlives this one
     this.mesh.removeFromParent();
-    this.material.dispose();
   }
 }

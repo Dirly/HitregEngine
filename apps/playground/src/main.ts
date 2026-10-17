@@ -1,5 +1,7 @@
+import { assetFileUrl } from "./asset-url.js";
 import { mountVolumePaint } from './volume-paint.js';
 import { startFramePump } from "./frame-pump.js";
+import { mountPropEdit } from "./prop-edit.js";
 import { createWorldMapOverlay } from "./world-map.js";
 import CameraControls from "camera-controls";
 import * as THREE from "three/webgpu";
@@ -31,6 +33,7 @@ import {
   resolvePortalArrival,
   type PortalTravel,
   regionAt,
+  regionLookAt,
   registerCoreAssetTypes,
   registerCoreComponents,
   registerCoreEvents,
@@ -59,6 +62,7 @@ import {
   type SceneMenuGroup,
   type ToolDefinition,
   type ToolResult,
+  staffRole,
 } from "@hitreg/core";
 import {
   AnimationSystem,
@@ -164,6 +168,7 @@ import {
   isEditRigId,
   createEditingChunk,
   createModelBones,
+  createPoseScrub,
   createSelection,
   createMultiSelection,
   createHover,
@@ -741,7 +746,7 @@ async function main(): Promise<void> {
   async function fetchChunkDoc(world: string, cx: number, cz: number): Promise<ChunkDoc> {
     try {
       const res = await fetch(
-        `/__hitreg/asset-file?file=${encodeURIComponent(chunkFilePath(world, cx, cz))}`,
+        assetFileUrl(chunkFilePath(world, cx, cz)),
       );
       if (!res.ok) throw new Error(String(res.status));
       const parsed = chunkDocSchema.safeParse(JSON.parse(await res.text()));
@@ -905,7 +910,7 @@ async function main(): Promise<void> {
   /** a destination scene's text a portal trip read for its loading art, handed to switchScene */
   let prefetchedScene: { name: string; text: string } | null = null;
   const fetchSceneText = (name: string): Promise<string> =>
-    fetch(`/__hitreg/asset-file?file=${encodeURIComponent(`scenes/${name}.scene.json`)}`).then((r) => r.text());
+    fetch(assetFileUrl(`scenes/${name}.scene.json`)).then((r) => r.text());
   const SCENE_SWITCH_TIMEOUT_MS = 10000; // don't stay stuck forever if something never resolves
   function showSceneLoading(name: string): void {
     sceneSwitchPending = true;
@@ -1046,7 +1051,109 @@ async function main(): Promise<void> {
     selected: () => selection.get(),
     item: (itemId) => assets.getDataAsset(itemId)?.data as ReturnType<Parameters<typeof createSocketPreview>[0]["item"]>,
     setLook: (entityId, look) => modelLooks.set(entityId, look),
+    itemOfModel: (model, slot) =>
+      assets
+        .dataAssetsOfType("item")
+        .map((a) => a.data as ReturnType<Parameters<typeof createSocketPreview>[0]["item"]>)
+        .find((i) => i?.appearance?.model === model && (i.slots ?? []).includes(slot)),
+    handleOf: (entityId) => movingInstances.handleOf(entityId),
   });
+
+  // The pose scrubber (prefab editing): the inspector picks a clip and a
+  // time, this stands the selected item's carrier there and measures the
+  // second hand against the item's handle — now, and sampled across the clip.
+  const poseScrub = createPoseScrub();
+  const SCRUB_SAMPLES = 48;
+  /**
+   * The second hand counts as holding the handle within this much of the
+   * GRIPPING hand's own reading (its palm-centre estimate sits off the line
+   * by a rig-dependent amount), or of 5 cm when that is unknown.
+   */
+  const ON_HANDLE_SLACK_M = 0.04;
+  let scrubClock = performance.now();
+  let scrubTime = 0;
+  let scrubPublishedTime = 0;
+  let scrubPublishedAt = 0;
+  let scrubSampled = "";
+  let scrubSampledDoc: SceneDoc | null = null;
+  let scrubSamples: number[] = [];
+  function editPose(): void {
+    const editing = editingPrefab.get() !== null;
+    const s = poseScrub.get();
+    const now = performance.now();
+    const dt = Math.min((now - scrubClock) / 1000, 0.1);
+    scrubClock = now;
+    const actor = editing ? socketPreview.actorOf(selection.get()) : null;
+    const clips = actor ? animations.clipNames(actor) : [];
+    const clip = s.clip && clips.includes(s.clip) ? s.clip : null;
+    const duration = (clip && actor ? animations.clipDuration(actor, clip) : null) ?? 0;
+    if (s.time !== scrubPublishedTime) scrubTime = s.time; // the slider moved
+    if (!clip) scrubTime = 0;
+    else if (s.playing && duration > 0) scrubTime = (scrubTime + dt * s.speed) % duration;
+    const stances = editing ? socketPreview.stanceClips() : new Map<string, readonly string[]>();
+    const pose = (time: number) =>
+      animations.poseStill(
+        stances.size === 0 && !clip
+          ? undefined
+          : (id) => {
+              if (clip && id === actor) return { clip, time };
+              const wanted = stances.get(id);
+              if (!wanted) return null;
+              const have = animations.clipNames(id);
+              return wanted.find((c) => have.includes(c)) ?? null;
+            },
+      );
+    // the second hand across the whole clip: re-sampled when the clip, the
+    // selection or the document (a socket moved) changes
+    const key = `${actor}|${clip}|${selection.get()}|${settings.get().previewHolstered}`;
+    if (clip && actor && duration > 0 && (key !== scrubSampled || lastExpanded !== scrubSampledDoc)) {
+      scrubSampled = key;
+      scrubSampledDoc = lastExpanded;
+      scrubSamples = [];
+      for (let i = 0; i < SCRUB_SAMPLES; i++) {
+        pose((i / SCRUB_SAMPLES) * duration);
+        socketPreview.update();
+        const hand = socketPreview.secondHand();
+        if (!hand) {
+          scrubSamples = [];
+          break;
+        }
+        scrubSamples.push(hand.distance);
+      }
+    } else if (!clip) {
+      scrubSampled = "";
+      scrubSamples = [];
+    }
+    pose(scrubTime);
+    socketPreview.update();
+    const hand = actor ? socketPreview.secondHand() : null;
+    const holding = hand && Number.isFinite(hand.holding) ? hand.holding : null;
+    const twoHand = hand
+      ? { ...hand, holding, samples: scrubSamples, onGrip: (holding ?? 0.01) + ON_HANDLE_SLACK_M }
+      : null;
+    // publish what changed; a playing clip's time at ~20 Hz (the inspector re-renders on it)
+    const timeDue = s.playing ? now - scrubPublishedAt > 50 : scrubTime !== s.time;
+    const changed =
+      actor !== s.actor ||
+      clips.length !== s.clips.length ||
+      duration !== s.duration ||
+      (clip === null && s.clip !== null && actor !== null && clips.length > 0) ||
+      JSON.stringify(twoHand) !== JSON.stringify(s.twoHand);
+    if (changed || timeDue) {
+      scrubPublishedAt = now;
+      scrubPublishedTime = scrubTime;
+      poseScrub.set({
+        ...s,
+        actor,
+        clips,
+        clip: actor && clips.length > 0 ? clip : s.clip,
+        duration,
+        time: scrubTime,
+        playing: clip ? s.playing : false,
+        twoHand,
+      });
+    }
+  }
   // The play session's runtime state. Declared HERE, with the scene it
   // belongs to, rather than further down beside the play functions: rebuild()
   // reads `sim` to decide whether the running scripts have to be restarted
@@ -1235,7 +1342,7 @@ async function main(): Promise<void> {
    * same one the published runtime uses, so a layer grows in the same places
    * in the editor and in a shipped game.
    */
-  const voxelCover = voxelGroundProbes(() => (activeVoxelWorld ? getVoxelWorld(activeVoxelWorld) : null));
+  const voxelCover = voxelGroundProbes(() => (activeVoxelWorld ? getVoxelWorld(activeVoxelWorld) : null), () => activeVoxelWorld);
   function invalidateFoliageProbes(): void {
     voxelCover.invalidate();
   }
@@ -1387,7 +1494,10 @@ async function main(): Promise<void> {
   const vfx = createVfx(assets);
   const vfxHost = makeVfxHost(vfx);
   ambientVfx = createAmbientVfx(vfx, assets, lightBudget);
-  let vfxWarmed = false;
+  /** The mode and scene the VFX pipelines were last compiled for ("" = never). */
+  let vfxWarmedFor = "";
+  /** Warms run one after another: two at once share the VFX root and kill each other's plays. */
+  let vfxWarming: Promise<void> = Promise.resolve();
   const grass = new GrassSystem();
   // only a generated world can say "not here" for a whole disc; heightmap
   // tiles keep walking theirs
@@ -1452,18 +1562,22 @@ async function main(): Promise<void> {
   function runtimeRegionAt(x: number, z: number): RegionAt | null {
     if (!activeVoxelWorld) return null;
     const field = getVoxelWorld(activeVoxelWorld);
-    const region = field ? regionAt(field.recipe.regions, x, z) : null;
-    if (!region) return null;
-    // a nested town zone without its own mood wears its parent's
-    const mood = region.mood ?? (region.within ? field!.recipe.regions.find((r) => r.id === region.within)?.mood : undefined);
-    // a signature place (region tagged `place`) is look only: its name and mood, the ZONE's tags and hub (it is not
-    // a zone for "am I in town", sanctuaries or hosting)
-    const place = regionAt(field!.recipe.regions, x, z, { places: true });
-    if (place && place !== region && place.tags.includes("place")) {
-      const placeMood = place.mood ?? mood;
-      return { id: place.id, name: place.name, tags: region.tags, ...(region.hub ? { hub: region.hub } : {}), ...(placeMood ? { mood: placeMood } : {}) };
-    }
-    return { id: region.id, name: region.name, tags: region.tags, ...(region.hub ? { hub: region.hub } : {}), ...(mood ? { mood } : {}) };
+    // mood, sound and ambient layers resolved over place -> zone -> parent (a nested town zone wears its
+    // parent's look); a signature place (tagged `place`) is look only: its name, the ZONE's tags and hub (it is
+    // not a zone for "am I in town", sanctuaries or hosting)
+    const look = field ? regionLookAt(field.recipe.regions, x, z) : null;
+    if (!look) return null;
+    const { region, place, mood, sound, ambient } = look;
+    const named = place ?? region;
+    return {
+      id: named.id,
+      name: named.name,
+      tags: region.tags,
+      ...(region.hub ? { hub: region.hub } : {}),
+      ...(mood ? { mood } : {}),
+      ...(sound ? { sound } : {}),
+      ...(ambient ? { ambient } : {}),
+    };
   }
   function runtimeBiomeAt(x: number, z: number): BiomeAt | null {
     if (!activeVoxelWorld) return null;
@@ -2201,13 +2315,13 @@ async function main(): Promise<void> {
 
     for (const created of body.result.assets) {
       if (created.kind === "texture") {
-        const url = `/__hitreg/asset-file?file=${encodeURIComponent(created.file)}&v=${Date.now()}`;
+        const url = `${assetFileUrl(created.file)}&v=${Date.now()}`;
         const existing = assets.getTexture(created.id);
         if (existing) existing.url = url;
         else assets.addTexture({ id: created.id, name: created.id.split("/").pop()!, url });
       } else if (created.kind === "prefab") {
         const prefabResponse = await fetch(
-          `/__hitreg/asset-file?file=${encodeURIComponent(created.file)}&v=${Date.now()}`,
+          `${assetFileUrl(created.file)}&v=${Date.now()}`,
         );
         if (!prefabResponse.ok) throw new Error(`could not load generated prefab ${created.id}`);
         const prefab = await prefabResponse.json();
@@ -2281,6 +2395,30 @@ async function main(): Promise<void> {
     onDraggingChanged: (dragging) => {
       gizmoDragging = dragging;
       controls.enabled = !dragging;
+    },
+    onTranslateMove: (id, object) => propEdit.onTranslateMove(id, object),
+  });
+  // placed props (dressed or installed): the owner edits them here and the edit is kept as an owner override
+  const propEdit = mountPropEdit({
+    store,
+    selection,
+    playMode,
+    editorVisible,
+    getObject: (id) => built.objects.get(id),
+    getScene: () => built.scene,
+    project: () => currentProject,
+    isWorkspaceScene: (name) => name === PREFAB_EDIT_SCENE || name === CHUNK_EDIT_SCENE,
+    dockSizes,
+    raycastDown: (x, y, z, far, ownId) => {
+      if (!sim) return undefined;
+      let top = y;
+      for (let i = 0; i < 4; i++) {
+        const hit = sim.raycast([x, top, z], [0, -1, 0], far - (y - top), { exclude: [ownId] });
+        if (!hit) return null;
+        if (hit.entityId !== ownId && !hit.entityId.startsWith(ownId + "/")) return hit.point[1];
+        top = hit.point[1] - 0.01; // the prop's own collider: look under it
+      }
+      return null;
     },
   });
 
@@ -2443,6 +2581,7 @@ async function main(): Promise<void> {
     dockSizes,
     assetsVersion,
     modelBones,
+    poseScrub,
     pins: pinStore.pins,
     camera,
     canvas,
@@ -2854,6 +2993,12 @@ async function main(): Promise<void> {
   void startDevConsole({
     runtime: () => scripts,
     isAuthority: () => (netPresence?.stats().role ?? "off") !== "peer",
+    // a GM/dev account on a server: the server honours its /give and /soulbind (staff/<peer>, from the signed ticket)
+    isStaff: () => {
+      const body = localPlayerId();
+      const peer = body ? netPresence?.netState.get(`owner/${body}`) : undefined;
+      return !!netPresence && typeof peer === "string" && staffRole(netPresence.netState, peer) !== null;
+    },
   }).then((handle) => {
     devConsole = handle;
   });
@@ -2981,7 +3126,11 @@ async function main(): Promise<void> {
    * buried spawn, see docs/voxel-worlds.md). A timeout must never release a
    * player into missing ground.
    */
-  let travelHold: { id: string; pos: [number, number, number] } | null = null;
+  // `meshesSince`: a play START also waits for the scene's own model loads (their mesh colliders), up to 20 s.
+  // An instance's floor is a model of its own over the rock shell: released on the first hit of anything (the shell
+  // under the floor, the shaft rock above), the body dropped before the floor existed, landed on the shell and the
+  // floor collider then came in ABOVE it (wreck-hole, 2026-10-12: stuck under the deck at y 0.3, 5.6 m short of the exit).
+  let travelHold: { id: string; pos: [number, number, number]; meshesSince?: number } | null = null;
   let travelView: { x: number; z: number; started: number } | null = null;
   const travelLoadingEl = document.createElement("div");
   travelLoadingEl.setAttribute("role", "status");
@@ -3723,7 +3872,7 @@ async function main(): Promise<void> {
     const shown = portalCurtain.show(label);
     const sceneText = await textP;
     if (sceneText) prefetchedScene = { name: scene, text: sceneText };
-    const art = loadingArtOf(sceneText, (rel) => `/__hitreg/asset-file?file=${encodeURIComponent(rel)}`);
+    const art = loadingArtOf(sceneText, (rel) => assetFileUrl(rel));
     let progress = 0;
     let goal = 0.15;
     const step = (to: number): void => {
@@ -3875,7 +4024,7 @@ async function main(): Promise<void> {
     // Pin the body only where we own it. Under a dedicated server the position
     // is the server's to set, and freezing it locally would fight the very
     // updates being waited for.
-    if (sim && playerId && !netServerUrl) travelHold = { id: playerId, pos: [p.x, p.y, p.z] };
+    if (sim && playerId && !netServerUrl) travelHold = { id: playerId, pos: [p.x, p.y, p.z], meshesSince: performance.now() };
     // stream around the player NOW rather than a frame later at the old focus
     chunkManager.update(p.x, p.z);
   }
@@ -4398,7 +4547,31 @@ async function main(): Promise<void> {
       propPool,
       foliageLod,
       culling,
+      // ground cover: a probe can read each layer's fade reach and placement state
+      grass,
       terrainHeight: (x: number, z: number) => sampleTerrainHeight(x, z),
+      // the voxel world's own solid (carves included) as the MESHER sees it — the density lattice, trilinear — or null
+      // without a voxel world: the see-through gate's outdoor rule. Raw density is sharper than the 2 m lattice and
+      // would call sub-voxel carve edges solid; -0.1 keeps a fin thinner than a voxel (no mass in field or mesh) out.
+      voxelSolid: (() => {
+        const lattice = new Map<string, number>();
+        let owner: unknown = null;
+        return (x: number, y: number, z: number): boolean | null => {
+          const field = activeVoxelWorld ? getVoxelWorld(activeVoxelWorld) : null;
+          if (!field) return null;
+          if (owner !== field || lattice.size > 2_000_000) { lattice.clear(); owner = field; }
+          const V = field.voxelSize, gx = x / V, gy = y / V, gz = z / V, i = Math.floor(gx), j = Math.floor(gy), k = Math.floor(gz);
+          const u = gx - i, v = gy - j, w = gz - k;
+          let s = 0;
+          for (let a = 0; a < 2; a++) for (let b = 0; b < 2; b++) for (let c = 0; c < 2; c++) {
+            const key = `${i + a},${j + b},${k + c}`;
+            let d = lattice.get(key);
+            if (d === undefined) { d = field.density((i + a) * V, (j + b) * V, (k + c) * V); lattice.set(key, d); }
+            s += (a ? u : 1 - u) * (b ? v : 1 - v) * (c ? w : 1 - w) * d;
+          }
+          return s < -0.1;
+        };
+      })(),
       waterWakeUniforms,
       // world ambience (cloud shadows, chimney smoke): a probe can read their live state
       ambience: { cloudShadow, chimneySmoke, setWorldExtrasEnabled },
@@ -4775,19 +4948,9 @@ async function main(): Promise<void> {
         // frame and every bone-socket is resolved, so a sword can be placed
         // in the hand without pressing play (see socket-preview.ts). A
         // selected held item stands its character in that weapon's stance
-        // idle instead (known from last frame's socket pass — a frame late, once)
-        const stances = editingPrefab.get() ? socketPreview.stanceClips() : new Map<string, readonly string[]>();
-        animations.poseStill(
-          stances.size === 0
-            ? undefined
-            : (id) => {
-                const wanted = stances.get(id);
-                if (!wanted) return null;
-                const have = animations.clipNames(id);
-                return wanted.find((c) => have.includes(c)) ?? null;
-              },
-        );
-        socketPreview.update();
+        // idle instead (known from last frame's socket pass — a frame late, once).
+        // The pose scrubber can stand it at any frame of any clip instead.
+        editPose();
       }
       if (playMode.get() !== "playing") {
         viewport.tick(); // a held item's gizmo stays seated on its grip
@@ -4821,7 +4984,8 @@ async function main(): Promise<void> {
           // answer for the ground; a hit anywhere below means the cell's
           // collider is in and the body may fall the last metre on its own
           const ground = sim.raycast([hold.pos[0] + 1.5, hold.pos[1] + 20, hold.pos[2]], [0, -1, 0], 60, { exclude: [hold.id] });
-          if (ground && chunkManager.isLandingReady(hold.pos[0], hold.pos[2]) && chunkManager.isViewReady()) travelHold = null;
+          const meshesIn = hold.meshesSince === undefined || gltfLoadingCount() === 0 || performance.now() - hold.meshesSince > 20000;
+          if (ground && meshesIn && chunkManager.isLandingReady(hold.pos[0], hold.pos[2]) && chunkManager.isViewReady()) travelHold = null;
           else {
             sim.setPosition(hold.id, hold.pos);
             sim.setLinvel(hold.id, [0, 0, 0]);
@@ -4902,11 +5066,17 @@ async function main(): Promise<void> {
       profiler.begin("particles");
       particles.update(dt, renderCamera); // billboards face the camera actually used
       billboards.update(dt); // flipbook VFX frames
-      if (!vfxWarmed) {
-        // once, on the first frame: compile every effect pipeline now, not on
-        // the first cast (VfxSystem.warmup measured that stall at 265–739 ms)
-        vfxWarmed = true;
-        void warmVfx(vfx, assets, (group) => renderer.precompileGroup(group, renderCamera, built.scene), renderCamera);
+      // per mode and per built scene: a rebuilt scene is a new render context too
+      const warmFor = `${playMode.get() === "playing" ? "play" : "edit"}:${built.scene.uuid}`;
+      if (vfxWarmedFor !== warmFor) {
+        // on the first frame, and again when Play starts: compile every effect
+        // pipeline now, not on the first cast (VfxSystem.warmup measured that
+        // stall at 265–739 ms). Play draws through a post chain with another
+        // render-target layout, and a pipeline compiled for the editor's fails
+        // validation there and is rebuilt on first use — so warm per mode.
+        vfxWarmedFor = warmFor;
+        const camera = renderCamera;
+        vfxWarming = vfxWarming.then(() => warmVfx(vfx, assets, (group) => renderer.precompileGroup(group, camera, built.scene), camera)).catch(() => undefined);
       }
       // standing effects start/stop/follow before the plays step, and before
       // the light budget re-aims its slots at their lights

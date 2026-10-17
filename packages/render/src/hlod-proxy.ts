@@ -1,6 +1,7 @@
 import * as THREE from "three/webgpu";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
-import type { PolyMeshSource, SceneDoc, VoxelMeshSource, VegetationTint } from "@hitreg/core";
+import type { PolyMeshSource, RockCap, SceneDoc, VoxelMeshSource, VegetationTint } from "@hitreg/core";
+import { instanceTintOf } from "./rock-cap.js";
 import { encodeVegetationTint, vegetationMaterialRole } from "./vegetation-tint.js";
 import { polyMeshGeometry } from "./poly-mesh-geometry.js";
 import { surfaceGeometry, type SurfaceMeshSource } from "./surface-mesh.js";
@@ -51,12 +52,14 @@ interface ProxyMesh {
         uv?: { mode?: "stretch" | "world"; scale?: [number, number] };
       }
     | { kind: "polygon"; points: Array<[number, number]>; height: number; bevel?: { size: number; segments: number } }
-    | { kind: "asset"; assetId: string; node?: string; vegetationTint?: VegetationTint }
+    | { kind: "asset"; assetId: string; node?: string; vegetationTint?: VegetationTint; rockCap?: RockCap }
     | { kind: "voxel"; world: string; cell: [number, number]; lodStep?: number; yRange?: [number, number] }
     | { kind: "heightmap" }
     | { kind: "path" }
     | SurfaceMeshSource;
   material?: string;
+  /** false = never baked into a supercell (drawn only in the full-render ring). */
+  hlod?: boolean;
 }
 
 interface ProxyTransform {
@@ -91,6 +94,20 @@ export interface HlodProxy {
  * range anyway, so the honest answer is to drop it rather than to feed the
  * shader coordinates it cannot interpret.
  */
+/**
+ * The far-proxy version of a placed model's material asset: the same asset drawn from the model's own UVs, without
+ * vertex colours (merged proxy geometry carries none) and without triplanar projection (a triplanar look in a proxy
+ * pipeline went past the 16 sampled-texture limit and the failed pipeline took the terrain's down with it). Kit
+ * pieces carry metre UVs at the same 3.2 m tiling, so the far read is the same stone.
+ */
+function proxyLookMaterial(id: string, options: BuildOptions, cache: Map<string, THREE.Material>): THREE.Material | null {
+  const data = options.resolveMaterial?.(id) as Record<string, unknown> | undefined;
+  if (!data) return null;
+  const proxyId = `${id}#hlod`;
+  const plain = { ...data, triplanar: false, vertexColors: false };
+  return materialForId(proxyId, { ...options, resolveMaterial: (asset: string) => (asset === proxyId ? plain : options.resolveMaterial?.(asset)) }, cache);
+}
+
 function withoutFoliageWind(material: THREE.Material | THREE.Material[]): THREE.Material | THREE.Material[] {
   const clear = (m: THREE.Material): THREE.Material => {
     const node = m as THREE.NodeMaterial;
@@ -447,6 +464,10 @@ function prepVoxelForMerge(geometry: THREE.BufferGeometry): THREE.BufferGeometry
 const sharedHlodMaterialCache = new Map<string, THREE.Material>();
 
 export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}): Promise<HlodProxy> {
+  // `mesh.hlod: false` (small rocks, pebbles): culled past the full-render ring rather than baked
+  if (Object.values(doc.entities).some((e) => (e.components["mesh"] as ProxyMesh | undefined)?.hlod === false)) {
+    doc = { ...doc, entities: Object.fromEntries(Object.entries(doc.entities).filter(([, e]) => (e.components["mesh"] as ProxyMesh | undefined)?.hlod !== false)) };
+  }
   const group = new THREE.Group();
   group.name = "hlod-proxy";
   const materialCache = sharedHlodMaterialCache;
@@ -544,16 +565,23 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
       if (lodded.length > 0 && cachedImpostor(assetId, node, source, submeshBounds(submeshes), options)) {
         // collected across every species and batched once below — all the
         // species whose atlases share a page draw as one
-        impostorItems.push({ assetId, node, gltf, submeshes,
+        const lookId = (lodded[0]![1].components["mesh"] as ProxyMesh).material;
+        const look = lookId ? materialForId(lookId, options, materialCache) : null;
+        impostorItems.push({ assetId, node, gltf, submeshes, look,
           matrices: lodded.map(([, entity]) => entityTransform(entity).clone()),
-          vegetationTints: lodded.map(([, entity]) => (entity.components["mesh"] as ProxyMesh & { source: { kind: "asset" } }).source.vegetationTint),
+          vegetationTints: lodded.map(([, entity]) => instanceTintOf((entity.components["mesh"] as ProxyMesh & { source: { kind: "asset" } }).source)),
         });
         toMerge = entities.filter(([, entity]) => (entity.components["mesh"] as { lod?: boolean }).lod === false);
       }
     }
     for (const [, entity] of toMerge) {
       const placement = entityTransform(entity).clone();
-      const tint = (entity.components["mesh"] as ProxyMesh & { source: { kind: "asset" } }).source.vegetationTint;
+      // The entity's own material (`mesh.material`, a material asset over a plain glTF: kit pieces drawn with a town
+      // role tile, triplanar stone) is what the near ring draws, so it is what the proxy must draw too. Merging with the
+      // glTF's embedded placeholder instead drew every such kit (retaining walls, bridges) flat white past the
+      // full-detail ring.
+      const lookId = (entity.components["mesh"] as ProxyMesh).material;
+      const tint = instanceTintOf((entity.components["mesh"] as ProxyMesh & { source: { kind: "asset" } }).source);
       submeshes.forEach((sub, index) => {
         // `sub.geometry` belongs to the shared glTF cache — every other chunk
         // and every un-merged instance of this model holds the same object, so
@@ -562,6 +590,12 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
         // duplicated every attribute, then toNonIndexed() expanded them again).
         const prepped = prepForMerge(sub.geometry, true);
         prepped.applyMatrix4(matrix.copy(placement).multiply(sub.localMatrix));
+        const look = lookId && !Array.isArray(sub.material) ? proxyLookMaterial(lookId, options, materialCache) : null;
+        if (look) {
+          // every piece drawn with this material asset shares one merged draw, whatever model it came from
+          addToBucket(`look:${lookId}`, look, prepped);
+          return;
+        }
         let bucketKey = Array.isArray(sub.material)
           ? `gltf:${key}#${index}`
           : mergedBucketKey(sub.material, `gltf:${key}#${index}`);
@@ -619,7 +653,7 @@ export async function buildHlodProxy(doc: SceneDoc, options: BuildOptions = {}):
       impostorDrawCalls += 1;
     }
     for (const item of unpaged) {
-      const batch = impostorBatchFor(item.assetId, item.node, item.gltf, item.submeshes, item.matrices, options, item.vegetationTints);
+      const batch = impostorBatchFor(item.assetId, item.node, item.gltf, item.submeshes, item.matrices, options, item.vegetationTints, item.look);
       if (batch) {
         group.add(batch);
         impostorDrawCalls += 1;

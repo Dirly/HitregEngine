@@ -28,6 +28,8 @@ export {
   coverScratch,
   coverWaterLevel,
   coverWaterGate,
+  coverKindAllowed,
+  coverWantsInland,
   type CoverGateLayer,
 } from "./cover.js";
 export {
@@ -74,7 +76,10 @@ export {
   type VertexAttributeSpec,
 } from "./marching-cubes.js";
 
-export { dualContour, type DualContourOptions } from "./dual-contouring.js";
+export { dualContour, type DualContourOptions, type HermiteSource } from "./dual-contouring.js";
+export { planarCliffsSchema, planarZoneSchema, planarFallsSchema, createPlanarCliffs, planarReach, wallsDensity, type PlanarCliffs, type PlanarCliffsDoc, type PlanarZoneDoc, type PlanarFallsDoc } from "./planar-cliffs.js";
+export { seaCliffSchema, seaCliffsSchema, seaStackShapeSchema, createSeaCliffs, type SeaCliffDoc, type SeaCliffs, type SeaStack, type SeaStackShapeDoc } from "./sea-cliffs.js";
+export { butteFieldSchema, buttesSchema, createButtes, type ButteFieldDoc, type Buttes } from "./buttes.js";
 export { csgTriangleMeshSchema, compileTriangleMesh, type CsgTriangleMesh, type CompiledTriangleMesh } from "./triangle-mesh.js";
 
 export {
@@ -174,6 +179,14 @@ export {
   regionSchema,
   regionMoodSchema,
   type RegionMood,
+  regionSoundSchema,
+  regionSoundBandsSchema,
+  regionAmbientLayerSchema,
+  type RegionSound,
+  type RegionSoundBands,
+  type RegionAmbientLayer,
+  regionLookAt,
+  type RegionLook,
   regionAt,
   townRegionOf,
   polygonEnclosesCircle,
@@ -214,12 +227,14 @@ export {
   type BiomeSample,
   type ZoneSample,
   type SampleBlockRequest,
+  type SampleBlockExact,
   type PolylineHit,
 } from "./field.js";
 
 export {
   voxelMesh,
   buildVoxelMesh,
+  dualMeshExperiment,
   primeVoxelMesh,
   registerVoxelWorld,
   registerVoxelField,
@@ -233,15 +248,21 @@ export {
   invalidateVoxelWorld,
   invalidateVoxelCells,
   voxelMeshCacheStats,
+  cachedVoxelMesh,
   isVoxelSource,
   type VoxelMesh,
   type VoxelMeshSource,
   type VoxelMesher,
+  type VoxelMesherChoice,
+  resolveCellMesher,
 } from "./mesh.js";
 
 export {
   scatterCell,
   scatterFooting,
+  scatterContact,
+  scatterGroundProbe,
+  scatterSeatSize,
   editedGround,
   FOOTING_OPEN,
   scatterVariation,
@@ -251,9 +272,14 @@ export {
 
 export {
   voxelChunkDoc,
+  ribbonSurfaces,
   voxelChunkOptionsFrom,
+  voxelRecipeAssetRefs,
   cellsInRect,
   VOXEL_TERRAIN_ID,
+  fittedFalls,
+  voxelWaterEntities,
+  FALL_LIP_OFFSET,
   type VoxelChunkOptions,
 } from "./chunk.js";
 
@@ -271,8 +297,78 @@ export {
   type FeatureKind,
   type Footprint,
 } from "./terraform.js";
+export {
+  terraceWallSchema,
+  terraceWallInsertSchema,
+  terraceWallPieceSchema,
+  terraceWallSolvedSchema,
+  terraceWallCutSchema,
+  terraceWallEntities,
+  terraceWallFeatureId,
+  TERRACE_WALL_STYLES,
+  TERRACE_WALL_INSERTS,
+  type TerraceWallDoc,
+  type TerraceWallSolved,
+  type TerraceWallInsert,
+  type TerraceWallCut,
+} from "./terrace-walls.js";
+export {
+  FINE_MIN,
+  FINE_REMEDY,
+  FINE_EXEMPT_PREFIXES,
+  registerOperator,
+  getOperator,
+  operatorNames,
+  operatorSpecs,
+  operatorDocSchema,
+  operatorCompiledSchema,
+  operatorParams,
+  operatorPrefix,
+  operatorPieces,
+  withoutOperatorPieces,
+  groundFingerprint,
+  featureMinDimension,
+  fineCarves,
+  compileOperator,
+  applyOperator,
+  removeOperator,
+  checkOperators,
+  hash32,
+  type LandformOperator,
+  type OperatorDoc,
+  type OperatorFieldReader,
+  type OperatorOutput,
+  type OperatorPiece,
+  type OperatorBounds,
+  type OperatorApplyResult,
+  type OperatorState,
+  type FineCarve,
+  type FineReport,
+} from "./operators.js";
+export { terraceOperatorSchema, type TerraceOperatorParams } from "./operators-terrace.js";
+export * from "./ribbon.js";
+export * from "./kit-walls.js";
+export * from "./ledge-landmark.js";
+export { caveOperatorSchema, caveRoutes, type CaveOperatorParams } from "./operators-cave.js";
+export { ledgesOperatorSchema, landmarkOptions, landmarkPrefabId, solveLedges, type LedgesOperatorParams } from "./operators-ledges.js";
+export { rockCover, routeCover } from "./cave-route.js";
+export { solveShelves, contourLines, fringeShelves, type ShelvingOptions, type ShelvingResult, type ShelvingGrid, type ShelfArea } from "./shelving.js";
+export {
+  bridgeSpanSchema,
+  bridgeAnchorSchema,
+  bridgeSpanPieceSchema,
+  bridgeSpanPierSchema,
+  bridgeSpanSolvedSchema,
+  bridgeSpanEntities,
+  bridgeSpanFeatureId,
+  BRIDGE_SPAN_KINDS,
+  BRIDGE_SPAN_STYLES,
+  type BridgeSpanDoc,
+  type BridgeSpanSolved,
+} from "./bridge-spans.js";
+export { measureFallLip, fitFall, shiftFall, fallFace, fallColumn, profileFace, groundAtProfile, fallProbeDepth, FALL_LIP_SEARCH, FALL_FACE_CLEAR, type FallLip, type FallFitField } from "./fall-fit.js";
 export { fallSiteSchema, applyFallSites, fallSiteLedge, FALL_SITE_MIN_TIER, type FallSiteDoc, type SolvedFallSite } from "./fall-sites.js";
-export { rockFormations, rockFormationSolid, type RockFormationSolid, type RockFormationSite, type RockFormationOptions, type RockFormationResult, type RockMass } from "./rock-formations.js";
+export { rockFormations, rockFormationSolid, rockMassNodes, zoneWallStone, type RockShapeContext, type RockFormationSolid, type RockFormationSite, type RockFormationOptions, type RockFormationResult, type RockMass } from "./rock-formations.js";
 export { fallSiteRockInstances, meshDensity, type SiteRockInstance, type MeshDensity } from "./fall-site-rocks.js";
 
 export {
@@ -298,3 +394,24 @@ export {
   type TerrainLipReport,
   type SeatReport,
 } from "./terrain-lips.js";
+export { rockCapResolver, createRockCapResolver, rockSkinProbe, createRockSkinProbe, type RockCapResolver, type RockSkinProbe, type RockSkinPick, type GroundBand } from "./rock-cap.js";
+export { formationMembers, waterPlacement, type FormationMember } from "./formations.js";
+export {
+  seatObject,
+  seatMany,
+  seatSamples,
+  fieldSolidProbe,
+  triangleSolidProbe,
+  unionSolidProbe,
+  defaultSeatContact,
+  SEAT_CONTACTS,
+  type SeatContact,
+  type SeatFootprint,
+  type SeatOptions,
+  type SeatResult,
+  type SeatStatus,
+  type SolidProbe,
+  type SeatField,
+} from "./seat.js";
+export * from "./landmark-stamp.js";
+export { landmarkOperatorSchema, landmarkSourceSchema, compileLandmarkOperator, landmarkSpecOf, type LandmarkOperatorParams } from "./operators-landmark.js";

@@ -42,6 +42,7 @@ import {
 } from "@hitreg/core";
 import type { HeadlessWorld } from "./world.js";
 import { VoxelPool, type VoxelPoolOptions } from "./voxel-pool.js";
+import { presentAssetsFor, terrainCacheKey, type TerrainCacheInputs, type TerrainCacheReader } from "./terrain-cache.js";
 
 export interface TerrainStreamerOptions {
   /** Cells around each focus to keep simulated (default: the component's `rings.simulation`, min 1). */
@@ -114,8 +115,16 @@ export class TerrainStreamer {
    * ensures, the no-worker fallback — the expensive kind) and cells integrated (doc → scene → physics, every
    * cell pays it), with the milliseconds each took.
    */
-  readonly counters = { inlineLoads: 0, inlineMs: 0, integrated: 0, integrateMs: 0, uncovered: 0 };
+  readonly counters = { inlineLoads: 0, inlineMs: 0, integrated: 0, integrateMs: 0, uncovered: 0, cacheHits: 0, cacheMs: 0 };
   private pool: VoxelPool | null = null;
+  /**
+   * The baked terrain cache for the CURRENT recipe (terrain-cache.ts), or null: cells are read from it
+   * instead of cooked. A terraform excludes the cells it touched; a whole new recipe drops it.
+   */
+  private cache: TerrainCacheReader | null = null;
+  private readonly cacheExcluded = new Set<string>();
+  /** Bumped by every recipe change: a cache read that started under an older recipe is dropped. */
+  private recipeEpoch = 0;
   /** Cells requested from the pool and not yet landed. */
   private readonly inflight = new Set<string>();
   /** Results that arrived between updates, integrated on the next one (bounded by the budget). */
@@ -169,20 +178,48 @@ export class TerrainStreamer {
 
   private initPool(): void {
     if (!this.pool) return;
-    const present: string[] = [];
-    for (const rule of this.resolved.field.recipe.scatter) {
-      const id = rule.prefab ?? rule.model;
-      if (id && this.options.assetExists?.(id, rule.prefab ? "prefab" : "model")) present.push(id);
-    }
-    for (const poi of this.resolved.field.recipe.features.pois) {
-      if (poi.prefab && this.options.assetExists?.(poi.prefab, "prefab")) present.push(poi.prefab);
-    }
+    const present = presentAssetsFor(this.resolved.field.recipe, (id, kind) => this.options.assetExists?.(id, kind) ?? false);
     this.pool.init(this.resolved.field.recipe, this.resolved.data.world, this.options, present);
   }
 
   dispose(): void {
     this.pool?.dispose();
     this.pool = null;
+    this.cache?.close();
+    this.cache = null;
+  }
+
+  /** What the terrain cache key is computed from — this streamer's world, recipe and cook options. */
+  cacheInputs(): TerrainCacheInputs {
+    return {
+      world: this.resolved.data.world,
+      recipe: this.resolved.field.recipe,
+      data: this.resolved.data,
+      assetExists: (id, kind) => this.options.assetExists?.(id, kind) ?? false,
+    };
+  }
+
+  /**
+   * Read cells from a baked cache from now on. Refused (false, reader closed) when it was baked for
+   * another recipe — a terraform landed while it was baking — so a stale cell is never served.
+   */
+  useCache(reader: TerrainCacheReader): boolean {
+    if (this.recipeEpoch > 0 && reader.meta.hash !== terrainCacheKey(this.cacheInputs())) {
+      reader.close();
+      return false;
+    }
+    this.cache?.close();
+    this.cache = reader;
+    return true;
+  }
+
+  /** The cache in use (diagnostics), or null. */
+  get cacheReader(): TerrainCacheReader | null {
+    return this.cache;
+  }
+
+  private cached(key: string, cx: number, cz: number): boolean {
+    return !!this.cache && !this.cacheExcluded.has(key) && this.cache.has(cx, cz);
   }
 
   /** Resident cell keys. */
@@ -347,9 +384,36 @@ export class TerrainStreamer {
 
   /** Ask a worker for the cell; the result lands on a later update. */
   private request(key: string): void {
-    if (this.inflight.has(key) || this.loaded.has(key) || !this.pool) return;
+    // landed and waiting for its integration slot: asking again would read / cook it twice
+    if (this.inflight.has(key) || this.loaded.has(key) || this.arrived.some((a) => a.key === key)) return;
     const coords = parseChunkKey(key);
     if (!coords) return;
+    if (this.cached(key, coords[0], coords[1])) {
+      this.inflight.add(key);
+      const epoch = this.recipeEpoch;
+      const started = performance.now();
+      this.cache!.read(coords[0], coords[1])
+        .then((cell) => {
+          this.inflight.delete(key);
+          if (epoch !== this.recipeEpoch) return;
+          if (!cell) return this.requestCooked(key, coords);
+          this.counters.cacheHits++;
+          this.counters.cacheMs += performance.now() - started;
+          this.arrived.push({ key, cell: cell.doc, source: cell.source, mesh: cell.mesh });
+        })
+        .catch((error: unknown) => {
+          this.inflight.delete(key);
+          console.warn(`[server:terrain] cache read failed for ${key}, cooking it:`, error);
+          this.requestCooked(key, coords);
+        });
+      return;
+    }
+    this.requestCooked(key, coords);
+  }
+
+  /** Ask a worker to cook the cell (no pool: the next update loads it inline). */
+  private requestCooked(key: string, coords: [number, number]): void {
+    if (this.inflight.has(key) || this.loaded.has(key) || !this.pool || this.pool.broken) return;
     this.inflight.add(key);
     const generation = this.pool.currentGeneration;
     this.pool
@@ -375,6 +439,20 @@ export class TerrainStreamer {
     const [cx, cz] = coords;
     const { field, data } = this.resolved;
     const started = performance.now();
+    if (this.cached(key, cx, cz)) {
+      try {
+        const cell = this.cache!.readSync(cx, cz);
+        if (cell) {
+          if (cell.source && cell.mesh) primeVoxelMesh(cell.source, cell.mesh);
+          this.integrate(key, cell.doc);
+          this.counters.cacheHits++;
+          this.counters.cacheMs += performance.now() - started;
+          return;
+        }
+      } catch (error) {
+        console.warn(`[server:terrain] cache read failed for ${key}, cooking it:`, error);
+      }
+    }
     try {
       const cell = voxelChunkDoc(field, data.world, cx, cz, this.options);
       this.integrate(key, cell);
@@ -453,6 +531,7 @@ export class TerrainStreamer {
     const result = applyRecipeEdits(before, edits);
     const field = registerVoxelWorld(this.resolved.data.world, result.recipe);
     this.resolved = { ...this.resolved, field };
+    this.recipeEpoch++;
     // workers hold their own field: re-ship the recipe, and anything they
     // were generating against the old one is dropped by generation
     this.initPool();
@@ -461,6 +540,8 @@ export class TerrainStreamer {
     this.limitCells =
       limit === Infinity ? Infinity : (limit + (field.recipe.bounds?.limitFalloff ?? 600)) / field.recipe.cellSize + 2;
     const touchedCells = cellsForEdits(result.recipe, result);
+    // the cache still holds every cell the batch did not reach; the ones it did are cooked from now on
+    for (const [cx, cz] of touchedCells) this.cacheExcluded.add(chunkKey(cx, cz));
     const reloaded: string[] = [];
     for (const [cx, cz] of touchedCells) {
       const key = chunkKey(cx, cz);
@@ -481,6 +562,10 @@ export class TerrainStreamer {
   replaceRecipe(recipe: WorldRecipe): string[] {
     const field = registerVoxelWorld(this.resolved.data.world, recipe);
     this.resolved = { ...this.resolved, field };
+    this.recipeEpoch++;
+    // the diff is unknown here: no cached cell can be trusted against this recipe
+    this.cache?.close();
+    this.cache = null;
     this.initPool();
     this.arrived.length = 0;
     const limit = field.worldLimit;

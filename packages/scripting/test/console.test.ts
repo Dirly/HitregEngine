@@ -17,7 +17,7 @@ registerCoreComponents(coreRegistry);
 const EMITTERS = ["weather-rain", "weather-snow", "weather-sand", "weather-dust"];
 
 /** A scene with a day/night + weather world, and a console pointed at it. */
-function world(options: { authority?: boolean } = {}) {
+function world(options: { authority?: boolean; staff?: boolean } = {}) {
   const ops: Op[] = [
     {
       op: "add-entity",
@@ -72,6 +72,7 @@ function world(options: { authority?: boolean } = {}) {
   const dev = new DevConsole({
     runtime: () => runtime,
     isAuthority: () => options.authority ?? true,
+    isStaff: () => options.staff ?? false,
   });
   const tick = (seconds: number) => {
     for (let i = 0; i < seconds * 30; i++) runtime.fixedUpdate(1 / 30);
@@ -198,6 +199,13 @@ describe("developer console", () => {
     const out = say("/time 3");
     expect(out).toMatch(/error:.*host owns/);
     expect(out).toContain("03:00"); // it still ran, and still says what it did
+  });
+
+  it("does not warn a staff tab about a command the server honours from staff, and still warns about the rest", () => {
+    const { say, dev } = world({ authority: false, staff: true });
+    dev.register({ name: "grant", description: "test grant", authority: true, staff: true, run: () => "granted" });
+    expect(say("/grant")).toBe("out:granted");
+    expect(say("/time 3")).toMatch(/error:.*host owns/); // /time is not honoured from staff
   });
 
   it("completes command names and remembers what was typed", () => {

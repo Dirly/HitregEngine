@@ -14,6 +14,10 @@ import {
   type WorldRecipe,
 } from "./recipe.js";
 import { cellsInRect } from "./chunk.js";
+import { getOperator, operatorDocSchema, operatorParams } from "./operator-registry.js";
+import { ribbonSchema } from "./ribbon.js";
+import { kitWallSchema } from "./kit-walls.js";
+import { landmarkSchema } from "./ledge-landmark.js";
 
 /**
  * TERRAFORM — editing a world recipe as atomic, invertible batches.
@@ -59,6 +63,10 @@ export const FEATURE_KINDS = [
   "blobs",
   "passages",
   "pois",
+  "operators",
+  "ribbons",
+  "kitWalls",
+  "landmarks",
 ] as const;
 
 export type FeatureKind = (typeof FEATURE_KINDS)[number];
@@ -75,6 +83,10 @@ const FEATURE_SCHEMAS: Record<FeatureKind, z.ZodType> = {
   blobs: blobSchema,
   passages: passageSchema,
   pois: poiSchema,
+  operators: operatorDocSchema,
+  ribbons: ribbonSchema,
+  kitWalls: kitWallSchema,
+  landmarks: landmarkSchema,
 };
 
 /** A feature after validation — every kind carries an `id`. */
@@ -223,6 +235,25 @@ export function featureFootprint(kind: FeatureKind, feature: unknown): Footprint
     }
     case "pois":
       return null;
+    case "ribbons": {
+      // the walk surface, its stair treads and wall pieces; pad covers the verge and the wall cuts
+      const samples = (f["samples"] as number[][] | undefined) ?? [];
+      return samples.length ? pointsBounds(samples.map((p) => [p[0]!, p[2]!]), 12) : null;
+    }
+    case "landmarks": {
+      const p = (f["position"] as number[] | undefined) ?? [0, 0, 0];
+      return pointsBounds([[p[0]!, p[2]!]], Number(f["radius"] ?? 0) + 4);
+    }
+    case "kitWalls": {
+      // the wall pieces and their face cuts (n reaches a few metres to the low side)
+      const pts = ((f["pieces"] as { position: number[] }[] | undefined) ?? []).map((p) => [p.position[0]!, p.position[2]!]);
+      return pts.length ? pointsBounds(pts, 8) : null;
+    }
+    case "operators": {
+      // the operator doc itself shapes nothing (its compiled `op:<id>:*` pieces do); its bounds are where they land
+      const o = getOperator(String(f["op"]));
+      return o ? o.bounds(operatorParams(f) as never) : null;
+    }
     case "towns": {
       const c = f["center"] as [number, number];
       const reach = num(f["radius"], 0) + num(f["falloff"], 35);
@@ -398,6 +429,10 @@ export function applyRecipeEdits(recipe: WorldRecipe, edits: readonly RecipeEdit
     inverse.unshift({ edit: "update-feature", kind: edit.kind, id: previous.id, feature: previous });
   });
 
+  // the optional kinds (operators, ribbons, kitWalls) are dropped when empty: no `operators: []` noise, and undoing the first install restores the recipe exactly
+  for (const kind of ["operators", "ribbons", "kitWalls", "landmarks"] as const) {
+    if (features[kind].length === 0) delete (features as Partial<Record<FeatureKind, AnyFeature[]>>)[kind];
+  }
   return {
     recipe: { ...recipe, features: features as WorldRecipe["features"] },
     inverse,

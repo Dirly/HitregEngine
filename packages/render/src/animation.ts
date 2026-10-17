@@ -260,6 +260,8 @@ interface Entry {
   maskRoot?: string | null;
   /** Edit mode: the clip it was last stood in (see poseStill); undefined = not yet. */
   posedStill?: string | null;
+  /** Edit mode: the paused action holding that pose. */
+  stillAction?: THREE.AnimationAction;
   fading: Array<{ action: THREE.AnimationAction; until: number }>;
   /** Override layers still showing (the current one, and any fading out) and their anchors. */
   anchored: Anchored[];
@@ -478,7 +480,10 @@ function autoMaskRoot(root: THREE.Object3D): string | null {
   while (level.length > 0) {
     const next: THREE.Object3D[] = [];
     for (const o of level) {
-      if (o.name && SPINE.test(o.name)) return o.name;
+      // Render meshes such as CrocKin_Torso can precede the skeleton. A mask
+      // must begin at a joint; matching a mesh makes the layer fall back to
+      // full-body playback and steals the gait from the legs.
+      if (!(o as THREE.Mesh).isMesh && o.name && SPINE.test(o.name)) return o.name;
       next.push(...o.children);
     }
     level = next;
@@ -1032,19 +1037,38 @@ export class AnimationSystem {
    * `clipFor` stands a model in another clip instead (null = its own): the
    * editor holds a character in a weapon's stance idle while that weapon is
    * selected, so a two-handed grip is placed in the pose that grips it.
+   * It may also name a TIME in that clip (seconds): the editor's pose scrubber
+   * stands a character at any frame of a swing, so a grip is placed and
+   * checked through the whole motion, not only at its first frame.
    */
-  poseStill(clipFor?: (entityId: string) => string | null): void {
+  poseStill(clipFor?: (entityId: string) => string | { clip: string; time: number } | null): void {
     if (this.running) return;
+    // a caller names the entity it knows (a character), which may delegate to its model child
+    let delegators: Map<string, string> | undefined;
+    if (clipFor && this.delegates.size > 0) {
+      delegators = new Map();
+      for (const [parent, child] of this.delegates) delegators.set(child, parent);
+    }
     for (const [id, entry] of this.entries) {
-      const wanted = clipFor?.(id);
-      const clip = wanted && entry.actions.has(wanted) ? wanted : (entry.animator?.play ?? null);
-      if (entry.posedStill === clip) continue;
-      entry.posedStill = clip;
+      const via = delegators?.get(id);
+      const wanted = clipFor?.(id) ?? (via !== undefined ? clipFor?.(via) : null);
+      const name = typeof wanted === "string" ? wanted : wanted?.clip;
+      const known = name !== undefined && entry.actions.has(name);
+      const clip = known ? name : (entry.animator?.play ?? null);
+      const time = known && typeof wanted === "object" && wanted ? wanted.time : 0;
+      const key = clip && time > 0 ? `${clip}@${time}` : clip;
+      if (entry.posedStill === key) continue;
+      entry.posedStill = key;
       const action = clip ? entry.actions.get(clip) : undefined;
       if (!action) continue;
+      // the action stays active, paused: stopping the last action on a bone
+      // hands it back to its original (bind) pose
       action.reset().play();
+      action.paused = true;
+      action.time = Math.min(time, action.getClip().duration);
+      if (entry.stillAction && entry.stillAction !== action) entry.stillAction.stop();
+      entry.stillAction = action;
       entry.mixer.update(0);
-      action.stop();
       entry.held = false;
       bumpPoseVersion(entry);
     }
@@ -1053,7 +1077,14 @@ export class AnimationSystem {
   /** Play mode started: run every animator's declared clip. */
   setRunning(running: boolean): void {
     this.running = running;
-    for (const entry of this.entries.values()) entry.posedStill = undefined;
+    for (const entry of this.entries.values()) {
+      entry.posedStill = undefined;
+      if (entry.stillAction) {
+        entry.stillAction.paused = false;
+        entry.stillAction.stop();
+        entry.stillAction = undefined;
+      }
+    }
     for (const [id, entry] of this.entries) {
       entry.pendingDt = 0;
       entry.held = false;

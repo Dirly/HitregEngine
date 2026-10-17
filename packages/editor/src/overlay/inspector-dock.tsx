@@ -6,7 +6,7 @@ import {
   type SceneDoc,
   type SceneStore,
 } from "@hitreg/core";
-import type { AssetSelection, EditorSettings, MeshEditState, Observable, Pin, Pins, Selection } from "../state.js";
+import type { AssetSelection, EditorSettings, MeshEditState, Observable, Pin, Pins, PoseScrub, PoseScrubState, Selection, TwoHandReport } from "../state.js";
 import { MeshComponentPanel } from "./poly-mesh-inspector.js";
 import { activeButtonStyle, apply, buttonStyle, DockHeader, useObservable, useStoreDoc } from "./common.js";
 import { Row, TextField, ValueField } from "./fields.js";
@@ -43,6 +43,7 @@ export function InspectorDock(props: {
   assetSelection: AssetSelection;
   assetsVersion: Observable<number>;
   modelBones?: Observable<Record<string, string[]>>;
+  poseScrub?: PoseScrub;
   saveAsset?: (file: string, content: string) => void;
   thumbnails: Observable<Record<string, string>>;
   onEditPrefab?: (id: string) => void;
@@ -84,6 +85,7 @@ export function InspectorDock(props: {
             registry={props.registry}
             assets={props.assets}
             modelBones={props.modelBones}
+            poseScrub={props.poseScrub}
             onEditPrefab={props.onEditPrefab}
             pins={props.pins}
             onPinCreateForEntity={props.onPinCreateForEntity}
@@ -275,6 +277,7 @@ function Inspector(props: {
   registry: ComponentRegistry;
   assets: AssetLibrary;
   modelBones?: Observable<Record<string, string[]>>;
+  poseScrub?: PoseScrub;
   onEditPrefab?: (id: string) => void;
   pins?: Pins;
   onPinCreateForEntity?: (entityId: string) => void;
@@ -322,6 +325,7 @@ function Inspector(props: {
       </Row>
 
       {props.settings && props.editingPrefab && <HolsterRow id={props.id} doc={props.doc} settings={props.settings} />}
+      {props.poseScrub && props.editingPrefab && <PoseRow id={props.id} doc={props.doc} scrub={props.poseScrub} />}
 
       {Object.entries(entity.components).map(([name, data]) => (
         <div key={name} style={{ marginTop: 10 }}>
@@ -444,5 +448,180 @@ function HolsterRow(props: { id: string; doc: SceneDoc; settings: Observable<Edi
         {on ? "holstered" : "in hand"}
       </button>
     </Row>
+  );
+}
+
+const FRAME = 1 / 30;
+const SPEEDS = [0.1, 0.25, 0.5, 1];
+
+/**
+ * The pose scrubber: stand the character at any frame of any clip — place a
+ * grip at the top of a swing, step a two-hander through its attack. With a
+ * held item selected it also reads the OTHER hand against the item's handle:
+ * now (centimetres, and where along the handle) and across the whole clip as
+ * a strip, solid where the hand is on the handle and hollow where it is not.
+ */
+function PoseRow(props: { id: string; doc: SceneDoc; scrub: Observable<PoseScrubState> }) {
+  const state = useObservable(props.scrub);
+  const [filter, setFilter] = useState("");
+  // the host decides what it can pose (a held item, its look child, or its carrier)
+  if (!state.actor) return null;
+  const set = (patch: Partial<PoseScrubState>) => props.scrub.set({ ...props.scrub.get(), ...patch });
+  const seek = (time: number) => {
+    const d = state.duration;
+    set({ time: d > 0 ? ((time % d) + d) % d : 0, playing: false });
+  };
+  const needle = filter.trim().toLowerCase();
+  const clips = needle ? state.clips.filter((c) => c.toLowerCase().includes(needle)) : state.clips;
+  if (state.clip && !clips.includes(state.clip)) clips.unshift(state.clip);
+  const frame = Math.round(state.time / FRAME);
+  const two = state.twoHand;
+  return (
+    <div style={{ margin: "6px 0", padding: "6px 0", borderTop: "1px solid #30363d", borderBottom: "1px solid #30363d" }}>
+      <Row label="pose">
+        <div style={{ display: "flex", gap: 4 }}>
+          <input
+            style={{ ...buttonStyle, width: 64, cursor: "text" }}
+            placeholder="filter"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+          />
+          <select
+            style={{ ...buttonStyle, flex: 1, minWidth: 0 }}
+            value={state.clip ?? ""}
+            onChange={(e) => set({ clip: e.target.value || null, time: 0 })}
+          >
+            <option value="">stance idle (default)</option>
+            {clips.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
+        </div>
+      </Row>
+      {state.clip && (
+        <>
+          <Row label="time">
+            <input
+              type="range"
+              style={{ width: "100%" }}
+              min={0}
+              max={Math.max(state.duration, FRAME)}
+              step={0.001}
+              value={state.time}
+              aria-label="Time in clip"
+              onChange={(e) => seek(Number(e.target.value))}
+            />
+          </Row>
+          <Row label="">
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center" }}>
+              <button style={buttonStyle} title="Back one frame (1/30 s)" onClick={() => seek(state.time - FRAME)}>
+                ◀
+              </button>
+              <button
+                style={state.playing ? activeButtonStyle : buttonStyle}
+                aria-pressed={state.playing}
+                title="Play the clip in place, looping"
+                onClick={() => set({ playing: !state.playing })}
+              >
+                {state.playing ? "pause" : "play"}
+              </button>
+              <button style={buttonStyle} title="Forward one frame (1/30 s)" onClick={() => seek(state.time + FRAME)}>
+                ▶
+              </button>
+              <select
+                style={buttonStyle}
+                value={state.speed}
+                title="Playback speed"
+                onChange={(e) => set({ speed: Number(e.target.value) })}
+              >
+                {SPEEDS.map((s) => (
+                  <option key={s} value={s}>
+                    {s}×
+                  </option>
+                ))}
+              </select>
+              <span style={{ color: "#8b949e", fontSize: 10, whiteSpace: "nowrap" }}>
+                f{frame} · {state.time.toFixed(2)}/{state.duration.toFixed(2)}s
+              </span>
+            </div>
+          </Row>
+        </>
+      )}
+      {two && <TwoHandStrip report={two} time={state.time} duration={state.clip ? state.duration : 0} onSeek={seek} />}
+    </div>
+  );
+}
+
+function TwoHandStrip(props: { report: TwoHandReport; time: number; duration: number; onSeek: (time: number) => void }) {
+  const { report } = props;
+  const on = report.distance <= report.onGrip;
+  const cm = (m: number) => (m * 100).toFixed(1);
+  const hand = report.hand.replace(/^CC_Base_|^mixamorig:?/, "").replace(/_/g, " ");
+  const n = report.samples.length;
+  const held = report.samples.filter((d) => d <= report.onGrip).length;
+  const W = 240;
+  const H = 28;
+  const cap = Math.max(report.onGrip * 4, 0.01);
+  return (
+    <>
+      <Row label="off hand">
+        <span style={{ fontSize: 11, color: on ? "#7ee787" : "#ffa657" }}>
+          {on ? "✓ on handle" : "✗ off handle"} — {hand} {cm(report.distance)} cm
+          {on ? `, ${Math.round(report.along * 100)}% from the pommel` : ""}
+        </span>
+      </Row>
+      {report.holding !== null && (
+        <Row label="">
+          <span style={{ fontSize: 10, color: "#8b949e" }}>gripping hand reads {cm(report.holding)} cm — on = within 4 cm of it</span>
+        </Row>
+      )}
+      {n > 0 && props.duration > 0 && (
+        <Row label="">
+          <svg
+            width="100%"
+            viewBox={`0 0 ${W} ${H + 12}`}
+            style={{ display: "block", cursor: "pointer" }}
+            role="img"
+            aria-label={`Off hand on the handle for ${held} of ${n} sampled frames`}
+            onClick={(e) => {
+              const r = e.currentTarget.getBoundingClientRect();
+              props.onSeek(((e.clientX - r.left) / r.width) * props.duration);
+            }}
+          >
+            <line x1={0} x2={W} y1={H - (report.onGrip / cap) * H} y2={H - (report.onGrip / cap) * H} stroke="#30363d" strokeDasharray="2 2" />
+            {report.samples.map((d, i) => {
+              const h = Math.max(2, (Math.min(d, cap) / cap) * H);
+              const w = W / n;
+              const ok = d <= report.onGrip;
+              return (
+                <rect
+                  key={i}
+                  x={i * w + 0.5}
+                  y={H - h}
+                  width={Math.max(1, w - 1)}
+                  height={h}
+                  fill={ok ? "#3fb950" : "none"}
+                  stroke={ok ? "none" : "#ffa657"}
+                  strokeWidth={0.8}
+                />
+              );
+            })}
+            <line
+              x1={(props.time / props.duration) * W}
+              x2={(props.time / props.duration) * W}
+              y1={0}
+              y2={H}
+              stroke="#e6edf3"
+              strokeWidth={1.5}
+            />
+            <text x={0} y={H + 10} fill="#8b949e" fontSize={9}>
+              on handle {held}/{n} frames · solid ≤ {cm(report.onGrip)} cm · click seeks
+            </text>
+          </svg>
+        </Row>
+      )}
+    </>
   );
 }

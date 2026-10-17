@@ -115,6 +115,43 @@ function hash01(seed: number, i: number): number {
 const upAxis = new THREE.Vector3(0, 1, 0);
 const aimTo = new THREE.Vector3();
 
+/**
+ * What makes a module a different SHADER (its look), or null for kinds that
+ * draw nothing compiled (light, shake, sound) or are not part of spells.
+ * Mirrors the variant keys in each module renderer and the particle batch key.
+ */
+function lookKey(m: VfxModule, spellTexel: number): string | null {
+  const blend = (m as { blend?: string }).blend ?? "";
+  switch (m.kind) {
+    case "sprite": {
+      const grid = (m.texel > 0 ? m.texel : spellTexel) > 0;
+      const halo = !!m.cell && m.glow > 0;
+      return `sprite|${m.sheet}|${grid}|${halo}|${!grid && m.pixel > 0}|${blend}`;
+    }
+    case "particles": {
+      const e = m.emitter as { blending?: string; texture?: string; sprite?: string; subUV?: { cols: number; rows: number }; softFade?: number; filter?: string };
+      return `particles|${e.blending}|${e.texture ?? e.sprite ?? "soft"}|${e.subUV ? `${e.subUV.cols}x${e.subUV.rows}` : "-"}|${e.softFade ?? 0}|${e.filter ?? ""}`;
+    }
+    case "ring":
+      return `ring|${m.texture ?? ""}|${blend}`;
+    case "shell":
+      return `shell|${blend}|${m.style === "smoke"}`;
+    case "decal":
+      return `decal|${m.sheet}|${blend}`;
+    case "mesh":
+      return `mesh|${m.sheet ?? ""}|${m.asset ?? m.primitive}`;
+    case "column":
+    case "beam":
+    case "slash":
+      return `${m.kind}|${blend}`;
+    case "bolt":
+    case "trail":
+      return m.kind;
+    default:
+      return null;
+  }
+}
+
 interface Scheduled {
   module: VfxModule;
   at: number;
@@ -820,6 +857,103 @@ export class VfxSystem implements LiveModuleHost {
     this.root.traverse((o) => {
       if (o.userData["vfx"] && (o as THREE.Mesh).isMesh && !(o as THREE.Light).isLight) o.visible = false;
     });
+  }
+
+  /**
+   * Compile every LOOK the given spells can draw, before anyone casts them.
+   *
+   * `warmup` covers each module kind once; a real spell draws its own sheets,
+   * blends, halos and particle looks, and each of those is its own shader
+   * (module materials are shared per look — see shaders.ts sharedUniforms —
+   * so one instance of a look compiles it for every later copy). This plays
+   * one module per distinct look found in any phase of any spell, far below
+   * the world, hands the root to `precompile` and discards the play: the
+   * first cast of every spell then builds nothing. Returns the looks warmed.
+   */
+  /** What the last `warmSpells` did (probes read it): spells given, looks played, wall ms, and any failure. */
+  warmStats: { spells: number; looks: number; ms: number; error?: string } | null = null;
+
+  async warmSpells(
+    spells: readonly SpellDoc[],
+    precompile: (group: THREE.Object3D) => Promise<void> | void,
+    camera?: THREE.Camera,
+    /** Standalone effects (`vfx` assets a game plays itself, such as hands while casting). */
+    effects: readonly VfxEffect[] = [],
+  ): Promise<number> {
+    const started = performance.now();
+    try {
+      const looks = await this.warmSpellLooks(spells, effects, precompile, camera);
+      this.warmStats = { spells: spells.length, looks, ms: Math.round(performance.now() - started) };
+      return looks;
+    } catch (error) {
+      this.warmStats = { spells: spells.length, looks: 0, ms: Math.round(performance.now() - started), error: String(error) };
+      console.warn("[vfx] spell warmup failed:", error);
+      return 0;
+    }
+  }
+
+  private async warmSpellLooks(
+    spells: readonly SpellDoc[],
+    standalone: readonly VfxEffect[],
+    precompile: (group: THREE.Object3D) => Promise<void> | void,
+    camera?: THREE.Camera,
+  ): Promise<number> {
+    const seen = new Set<string>();
+    const modules: VfxModule[] = [];
+    const textures = new Set<string>();
+    const decalTextures = new Set<string>();
+    const sources = [
+      ...spells.map((spell) => ({ effects: Object.values(spell.phases), texel: spell.texel ?? 0 })),
+      ...standalone.map((effect) => ({ effects: [effect], texel: 0 })),
+    ];
+    for (const spell of sources) {
+      for (const effect of spell.effects) {
+        if (!effect) continue;
+        for (const raw of effect.modules) {
+          const key = lookKey(raw, spell.texel);
+          if (!key || seen.has(key)) continue;
+          seen.add(key);
+          const m = expandRepeat(raw)[0]!;
+          const copy = { ...m, delay: 0, anchor: { ...m.anchor, at: "origin", follow: false } } as VfxModule;
+          // the look as the spell draws it: a sprite on the spell's texel grid
+          // says so itself (the warm play has no spell texel of its own)
+          if (copy.kind === "sprite" && copy.texel <= 0 && spell.texel > 0) copy.texel = spell.texel;
+          // a particle batch only draws (and compiles) once it holds particles
+          if (copy.kind === "particles") Object.assign(copy, { burst: Math.max(4, copy.burst), stream: false });
+          modules.push(copy);
+          const sheetId = (m as { sheet?: string }).sheet;
+          const sheet = sheetId ? this.resolvers.sheet?.(sheetId) : undefined;
+          if (sheet) (m.kind === "decal" ? decalTextures : textures).add(sheet.texture);
+          if (m.kind === "ring" && m.texture) textures.add(m.texture);
+        }
+      }
+    }
+    if (modules.length === 0) return 0;
+    // textures first: a textured look only builds its shader once its image is in
+    const load = (id: string, nearest: boolean, data = false): Promise<void> => {
+      const url = this.resolvers.texture?.(id);
+      return url ? new Promise<void>((resolve) => loadTexture(url, () => resolve(), nearest, data)) : Promise.resolve();
+    };
+    await Promise.all([...[...textures].flatMap((id) => [load(id, false), load(id, true)]), ...[...decalTextures].map((id) => load(id, true, true))]);
+    const effect = vfxEffectSchema.parse({ name: "warm-spells", modules });
+    const frame: VfxFrame = { origin: [0, -1000, 0], direction: [0, 0, -1], palette: { primary: "#ffffff", secondary: "#888888", glow: "#ffffff" } };
+    const play = this.play(effect, frame) as EffectPlay;
+    const cam = camera ?? new THREE.PerspectiveCamera();
+    this.update(0.016, cam);
+    this.update(0.016, cam);
+    this.root.traverse((o) => {
+      if (o.userData["vfx"] && (o as THREE.Mesh).isMesh) o.visible = true;
+    });
+    try {
+      await precompile(this.root);
+    } catch (error) {
+      console.warn("[vfx] spell warmup precompile failed:", error);
+    }
+    play.kill();
+    this.root.traverse((o) => {
+      if (o.userData["vfx"] && (o as THREE.Mesh).isMesh && !(o as THREE.Light).isLight) o.visible = false;
+    });
+    return modules.length;
   }
 
   /** Stop everything, fading over `fade` seconds. */

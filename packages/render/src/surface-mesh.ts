@@ -8,6 +8,8 @@ export interface SurfaceMeshSource {
   uvs?: number[];
   /** Optional second uv (a fall curtain's across/down, read by the water material's dissolve). */
   uv1s?: number[];
+  /** Optional flat r, g, b, a per vertex (a path ribbon's verge fade: drawn under an `alphaHash` material). */
+  colors?: number[];
 }
 
 /**
@@ -22,6 +24,7 @@ export function surfaceGeometry(source: SurfaceMeshSource): THREE.BufferGeometry
   const uvs = source.uvs && source.uvs.length === count * 2 ? Float32Array.from(source.uvs) : new Float32Array(count * 2);
   geometry.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
   if (source.uv1s && source.uv1s.length === count * 2) geometry.setAttribute("uv1", new THREE.BufferAttribute(Float32Array.from(source.uv1s), 2));
+  if (source.colors && source.colors.length === count * 4) geometry.setAttribute("color", new THREE.BufferAttribute(Float32Array.from(source.colors), 4));
   const IndexArray = count > 65535 ? Uint32Array : Uint16Array;
   geometry.setIndex(new THREE.BufferAttribute(IndexArray.from(source.indices), 1));
   geometry.computeVertexNormals();

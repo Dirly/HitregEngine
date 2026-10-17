@@ -6,7 +6,9 @@ import {
   vfxEffectSchema,
   type AssetLibrary,
   type Phase,
+  type SpellDoc,
   type SpritesheetDoc,
+  type VfxEffect,
 } from "@hitreg/core";
 import { AmbientVfx, VfxSystem, loadGltf, type LightBudgetSystem, type VfxFrame } from "@hitreg/render";
 import type { RuntimeVfxFrame, RuntimeVfxHost } from "@hitreg/scripting";
@@ -57,7 +59,23 @@ export function warmVfx(
   const sheets = all.filter((d) => !isDecal(d)).map((d) => d.id);
   const decals = all.filter(isDecal).map((d) => d.id);
   const sheet = sheets[0];
-  return vfx.warmup(precompile, { ...(mask ? { mask } : {}), ...(sheet ? { sheet } : {}), sheets, decals, ...(camera ? { camera } : {}) });
+  // then every look the project's spells draw (VfxSystem.warmSpells): the
+  // first cast of each spell compiles nothing
+  const spells: SpellDoc[] = [];
+  for (const doc of assets.dataAssetsOfType("spell")) {
+    const parsed = spellSchema.safeParse(doc.data);
+    if (parsed.success) spells.push(parsed.data);
+  }
+  // ...and the standalone effects a game plays itself (`vfx` assets)
+  const effects: VfxEffect[] = [];
+  for (const doc of assets.dataAssetsOfType("vfx")) {
+    const parsed = vfxEffectSchema.safeParse(doc.data);
+    if (parsed.success) effects.push(parsed.data);
+  }
+  return vfx
+    .warmup(precompile, { ...(mask ? { mask } : {}), ...(sheet ? { sheet } : {}), sheets, decals, ...(camera ? { camera } : {}) })
+    .then(() => vfx.warmSpells(spells, precompile, camera, effects))
+    .then(() => undefined);
 }
 
 /**
@@ -80,6 +98,7 @@ export function createAmbientVfx(vfx: VfxSystem, assets: AssetLibrary, lightBudg
 const NEUTRAL = paletteFor("water");
 
 export function makeVfxHost(vfx: VfxSystem): RuntimeVfxHost {
+  const validated = new WeakMap<object, ReturnType<typeof spellSchema.safeParse>>();
   const toFrame = (f: RuntimeVfxFrame, palette: VfxFrame["palette"]): VfxFrame => ({
     origin: f.origin,
     direction: f.direction,
@@ -100,7 +119,11 @@ export function makeVfxHost(vfx: VfxSystem): RuntimeVfxHost {
       return vfx.play(parsed.data, toFrame(frame, NEUTRAL), opts);
     },
     playSpell: (spell, frame, opts) => {
-      const parsed = spellSchema.safeParse(spell);
+      // a script hands the same (fitted, cached) document on every cast:
+      // validate it once, not per cast (a big spell is ~1 ms of Zod)
+      const known = typeof spell === "object" && spell !== null ? validated.get(spell) : undefined;
+      const parsed = known ?? spellSchema.safeParse(spell);
+      if (!known && typeof spell === "object" && spell !== null) validated.set(spell, parsed);
       if (!parsed.success) {
         console.warn("[vfx] invalid spell document", parsed.error.message);
         return { stop: () => {}, done: true, time: 0, trigger: () => {}, setPath: () => {} };

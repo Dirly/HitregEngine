@@ -196,6 +196,17 @@ export const dressingSchema = z
       .default("both")
       .describe("Where it may be used. An `outdoor` prop inside a building (a gravestone, a market stall) is refused, and the reverse."),
     category: z.string().default("").describe("Coarse family for the catalogue menu: furniture, storage, bedding, light, tableware, document, tool, decor, trade, sacred, street."),
+    contact: z
+      .enum(["base", "legs", "embed", "hang", "wall", "seated"])
+      .optional()
+      .describe(
+        "How it touches what holds it up — what every placer seats it by and `worldgen float` / `float scene` check (docs/voxel-worlds.md " +
+          "\"Seat\"). `base`: a flat base on the surface, sunk 3 cm. `legs`: every foot touches. `embed`: a rock sunk a fifth of its height " +
+          "below the lowest ground under it. `hang`: its top touches what it hangs from (or a wall beside it). `wall`: its back touches a " +
+          "wall. `seated`: a sitting figure rests where its own underside touches (hips on the seat, feet on a step); its legs may " +
+          "overhang the seat's edge. Omitted = derived (`defaultSeatContact`): wall mount -> wall, ceiling -> hang, rocks -> embed, tables/chairs/benches -> " +
+          "legs, else base.",
+      ),
     use: z
       .array(z.enum(DRESSING_USES))
       .default([])

@@ -30,6 +30,7 @@ import {
   registerCharacterNetState,
   registerTransferLockNetState,
   registerLandingNetState,
+  registerStaffNetState,
   registerNoticeNetState,
   registerSanctuariesNetState,
   getVoxelWorld,
@@ -194,6 +195,7 @@ export class HeadlessWorld {
     registerCharacterNetState(this.netState); // character/<bodyId> sheets validate + appear in the spec
     registerTransferLockNetState(this.netState); // transferLock/<bodyId> — combat scripts hold a body on this server
     registerLandingNetState(this.netState); // landing/<bodyId> — a body that just arrived; brains leave it alone
+    registerStaffNetState(this.netState); // staff/<peerId> — a GM/dev account, from its signed ticket
     registerNoticeNetState(this.netState); // notice/<bodyId> — how far brains notice a body (a game's stealth)
     registerSanctuariesNetState(this.netState); // sanctuaries/list — no player-on-player damage inside (serve.ts publishes it)
     this.netState.define("name", z.string().max(64).describe("Display name of a player body (name/<bodyId>), written by the server on spawn — what a party frame or a nameplate shows."));

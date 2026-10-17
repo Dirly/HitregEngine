@@ -123,6 +123,9 @@ export function checkCatalog({ project, assets, index = 'authoring/prop-catalogs
         const { failures: dressingFailures, ...dressing } = checkDressing({ id, owners: matches, prefabDoc: read(file), readSidecar });
         result.dressing = dressing;
         for (const message of dressingFailures) fail(message);
+        const models = result.dependencies.filter(d => /.glb$/i.test(d)).map(d => path.join(root, d));
+        const seeThrough = seeThroughProp({ id, size: dressing.declaration?.size, models, root });
+        if (seeThrough) fail(seeThrough);
       }
       result.effects = [...new Set(result.effects)].sort();
       for (const { row } of matches) {
@@ -134,6 +137,37 @@ export function checkCatalog({ project, assets, index = 'authoring/prop-catalogs
     results.push(result);
   }
   return { version: 1, passed: failures.length === 0, scope: 'Explicitly supplied changed assets: catalog coverage, available hashes, prefab model/material/VFX/nested-prefab dependencies, and a dressing declaration or exemption on every catalogued prefab. Not metadata, visual, collision or performance acceptance; not an editor import interceptor.', results, failures };
+}
+
+/** A big DC prop (the size threshold, metres, on its largest side) gets the see-through prop review. */
+export const SEE_THROUGH_PROP_SIZE = 8;
+/** The GLB was baked by dual contouring (its glTF generator says DC). */
+export function isDcModel(file) {
+  try {
+    const b = fs.readFileSync(file); if (b.readUInt32LE(0) !== 0x46546c67) return false;
+    const generator = JSON.parse(b.subarray(20, 20 + b.readUInt32LE(12)).toString("utf8")).asset?.generator ?? "";
+    return /(^|[^A-Za-z])DC([^A-Za-z]|$)/.test(generator) || /dual.?contour/i.test(generator);
+  } catch { return false; }
+}
+/**
+ * The see-through prop review: a catalogued prop at least SEE_THROUGH_PROP_SIZE m on a side whose model is a DC bake
+ * (thin hulls and shells perforate) needs authoring/prop-reviews/see-through/<id>.json from
+ * `apps/playground/tools/see-through.mts prop <scene> --entity <id> --out ...` saying ok, newer than its models.
+ * Returns the failure, or null.
+ */
+export function seeThroughProp({ id, size, models, root }) {
+  if (!Array.isArray(size) || Math.max(...size) < SEE_THROUGH_PROP_SIZE) return null;
+  const dc = models.filter(f => fs.existsSync(f) && isDcModel(f));
+  if (!dc.length) return null;
+  const file = path.join(root, 'authoring', 'prop-reviews', 'see-through', `${id.replaceAll('/', '__')}.json`);
+  const how = `node node_modules/tsx/dist/cli.mjs tools/see-through.mts prop <scene holding it> --entity <its entity> --out ${slash(path.relative(path.resolve(root, '..', '..'), file))} (docs/see-through.md)`;
+  if (!fs.existsSync(file)) return `Big DC prop (${Math.max(...size)} m) has no see-through review: run ${how}`;
+  let rep; try { rep = read(file); } catch { return `${slash(file)} is not a see-through report`; }
+  if (rep.ok !== true) return `See-through review failed: ${rep.counts?.sites ?? '?'} hole site(s) through the prop (${rep.sheet ?? 'see the report'})`;
+  const at = fs.statSync(file).mtimeMs;
+  const newer = dc.filter(f => fs.statSync(f).mtimeMs > at);
+  if (newer.length) return `See-through review is older than ${newer.map(f => path.basename(f)).join(', ')}: run it again (${how})`;
+  return null;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {

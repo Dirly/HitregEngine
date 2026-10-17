@@ -513,5 +513,49 @@ export function createEditorSettings(): Observable<EditorSettings> {
  * the host from onModelLoaded (via @hitreg/render collectBones); the
  * inspector uses it to offer bone-name dropdowns instead of blind typing.
  */
+/**
+ * The pose scrubber (prefab editing): stand a character carrying held items
+ * at any frame of any of its clips, to place a grip against a swing and see
+ * whether the second hand is on a two-hander's handle. The overlay writes the
+ * choice (clip, time, playing, speed); the host writes what it found (actor,
+ * clips, duration, twoHand). Presentation only, never written to a document.
+ */
+export interface PoseScrubState {
+  /** Host: the character being posed (the selected held item's carrier, or the selected carrier). */
+  actor: string | null;
+  /** Host: the actor's clip names. */
+  clips: string[];
+  /** Overlay: the clip to stand in; null = the default (its stance idle, else its own clip). */
+  clip: string | null;
+  /** Seconds into `clip`. The host advances it while playing. */
+  time: number;
+  /** Host: `clip`'s length in seconds. */
+  duration: number;
+  playing: boolean;
+  /** Playback rate while playing (1 = real time). */
+  speed: number;
+  /** Host: the second hand against the selected held item's handle; null = no handle or not selected. */
+  twoHand: TwoHandReport | null;
+}
+
+export interface TwoHandReport {
+  /** The hand measured (the one the item is NOT socketed to). */
+  hand: string;
+  /** Palm centre to the handle line now, metres. */
+  distance: number;
+  /** Where along the handle the palm is closest, 0 = pommel end .. 1 = blade/head end. */
+  along: number;
+  /** The GRIPPING hand's own reading, metres — what "on the handle" measures on this rig; null if unknown. */
+  holding: number | null;
+  /** Distance at evenly spaced times across the whole clip, metres. */
+  samples: number[];
+  /** At or under this distance the hand counts as on the handle, metres. */
+  onGrip: number;
+}
+
+export type PoseScrub = Observable<PoseScrubState>;
+export const createPoseScrub = (): PoseScrub =>
+  observable<PoseScrubState>({ actor: null, clips: [], clip: null, time: 0, duration: 0, playing: false, speed: 1, twoHand: null });
+
 export type ModelBones = Observable<Record<string, string[]>>;
 export const createModelBones = (): ModelBones => observable<Record<string, string[]>>({});

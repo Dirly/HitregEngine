@@ -61,6 +61,28 @@ describe("AnimationSystem one-shot completion", () => {
   });
 });
 
+describe('AnimationSystem mesh names', () => {
+  it('keeps the gait when a torso mesh appears before the upper-body joints', () => {
+    const root = rig();
+    const torso = new THREE.Mesh();
+    torso.name = 'CrocKin_Torso';
+    root.add(torso);
+    // GLB render nodes commonly precede the armature in scene traversal.
+    root.children.unshift(root.children.pop()!);
+    const system = new AnimationSystem();
+    system.register('hero', root, [
+      poseClip('Run', 1, { thigh_l: [0, 1], upperarm_l: [0, 1] }),
+      poseClip('Cast', 1, { thigh_l: [20, 20], upperarm_l: [5, 5] }),
+    ], { fade: 0, speed: 1 });
+    system.setRunning(true);
+    system.play('hero', 'Run', 0);
+    system.playLayer('hero', 'Cast', { fade: 0 });
+    system.update(0.5);
+    expect(node(root, 'thigh_l').position.x).toBeCloseTo(0.5);
+    expect(node(root, 'upperarm_l').position.x).toBeCloseTo(5);
+  });
+});
+
 /** A three-bone humanoid: root > Hips > spine_01 > upperarm_l, plus a thigh. */
 function rig(): THREE.Object3D {
   const root = new THREE.Object3D();

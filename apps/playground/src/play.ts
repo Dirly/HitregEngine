@@ -775,7 +775,7 @@ async function main(): Promise<void> {
   });
   await chunkManager.configure(streamer, built.scene);
   // ground probes for the `grass` component; null world -> no cover, no throw
-  const ground = voxelGroundProbes(() => (voxelWorldId ? getVoxelWorld(voxelWorldId) : null));
+  const ground = voxelGroundProbes(() => (voxelWorldId ? getVoxelWorld(voxelWorldId) : null), () => voxelWorldId);
   // the world carries its own cover (recipe.cover), one layer per `cover:<id>`
   grass.regionTest = ground.regionTest;
   const worldCoverRoot = new THREE.Group();

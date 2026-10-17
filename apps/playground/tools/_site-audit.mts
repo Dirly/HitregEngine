@@ -37,7 +37,7 @@ for (let cx = Math.floor(minX / S); cx <= Math.floor(maxX / S); cx++) for (let c
 const nS = field.surfaceCount;
 for (const [cx, cz] of cells) {
   const x0 = cx * S, z0 = cz * S;
-  const m = buildVoxelMesh(field, { kind: "voxel", world: "w", cell: [cx, cz] } as never);
+  const m = buildVoxelMesh(field, { kind: "voxel", world: "w", cell: [cx, cz], mesher: "auto" } as never);
   const p = m.positions, idx = m.indices;
   for (let t = 0; t < idx.length; t += 3) {
     const i = idx[t]!, j = idx[t + 1]!, k = idx[t + 2]!;
@@ -312,7 +312,8 @@ results.push({ check: "b rocks", pass: hc.un + hc.rim + hc.bur + wc.un + wc.out 
 
 // ---------------------------------------------------------------- (c) steep uncovered wall
 const names = recipe.surfaces.map((s) => s.name);
-const rockIdx = names.indexOf("rock"), cliffIdx = names.indexOf("cliff");
+// stone surfaces: rock / cliff, and a zone palette's own <zone>-rock / <zone>-cliff (skelmorrow-hagsheer-cliff)
+const stoneIdx = names.map((n, i) => (/(^|-)(rock|cliff)$/.test(n) ? i : -1)).filter((i) => i >= 0);
 let steepArea = 0, uncovered = 0, brownArea = 0;
 // the gorge: from 10 m above the top lip to 15 m past the foot, 25 m either side
 const gA = { x: lip(top).x - top.dirX * 10, z: lip(top).z - top.dirZ * 10 }, gB = { x: bot.x + fdx * 15, z: bot.z + fdz * 15 };
@@ -335,7 +336,7 @@ terrainTris.forEach((t, n) => {
   steepArea += area;
   const sp = terrainSplat[n]!;
   // stone = rock + cliff: Derek prefers the cliff texture on river walls
-  const rockW = (rockIdx >= 0 ? sp[rockIdx]! : 0) + (cliffIdx >= 0 ? sp[cliffIdx]! : 0);
+  const rockW = stoneIdx.reduce((a, i) => a + (sp[i] ?? 0), 0);
   let best = 0;
   for (let s = 1; s < sp.length; s++) if (sp[s]! > sp[best]!) best = s;
   // a face a formation stands over (the tri's centre inside, or within 0.3 m of, a mass) is covered by rock

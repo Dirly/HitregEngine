@@ -42,6 +42,9 @@ gate), `dungeon-lighting` (readability, matte, culling, buckets), `portals` (doo
 
 ## Dressing and creatures
 - Props by name through dressing plans; walls first, centre clear; link passages on the route stay empty.
+- Nothing floats: `dress apply` seats every prop on the real floor (DC mesh, colliders) by its catalogue contact, and the
+  pipeline's `float` stage (`tools/float.mts scene <project>`) must pass before portal play; a prop with no support moves in the plan.
+- No see-through: every wall, vault and hull closes on screen — the pipeline's `see-through` stage must pass (docs/see-through.md); vault shells and arch springings at least 3 voxels thick in the source.
 - More bones in a tomb (an exception entry, `dungeon-build`); candles carry a barrow; nothing inside a hearth.
 - A dungeon is a place to farm (`encounter-standards`). Boss mechanics are engine builtins, the dungeon is data
   (`encounter-waves`, `spawnArea.patrol`); a patrol is a route between named points.

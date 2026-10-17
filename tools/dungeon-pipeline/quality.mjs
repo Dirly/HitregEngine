@@ -6,7 +6,7 @@
  *   node ../../../../tools/dungeon-pipeline/quality.mjs <gate|all> [--project <dir>] [--build] [--print]
  *     (from projects/<id>; --project defaults to the working directory)
  *
- * Gates: noise, originality, atlas, matte, recipe, culling, stairs, readability, compare (README.md). Numbers: thresholds.json. A dungeon that must
+ * Gates: noise, originality, decals, atlas, matte, recipe, culling, stairs, arrival, loot, readability, compare (README.md). Numbers: thresholds.json. A dungeon that must
  * differ writes authoring/quality-exceptions.json:
  *   { "version": 1, "exceptions": [ { "gate": "recipe", "check": "decalsMin", "space": "drowned" | "*", "why": "..." } ] }
  * An exception needs a `why`; it turns the matching failures into `excepted` lines (still printed).
@@ -52,8 +52,10 @@ export function ownSheet(c) {
   for (const rel of ["reports/views/sheet.png", "authoring/views/sheet.png"]) if (exists(c.f(rel))) return c.f(rel);
   return c.f("reports/views/sheet.png");
 }
-function referenceSheets(c) {
-  return Object.entries(T.references).filter(([k]) => k !== "about" && k !== c.id).map(([k, rel]) => ({ id: k, file: path.join(c.projects, k, rel) }));
+export function referenceSheets(c) {
+  // a reference whose sheet moved between the two homes the views stage uses (reports/views, authoring/views) is still found
+  const home = (k, rel) => [rel, "reports/views/sheet.png", "authoring/views/sheet.png"].map((r) => path.join(c.projects, k, r)).find(exists) ?? path.join(c.projects, k, rel);
+  return Object.entries(T.references).filter(([k]) => k !== "about" && k !== c.id).map(([k, rel]) => ({ id: k, file: home(k, rel) }));
 }
 
 /** Builder files of one project (originality). */
@@ -72,6 +74,7 @@ function otherDungeons(c) {
 export const GATES = {
   noise: { note: "natural roles carry geometry noise: authoring/noise.json exists, the stamp embeds it, natural solids are noised, no box lumps, no flat natural ceilings" },
   originality: { note: "no set-piece builder or build script shared with another dungeon (function + file hashes across projects/*/authoring; lib/ primitives allowed)" },
+  decals: { note: "the decal set is this dungeon's own: no decal texture (same file, byte copy or perceptual near copy) used by another dungeon, no one decal over 40% of them; decals are optional" },
   atlas: { note: "ONE atlas page; every role mapped into it; one stone / wood / metal colouring (hue + saturation bands); tints only darken" },
   recipe: { note: "per room: built detail, props via dressing plans (count, kinds), bone cap, 2-5 visible light sources with fixtures, 6-12 decals (>= 3 textures), a set piece" },
   readability: { note: "shipped-light views read dim, never black: per-view near-black share, the median view's near-black share, mean luminance band and flat-fill floor (thresholds.json readability)" },
@@ -79,6 +82,7 @@ export const GATES = {
   culling: { note: "interior pop-in along the route: every room's dressing is shown when the walker enters the room (scene cullingProfile; docs/culling.md 'Interior scenes')" },
   stairs: { note: "stair ceilings follow the stair: along every stair/ramp line the clear height above the walking surface stays >= 2.6 m and within a band (no flat ceiling pinch, no stepped roof), cast from the shipped GLBs" },
   arrival: { note: "arrival safe zone: no pack, patrol point, named or boss within safeM (thresholds.json arrival) of any arrival or exit portal anchor, so a player who arrives or leaves is never pulled into the fight lock" },
+  loot: { note: "instance loot coverage: authoring/loot.json drops every armor weight, every armor slot in 2+ weights, every weapon role (caster, 1h, 2h, tank), a trash table, something from every named, a rare from the boss; rarity within the level band, ornaments rare+, every drop wired into its source's loot string (thresholds.json loot)" },
   compare: { note: "reports/compare.png: this dungeon's shipped-light sheet beside fieldfast-barrow and fieldfast-hall, newer than the views (--build makes it)" },
 };
 
@@ -90,13 +94,15 @@ export function gateInputs(name, root) {
     case "noise": return [...base, c.f("authoring/noise.json"), c.f(c.stampRel), c.f("reports/source-audit.json"), c.f("authoring/plan.json")];
     // own builders only: a later copy is judged on the copier's side, so edits elsewhere never re-stale this gate
     case "originality": return [...base, ...builderFiles(c.root)];
+    case "decals": return [...base, sceneFile(c), c.f("authoring/decals/set.json"), ...otherDungeons(c).map((d) => sceneFile(ctxOf(d)))];
     case "atlas": return [...base, c.f("reports/materials.json"), ...palettes(c)];
     case "recipe": return [...base, c.f("authoring/plan.json"), c.f("reports/source-audit.json"), sceneFile(c), c.f("authoring/dressing/plans"), c.f("authoring/room-sheet.json")];
     case "compare": return [...base, ownSheet(c), ...referenceSheets(c).map((r) => r.file)];
-    case "readability": return [...base, ownSheet(c)];
+    case "readability": return [...base, ownSheet(c), c.f("authoring/lighting.json")];
     case "matte": return [...base, c.f("reports/materials.json"), c.f("assets/materials"), c.f("assets/models")];
     case "culling": return [...base, sceneFile(c), c.f("authoring/plan.json")];
     case "arrival": return [...base, c.f("authoring/plan.json")];
+    case "loot": return [...base, c.f("authoring/plan.json"), c.f("authoring/loot.json")];
     case "stairs": return [...base, c.f("authoring/plan.json"), c.f("authoring/rooms.json"), c.f("reports/kit/markers.json"), c.f("assets/models")];
     default: return base;
   }
@@ -362,6 +368,107 @@ async function gateOriginality(c) {
   return gateReport(c, "originality", failures, metrics);
 }
 
+// ---------------------------------------------------------------- gate: decals (the decal set is this dungeon's own)
+
+/** Decal textures a scene uses: texture id -> count. */
+export function sceneDecals(file) {
+  const out = new Map();
+  for (const e of Object.values(readJson(file)?.entities ?? {})) {
+    const t = e?.components?.decal?.texture;
+    if (typeof t === "string") out.set(t, (out.get(t) ?? 0) + 1);
+  }
+  return out;
+}
+/** A texture id's file: the project's own, then its dependsOn closure (where a shared decal would come from). */
+function textureFile(projectRoot, projects, id) {
+  const seen = new Set(), order = [];
+  const visit = (name) => { if (seen.has(name)) return; seen.add(name); order.push(name); for (const d of readJson(path.join(projects, name, "project.json"))?.dependsOn ?? []) visit(d); };
+  visit(path.basename(projectRoot));
+  for (const p of order) { const f = path.join(projects, p, "assets/textures", id); if (exists(f)) return f; }
+  return null;
+}
+/** 64-bit difference hash of an RGBA image (alpha laid over mid grey; 9 x 8 box-averaged luma), 16 hex digits. */
+export function dHash(img) {
+  const W = 9, H = 8, cells = new Float64Array(W * H), n = new Float64Array(W * H);
+  for (let y = 0; y < img.height; y++) {
+    const cy = Math.min(H - 1, Math.floor((y * H) / img.height));
+    for (let x = 0; x < img.width; x++) {
+      const cx = Math.min(W - 1, Math.floor((x * W) / img.width)), i = (y * img.width + x) * 4, a = img.data[i + 3] / 255;
+      const l = 0.299 * img.data[i] + 0.587 * img.data[i + 1] + 0.114 * img.data[i + 2];
+      cells[cy * W + cx] += l * a + 128 * (1 - a); n[cy * W + cx]++;
+    }
+  }
+  let hexOut = "";
+  for (let y = 0; y < H; y++) {
+    let nib = 0;
+    for (let x = 0; x < W - 1; x++) {
+      const bit = cells[y * W + x] / (n[y * W + x] || 1) > cells[y * W + x + 1] / (n[y * W + x + 1] || 1) ? 1 : 0;
+      nib = (nib << 1) | bit;
+      if (x % 4 === 3) { hexOut += nib.toString(16); nib = 0; }
+    }
+  }
+  return hexOut;
+}
+export function hamming(a, b) {
+  let d = 0;
+  for (let i = 0; i < Math.min(a.length, b.length); i++) { let x = parseInt(a[i], 16) ^ parseInt(b[i], 16); while (x) { d += x & 1; x >>= 1; } }
+  return d;
+}
+
+/**
+ * The decal set is this dungeon's own (owner ruling 2026-10-13). Decals are optional: none passes. A decal texture
+ * fails when it is the same file, a byte copy or a perceptual near copy of a decal another dungeon uses, and one
+ * texture fails when it makes up more than maxShareOfOne of the dungeon's decals.
+ */
+async function gateDecals(c) {
+  const D = T.decals, failures = [], metrics = { own: {}, total: 0, compared: [], shared: [] };
+  const mine = sceneDecals(sceneFile(c));
+  const total = [...mine.values()].reduce((a, b) => a + b, 0);
+  metrics.own = Object.fromEntries(mine); metrics.total = total;
+  if (!total) return gateReport(c, "decals", failures, { ...metrics, note: "no decals (optional)" });
+  const { decodePng } = await png();
+  const cache = new Map();
+  const info = (root, id) => {
+    const f = textureFile(root, c.projects, id);
+    if (!f) return { id, file: null };
+    if (!cache.has(f)) { const buf = fs.readFileSync(f); let ph = null; try { ph = dHash(decodePng(buf)); } catch { /* not a PNG */ } cache.set(f, { sha: createHash("sha1").update(buf).digest("hex"), ph }); }
+    return { id, file: f, ...cache.get(f) };
+  };
+  const own = [...mine.keys()].map((id) => info(c.root, id));
+  metrics.missing = own.filter((m) => !m.file).map((m) => m.id);
+  // the decal set is made from the concept frames: authoring/decals/set.json is the image-request gen-set manifest
+  // (images[] { id "<project>-decal-*", target assets/textures/<texture>, ref: a concept frame, alpha, prompt })
+  const set = readJson(c.f("authoring/decals/set.json"));
+  const made = new Map((set?.images ?? (Array.isArray(set) ? set : [])).map((im) => [String(im.target ?? "").replace(/\\/g, "/").replace(/^.*assets\/textures\//, ""), im]));
+  metrics.set = set ? made.size : null;
+  for (const m of own) {
+    const im = made.get(m.id);
+    if (!im) failures.push({ space: "*", check: "decalSet", what: `decal ${m.id} is not in authoring/decals/set.json: make the dungeon's decals from its concept frames (node tools/image-request.mjs gen-set --manifest projects/${c.id}/authoring/decals/set.json; ids ${c.id}-decal-*, ref = a concept frame, alpha)` });
+    else if (!String(im.id ?? "").startsWith(`${c.id}-`) || !(Array.isArray(im.ref) ? im.ref.length : im.ref ?? set?.ref))
+      failures.push({ space: "*", check: "decalSet", what: `decal ${m.id}: its set entry needs an id prefixed "${c.id}-" (image ids are shared across projects) and a concept frame as ref` });
+  }
+  if (total >= D.minForShare) for (const [id, n] of mine) if (n / total > D.maxShareOfOne)
+    failures.push({ space: "*", check: "decalShare", what: `${id} is ${Math.round((100 * n) / total)}% of the dungeon's ${total} decals (max ${Math.round(100 * D.maxShareOfOne)}%): one decal stamped everywhere` });
+  for (const other of otherDungeons(c)) {
+    const oid = path.basename(other), of = sceneFile(ctxOf(other));
+    if (!exists(of)) continue;
+    metrics.compared.push(oid);
+    for (const otex of sceneDecals(of).keys()) {
+      const o = info(other, otex);
+      if (!o.file) continue;
+      for (const m of own) {
+        if (!m.file) continue;
+        const dist = m.ph && o.ph ? hamming(m.ph, o.ph) : 64;
+        const why = path.resolve(m.file) === path.resolve(o.file) ? "the same file as" : m.sha === o.sha ? "a byte copy of" : dist <= D.phashMaxDistance ? `a near copy (perceptual distance ${dist}) of` : null;
+        if (!why) continue;
+        metrics.shared.push(`${m.id} = ${oid}:${o.id} (${why.split(" (")[0].replace(/ of$/, "")})`);
+        failures.push({ space: "*", check: "decalReused", what: `decal ${m.id} is ${why} ${oid}'s ${o.id}: every dungeon makes its own decal set from its concept frames (image-request gen, ids prefixed <project>-decal-)` });
+      }
+    }
+  }
+  return gateReport(c, "decals", failures, metrics);
+}
+
 // ---------------------------------------------------------------- gate: atlas
 
 async function gateAtlas(c) {
@@ -486,7 +593,8 @@ async function gateRecipe(c) {
     if (sid) per.get(sid).decals++; else unplaced.decals++;
   }
   metrics.decalTextures = Object.fromEntries(decalTex);
-  if (decalTex.size < R.dungeon.decalTexturesMin) failures.push({ check: "decalTextures", what: `${decalTex.size} decal texture(s) in the dungeon (min ${R.dungeon.decalTexturesMin})` });
+  // decals are optional (owner ruling 2026-10-13): the texture minimum applies only to a dungeon that has decals
+  if (decalTex.size && decalTex.size < R.dungeon.decalTexturesMin) failures.push({ check: "decalTextures", what: `${decalTex.size} decal texture(s) in the dungeon (min ${R.dungeon.decalTexturesMin})` });
   if (decalTex.size) {
     let mid = false;
     for (const t of decalTex.keys()) { const f = [c.f(`assets/textures/${t}`), path.join(c.projects, "voxel-demo/assets/textures", t), path.join(c.projects, "foundation/assets/textures", t)].find(exists); if (f && luma(await meanColour(f)) >= R.dungeon.decalMidLuma) mid = true; }
@@ -623,8 +731,20 @@ export async function viewLuminance(file) {
 }
 const median = (xs) => { const s = [...xs].sort((a, b) => a - b); const m = s.length >> 1; return s.length ? (s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2) : null; };
 
+/**
+ * A dungeon's light level (thresholds.json readability.levels): `level` in its authoring/lighting.json, default lit.
+ * lighting.mts gives the level's fill; the readability gate judges the level's band.
+ */
+export function lightLevel(own) {
+  const level = own?.level ?? "lit";
+  if (!T.readability.levels?.[level] || level === "about") throw new Error(`unknown light level "${level}" (thresholds.json readability.levels)`);
+  return level;
+}
+
 async function gateReadability(c) {
   const Rd = T.readability, failures = [], metrics = {};
+  const level = lightLevel(readJson(c.f("authoring/lighting.json")));
+  metrics.level = level;
   const files = viewFiles(c);
   if (!files.length) return gateReport(c, "readability", [{ check: "views", what: `no shipped-light views in ${path.relative(c.root, path.dirname(ownSheet(c)))}: run the views stage` }], metrics);
   const rows = [];
@@ -635,10 +755,10 @@ async function gateReadability(c) {
   }
   const med = { mean: median(rows.map((r) => r.mean)), darkShare: median(rows.map((r) => r.darkShare)), p10: median(rows.map((r) => r.p10)), p90: median(rows.map((r) => r.p90)) };
   metrics.median = med; metrics.views = rows;
-  const D = Rd.dungeon;
+  const D = level === "lit" ? Rd.dungeon : Rd.levels[level].dungeon;
   if (med.darkShare > D.darkShareMedianMax) failures.push({ check: "lightsOnBlack", what: `the median view is ${Math.round(100 * med.darkShare)}% near black (max ${Math.round(100 * D.darkShareMedianMax)}%): pools of light on black. Raise the readability fill and lift the fog colour (tools/dungeon-pipeline/lighting.json), not the fixtures` });
-  if (med.mean < D.meanMin) failures.push({ check: "tooDark", what: `median view luminance ${med.mean} < ${D.meanMin}` });
-  if (med.mean > D.meanMax) failures.push({ check: "tooBright", what: `median view luminance ${med.mean} > ${D.meanMax}: a dungeon reads dim` });
+  if (med.mean < D.meanMin) failures.push({ check: "tooDark", what: `median view luminance ${med.mean} < ${D.meanMin} (light level ${level})` });
+  if (med.mean > D.meanMax) failures.push({ check: "tooBright", what: `median view luminance ${med.mean} > ${D.meanMax} (light level ${level}): a dungeon reads dim` });
   if (med.p10 > D.p10Max) failures.push({ check: "flat", what: `the darkest tenth of the median view is luma ${med.p10} (max ${D.p10Max}): a flat bright fill, no pools of light; lower the fill and let the fixtures carry the light` });
   return gateReport(c, "readability", failures, metrics);
 }
@@ -1065,11 +1185,67 @@ async function gateArrival(c) {
   return gateReport(c, "arrival", failures, { safeM: m.safeM, anchors: m.anchors, hostiles: m.hostiles, nearest: m.nearest });
 }
 
+/**
+ * Instance loot coverage, measured on authoring/loot.json — the instance's drop list:
+ *   { version, items: [ { id, name, slot, weight?, role?, rarity, from: ["trash" | <miniboss id> | <boss id>], chance,
+ *                          appearance?: { model, parts, texture } } ] }
+ * Armor carries `weight` (cloth/leather/mail/plate), weapons a `role` (thresholds.json loot.roles). The level band
+ * comes from the plan's bosses and named. Wiring: the item file exists and the source's loot string names it
+ * (trash: plan.trashLoot).
+ */
+export function measureLoot(plan, loot, { itemExists = () => true } = {}) {
+  const L = T.loot;
+  const items = loot?.items ?? [];
+  const fail = [];
+  const rank = (r) => L.rarityOrder.indexOf(r);
+  const armor = items.filter((i) => L.slots.includes(i.slot));
+  const weapons = items.filter((i) => i.role);
+  for (const w of L.weights) if (!armor.some((i) => i.weight === w)) fail.push({ check: "weights", what: `no ${w} armor drops here: a ${w} wearer has no reason to come` });
+  const perSlot = {};
+  for (const s of L.slots) {
+    perSlot[s] = [...new Set(armor.filter((i) => i.slot === s).map((i) => i.weight))];
+    if (perSlot[s].length < L.minWeightsPerSlot) fail.push({ check: "slots", what: `${s}: drops in ${perSlot[s].length ? perSlot[s].join(", ") : "no"} weight(s), want ${L.minWeightsPerSlot}+` });
+  }
+  for (const r of L.roles) if (!weapons.some((i) => i.role === r)) fail.push({ check: "roles", what: `no ${r} weapon drops here` });
+  const named = [...(plan?.minibosses ?? []), ...(plan?.boss ? [plan.boss] : [])];
+  const bossId = plan?.boss?.id;
+  const trash = items.filter((i) => (i.from ?? []).includes("trash"));
+  if (trash.length < L.minTrashItems) fail.push({ check: "trash", what: `trash drops ${trash.length} item(s), want ${L.minTrashItems}+ (the packs need their own table)` });
+  for (const n of named) if (!items.some((i) => (i.from ?? []).includes(n.id))) fail.push({ check: "named", what: `${n.id} drops nothing from loot.json` });
+  if (bossId && !items.some((i) => (i.from ?? []).includes(bossId) && rank(i.rarity) >= rank("rare"))) fail.push({ check: "bossRare", what: `the boss ${bossId} drops no rare` });
+  const top = Math.max(0, ...named.map((n) => n.level ?? 0));
+  const band = L.levelBands.find((b) => top <= b.maxLevel) ?? L.levelBands[L.levelBands.length - 1];
+  const orn = new RegExp(L.ornamentParts);
+  for (const i of items) {
+    const fromBoss = (i.from ?? []).includes(bossId);
+    const cap = fromBoss ? band.bossCap : band.cap;
+    if (rank(i.rarity) < 0) fail.push({ check: "rarity", what: `${i.id}: unknown rarity ${i.rarity}` });
+    else if (rank(i.rarity) > rank(cap)) fail.push({ check: "rarity", what: `${i.id}: ${i.rarity} is above the level-${top} cap (${cap}${fromBoss ? ", boss" : ""})` });
+    if ((i.appearance?.parts ?? []).some((p) => orn.test(p)) && rank(i.rarity) < rank(L.ornamentMinRarity)) fail.push({ check: "ornament", what: `${i.id}: ornament parts on a ${i.rarity} item (rare+ only)` });
+    if (!itemExists(i.id)) fail.push({ check: "wired", what: `${i.id}: no item file` });
+    for (const src of i.from ?? []) {
+      const str = src === "trash" ? plan?.trashLoot : named.find((n) => n.id === src)?.loot;
+      if (src !== "trash" && !named.some((n) => n.id === src)) fail.push({ check: "source", what: `${i.id}: from "${src}", which is not a named or the boss in plan.json` });
+      else if (!(str ?? "").split(",").some((e) => e.split(":")[0] === i.id)) fail.push({ check: "wired", what: `${i.id}: not in ${src === "trash" ? "plan.trashLoot" : `${src}'s loot string`}` });
+    }
+  }
+  return { failures: fail, metrics: { items: items.length, levelTop: top, cap: band.cap, bossCap: band.bossCap, perSlot, roles: L.roles.map((r) => [r, weapons.filter((i) => i.role === r).length]), trash: trash.length } };
+}
+
+async function gateLoot(c) {
+  const loot = readJson(c.f("authoring/loot.json"));
+  const dirs = T.loot.itemDirs.map((d) => path.resolve(c.root, d));
+  const m = measureLoot(c.plan, loot, { itemExists: (id) => dirs.some((d) => exists(path.join(d, `${id}.json`))) });
+  if (!loot) m.failures.unshift({ check: "lootFile", what: "no authoring/loot.json (the instance's drop list)" });
+  return gateReport(c, "loot", m.failures.map((f) => ({ space: "*", ...f })), m.metrics);
+}
+
 export async function runGate(name, root, opts = {}) {
   const c = ctxOf(root);
   switch (name) {
     case "noise": return gateNoise(c);
     case "originality": return gateOriginality(c);
+    case "decals": return gateDecals(c);
     case "atlas": return gateAtlas(c);
     case "recipe": return gateRecipe(c);
     case "compare": return gateCompare(c, opts);
@@ -1078,6 +1254,7 @@ export async function runGate(name, root, opts = {}) {
     case "culling": return gateCulling(c);
     case "stairs": return gateStairs(c);
     case "arrival": return gateArrival(c);
+    case "loot": return gateLoot(c);
     default: throw new Error(`unknown gate ${name} (${Object.keys(GATES).join(", ")})`);
   }
 }

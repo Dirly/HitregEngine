@@ -80,6 +80,22 @@ export function coverScratch(): SurfaceSample {
   return { y: 0, flowX: 0, flowZ: 0, kind: "lake", floor: 0 };
 }
 
+/**
+ * Whether a layer's `water.kinds` accepts water of `kind` (what the field's
+ * `waterSurface` reported). A kind named in the list counts; so does EVERY
+ * still-water kind a world adds beyond lakes (a marsh pool, a bog) when the
+ * list names `lake` — still water is still water to a reed.
+ */
+export function coverKindAllowed(kinds: readonly string[], kind: string): boolean {
+  if (kinds.includes(kind)) return true;
+  return kind !== "river" && kind !== "sea" && kinds.includes("lake");
+}
+
+/** Whether a layer's kinds ask for any inland water at all (anything but the sea). */
+export function coverWantsInland(kinds: readonly string[]): boolean {
+  return kinds.some((k) => k !== "sea");
+}
+
 /** Ring offsets a shore search samples, as fractions of `reach`. */
 const SHORE_RING: readonly (readonly [number, number])[] = (() => {
   const out: [number, number][] = [[0, 0]];
@@ -112,12 +128,10 @@ export function coverWaterLevel(
   scratch: SurfaceSample,
 ): number {
   let level = Number.NaN;
-  const lakes = kinds.includes("lake");
-  const rivers = kinds.includes("river");
-  if ((lakes || rivers) && field.waterNear(x - reach, z - reach, x + reach, z + reach)) {
+  if (coverWantsInland(kinds) && field.waterNear(x - reach, z - reach, x + reach, z + reach)) {
     for (const [ox, oz] of SHORE_RING) {
       if (!field.waterSurface(x + ox * reach, z + oz * reach, scratch)) continue;
-      if (scratch.kind === "lake" ? !lakes : !rivers) continue;
+      if (!coverKindAllowed(kinds, scratch.kind)) continue;
       if (Number.isNaN(level) || scratch.y > level) level = scratch.y;
     }
   }
@@ -169,7 +183,7 @@ export function coverWaterGate(
     // under the water: the sheet must cover this point, deep enough to be
     // under it and shallow enough to see; a torrent grows nothing
     if (!field.waterSurface(x, z, scratch)) return null;
-    const allowed = scratch.kind === "lake" ? water.kinds.includes("lake") : water.kinds.includes("river");
+    const allowed = coverKindAllowed(water.kinds, scratch.kind);
     if (!allowed || Math.hypot(scratch.flowX, scratch.flowZ) > water.maxFlow) return null;
     const depth = scratch.y - bed;
     // the tallest card this layer can draw must stay under the sheet, or the
@@ -181,7 +195,7 @@ export function coverWaterGate(
   if (water.mode === "surface") {
     let surface = Number.NaN;
     if (field.waterSurface(x, z, scratch)) {
-      const allowed = scratch.kind === "lake" ? water.kinds.includes("lake") : water.kinds.includes("river");
+      const allowed = coverKindAllowed(water.kinds, scratch.kind);
       const flow = Math.hypot(scratch.flowX, scratch.flowZ);
       if (allowed && flow <= water.maxFlow) surface = scratch.y;
     } else if (water.kinds.includes("sea") && bed < sea) {

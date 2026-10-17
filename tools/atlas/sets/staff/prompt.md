@@ -11,13 +11,15 @@ Regenerate the key and the mesh's UVs (needed whenever the model changes):
 What a staff is made of (the item generator's rules, not the painter's):
 
 - always the **grip** (Handle);
-- ONE **pommel** (Pummel1-2), ONE **collar** (CrossGuard1-3), ONE **upper
-  shaft** (TopStaff1-4: plain rod, diamond frame, crook, double helix) and ONE
-  **crown** (Crown1-3: octahedral gem, hex crystal, a HEAD);
+- ONE **pommel** (Pummel1-2), ONE **collar** (CrossGuard1-3) and ONE **upper
+  shaft** (TopStaff1-4: plain rod, diamond frame, crook, double helix);
+- AT MOST ONE **crown** (Crown1-3: octahedral gem, round crystal, a HEAD).
+  TopStaff1, 3 and 4 have closed tops, so a plain staff may go without one;
+  TopStaff2's open diamond frame always takes a crown;
 - optional, rarest only: ONE **floating gem** (ShapeOrnate1-2) hanging free in
   the middle of the upper shaft — **never with TopStaff1**, whose rod runs
   straight through it — and the **top ornament** (OrnateTop), the cut-out plate
-  rising out of the crown. The floating gem can wear a glow like a blade
+  rising out of the crown, so never on a crownless staff. The floating gem can wear a glow like a blade
   (docs/item-looks.md). The HEAD crown (Crown3) is rarest-of-rare too.
 
 The head is a theme's chance to be strange: a golden idol, a mummy, a beholder,
@@ -79,9 +81,9 @@ REGION KEY (by position — ignore what colour each block is):
 - BELOW THE SHAFTS, LEFT, three small DIAMONDS stacked .. top to bottom: the
   GEM CROWN (an eight-faced crystal on top of the staff), the small FLOATING
   CRYSTAL, and the SPIKE POMMEL (an eight-faced point at the foot).
-- BELOW THE SHAFTS, MIDDLE, five flat strips stacked .. top to bottom: the HEX
-  CRYSTAL CROWN (a six-sided crystal, peeled open all the way round), the hex
-  FLOATING CRYSTAL (same, smaller), the SQUARE COLLAR, the HEX COLLAR (both
+- BELOW THE SHAFTS, MIDDLE, five flat strips stacked .. top to bottom: the ROUND
+  CROWN (an orb or knob, peeled open all the way round), the round
+  FLOATING GEM (same, smaller), the SQUARE COLLAR, the HEX COLLAR (both
   bands of metal peeled open round the haft), and the HEX KNOB POMMEL (a strip
   with a point at each end).
 - BELOW THE SHAFTS, RIGHT, a shape with TWO PRONGS rising in a V and a bar under

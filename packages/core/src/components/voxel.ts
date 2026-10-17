@@ -51,13 +51,17 @@ export const voxelWorldSchema = z.object({
     .describe("Terrain casting shadows means every cascade re-rasterises a large mesh every frame. Off by default; turn it on for worlds whose silhouette (canyons, spires) depends on it."),
   collision: z.boolean().default(true).describe("Cook a trimesh collider for simulation-ring cells. Off only for a fly-through preview."),
   mesher: z
-    .enum(["mc", "dc", "nets"])
+    .enum(["mc", "dc", "nets", "auto"])
     .default("mc")
     .describe(
-      "EXPERIMENT. How the sampled field becomes triangles: 'mc' marching cubes (the shipping mesher), " +
+      "How the sampled field becomes triangles. 'auto': PER CELL, dual contouring where the recipe's terrain.planarCliffs " +
+        "mask reaches the cell (plus planarCliffs.dcMargin), marching cubes everywhere else — what a planar-cliffs world " +
+        "wants (DC keeps the cliff planes sharp; MC is ~2-3x cheaper on smooth ground; borders fall on smooth ground). " +
+        "On a world without planarCliffs 'auto' is MC everywhere. 'mc' marching cubes (the shipping mesher), " +
         "'dc' dual contouring (a QEF vertex per cell — sharp rims and scarps survive), 'nets' surface nets " +
-        "(the same dual topology, smoothed). The dual meshers have no skirts, so an LOD transition cracks: " +
-        "use them on a scene whose fullRender ring covers what you are looking at, not on a streaming world.",
+        "(the same dual topology, smoothed). Dual cells are clipped to their column and skirted into the rock, so an LOD " +
+        "step closes about as well as MC's. Pair 'dc' with a world whose recipe sets terrain.planarCliffs: on the plain " +
+        "field DC keeps no sharper an edge than MC (there is none to keep) and costs ~1.6x per chunk.",
     ),
   colliderLodStep: z
     .number()

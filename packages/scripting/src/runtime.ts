@@ -767,6 +767,14 @@ export class ScriptRuntime {
           }
         }
       }
+      // No socket entity on this body (a player or a creature prefab has none
+      // of its own): the bone the socket names, on its rig. Until the model
+      // has loaded there is no rig to search, so a miss is not remembered.
+      if (!found && body) {
+        const bone = socketBone(body, name);
+        if (bone) found = bone;
+        else if (!hasSkinnedMesh(body)) return null;
+      }
       socketCache.set(key, found);
       return found;
     };
@@ -1030,4 +1038,37 @@ export class ScriptRuntime {
     for (const id of [...this.subscriptions.keys()]) this.dropSubscriptions(id);
     this.timers.clear();
   }
+}
+
+/**
+ * The bone a named VFX socket resolves to when the body carries no
+ * `socket:<name>` entity: patterns over the rig's bone names as three loaded
+ * them (GLTFLoader strips `:`, so "mixamorig:RightHand" is
+ * "mixamorigRightHand"), lowercased. Covers Mixamo, Character Creator
+ * (CC_Base_R_Hand), the Universal Animation Library (hand_r) and plain names.
+ * The first bone in traversal order that matches wins — the rig's root side.
+ */
+const SOCKET_BONES: Record<string, RegExp> = {
+  rightHand: /(?:^|[^a-z])(?:r|right)[_. ]?hand$|righthand$|(?:^|[^a-z])hand[_. ]?(?:r|right)$/,
+  leftHand: /(?:^|[^a-z])(?:l|left)[_. ]?hand$|lefthand$|(?:^|[^a-z])hand[_. ]?(?:l|left)$/,
+  head: /(?:^|[^a-z])head$|righead$|mixamorighead$/,
+  chest: /spine[_. ]?0?2$|spine_03$|(?:^|[^a-z])(?:upper)?chest$/,
+};
+
+export function socketBone(body: THREE.Object3D, name: string): THREE.Object3D | null {
+  const pattern = SOCKET_BONES[name];
+  if (!pattern) return null;
+  let found: THREE.Object3D | null = null;
+  body.traverse((o) => {
+    if (!found && (o as THREE.Bone).isBone && pattern.test(o.name.toLowerCase())) found = o;
+  });
+  return found;
+}
+
+function hasSkinnedMesh(body: THREE.Object3D): boolean {
+  let found = false;
+  body.traverse((o) => {
+    if ((o as THREE.SkinnedMesh).isSkinnedMesh) found = true;
+  });
+  return found;
 }

@@ -553,12 +553,14 @@ const RECIPES = {
   // ornament plate lies in the XY plane, so the flat-on view is along Z, not X.
   // Every staff wears the Handle and ONE of each family: Pummel1-2,
   // CrossGuard1-3 (collars at the top of the grip), TopStaff1-4 (the upper
-  // shaft: plain rod, diamond frame, crook, double helix) and Crown1-3 (the
-  // finial: octahedral gem, hex crystal, a HEAD). Optional on top: ONE floating
-  // ShapeOrnate (a gem hanging free in the middle of the upper shaft — never
-  // with TopStaff1, whose rod runs straight through it; glow-able like a blade)
-  // and the OrnateTop cut-out plate rising out of the crown. Ornates and the
-  // head are for the rarest items (Derek, 2026-10-08).
+  // shaft: plain rod, diamond frame, crook, double helix), and at most one of
+  // Crown1-3 (the finial: octahedral gem, round crystal, a HEAD). TopStaff1, 3
+  // and 4 have closed tops, so their crown is optional; TopStaff2's open frame
+  // always takes one. Optional on top: ONE floating ShapeOrnate (a gem hanging
+  // free in the middle of the upper shaft — never with TopStaff1, whose rod
+  // runs straight through it; glow-able like a blade) and the OrnateTop cut-out
+  // plate, which rises out of the crown and so needs one. Ornates and the head
+  // are for the rarest items (Derek, 2026-10-08/09).
   staff: {
     source: "MMO/3d/Weapons/Staff.obj",
     sourceScale: 100,
@@ -652,6 +654,8 @@ const RECIPES = {
       ["Handle", "Pummel2", "CrossGuard2", "TopStaff2", "Crown2", "ShapeOrnate1"],
       ["Handle", "Pummel1", "CrossGuard3", "TopStaff3", "Crown2"],
       ["Handle", "Pummel2", "CrossGuard2", "TopStaff4", "Crown3", "ShapeOrnate2", "OrnateTop"],
+      ["Handle", "Pummel1", "CrossGuard1", "TopStaff3"],
+      ["Handle", "Pummel2", "CrossGuard3", "TopStaff4", "ShapeOrnate1"],
     ],
   },
   // A CREATURE, not a modular weapon — the same machinery, one difference worth

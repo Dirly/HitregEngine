@@ -7,7 +7,7 @@ const require = createRequire(new URL('../../apps/playground/package.json', impo
 export const T = await import(pathToFileURL(require.resolve('three')).href);
 const { GLTFLoader } = await import(pathToFileURL(require.resolve('three/examples/jsm/loaders/GLTFLoader.js')).href);
 const { tsImport } = await import(pathToFileURL(require.resolve('tsx/esm/api')).href);
-const { ComponentRegistry, registerCoreComponents, createScene, applyOps, prefabDocSchema, validatePrefab } = await tsImport('../../packages/core/src/index.ts', import.meta.url);
+const { ComponentRegistry, registerCoreComponents, createScene, applyOps, prefabDocSchema, validatePrefab, SEAT_CONTACTS } = await tsImport('../../packages/core/src/index.ts', import.meta.url);
 const { partProblems, partRulesSchema } = await tsImport('../../packages/core/src/character/part-rules.ts', import.meta.url);
 const V = (...a) => new T.Vector3(...a), Q = () => new T.Quaternion();
 const safeId = /^[a-zA-Z0-9_][a-zA-Z0-9_.-]*(?:\/[a-zA-Z0-9_][a-zA-Z0-9_.-]*)*$/;
@@ -201,6 +201,7 @@ export async function buildStatue(recipe, readModel, options = {}) {
   assetId(recipe.name); assetId(recipe.materialId); positive(recipe.height, 'height');
   const pedestalContract=recipe.pedestal?validatePedestalPrefab(options.pedestalPrefab,recipe.pedestal):null;
   if (recipe.height > 200) throw new Error('Statue height must be <= 200m');
+  if (recipe.contact !== undefined && !SEAT_CONTACTS.includes(recipe.contact)) throw new Error(`contact must be one of ${SEAT_CONTACTS.join(', ')}`);
   const hashes = {}, cache = new Map();
   async function load(id) {
     assetId(id);
@@ -246,7 +247,7 @@ export async function buildStatue(recipe, readModel, options = {}) {
     const baseTriangles=gather(base,undefined,new T.Matrix4(),'pedestal');
     pedestalReport={...validatePedestal(triangles,baseTriangles,offset),...pedestalContract,destinationPrefabVerified:options.pedestalSource==='asset-file'};
   }
-  const entities = { anchor: {name:recipe.name,parent:null,tags:['statue'],components:{transform:{}}}, sculpture:{name:'Sculpture',parent:'anchor',tags:[],components:{transform:{position:[0,offset,0]},mesh:{source:{kind:'asset',assetId:`${recipe.name}.gltf`},material:recipe.materialId,castShadow:true,receiveShadow:true},collider:{shape:'trimesh'}}} };
+  const entities = { anchor: {name:recipe.name,parent:null,tags:['statue'],components:{transform:{},...(recipe.contact?{dressing:{mount:'floor',size:[bounds.max.x-bounds.min.x,bounds.max.y-bounds.min.y+offset,bounds.max.z-bounds.min.z].map(v=>Math.round(v*1000)/1000),origin:'foot',contact:recipe.contact}}:{})}}, sculpture:{name:'Sculpture',parent:'anchor',tags:[],components:{transform:{position:[0,offset,0]},mesh:{source:{kind:'asset',assetId:`${recipe.name}.gltf`},material:recipe.materialId,castShadow:true,receiveShadow:true},collider:{shape:'trimesh'}}} };
   if (recipe.pedestal) entities.pedestal = {name:'Pedestal',parent:'anchor',tags:[],components:{transform:{},prefab:{prefabId:assetId(recipe.pedestal.prefabId)}}};
   const registry = new ComponentRegistry(); registerCoreComponents(registry);
   const {doc} = applyOps(createScene(recipe.name), Object.entries(entities).map(([id,entity]) => ({op:'add-entity',id,entity})), registry);

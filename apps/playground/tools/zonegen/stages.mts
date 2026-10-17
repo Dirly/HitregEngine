@@ -142,6 +142,9 @@ export function zoneRows(ctx: Ctx, zone: string): Row[] {
 
   const build = buildRows(ctx, zone);
   build.push(lipsRow(ctx, zone));
+  build.push(floatRow(ctx, zone));
+  build.push(rockSkinsRow(ctx, zone));
+  build.push(waterEdgesRow(ctx, zone));
   if (!exists(freezeFile)) for (const r of build) if (!r.gap) Object.assign(r, { state: "MISSING", why: `after freeze${r.state === "ok" ? " (evidence exists from before)" : ""}` });
   if (exists(freezeFile) && !frozen.ok) for (const r of build) if (!r.gap) Object.assign(r, { state: "STALE", why: frozen.why });
   return [...rows, ...build];
@@ -184,6 +187,117 @@ function lipsRow(ctx: Ctx, zone: string): Row {
   return res!.ok
     ? { stage, who: "procedural", state: "ok", why: "", how: how.replace("<x,z,r>", res!.near!.join(",")) }
     : { stage, who: "procedural", state: "FAILED", why: `alias ${t.alias}, step ${t.step}, lip ${t.lip} (worst: ${worst})`, how: how.replace("<x,z,r>", res!.near!.join(",")) };
+}
+
+/**
+ * The float gate over the zone (`worldgen float --rect` on the zone polygon's bounding box): every scene object
+ * (props, fires, torches, lanterns, structures) and every scatter rock seated on the REAL solid (voxel/seat.ts).
+ * Cached in reports/float.json against the recipe's and the scene's size+mtime.
+ */
+function floatRow(ctx: Ctx, zone: string): Row {
+  const { world, project, paths: p } = ctx;
+  const stage = "float";
+  const how = `npx tsx tools/worldgen.mts float ${world} --project ${project} --rect <rect> --list  (fix: tools/float.mts scene ${project} --fix; docs/voxel-worlds.md "Seat")`;
+  if (!exists(p.recipe)) return { stage, who: "procedural", state: "MISSING", why: "no recipe", how };
+  const scene = path.join(path.dirname(path.dirname(p.recipe)), "scenes", `${world}.scene.json`);
+  const stamp = (f: string): string => (exists(f) ? `${fs.statSync(f).size}:${fs.statSync(f).mtimeMs}` : "-");
+  const key = `${stamp(p.recipe)}|${stamp(scene)}`;
+  const cache = path.join(p.zoneDir(zone), "reports", "float.json");
+  let res: { key?: string; rect?: number[]; ok?: boolean; counts?: { off: number; unsupported: number }; rows?: { what: string; id: string; gap: number }[] } | null = exists(cache) ? (readJson(cache) as never) : null;
+  if (!res || res.key !== key) {
+    const recipe = readJson(p.recipe) as { regions?: { id: string; polygon?: [number, number][] }[] };
+    const poly = recipe.regions?.find((r) => r.id === zone)?.polygon;
+    if (!poly?.length) return { stage, who: "procedural", state: "MISSING", why: `zone ${zone} has no polygon in the recipe regions`, how };
+    const xs = poly.map((q) => q[0]), zs = poly.map((q) => q[1]);
+    const rect = [Math.floor(Math.min(...xs)), Math.floor(Math.min(...zs)), Math.ceil(Math.max(...xs)), Math.ceil(Math.max(...zs))];
+    const out = spawnSync(process.execPath, ["--import", "tsx", path.join("tools", "worldgen.mts"), "float", world, "--project", project, "--rect", rect.join(","), "--json"], { encoding: "utf8", maxBuffer: 1 << 26 });
+    try {
+      res = { key, rect, ...JSON.parse(out.stdout.slice(out.stdout.indexOf("{"))) };
+      fs.mkdirSync(path.dirname(cache), { recursive: true });
+      fs.writeFileSync(cache, JSON.stringify(res, null, 1));
+    } catch {
+      return { stage, who: "procedural", state: "FAILED", why: `worldgen float failed: ${(out.stderr || out.stdout || "").split(/?
+/).find((l) => l.trim()) ?? "no output"}`, how };
+    }
+  }
+  const h = how.replace("<rect>", res!.rect!.join(","));
+  if (res!.ok) return { stage, who: "procedural", state: "ok", why: "", how: h };
+  const worst = (res!.rows ?? []).slice(0, 3).map((r) => `${r.what} ${r.id} gap ${r.gap}`).join(", ");
+  return { stage, who: "procedural", state: "FAILED", why: `${res!.counts!.off} off, ${res!.counts!.unsupported} unsupported (worst: ${worst})`, how: h };
+}
+
+/**
+ * The rock-skins gate over the zone (`worldgen rock-skins --rect` on the zone polygon's bounding box): every scatter
+ * rock, cliff mass and placed rock in its zone's (or its cliff's) stone, every cap on the ground band beside it
+ * (packages/core voxel/rock-cap.ts). Cached in reports/rock-skins.json against the recipe's and the scene's size+mtime.
+ */
+function rockSkinsRow(ctx: Ctx, zone: string): Row {
+  const { world, project, paths: p } = ctx;
+  const stage = "rock-skins";
+  const how = `npx tsx tools/worldgen.mts rock-skins ${world} --project ${project} --rect <rect> --list  (fix: recipe.rockSkins + rock material bases; docs/voxel-worlds.md "Rock skins")`;
+  if (!exists(p.recipe)) return { stage, who: "procedural", state: "MISSING", why: "no recipe", how };
+  const scene = path.join(path.dirname(path.dirname(p.recipe)), "scenes", `${world}.scene.json`);
+  const stamp = (f: string): string => (exists(f) ? `${fs.statSync(f).size}:${fs.statSync(f).mtimeMs}` : "-");
+  const key = `${stamp(p.recipe)}|${stamp(scene)}`;
+  const cache = path.join(p.zoneDir(zone), "reports", "rock-skins.json");
+  let res: { key?: string; rect?: number[]; ok?: boolean; counts?: { skin: number; cap: number; recipe: number }; rows?: { fault: string; what: string; id: string; detail: string }[] } | null = exists(cache) ? (readJson(cache) as never) : null;
+  if (!res || res.key !== key) {
+    const recipe = readJson(p.recipe) as { regions?: { id: string; polygon?: [number, number][] }[] };
+    const poly = recipe.regions?.find((r) => r.id === zone)?.polygon;
+    if (!poly?.length) return { stage, who: "procedural", state: "MISSING", why: `zone ${zone} has no polygon in the recipe regions`, how };
+    const xs = poly.map((q) => q[0]), zs = poly.map((q) => q[1]);
+    const rect = [Math.floor(Math.min(...xs)), Math.floor(Math.min(...zs)), Math.ceil(Math.max(...xs)), Math.ceil(Math.max(...zs))];
+    const out = spawnSync(process.execPath, ["--import", "tsx", path.join("tools", "worldgen.mts"), "rock-skins", world, "--project", project, "--rect", rect.join(","), "--json"], { encoding: "utf8", maxBuffer: 1 << 26 });
+    try {
+      res = { key, rect, ...JSON.parse(out.stdout.slice(out.stdout.indexOf("{"))) };
+      fs.mkdirSync(path.dirname(cache), { recursive: true });
+      fs.writeFileSync(cache, JSON.stringify(res, null, 1));
+    } catch {
+      return { stage, who: "procedural", state: "FAILED", why: `worldgen rock-skins failed: ${(out.stderr || out.stdout || "").split(/?
+/).find((l) => l.trim()) ?? "no output"}`, how };
+    }
+  }
+  const h = how.replace("<rect>", res!.rect!.join(","));
+  if (res!.ok) return { stage, who: "procedural", state: "ok", why: "", how: h };
+  const worst = (res!.rows ?? []).slice(0, 3).map((r) => `${r.fault} ${r.what} ${r.id}: ${r.detail}`).join("; ");
+  return { stage, who: "procedural", state: "FAILED", why: `${res!.counts!.skin} skin, ${res!.counts!.cap} cap, ${res!.counts!.recipe} recipe (worst: ${worst})`, how: h };
+}
+
+/**
+ * The water-edges gate over the zone (`worldgen water-edges --rect` on the zone polygon's bounding box): every fall
+ * curtain hangs from its measured lip and hugs its face, every placed water body's edge is buried or finished
+ * (core water-edges.ts). Cached in reports/water-edges.json against the recipe's and the scene's size+mtime.
+ */
+function waterEdgesRow(ctx: Ctx, zone: string): Row {
+  const { world, project, paths: p } = ctx;
+  const stage = "water-edges";
+  const how = `npx tsx tools/worldgen.mts water-edges ${world} --project ${project} --rect <rect> --list  (dungeons: tools/water-edges.mts scene <project> --fix; docs/voxel-worlds.md "Water edges")`;
+  if (!exists(p.recipe)) return { stage, who: "procedural", state: "MISSING", why: "no recipe", how };
+  const scene = path.join(path.dirname(path.dirname(p.recipe)), "scenes", `${world}.scene.json`);
+  const stamp = (f: string): string => (exists(f) ? `${fs.statSync(f).size}:${fs.statSync(f).mtimeMs}` : "-");
+  const key = `${stamp(p.recipe)}|${stamp(scene)}`;
+  const cache = path.join(p.zoneDir(zone), "reports", "water-edges.json");
+  let res: { key?: string; rect?: number[]; ok?: boolean; curtains?: number; bodies?: number; rows?: { kind: string; id: string; what: string; issue: string }[] } | null = exists(cache) ? (readJson(cache) as never) : null;
+  if (!res || res.key !== key) {
+    const recipe = readJson(p.recipe) as { regions?: { id: string; polygon?: [number, number][] }[] };
+    const poly = recipe.regions?.find((r) => r.id === zone)?.polygon;
+    if (!poly?.length) return { stage, who: "procedural", state: "MISSING", why: `zone ${zone} has no polygon in the recipe regions`, how };
+    const xs = poly.map((q) => q[0]), zs = poly.map((q) => q[1]);
+    const rect = [Math.floor(Math.min(...xs)), Math.floor(Math.min(...zs)), Math.ceil(Math.max(...xs)), Math.ceil(Math.max(...zs))];
+    const out = spawnSync(process.execPath, ["--import", "tsx", path.join("tools", "worldgen.mts"), "water-edges", world, "--project", project, "--rect", rect.join(","), "--json"], { encoding: "utf8", maxBuffer: 1 << 26 });
+    try {
+      res = { key, rect, ...JSON.parse(out.stdout.slice(out.stdout.indexOf("{"))) };
+      fs.mkdirSync(path.dirname(cache), { recursive: true });
+      fs.writeFileSync(cache, JSON.stringify(res, null, 1));
+    } catch {
+      return { stage, who: "procedural", state: "FAILED", why: `worldgen water-edges failed: ${(out.stderr || out.stdout || "").split(/?
+/).find((l) => l.trim()) ?? "no output"}`, how };
+    }
+  }
+  const h = how.replace("<rect>", res!.rect!.join(","));
+  if (res!.ok) return { stage, who: "procedural", state: "ok", why: "", how: h };
+  const worst = (res!.rows ?? []).slice(0, 3).map((r) => `${r.kind} ${r.id} ${r.what}: ${r.issue}`).join("; ");
+  return { stage, who: "procedural", state: "FAILED", why: `${res!.rows?.length ?? 0} fault(s) over ${res!.curtains ?? 0} curtain(s), ${res!.bodies ?? 0} bod(ies) (worst: ${worst})`, how: h };
 }
 
 /** The build half: per town, per reserved location, per dungeon, the art lane, then explore / bind / play / audit. */
@@ -312,7 +426,7 @@ function buildRows(ctx: Ctx, zone: string): Row[] {
     }, [{ file: doc, authored: true, proj: (d) => d.residents ?? [] }, { file: plan, authored: true, proj: (x) => x.residents ?? [] }, { file: layout, authored: false }]);
     // interiors: a passing `dress check` report for a plan on every measured model
     const plansDir = path.join(p.projectDir, "authoring", "dressing", "plans");
-    const dressPlans = fs.existsSync(plansDir) ? fs.readdirSync(plansDir).filter((x) => x.endsWith(".json") && !x.endsWith(".report.json") && !x.endsWith(".inverse.json")) : [];
+    const dressPlans = fs.existsSync(plansDir) ? fs.readdirSync(plansDir).filter((x) => x.endsWith(".json") && !x.endsWith(".report.json") && !x.endsWith(".inverse.json") && !x.endsWith(".owner.json")) : [];
     const undressed: string[] = [];
     // per LOT, not per model: two lots sharing a model are two furnished buildings (plan <town>--<lot>.json, or any
     // plan that names the lot's socket map when the town has one building per model)

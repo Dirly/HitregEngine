@@ -16,7 +16,7 @@ node ../../../../tools/dungeon-pipeline/quality.mjs readability --dry --metrics 
 ```
 `lighting.mts` applies the shared `lighting.json` merged with the project's `authoring/lighting.json` (only the keys
 it changes, each with a why): ONE hemisphere fill intensity for every dungeon (`light.groundColor`: sky tone above,
-darker below), toned warm/cold/neutral by the dominant bucket; fog and sky dome to the fill tone (never black);
+darker below), toned warm/cold/neutral by the dominant bucket (a project `"tone"` overrides it when the read sits in the minority spaces); fog and sky dome to the fill tone (never black);
 exposure 1, vignette <= 0.25; the interior `cullingProfile`.
 
 ## Gates: failure -> fix

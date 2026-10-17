@@ -14,6 +14,13 @@
  *     check/review also take --space '<json>' (override the plan's `space` { kind, scale, cultures } for a trial) and
  *     --scene <name|file> --at x,y,z: the scene's decals, statues and catalogued props NOT placed by this plan are read into
  *     the map frame, so no prop stands in a decal's projection or overlaps placed geometry
+ *   npx tsx tools/dress.mts overrides <project> [--summary] [--json]   what the OWNER changed by hand (editor), by item, reason
+ *                                    class (floating = moved down, moved, swapped, deleted, added...) and prop; read it before dressing
+ *   npx tsx tools/dress.mts owner-apply --project <p> --scene <name> [--dry]   re-apply the owner's edits to installer-placed props
+ *                                    (authoring/owner-overrides/<scene>.json); installers run it LAST
+ *   OWNER OVERRIDES (packages/core dressing/owner.ts): the editor writes the owner's edits of a dressed prop to <plan>.owner.json;
+ *                                    check/apply/review resolve the plan, then apply them LAST (deleted never re-added, moved never
+ *                                    moved or re-seated, added kept); manifest prints them as FIXED. --no-owner ignores them (a trial).
  *   npx tsx tools/dress.mts walk     --project <p> --plan <file|id> --scene <name>   the REAL player body through the installed
  *                                    building (tools/dress-walk.mts): door -> every ground-floor room and stair foot, and up
  *                                    each stair to the upper rooms (all gated, exit 1); <plan>.walk.json + report
@@ -77,9 +84,16 @@ import {
   type SocketLevel,
   type SocketMap,
   type Op,
+  applyOwnerOverrides,
+  ownerOverridesSchema,
+  sceneOwnerOps,
+  rebaseOwnerOverrides,
+  type OwnerOverrides,
 } from "@hitreg/core";
 
 import { controllerLimits } from "./dress-steps.mts";
+import { fieldOfScene, seatPlaced } from "./float.mts";
+import { skinPlacedOps } from "./rock-skins.mts";
 import { measure, prefabGeometry } from "./_prop-geometry.mts";
 import { closure, findAsset, PROJECTS } from "./_closure.mjs";
 
@@ -139,6 +153,16 @@ function planFile(proj: string, ref: string): string {
   const file = path.join(dressDir(proj, "plans"), `${ref}.json`);
   if (!fs.existsSync(file)) fail(`no plan ${ref} (looked for ${path.relative(PLAYGROUND, file)})`);
   return file;
+}
+
+/** The owner's hand edits to a plan's props: `<plan>.owner.json` beside the plan (packages/core dressing/owner.ts). */
+const ownerFileOf = (planFile: string): string => planFile.replace(/\.json$/, ".owner.json");
+function loadOwner(file: string): { owner: OwnerOverrides | null; raw: string } {
+  if (!fs.existsSync(file)) return { owner: null, raw: "" };
+  const raw = fs.readFileSync(file, "utf8");
+  const parsed = ownerOverridesSchema.safeParse(JSON.parse(raw));
+  if (!parsed.success) fail(`owner overrides ${file} are invalid:\n${parsed.error.issues.map((i) => `  ${i.path.join(".")}: ${i.message}`).join("\n")}`);
+  return { owner: parsed.data, raw };
 }
 
 function loadPlan(file: string): { plan: DressingPlan; raw: string } {
@@ -290,6 +314,13 @@ function manifest(): void {
   const { map } = loadMap(proj, need("map"));
   const only = opt("level");
   const lines: string[] = [`MAP ${map.id}${map.source ? `  (from ${map.source.model})` : ""}`];
+  // the owner's hand edits on plans of this map are FIXED: a dresser never moves, re-adds or replaces them
+  for (const f of ownerFiles(proj)) {
+    const planOf = f.file.replace(/\.owner\.json$/, ".json");
+    if (!f.data.plan || !fs.existsSync(planOf) || (readJson(planOf) as { map?: string }).map !== map.id) continue;
+    lines.push(`OWNER OVERRIDES on plan ${f.data.plan} (FIXED: the owner placed these by hand. Never move, re-add or replace them; keep other props clear of them. \`dress overrides\` lists why):`);
+    for (const o of f.data.overrides) lines.push(`  ${ownerLine(o)}`);
+  }
   const body = bodyLane(proj);
   lines.push(
     `walkable lane: ${f2(body.laneWidth)} m = the player capsule (${f2(body.radius * 2)} m wide, ${f2(body.height)} m tall) + ${f2(LANE_COMFORT)} m each side. It must reach every room, ` +
@@ -424,6 +455,35 @@ function resolvePlan(proj: string, file: string) {
   const spaceOpt = opt("space");
   if (spaceOpt) plan.space = dressingSpaceSchema.parse(JSON.parse(spaceOpt));
   const scene = opt("scene") && opt("at") ? sceneContext(proj, plan, map) : { decals: [], obstacles: [] };
+  // OWNER: what the owner placed by hand stands where they put it — every other item keeps clear of it (an obstacle)
+  const loaded = flag("no-owner") ? { owner: null, raw: "" } : loadOwner(ownerFileOf(file));
+  // the owner's edits were recorded against the frame the plan was installed with: re-base them onto this --at/--yaw
+  const atOpt = opt("at")?.split(",").map(Number);
+  const owner = loaded.owner && atOpt?.length === 3 && atOpt.every(Number.isFinite) ? rebaseOwnerOverrides(loaded.owner, { at: atOpt as [number, number, number], yaw: Number(opt("yaw") ?? 0) }) : loaded.owner;
+  const ownerRaw = loaded.raw;
+  // The owner's state goes INTO the plan before it resolves, so every other item works around it: a moved floor item
+  // becomes a floor place at the owner's spot (what stands on it resolves on it there), a swapped one takes the new
+  // prop's footprint, a deleted one gives its room back (kept only while something stands on it). Owner-added floor
+  // props are obstacles. After resolving, the owner's exact values are applied last (applyOwnerOverrides).
+  for (const o of owner?.overrides ?? []) {
+    const item = plan.items.find((i) => i.id === o.item);
+    if (item && !o.added) {
+      if (o.deleted) {
+        if (!plan.items.some((i) => i.place.kind === "on" && i.place.item === item.id)) plan.items = plan.items.filter((i) => i !== item);
+        continue;
+      }
+      if (o.set.prop && item.prop) item.prop = o.set.prop;
+      const d = src.prop(item.prop);
+      if (o.set.pos && item.prop && d?.mount === "floor" && (item.place.kind === "floor" || item.place.kind === "auto" || item.place.kind === "wall"))
+        item.place = { kind: "floor", level: 0, at: [o.set.pos[0], o.set.pos[2]], yaw: o.set.yaw ?? 0 };
+      continue;
+    }
+    if (!o.added || o.deleted || !o.set.pos) continue;
+    const d = src.prop(o.set.prop ?? "");
+    if (!d?.size || d.mount !== "floor" || d.solid === false) continue;
+    const k = o.set.scale ?? 1;
+    plan.obstacles.push({ id: `owner:${o.item}`, level: 0, at: [o.set.pos[0], o.set.pos[2]], size: [d.size[0]! * k, d.size[2]! * k], yaw: o.set.yaw ?? 0, height: d.size[1]! * k, note: "placed by the owner (fixed)" });
+  }
   const result = resolveDressing({ plan, map, prop: src.prop, set: src.set, options: { laneWidth: body.laneWidth }, vocabulary: vocabulary(proj), ...scene });
   for (const p of src.problems) result.violations.push({ item: "", code: "decl-invalid", message: p });
   // Instance prop values must name props the prefab declares (expandScene would throw on apply otherwise).
@@ -446,10 +506,22 @@ function resolvePlan(proj: string, file: string) {
     const issue = realSizeIssue(p.prop, d.size, scale, scales, sizes);
     if (issue) result.violations.push({ item: p.id, code: "wrong-size", message: `${p.prop}: ${issue}${scale ? "" : " (the place declares no scale: human assumed)"}` });
   }
+  // OWNER, LAST: deleted items never come back, edited ones take the owner's values (and what stands ON them follows),
+  // owner-added ones join; the owner's own placements are fixed, so their findings are warnings, never refusals
+  const hostOf = new Map(plan.items.filter((i) => i.place.kind === "on").map((i) => [i.id, (i.place as { item: string }).item]));
+  const own = applyOwnerOverrides(result.placements, owner, hostOf);
+  result.placements = own.placements;
+  const ownerHit = (id: string): boolean => [...own.fixed, ...own.deleted].some((o) => id === o || id.startsWith(o + "/") || id === `owner:${o}`);
+  const gone = (id: string): boolean => own.deleted.some((o) => id === o || id.startsWith(o + "/"));
+  for (const v of result.violations.filter((v) => ownerHit(v.item))) if (!gone(v.item)) result.warnings.push({ ...v, code: `owner-fixed:${v.code}`, message: `(owner placed it; kept) ${v.message}` });
+  result.violations = result.violations.filter((v) => !ownerHit(v.item));
+  result.warnings = result.warnings.filter((w) => !gone(w.item));
+  for (const id of own.stale) result.warnings.push({ item: id, code: "owner-stale", message: `the owner edited "${id}", which this plan no longer has (the override is kept; remove it from ${path.basename(ownerFileOf(file))} if the item is gone for good)` });
+  if (owner?.overrides.length) console.log(`OWNER: ${own.fixed.size} prop(s) fixed by the owner, ${own.deleted.length} deleted (never re-added), ${own.added.length} added by the owner — ${path.relative(PLAYGROUND, ownerFileOf(file))}`);
   const h = crypto.createHash("sha256");
-  h.update(planRaw).update("\0").update(mapRaw);
+  h.update(planRaw).update("\0").update(mapRaw).update("\0").update(ownerRaw);
   for (const k of [...src.used.keys()].sort()) h.update("\0" + k + "\0" + src.used.get(k));
-  return { plan, map, result, hash: h.digest("hex").slice(0, 16), src, body };
+  return { plan, map, result, hash: h.digest("hex").slice(0, 16), src, body, owner, own };
 }
 
 /** Names of the props a prefab declares (its tunable knobs), [] when it has none or does not exist. */
@@ -580,7 +652,7 @@ function staticOverrides(proj: string, prefabId: string, fire: boolean): { path:
 function apply(): void {
   const proj = projectDir();
   const file = planFile(proj, need("plan"));
-  const { plan, map, result, hash, src } = resolvePlan(proj, file);
+  const { plan, map, result, hash, src, owner, own } = resolvePlan(proj, file);
   if (result.violations.length) {
     printCheck(plan, map, result);
     fail(`refused: the plan has ${result.violations.length} violation(s); fix them (dress check) before applying`);
@@ -598,9 +670,10 @@ function apply(): void {
   const scene = readJson(sceneFile) as { entities: Record<string, { parent: string | null; tags?: string[] }> }; // re-read: the editor autosaves
   if (parent && !scene.entities[parent]) fail(`--parent ${parent} is not an entity of ${path.basename(sceneFile)}`);
   const prefix = `dress-${idPart(plan.id)}-`;
+  const ownerIds = new Set((owner?.overrides ?? []).filter((o) => o.added && o.entity).map((o) => o.entity!));
   const ops: Op[] = [];
   // The tag check keeps plan "a/b" from removing plan "a/b-2"'s entities, which share the id prefix.
-  const mine = Object.keys(scene.entities).filter((id) => id.startsWith(prefix) && (scene.entities[id]!.tags ?? []).includes(`dress:${plan.id}`));
+  const mine = Object.keys(scene.entities).filter((id) => (id.startsWith(prefix) || ownerIds.has(id)) && (scene.entities[id]!.tags ?? []).includes(`dress:${plan.id}`));
   for (const id of mine) if (!mine.includes(scene.entities[id]!.parent ?? "")) ops.push({ op: "remove-entity", id });
   const removed = ops.length;
   // One group per room: a room is one culling unit and its furniture never batches with another room or the shell
@@ -627,6 +700,9 @@ function apply(): void {
   const batch = !flag("no-batch");
   let batched = 0;
   const itemProps = new Map(plan.items.filter((i) => i.props && Object.keys(i.props).length).map((i) => [i.id, i.props!]));
+  // owner-added props keep the entity id the editor gave them (the scene and the overrides file stay in step)
+  const ownerEntity = new Map((owner?.overrides ?? []).filter((o) => o.added && o.entity).map((o) => [o.item, o.entity!]));
+  const entityOf = (id: string): string => ownerEntity.get(id) ?? prefix + idPart(id);
   for (const p of result.placements) {
     const overrides = batch ? staticOverrides(proj, p.prop, src.prop(p.prop)?.fire ?? false) : [];
     if (overrides.length) batched++;
@@ -635,26 +711,54 @@ function apply(): void {
     const y = yaw0 + p.yaw;
     ops.push({
       op: "add-entity",
-      id: prefix + idPart(p.id),
+      id: entityOf(p.id),
       entity: {
         name: `${p.id}: ${p.prop}`,
         parent: groupOf(p.room),
-        tags: ["dressing", `dress:${plan.id}`],
+        tags: ["dressing", `dress:${plan.id}`, ...(own.fixed.has(p.id) ? ["owner-fixed"] : [])],
         components: {
           transform: { position, rotation: [0, +Math.sin(y / 2).toFixed(6), 0, +Math.cos(y / 2).toFixed(6)], scale: p.scale ?? [1, 1, 1] },
-          prefab: { prefabId: p.prop, ...(itemProps.has(p.id) ? { props: itemProps.get(p.id) } : {}), ...(overrides.length ? { overrides } : {}) },
+          prefab: { prefabId: p.prop, ...(itemProps.has(p.id) && plan.items.find((i) => i.id === p.id)?.prop === p.prop ? { props: itemProps.get(p.id) } : {}), ...(overrides.length ? { overrides } : {}) },
         },
       },
     });
   }
   const reg = new ComponentRegistry();
   registerCoreComponents(reg);
-  const { doc, inverse } = applyOps(scene as never, ops, reg);
+  let { doc, inverse } = applyOps(scene as never, ops, reg);
+  // SEAT (voxel/seat.ts): the plan's y is the socket map's floor, measured earlier; every placed prop is now
+  // measured on the REAL solid under its footprint (DC floors, decks, colliders, the field) by its catalogue contact
+  // and re-seated in a second batch — the inverse undoes both. No support at all is reported, not hidden.
+  if (!flag("no-seat")) {
+    // the owner's own placements are where the owner put them: never re-seated
+    const placed = new Set(result.placements.filter((p) => !own.fixed.has(p.id)).map((p) => entityOf(p.id)));
+    const seat = seatPlaced(path.basename(proj), doc as never, placed);
+    if (seat.ops.length) {
+      const second = applyOps(doc, seat.ops, reg);
+      doc = second.doc;
+      inverse = [...second.inverse, ...inverse];
+    }
+    console.log(`seat: ${seat.ops.length} of ${placed.size} props re-seated on the real floor${seat.unsupported.length ? `; ${seat.unsupported.length} with NO support (move them in the plan): ${seat.unsupported.slice(0, 6).map((r) => r.id.slice(prefix.length)).join(", ")}` : ""}`);
+  }
+  // SKIN (voxel/rock-cap.ts): a placed rock is the stone of its place and wears the ground's cap, as the scatter rocks
+  // beside it do: the world's rock material + the resolver's rockCap per instance (no material per instance)
+  {
+    const placed = new Set(result.placements.map((p) => entityOf(p.id)));
+    const field = fieldOfScene(path.basename(proj), doc as never);
+    const skin = field ? skinPlacedOps(path.basename(proj), doc, field, placed) : { ops: [], changed: [] };
+    if (skin.ops.length) {
+      const third = applyOps(doc, skin.ops, reg);
+      doc = third.doc;
+      inverse = [...third.inverse, ...inverse];
+      console.log(`skin: ${skin.changed.length} placed rock(s) take their place's stone and cap (worldgen rock-skins)`);
+    }
+  }
   const inverseFile = file.replace(/\.json$/, ".inverse.json");
   console.log(`${flag("dry") ? "DRY RUN: would apply" : "applied"} one batch to ${path.relative(PLAYGROUND, sceneFile)}: removed ${removed} previous root(s) of ${prefix}*, added ${new Set(result.placements.map((p) => p.room)).size} room group(s) + ${result.placements.length} prefab instances, ${batched} opted into static batching${batch ? "" : " (--no-batch)"} (plan hash ${hash})${result.warnings.length ? `; ${result.warnings.length} warnings (dress check)` : ""}`);
   if (flag("dry")) return;
   fs.writeFileSync(sceneFile, JSON.stringify(doc, null, 2));
-  fs.writeFileSync(inverseFile, JSON.stringify({ plan: plan.id, scene: path.relative(PLAYGROUND, sceneFile), hash, ops: inverse }, null, 1));
+  // the frame is recorded so the editor can write the owner's edits back in the plan's own (map-local) frame
+  fs.writeFileSync(inverseFile, JSON.stringify({ plan: plan.id, scene: path.relative(PLAYGROUND, sceneFile), hash, frame: { at, yaw: yawDeg }, parent, ops: inverse }, null, 1));
   console.log(`inverse -> ${path.relative(PLAYGROUND, inverseFile)}`);
 }
 
@@ -871,6 +975,117 @@ function fixtures(): void {
   fs.writeFileSync(file, JSON.stringify(plan, null, 1) + "\n");
 }
 
+// ---- owner overrides --------------------------------------------------------
+
+/** Every owner-overrides file of a project: `<plan>.owner.json` beside plans, and authoring/owner-overrides/<scene>.json. */
+function ownerFiles(proj: string): { file: string; data: OwnerOverrides }[] {
+  const out: { file: string; data: OwnerOverrides }[] = [];
+  const walkDir = (dir: string, keep: (f: string) => boolean): void => {
+    if (!fs.existsSync(dir)) return;
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const f = path.join(dir, e.name);
+      if (e.isDirectory()) walkDir(f, keep);
+      else if (keep(e.name)) {
+        const parsed = ownerOverridesSchema.safeParse(JSON.parse(fs.readFileSync(f, "utf8")));
+        if (parsed.success) out.push({ file: f, data: parsed.data });
+        else console.error(`dress: ${path.relative(PLAYGROUND, f)} is not valid owner overrides: ${parsed.error.issues[0]?.message}`);
+      }
+    }
+  };
+  walkDir(path.join(proj, "authoring", "dressing", "plans"), (n) => n.endsWith(".owner.json"));
+  walkDir(path.join(proj, "authoring", "owner-overrides"), (n) => n.endsWith(".json"));
+  return out;
+}
+
+const v3 = (v?: number[]): string => (v ? `[${v.map(f2).join(", ")}]` : "-");
+function ownerLine(o: OwnerOverrides["overrides"][number]): string {
+  const what = o.added ? `ADDED ${o.set.prop} at ${v3(o.set.pos)}` : o.deleted ? "DELETED (never re-add)" : [
+    o.set.prop && o.set.prop !== o.from?.prop ? `swapped ${o.from?.prop ?? "?"} -> ${o.set.prop}` : "",
+    o.set.pos ? `at ${v3(o.set.pos)}${o.from?.pos ? ` (was ${v3(o.from.pos)})` : ""}` : "",
+    o.set.yaw !== undefined ? `yaw ${f2(o.set.yaw)}°` : "",
+    o.set.scale !== undefined && o.set.scale !== 1 ? `scale ${f2(o.set.scale)}` : "",
+  ].filter(Boolean).join(", ");
+  return `${o.item}${o.from?.prop && !o.added ? ` (${o.from.prop})` : ""}: ${what}  [${o.reasons.join(", ") || "kept"}]${o.note ? ` "${o.note}"` : ""}`;
+}
+
+/**
+ * dress overrides <project> [--summary] [--json]: what the owner changed by hand, per file and item, then by reason
+ * class (floating = moved down, sunk = moved up, moved, rotated, scaled, swapped, deleted, added) and by prop.
+ * Reviewers and dresser briefs read it: these are the agents' faults the owner had to fix.
+ */
+function overridesCmd(): void {
+  const name = opt("project") ?? argv.find((a) => !a.startsWith("--"));
+  if (!name) fail("usage: dress overrides <project> [--summary] [--json]");
+  const proj = path.join(PLAYGROUND, "projects", name!);
+  if (!fs.existsSync(proj)) fail(`no project ${proj}`);
+  const files = ownerFiles(proj);
+  const byReason = new Map<string, Map<string, number>>();
+  const byProp = new Map<string, Map<string, number>>();
+  let n = 0;
+  for (const f of files)
+    for (const o of f.data.overrides) {
+      n++;
+      const prop = o.from?.prop ?? o.set.prop ?? o.item;
+      for (const r of o.reasons.length ? o.reasons : ["kept"]) {
+        const a = byReason.get(r) ?? new Map<string, number>(); a.set(prop, (a.get(prop) ?? 0) + 1); byReason.set(r, a);
+        const b = byProp.get(prop) ?? new Map<string, number>(); b.set(r, (b.get(r) ?? 0) + 1); byProp.set(prop, b);
+      }
+    }
+  if (flag("json")) {
+    console.log(JSON.stringify({ project: name, files: files.map((f) => ({ file: path.relative(PLAYGROUND, f.file), ...f.data })), byReason: Object.fromEntries([...byReason].map(([r, m]) => [r, Object.fromEntries(m)])) }, null, 1));
+    return;
+  }
+  if (!flag("summary"))
+    for (const f of files) {
+      console.log(`${f.data.plan ? `plan ${f.data.plan}` : `scene ${f.data.scene}`}  (${path.relative(PLAYGROUND, f.file)}, ${f.data.frame} frame)`);
+      for (const o of f.data.overrides) console.log(`  ${ownerLine(o)}`);
+    }
+  console.log(`\nBY REASON (${n} owner edit(s) in ${files.length} file(s)):`);
+  const order = ["floating", "sunk", "moved", "rotated", "scaled", "swapped", "deleted", "added", "kept"];
+  for (const r of order) {
+    const m = byReason.get(r);
+    if (!m) continue;
+    const total = [...m.values()].reduce((a, b) => a + b, 0);
+    console.log(`  ${r.padEnd(9)} ${String(total).padStart(3)}  ${[...m].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([p, c]) => `${p}${c > 1 ? ` x${c}` : ""}`).join(", ")}`);
+  }
+  console.log(`BY PROP (most edited first):`);
+  for (const [prop, m] of [...byProp].sort((a, b) => [...b[1].values()].reduce((x, y) => x + y, 0) - [...a[1].values()].reduce((x, y) => x + y, 0)).slice(0, 15))
+    console.log(`  ${prop}: ${[...m].map(([r, c]) => `${r}${c > 1 ? ` x${c}` : ""}`).join(", ")}`);
+  console.log(`OVERRIDES ${name}: ${n} owner edit(s); floating ${[...(byReason.get("floating")?.values() ?? [])].reduce((a, b) => a + b, 0)}, deleted ${[...(byReason.get("deleted")?.values() ?? [])].reduce((a, b) => a + b, 0)}, swapped ${[...(byReason.get("swapped")?.values() ?? [])].reduce((a, b) => a + b, 0)}`);
+}
+
+/**
+ * dress owner-apply --project <p> --scene <name|file> [--dry]: bring a scene to the owner's edits of installer-placed
+ * props (authoring/owner-overrides/<scene>.json) as ONE ops batch, inverse saved beside it. Installers run it LAST;
+ * it is idempotent (nothing to do = no write).
+ */
+function ownerApply(): void {
+  const proj = projectDir();
+  const sceneRef = need("scene");
+  const sceneFile = fs.existsSync(sceneRef) && sceneRef.endsWith(".json") ? path.resolve(sceneRef) : path.join(proj, "assets", "scenes", `${sceneRef}.scene.json`);
+  if (!fs.existsSync(sceneFile)) fail(`no scene ${sceneFile}`);
+  const sceneName = path.basename(sceneFile).replace(/\.scene\.json$/, "");
+  const file = path.join(proj, "authoring", "owner-overrides", `${sceneName}.json`);
+  const { owner } = loadOwner(file);
+  if (!owner?.overrides.length) {
+    console.log(`owner-apply: no owner overrides for ${sceneName} (${path.relative(PLAYGROUND, file)})`);
+    return;
+  }
+  const scene = readJson(sceneFile) as never;
+  const ops = sceneOwnerOps(scene, owner) as Op[];
+  if (!ops.length) {
+    console.log(`owner-apply: ${sceneName} already matches its ${owner.overrides.length} owner override(s)`);
+    return;
+  }
+  const reg = new ComponentRegistry();
+  registerCoreComponents(reg);
+  const { doc, inverse } = applyOps(scene, ops, reg);
+  console.log(`${flag("dry") ? "DRY RUN: would apply" : "applied"} ${ops.length} owner op(s) to ${path.relative(PLAYGROUND, sceneFile)}`);
+  if (flag("dry")) return;
+  fs.writeFileSync(sceneFile, JSON.stringify(doc, null, 2));
+  fs.writeFileSync(file.replace(/\.json$/, ".inverse.json"), JSON.stringify({ scene: path.relative(PLAYGROUND, sceneFile), ops: inverse }, null, 1));
+}
+
 // ---- dispatch -------------------------------------------------------------
 
 switch (cmd) {
@@ -899,6 +1114,12 @@ switch (cmd) {
     break;
   case "walk":
     await walk();
+    break;
+  case "overrides":
+    overridesCmd();
+    break;
+  case "owner-apply":
+    ownerApply();
     break;
   default:
     console.log(fs.readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n").slice(1, 20).map((l) => l.replace(/^ \*\/?\s?/, "")).join("\n"));
