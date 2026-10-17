@@ -40,6 +40,14 @@ pnpm typecheck                   # all packages
   schemas/`.describe()` → `spec.json`; prose stays judgment-only).
 - **Latency budgets are hard**: data-op batch < 50ms, script hot-reload < 1s,
   no compile step in any data path. Don't add synchronous stalls to the AI/editor loop.
+- **No iteration files, in any repo.** Git is the history. Never write a
+  numbered or staged copy of a file or folder (`-v2`, `-v20/`, `-final`,
+  `-old`, `-before`/`-after`, `-trial`, `-backup`, `.bak`, `.blend1`, a
+  `backups/` folder). Overwrite the one working file in place and commit when
+  it's good. A file is named for what it is, never for which attempt it was.
+  Comparisons you need right now (before/after shots, A/B timings) go in the
+  OS temp or scratch folder and are deleted when the round ends. Tools follow
+  the same rule: they overwrite their outputs and never keep backups.
 - **3D only. Multiplayer-compatible by default**: gameplay state changes belong
   in `fixedUpdate`; nothing in `packages/core` may depend on the DOM (it runs
   headless in Node).

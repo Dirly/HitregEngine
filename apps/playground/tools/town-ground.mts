@@ -219,7 +219,7 @@ function build(): void {
     console.log(`dry run: ${rel(c.dir)}/ground-edits-dry.json, ground-report-dry.json, ground-dry.f32 (recipe and plan untouched)`);
     return;
   }
-  fs.copyFileSync(path.join(c.townsDir, `${c.town}-plan.json`), path.join(c.dir, "plan-before-build.json"));
+  fs.copyFileSync(path.join(c.townsDir, `${c.town}-plan.json`), path.join(c.dir, "plan-inverse.json"));
   writeJson(path.join(c.dir, "ground-edits.json"), elide(r.edits));
   writeJson(path.join(c.dir, "ground-inverse.json"), r.inverse);
   writeJson(path.join(c.dir, "ground-report.json"), r.report);
@@ -233,9 +233,10 @@ function undo(): void {
   if (!step || !fs.existsSync(inv)) throw new Error("undo --step build|doors (needs the saved inverse)");
   const recipe = worldRecipeSchema.parse(readJson(c.worldFile));
   writeRecipe(applyRecipeEdits(recipe, readJson(inv)).recipe);
-  if (step === "build" && fs.existsSync(path.join(c.dir, "plan-before-build.json"))) fs.copyFileSync(path.join(c.dir, "plan-before-build.json"), path.join(c.townsDir, `${c.town}-plan.json`));
-  fs.renameSync(inv, `${inv}.applied`);
-  console.log(`undone: ${step} (${rel(inv)} -> .applied)`);
+  const planInv = path.join(c.dir, "plan-inverse.json");
+  if (step === "build" && fs.existsSync(planInv)) { fs.copyFileSync(planInv, path.join(c.townsDir, `${c.town}-plan.json`)); fs.rmSync(planInv); }
+  fs.rmSync(inv);
+  console.log(`undone: ${step} (${rel(inv)} spent and removed)`);
 }
 
 // ------------------------------------------------------------------ doors

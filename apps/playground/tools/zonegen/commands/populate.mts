@@ -1559,7 +1559,7 @@ if (argv.includes("--uninstall")) {
   const res = applyOps(read(SCENE), read(INV), reg);
   if (dry) { console.log("[dry-run] would undo the populate batch in " + sceneId); process.exit(0); }
   fs.writeFileSync(SCENE, JSON.stringify(res.doc, null, 2) + "\\n");
-  fs.renameSync(INV, INV.replace(/\\.json$/, ".applied-" + Date.now() + ".json"));
+  fs.rmSync(INV);
   if (fs.existsSync(REC)) fs.rmSync(REC);
   console.log("removed the populate batch from " + sceneId);
   process.exit(0);

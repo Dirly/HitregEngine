@@ -34,6 +34,8 @@ The detailed live-editor and gameplay command reference is
   `apps/playground/assets/` for throwaway experiments); edit the files directly — while `pnpm dev` runs, saves live-sync into the user's
   browser (schema-validated; invalid edits are rejected with a console warning).
 - Always write complete, valid JSON files; never leave a file mid-edit.
+- No iteration files (`-v2`, `-final`, `-before`, `-trial`, `.bak`, `.blend1`,
+  numbered folders): overwrite in place, git is the history. See CLAUDE.md's invariants.
 - Runtime context (what the user sees, selection, camera, kit model contents):
   `curl -s http://localhost:5173/__hitreg/context`. Its `focus` block is the
   referent channel — `focus.strongest` ranks manipulating/hover/selection/asset

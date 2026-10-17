@@ -9,12 +9,11 @@
  *
  * The page is enlarged by a whole factor (nearest) only when a slot is too small for the new art: every other
  * tile keeps its normalized place and its pixels (blown up, which `texelDensity` counts at their real detail),
- * so no other prop's model changes. Backups (`.bak-2026-10-01`) are written beside the page and the model once.
+ * so no other prop's model changes. No backups: git is the history.
  */
 import fs from "node:fs";
 import type { Tri, V3, PixelPage } from "./_prop-geometry.mts";
 
-export const BAK = ".bak-2026-10-01";
 export interface Role { page: PixelPage; rect: number[]; metres: number; /** only texels of this colour family take the detail (a bed's linen keeps its own) */ mask?: "wood" | "grey" }
 export interface ReskinJob {
   route: "a" | "b" | "c";
@@ -36,9 +35,8 @@ export interface ReskinJob {
   encode: (w: number, h: number, rgba: Uint8Array) => Uint8Array;
   decode: (b: Buffer) => PixelPage;
 }
-export interface ReskinResult { page: { before: number; after: number; enlarged: number }; content: [number, number]; tile: number[]; slot: number; backups: string[] }
+export interface ReskinResult { page: { before: number; after: number; enlarged: number }; content: [number, number]; tile: number[]; slot: number }
 
-const backup = (file: string, out: string[]) => { const b = file + BAK; if (!fs.existsSync(b)) { fs.copyFileSync(file, b); out.push(b); } };
 export function resample(src: PixelPage, w: number, h: number, rotate = false): PixelPage {
   const out = new Uint8Array(w * h * 4);
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
@@ -99,7 +97,6 @@ const sub = (a: V3, b: V3): V3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 const cross = (a: V3, b: V3): V3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 
 export function reskin(job: ReskinJob): ReskinResult {
-  const backups: string[] = [];
   let page = job.decode(fs.readFileSync(job.pageFile));
   const before = page.width;
   if (page.width !== job.atlas.size[0]) throw Error(`page is ${page.width}px but the kit records ${job.atlas.size[0]}`);
@@ -132,17 +129,15 @@ export function reskin(job: ReskinJob): ReskinResult {
     const sx = Math.min(cw - 1, Math.max(0, x)), sy = Math.min(ch - 1, Math.max(0, y));
     page.data.set(content.data.subarray((sy * cw + sx) * 4, (sy * cw + sx) * 4 + 4), ((oy + y) * W + ox + x) * 4);
   }
-  backup(job.pageFile, backups);
   fs.writeFileSync(job.pageFile, Buffer.from(job.encode(W, W, page.data)));
   // the prop's UVs: its old tile -> the content rectangle (route c: the island's bounds -> the whole content)
-  backup(job.modelFile, backups);
   const glb = remapGlbUvs(job.modelFile, (u, v) => {
     let [x, y] = local(u, v);
     if (island) { x = (x - island[0]) / (island[2] - island[0]); y = (y - island[1]) / (island[3] - island[1]); }
     return [(ox + x * cw) / W, 1 - (oy + y * ch) / W];
   });
   fs.writeFileSync(job.modelFile, glb);
-  return { page: { before, after: W, enlarged: k }, content: [cw, ch], tile: [+(ox / W).toFixed(6), +(oy / W).toFixed(6), +(need / W).toFixed(6)], slot, backups };
+  return { page: { before, after: W, enlarged: k }, content: [cw, ch], tile: [+(ox / W).toFixed(6), +(oy / W).toFixed(6), +(need / W).toFixed(6)], slot };
 }
 
 type Local = (u: number, v: number) => [number, number];

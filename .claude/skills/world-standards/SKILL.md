@@ -1,6 +1,6 @@
 ---
 name: world-standards
-description: Coordinating or reviewing generated world content: the standing rules for an unattended zone run (places before quests, a reviewer agent before detail work, acceptance on the server, no re-proving, revisions write new files, rulings live in tools) and which task skill each job loads. Use before briefing, reviewing or installing any site, dungeon or town.
+description: Coordinating or reviewing generated world content: the standing rules for an unattended zone run (places before quests, a reviewer agent before detail work, acceptance on the server, no re-proving, revisions overwrite in place (no iteration files), rulings live in tools) and which task skill each job loads. Use before briefing, reviewing or installing any site, dungeon or town.
 ---
 
 # world-standards
@@ -62,5 +62,6 @@ How a zone run is run: `docs/zone-creation.md` (skill `zone-creator`). Reviewer 
 - A gate that over-reports gets ignored; the same failure count in two places measures the rule: fix the gate.
 
 ## Files and installs
-- A revision writes new files; never overwrite what an installed version uses. One writer on a world file: builders
+- A revision overwrites the same files in place: no `-v2`/`v3/`/`-final`/`-before` copies. Commit the installed
+  version first; git and the install's inverse ops are the undo. One writer on a world file: builders
   deliver installers, one queue installs.

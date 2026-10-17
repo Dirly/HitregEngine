@@ -817,7 +817,7 @@ async function reskinProp(id: string) {
   if (!["a", "b", "c"].includes(route)) throw Error("reskin <id> --route a|b|c [--role wood|stone] [--art <png>]");
   const owners = catalogued().get(id) ?? [], kitOwner = owners.find((o) => Array.isArray(o.row.tile));
   if (!kitOwner) throw Error(`${id}: not in an atlas kit collection (rows with tile [u, v, scale]); reskin its own texture instead`);
-  const { reskin, BAK } = await import("./_prop-reskin.mts");
+  const { reskin } = await import("./_prop-reskin.mts");
   const { decodePng, encodePng } = await import("./_png.mjs" as string);
   const kitFile = proj(kitOwner.entry.path), kit = readJson(kitFile), row = kit[kitOwner.entry.entries].find((r: any) => r.id === id);
   if (kit.atlas?.standard) throw Error(`${kitOwner.entry.path} is sized and routed by its generator (${kit.generatedBy}): add "${id.split("/").pop()}" to its ROUTES and re-run it; a reskin here would be wiped`);
@@ -866,11 +866,10 @@ async function reskinProp(id: string) {
     route, ...(roleName ? { role: roleName, detail: roleDecl } : {}), ...(art ? { art: path.relative(PROJECT, path.resolve(art)).replaceAll("\\", "/") } : {}),
     content: res.content, date: "2026-10-01", by: "tools/props.mts reskin",
     texelsPerMetre: { before: +before.median.toFixed(1), beforeP10: +before.p10.toFixed(1), after: +after.median.toFixed(1), afterP10: +after.p10.toFixed(1), target: STANDARD.target },
-    backups: [`${row.modelPath}${BAK}`, `${kit.atlas.path}${BAK}`],
     note: "applied on top of the generated kit: re-running interior-kit.mjs drops it unless the generator learns per-prop tiles and art",
   };
   fs.writeFileSync(kitFile, JSON.stringify(kit, null, 2) + "\n");
-  console.log(`${id}: route ${route}${roleName ? ` (${roleName})` : ""}  texels/m ${before.median.toFixed(1)} (p10 ${before.p10.toFixed(1)}) -> ${after.median.toFixed(1)} (p10 ${after.p10.toFixed(1)})  content ${res.content.join("x")}px in a ${res.slot}px slot; page ${res.page.before} -> ${res.page.after}${res.backups.length ? `\n  backups: ${res.backups.map((b) => path.relative(PROJECT, b)).join(", ")}` : ""}\n  ${densityLine(after)}`);
+  console.log(`${id}: route ${route}${roleName ? ` (${roleName})` : ""}  texels/m ${before.median.toFixed(1)} (p10 ${before.p10.toFixed(1)}) -> ${after.median.toFixed(1)} (p10 ${after.p10.toFixed(1)})  content ${res.content.join("x")}px in a ${res.slot}px slot; page ${res.page.before} -> ${res.page.after}\n  ${densityLine(after)}`);
 }
 
 // ---------------------------------------------------------------- proof ----

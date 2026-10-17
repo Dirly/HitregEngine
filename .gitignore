@@ -77,3 +77,10 @@ apps/playground/*-map.png
 # runtime / crash files
 .hitreg-live-context.json
 *.stackdump
+
+# No iteration files: Blender and editor backups (git is the history).
+*.blend1
+*.blend2
+*.bak
+*.bak-*
+*.orig
